@@ -24,14 +24,25 @@
 //!   background ticking counter that proves a `frust::RwSignal` write alone
 //!   — no pointer or key event — wakes exactly the frames it needs to (the
 //!   "signal-driven update, zero input events" milestone).
+//! - `?theme=light` / `?theme=dark`, orthogonal to the above: an embedding
+//!   host's explicit request to pin one appearance end-to-end
+//!   ([`app::resolve_theme_override_from_query`]), overriding whatever the
+//!   host itself reports.
 //!
-//! Dark/light theme follow and resize/DPR handling need no app code at all:
-//! both are the browser shell's own job (`crates/frust-shell-web`'s
-//! `follow_platform_brightness`/window-metrics publish, from w1-02/w1-03).
-//! The index page's `window: ... — Orientation` line
-//! ([`frust::WindowMetrics`] read via `use_context`) is this app's one piece
-//! of in-UI evidence that a resize/DPR change actually reached the tree,
-//! alongside the screenshots recorded in README.md.
+//! Dark/light theme **follow** and resize/DPR handling need no app code at
+//! all when `?theme=` is absent: both are the browser shell's own job
+//! (`crates/frust-shell-web`'s `follow_platform_brightness`/window-metrics
+//! publish, from w1-02/w1-03). `?theme=` is the one exception — this app's
+//! own [`frust::set_app_theme`] call, made because an embedding host (a
+//! preview iframe, say) may want to force one appearance regardless of what
+//! it or the browser reports; see [`app::AppState::new`]'s call site. The
+//! index page's `window: ... — Orientation` line ([`frust::WindowMetrics`]
+//! read via `use_context`) is this app's one piece of in-UI evidence that a
+//! resize/DPR change actually reached the tree, alongside the screenshots
+//! recorded in README.md. Reporting this page's own rendered height to an
+//! embedding parent frame (the `postMessage({type:"frust:height",...})`
+//! contract) is likewise not this crate's own code — see `index.html`'s
+//! header comment for where that lives.
 //!
 //! # A discovered pre-existing limitation: `SystemUi` never resolves on `wasm32`
 //!
@@ -143,19 +154,32 @@ mod app {
             frust::register_app_fonts(LABEL_FONT_BYTES.to_vec());
 
             let case = resolve_case_from_query();
-            // A design-tagged case (`material/button`, `shadcn/button`, ...)
-            // wants that design system's own theme underneath it, not the
-            // framework's neutral baseline; `Base` cases render correctly
-            // either way, so they are left alone rather than pinned. This is
-            // `set_default_theme`, not `set_app_theme`: it seeds the base the
-            // shell still re-derives light/dark from on every platform
-            // brightness change, so a design-tagged case still honours the
-            // OS/browser theme-follow milestone instead of freezing one
-            // brightness — see `frust::set_default_theme`'s own doc for the
-            // precedence order this relies on.
-            if let Some(case) = case
+            // `?theme=light|dark` (see [`resolve_theme_override_from_query`])
+            // takes precedence over the design-tagged-case seeding below: it
+            // is an explicit embedding-host request to pin one appearance
+            // end-to-end, exactly `frust::set_app_theme`'s own contract
+            // ("never overridden back by a live platform dark-mode flip
+            // until `clear_app_theme` runs"). Host-follow with no query
+            // parameter is the shell's own job (`Window::theme()`/
+            // `prefers-color-scheme` on this target) and needs no app code
+            // at all — this app only ever forces brightness when asked to.
+            if let Some(variant) = resolve_theme_override_from_query() {
+                let design = case.map_or(Design::Base, |case| case.design);
+                frust::set_app_theme(frust_gallery::theme(design, variant));
+            } else if let Some(case) = case
                 && case.design != Design::Base
             {
+                // A design-tagged case (`material/button`, `shadcn/button`,
+                // ...) wants that design system's own theme underneath it,
+                // not the framework's neutral baseline; `Base` cases render
+                // correctly either way, so they are left alone rather than
+                // pinned. This is `set_default_theme`, not `set_app_theme`:
+                // it seeds the base the shell still re-derives light/dark
+                // from on every platform brightness change, so a
+                // design-tagged case still honours the OS/browser
+                // theme-follow milestone instead of freezing one brightness
+                // — see `frust::set_default_theme`'s own doc for the
+                // precedence order this relies on.
                 frust::set_default_theme(frust_gallery::theme(case.design, Variant::Light));
             }
 
@@ -200,6 +224,24 @@ mod app {
         let params = web_sys::UrlSearchParams::new_with_str(&search).ok()?;
         let slug = params.get("case")?;
         frust_gallery::find(&slug)
+    }
+
+    /// Reads `?theme=<variant>` off `window.location.search`: `Some(Variant::
+    /// Light)` for `light`, `Some(Variant::Dark)` for `dark`, `None` for a
+    /// missing query parameter, an unavailable `window`/`Location`, or any
+    /// other value — every one of those leaves brightness on the shell's own
+    /// host-follow path (see [`AppState::new`]'s call site), the identical
+    /// "fall back rather than fail" contract [`resolve_case_from_query`]
+    /// follows for `?case=`.
+    fn resolve_theme_override_from_query() -> Option<Variant> {
+        let window = web_sys::window()?;
+        let search = window.location().search().ok()?;
+        let params = web_sys::UrlSearchParams::new_with_str(&search).ok()?;
+        match params.get("theme")?.as_str() {
+            "light" => Some(Variant::Light),
+            "dark" => Some(Variant::Dark),
+            _ => None,
+        }
     }
 
     /// Awaits `ms` milliseconds of wall-clock time via the

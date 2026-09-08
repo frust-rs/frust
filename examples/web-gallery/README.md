@@ -29,10 +29,61 @@ Query parameters, all read in `src/main.rs` / `index.html`:
 | Param | Values | Effect |
 |---|---|---|
 | `?case=<slug>` | any registry slug | render that one case |
+| `?theme=<variant>` | `light`/`dark` | force that appearance end-to-end (`frust::set_app_theme`), overriding the host's own reported light/dark appearance; any other value (including absent) leaves the shell following the host, unchanged from before this parameter existed |
 | `?log=<level>` | `off`/`error`/`warn`/`info`/`debug`/`trace` | raise the console log ceiling above the facade's `Warn` default |
 | `?arm=webgl` | present/absent | force the WebGL2 backend arm (see "The WebGL2 arm" below) |
 
+See "Embedding" below for the `?theme=` override's rationale and the iframe
+height-report contract this task adds.
+
 ## Build
+
+### Primary recipe: `frust build web --release`
+
+From this directory, once `frust` itself is built from this checkout (an
+installed `frust` predating the web-shell plan's CLI work has no `web`
+subcommand at all — check `frust build web --help` before assuming an
+already-installed binary is new enough):
+
+```sh
+frust build web --release
+```
+
+This is `crates/frust-drive::web_build::build` (`BuildTarget::Web` in
+`crates/frust-cli/src/commands/build.rs`), and it always builds in release
+mode regardless of the flag (every `frust build` target does — matching
+`macos`/`windows`/`linux`/`apk`/`appbundle`/`ios`/`ipa`); `--release` is
+written above because it is the invocation the CLI documents for every
+target, not because it changes anything here. In order: `cargo build
+--target wasm32-unknown-unknown --release`, `wasm-bindgen --target web`
+straight into `<out-dir>/pkg/` (`build/web/pkg/` by default), then
+`wasm-opt` — release always runs it, using the exact named-proposal list
+`WASM_OPT_FEATURES` in `crates/frust-drive/src/web_build/mod.rs` carries
+(see "wasm-opt feature flags" below; kept in lockstep with the manual
+recipe's own flags), then stages a host page over the result.
+
+**This crate has no `web/` host-page directory of its own** (`[web]
+host-dir`'s default), only an `index.html` at its project root — the exact
+shape `frust-drive::web_build::bundle::resolve_embedder`'s own test names
+this crate by: *"No app host page at all (`examples/web-gallery`'s shape: an
+`index.html` at the project root, not under `web/`) falls back to the
+framework embedder."* So `frust build web` **always** stages
+`platform/web/index.html` + `platform/web/frust_web.js` verbatim, named
+`pkg/app.js`/`pkg/app_bg.wasm` (`BINDGEN_OUT_NAME`) — never this directory's
+own `index.html`, whatever it says. That framework page already implements
+the height-report contract (see "Embedding" below), so this is the recipe
+the binary-size table below and the browser verification were measured
+against — it needed no change from this task at all, which is this task's
+own justification for leaving `Cargo.toml`/the CLI's embedder choice alone
+and only touching this crate's own `index.html` for the *second*, independent
+embedding route (below).
+
+Output lands in `build/web/` (`pkg/app.js`, `pkg/app_bg.wasm`, the staged
+`index.html`/`frust_web.js`) — see "Generated output" below for why it is
+**not** committed, and the one `.gitignore` gap this task cannot close
+itself.
+
+### Manual recipe (no `frust` build required)
 
 From this directory:
 
@@ -47,9 +98,18 @@ wasm-opt -O \
   -o pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
 ```
 
+This produces the exact `pkg/web_gallery.js`/`pkg/web_gallery_bg.wasm` this
+directory's own `index.html` imports by that fixed `--out-name`. Unlike the
+primary recipe, this one **does** serve this directory's own `index.html` —
+see "Serve" below for the one requirement that recipe adds (serving from the
+repository root, not this directory, so `index.html`'s
+`../../platform/web/frust_web.js` import resolves).
+
 Host tool versions the sizes below were measured with: `wasm-bindgen-cli`
 0.2.128 (must equal the crate's own `=0.2.128` pin — see `Cargo.toml`),
 `wasm-opt` 132, `cargo` 1.98.1 (the repo's pinned toolchain).
+
+### `wasm-opt` feature flags
 
 `wasm-opt` must be told which proposals to accept — bare `-O` refuses to
 parse this `rustc`/`wasm-opt` combination's output, the finding
@@ -75,24 +135,51 @@ enable with --experimental-wasm-compact-imports
 cp pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
 ```
 
-### Binary size (this build, `[profile.release]` from this crate's own
-`Cargo.toml` — `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`,
-`panic = "abort"`, copied from the root profile since a standalone workspace
-never sees it):
+### Binary size — the number that decides whether live previews ship
+default-on or opt-in
+
+Measured against the **primary recipe** (`frust build web --release`,
+`build/web/pkg/app_bg.wasm`) — the artifact this task's browser verification
+actually loaded (see "Embedding" below) — not the manual recipe, though the
+two produce byte-identical `.wasm` (same crate, same `[profile.release]`,
+same `wasm-bindgen`/`wasm-opt` invocation under the hood; only the file
+name/host page differ). `[profile.release]` is this crate's own (`lto =
+"fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, copied
+from the root profile since a standalone workspace never sees it):
 
 | Stage | Size |
 |---|---|
-| `wasm-bindgen` output (`web_gallery_bg.wasm`, unoptimized) | 11,535,811 B ≈ 11.00 MiB |
-| after `wasm-opt -O` with the feature list above | 10,730,424 B ≈ 10.23 MiB |
-| gzip `-9` of the `wasm-opt`'d file | 4,465,581 B ≈ 4.26 MiB |
+| `wasm-bindgen` output (unoptimized) | 11,523,550 B ≈ 10.99 MiB |
+| after `wasm-opt -O` with the feature list above | 10,723,407 B ≈ 10.23 MiB |
+| gzip `-9` of the `wasm-opt`'d file | 4,466,224 B ≈ 4.26 MiB |
 
-Measured 2026-09-08 on `dev` after the web shell's IME bridge and CLI web
-build landed; the earlier rows this table carried (9.34 / 8.72 / 3.69 MiB)
-predate both.
+Measured 2026-09-08 on this task's own branch (`feature/widget-previews-p3`),
+toolchain `cargo`/`wasm-bindgen-cli`/`wasm-opt` versions as recorded above,
+via `frust build web --release` itself (built from this checkout — see
+"Primary recipe" above) followed by `gzip -9 -c build/web/pkg/app_bg.wasm |
+wc -c`. This table's immediately-prior measurement (11,535,811 / 10,730,424
+/ 4,465,581 B, from the base commit this task started from, before the
+`?theme=` override landed) is close enough that the delta is entirely that
+one small `resolve_theme_override_from_query` addition — not noise, but not
+a meaningful shift either. The earlier rows this table carried before that
+(9.34 / 8.72 / 3.69 MiB) predate the web shell's IME bridge and CLI web
+build landing.
 
-One binary contains the whole 35-case registry (see "A discrepancy with the
-card's '107 cases'" below) plus the JS glue (`web_gallery.js`, 162,382 B,
-uncompressed) is separate and tiny by comparison. For scale,
+**Verdict for the live-preview default:** unchanged by this task — a ~10.2
+MiB (~4.3 MiB gzipped) module is still too large to load eagerly per
+preview instance; g3-02's lazy-iframe-with-PNG-poster design (load only on
+demand, one shared module cached across every embedded case on a page) is
+the right shape, not a default-on embed. This binary carries the *whole*
+35-case registry (see "A discrepancy with the card's '107 cases'" below) —
+per-design-system splitting, so a single Material-only preview page does not
+pay for Cupertino/Glyph/Shadcn/beUI too, remains the lever actually worth
+pulling before "opt-in" becomes "affordable by default"; that split is
+future work, not something this task's `write_files` can do (it would mean
+restructuring `frust-gallery`'s own case registry, `examples/gallery`).
+
+One binary contains the whole 35-case registry plus the JS glue
+(`app.js`/`web_gallery.js`, 162,358–162,382 B depending on `--out-name`,
+uncompressed) — separate and tiny by comparison. For scale,
 `examples/web-spike`'s own five-crate render-engine probe (no widgets, no
 `frust-gallery`, no design-system plugins) measured 5.44 MiB / 1.93 MiB
 gzipped at `wasm-opt`; the delta here is the widget set, the reactive
@@ -109,19 +196,144 @@ to `application/wasm` since 3.9 — the same fact `examples/web-spike/serve.sh`
 documents). A `serve.sh` matching that spike's own script was **not** added
 — it is outside this task's `write_files` (`Cargo.toml`, `README.md`,
 `index.html`, `src/main.rs`); the conductor can add one from this recipe if
-wanted:
+wanted.
+
+**Primary recipe's artifact** (`build/web/`, self-contained — `frust_web.js`
+is staged *into* it, so nothing outside it is ever read):
 
 ```sh
-python3 -m http.server 8931 --bind 127.0.0.1
-# open http://127.0.0.1:8931/index.html
+python3 -m http.server 8931 --bind 127.0.0.1 --directory build/web
+# open http://127.0.0.1:8931/index.html?case=button
 ```
 
-`pkg/` and `target/` are generated and **must not be committed** — this
-standalone workspace needs its own `.gitignore` for that, which is also
-outside `write_files`; the conductor adds it (see the task card's own "if the
-standalone workspace needs its own .gitignore ... report it" instruction).
+**Manual recipe's `index.html`** — this directory's own page now imports
+`../../platform/web/frust_web.js` directly rather than carrying a copy (see
+"Embedding" below for why), so the server root must be the **repository
+root**, not this directory, or that relative import 404s:
 
-## Rig used for the milestone evidence below
+```sh
+python3 -m http.server 8931 --bind 127.0.0.1 --directory ../..
+# open http://127.0.0.1:8931/examples/web-gallery/index.html?case=button
+```
+
+`--directory` needs Python 3.7+; both invocations were verified against the
+`python3` this task's own host carries.
+
+`pkg/` and `target/` are generated and **must not be committed** — this
+standalone workspace's own `.gitignore` already covers both (`efe979c5`).
+**`build/` is a new gap this task's `frust build web` recipe introduces and
+this task cannot close**: `.gitignore` is not in this task's `write_files`
+(`Cargo.toml`, `README.md`, `index.html`, `src/main.rs`); the conductor
+should add a `/build/` line alongside the existing `/pkg/`/`/target/` ones.
+This task's own worktree does not commit a `build/` directory (removed
+before hand-off), but the next person to run `frust build web --release`
+here will produce one that `git status` flags until that line lands.
+
+## Embedding (this task, g3-01)
+
+This task's objective: make the gallery embeddable — `?case=`/`?theme=`
+routing (done; `?case=` already existed from w1-06, `?theme=` is new here)
+plus reporting the embedded page's own rendered height to a parent frame, so
+a preview host (g3-02's lazy iframe) can size itself without guessing.
+
+**The height contract is the framework's, not this crate's own code.**
+`platform/web/frust_web.js`'s `mount()` (read-only evidence for this task —
+outside `write_files`) posts `{type: "frust:height", height}` to
+`window.parent` via `postMessage`, on canvas-ready, after the wasm module's
+own `init()` resolves, and on every `window resize` event — see that file's
+`postHeightToParent`/`mount` doc comments for the exact mechanism (a plain
+`document.documentElement.scrollHeight` read, `"*"` as the target origin
+since a preview host is not assumed same-origin). Two independent routes
+put this crate's own page on that contract, both inside this task's
+`write_files`, and both are now live:
+
+1. **`frust build web --release` stages the framework's own
+   `platform/web/index.html` verbatim**, because this crate has no `web/`
+   host-page directory of its own (see "Primary recipe" above) — no code
+   change needed at all; the framework page already calls `mount()`.
+2. **This directory's own `index.html` now imports `mount` from
+   `../../platform/web/frust_web.js` directly**, replacing its former
+   hand-rolled canvas-binding/resize script (the "Milestone 6" fix below) —
+   the general version of the identical technique, plus the height-report
+   calls that script never made. Chosen over copying `frust_web.js` into
+   this directory (the shape `templates/app/web.tmpl/` uses for a *real*
+   scaffolded app's own `<host-dir>`) because a copy is a second identity to
+   keep in sync by hand the moment the framework's contract changes, and
+   this task's `write_files` has no `web/` subdirectory to put one in
+   anyway — a plain relative import is `mount()`'s own read-only evidence,
+   never duplicated.
+
+Both were verified end-to-end this task (see "Browser verification" below)
+to actually post the message with the correct payload; the "Binary size"
+table above records route 1's own measurement, since that is what `frust
+build web --release`'s own recipe produces and what a real embedding is
+expected to load.
+
+**`?theme=light`/`?theme=dark`** (`src/main.rs`'s
+`resolve_theme_override_from_query`) is the other half: an embedding host's
+explicit request to pin one appearance end-to-end
+(`frust::set_app_theme(frust_gallery::theme(design, variant))`), overriding
+whatever the host/browser itself reports — orthogonal to and layered above
+the existing per-design-system-case seeding (`set_default_theme`), which
+still runs unchanged when `?theme=` is absent. Host-follow with no query
+parameter needs no app code at all, exactly as before this task.
+
+## Browser verification (this task, g3-01)
+
+This Mac carries no automated WebDriver rig (the prior milestone evidence
+below was gathered from a Linux Docker container this task's host does not
+have) — but it does have `/Applications/Google Chrome.app` installed, and
+Playwright's `chromium.launch({channel: "chrome"})` drives an **already
+installed** Chrome over CDP directly, no `chromedriver`/Selenium download
+needed. Verified this way, headed (not headless — this Mac's headless Chrome
+GPU behaviour was not characterized, and headed matches the milestone
+evidence below's own precedent), against `frust build web --release`'s own
+`build/web/` output served locally and embedded in a plain cross-origin
+`<iframe>` (a second local static server on a different port — the real
+preview-embedding shape, not same-origin):
+
+- **Chrome, WebGPU (`?case=button`):** loads; a canvas is created and
+  correctly reparented under `#frust-host`
+  (`canvasParentId === "frust-host"`); the parent frame receives **two**
+  `{"type":"frust:height","height":700}` messages (canvas-ready, then
+  post-`init()`) matching the iframe's own CSS box height exactly; the
+  button case's shapes and (on this Chrome/macOS combination) its text both
+  render.
+- **Chrome, forced WebGL2 (`?case=button&arm=webgl`):** loads through the
+  GL arm (`ANGLE (Apple, ANGLE Metal Renderer: Apple M4, ...)` in the
+  adapter name, Naga-generated GLSL in the console under `?log=debug`,
+  matching the WebGL2-arm mechanism described below); canvas adoption and
+  the height-message pair both behave identically to the WebGPU arm.
+- **`?theme=dark` / `?theme=light` (`?case=button`):** both load and post
+  height correctly; screenshots confirm a genuinely different rendered
+  background (near-black vs. near-white) for the two, with no OS/browser
+  dark-mode emulation touched — the override is real, not host-follow
+  coincidentally agreeing.
+- **The manual recipe's own `index.html`** (served from the repository root
+  per "Serve" above): posts the identical two height messages, confirming
+  route 2 above works as well as route 1.
+
+**One incidental observation, not chased further (out of this task's
+scope):** on this Chrome/macOS/M4 combination, case-label text rendered
+legibly on **both** the WebGPU and forced-WebGL2 arms — screenshots show
+"Save"/"Cancel"/"Delete"/"Locked" clearly, which does not match the "A font
+defect" section below's "every label renders as a blank/solid box"
+finding from the prior task's Linux rig. This could be a platform/GPU
+difference (a real system font resolving through some path this task did
+not trace) rather than the defect being fixed; it is reported here as an
+honest observation, not a claim that the documented `fontique`
+`wasm32`/`SystemUi` limitation no longer exists — that would need the same
+Linux rig re-run to confirm either way, and doing so is outside this task's
+`write_files`.
+
+**Not run, and not claimable from this Mac:** Safari 26. There is no Safari
+automation available in this environment (Playwright's `webkit` channel is
+a bundled WebKit build, not shipping Safari, and was not substituted for
+it here since that would misrepresent the leg as covered). The conductor
+should bill a real Safari 26 pass to Ed or a macOS device gate, the same way
+the card's own acceptance names it.
+
+## Rig used for the milestone evidence below (prior task, w1-06)
 
 `docker exec frust-linux-native ...` — Chrome 151.0.7922.108 at
 `/usr/bin/google-chrome`, `chromedriver` 151.0.7922.108 at
@@ -233,6 +445,13 @@ new width. This is genuinely useful, in-scope evidence for the milestone —
 but the underlying gap (an *unstyled* page's canvas never resizes at all)
 is a `frust-shell-web` fact this app's `write_files` cannot fix at the
 source; see "Recommended follow-up" below.
+
+**Update (g3-01):** this page's own `MutationObserver` script described
+above has since been removed — `platform/web/frust_web.js`'s `mount()` now
+implements the identical fix, generalized from a fixed `100vw`/`100vh`
+target to an arbitrary host element's own box (see "Embedding" above). The
+finding and its root-cause diagnosis above remain accurate history; only
+where the fix lives has moved.
 
 ### 7. Device-pixel-ratio change
 
@@ -393,8 +612,9 @@ not yet exercised by any case in the registry.
 | File | Purpose |
 |---|---|
 | `Cargo.toml` | Standalone workspace manifest: the `frust` facade + `frust-gallery` path deps, the `wasm32`-gated `wasm-bindgen`/`web-sys`/`js-sys`/`wasm-bindgen-futures`/`frust-shell-web` rows, and this crate's own `[profile.release]`. |
-| `src/main.rs` | The app. `fn main() {}` (required for a `[[bin]]` target; the real entry is `wasm_bindgen(start)`) plus a `wasm32`-only `mod app`: `AppState`, the font-registration/case-resolution/log-level startup sequence, `label`/`nav_row` (the font-defect workaround), `CaseHost` (the `Component` state-boundary bridge into a `()`-state `Case`), `case_view`/`index_view`, and the `frust::web_app!` invocation. |
-| `index.html` | Host page. No `<canvas>` of its own (the shell creates one) — carries the `?arm=webgl` WebGPU-removal script, the canvas-resize `MutationObserver`, and the load-failure `<pre id="log">` mirror. |
+| `src/main.rs` | The app. `fn main() {}` (required for a `[[bin]]` target; the real entry is `wasm_bindgen(start)`) plus a `wasm32`-only `mod app`: `AppState`, the font-registration/case-and-theme-resolution/log-level startup sequence (`resolve_case_from_query`, `resolve_theme_override_from_query`), `label`/`nav_row` (the font-defect workaround), `CaseHost` (the `Component` state-boundary bridge into a `()`-state `Case`), `case_view`/`index_view`, and the `frust::web_app!` invocation. |
+| `index.html` | Host page for the manual recipe. No `<canvas>` of its own (the shell creates one) — carries the `?arm=webgl` WebGPU-removal script and the load-failure `<pre id="log">` mirror; canvas-host binding, resize/DPR sync, and the iframe height-report contract are now `platform/web/frust_web.js`'s `mount()` (imported directly, see "Embedding" above), not a page-local script. Not read at all by `frust build web --release`, which stages the framework's own page instead (see "Primary recipe" above). |
 | `README.md` | This file. |
-| `pkg/` | `wasm-bindgen`/`wasm-opt` output. Generated; **not committed** (see "Serve" above). |
-| `target/` | Cargo build output. Generated; **not committed**. |
+| `pkg/` | `wasm-bindgen`/`wasm-opt` output (manual recipe). Generated; **not committed** (`.gitignore`-covered — see "Serve" above). |
+| `target/` | Cargo build output. Generated; **not committed** (`.gitignore`-covered). |
+| `build/` | `frust build web --release`'s own output directory (primary recipe). Generated; **not committed**, but **not yet `.gitignore`-covered** — see "Generated output" note above the "Embedding" section for the gap this task cannot close itself. |
