@@ -78,8 +78,18 @@
 //! proportional face substituted for `Monospace` would silently regress
 //! `TextInput`/code-display layout, and the bundled face set has neither a
 //! serif nor an emoji face), so text explicitly requesting one of those
-//! three still resolves zero glyphs there — but no case in this registry
-//! does. This app's own [`app::LABEL_FAMILY`]/[`app::nav_row`]
+//! three still resolves zero glyphs there — and cases in this registry do
+//! request `Monospace`: both Glyph faces are
+//! `stack_with_generic([...], GenericSlot::Monospace)`
+//! (`plugins/glyph/src/tokens/scales.rs`) and every Glyph type token uses
+//! one of them, so all 14 `glyph/*` cases render no text on this target;
+//! the `shadcn` and `beui` mono slots carry the same tail. Their
+//! CPU-rendered snapshots still look correct, because the host has the real
+//! faces — so a `glyph/*` page must not be given a live preview until this
+//! binary registers "Space Mono"/"IBM Plex Mono" itself. It cannot inherit
+//! them: the registry's Glyph cases are built without `frust_glyph::install`
+//! (`examples/gallery/src/glyph.rs`), the only seam that registers them.
+//! This app's own [`app::LABEL_FAMILY`]/[`app::nav_row`]
 //! hand-registration (a *named*-family route through
 //! [`frust::register_app_fonts`], predating the shell fix above) is now
 //! redundant per `frust-shell-web`'s own doc comment on
@@ -87,10 +97,14 @@
 //! registration is redundant and can be dropped in favor of this default")
 //! — left in place since dropping it is outside this task's scope, and a
 //! named lookup winning over a generic one makes keeping it harmless. A
-//! hosted [`frust_gallery::Case`]'s own internal text goes through the
-//! identical `SystemUi`/`Theme::neutral()` default path and now renders too,
-//! for the same reason — see README.md's font-defect section for the full
-//! writeup.
+//! hosted [`frust_gallery::Case`] takes that same `SystemUi`/
+//! [`Theme::neutral`] default only when it is a `Design::Base` case:
+//! [`app::AppState::new`] installs the case's own design-system theme
+//! through `frust::set_default_theme` for every non-`Base` case. Material,
+//! shadcn and beUI body text tails `SansSerif` and so renders; Cupertino
+//! sets no family of its own and keeps the `SystemUi` default; Glyph tails
+//! `Monospace` and does not — see README.md's `wasm32` text section for the
+//! full writeup.
 //!
 //! See `README.md` for the build/serve/drive commands and the recorded
 //! evidence for every milestone above, on both the WebGPU and the forced
@@ -132,9 +146,9 @@ mod app {
     /// carrying a new font asset of this crate's own — full Latin coverage,
     /// already vendored and licensed in-repo, and not a new write-scope file
     /// (an `include_bytes!` read, not a write). See this file's module-level
-    /// "discovered pre-existing limitation" section for why registering a
-    /// face at all is necessary on this target, and why it is not enough on
-    /// its own to fix every case's own text.
+    /// `SystemUi`/`SansSerif` section for why this app registered a face of
+    /// its own before the shell fix landed, and why a registered face is
+    /// still not enough to fix every case's own text.
     const LABEL_FAMILY: &str = "Inter Variable";
     const LABEL_FONT_BYTES: &[u8] =
         include_bytes!("../../../plugins/shadcn/fonts/inter/InterVariable.ttf");
@@ -176,10 +190,11 @@ mod app {
         /// way it would inside a root [`Component::init`].
         fn new() -> Self {
             raise_log_level_from_query();
-            // See `LABEL_FONT_BYTES`'s doc: without this, every text-bearing
-            // widget on this target — including this app's own chrome —
-            // renders zero glyphs (`FontFamily::SystemUi` never resolves on
-            // `wasm32`; see this module's header doc). Registered before
+            // Redundant since `frust-shell-web`'s `install_default_fonts`
+            // began mapping `SystemUi`/`SansSerif` unconditionally (see this
+            // module's header doc); kept because a named lookup wins over a
+            // generic one, so it costs nothing, and dropping it is outside
+            // this task's scope. Registered before
             // `run_app` constructs the shell, matching the timing contract
             // `frust::register_app_fonts`'s own doc and `frust_shadcn::install`
             // (the precedent this follows) both spell out: "a shell reads ...
@@ -330,17 +345,19 @@ mod app {
 
     /// A [`text`] view pre-styled with [`LABEL_FAMILY`] — every piece of this
     /// app's own authored chrome goes through this rather than a bare
-    /// [`text`] call, so it is legible on `wasm32` (see this module's header
-    /// doc for why a bare `text()`/`SystemUi` default renders nothing there).
+    /// [`text`] call — originally because a bare `text()`/`SystemUi` default
+    /// resolved nothing on `wasm32`, and now belt-and-braces over the shell's
+    /// own generic fallback (see this module's header doc).
     fn label(content: impl Into<String>) -> TextView {
         text(content).family(FontFamily::named(LABEL_FAMILY))
     }
 
     /// This app's own hand-rolled tappable row: [`frust_widgets::button`]'s
     /// internal label has no family-override builder, so a `button()` call
-    /// would render an invisible (but still clickable) label under the same
-    /// `SystemUi` defect [`label`] works around — see this module's header
-    /// doc. Composes existing primitives instead ([`GestureDetector`] for the
+    /// could not be pinned to [`LABEL_FAMILY`] the way [`label`] is — which
+    /// mattered while `SystemUi` resolved nothing on `wasm32`, and is now
+    /// merely a lost override (see this module's header doc). Composes
+    /// existing primitives instead ([`GestureDetector`] for the
     /// tap, [`container`] for the fill/radius chrome, [`label`] for the
     /// legible text), all within this crate's own write scope.
     fn nav_row<F: Fn(&mut AppState) + 'static>(

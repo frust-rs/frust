@@ -32,7 +32,7 @@ Query parameters, all read in `src/main.rs` / `index.html`:
 |---|---|---|
 | `?case=<slug>` | any registry slug | render that one case |
 | `?theme=<variant>` | `light`/`dark` | force that appearance end-to-end (`frust::set_app_theme`), overriding the host's own reported light/dark appearance; any other value (including absent) leaves the shell following the host, unchanged from before this parameter existed |
-| `?embed=1` | exact string `1` | strip this app's own chrome down to exactly the hosted case — no "‹ Index" header, no debug title, no outer `scroll_view`/padding — and make it inescapable from inside the frame; any other value (including absent) leaves the existing chromed `?case=` page unchanged. **This is the exact spelling and semantics the website's `WidgetPreview` component's iframe `src` must use** (`?case=<slug>&embed=1`) — see "Embedding" below |
+| `?embed=1` | exact string `1` | strip this app's own chrome down to exactly the hosted case — no "‹ Index" header, no debug title, no outer `scroll_view`/padding — and make it inescapable from inside the frame (for a slug the registry carries; an unknown slug still falls back to the chromed index, see "Embedding"); any other value (including absent) leaves the existing chromed `?case=` page unchanged. **This is the exact spelling and semantics the website's `WidgetPreview` component's iframe `src` must use** (`?case=<slug>&embed=1`) — see "Embedding" below |
 | `?log=<level>` | `off`/`error`/`warn`/`info`/`debug`/`trace` | raise the console log ceiling above the facade's `Warn` default |
 | `?arm=webgl` | present/absent | force the WebGL2 backend arm (see "The WebGL2 arm" below) |
 
@@ -82,7 +82,7 @@ and only touching this crate's own `index.html` for the *second*, independent
 embedding route (below).
 
 Output lands in `build/web/` (`pkg/app.js`, `pkg/app_bg.wasm`, the staged
-`index.html`/`frust_web.js`) — see "Generated output" below for why it is
+`index.html`/`frust_web.js`) — see "Serve" below for why it is
 **not** committed.
 
 ### Manual recipe (no `frust` build required)
@@ -311,11 +311,15 @@ remained inside a box the website sizes from the poster PNG
 (`examples/gallery/src/case.rs`, 360×240 for five of the six live slugs,
 400×180 for `material/tabs`) — a composition mismatch between the poster
 and the live frame it cross-fades into. Worse, the chromed page's "‹ Index"
-tap set `AppState::case` back to `None` with no way back from inside the
-frame, permanently replacing the documented widget with the full gallery
-index. `?embed=1` closes both: `embedded_case_view` never renders a
-`nav_row`/`GestureDetector` at all, so nothing inside an embedded frame can
-ever reach `index_view`. Any value other than the literal string `"1"`
+tap set `AppState::case` back to `None`, replacing the documented widget
+with the full gallery index (recoverable only by tapping the slug's row
+again — `src/main.rs`'s `index_view` sets `case` back to `Some`). `?embed=1`
+closes both: `embedded_case_view` never renders a `nav_row`/`GestureDetector`
+at all, so no tap inside an embedded frame can reach `index_view`. One
+caveat the parameter cannot cover: `?embed=1` with a slug the registry does
+not carry resolves to `None`, and `src/main.rs`'s view match then renders
+the chromed `index_view` — so a stale or renamed slug shows the full index
+inside the frame. The tap-out is closed; a bad slug is not. Any value other than the literal string `"1"`
 (including the parameter's absence) leaves the existing chromed `?case=`
 page unchanged — additive, not a replacement, the identical discipline
 `?theme=` already established. **This exact spelling (`embed`, exact value
@@ -361,8 +365,8 @@ preview-embedding shape, not same-origin):
 **One observation from this task, now explained (not a Mac/Linux platform
 quirk):** on this Chrome/macOS/M4 combination, case-label text rendered
 legibly on **both** the WebGPU and forced-WebGL2 arms — screenshots show
-"Save"/"Cancel"/"Delete"/"Locked" clearly, which did not match the "A font
-defect" section below's original "every label renders as a blank/solid box"
+"Save"/"Cancel"/"Delete"/"Locked" clearly, which did not match the "Text on
+`wasm32`" section below's original "every label renders as a blank/solid box"
 finding from the prior task's Linux rig. A review-round-1 fix (this pass)
 traced this to `docs/LIMITATIONS.md`'s `web-generic-family-partial-fallback`
 entry: `crates/frust-shell-web`'s `install_default_fonts` registers a
@@ -372,10 +376,12 @@ in the codebase this whole crate builds against today, that mapping is
 already live for every case's default-styled text. So the legible text
 above is that framework-level fix actually working, not an unexplained
 platform/GPU difference; this passage no longer needs the Linux rig re-run
-it originally called for. See the "A font defect" section below for the
+it originally called for. See the "Text on `wasm32`" section below for the
 corrected, current state (`Monospace`/`Serif`/`Emoji` remain unmapped and
-would still show the original defect; no case in the registry requests any
-of the three).
+still show the original defect — and cases in the registry DO request
+`Monospace`: every `glyph/*` case does, so all 14 render no text here).
+Note this rig exercised only `Base` cases, which is why that was not
+observed at the time.
 
 **Not run, and not claimable from this Mac:** Safari 26. There is no Safari
 automation available in this environment (Playwright's `webkit` channel is
@@ -411,9 +417,8 @@ recipe above to reproduce.
 
 ### 1. Mouse click / hover (index navigation)
 
-Clicking a row in the index list's `nav_row` (see "A font defect and how
-this app works around it" below for why rows are hand-rolled instead of
-`frust::button`) navigated to that case's `?case=` page; clicking "‹ Index"
+Clicking a row in the index list's `nav_row` (see "Text on `wasm32`" below
+for why rows are hand-rolled instead of `frust::button`) navigated to that case's `?case=` page; clicking "‹ Index"
 on a case page navigated back. Verified round-trip on both the WebGPU and
 the forced-WebGL2 arm.
 
@@ -608,8 +613,17 @@ does not opt in to anything for it. `Monospace`, `Serif`, and `Emoji`
 remain **unmapped** by design (a proportional face substituted for
 `Monospace` would silently regress `TextInput`/code-display layout, and the
 bundled face set has neither a serif nor an emoji face) — text explicitly
-requesting one of those three still resolves zero glyphs on this target,
-but no case in this registry does.
+requesting one of those three still resolves zero glyphs on this target —
+and cases in this registry do. Both Glyph faces are
+`stack_with_generic([...], GenericSlot::Monospace)`
+(`plugins/glyph/src/tokens/scales.rs`) and every Glyph type token uses one
+of them, so all 14 `glyph/*` cases render no text here; the `shadcn` and
+`beui` mono slots carry the same tail. The CPU-rendered snapshots look
+correct because the host has the real faces, so a `glyph/*` page must not
+be given a live preview until this binary registers "Space Mono"/"IBM Plex
+Mono" itself — it cannot inherit them, since the registry's Glyph cases are
+built without `frust_glyph::install` (`examples/gallery/src/glyph.rs`), the
+only seam that registers them.
 
 This app's own hand-rolled workaround, from before the framework fix above
 landed, is now **redundant** — `frust-shell-web`'s own doc comment on
@@ -640,17 +654,22 @@ harmless rather than wrong:
   `frust::register_app_fonts`'s own doc and `frust_shadcn::install`'s
   identical pattern both spell out).
 
-A hosted `Case`'s own internal text (the overwhelming majority of the
-registry's actual content) now renders on this target too, for the same
-reason: it goes through the identical `SystemUi`/`Theme::neutral()` default
-path this app's own chrome does, and the shell's generic-family fallback
-applies process-wide, not just to labels this crate authors itself. A case's
+A hosted `Case`'s own internal text now renders on this target too, but
+only where its family tails a slot the shell maps. A `Design::Base` case
+goes through the identical `SystemUi`/`Theme::neutral()` default path this
+app's own chrome does, and the shell's generic-family fallback applies
+process-wide rather than only to labels this crate authors. A non-`Base`
+case does not take that path at all: `AppState::new` installs the case's
+own design-system theme through `frust::set_default_theme`. Material,
+shadcn and beUI body text tails `SansSerif` and renders; Cupertino sets no
+family of its own and keeps the `SystemUi` default; Glyph tails
+`Monospace` and renders nothing. A case's
 shapes, images, layout and theme colours have always rendered correctly; its
 default-styled labels now do too, on **both** backend arms (this was a
 `frust-text`/`fontique` defect, orthogonal to the WebGL2-specific
-glyph-atlas defect above). A case naming `Monospace`/`Serif`/`Emoji`
-explicitly would still resolve no glyphs for that text; none in the
-registry currently does.
+glyph-atlas defect above). A case resolving to `Monospace`/`Serif`/`Emoji`
+still gets no glyphs for that text, and the 14 `glyph/*` cases do resolve
+to `Monospace` — see above.
 
 **Remaining follow-up, if one is still wanted:** `docs/LIMITATIONS.md`'s
 `web-generic-family-partial-fallback` entry already names its own trigger

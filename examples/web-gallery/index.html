@@ -32,6 +32,13 @@
                      unchanged behaviour — the shell keeps following the
                      host's reported appearance, exactly as before this
                      query parameter existed.
+    ?embed=1         Exact string `1`: strip this app's own chrome down to
+                     the hosted case alone — no "‹ Index" header, no debug
+                     title, no outer scroll/padding — so a documentation
+                     iframe shows the widget and nothing else. Any other
+                     value (including absent) leaves the chromed `?case=`
+                     page unchanged. A slug the registry does not carry
+                     still falls back to the index page.
     ?log=<level>     Raise the browser console's log ceiling above the
                      facade's `Warn` default (`off`/`error`/`warn`/`info`/
                      `debug`/`trace` — `frust_shell_web::logging::
@@ -48,9 +55,9 @@
   `../../platform/web/frust_web.js` import requires (the server root must be
   the repository root, not this directory, so that relative path resolves).
 
-  `pkg/` and `target/` are generated and MUST NOT be committed — see
-  README.md's "Generated output" section (this standalone workspace's own
-  `.gitignore` is outside this task's write scope; the conductor adds it).
+  `pkg/`, `build/` and `target/` are generated and MUST NOT be committed —
+  see README.md's "Serve" section; this standalone workspace's own
+  `.gitignore` covers all three.
 -->
 <html lang="en">
   <head>

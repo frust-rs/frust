@@ -79,12 +79,10 @@ The repository already contains substantial non-pixel coverage:
   re-renders and byte-compares, proving same-host determinism only. Run via
   `scripts/widget-snapshots.sh`.
 - `examples/web-gallery`: the frust.dev website's live-preview app, rendering the same
-  `examples/gallery` case registry in-browser via `frust build web --release`; its
-  multi-megabyte `wasm-opt`'d build artifact is what decided the website mounts live
-  previews click-to-run rather than automatically. That byte count is not restated here —
-  it moves with every build (even absent an app-code change) and this file is not the
-  place to keep a second copy in sync; the current measurement, the build recipe, and the
-  full size history live in `examples/web-gallery/README.md`.
+  `examples/gallery` case registry in-browser via `frust build web --release`. It carries
+  no automated coverage and is gated manually in a browser — see its README's "Browser
+  verification" section for the procedure, and its "Binary size" section for the artifact
+  measurement (deliberately not restated here, since it moves with every build).
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.
