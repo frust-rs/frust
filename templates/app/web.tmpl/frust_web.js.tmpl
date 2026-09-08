@@ -30,7 +30,7 @@ function resolveElement(selectorOrElement, fallbackSelector) {
  * on-page log element, and `console.error`. Exported so a host page's own
  * `import(moduleUrl)` failure (before `mount()` is ever reached — a bad
  * `?module=` path, a 404) can be reported through the identical path a wasm
- * init failure uses. Mirrors `examples/web-gallery/index.html`'s precedent.
+ * init failure uses.
  */
 export function reportFailure(err, options = {}) {
   const message = `FAIL: ${err}`;
@@ -235,9 +235,8 @@ function postHeightToParent() {
  * `DEFAULT_LOG_SELECTOR`.
  *
  * Returns a promise that resolves once `init()` has settled (successfully
- * or not — a failure is reported, not rethrown, matching
- * `examples/web-gallery/index.html`'s `init().catch(...)` shape rather than
- * leaving an unhandled rejection for a caller who did not ask for one).
+ * or not — a failure is reported, not rethrown, rather than leaving an
+ * unhandled rejection for a caller who did not ask for one).
  */
 export function mount(init, options = {}) {
   const host = resolveElement(options.host, DEFAULT_HOST_SELECTOR);
