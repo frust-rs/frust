@@ -41,6 +41,38 @@ frust = { path = "../../crates/frust" }
 # is the first thing to actually build `frust-gallery` itself for the
 # target).
 frust-gallery = { path = "../gallery" }
+# The three design-system plugins whose bundled faces this binary registers
+# at startup — see `src/main.rs`'s `register_design_system_fonts` for why all
+# three, unconditionally, and why the other two are missing here.
+#
+# These rows add NO crate: `frust-gallery` above already depends on all five
+# design systems, so all three are in this workspace's graph and lockfile
+# already (the lockfile diff that added them is three lines, no new
+# package). What a row buys is the ability to NAME the plugin here, since
+# Rust resolves `frust_glyph::font_data` only through a direct dependency
+# edge; the alternative (a second `include_bytes!` of the same TTFs, the
+# shape `LABEL_FONT_BYTES` uses) would add ~2.5 MB of duplicate payload.
+#
+# The rows themselves cost no bytes either — but do not read that as the
+# whole registration being free. Reachability, not the manifest, decides
+# what the linker keeps: before `register_design_system_fonts` existed, only
+# the faces each plugin's `native_typefaces` names survived into the
+# artifact, and calling `font_data()` brings the other seven back at
+# +1,221,759 B (`wasm-opt` stage) / +560,157 B gzipped. README.md's `wasm32`
+# text section has the measured before/after.
+#
+# `frust-material` and `frust-cupertino` are deliberately absent, each for
+# its own reason: Cupertino declares no font family at all, and Material's
+# type scale contains no `Monospace` slot whatsoever (its one stack is
+# `[Roboto Flex] + SansSerif`, which the web shell's `install_default_fonts`
+# already maps), so neither is exposed to the defect this fixes. Material
+# could not be registered even if it were: `plugins/material/src/lib.rs`'s
+# `mod tokens;` is private and the crate-root re-export list omits
+# `font_data`, so its bundled bytes have no public accessor — unlike the
+# three below, each of which re-exports `font_data` at its crate root.
+frust-glyph = { path = "../../plugins/glyph" }
+frust-shadcn = { path = "../../plugins/shadcn" }
+frust-beui = { path = "../../plugins/beui" }
 
 # --- wasm32-only rows -------------------------------------------------------
 #

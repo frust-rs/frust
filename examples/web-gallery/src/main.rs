@@ -56,7 +56,7 @@
 //! contract) is likewise not this crate's own code — see `index.html`'s
 //! header comment for where that lives.
 //!
-//! # `SystemUi`/`SansSerif` now resolve on `wasm32`; `Monospace`/`Serif`/`Emoji` still do not
+//! # Text on `wasm32`: `SystemUi`/`SansSerif` and the bundled design-system faces resolve; the `Monospace`/`Serif`/`Emoji` generics still do not
 //!
 //! Every text-bearing widget defaults to [`frust_text::FontFamily::SystemUi`]
 //! (`TextStyle::default()`) unless a caller sets `.family(...)` explicitly —
@@ -82,13 +82,28 @@
 //! request `Monospace`: both Glyph faces are
 //! `stack_with_generic([...], GenericSlot::Monospace)`
 //! (`plugins/glyph/src/tokens/scales.rs`) and every Glyph type token uses
-//! one of them, so all 14 `glyph/*` cases render no text on this target;
-//! the `shadcn` and `beui` mono slots carry the same tail. Their
-//! CPU-rendered snapshots still look correct, because the host has the real
-//! faces — so a `glyph/*` page must not be given a live preview until this
-//! binary registers "Space Mono"/"IBM Plex Mono" itself. It cannot inherit
-//! them: the registry's Glyph cases are built without `frust_glyph::install`
+//! one of them; the `shadcn` and `beui` mono slots carry the same tail.
+//!
+//! **That half is this binary's own job, and it now does it**
+//! ([`app::register_design_system_fonts`], called from
+//! [`app::AppState::new`] before `run_app` constructs the shell): the
+//! bundled Glyph, shadcn and beUI faces are handed to
+//! [`frust::register_app_fonts`] unconditionally, so the *named* half of
+//! each of those stacks ("Space Mono"/"IBM Plex Mono", "JetBrains Mono",
+//! "Geist Mono") resolves and the unmapped generic tail is never reached.
+//! Before that call, all 14 `glyph/*` cases rendered zero glyphs here while
+//! their CPU snapshots looked perfectly correct, because the snapshot host
+//! has the real faces. They could not inherit them: the registry's Glyph
+//! cases are built without `frust_glyph::install`
 //! (`examples/gallery/src/glyph.rs`), the only seam that registers them.
+//! **Registering a face is not the same as mapping a generic**, and this
+//! changes only the former — text that resolves to a bare
+//! `Monospace`/`Serif`/`Emoji` generic with no named face in front of it
+//! still renders nothing on this target. See
+//! [`app::register_design_system_fonts`] for why Material (no `Monospace`
+//! slot at all, and no public accessor for its bundled bytes) and Cupertino
+//! (no family of its own) are not registered and do not need to be.
+//!
 //! This app's own [`app::LABEL_FAMILY`]/[`app::nav_row`]
 //! hand-registration (a *named*-family route through
 //! [`frust::register_app_fonts`], predating the shell fix above) is now
@@ -101,10 +116,12 @@
 //! [`Theme::neutral`] default only when it is a `Design::Base` case:
 //! [`app::AppState::new`] installs the case's own design-system theme
 //! through `frust::set_default_theme` for every non-`Base` case. Material,
-//! shadcn and beUI body text tails `SansSerif` and so renders; Cupertino
-//! sets no family of its own and keeps the `SystemUi` default; Glyph tails
-//! `Monospace` and does not — see README.md's `wasm32` text section for the
-//! full writeup.
+//! shadcn and beUI body text tails `SansSerif` and always rendered;
+//! Cupertino sets no family of its own and keeps the `SystemUi` default;
+//! Glyph's whole type scale, and the shadcn/beUI mono slots, tail
+//! `Monospace` and render through the named faces registered above — see
+//! README.md's `wasm32` text section for the full writeup and the
+//! browser-measured evidence.
 //!
 //! See `README.md` for the build/serve/drive commands and the recorded
 //! evidence for every milestone above, on both the WebGPU and the forced
@@ -153,6 +170,78 @@ mod app {
     const LABEL_FONT_BYTES: &[u8] =
         include_bytes!("../../../plugins/shadcn/fonts/inter/InterVariable.ttf");
 
+    /// Hand every bundled design-system face this binary can reach to
+    /// [`frust::register_app_fonts`], once, before the shell exists.
+    ///
+    /// Without this, all 14 `glyph/*` cases render **zero glyphs** on
+    /// `wasm32`, under posters that look perfectly correct. Both Glyph type
+    /// faces are `stack_with_generic([..], GenericSlot::Monospace)`
+    /// (`plugins/glyph/src/tokens/scales.rs`), the named half of that stack
+    /// resolves only against faces someone registered, and the generic tail
+    /// is deliberately unmapped on this target
+    /// (`crates/frust-shell-web/src/fonts.rs` maps `SystemUi`/`SansSerif`
+    /// only — `docs/LIMITATIONS.md`'s `web-generic-family-partial-fallback`).
+    /// The registry builds its Glyph cases directly rather than through
+    /// `frust_glyph::install` (`examples/gallery/src/glyph.rs` explains why),
+    /// so nothing else in this binary ever registers them. The shadcn and
+    /// beUI mono slots (`JetBrains Mono`, `Geist Mono`) sit on the identical
+    /// tail; their sans body text was always fine.
+    ///
+    /// # Why these three, and no `install()` call
+    ///
+    /// `frust_{glyph,shadcn,beui}::install()` would also
+    /// `set_default_theme`, fighting [`AppState::new`]'s own per-case
+    /// seeding below; `font_data()` is the pure-bytes half of exactly what
+    /// `install` registers, so this is that call's font half and nothing
+    /// else. Material is absent because its type scale carries no
+    /// `Monospace` slot at all — its one stack is `[Roboto Flex] +
+    /// SansSerif`, which the shell already maps — and because its bundled
+    /// bytes have no public accessor anyway (`plugins/material`'s `tokens`
+    /// module is private and its crate root does not re-export
+    /// `font_data`, unlike the three below). Cupertino declares no family of
+    /// its own. Neither can hit this defect, so neither is registered; see
+    /// this crate's `Cargo.toml` for the same note beside the missing rows.
+    ///
+    /// # Why unconditionally, rather than per-case
+    ///
+    /// Registering only the on-screen case's own design would be thriftier —
+    /// ~1.0 MB (Glyph) instead of ~2.5 MB of `Vec<u8>` copies per module
+    /// instance — but it would be wrong for the way this app is navigated.
+    /// A shell reads the registry at construction; `?case=` is resolved in
+    /// the same breath, but the index page's own list writes
+    /// [`AppState::case`] at *runtime*, long after that, so a per-case
+    /// scheme would have to re-register on every navigation and lean on the
+    /// shell's once-per-frame re-drain to recover. That is more machinery
+    /// than a demo binary whose entire job is proving text renders should
+    /// carry, and it re-opens the exact blank-text failure mode this
+    /// function closes. The cost it buys off is bounded, one-time, and heap
+    /// only: the *payload* is identical either way, since a per-case `match`
+    /// would name all three `font_data()`s and keep every face reachable
+    /// just the same.
+    ///
+    /// # This is not free — measured, not assumed
+    ///
+    /// All three plugins do bundle unconditionally (`include_bytes!`, no
+    /// feature gate), but "bundled" is not "linked": before this call the
+    /// only faces surviving into the artifact were the one or two each
+    /// plugin's `native_typefaces` binding references (Space Mono Regular,
+    /// IBM Plex Mono Regular, Inter, Geist), and the linker dropped the
+    /// other seven as unreachable. Turning them on grew the module by
+    /// 1,221,759 B after `wasm-opt` (+11.4%) and 560,157 B gzipped
+    /// (+12.5%) — 585 B off the 1,222,344 B those seven faces weigh on
+    /// disk. README.md's `wasm32` text section carries the full before/after
+    /// table; the lever, if that ever proves too expensive, is registering
+    /// each family's Regular only, never dropping a family.
+    fn register_design_system_fonts() {
+        for bytes in frust_glyph::font_data()
+            .iter()
+            .chain(frust_shadcn::font_data())
+            .chain(frust_beui::font_data())
+        {
+            frust::register_app_fonts(bytes.to_vec());
+        }
+    }
+
     /// The app's whole retained state: which case (if any) is showing, the
     /// index page's live filter text, and the zero-input-event ticking
     /// counter's signal handle.
@@ -190,16 +279,23 @@ mod app {
         /// way it would inside a root [`Component::init`].
         fn new() -> Self {
             raise_log_level_from_query();
-            // Redundant since `frust-shell-web`'s `install_default_fonts`
-            // began mapping `SystemUi`/`SansSerif` unconditionally (see this
-            // module's header doc); kept because a named lookup wins over a
-            // generic one, so it costs nothing, and dropping it is outside
-            // this task's scope. Registered before
-            // `run_app` constructs the shell, matching the timing contract
-            // `frust::register_app_fonts`'s own doc and `frust_shadcn::install`
-            // (the precedent this follows) both spell out: "a shell reads ...
-            // and drains the font registry once, at construction".
+            // Redundant twice over now: `frust-shell-web`'s
+            // `install_default_fonts` maps `SystemUi`/`SansSerif`
+            // unconditionally (see this module's header doc), and
+            // `register_design_system_fonts` below registers shadcn's own
+            // copy of these exact bytes — `LABEL_FONT_BYTES` `include_bytes!`s
+            // the same `plugins/shadcn/fonts/inter/InterVariable.ttf` the
+            // plugin bundles. Kept anyway: dropping it would make this app's
+            // own chrome depend on a plugin's bundle, and re-registering one
+            // already-registered family is harmless. Retiring it (and the
+            // duplicated ~0.88 MB payload behind it) is a follow-up, not this
+            // change. Both calls run before `run_app` constructs the shell,
+            // matching the timing contract `frust::register_app_fonts`'s own
+            // doc and `frust_shadcn::install` (the precedent this follows)
+            // both spell out: "a shell reads ... and drains the font registry
+            // once, at construction".
             frust::register_app_fonts(LABEL_FONT_BYTES.to_vec());
+            register_design_system_fonts();
 
             let case = resolve_case_from_query();
             // See [`resolve_embed_from_query`]'s own doc for the exact
