@@ -13,25 +13,27 @@
 //! # What this crate is today
 //!
 //! Two layers. The host-signal translation layer ([`app_handler`]'s
-//! winit-generic half, [`pacing`], and [`render`]'s pure pieces) is built out
-//! of pure or near-pure functions that run and are unit-tested on the build
-//! host as well as on `wasm32-unknown-unknown`, which is what keeps the
-//! browser translation testable without a browser. On top of it, gated to
-//! `target_arch = "wasm32"`, sits the part that owns browser resources: the
-//! canvas-bound event loop and `requestAnimationFrame` frame pipeline
-//! ([`spawn_app`], entered by the facade through [`run_app`]) and the
-//! single-thread inline frame executor over the wgpu surface
-//! ([`render::WebFrameExecutor`]).
+//! winit-generic half, [`pacing`], [`ime`]'s policy and mapping, and
+//! [`render`]'s pure pieces) is built out of pure or near-pure functions that
+//! run and are unit-tested on the build host as well as on
+//! `wasm32-unknown-unknown`, which is what keeps the browser translation
+//! testable without a browser. On top of it, gated to `target_arch = "wasm32"`,
+//! sits the part that owns browser resources: the canvas-bound event loop and
+//! `requestAnimationFrame` frame pipeline ([`spawn_app`], entered by the facade
+//! through [`run_app`]), the single-thread inline frame executor over the wgpu
+//! surface ([`render::WebFrameExecutor`]), and the input method's own DOM
+//! element (`ime::ImeOverlay`).
 //!
 //! # Host signals a browser does not have
 //!
-//! Three of the desktop core's seams have no web counterpart at all, and are
+//! Two of the desktop core's seams have no web counterpart at all, and are
 //! honest documented no-ops here rather than absent or faked — see
-//! [`app_handler::sync_ime`], [`app_handler::push_semantics`] and
-//! [`app_handler::pump_devtools`] for each one's own reasoning. A fourth,
-//! cursor setting, *does* have one (winit's web backend drives the canvas's CSS
-//! `cursor` property), so it is a real implementation:
-//! [`app_handler::sync_cursor`].
+//! [`app_handler::push_semantics`] and [`app_handler::pump_devtools`] for each
+//! one's own reasoning. Two others *do* have one: cursor setting, which winit's
+//! web backend drives through the canvas's CSS `cursor` property
+//! ([`app_handler::sync_cursor`]), and the input method, which winit does not
+//! reach at all — [`ime`] bypasses it with a hidden `<input>` overlay bound to
+//! the browser's own composition events.
 //!
 //! # Default text face
 //!
@@ -43,6 +45,7 @@
 
 pub mod app_handler;
 pub mod fonts;
+pub mod ime;
 pub mod input;
 pub mod logging;
 pub mod pacing;
@@ -51,11 +54,18 @@ pub mod render;
 pub use app_handler::{
     ComposeLatch, InputState, apply_theme, base_theme, brightness_from_winit, event_under_owner,
     follow_platform_brightness, publish_window_metrics, pump_devtools, push_semantics,
-    reverted_theme, sync_cursor, sync_ime, theme_after_override_poll,
+    reverted_theme, sync_cursor, theme_after_override_poll,
 };
 #[cfg(target_arch = "wasm32")]
 pub use app_handler::{ShellUserEvent, run_app, spawn_app};
 pub use fonts::install_default_fonts;
+#[cfg(target_arch = "wasm32")]
+pub use ime::ImeOverlay;
+pub use ime::{
+    DomEditEvent, IME_PROCESS_KEY, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy,
+    UNIDENTIFIED_KEY, cancels_composition, forwards_to_canvas, overlay_box, overlay_box_moved,
+    session_is_active,
+};
 pub use input::{TouchTracker, map_touch_phase};
 pub use logging::{DEFAULT_LEVEL, LEVEL_QUERY_PARAM, install, level_from_query, parse_level};
 pub use pacing::{

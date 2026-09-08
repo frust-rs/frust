@@ -1,7 +1,7 @@
 //! The winit-generic host-signal translation this shell is built from: input
 //! mapping, the reactive-owner event wrap, theme delivery, and the
-//! change-guarded window-metrics publish — plus the three seams a browser has
-//! no counterpart for, kept as documented no-ops.
+//! change-guarded window-metrics publish — plus the two seams a browser has no
+//! counterpart for, kept as documented no-ops.
 //!
 //! # Why these are ports, not a dependency
 //!
@@ -28,11 +28,14 @@
 //!   `WindowEvent::ThemeChanged` is emitted on a live change, so
 //!   brightness-follow ports unchanged.
 //! * `Window::set_cursor()` writes the canvas's CSS `cursor` property — a real
-//!   implementation, unlike the three IME setters below.
-//! * `WindowEvent::Ime` is **never** emitted by the web backend, so nothing
-//!   currently feeds [`ComposeLatch`]; it ships anyway because it is the seam a
-//!   real web IME bridge (a hidden editable element) would push into, and
-//!   [`map_key_event`]'s dedupe rule is meaningless without it.
+//!   implementation, unlike `set_ime_allowed`/`set_ime_cursor_area`/
+//!   `set_ime_purpose`, which the backend accepts and does nothing with, which
+//!   is why [`crate::ime`] reaches the DOM directly rather than through them.
+//! * `WindowEvent::Ime` is **never** emitted by the web backend, so the winit
+//!   arm of [`ComposeLatch`] ([`ComposeLatch::observe`]) sees nothing here. The
+//!   latch itself is very much live: [`crate::ime`]'s hidden-input overlay
+//!   drives it through [`ComposeLatch::observe_dom`] instead, and
+//!   [`map_key_event`]'s dedupe rule runs off it.
 //! * `WindowEvent::Touch` *is* emitted, and is deliberately mapped in
 //!   [`crate::input`] rather than here: unlike every mapping above, it has no
 //!   twin in `frust-shell-desktop` (winit reports no touch on the desktop
@@ -243,22 +246,30 @@ pub fn map_key_event(
     })
 }
 
-/// Tracks whether an IME preedit (marked-text) composition is in progress,
-/// purely from a stream of winit [`Ime`] variants — the dedupe latch
-/// [`map_key_event`] consults so keyboard-derived `Character` events are
-/// suppressed while a composition owns the text.
+/// Tracks whether an IME preedit (marked-text) composition is in progress — the
+/// dedupe latch [`map_key_event`] consults so keyboard-derived `Character`
+/// events are suppressed while a composition owns the text.
 ///
-/// **Nothing feeds this on the web today.** winit's web backend emits no
-/// `WindowEvent::Ime` at all (verified against the pinned 0.30.13), so a
-/// browser build currently sees `is_composing() == false` forever and no key
-/// event is ever suppressed. It is here because [`InputState::ime`] is the
-/// documented push point for a real web IME bridge — a hidden contenteditable
-/// or `<input>` driven from `compositionstart`/`compositionupdate`/
-/// `compositionend` — and that bridge needs exactly this latch to avoid
-/// double-inserting composed text.
+/// **One latch, two feeds.** [`ComposeLatch::observe`] takes winit [`Ime`]
+/// variants, the shape ported from the desktop core; winit's web backend emits
+/// none of them (verified against the pinned 0.30.13), so on this target the
+/// live feed is [`ComposeLatch::observe_dom`], which the hidden-input overlay
+/// in [`crate::ime`] drives from the browser's own composition events. Both
+/// arms move the same `active` flag, so the key path has exactly one thing to
+/// consult and a composition can never be double-delivered by a bridge racing a
+/// second latch of its own.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ComposeLatch {
     active: bool,
+    /// Whether the composition session currently open (or just closed) has
+    /// already produced its [`ImeEvent::Commit`].
+    ///
+    /// The DOM ends a composition in two orders depending on the browser and
+    /// the input method — `compositionend` followed by an `input`, or an
+    /// `input` with no `compositionend` at all — and both must land exactly one
+    /// commit. Only the web feed sets it; the winit feed has a single,
+    /// unambiguous `Ime::Commit`.
+    committed: bool,
 }
 
 impl ComposeLatch {
@@ -290,6 +301,101 @@ impl ComposeLatch {
                 self.active = false;
                 ImeEvent::Disabled
             }
+        }
+    }
+
+    /// Observe one browser composition signal from the hidden-input overlay,
+    /// updating the latch and mapping it to an [`ImeEvent`] in the same pass —
+    /// the web counterpart of [`ComposeLatch::observe`].
+    ///
+    /// `None` means the signal is deliberately not forwarded, which is where
+    /// the dedupe against the key path lives (see [`crate::ime`]'s module doc):
+    ///
+    /// * A signal the DOM itself marks `isComposing` is left to the composition
+    ///   events, which report the whole preedit rather than a delta.
+    /// * An `input` arriving with **no** composition open is a plain keystroke.
+    ///   winit already delivered it as a `WindowEvent::KeyboardInput` from the
+    ///   canvas, so forwarding it here would insert the character twice.
+    /// * A second end-of-composition signal is absorbed, so the browser's two
+    ///   orderings both land exactly one [`ImeEvent::Commit`].
+    ///
+    /// The preedit caret is placed at the end of the marked text: the DOM
+    /// reports the composing string but not the selection inside it, and the
+    /// byte length is the end offset [`ImeEvent::Compose`] wants.
+    pub fn observe_dom(&mut self, event: &crate::ime::DomEditEvent) -> Option<ImeEvent> {
+        use crate::ime::DomEditEvent;
+        match event {
+            DomEditEvent::CompositionStart => {
+                self.active = true;
+                self.committed = false;
+                None
+            }
+            DomEditEvent::CompositionUpdate { data } => {
+                self.active = true;
+                self.committed = false;
+                Some(ImeEvent::Compose {
+                    text: data.clone(),
+                    cursor: Some((data.len(), data.len())),
+                })
+            }
+            DomEditEvent::CompositionEnd { data } => {
+                let settles = self.active && !self.committed;
+                self.active = false;
+                self.committed = true;
+                settles.then(|| Self::settle(data))
+            }
+            DomEditEvent::Input {
+                input_type,
+                data,
+                is_composing,
+            } => {
+                if *is_composing || !self.active || self.committed {
+                    return None;
+                }
+                // A deletion mid-composition is the input method editing its
+                // own preedit, not a commit; only an insertion settles one.
+                if !input_type.starts_with("insert") {
+                    return None;
+                }
+                self.active = false;
+                self.committed = true;
+                Some(Self::settle(data.as_deref().unwrap_or_default()))
+            }
+            DomEditEvent::Cancel => {
+                if !self.active {
+                    return None;
+                }
+                self.active = false;
+                self.committed = true;
+                Some(Self::cleared_preedit())
+            }
+            DomEditEvent::Blur => {
+                let dangling = self.active;
+                self.active = false;
+                self.committed = false;
+                dangling.then(Self::cleared_preedit)
+            }
+        }
+    }
+
+    /// Close a composition session with `text`: a commit when the input method
+    /// produced something, an emptied preedit when it produced nothing (a
+    /// cancel).
+    fn settle(text: &str) -> ImeEvent {
+        if text.is_empty() {
+            Self::cleared_preedit()
+        } else {
+            ImeEvent::Commit(text.to_string())
+        }
+    }
+
+    /// The event that drops a preedit without inserting anything — an empty
+    /// `Compose`, which the text editor applies as "replace the marked text
+    /// with nothing".
+    fn cleared_preedit() -> ImeEvent {
+        ImeEvent::Compose {
+            text: String::new(),
+            cursor: None,
         }
     }
 
@@ -339,8 +445,9 @@ impl InputState {
         self.modifiers
     }
 
-    /// Whether an IME composition is in progress — see [`ComposeLatch`] for why
-    /// this is always `false` on the web until a real IME bridge lands.
+    /// Whether an IME composition is in progress — driven on this target by
+    /// [`crate::ime`]'s overlay through [`InputState::dom_edit`], and consulted
+    /// by [`InputState::keyboard_input`] to suppress a duplicate character.
     pub fn is_composing(&self) -> bool {
         self.compose.is_composing()
     }
@@ -432,10 +539,19 @@ impl InputState {
 
     /// One IME transition: the latch both maps the variant and updates its own
     /// dedupe state in a single pass. See [`ComposeLatch`] — winit's web
-    /// backend never calls this today, and it exists for the IME bridge that
-    /// will.
+    /// backend never calls this today; the live feed on this target is
+    /// [`InputState::dom_edit`].
     pub fn ime(&mut self, ime: &Ime) -> InputEvent {
         InputEvent::Ime(self.compose.observe(ime))
+    }
+
+    /// One browser composition signal from [`crate::ime`]'s hidden-input
+    /// overlay, mapped through the same latch the key path consults.
+    ///
+    /// `None` where the signal must not reach the tree — see
+    /// [`ComposeLatch::observe_dom`] for the three dedupe rules.
+    pub fn dom_edit(&mut self, event: &crate::ime::DomEditEvent) -> Option<InputEvent> {
+        self.compose.observe_dom(event).map(InputEvent::Ime)
     }
 }
 
@@ -686,42 +802,16 @@ pub fn sync_cursor(window: &Window, last: &mut CursorIcon, resolved: CursorIcon)
 ///
 /// Once, not per call: every seam below sits on a per-event or per-frame path,
 /// and a browser console that repeats the same line sixty times a second buries
-/// the diagnostics that matter. Once is enough to answer "why does my text
-/// field get no IME?" and cheap enough to leave in a release build.
+/// the diagnostics that matter. Once is enough to answer "why does a screen
+/// reader see nothing here?" and cheap enough to leave in a release build.
 fn report_gap_once(reported: &AtomicBool, gap: &str) {
     if !reported.swap(true, Ordering::Relaxed) {
         log::debug!("frust-shell-web: {gap}");
     }
 }
 
-static IME_GAP_REPORTED: AtomicBool = AtomicBool::new(false);
 static SEMANTICS_GAP_REPORTED: AtomicBool = AtomicBool::new(false);
 static DEVTOOLS_GAP_REPORTED: AtomicBool = AtomicBool::new(false);
-
-/// Push the focused widget's IME editing state to the platform input method —
-/// a documented **no-op** in a browser.
-///
-/// The desktop core drives `set_ime_allowed`, `set_ime_cursor_area` and
-/// `set_ime_purpose` here. All three are no-ops in the pinned winit's web
-/// backend (its own source says so at each one), and the backend emits no
-/// `WindowEvent::Ime` for them to pair with, so calling them would be theatre:
-/// the framework would believe it had armed an input method that does not
-/// exist.
-///
-/// A real web IME is a hidden editable element the shell focuses and positions,
-/// bridging `compositionstart`/`compositionupdate`/`compositionend` into
-/// [`InputState::ime`]. That is a browser-DOM job with its own consent and
-/// focus-stealing questions, not a translation, and it is deliberately not
-/// invented here — this seam exists so the eventual bridge has a call site
-/// already in the loop, and so the gap is *stated* rather than looking like an
-/// oversight.
-pub fn sync_ime(_window: &Window) {
-    report_gap_once(
-        &IME_GAP_REPORTED,
-        "platform IME is unavailable in a browser (winit's web backend implements no IME \
-         setters and emits no IME events); text input works, composed input does not",
-    );
-}
 
 /// Publish the semantics tree to an assistive-technology client — a documented
 /// **no-op** in a browser.
@@ -786,7 +876,7 @@ mod browser_loop {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use frust_core::event::{CursorIcon, InputEvent};
+    use frust_core::event::{CursorIcon, InputEvent, PointerPhase};
     use frust_core::view::View;
     use frust_core::{FrameTime, RenderRoot};
     use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope};
@@ -808,6 +898,7 @@ mod browser_loop {
     use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
     use winit::window::{Window, WindowId};
 
+    use crate::ime::ImeOverlay;
     use crate::input::TouchTracker;
     use crate::pacing::{
         ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, next_paced_wake, overshoot, paced_wake_action,
@@ -1023,6 +1114,10 @@ mod browser_loop {
         /// (last pointer position, held modifiers, the secondary-press latch,
         /// the IME compose latch) — see [`InputState`].
         input: InputState,
+        /// The hidden-input IME overlay: the browser's composition bridge, and
+        /// the only thing on this shell that owns a DOM element of its own —
+        /// see [`crate::ime`].
+        ime: ImeOverlay,
         /// The single-contact touch tracker `WindowEvent::Touch` is wired
         /// through — see [`crate::input::TouchTracker`].
         touch: TouchTracker,
@@ -1040,23 +1135,67 @@ mod browser_loop {
     {
         /// Deliver one mapped input event to the tree under the reactive
         /// root `Owner` ([`super::event_under_owner`]), re-sync the two
-        /// per-event seams every dispatch can move (IME — a documented
-        /// no-op here, [`super::sync_ime`] — and the cursor shape,
-        /// [`super::sync_cursor`]), and request the one frame a dirtying
-        /// event owes.
+        /// per-event seams every dispatch can move (the IME overlay,
+        /// [`crate::ime`], and the cursor shape, [`super::sync_cursor`]), and
+        /// request the one frame a dirtying event owes.
         ///
         /// Mirrors `frust-shell-desktop`'s own `dispatch`: the event pass
         /// never repaints directly, it only sets `EventOutcome::needs_redraw`,
         /// which this turns into a single `request_redraw()` so the `Wait`
         /// loop wakes for exactly one frame.
-        fn dispatch(&mut self, window: &Window, event: InputEvent) {
+        ///
+        /// Composition is drained *first*, before this event reaches the tree.
+        /// A browser composition signal carries no winit event of its own and
+        /// is queued by a DOM listener, so draining it here is what keeps a
+        /// commit ahead of the next keystroke instead of behind it.
+        fn dispatch(&mut self, window: &Arc<Window>, event: InputEvent) {
+            let mut needs_redraw = self.drain_ime();
             let outcome =
                 super::event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
-            super::sync_ime(window);
+            needs_redraw |= outcome.needs_redraw;
+
+            // A pointer press is the one moment a browser honours a `focus()`
+            // with a soft keyboard, and the moment the canvas has just taken
+            // DOM focus back from the overlay — see `crate::ime`'s policy.
+            let gesture = matches!(
+                &event,
+                InputEvent::Pointer(pointer) if pointer.phase == PointerPhase::Down
+            );
+            self.ime.sync(
+                window,
+                self.root.ime_state().as_ref(),
+                self.root.focus_ime_generation(),
+                gesture,
+                self.input.is_composing(),
+            );
+
             super::sync_cursor(window, &mut self.cursor_icon, self.root.cursor());
-            if outcome.needs_redraw {
+            if needs_redraw {
                 window.request_redraw();
             }
+        }
+
+        /// Turn every queued browser composition signal into a framework
+        /// [`InputEvent::Ime`] and deliver it, reporting whether any of them
+        /// dirtied the tree.
+        ///
+        /// The mapping (and the dedupe against the key path) is
+        /// [`InputState::dom_edit`]'s; this only walks the queue and dispatches
+        /// what survives it.
+        fn drain_ime(&mut self) -> bool {
+            let mut needs_redraw = false;
+            while let Some(signal) = self.ime.next_event() {
+                if let Some(event) = self.input.dom_edit(&signal) {
+                    let outcome = super::event_under_owner(
+                        self.runtime,
+                        &mut self.root,
+                        &mut self.state,
+                        &event,
+                    );
+                    needs_redraw |= outcome.needs_redraw;
+                }
+            }
+            needs_redraw
         }
 
         /// The whole `rebuild → layout → paint → encode → present` turn, run
@@ -1066,6 +1205,20 @@ mod browser_loop {
             // Drain any local tasks queued since the last turn before
             // rebuilding, so their signal writes are visible to this frame.
             self.runtime.pump_local();
+
+            // Composition arrives with no winit event behind it: the DOM
+            // listener queues the signal and asks for this frame, and here is
+            // where it reaches the tree, before the rebuild that renders it.
+            self.drain_ime();
+            // A field the app blurred itself — a rebuild dropping it, a signal
+            // moving focus — publishes no input event, so the frame loop is the
+            // only place that session's overlay can be taken down. Closing and
+            // following the caret are all this path may do; opening a session
+            // would take DOM focus on a caret blink. See `crate::ime`'s policy.
+            let ime_state = self.root.ime_state();
+            if !self.ime.close_if_inactive(ime_state.as_ref()) {
+                self.ime.reposition(window, ime_state.as_ref());
+            }
 
             // Poll the app-facing theme override slot once per frame, before
             // rebuild. Reverting an override lands on the base this shell
@@ -1424,12 +1577,12 @@ mod browser_loop {
                 }
 
                 // Plain text entry only — `InputState::keyboard_input` drops
-                // key-ups, unmapped named keys, and (once a real web IME
-                // bridge exists) a composing-suppressed character; `repeat`
-                // passes straight through to the framework event. There is no
-                // web `Ime` bridge yet (see the module doc), so
-                // `is_composing()` is always `false` here today and every
-                // resolved character key reaches the tree.
+                // key-ups, unmapped named keys, and a character suppressed by
+                // an active composition; `repeat` passes straight through to
+                // the framework event. Keystrokes reach this arm whether they
+                // were typed with the canvas focused or with the IME overlay
+                // focused: the overlay re-dispatches its own onto the canvas so
+                // this path stays the single keyboard route (`crate::ime`).
                 WindowEvent::KeyboardInput { event, .. } => {
                     if let Some(input_event) = self.input.keyboard_input(
                         &event.logical_key,
@@ -1457,12 +1610,12 @@ mod browser_loop {
 
                 // `WindowEvent::Ime` is never emitted by winit's web backend
                 // (verified against the pinned 0.30.13 — see the module doc),
-                // so there is nothing to wire it to; a real web IME bridge (a
-                // hidden editable element) is Phase 3's work, not this
-                // module's. Every other variant (window focus, cursor
-                // enter/leave, drag-and-drop, gesture events winit reports on
-                // other backends) has no handling this card's acceptance
-                // criteria call for.
+                // so there is nothing to wire it to: composition reaches this
+                // shell through `crate::ime`'s hidden-input overlay instead,
+                // drained in `dispatch` and `frame` rather than arriving as a
+                // window event at all. Every other variant (window focus,
+                // cursor enter/leave, drag-and-drop, gesture events winit
+                // reports on other backends) is unhandled by design.
                 _ => {}
             }
         }
@@ -1530,6 +1683,7 @@ mod browser_loop {
             anim_pacing: !anim_pacing_kill_switch_engaged(),
             epoch,
             input: InputState::new(),
+            ime: ImeOverlay::new(),
             touch: TouchTracker::new(),
             cursor_icon: CursorIcon::default(),
         };
@@ -1571,6 +1725,8 @@ pub use browser_loop::{ShellUserEvent, run_app, spawn_app};
 
 #[cfg(test)]
 mod tests {
+    use crate::ime::DomEditEvent;
+
     use super::{
         ComposeLatch, ElementState, Ime, InputState, MouseScrollDelta, WinitCursorIcon, WinitKey,
         WinitNamedKey, WinitTheme, base_theme, brightness_from_winit, cursor_change_to_apply,
@@ -1872,6 +2028,254 @@ mod tests {
         // winit's contract: an empty preedit precedes a commit.
         latch.observe(&Ime::Preedit(String::new(), None));
         assert!(!latch.is_composing());
+    }
+
+    // --- ComposeLatch: the browser composition feed ---
+
+    /// The browser signals for composing `にほんご` and accepting `日本語`, in
+    /// the order Chrome produces them (`compositionend` first, then the `input`
+    /// that mirrors it into the element's value).
+    fn compose_nihongo() -> Vec<DomEditEvent> {
+        vec![
+            DomEditEvent::CompositionStart,
+            DomEditEvent::CompositionUpdate {
+                data: "に".to_string(),
+            },
+            DomEditEvent::CompositionUpdate {
+                data: "にほんご".to_string(),
+            },
+            DomEditEvent::CompositionEnd {
+                data: "日本語".to_string(),
+            },
+            DomEditEvent::Input {
+                input_type: "insertCompositionText".to_string(),
+                data: Some("日本語".to_string()),
+                is_composing: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_composition_reports_each_preedit_with_the_caret_at_its_end() {
+        let mut latch = ComposeLatch::default();
+        assert_eq!(latch.observe_dom(&DomEditEvent::CompositionStart), None);
+        assert!(latch.is_composing());
+
+        let mapped = latch.observe_dom(&DomEditEvent::CompositionUpdate {
+            data: "にほん".to_string(),
+        });
+        assert_eq!(
+            mapped,
+            Some(ImeEvent::Compose {
+                text: "にほん".to_string(),
+                // Byte offsets, and three-byte characters: the caret sits at
+                // the end of the marked text, which is what the DOM leaves
+                // unsaid.
+                cursor: Some((9, 9)),
+            })
+        );
+        assert!(latch.is_composing());
+    }
+
+    #[test]
+    fn a_composition_commits_exactly_once_across_both_browser_orderings() {
+        let mut latch = ComposeLatch::default();
+        let commits: Vec<ImeEvent> = compose_nihongo()
+            .iter()
+            .filter_map(|signal| latch.observe_dom(signal))
+            .filter(|event| matches!(event, ImeEvent::Commit(_)))
+            .collect();
+        assert_eq!(commits, vec![ImeEvent::Commit("日本語".to_string())]);
+        assert!(!latch.is_composing());
+    }
+
+    #[test]
+    fn an_input_method_that_never_sends_composition_end_still_commits_once() {
+        let mut latch = ComposeLatch::default();
+        latch.observe_dom(&DomEditEvent::CompositionStart);
+        latch.observe_dom(&DomEditEvent::CompositionUpdate {
+            data: "にほんご".to_string(),
+        });
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("日本語".to_string()),
+                is_composing: false,
+            }),
+            Some(ImeEvent::Commit("日本語".to_string()))
+        );
+        // A late `compositionend` for the session that already settled is
+        // absorbed rather than committed a second time.
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::CompositionEnd {
+                data: "日本語".to_string(),
+            }),
+            None
+        );
+        assert!(!latch.is_composing());
+    }
+
+    #[test]
+    fn a_plain_keystroke_is_never_delivered_twice() {
+        // Typing `a` with a field focused reaches the tree as a
+        // `WindowEvent::KeyboardInput` (the overlay re-dispatches it onto the
+        // canvas) AND lands in the overlay's own value. Only the first is text.
+        let mut latch = ComposeLatch::default();
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("a".to_string()),
+                is_composing: false,
+            }),
+            None
+        );
+        // ... and the key path is not suppressed for it either.
+        assert!(!latch.is_composing());
+    }
+
+    #[test]
+    fn an_input_the_dom_marks_composing_is_left_to_the_composition_events() {
+        let mut latch = ComposeLatch::default();
+        latch.observe_dom(&DomEditEvent::CompositionStart);
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "insertCompositionText".to_string(),
+                data: Some("に".to_string()),
+                is_composing: true,
+            }),
+            None
+        );
+        assert!(latch.is_composing());
+    }
+
+    #[test]
+    fn a_deletion_mid_composition_is_the_input_method_editing_its_own_preedit() {
+        let mut latch = ComposeLatch::default();
+        latch.observe_dom(&DomEditEvent::CompositionStart);
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "deleteContentBackward".to_string(),
+                data: None,
+                is_composing: false,
+            }),
+            None
+        );
+        assert!(latch.is_composing());
+    }
+
+    #[test]
+    fn escape_clears_the_preedit_and_absorbs_the_composition_end_behind_it() {
+        let mut latch = ComposeLatch::default();
+        latch.observe_dom(&DomEditEvent::CompositionStart);
+        latch.observe_dom(&DomEditEvent::CompositionUpdate {
+            data: "にほん".to_string(),
+        });
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Cancel),
+            Some(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            })
+        );
+        assert!(!latch.is_composing());
+        // Whatever the browser sends afterwards, the preedit is already gone.
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::CompositionEnd {
+                data: String::new(),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_cancelling_composition_end_clears_the_preedit_without_committing() {
+        let mut latch = ComposeLatch::default();
+        latch.observe_dom(&DomEditEvent::CompositionStart);
+        latch.observe_dom(&DomEditEvent::CompositionUpdate {
+            data: "に".to_string(),
+        });
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::CompositionEnd {
+                data: String::new(),
+            }),
+            Some(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_blur_mid_composition_drops_the_dangling_preedit_and_reopens_clean() {
+        let mut latch = ComposeLatch::default();
+        latch.observe_dom(&DomEditEvent::CompositionStart);
+        latch.observe_dom(&DomEditEvent::CompositionUpdate {
+            data: "にほん".to_string(),
+        });
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Blur),
+            Some(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            })
+        );
+        assert!(!latch.is_composing());
+        // A settled session's blur has nothing to drop.
+        assert_eq!(latch.observe_dom(&DomEditEvent::Blur), None);
+
+        // The next session commits normally rather than being absorbed as a
+        // duplicate of the one the blur ended.
+        let session = compose_nihongo();
+        let mut committed = session
+            .iter()
+            .filter_map(|signal| latch.observe_dom(signal))
+            .filter(|event| matches!(event, ImeEvent::Commit(_)));
+        assert_eq!(
+            committed.next(),
+            Some(ImeEvent::Commit("日本語".to_string()))
+        );
+        assert_eq!(committed.next(), None);
+    }
+
+    #[test]
+    fn the_web_feed_drives_the_same_latch_the_key_path_reads() {
+        // One latch, not two: a composition opened from the DOM is what
+        // `keyboard_input` consults to drop a duplicate character.
+        let mut input = InputState::new();
+        assert!(!input.is_composing());
+        input.dom_edit(&DomEditEvent::CompositionStart);
+        assert!(input.is_composing());
+        assert!(
+            input
+                .keyboard_input(
+                    &WinitKey::Character("a".into()),
+                    Some("a"),
+                    ElementState::Pressed,
+                    false,
+                )
+                .is_none()
+        );
+
+        let committed = input
+            .dom_edit(&DomEditEvent::CompositionEnd {
+                data: "日本語".to_string(),
+            })
+            .expect("the commit reaches the tree");
+        assert_eq!(
+            committed,
+            InputEvent::Ime(ImeEvent::Commit("日本語".to_string()))
+        );
+        assert!(!input.is_composing());
+        assert!(
+            input
+                .keyboard_input(
+                    &WinitKey::Character("a".into()),
+                    Some("a"),
+                    ElementState::Pressed,
+                    false,
+                )
+                .is_some()
+        );
     }
 
     // --- InputState ---
