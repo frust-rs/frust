@@ -143,55 +143,73 @@ default-on or opt-in
 Measured against the **primary recipe** (`frust build web --release`,
 `build/web/pkg/app_bg.wasm`) — the artifact this task's browser verification
 actually loaded (see "Embedding" below) — not the manual recipe, though the
-two produce byte-identical `.wasm` (same crate, same `[profile.release]`,
-same `wasm-bindgen`/`wasm-opt` invocation under the hood; only the file
-name/host page differ). `[profile.release]` is this crate's own (`lto =
-"fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, copied
-from the root profile since a standalone workspace never sees it):
+two drive the identical underlying pipeline: same crate, same
+`[profile.release]`, the identical `cargo build`/`wasm-bindgen`/`wasm-opt`
+invocation (compare "Primary recipe" above against "Manual recipe" below —
+`crates/frust-drive/src/web_build/mod.rs`'s `WASM_OPT_FEATURES` list is the
+same seven flags the manual recipe passes by hand); only the file
+name/host page differ. That does not make their *output* byte-identical,
+and it should not be read as such — see the "snapshot, not a constant" note
+below the table, which records two builds of this identical pipeline, from
+unchanged source, producing different byte counts at every stage.
+`[profile.release]` is this crate's own (`lto = "fat"`, `codegen-units = 1`,
+`strip = "symbols"`, `panic = "abort"`, copied from the root profile since a
+standalone workspace never sees it):
 
 | Stage | Size |
 |---|---|
-| `wasm-bindgen` output (unoptimized) | 11,523,553 B ≈ 10.99 MiB |
-| after `wasm-opt -O` with the feature list above | 10,723,170 B ≈ 10.23 MiB |
-| gzip `-9` of the `wasm-opt`'d file | 4,466,842 B ≈ 4.26 MiB |
+| `wasm-bindgen` output (unoptimized) | 11,524,399 B ≈ 10.99 MiB |
+| after `wasm-opt -O` with the feature list above | 10,724,099 B ≈ 10.23 MiB |
+| gzip `-9` of the `wasm-opt`'d file | 4,466,947 B ≈ 4.26 MiB |
 
-Measured 2026-09-08 on this task's own branch (`task/p3-r1-embed-mode`, off
-`feature/widget-previews-p3`), toolchain `cargo`/`wasm-bindgen-cli`/`wasm-opt`
-versions as recorded above, via `frust build web --release` itself (built
-from this checkout — see "Primary recipe" above) followed by `gzip -9 -c
-build/web/pkg/app_bg.wasm | wc -c`. This table's immediately-prior
-measurement (11,523,550 / 10,723,407 / 4,466,224 B, from the base commit
-this review-round-1 fix started from, before `?embed=1` landed) is close
-enough — a 237 B *smaller* optimized module, 618 B larger gzipped — that the
-delta is noise-level, not a meaningful shift from adding one query-parameter
-resolver and one chrome-free view function; embed mode did not move the
-size needle. The earlier prior-prior measurement (11,535,811 / 10,730,424 /
-4,465,581 B, from before the `?theme=` override landed) and the rows before
-that (9.34 / 8.72 / 3.69 MiB, predating the web shell's IME bridge and CLI
-web build landing) remain useful history for the same reason.
+**These three numbers are a snapshot, not a constant — re-measure before
+citing one anywhere else.** All three rows above are from one build's own
+log — the deployed artifact, measured 2026-09-09 against
+`feature/widget-previews-p3` — never mixed across builds; `wasm-opt` shrank
+that build's own unoptimized module from 11,524,399 B to the 10,724,099 B
+row above it. Same recipe as always: `frust build web --release` (see
+"Primary recipe" above) followed by `gzip -9 -c build/web/pkg/app_bg.wasm |
+wc -c`. This table's immediately-prior row (11,523,553 / 10,723,170 /
+4,466,842 B, measured 2026-09-08 on `task/p3-r1-embed-mode`, this same base,
+no source change since) differs from today's row at every stage — 846 B
+larger unoptimized, 929 B larger optimized, 105 B larger gzipped. That is
+the observation: two builds of unchanged source through the identical
+pipeline did not produce byte-identical output. This document does not know
+why — nothing here diagnoses a cause, and none should be assumed — only
+that it happened, which is reason enough that a second document
+(`docs/TESTING.md`) copying one of these numbers goes stale the moment
+either file rebuilds, independent of any app-code change; that is
+why `docs/TESTING.md` no longer quotes a byte count at all (see its own
+`examples/web-gallery` entry). The prior-prior measurement (11,523,550 /
+10,723,407 / 4,466,224 B, the base commit review-round-1 started from — the
+exact pair a previous draft of this document, and `docs/TESTING.md`,
+both went on quoting as if still current) and the rows before that
+(11,535,811 / 10,730,424 / 4,465,581 B before `?theme=`; 9.34 / 8.72 / 3.69
+MiB predating the web shell's IME bridge and CLI web build landing) remain
+useful history for the same reason — read as history, never as today's
+number.
 
 **Verdict for the live-preview default:** unchanged by this task — a ~10.2
 MiB (~4.3 MiB gzipped) module is still too large to load eagerly per
 preview instance; g3-02's lazy-iframe-with-PNG-poster design (load only on
 demand, one shared module cached across every embedded case on a page) is
 the right shape, not a default-on embed. This binary carries the *whole*
-35-case registry (see "A discrepancy with the card's '107 cases'" below) —
-per-design-system splitting, so a single Material-only preview page does not
-pay for Cupertino/Glyph/Shadcn/beUI too, remains the lever actually worth
-pulling before "opt-in" becomes "affordable by default"; that split is
+107-case registry — Base plus all five design systems (see "Registry size"
+below) — per-design-system splitting, so a single Material-only preview page
+does not pay for Cupertino/Glyph/Shadcn/beUI too, remains the lever actually
+worth pulling before "opt-in" becomes "affordable by default"; that split is
 future work, not something this task's `write_files` can do (it would mean
 restructuring `frust-gallery`'s own case registry, `examples/gallery`).
 
-One binary contains the whole 35-case registry plus the JS glue
+One binary contains the whole 107-case registry plus the JS glue
 (`app.js`/`web_gallery.js`, 162,358–162,382 B depending on `--out-name`,
 uncompressed) — separate and tiny by comparison. For scale,
 `examples/web-spike`'s own five-crate render-engine probe (no widgets, no
 `frust-gallery`, no design-system plugins) measured 5.44 MiB / 1.93 MiB
 gzipped at `wasm-opt`; the delta here is the widget set, the reactive
 runtime's full surface, and the five design-system plugins' own font/token
-data pulled in transitively through `frust-gallery`'s dependency on all five
-(even though, at this base commit, `cases()` only actually walks the `Base`
-module — see below).
+data, which `cases()` now pulls in directly, not merely transitively — see
+"Registry size" below.
 
 ## Serve
 
@@ -427,10 +445,12 @@ scope can investigate further.
 ### 4. Keyboard text entry
 
 Typing `flex` into the index page's filter `text_input` (WebDriver key
-actions, one `keyDown`/`keyUp` pair per character) live-filtered the
-35-case list down to the single `flex — Row and Column` row, confirmed by
-screenshot. The typed value round-tripped through the widget's controlled
-`on_change`/`value` contract exactly as `TextInputView`'s own doc describes.
+actions, one `keyDown`/`keyUp` pair per character) live-filtered the case
+list — 35 entries at the time of this evidence (before the design-system
+batches landed; 107 today, see "Registry size" below) — down to the single
+`flex — Row and Column` row, confirmed by screenshot. The typed value
+round-tripped through the widget's controlled `on_change`/`value` contract
+exactly as `TextInputView`'s own doc describes.
 
 ### 5. Dark/light theme follow — **live flip**
 
@@ -640,22 +660,36 @@ them in every binary" — covering the one gap left open above. No further
 follow-up is needed for `SystemUi`/`SansSerif`; that half of the original
 recommendation here has already landed.
 
-## A discrepancy with the card's "107 cases"
+## Registry size: 107 cases, not 35
 
-This task's dispatch text states `frust_gallery::cases()` returns "107 cases
-incl. five design systems". At this task's actual `base_sha`,
-`frust_gallery::cases()` returns **35** — every one tagged
-`Design::Base` — because `examples/gallery/src/lib.rs`'s own `cases()`
-still only calls `base::cases()`; its doc comment says so explicitly
-("Currently the whole `Base` page set... later phases add each design
-system's own case modules and concatenate them here"). This app's own
-`?case=`/index-page code reads the registry *dynamically* (`frust_gallery::cases().len()`
-is what the index page's own "N cases in the registry" line reports, and it
-correctly says 35, not a hard-coded 107), so no change is needed here when
-the design-system case batches land — this app will pick them up
-automatically, including the per-case `set_default_theme` override in
-`AppState::new` for a `Design != Base` case, written and compiling today but
-not yet exercised by any case in the registry.
+An earlier draft of this document asserted the registry held only 35 cases,
+all `Design::Base` — accurate at an earlier base commit, when
+`examples/gallery/src/lib.rs`'s `cases()` still only called `base::cases()`
+and its own doc comment said so explicitly. That assertion was not corrected
+when the design-system case batches landed; it was instead carried forward
+into text a later pass of this same document rewrote (the "Binary size"
+section above), while `src/main.rs`'s own doc comment, added in that same
+pass, correctly said 107 — one draft of this file contradicting itself.
+
+As of this task's own base commit, `lib.rs`'s `cases()` (`lib.rs:80-89`)
+concatenates `base::cases()` with every design-system module's own `CASES`
+slice (`DESIGN_PARTS` at `lib.rs:67-73`: material, cupertino, glyph, shadcn,
+beui, in that order) into one cached, `'static` slice. Counted directly
+against that function: **107 cases total** — 35 `Base`, 23 `Material`, 15
+`Shadcn`, 14 `Glyph`, 13 `Beui`, 7 `Cupertino` — every slug unique
+(`examples/gallery/tests/registry.rs`'s `slugs_are_unique`). This app's own
+`?case=`/index-page code has always read the registry *dynamically*
+(`frust_gallery::cases().len()` is what the index page's own "N cases in the
+registry" line reports, `src/main.rs:451`), so no app-code change was needed
+here when the batches landed — only this document was wrong.
+
+The per-case `set_default_theme` override in `AppState::new` for a
+`Design != Base` case (see "Embedding" above) is likewise **not** dormant,
+contrary to what an earlier draft of this section claimed: it runs for every
+one of the 72 non-`Base` cases now in the registry, including two of the six
+slugs the website's own catalog currently embeds (`material/tabs`,
+`beui/button`) — a `?case=material/tabs` request exercises this branch on
+every load.
 
 ## Files
 
