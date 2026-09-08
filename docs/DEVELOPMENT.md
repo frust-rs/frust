@@ -153,17 +153,9 @@ frust create --platforms web     # opt-in web scaffold (templates/app/web.tmpl; 
 `frust.toml` keys and the dev server's containment/security posture: [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 **MANUAL WEB GATE** (browser matrix; no automated pixel gate exists — a person must look, like this
-guide's other manual gates). Serve `examples/web-gallery` or a `--platforms web` scaffold per its
-README / [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)'s Browser manual gate, and check:
-
-- [ ] Chrome, default (WebGPU): pointer/wheel/touch-drag/keyboard reach the app; theme, resize and
-      DPR track live; the index page's counter advances with zero input.
-- [ ] Chrome, forced to WebGL2 (`?arm=webgl` — `--disable-features=WebGPU` does **not** reach this
-      fallback, so the query param is the only way): shapes, text, gradients, blur, layers correct.
-- [ ] Safari 26 and Firefox on Windows/macOS (WebGPU): same checks as the Chrome/WebGPU row above.
-      Firefox on Linux (its own WebGL2 fallback): same checks as the Chrome/WebGL2 row.
-- [ ] IME: focus the search box, type ASCII, compose Japanese `nihongo` → にほんご → 日本語 (Enter
-      commits once, Escape cancels); blurring the field removes `#frust-ime-overlay` from the DOM.
+guide's other manual gates): serve `examples/web-gallery` or a `--platforms web` scaffold per its
+README, then run the checklist in [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)'s Browser manual
+gate section (Chrome/Safari/Firefox × WebGPU/WebGL2, plus the IME legs).
 
 ## Dev Loop
 

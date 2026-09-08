@@ -370,16 +370,27 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   implements none of the IME setters — upstream issue 4424 is open with no timeline), so
   `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under
   `document.body` (`opacity: 0`, `pointer-events: none`), opened when the focused widget publishes
-  an active `ImeState` (`focus_ime_generation`) and removed when it stops. `compositionupdate` maps
-  to `ImeEvent::Compose`; a `compositionend` carrying data, or a non-composing `input` signal
-  arriving while a session is open, maps to exactly one `ImeEvent::Commit`; Escape cancels a live
-  composition. winit's own `keydown`/`keyup` listeners stay attached to the canvas element rather
-  than `document`, so the overlay re-dispatches each plain keystroke it receives onto the canvas as
-  a copy, leaving winit's existing key mapping the single route for non-composed input. Not yet
-  wired: the `ImeContentType` hint (a web password field gets no `type="password"`, no
-  `inputmode`), the mobile visual-viewport jump when a soft keyboard opens, and multiple
-  simultaneous editables. The bridge is compile- and unit-tested but device-unverified — this build
-  host has no browser rig — see [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
+  an active `ImeState` (`focus_ime_generation`) and removed when it stops. Its attributes come from
+  the focused field's `ImeContentType`: a secret field gets `type="password"` plus
+  `autocomplete="new-password"`, a suggestion-refusing field adds `inputmode="text"`, and a hint
+  that moves tears the element down and rebuilds it rather than mutating it, since a browser only
+  reads `type` when it classifies an element it has not seen before; the frame loop's reposition
+  pass clears the element's value on every pass no composition owns. Composition tracking is an
+  explicit `ComposeSession` (Idle/Open/PendingEmptyEnd): in `Open`, a `compositionend` carrying data
+  commits directly, but an *empty* one does not retract the preedit on the spot — several browsers
+  end a composition that way and deliver its text on the `input` immediately behind it — so it moves
+  to `PendingEmptyEnd`, which holds the preedit for the rest of that one signal-drain pass and lets
+  the next `insert*` `input` resolve it as the commit, while anything else resolves it as one clear.
+  winit's own `keydown`/`keyup` listeners stay attached to the canvas element rather than
+  `document`, so the overlay re-dispatches each plain keystroke it receives onto the canvas as a
+  copy — except a `keydown` the browser reports as `Unidentified` (what a mobile soft keyboard sends
+  for most of its keys), which is never re-dispatched; its edit is instead taken from the `input`
+  signal behind it (`deleteContentBackward` becomes `Backspace`, an `insert*` carrying data becomes
+  its characters) and delivered once as a key event. Removing the element mid-composition ends the
+  latch's session and retracts the preedit, the same as a blur. Not yet wired: the mobile
+  visual-viewport jump when a soft keyboard opens, and multiple simultaneous editables. The bridge
+  is compile- and unit-tested but device-unverified — this build host has no browser rig — see
+  [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
 - **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
   adapter — a canvas app needs its semantics mirrored into real DOM/ARIA elements) and the in-app
   devtools UI-thread hop (a `wasm32` build has no sockets for its loopback listener, so
