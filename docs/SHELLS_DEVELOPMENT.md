@@ -95,10 +95,14 @@ this surface — a person must look. Check:
       compose latch's empty-`compositionend` grace window, `PendingEmptyEnd`).
 - [ ] Password field: focus a field publishing `ImeContentType::Password` (an obscured
       `TextInput`) — expect the overlay element to be `type="password"` and the on-screen
-      keyboard to offer no suggestions.
-- [ ] Android Chrome soft keyboard: with no hardware keyboard attached, type then press Backspace
-      on the soft keyboard — expect exactly one deletion, not a double insertion (exercises the
-      `Unidentified`-keystroke carry through the `input` path).
+      keyboard to offer no suggestions; note whether CJK composition is available on it at all
+      (it may not be — see [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`). Then land
+      focus on it by a signal rather than a tap (a button that focuses the field) — expect the
+      element to be replaced by a `type="password"` one on the next frame, still focused.
+- [ ] Android Chrome soft keyboard: with no hardware keyboard attached, type on the soft
+      keyboard — expect each letter exactly once, never doubled (the `Unidentified`-keystroke
+      carry through the `input` path); then press its Backspace — expect no deletion, which is
+      the recorded gap; a deletion that does land is evidence to note against that gap.
 
 ## Version Pins
 

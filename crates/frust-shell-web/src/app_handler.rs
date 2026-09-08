@@ -542,7 +542,16 @@ pub struct InputState {
     compose: ComposeLatch,
     /// Whether the last DOM signal was a keystroke the key path could not
     /// carry, so the signal after it must ([`crate::ime::key_path_dropped`]).
-    /// One-shot: every following signal takes it, whether or not it uses it.
+    ///
+    /// A mark, not a count, and a short-lived one: every following signal
+    /// takes it whether or not it uses it, a keystroke the key path *did*
+    /// deliver ends it ([`InputState::keyboard_input`]), and the end of the
+    /// signal drain that queued it discards it ([`InputState::settle_pending`]).
+    /// A second mark arriving before the first was taken means the first
+    /// keystroke produced no edit at all — a soft keyboard's shift, or a
+    /// backspace on an empty element — so it replaces the first rather than
+    /// being added to it: counting it would carry a dead keystroke's mark onto
+    /// a later signal, which is exactly the misattachment the bounds prevent.
     key_dropped: bool,
 }
 
@@ -639,22 +648,29 @@ impl InputState {
     /// [`map_key_event`] for why the struct itself cannot be passed). `None`
     /// on key-up, on an unmapped named key, or on a character suppressed by an
     /// active composition.
+    ///
+    /// A keystroke this path delivers ends any carry mark still armed (see
+    /// [`InputState::dom_edit`]): the mark belonged to an earlier keystroke
+    /// the key path could not name, and that keystroke produced no edit of
+    /// its own — the `input` echo of *this* keystroke must not be taken for
+    /// it.
     pub fn keyboard_input(
-        &self,
+        &mut self,
         logical_key: &WinitKey,
         text: Option<&str>,
         state: ElementState,
         repeat: bool,
     ) -> Option<InputEvent> {
-        map_key_event(
+        let event = map_key_event(
             logical_key,
             text,
             state,
             repeat,
             self.modifiers,
             self.compose.is_composing(),
-        )
-        .map(InputEvent::Key)
+        )?;
+        self.key_dropped = false;
+        Some(InputEvent::Key(event))
     }
 
     /// One IME transition: the latch both maps the variant and updates its own
@@ -675,11 +691,14 @@ impl InputState {
     ///
     /// A [`DomEditEvent::KeyDropped`](crate::ime::DomEditEvent::KeyDropped)
     /// marks the signal behind it as carrying a keystroke winit's web mapping
-    /// could not name (a soft keyboard's letter or backspace). The mark is
-    /// honoured exactly once, and only when the composition machinery did not
-    /// claim that signal itself and has no session in flight — otherwise this
-    /// would re-deliver text the composition events already reported, or turn
-    /// an input method's edit of its own preedit into a backspace.
+    /// could not name (a soft keyboard's letter). The mark is honoured at most
+    /// once, by the very next signal, and only when the composition machinery
+    /// did not claim that signal itself and has no session in flight —
+    /// otherwise this would re-deliver text the composition events already
+    /// reported. A mark nothing consumes is discarded at the end of the signal
+    /// drain ([`InputState::settle_pending`]) or by the next keystroke the key
+    /// path delivers ([`InputState::keyboard_input`]), never carried into a
+    /// later one.
     pub fn dom_edit(&mut self, event: &crate::ime::DomEditEvent) -> Option<InputEvent> {
         if matches!(event, crate::ime::DomEditEvent::KeyDropped) {
             self.key_dropped = true;
@@ -696,11 +715,26 @@ impl InputState {
         None
     }
 
-    /// Close the grace window a browser's empty `compositionend` opened, once
-    /// the shell has drained every signal queued with it — see
-    /// [`ComposeLatch::settle_pending`].
+    /// The end of one signal drain: close the grace window a browser's empty
+    /// `compositionend` opened ([`ComposeLatch::settle_pending`]) and discard
+    /// a carry mark no signal consumed.
+    ///
+    /// Both are bounded to the drain for the same reason. A browser queues a
+    /// keystroke's `keydown` and the `input` it produced in the same task, so
+    /// a mark still armed when the queue runs dry belongs to a keystroke that
+    /// produced no edit — and a signal in a later drain is the next
+    /// keystroke's own, which the key path already delivered.
     pub fn settle_pending(&mut self) -> Option<InputEvent> {
+        self.key_dropped = false;
         self.compose.settle_pending().map(InputEvent::Ime)
+    }
+
+    /// Whether a composition session is still in flight — composing, or
+    /// holding the grace window open. The gate an overlay teardown owes its
+    /// signal on ([`crate::ime::teardown_signal`]): a session in either state
+    /// has a preedit to retract.
+    pub fn has_open_session(&self) -> bool {
+        self.compose.has_open_session()
     }
 }
 
@@ -710,14 +744,22 @@ impl InputState {
 /// # Why a key event and not an [`ImeEvent`]
 ///
 /// These edits are keystrokes, not composition: the browser named them
-/// `deleteContentBackward` / `insert*` on a field with no composition open.
-/// Routing them as [`InputEvent::Key`] puts them on the exact path the same
-/// keystroke takes from a hardware keyboard, so selection replacement, undo
-/// grouping and a widget's own Enter/Backspace contracts all behave identically
-/// whichever keyboard produced them. The IME vocabulary has no spelling for the
-/// deletion at all — there is no `ImeEvent` that deletes — so carrying the
-/// insertion as [`ImeEvent::Commit`] would need a second, different route for
-/// the backspace half of the same problem.
+/// `insert*` on a field with no composition open. Routing them as
+/// [`InputEvent::Key`] puts them on the exact path the same keystroke takes
+/// from a hardware keyboard, so selection replacement, undo grouping and a
+/// widget's own character contract all behave identically whichever keyboard
+/// produced them.
+///
+/// # Why a deletion is not carried
+///
+/// A soft keyboard's backspace arrives unnamed too, but the `input` that would
+/// report it (`deleteContentBackward`) can never fire: the overlay element is
+/// emptied on every frame no composition owns, so the deletion finds nothing
+/// to delete and the browser raises no signal for it. A route nothing can
+/// reach is not a route, so the deletion is left alone here and recorded as a
+/// gap instead (LIMITATIONS `web-ime-residual-gaps`) — closing it means keeping
+/// something in the element for a deletion to consume, which is a change to
+/// watch on a device rather than reason out on the build host.
 ///
 /// The modifier chord is the one the shell is tracking. A soft keyboard reports
 /// none, and a hardware chord the user is genuinely holding is exactly what the
@@ -737,16 +779,14 @@ pub fn carried_key_event(
     if *is_composing {
         return None;
     }
-    let key = if input_type == "deleteContentBackward" {
-        Key::Named(NamedKey::Backspace)
-    } else if input_type.starts_with("insert") {
-        // An insertion with nothing in it is not a keystroke; every other
-        // `inputType` (a forward delete, a format command, a drag-drop) has no
-        // keystroke behind it either and is left alone.
-        Key::Character(data.as_deref().filter(|text| !text.is_empty())?.to_string())
-    } else {
+    if !input_type.starts_with("insert") {
+        // A deletion is the gap described above; every other `inputType` (a
+        // format command, a drag-drop) has no keystroke behind it at all.
         return None;
-    };
+    }
+    // An insertion with nothing in it is not a keystroke either.
+    let text = data.as_deref().filter(|text| !text.is_empty())?;
+    let key = Key::Character(text.to_string());
     Some(KeyEvent {
         key,
         modifiers,
@@ -1401,7 +1441,7 @@ mod browser_loop {
         /// element out from under, when there was one — see
         /// [`crate::ime::teardown_signal`].
         fn end_torn_down_session(&mut self, detached: bool) -> bool {
-            let Some(signal) = crate::ime::teardown_signal(detached, self.input.is_composing())
+            let Some(signal) = crate::ime::teardown_signal(detached, self.input.has_open_session())
             else {
                 return false;
             };
@@ -1455,6 +1495,14 @@ mod browser_loop {
                 // and the retraction lands before the rebuild below.
                 let _ = self.end_torn_down_session(true);
             } else {
+                // A focus move a signal drove reaches the tree with no input
+                // event behind it, so a field whose content-type hint differs
+                // from the element's is seen here first: the element is
+                // replaced (or, if it no longer held focus, closed) before the
+                // frame places it, and the same debt is paid.
+                if self.ime.replace_if_stale(window, ime_state.as_ref()) {
+                    let _ = self.end_torn_down_session(true);
+                }
                 self.ime
                     .reposition(window, ime_state.as_ref(), self.input.is_composing());
             }
@@ -2633,7 +2681,10 @@ mod tests {
             }))
         );
 
-        // The same for the backspace half, which has no IME spelling at all.
+        // Not the backspace half: the element a soft keyboard deletes from is
+        // emptied every frame, so its deletion produces no `input` to carry —
+        // and one that somehow did is not turned into a keystroke either. See
+        // `carried_key_event`.
         let mut input = InputState::new();
         input.dom_edit(&DomEditEvent::KeyDropped);
         assert_eq!(
@@ -2642,12 +2693,73 @@ mod tests {
                 data: None,
                 is_composing: false,
             }),
-            Some(InputEvent::Key(KeyEvent {
-                key: Key::Named(NamedKey::Backspace),
-                modifiers: Modifiers::default(),
-                repeat: false,
-            }))
+            None
         );
+    }
+
+    #[test]
+    fn a_mark_nothing_consumed_does_not_outlive_its_drain() {
+        // The unnamed keystroke changed nothing in the element — a shift key,
+        // a backspace with nothing to delete — so no `input` follows it, and
+        // the drain runs dry with the mark still armed.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        assert_eq!(input.settle_pending(), None);
+
+        // The next drain's first signal is the echo of a keystroke the key
+        // path delivered on its own; a mark that survived would insert it
+        // twice.
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("b".to_string()),
+                is_composing: false,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_keystroke_the_key_path_delivered_ends_the_mark() {
+        // Same dead mark, but the next thing to happen is a named keystroke
+        // winit mapped and delivered — the mark cannot attach to its echo.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        assert!(
+            input
+                .keyboard_input(
+                    &WinitKey::Character("b".into()),
+                    Some("b"),
+                    ElementState::Pressed,
+                    false,
+                )
+                .is_some()
+        );
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("b".to_string()),
+                is_composing: false,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_second_mark_replaces_the_first_rather_than_counting_it() {
+        // Two unnamed keystrokes with no signal between them: the first
+        // produced no edit. Counting it would let the second keystroke's echo
+        // be taken twice.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        let carried = DomEditEvent::Input {
+            input_type: "insertText".to_string(),
+            data: Some("a".to_string()),
+            is_composing: false,
+        };
+        assert!(input.dom_edit(&carried).is_some());
+        assert_eq!(input.dom_edit(&carried), None);
     }
 
     #[test]
@@ -2695,7 +2807,8 @@ mod tests {
     #[test]
     fn a_composition_editing_its_own_preedit_is_never_carried_as_a_keystroke() {
         // A mark left by an unnamed keystroke cannot turn the input method's
-        // own preedit deletion into a Backspace the field would apply.
+        // own preedit deletion into a keystroke the field would apply — the
+        // session gate refuses it before the carry ever looks at the edit.
         let mut input = InputState::new();
         input.dom_edit(&DomEditEvent::CompositionStart);
         input.dom_edit(&DomEditEvent::KeyDropped);
@@ -2743,14 +2856,13 @@ mod tests {
                 .map(|event| event.key),
             Some(Key::Character("the".to_string()))
         );
+        // Nothing to carry: a deletion (the gap `carried_key_event` records),
+        // an empty insertion, an edit with no keystroke behind it, and a
+        // signal that is not an `input` at all.
         assert_eq!(
-            carried_key_event(&insert("deleteContentBackward", None), modifiers)
-                .map(|event| event.key),
-            Some(Key::Named(NamedKey::Backspace))
+            carried_key_event(&insert("deleteContentBackward", None), modifiers),
+            None
         );
-
-        // Nothing to carry: an empty insertion, an edit with no keystroke
-        // behind it, and a signal that is not an `input` at all.
         assert_eq!(
             carried_key_event(&insert("insertText", None), modifiers),
             None

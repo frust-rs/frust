@@ -4992,7 +4992,7 @@ site for the eventual real implementation, not a silent absence — see
 **Trigger for removal**: a DOM/ARIA semantics mirror, and a WebSocket-based
 devtools transport, each its own future change.
 
-### `web-ime-residual-gaps` — the web IME bridge ships, but three gaps remain
+### `web-ime-residual-gaps` — the web IME bridge ships, but gaps remain
 
 **Observed** (evidence: `crates/frust-shell-web/src/ime.rs`'s module doc,
 "Cases deliberately not handled"; [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s
@@ -5005,42 +5005,68 @@ and two rules the IME bridge review added on 2026-09-08 rest entirely on that
 unobserved ground. The first is the **unnamed-keystroke rule**: a `keydown`
 the browser reports as `Unidentified` — what a mobile soft keyboard sends for
 most of its keys — is not forwarded to the canvas, and the edit it produced is
-taken from the `input` signal behind it instead (`deleteContentBackward`
-becomes a `Backspace` key event, an `insert*` carrying data becomes its
-characters), which is the only route by which a soft keyboard's letters and
-backspaces reach the tree at all. It is derived from winit 0.30.13's web key
-mapping producing nothing for an unnamed key, not from a keyboard watched
-doing it. The second is the **commit window**: an empty-data `compositionend`
-no longer retracts the preedit on the spot, because several browsers end a
-composition that way and deliver its text on the `input` immediately behind
-it (mobile predictive text, Safari); the preedit is instead held for the rest
-of that one signal drain, and an `insert*` `input` arriving inside it commits.
-The window's width is reasoned from browsers firing both signals in the same
-task, not measured. (2) a mobile browser's visual-viewport jump when its soft
-keyboard opens is not followed — the overlay is placed in layout-viewport
-coordinates and drifts from the focused field until the next reposition;
-(3) the plain-key re-dispatch this bridge relies on is coupled to winit's own
-choice to attach `keydown`/`keyup` to the canvas element rather than
-`document` — a future winit release moving that attachment point would
-silently break the re-dispatch. (2026-09-08)
+taken from the `input` signal behind it instead (an `insert*` carrying data
+becomes its characters, delivered once as a key event), which is the only
+route by which a soft keyboard's letters reach the tree at all. The mark that
+arms the carry lives no longer than the signal drain that queued it and is
+ended by any keystroke the key path does deliver, so an unnamed keystroke
+that changed nothing cannot attach to a later keystroke's echo; that bound is
+reasoned from browsers queueing a keystroke's `keydown` and `input` in the
+same task, not measured, and the rule itself is derived from winit 0.30.13's
+web key mapping producing nothing for an unnamed key, not from a keyboard
+watched doing it. The second is the **commit window**: an empty-data
+`compositionend` no longer retracts the preedit on the spot, because several
+browsers end a composition that way and deliver its text on the `input`
+immediately behind it (mobile predictive text, Safari); the preedit is
+instead held for the rest of that one signal drain, and an `insert*` `input`
+arriving inside it commits. The window's width is reasoned from browsers
+firing both signals in the same task, not measured. (2) a mobile browser's
+visual-viewport jump when its soft keyboard opens is not followed — the
+overlay is placed in layout-viewport coordinates and drifts from the focused
+field until the next reposition; (3) the plain-key re-dispatch this bridge
+relies on is coupled to winit's own choice to attach `keydown`/`keyup` to the
+canvas element rather than `document` — a future winit release moving that
+attachment point would silently break the re-dispatch; (4) **a soft
+keyboard's Backspace is lost**: it arrives unnamed like the letters, but the
+overlay element is emptied on every frame no composition owns, so the
+deletion finds nothing to delete and the browser raises no `input` for it —
+nothing reaches the tree. A carry for `deleteContentBackward` was added and
+then withdrawn on 2026-09-08 as unreachable by construction; the candidate
+fix (keep a sentinel character in the element for a deletion to consume,
+refilled as it is consumed) changes what the input method sees and has to be
+watched on a device first; (5) a field published as `Password` is served by a
+`type="password"` element, and such an element may receive no composition at
+all — many browsers and keyboards switch secure entry to a plain layout, as
+the native platforms do — so a secret field takes text through the key path
+and the unnamed-keystroke rule only. A hint that moves under a focused field
+is answered from the frame loop as well as from a dispatched event: the
+replacement inherits the DOM focus the old element held, and on a mobile
+browser that `focus()` runs outside a gesture, so the soft keyboard may close
+until the next tap. (2026-09-08)
 
 **Accepted because**: the composition/commit/cancel contract itself is real
 and tested (unlike the no-op it replaces), and each residual is independently
-scoped; none blocks ordinary text entry. `ImeContentType` is no longer among
-them — the overlay is built from the focused field's hint, so a secret field
-gets a real `type="password"` element and a suggestion-refusing one gets
+scoped; none blocks ordinary text entry, and (4) blocks only deletion from a
+soft keyboard — a hardware Backspace, and every deletion inside a
+composition, still work. `ImeContentType` is no longer among them — the
+overlay is built from the focused field's hint, so a secret field gets a real
+`type="password"` element and a suggestion-refusing one gets
 `inputmode="text"`.
 
 **Trigger for removal**: a browser device gate exercising CJK composition
 end-to-end (closes 1). It must include, as manual checks: Safari — compose CJK
 text and let predictive text commit it (the commit window); Android Chrome —
-type and backspace on the soft keyboard with no hardware keyboard attached
-(the unnamed-keystroke rule); and a field published as `Password` — confirm
-the overlay element is `type="password"` and that the keyboard offers it no
-suggestions. Then: the overlay reading `visualViewport` offsets (closes 2);
-a conformance test pinning winit's canvas-attachment choice, or an upstream
-`WindowEvent::Ime` implementation removing the need for the bridge entirely
-(closes 3).
+type on the soft keyboard with no hardware keyboard attached (the
+unnamed-keystroke rule: each letter exactly once), then press its Backspace
+(expected: no deletion, which is gap 4 — a deletion that does land is
+evidence the sentinel design is not needed); and a field published as
+`Password` — confirm the overlay element is `type="password"`, that the
+keyboard offers it no suggestions, and record whether composition is
+available on it (gap 5). Then: the overlay reading `visualViewport` offsets
+(closes 2); a conformance test pinning winit's canvas-attachment choice, or an
+upstream `WindowEvent::Ime` implementation removing the need for the bridge
+entirely (closes 3); the sentinel design landed with that Android evidence
+(closes 4).
 
 ### `web-touch-single-contact` — the web shell tracks only one touch contact at a time
 

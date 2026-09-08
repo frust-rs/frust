@@ -67,7 +67,10 @@
 //!    ([`key_path_dropped`], queued as [`DomEditEvent::KeyDropped`] so it keeps
 //!    its place in the signal order). The very next signal consumes that mark:
 //!    when it is a non-composing `input` the composition machinery did not
-//!    claim, that `input` — and only it — becomes the keystroke instead.
+//!    claim, that `input` — and only it — becomes the keystroke instead. A
+//!    mark nothing consumes dies with the signal drain that queued it, or
+//!    with the next keystroke the key path does deliver; it never reaches a
+//!    later keystroke's own echo.
 //!
 //! # Cases handled here
 //!
@@ -88,7 +91,10 @@
 //!   `type="password"` element, so the browser applies its own secure-entry
 //!   handling and no keyboard mines the text for suggestions or word learning.
 //!   A hint that moves rebuilds the element ([`overlay_needs_rebuild`]) —
-//!   `type` is what the browser reads when it decides that handling.
+//!   `type` is what the browser reads when it decides that handling — and the
+//!   check runs from the frame loop as well as from a dispatched event, since
+//!   a focus move a signal drove reaches the tree with no event behind it
+//!   ([`stale_overlay_action`]).
 //! * **A composition cancelled with Escape.** Browsers disagree about whether
 //!   `compositionend` fires (and with what data) for a cancel, so Escape is
 //!   read from the keystroke itself while composing
@@ -107,7 +113,8 @@
 //!   a user gesture, which is why the pointer-press path re-focuses. Their keys
 //!   mostly arrive unnamed, so the edits they produce reach the tree through
 //!   the `input` path (dedupe rule 4) rather than through winit's key mapping,
-//!   which has nothing to map them to.
+//!   which has nothing to map them to. Their backspace is the exception,
+//!   below.
 //! * **An overlay torn down mid-composition.** Removing the element ends the
 //!   session, and the DOM raises nothing for it once the listeners are off — so
 //!   the shell synthesizes [`DomEditEvent::Teardown`] ([`teardown_signal`]),
@@ -115,6 +122,17 @@
 //!
 //! # Cases deliberately not handled
 //!
+//! * **A soft keyboard's backspace.** It arrives unnamed like its letters, but
+//!   the `input` that would report the deletion never fires: the element is
+//!   emptied on every frame no composition owns, so there is nothing for it
+//!   to delete. Carrying it means keeping something in the element for a
+//!   deletion to consume, which has to be watched on a device rather than
+//!   reasoned out here; until then the keystroke is lost, and the gap is
+//!   recorded in LIMITATIONS `web-ime-residual-gaps`.
+//! * **Composition on a secret field.** A `type="password"` element may get no
+//!   input method at all — many browsers and keyboards switch secure entry to
+//!   a plain layout, as the native platforms do — so such a field takes text
+//!   through the key path and rule 4 only.
 //! * **The mobile viewport jump when a soft keyboard opens.** The overlay is
 //!   placed in layout-viewport coordinates; a browser that scrolls or shrinks
 //!   the *visual* viewport to make room for the keyboard leaves it offset from
@@ -399,10 +417,11 @@ pub fn forwards_to_canvas(key: &str, dom_is_composing: bool) -> bool {
 /// (`isComposing`, or [`IME_PROCESS_KEY`]) is text the composition events
 /// already report, and carrying it again is the double delivery the dedupe
 /// rules exist to prevent. An [`UNIDENTIFIED_KEY`] pressed with no composition
-/// open is the opposite case: it is a plain edit — a soft keyboard's letter or
-/// backspace — that winit's web key mapping cannot name, so unless the `input`
-/// behind it is allowed through, nothing about that keystroke reaches the tree
-/// at all.
+/// open is the opposite case: it is a plain edit — a soft keyboard's letter —
+/// that winit's web key mapping cannot name, so unless the `input` behind it is
+/// allowed through, nothing about that keystroke reaches the tree at all. (Its
+/// backspace is the gap the module doc records: with nothing in the element to
+/// delete, no `input` follows, and the mark it leaves dies with the drain.)
 pub fn key_path_dropped(key: &str, dom_is_composing: bool) -> bool {
     !dom_is_composing && key == UNIDENTIFIED_KEY
 }
@@ -417,11 +436,15 @@ pub fn key_path_dropped(key: &str, dom_is_composing: bool) -> bool {
 /// synthesizes the end of the session — with blur semantics, since that is what
 /// losing the element is.
 ///
-/// `detached` is [`OverlaySync::detached`] (or `ImeOverlay::close_if_inactive`'s
-/// answer); `composing` is the latch's own
-/// [`is_composing`](crate::app_handler::ComposeLatch::is_composing).
-pub fn teardown_signal(detached: bool, composing: bool) -> Option<DomEditEvent> {
-    (detached && composing).then_some(DomEditEvent::Teardown)
+/// `detached` is [`OverlaySync::detached`] (or the answer of
+/// `ImeOverlay::close_if_inactive` / `ImeOverlay::replace_if_stale`);
+/// `session_open` is the latch's own
+/// [`has_open_session`](crate::app_handler::InputState::has_open_session) —
+/// open *or* holding the grace window, since either still has a preedit to
+/// retract. It is deliberately not the narrower `is_composing`, so the answer
+/// does not depend on the caller having drained and settled the queue first.
+pub fn teardown_signal(detached: bool, session_open: bool) -> Option<DomEditEvent> {
+    (detached && session_open).then_some(DomEditEvent::Teardown)
 }
 
 /// The attributes the overlay element is created with for one content type.
@@ -486,6 +509,49 @@ pub fn overlay_needs_rebuild(built: Option<ImeContentType>, published: ImeConten
     built.is_some_and(|built| built != published)
 }
 
+/// What the frame loop does with a live element whose content-type hint no
+/// longer matches the focused field's — see [`stale_overlay_action`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleOverlay {
+    /// The element still fits the field, or there is no element.
+    Keep,
+    /// Replace the element with one built for the published hint, and give
+    /// the replacement the DOM focus the old one held.
+    Replace,
+    /// Remove the element and close the session; the next gesture or focus
+    /// move opens a fresh one.
+    Close,
+}
+
+/// The frame loop's answer to a content-type hint that moved with no input
+/// event to carry it.
+///
+/// [`overlay_needs_rebuild`] is consulted from a dispatched event, but a focus
+/// move a signal drove — a rebuild landing focus on an obscured field — reaches
+/// the tree with no event at all, and until the next one arrived the secret
+/// field would be served by an element the browser had already classified as
+/// plain text. So the frame loop asks too, with one input the dispatch path
+/// does not need: whether the old element actually holds DOM focus.
+///
+/// A replacement is focused only when the element it replaces was — that is
+/// not a focus change, it is the same focus on a new element. A stale element
+/// that has *lost* focus (the user tabbed out, or the `focus()` never took) is
+/// closed instead: a frame never takes focus for the user, the same rule
+/// [`OverlayPolicy::poll`] applies to opening a session.
+pub fn stale_overlay_action(
+    built: Option<ImeContentType>,
+    published: ImeContentType,
+    held_focus: bool,
+) -> StaleOverlay {
+    if !overlay_needs_rebuild(built, published) {
+        StaleOverlay::Keep
+    } else if held_focus {
+        StaleOverlay::Replace
+    } else {
+        StaleOverlay::Close
+    }
+}
+
 /// The content type a published surface asks for, defaulting to
 /// [`ImeContentType::Normal`] when there is no surface to read one from.
 pub fn published_content_type(ime: Option<&ImeState>) -> ImeContentType {
@@ -528,15 +594,17 @@ mod browser {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{
-        CompositionEvent, HtmlCanvasElement, HtmlInputElement, KeyboardEvent, KeyboardEventInit,
+        CompositionEvent, Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent,
+        KeyboardEventInit,
     };
     use winit::platform::web::WindowExtWebSys;
     use winit::window::Window;
 
     use super::{
-        DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync, cancels_composition,
-        forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box, overlay_box_moved,
-        overlay_needs_rebuild, published_content_type, session_is_active,
+        DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync, StaleOverlay,
+        cancels_composition, forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box,
+        overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
+        stale_overlay_action,
     };
 
     /// The style declarations the overlay is created with, beyond its per-frame
@@ -711,6 +779,50 @@ mod browser {
                 self.teardown();
             }
             closing
+        }
+
+        /// The frame loop's half of the content-type contract: replace an
+        /// element built for a hint the focused field no longer publishes, or
+        /// close it when it no longer holds focus — see
+        /// [`stale_overlay_action`](super::stale_overlay_action). Returns
+        /// whether a live element was removed, for
+        /// [`teardown_signal`](super::teardown_signal).
+        ///
+        /// Runs before [`ImeOverlay::reposition`], so the frame places the
+        /// replacement rather than the element it removed.
+        pub fn replace_if_stale(&mut self, window: &Arc<Window>, ime: Option<&ImeState>) -> bool {
+            if !session_is_active(ime) {
+                return false;
+            }
+            let Some(element) = self.element.as_ref() else {
+                return false;
+            };
+            let action = stale_overlay_action(
+                self.built_content_type,
+                published_content_type(ime),
+                holds_dom_focus(element),
+            );
+            match action {
+                StaleOverlay::Keep => false,
+                StaleOverlay::Replace => {
+                    self.teardown();
+                    self.build(window, ime);
+                    if self.element.is_none() {
+                        // Same as a failed open: hand the session back so a
+                        // later gesture tries again.
+                        self.policy.mark_closed();
+                    } else {
+                        self.place(window, ime);
+                        self.focus();
+                    }
+                    true
+                }
+                StaleOverlay::Close => {
+                    self.teardown();
+                    self.policy.mark_closed();
+                    true
+                }
+            }
         }
 
         /// Follow the caret while a session is open, and drop any value the
@@ -1002,6 +1114,15 @@ mod browser {
         }
     }
 
+    /// Whether `element` is the document's active element — the one input
+    /// [`stale_overlay_action`] needs that only the DOM can answer.
+    fn holds_dom_focus(element: &HtmlInputElement) -> bool {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .is_some_and(|active| &active == AsRef::<Element>::as_ref(element))
+    }
+
     /// Queue one signal and ask for the frame that applies it.
     fn push(signals: &Rc<Signals>, event: DomEditEvent, window: &Arc<Window>) {
         signals.queue.borrow_mut().push_back(event);
@@ -1050,10 +1171,10 @@ mod browser {
 #[cfg(test)]
 mod tests {
     use super::{
-        DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy,
+        DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy, StaleOverlay,
         cancels_composition, forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box,
         overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
-        teardown_signal,
+        stale_overlay_action, teardown_signal,
     };
     use frust_core::event::{EditingState, ImeContentType, ImeState};
     use kurbo::Rect;
@@ -1256,7 +1377,7 @@ mod tests {
             Some(DomEditEvent::Teardown),
             "a composition survived the element it was being typed into"
         );
-        // Nothing to end: no composition, or no element removed.
+        // Nothing to end: no session in flight, or no element removed.
         assert_eq!(teardown_signal(true, false), None);
         assert_eq!(teardown_signal(false, true), None);
         assert_eq!(teardown_signal(false, false), None);
@@ -1341,6 +1462,41 @@ mod tests {
         ));
         // Nothing built yet is an open, not a rebuild.
         assert!(!overlay_needs_rebuild(None, ImeContentType::Password));
+    }
+
+    #[test]
+    fn a_stale_element_is_replaced_only_while_it_holds_focus() {
+        // The hint moved under a focused element: the replacement inherits
+        // the focus, so the secret field is served by a secure element before
+        // any further input arrives.
+        assert_eq!(
+            stale_overlay_action(Some(ImeContentType::Normal), ImeContentType::Password, true),
+            StaleOverlay::Replace
+        );
+        // The hint moved but the element had already lost focus: a frame never
+        // takes focus for the user, so the session closes instead.
+        assert_eq!(
+            stale_overlay_action(
+                Some(ImeContentType::Normal),
+                ImeContentType::Password,
+                false
+            ),
+            StaleOverlay::Close
+        );
+        // An unchanged hint keeps the element whether or not it holds focus.
+        assert_eq!(
+            stale_overlay_action(
+                Some(ImeContentType::Password),
+                ImeContentType::Password,
+                false
+            ),
+            StaleOverlay::Keep
+        );
+        // No element is nothing to replace: opening is the dispatch path's.
+        assert_eq!(
+            stale_overlay_action(None, ImeContentType::Password, true),
+            StaleOverlay::Keep
+        );
     }
 
     #[test]

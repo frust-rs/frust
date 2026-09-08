@@ -374,8 +374,11 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   the focused field's `ImeContentType`: a secret field gets `type="password"` plus
   `autocomplete="new-password"`, a suggestion-refusing field adds `inputmode="text"`, and a hint
   that moves tears the element down and rebuilds it rather than mutating it, since a browser only
-  reads `type` when it classifies an element it has not seen before; the frame loop's reposition
-  pass clears the element's value on every pass no composition owns. Composition tracking is an
+  reads `type` when it classifies an element it has not seen before — checked from a dispatched
+  event and from the frame loop alike, so a focus move a signal drove (no input event behind it)
+  is answered on the next frame: the replacement inherits the DOM focus the old element held, and
+  an element that had lost focus is closed instead, a frame never taking focus for the user; the
+  frame loop's reposition pass clears the element's value on every pass no composition owns. Composition tracking is an
   explicit `ComposeSession` (Idle/Open/PendingEmptyEnd): in `Open`, a `compositionend` carrying data
   commits directly, but an *empty* one does not retract the preedit on the spot — several browsers
   end a composition that way and deliver its text on the `input` immediately behind it — so it moves
@@ -385,8 +388,10 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   `document`, so the overlay re-dispatches each plain keystroke it receives onto the canvas as a
   copy — except a `keydown` the browser reports as `Unidentified` (what a mobile soft keyboard sends
   for most of its keys), which is never re-dispatched; its edit is instead taken from the `input`
-  signal behind it (`deleteContentBackward` becomes `Backspace`, an `insert*` carrying data becomes
-  its characters) and delivered once as a key event. Removing the element mid-composition ends the
+  signal behind it (an `insert*` carrying data becomes its characters) and delivered once as a key
+  event, by a mark that lives no longer than the signal drain that queued it and is ended by any
+  keystroke the key path does deliver. A soft keyboard's Backspace is the known gap: the element is
+  emptied every frame, so the deletion has nothing to consume and raises no `input`. Removing the element mid-composition ends the
   latch's session and retracts the preedit, the same as a blur. Not yet wired: the mobile
   visual-viewport jump when a soft keyboard opens, and multiple simultaneous editables. The bridge
   is compile- and unit-tested but device-unverified — this build host has no browser rig — see
