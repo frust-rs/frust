@@ -102,7 +102,8 @@
 //! still renders nothing on this target. See
 //! [`app::register_design_system_fonts`] for why Material (no `Monospace`
 //! slot at all, and no public accessor for its bundled bytes) and Cupertino
-//! (no family of its own) are not registered and do not need to be.
+//! (a named SF Pro stack on every role, but no bundled font files to
+//! register) are not registered and do not need to be.
 //!
 //! This app's own [`app::LABEL_FAMILY`]/[`app::nav_row`]
 //! hand-registration (a *named*-family route through
@@ -117,7 +118,11 @@
 //! [`app::AppState::new`] installs the case's own design-system theme
 //! through `frust::set_default_theme` for every non-`Base` case. Material,
 //! shadcn and beUI body text tails `SansSerif` and always rendered;
-//! Cupertino sets no family of its own and keeps the `SystemUi` default;
+//! Cupertino sets `FontFamily::stack(["SF Pro Display" | "SF Pro Text",
+//! "SF Pro"])` on every type role (`plugins/cupertino/src/tokens.rs`'s
+//! `sf_family_for_size`/`apply_type`) — a named stack with **no** generic
+//! tail, so it resolves through parley's own fallback once those names miss
+//! rather than through a mapped generic slot, and its cases render;
 //! Glyph's whole type scale, and the shadcn/beUI mono slots, tail
 //! `Monospace` and render through the named faces registered above — see
 //! README.md's `wasm32` text section for the full writeup and the
@@ -198,15 +203,27 @@ mod app {
     /// SansSerif`, which the shell already maps — and because its bundled
     /// bytes have no public accessor anyway (`plugins/material`'s `tokens`
     /// module is private and its crate root does not re-export
-    /// `font_data`, unlike the three below). Cupertino declares no family of
-    /// its own. Neither can hit this defect, so neither is registered; see
-    /// this crate's `Cargo.toml` for the same note beside the missing rows.
+    /// `font_data`, unlike the three below). Cupertino is absent for a
+    /// different reason than "no family": it *does* declare one — a named
+    /// `FontFamily::stack(["SF Pro Display" | "SF Pro Text", "SF Pro"])` on
+    /// every type role (`plugins/cupertino/src/tokens.rs`'s
+    /// `sf_family_for_size`, applied by `apply_type` and wired through
+    /// `type_scale` into `baseline`) — but with **no** generic tail and, the
+    /// decisive part, **no bundled font files at all**: that crate has no
+    /// `fonts/` directory, no `include_bytes!` and no `font_data`, so there
+    /// is nothing here to register. Its named stack misses and resolves
+    /// through parley's own fallback instead, which is why its cases render
+    /// without this function's help. Neither plugin can hit the defect this
+    /// function fixes; see this crate's `Cargo.toml` for the same note
+    /// beside the missing rows.
     ///
     /// # Why unconditionally, rather than per-case
     ///
-    /// Registering only the on-screen case's own design would be thriftier —
-    /// ~1.0 MB (Glyph) instead of ~2.5 MB of `Vec<u8>` copies per module
-    /// instance — but it would be wrong for the way this app is navigated.
+    /// Registering only the on-screen case's own design would be thriftier
+    /// at runtime — ~1.0 MB (Glyph) instead of ~2.5 MB of `Vec<u8>` **heap**
+    /// copies per module instance, `register_app_fonts` taking owned bytes;
+    /// it saves no payload — but it would be wrong for the way this app is
+    /// navigated.
     /// A shell reads the registry at construction; `?case=` is resolved in
     /// the same breath, but the index page's own list writes
     /// [`AppState::case`] at *runtime*, long after that, so a per-case
@@ -287,9 +304,19 @@ mod app {
             // the same `plugins/shadcn/fonts/inter/InterVariable.ttf` the
             // plugin bundles. Kept anyway: dropping it would make this app's
             // own chrome depend on a plugin's bundle, and re-registering one
-            // already-registered family is harmless. Retiring it (and the
-            // duplicated ~0.88 MB payload behind it) is a follow-up, not this
-            // change. Both calls run before `run_app` constructs the shell,
+            // already-registered family is harmless.
+            //
+            // It carries NO duplicate payload, contrary to what an earlier
+            // pass of this comment claimed: identical `include_bytes!`
+            // constants merge, so the two sites are one copy in the
+            // artifact. Verified by byte-probing the shipped module —
+            // three 4096-byte probes from InterVariable.ttf each match
+            // exactly once, the same result the single-site
+            // SpaceMono-Regular control gives. Retiring this call is a
+            // clarity change worth roughly zero bytes, not the ~0.88 MB win
+            // that claim implied.
+            //
+            // Both calls run before `run_app` constructs the shell,
             // matching the timing contract `frust::register_app_fonts`'s own
             // doc and `frust_shadcn::install` (the precedent this follows)
             // both spell out: "a shell reads ... and drains the font registry

@@ -650,7 +650,16 @@ shape:
 | shadcn | `mono_family()` = `[JetBrains Mono] + Monospace` (`tokens/theme.rs`), used by `kbd`/`questionnaire` shortcut badges; body text tails `SansSerif` and always rendered | 2 faces, unconditional; `font_data` at crate root | **Yes** |
 | beUI | `mono_family()` = `[Geist Mono] + Monospace` (`tokens/theme.rs`), used by `code-block`, loaders, `number`, agents blocks; body tails `SansSerif` | 2 faces, unconditional; `font_data` at crate root | **Yes** |
 | Material | **No `Monospace` slot at all** — its one stack is `[Roboto Flex] + SansSerif`, which the shell already maps. Roboto Mono is bundled but no type token selects it | 2 faces, unconditional — but `mod tokens;` is **private** and the crate root does not re-export `font_data`, so there is no public accessor | No — not exposed to this defect, and could not be registered if it were |
-| Cupertino | Declares no font family anywhere; keeps the mapped `SystemUi` default | none bundled | No — nothing to register |
+| Cupertino | **Does** declare one — `FontFamily::stack(["SF Pro Display" \| "SF Pro Text", "SF Pro"])` on every type role (`plugins/cupertino/src/tokens.rs`'s `sf_family_for_size`, applied by `apply_type`, wired through `type_scale` into `baseline`). A named stack with **no** generic tail, so it resolves through parley's own fallback once those names miss rather than through a mapped generic slot; its cases render | **None at all** — no `fonts/` directory, no `include_bytes!`, no `font_data` | No — nothing exists to register |
+
+**Correction, since the wrong version of the Cupertino row shipped first.**
+Earlier drafts of this file, `src/main.rs` and `Cargo.toml` all said
+Cupertino "declares no font family anywhere". That was false, and it came
+from grepping for `stack_with_generic`/`GenericSlot::` and reading the empty
+result as "no family" — Cupertino uses plain `FontFamily::stack(...)`, which
+that pattern cannot see. The conclusion (nothing to register) survives, but
+only for the reason in the table above: it bundles no font files. A `grep`
+that returns nothing is evidence about the pattern, not about the code.
 
 **This does not map a generic.** Registering a named face and mapping a
 generic slot are different things, and only the first happens here: text
@@ -675,18 +684,27 @@ than 24/255 — text is overwhelmingly the source of such edges) for the live
 capture and for the case's committed CPU poster in the website's
 `static/preview/`.
 
-Live and poster are not expected to reach parity: the embed view anchors a
-case top-left while the poster centres it in the frame, so the `Base`
-control's own live/poster edge ratio (0.386) is the ceiling this comparison
-can reach, and it is the bar the design-system cases are read against.
+**Edge density is a fraction of the whole canvas, so it only means anything
+with the capture viewport stated.** Each case was captured at its own
+manifest size, one browser context per case, DPR 1 — the sizes in the table
+below. A larger viewport spreads the same case over more empty pixels and
+drives every figure down together (measuring these cases at 900x700 returns
+roughly a seventh of these numbers), so compare the before/after pair and
+the ratio, never an absolute against a differently-sized run.
 
-| Case | Live edges before | Live edges after | Poster edges | Live/poster before → after |
-|---|---|---|---|---|
-| `glyph/term-block` | 0.0011 | 0.0139 | 0.0343 | 0.033 → **0.405** |
-| `glyph/list` | 0.0019 | 0.0107 | 0.0300 | 0.062 → **0.358** |
-| `beui/code-block` | 0.0010 | 0.0067 | 0.0183 | 0.054 → **0.366** |
-| `shadcn/questionnaire` | 0.0097 | 0.0099 | 0.0278 | 0.350 → **0.356** |
-| `button` (`Base` control) | 0.0078 | 0.0078 | 0.0203 | 0.385 → **0.386** |
+Live and poster are not expected to reach parity either: the embed view
+anchors a case top-left while the poster centres it in the frame, so the
+`Base` control's own live/poster edge ratio (0.386) is the ceiling this
+comparison can reach, and it is the bar the design-system cases are read
+against.
+
+| Case | Viewport (CSS px, DPR 1) | Live edges before | Live edges after | Poster edges | Live/poster before → after |
+|---|---|---|---|---|---|
+| `glyph/term-block` | 360x240 | 0.0011 | 0.0139 | 0.0343 | 0.033 → **0.405** |
+| `glyph/list` | 360x420 | 0.0019 | 0.0107 | 0.0300 | 0.062 → **0.358** |
+| `beui/code-block` | 420x280 | 0.0010 | 0.0067 | 0.0183 | 0.054 → **0.366** |
+| `shadcn/questionnaire` | 420x320 | 0.0097 | 0.0099 | 0.0278 | 0.350 → **0.356** |
+| `button` (`Base` control) | 360x240 | 0.0078 | 0.0078 | 0.0203 | 0.385 → **0.386** |
 
 Read alongside the captures themselves: before, `glyph/term-block` drew the
 terminal chrome and its three window dots over an empty collapsed body,
@@ -738,9 +756,23 @@ this app's own chrome (`label()`/`nav_row()` name `"Inter Variable"`
 explicitly — the variable release's real name-table entry, not `"Inter"`).
 It is now redundant twice over: the shell's generic fallback covers it, and
 `register_design_system_fonts` registers shadcn's own copy of the identical
-file. It is kept so this app's chrome does not depend on a plugin's bundle;
-retiring it, and the duplicated ~0.88 MB payload behind it, is a follow-up
-with a real size win attached, not part of this change.
+file. It is kept so this app's chrome does not depend on a plugin's bundle.
+
+**Retiring it saves approximately nothing, and an earlier draft of this
+section was wrong to advertise a "~0.88 MB" win.** There is no duplicate to
+reclaim: identical `include_bytes!` constants merge, so the two sites —
+`LABEL_FONT_BYTES` here and `plugins/shadcn`'s own `INTER_VARIABLE` — are
+one copy in the artifact. Measured, not assumed: three 4096-byte probes
+taken at 1/4, 1/2 and 3/4 through `InterVariable.ttf` each match **exactly
+once** in the shipped module, the same result the single-site
+`SpaceMono-Regular` control gives, while `RobotoMono.ttf` (bundled by
+Material, never registered) matches **zero** times — the control that shows
+the probe can tell present from absent. The same merging argument retires
+the claim, previously in `Cargo.toml`, that `include_bytes!`ing the plugins'
+TTFs here instead of depending on the plugins would have cost ~2.5 MB extra:
+it would have cost the same ~1.22 MB, and the real reasons to prefer the
+dependency rows are drift and provenance, not size. Retiring
+`LABEL_FONT_BYTES` remains worth doing for clarity; budget no bytes for it.
 
 ## Registry size: 107 cases, not 35
 
