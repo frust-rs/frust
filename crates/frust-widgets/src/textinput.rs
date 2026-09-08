@@ -1124,8 +1124,26 @@ impl TextInputWidget {
     }
 
     /// Handle an IME event (already focus-gated by the caller).
+    ///
+    /// # Empty text is a retraction, not a composition
+    ///
+    /// Every shell spells "drop the preedit, insert nothing" as a `Compose`
+    /// (or, from a platform that reports a commit for it, a `Commit`) with
+    /// empty text: a cancelled composition, a field blurred mid-composition,
+    /// an input method that ended a session with nothing to show for it. The
+    /// editor has a primitive for exactly that — [`EditOp::ClearCompose`] —
+    /// and it is the one that must be used, because `EditOp::Compose` is a
+    /// *set-the-marked-text* operation whose backing editor asserts the text
+    /// is non-empty. Routing an empty retraction through it panics a debug
+    /// build on every platform that produces one.
     fn handle_ime(&mut self, ctx: &mut EventCtx, event: &ImeEvent) -> EventResult {
         match event {
+            // The caret a retraction carries is meaningless — there is no
+            // marked text left to place it in — so it is deliberately unread.
+            ImeEvent::Compose { text, .. } if text.is_empty() => {
+                self.apply_edit(ctx, EditOp::ClearCompose);
+                EventResult::Handled
+            }
             ImeEvent::Compose { text, cursor } => {
                 self.apply_edit(
                     ctx,
@@ -1153,6 +1171,13 @@ impl TextInputWidget {
                         cb(ctx, text);
                     }
                     ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+                // An empty commit inserts nothing, so it is the same retraction
+                // an empty `Compose` is — and reaches the same assertion if it
+                // goes through the compose machinery below.
+                if s.is_empty() {
+                    self.apply_edit(ctx, EditOp::ClearCompose);
                     return EventResult::Handled;
                 }
                 // Commit the given text via the compose machinery so it replaces
@@ -2132,6 +2157,80 @@ mod tests {
 
         assert_eq!(widget(&root).editor.text(), "hello");
         assert_eq!(state.value, "hello", "on_change reflects the synced value");
+    }
+
+    #[test]
+    fn ime_empty_compose_retracts_the_preedit_without_panicking() {
+        // Every shell spells a cancelled/abandoned composition as a `Compose`
+        // with empty text. The editor's set-marked-text primitive asserts the
+        // text is non-empty, so this test is the assertion: in a debug build
+        // (which is what `cargo test` runs) the old routing panicked here.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: "ni".to_string(),
+                cursor: Some((2, 2)),
+            }),
+        );
+        assert_eq!(widget(&root).editor.text(), "ni", "the preedit is live");
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            }),
+        );
+        assert_eq!(
+            widget(&root).editor.text(),
+            "",
+            "the marked text is retracted, not replaced with an empty preedit"
+        );
+        assert_eq!(
+            widget(&root).editor.editing_state_bytes().composing,
+            None,
+            "and no composing region is left behind"
+        );
+        assert_eq!(state.value, "");
+
+        // A retraction with nothing marked is a no-op, not a second panic.
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            }),
+        );
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn ime_empty_commit_retracts_the_preedit_without_panicking() {
+        // The same defect through the commit arm, which reaches the same
+        // primitive: a platform that reports an empty commit for a composition
+        // that produced nothing must retract, not assert.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: "ni".to_string(),
+                cursor: None,
+            }),
+        );
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit(String::new())),
+        );
+
+        assert_eq!(widget(&root).editor.text(), "");
+        assert_eq!(widget(&root).editor.editing_state_bytes().composing, None);
     }
 
     #[test]

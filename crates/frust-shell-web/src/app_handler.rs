@@ -255,21 +255,53 @@ pub fn map_key_event(
 /// none of them (verified against the pinned 0.30.13), so on this target the
 /// live feed is [`ComposeLatch::observe_dom`], which the hidden-input overlay
 /// in [`crate::ime`] drives from the browser's own composition events. Both
-/// arms move the same `active` flag, so the key path has exactly one thing to
-/// consult and a composition can never be double-delivered by a bridge racing a
-/// second latch of its own.
+/// arms move the same `ComposeSession`, so the key path has exactly one thing
+/// to consult and a composition can never be double-delivered by a bridge
+/// racing a second latch of its own.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ComposeLatch {
-    active: bool,
-    /// Whether the composition session currently open (or just closed) has
-    /// already produced its [`ImeEvent::Commit`].
+    session: ComposeSession,
+}
+
+/// How far one composition session has got, as this latch understands it.
+///
+/// # Why a state and not a pair of flags
+///
+/// The DOM ends a composition in more than one order — `compositionend` then
+/// an `input`, an `input` with no `compositionend` at all, or an *empty*
+/// `compositionend` whose text arrives on the `input` behind it — and the last
+/// of those is not decidable from the `compositionend` alone. A boolean pair
+/// has to guess on the spot; a state can hold the question open for exactly one
+/// signal, which is what `ComposeSession::PendingEmptyEnd` is.
+///
+/// # There is deliberately no separate "settled" state
+///
+/// A session that has produced its outcome is indistinguishable from one that
+/// never opened: every later end-of-composition signal is absorbed by the same
+/// arms, and a non-composing `input` is a plain keystroke in both cases. Both
+/// are `ComposeSession::Idle`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ComposeSession {
+    /// No session in flight — none has opened, or the last one already
+    /// produced its commit or its clear.
+    #[default]
+    Idle,
+    /// A composition owns the field: its preedit is live in the tree, and the
+    /// key path is suppressed for as long as it is.
+    Open,
+    /// `compositionend` arrived carrying no text, and the preedit has *not*
+    /// been retracted yet.
     ///
-    /// The DOM ends a composition in two orders depending on the browser and
-    /// the input method — `compositionend` followed by an `input`, or an
-    /// `input` with no `compositionend` at all — and both must land exactly one
-    /// commit. Only the web feed sets it; the winit feed has a single,
-    /// unambiguous `Ime::Commit`.
-    committed: bool,
+    /// Empty data is how a cancel looks, and also how several browsers report
+    /// a perfectly ordinary commit whose text they deliver on the `input`
+    /// immediately behind it (a mobile keyboard accepting its own predictive
+    /// suggestion is the common case). Retracting on the spot loses that
+    /// commit, because the `input` behind it then arrives with no session left
+    /// to attribute it to; committing on the spot invents text a real cancel
+    /// never produced. So the preedit stays and the very next signal decides:
+    /// an `insert*` `input` with data is that commit, anything else is the
+    /// cancel it looked like.
+    PendingEmptyEnd,
 }
 
 impl ComposeLatch {
@@ -283,22 +315,26 @@ impl ComposeLatch {
     pub fn observe(&mut self, ime: &Ime) -> ImeEvent {
         match ime {
             Ime::Preedit(text, cursor) => {
-                self.active = !text.is_empty();
+                self.session = if text.is_empty() {
+                    ComposeSession::Idle
+                } else {
+                    ComposeSession::Open
+                };
                 ImeEvent::Compose {
                     text: text.clone(),
                     cursor: *cursor,
                 }
             }
             Ime::Commit(text) => {
-                self.active = false;
+                self.session = ComposeSession::Idle;
                 ImeEvent::Commit(text.clone())
             }
             Ime::Enabled => {
-                self.active = false;
+                self.session = ComposeSession::Idle;
                 ImeEvent::Enabled
             }
             Ime::Disabled => {
-                self.active = false;
+                self.session = ComposeSession::Idle;
                 ImeEvent::Disabled
             }
         }
@@ -315,7 +351,11 @@ impl ComposeLatch {
     ///   events, which report the whole preedit rather than a delta.
     /// * An `input` arriving with **no** composition open is a plain keystroke.
     ///   winit already delivered it as a `WindowEvent::KeyboardInput` from the
-    ///   canvas, so forwarding it here would insert the character twice.
+    ///   canvas, so forwarding it here would insert the character twice. (The
+    ///   one keystroke winit *cannot* deliver is carried by that `input`
+    ///   instead — that decision is [`InputState::dom_edit`]'s, above this
+    ///   mapping rather than inside it, because what it produces is a key
+    ///   event and not an [`ImeEvent`] at all.)
     /// * A second end-of-composition signal is absorbed, so the browser's two
     ///   orderings both land exactly one [`ImeEvent::Commit`].
     ///
@@ -326,56 +366,118 @@ impl ComposeLatch {
         use crate::ime::DomEditEvent;
         match event {
             DomEditEvent::CompositionStart => {
-                self.active = true;
-                self.committed = false;
-                None
+                // A session opening on top of an unresolved empty end settles
+                // that end as what it turned out to be: a cancel.
+                let deferred = self.take_deferred_clear();
+                self.session = ComposeSession::Open;
+                deferred
             }
             DomEditEvent::CompositionUpdate { data } => {
-                self.active = true;
-                self.committed = false;
+                // No deferred clear is owed here even from the grace window:
+                // `Compose` replaces the marked text wholesale, so this preedit
+                // supersedes whatever the pending end left on screen.
+                self.session = ComposeSession::Open;
                 Some(ImeEvent::Compose {
                     text: data.clone(),
                     cursor: Some((data.len(), data.len())),
                 })
             }
-            DomEditEvent::CompositionEnd { data } => {
-                let settles = self.active && !self.committed;
-                self.active = false;
-                self.committed = true;
-                settles.then(|| Self::settle(data))
-            }
+            DomEditEvent::CompositionEnd { data } => match self.session {
+                // Empty data is not yet a decision — hold the preedit for one
+                // more signal. See `ComposeSession::PendingEmptyEnd`.
+                ComposeSession::Open if data.is_empty() => {
+                    self.session = ComposeSession::PendingEmptyEnd;
+                    None
+                }
+                ComposeSession::Open => {
+                    self.session = ComposeSession::Idle;
+                    Some(ImeEvent::Commit(data.clone()))
+                }
+                // A second end for the same session: whatever it carries is
+                // this session's last word, so an empty one is the cancel the
+                // first end already looked like.
+                ComposeSession::PendingEmptyEnd => {
+                    self.session = ComposeSession::Idle;
+                    Some(Self::settle(data))
+                }
+                ComposeSession::Idle => None,
+            },
             DomEditEvent::Input {
                 input_type,
                 data,
                 is_composing,
             } => {
-                if *is_composing || !self.active || self.committed {
+                if *is_composing {
                     return None;
                 }
-                // A deletion mid-composition is the input method editing its
-                // own preedit, not a commit; only an insertion settles one.
-                if !input_type.starts_with("insert") {
-                    return None;
+                let text = data.as_deref().unwrap_or_default();
+                let inserting = input_type.starts_with("insert");
+                match self.session {
+                    ComposeSession::Open => {
+                        // A deletion mid-composition is the input method
+                        // editing its own preedit, not a commit; only an
+                        // insertion settles one.
+                        if !inserting {
+                            return None;
+                        }
+                        self.session = ComposeSession::Idle;
+                        Some(Self::settle(text))
+                    }
+                    // The grace window: this is the text the empty
+                    // `compositionend` did not carry. Anything else — a
+                    // deletion, an insertion with nothing in it — resolves the
+                    // window as the cancel it looked like.
+                    ComposeSession::PendingEmptyEnd => {
+                        self.session = ComposeSession::Idle;
+                        Some(Self::settle(if inserting { text } else { "" }))
+                    }
+                    ComposeSession::Idle => None,
                 }
-                self.active = false;
-                self.committed = true;
-                Some(Self::settle(data.as_deref().unwrap_or_default()))
             }
-            DomEditEvent::Cancel => {
-                if !self.active {
-                    return None;
-                }
-                self.active = false;
-                self.committed = true;
-                Some(Self::cleared_preedit())
+            DomEditEvent::Cancel | DomEditEvent::Blur | DomEditEvent::Teardown => {
+                self.end_session()
             }
-            DomEditEvent::Blur => {
-                let dangling = self.active;
-                self.active = false;
-                self.committed = false;
-                dangling.then(Self::cleared_preedit)
-            }
+            // Carries no edit: it marks the signal behind it. Consumed by
+            // [`InputState::dom_edit`], which owns that mark.
+            DomEditEvent::KeyDropped => None,
         }
+    }
+
+    /// Resolve a session left in the grace window when the signal queue runs
+    /// dry, retracting the preedit the empty `compositionend` left standing.
+    ///
+    /// The window is deliberately **one drain pass wide**, not open-ended. A
+    /// browser fires the `input` that carries a commit in the same task as the
+    /// `compositionend` before it, so both are already queued by the time the
+    /// shell drains them; a signal arriving in a *later* task belongs to
+    /// whatever the user did next. Without this bound, a genuine cancel (which
+    /// produces no `input` at all) would leave the window open until the next
+    /// keystroke, whose own `input` echo would then be taken as the missing
+    /// commit — inserting a character the key path had already delivered.
+    pub fn settle_pending(&mut self) -> Option<ImeEvent> {
+        self.take_deferred_clear()
+    }
+
+    /// Resolve `ComposeSession::PendingEmptyEnd` as the cancel it looked
+    /// like, or answer `None` when no window is open.
+    fn take_deferred_clear(&mut self) -> Option<ImeEvent> {
+        if self.session != ComposeSession::PendingEmptyEnd {
+            return None;
+        }
+        self.session = ComposeSession::Idle;
+        Some(Self::cleared_preedit())
+    }
+
+    /// End the session outright — a cancel, a blur, or the overlay being torn
+    /// down under it — retracting a preedit that is still on screen.
+    ///
+    /// The latch reopens clean rather than "settled": there is no session left
+    /// to absorb a duplicate commit for, and the next composition must be able
+    /// to commit normally.
+    fn end_session(&mut self) -> Option<ImeEvent> {
+        let live = self.session != ComposeSession::Idle;
+        self.session = ComposeSession::Idle;
+        live.then(Self::cleared_preedit)
     }
 
     /// Close a composition session with `text`: a commit when the input method
@@ -401,15 +503,29 @@ impl ComposeLatch {
 
     /// Whether a keyboard-derived `Character` event should be dropped because a
     /// composition is currently in progress.
+    ///
+    /// False inside the grace window: the DOM has already ended the
+    /// composition there, so a keystroke arriving in it is the user's own text
+    /// and not the input method's.
     pub fn is_composing(&self) -> bool {
-        self.active
+        self.session == ComposeSession::Open
+    }
+
+    /// Whether a session is still in flight — composing, or holding the grace
+    /// window open.
+    ///
+    /// Distinct from [`ComposeLatch::is_composing`]: this is the gate on
+    /// carrying a dropped keystroke through the `input` path, which must never
+    /// fire for a signal the composition machinery is still reasoning about.
+    fn has_open_session(&self) -> bool {
+        self.session != ComposeSession::Idle
     }
 }
 
 /// The per-window input state a browser shell carries between events, and the
 /// one place a winit `WindowEvent` becomes an [`InputEvent`].
 ///
-/// The desktop core keeps these four values as loose fields on its event-loop
+/// The desktop core keeps its own such values as loose fields on its event-loop
 /// handler; grouped here instead because this crate has no handler yet — the
 /// event loop is a separate concern from the translation, and keeping the
 /// translation in a plain struct is what lets every arm below be exercised on
@@ -424,6 +540,10 @@ pub struct InputState {
     modifiers: Modifiers,
     secondary_down_delivered: bool,
     compose: ComposeLatch,
+    /// Whether the last DOM signal was a keystroke the key path could not
+    /// carry, so the signal after it must ([`crate::ime::key_path_dropped`]).
+    /// One-shot: every following signal takes it, whether or not it uses it.
+    key_dropped: bool,
 }
 
 impl InputState {
@@ -549,10 +669,91 @@ impl InputState {
     /// overlay, mapped through the same latch the key path consults.
     ///
     /// `None` where the signal must not reach the tree — see
-    /// [`ComposeLatch::observe_dom`] for the three dedupe rules.
+    /// [`ComposeLatch::observe_dom`] for the dedupe rules.
+    ///
+    /// # The one signal that becomes a key event
+    ///
+    /// A [`DomEditEvent::KeyDropped`](crate::ime::DomEditEvent::KeyDropped)
+    /// marks the signal behind it as carrying a keystroke winit's web mapping
+    /// could not name (a soft keyboard's letter or backspace). The mark is
+    /// honoured exactly once, and only when the composition machinery did not
+    /// claim that signal itself and has no session in flight — otherwise this
+    /// would re-deliver text the composition events already reported, or turn
+    /// an input method's edit of its own preedit into a backspace.
     pub fn dom_edit(&mut self, event: &crate::ime::DomEditEvent) -> Option<InputEvent> {
-        self.compose.observe_dom(event).map(InputEvent::Ime)
+        if matches!(event, crate::ime::DomEditEvent::KeyDropped) {
+            self.key_dropped = true;
+            return None;
+        }
+        let carrying = std::mem::take(&mut self.key_dropped);
+        let in_session = self.compose.has_open_session();
+        if let Some(ime) = self.compose.observe_dom(event) {
+            return Some(InputEvent::Ime(ime));
+        }
+        if carrying && !in_session {
+            return carried_key_event(event, self.modifiers).map(InputEvent::Key);
+        }
+        None
     }
+
+    /// Close the grace window a browser's empty `compositionend` opened, once
+    /// the shell has drained every signal queued with it — see
+    /// [`ComposeLatch::settle_pending`].
+    pub fn settle_pending(&mut self) -> Option<InputEvent> {
+        self.compose.settle_pending().map(InputEvent::Ime)
+    }
+}
+
+/// The keystroke a DOM `input` signal is carrying for a key path that could not
+/// deliver it — see [`InputState::dom_edit`] for when this is consulted at all.
+///
+/// # Why a key event and not an [`ImeEvent`]
+///
+/// These edits are keystrokes, not composition: the browser named them
+/// `deleteContentBackward` / `insert*` on a field with no composition open.
+/// Routing them as [`InputEvent::Key`] puts them on the exact path the same
+/// keystroke takes from a hardware keyboard, so selection replacement, undo
+/// grouping and a widget's own Enter/Backspace contracts all behave identically
+/// whichever keyboard produced them. The IME vocabulary has no spelling for the
+/// deletion at all — there is no `ImeEvent` that deletes — so carrying the
+/// insertion as [`ImeEvent::Commit`] would need a second, different route for
+/// the backspace half of the same problem.
+///
+/// The modifier chord is the one the shell is tracking. A soft keyboard reports
+/// none, and a hardware chord the user is genuinely holding is exactly what the
+/// key path would have carried.
+pub fn carried_key_event(
+    event: &crate::ime::DomEditEvent,
+    modifiers: Modifiers,
+) -> Option<KeyEvent> {
+    let crate::ime::DomEditEvent::Input {
+        input_type,
+        data,
+        is_composing,
+    } = event
+    else {
+        return None;
+    };
+    if *is_composing {
+        return None;
+    }
+    let key = if input_type == "deleteContentBackward" {
+        Key::Named(NamedKey::Backspace)
+    } else if input_type.starts_with("insert") {
+        // An insertion with nothing in it is not a keystroke; every other
+        // `inputType` (a forward delete, a format command, a drag-drop) has no
+        // keystroke behind it either and is left alone.
+        Key::Character(data.as_deref().filter(|text| !text.is_empty())?.to_string())
+    } else {
+        return None;
+    };
+    Some(KeyEvent {
+        key,
+        modifiers,
+        // A soft keyboard reports no auto-repeat, and the DOM `input` signal
+        // carries no flag for one.
+        repeat: false,
+    })
 }
 
 // --- the reactive-owner event wrap ---------------------------------------
@@ -898,7 +1099,7 @@ mod browser_loop {
     use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
     use winit::window::{Window, WindowId};
 
-    use crate::ime::ImeOverlay;
+    use crate::ime::{DomEditEvent, ImeOverlay};
     use crate::input::TouchTracker;
     use crate::pacing::{
         ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, next_paced_wake, overshoot, paced_wake_action,
@@ -1161,18 +1362,50 @@ mod browser_loop {
                 &event,
                 InputEvent::Pointer(pointer) if pointer.phase == PointerPhase::Down
             );
-            self.ime.sync(
+            let synced = self.ime.sync(
                 window,
                 self.root.ime_state().as_ref(),
                 self.root.focus_ime_generation(),
                 gesture,
                 self.input.is_composing(),
             );
+            // Removing the element ends the browser's composition with no DOM
+            // signal to show for it, so the latch is told by hand — otherwise
+            // it keeps suppressing the key path for a session that is gone, and
+            // the tree keeps painting its preedit.
+            needs_redraw |= self.end_torn_down_session(synced.detached);
 
             super::sync_cursor(window, &mut self.cursor_icon, self.root.cursor());
             if needs_redraw {
                 window.request_redraw();
             }
+        }
+
+        /// Deliver one mapped event under the root `Owner`, reporting whether
+        /// the tree wants a repaint for it.
+        fn deliver(&mut self, event: &InputEvent) -> bool {
+            super::event_under_owner(self.runtime, &mut self.root, &mut self.state, event)
+                .needs_redraw
+        }
+
+        /// Feed one composition signal — queued or synthesized — through the
+        /// latch and deliver whatever it maps to.
+        fn feed_ime(&mut self, signal: &DomEditEvent) -> bool {
+            let Some(event) = self.input.dom_edit(signal) else {
+                return false;
+            };
+            self.deliver(&event)
+        }
+
+        /// End the composition session an overlay teardown just took the
+        /// element out from under, when there was one — see
+        /// [`crate::ime::teardown_signal`].
+        fn end_torn_down_session(&mut self, detached: bool) -> bool {
+            let Some(signal) = crate::ime::teardown_signal(detached, self.input.is_composing())
+            else {
+                return false;
+            };
+            self.feed_ime(&signal)
         }
 
         /// Turn every queued browser composition signal into a framework
@@ -1182,18 +1415,17 @@ mod browser_loop {
         /// The mapping (and the dedupe against the key path) is
         /// [`InputState::dom_edit`]'s; this only walks the queue and dispatches
         /// what survives it.
+        ///
+        /// The queue running dry is itself a signal: it closes the grace window
+        /// an empty `compositionend` opens, which is bounded to exactly this
+        /// one pass — see [`ComposeLatch::settle_pending`].
         fn drain_ime(&mut self) -> bool {
             let mut needs_redraw = false;
             while let Some(signal) = self.ime.next_event() {
-                if let Some(event) = self.input.dom_edit(&signal) {
-                    let outcome = super::event_under_owner(
-                        self.runtime,
-                        &mut self.root,
-                        &mut self.state,
-                        &event,
-                    );
-                    needs_redraw |= outcome.needs_redraw;
-                }
+                needs_redraw |= self.feed_ime(&signal);
+            }
+            if let Some(event) = self.input.settle_pending() {
+                needs_redraw |= self.deliver(&event);
             }
             needs_redraw
         }
@@ -1216,8 +1448,15 @@ mod browser_loop {
             // following the caret are all this path may do; opening a session
             // would take DOM focus on a caret blink. See `crate::ime`'s policy.
             let ime_state = self.root.ime_state();
-            if !self.ime.close_if_inactive(ime_state.as_ref()) {
-                self.ime.reposition(window, ime_state.as_ref());
+            if self.ime.close_if_inactive(ime_state.as_ref()) {
+                // Same debt as the dispatch path: the element is gone, so a
+                // session the latch still holds has to be ended by hand. The
+                // repaint it asks for is already owed — this *is* the frame,
+                // and the retraction lands before the rebuild below.
+                let _ = self.end_torn_down_session(true);
+            } else {
+                self.ime
+                    .reposition(window, ime_state.as_ref(), self.input.is_composing());
             }
 
             // Poll the app-facing theme override slot once per frame, before
@@ -1729,14 +1968,14 @@ mod tests {
 
     use super::{
         ComposeLatch, ElementState, Ime, InputState, MouseScrollDelta, WinitCursorIcon, WinitKey,
-        WinitNamedKey, WinitTheme, base_theme, brightness_from_winit, cursor_change_to_apply,
-        follow_platform_brightness, map_key_event, map_modifiers, map_mouse_button, map_named_key,
-        map_scroll_delta, mouse_button_should_dispatch, physical_to_logical, reverted_theme,
-        theme_after_override_poll, winit_cursor_for,
+        WinitNamedKey, WinitTheme, base_theme, brightness_from_winit, carried_key_event,
+        cursor_change_to_apply, follow_platform_brightness, map_key_event, map_modifiers,
+        map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
+        physical_to_logical, reverted_theme, theme_after_override_poll, winit_cursor_for,
     };
     use frust_core::event::{
-        CursorIcon, ImeEvent, InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerPhase,
-        ScrollDelta,
+        CursorIcon, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+        PointerPhase, ScrollDelta,
     };
     use frust_theme::{Brightness, Theme};
     use kurbo::Point;
@@ -2187,22 +2426,359 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_cancelling_composition_end_clears_the_preedit_without_committing() {
-        let mut latch = ComposeLatch::default();
+    /// The empty `compositionend` a browser sends both for a cancel and for a
+    /// commit it delivers on the `input` behind it.
+    fn empty_end() -> DomEditEvent {
+        DomEditEvent::CompositionEnd {
+            data: String::new(),
+        }
+    }
+
+    fn cleared_preedit() -> ImeEvent {
+        ImeEvent::Compose {
+            text: String::new(),
+            cursor: None,
+        }
+    }
+
+    /// Open a session with a live preedit.
+    fn composing(latch: &mut ComposeLatch) {
         latch.observe_dom(&DomEditEvent::CompositionStart);
         latch.observe_dom(&DomEditEvent::CompositionUpdate {
             data: "に".to_string(),
         });
+    }
+
+    #[test]
+    fn a_cancelling_composition_end_clears_the_preedit_without_committing() {
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        // The end itself decides nothing: empty data is how a cancel looks and
+        // how a commit-through-`input` looks. Nothing follows it here, so the
+        // drain's own close resolves it as the cancel it was.
+        assert_eq!(latch.observe_dom(&empty_end()), None);
+        assert_eq!(latch.settle_pending(), Some(cleared_preedit()));
+        assert!(!latch.is_composing());
+        // Exactly one clear: the window is closed, not re-closable.
+        assert_eq!(latch.settle_pending(), None);
+    }
+
+    #[test]
+    fn an_empty_composition_end_lets_the_input_behind_it_commit() {
+        // Chrome/Android and Safari predictive text both end the composition
+        // with no data and put the accepted text on the `input` that follows.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        assert_eq!(latch.observe_dom(&empty_end()), None);
         assert_eq!(
-            latch.observe_dom(&DomEditEvent::CompositionEnd {
-                data: String::new(),
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("日本語".to_string()),
+                is_composing: false,
             }),
-            Some(ImeEvent::Compose {
-                text: String::new(),
-                cursor: None,
-            })
+            Some(ImeEvent::Commit("日本語".to_string())),
+            "the text the empty end did not carry"
         );
+        // The commit consumed the window, so nothing is retracted behind it.
+        assert_eq!(latch.settle_pending(), None);
+        assert!(!latch.is_composing());
+    }
+
+    #[test]
+    fn the_commit_window_is_one_drain_pass_wide() {
+        // A genuine cancel produces no `input` at all. If the window stayed
+        // open past the drain that saw the end, the NEXT keystroke's own
+        // `input` echo would be taken as the missing commit — inserting a
+        // character the key path had already delivered from the canvas.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        latch.observe_dom(&empty_end());
+        assert_eq!(latch.settle_pending(), Some(cleared_preedit()));
+
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("x".to_string()),
+                is_composing: false,
+            }),
+            None,
+            "a later keystroke is the key path's, not the cancelled session's"
+        );
+    }
+
+    #[test]
+    fn anything_but_an_insertion_resolves_the_window_as_the_cancel_it_looked_like() {
+        // A deletion behind the empty end is the field being edited, not the
+        // composition's missing text.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        latch.observe_dom(&empty_end());
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "deleteContentBackward".to_string(),
+                data: None,
+                is_composing: false,
+            }),
+            Some(cleared_preedit())
+        );
+
+        // An insertion with nothing in it commits nothing either.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        latch.observe_dom(&empty_end());
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: None,
+                is_composing: false,
+            }),
+            Some(cleared_preedit())
+        );
+
+        // A second `compositionend` is this session's last word.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        latch.observe_dom(&empty_end());
+        assert_eq!(latch.observe_dom(&empty_end()), Some(cleared_preedit()));
+
+        // ... and a new session opening on top of the window retracts it.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        latch.observe_dom(&empty_end());
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::CompositionStart),
+            Some(cleared_preedit())
+        );
+        assert!(latch.is_composing());
+    }
+
+    #[test]
+    fn the_key_path_is_not_suppressed_inside_the_commit_window() {
+        // The DOM has ended the composition by then, so a keystroke arriving
+        // in the window is the user's own text.
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        assert!(latch.is_composing());
+        latch.observe_dom(&empty_end());
+        assert!(!latch.is_composing());
+    }
+
+    // --- ComposeLatch: the overlay going away under a session ---
+
+    #[test]
+    fn a_teardown_retracts_the_preedit_and_reopens_the_latch() {
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Teardown),
+            Some(cleared_preedit()),
+            "the element the composition was being typed into is gone"
+        );
+        // The invariant the whole signal exists for.
+        assert!(!latch.is_composing());
+        // Nothing left to end a second time.
+        assert_eq!(latch.observe_dom(&DomEditEvent::Teardown), None);
+
+        // And the session that follows commits normally rather than being
+        // absorbed as a duplicate of the one the teardown ended.
+        let session = compose_nihongo();
+        let mut committed = session
+            .iter()
+            .filter_map(|signal| latch.observe_dom(signal))
+            .filter(|event| matches!(event, ImeEvent::Commit(_)));
+        assert_eq!(
+            committed.next(),
+            Some(ImeEvent::Commit("日本語".to_string()))
+        );
+        assert_eq!(committed.next(), None);
+    }
+
+    #[test]
+    fn a_teardown_inside_the_commit_window_resolves_it_as_a_cancel() {
+        let mut latch = ComposeLatch::default();
+        composing(&mut latch);
+        latch.observe_dom(&empty_end());
+        assert_eq!(
+            latch.observe_dom(&DomEditEvent::Teardown),
+            Some(cleared_preedit())
+        );
+        assert_eq!(latch.settle_pending(), None);
+    }
+
+    #[test]
+    fn a_teardown_with_no_session_open_says_nothing() {
+        let mut latch = ComposeLatch::default();
+        assert_eq!(latch.observe_dom(&DomEditEvent::Teardown), None);
+        assert!(!latch.is_composing());
+    }
+
+    // --- the carried keystroke ---
+
+    #[test]
+    fn a_soft_keyboards_unnamed_keystroke_reaches_the_tree_through_the_input_path() {
+        // The keydown was `Unidentified`, which winit's web mapping turns into
+        // nothing, so the key path dropped it and marked that it did.
+        let mut input = InputState::new();
+        assert_eq!(input.dom_edit(&DomEditEvent::KeyDropped), None);
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("a".to_string()),
+                is_composing: false,
+            }),
+            Some(InputEvent::Key(KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }))
+        );
+
+        // The same for the backspace half, which has no IME spelling at all.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "deleteContentBackward".to_string(),
+                data: None,
+                is_composing: false,
+            }),
+            Some(InputEvent::Key(KeyEvent {
+                key: Key::Named(NamedKey::Backspace),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn the_carry_mark_is_honoured_exactly_once() {
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        let carried = DomEditEvent::Input {
+            input_type: "insertText".to_string(),
+            data: Some("a".to_string()),
+            is_composing: false,
+        };
+        assert!(input.dom_edit(&carried).is_some());
+        // The desktop dedupe is back in force immediately: this `input` is the
+        // echo of a keystroke winit already delivered from the canvas.
+        assert_eq!(input.dom_edit(&carried), None);
+    }
+
+    #[test]
+    fn the_carry_mark_is_taken_by_whatever_signal_follows_it() {
+        // A soft keyboard's first keystroke of a composition is `Unidentified`
+        // too, and the mark it leaves must not survive to the composition's own
+        // trailing `input`, which would then insert the committed text twice.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        input.dom_edit(&DomEditEvent::CompositionStart);
+        input.dom_edit(&DomEditEvent::CompositionUpdate {
+            data: "にほんご".to_string(),
+        });
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::CompositionEnd {
+                data: "日本語".to_string(),
+            }),
+            Some(InputEvent::Ime(ImeEvent::Commit("日本語".to_string())))
+        );
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "insertCompositionText".to_string(),
+                data: Some("日本語".to_string()),
+                is_composing: false,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_composition_editing_its_own_preedit_is_never_carried_as_a_keystroke() {
+        // A mark left by an unnamed keystroke cannot turn the input method's
+        // own preedit deletion into a Backspace the field would apply.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::CompositionStart);
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "deleteContentBackward".to_string(),
+                data: None,
+                is_composing: false,
+            }),
+            None
+        );
+        assert!(input.is_composing());
+    }
+
+    #[test]
+    fn an_input_with_no_mark_behind_it_is_still_a_plain_keystroke() {
+        // Unchanged by construction: the desktop path delivered it already.
+        let mut input = InputState::new();
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("a".to_string()),
+                is_composing: false,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_real_edit_is_carried() {
+        let modifiers = Modifiers::default();
+        let insert = |input_type: &str, data: Option<&str>| DomEditEvent::Input {
+            input_type: input_type.to_string(),
+            data: data.map(str::to_string),
+            is_composing: false,
+        };
+
+        assert_eq!(
+            carried_key_event(&insert("insertText", Some("ü")), modifiers).map(|event| event.key),
+            Some(Key::Character("ü".to_string()))
+        );
+        // Autocorrect replacing a whole word arrives as one insertion.
+        assert_eq!(
+            carried_key_event(&insert("insertReplacementText", Some("the")), modifiers)
+                .map(|event| event.key),
+            Some(Key::Character("the".to_string()))
+        );
+        assert_eq!(
+            carried_key_event(&insert("deleteContentBackward", None), modifiers)
+                .map(|event| event.key),
+            Some(Key::Named(NamedKey::Backspace))
+        );
+
+        // Nothing to carry: an empty insertion, an edit with no keystroke
+        // behind it, and a signal that is not an `input` at all.
+        assert_eq!(
+            carried_key_event(&insert("insertText", None), modifiers),
+            None
+        );
+        assert_eq!(
+            carried_key_event(&insert("insertText", Some("")), modifiers),
+            None
+        );
+        assert_eq!(
+            carried_key_event(&insert("deleteContentForward", None), modifiers),
+            None
+        );
+        assert_eq!(
+            carried_key_event(&insert("formatBold", None), modifiers),
+            None
+        );
+        assert_eq!(
+            carried_key_event(
+                &DomEditEvent::Input {
+                    input_type: "insertCompositionText".to_string(),
+                    data: Some("に".to_string()),
+                    is_composing: true,
+                },
+                modifiers
+            ),
+            None
+        );
+        assert_eq!(carried_key_event(&DomEditEvent::Blur, modifiers), None);
     }
 
     #[test]

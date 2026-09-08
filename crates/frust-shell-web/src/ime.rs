@@ -46,7 +46,7 @@
 //!
 //! Composed text must reach the tree once, not twice, and the two sources
 //! overlap by construction — the browser both composes into the overlay and
-//! reports the underlying keystrokes. Three rules, all keyed off the single
+//! reports the underlying keystrokes. Four rules, all keyed off the single
 //! [`ComposeLatch`](crate::app_handler::ComposeLatch) this crate already
 //! carries:
 //!
@@ -55,11 +55,19 @@
 //!    on the `Process` key sentinel a browser reports for it.
 //! 2. A DOM `input` signal only becomes framework text while the latch says a
 //!    composition owns the field. Every other `input` is dropped, because those
-//!    characters already reached the tree as a `WindowEvent::KeyboardInput`.
-//! 3. Once a session has produced its commit the latch refuses a second one, so
-//!    the two orderings browsers use for the end of a composition
+//!    characters already reached the tree as a `WindowEvent::KeyboardInput` —
+//!    *unless* rule 4 says the key path never carried that keystroke at all.
+//! 3. Once a session has produced its outcome the latch refuses a second one,
+//!    so the two orderings browsers use for the end of a composition
 //!    (`compositionend` then `input`, or `input` alone) both deliver exactly
 //!    one [`Commit`](frust_core::event::ImeEvent::Commit).
+//! 4. A keystroke the browser could not name ([`UNIDENTIFIED_KEY`], what a
+//!    soft keyboard reports for most of its keys) maps to nothing winit can
+//!    deliver, so the key path drops it and marks that it did
+//!    ([`key_path_dropped`], queued as [`DomEditEvent::KeyDropped`] so it keeps
+//!    its place in the signal order). The very next signal consumes that mark:
+//!    when it is a non-composing `input` the composition machinery did not
+//!    claim, that `input` — and only it — becomes the keystroke instead.
 //!
 //! # Cases handled here
 //!
@@ -71,8 +79,16 @@
 //!   fight a user who deliberately tabbed away.
 //! * **Autofill, autocorrect and spellcheck popping over the app.** The element
 //!   is created with `autocomplete`/`autocorrect`/`autocapitalize` off and
-//!   `spellcheck="false"`, and is emptied whenever it is not composing, so a
-//!   browser has neither a form context nor accumulated text to offer.
+//!   `spellcheck="false"`, and is emptied whenever it is not composing — from
+//!   the frame loop as well as from a dispatched event, so a paste or a last
+//!   keystroke that no further event follows cannot linger in the DOM value.
+//! * **A field that holds a secret or refuses suggestions.** The focused
+//!   widget's [`ImeState::content_type`](frust_core::event::ImeState) picks the
+//!   element's attributes ([`overlay_attributes`]): a secret field is a real
+//!   `type="password"` element, so the browser applies its own secure-entry
+//!   handling and no keyboard mines the text for suggestions or word learning.
+//!   A hint that moves rebuilds the element ([`overlay_needs_rebuild`]) —
+//!   `type` is what the browser reads when it decides that handling.
 //! * **A composition cancelled with Escape.** Browsers disagree about whether
 //!   `compositionend` fires (and with what data) for a cancel, so Escape is
 //!   read from the keystroke itself while composing
@@ -81,8 +97,21 @@
 //! * **An input method that commits through `input` with no `compositionend`.**
 //!   A non-composing `insert*` signal arriving while a session is still open is
 //!   taken as that session's commit.
+//! * **An empty `compositionend` that is not a cancel.** Several browsers end a
+//!   composition with no data and deliver the committed text on the `input`
+//!   that follows. The preedit is therefore not retracted on the empty end
+//!   itself: the latch holds the session one signal longer and lets an
+//!   `insert*` `input` carrying data resolve it as that session's commit —
+//!   every other continuation resolves it as the cancel it looked like.
 //! * **Soft keyboards.** A mobile browser opens one only for a `focus()` inside
-//!   a user gesture, which is why the pointer-press path re-focuses.
+//!   a user gesture, which is why the pointer-press path re-focuses. Their keys
+//!   mostly arrive unnamed, so the edits they produce reach the tree through
+//!   the `input` path (dedupe rule 4) rather than through winit's key mapping,
+//!   which has nothing to map them to.
+//! * **An overlay torn down mid-composition.** Removing the element ends the
+//!   session, and the DOM raises nothing for it once the listeners are off — so
+//!   the shell synthesizes [`DomEditEvent::Teardown`] ([`teardown_signal`]),
+//!   which retracts the preedit and reopens the latch exactly as a blur does.
 //!
 //! # Cases deliberately not handled
 //!
@@ -98,7 +127,7 @@
 //! * **Multiple simultaneous editable fields.** One session at a time, matching
 //!   what [`ImeState`] itself publishes.
 
-use frust_core::event::ImeState;
+use frust_core::event::{ImeContentType, ImeState};
 use kurbo::Rect;
 
 /// The DOM `key` value a browser reports for a keystroke its input method
@@ -107,10 +136,27 @@ use kurbo::Rect;
 /// path.
 pub const IME_PROCESS_KEY: &str = "Process";
 
-/// The DOM `key` value for a keystroke a browser could not name. Some input
-/// methods report it instead of [`IME_PROCESS_KEY`] while composing, and winit
-/// maps it to nothing useful either way, so it is dropped on the same rule.
+/// The DOM `key` value for a keystroke a browser could not name — what a
+/// mobile soft keyboard reports for most of its keys, and what some input
+/// methods report instead of [`IME_PROCESS_KEY`] while composing.
+///
+/// It is never forwarded to the canvas, but for two different reasons, and the
+/// difference decides where the edit it produced goes:
+///
+/// * **While composing** it belongs to the input method, exactly like
+///   [`IME_PROCESS_KEY`]: the text arrives as `Compose`/`Commit` and the
+///   keystroke must not reach the tree at all.
+/// * **While not composing** it is a real edit that winit's own web key mapping
+///   turns into nothing — the pinned backend maps an unnamed key to no
+///   `Key`/`NamedKey` at all, so re-dispatching it onto the canvas produces no
+///   event. Dropping it is therefore not a choice but a fact, and the edit is
+///   picked up from the `input` signal that follows instead — see
+///   [`key_path_dropped`] and the module doc's dedupe rule 4.
 pub const UNIDENTIFIED_KEY: &str = "Unidentified";
+
+/// The element's `id`, so a page inspecting its own DOM (or a bug report's
+/// screenshot of one) can tell what put an extra `<input>` there.
+const OVERLAY_ID: &str = "frust-ime-overlay";
 
 /// The smallest side, in CSS pixels, the overlay element is ever given.
 ///
@@ -156,8 +202,17 @@ pub enum DomEditEvent {
     /// the cancel is read from the keystroke rather than from
     /// `compositionend`.
     Cancel,
+    /// A `keydown` the key path could not carry ([`key_path_dropped`]). Carries
+    /// no edit of its own: it marks the *next* signal as the one that must
+    /// deliver the keystroke, and is queued rather than flagged so it keeps its
+    /// place among the composition signals around it.
+    KeyDropped,
     /// The element lost DOM focus. Any session it still held is over.
     Blur,
+    /// The shell removed the element while a session was still open — see
+    /// [`teardown_signal`]. Synthesized rather than observed: the listeners
+    /// come off before the element does, so no `blur` is raised for it.
+    Teardown,
 }
 
 /// What the shell must do to the overlay element for one dispatched event.
@@ -175,6 +230,21 @@ pub enum OverlayAction {
     },
     /// Close the session — remove the element.
     Close,
+}
+
+/// What one `ImeOverlay::sync` pass did, for the caller that has to keep the
+/// compose latch consistent with it.
+///
+/// The action alone is not enough: a content-type change removes and re-creates
+/// the element inside an [`OverlayAction::Update`], which ends the DOM's
+/// composition exactly as a close does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlaySync {
+    /// The lifecycle action the policy chose for this pass.
+    pub action: OverlayAction,
+    /// Whether the pass removed a live element — a close, or the teardown half
+    /// of a rebuild. Feed it to [`teardown_signal`] with the latch's own state.
+    pub detached: bool,
 }
 
 /// The overlay's lifecycle decision, split out from the DOM so it runs and is
@@ -322,6 +392,106 @@ pub fn forwards_to_canvas(key: &str, dom_is_composing: bool) -> bool {
     !dom_is_composing && key != IME_PROCESS_KEY && key != UNIDENTIFIED_KEY
 }
 
+/// Whether a keystroke [`forwards_to_canvas`] refused is one whose *edit* still
+/// has to reach the tree, through the `input` signal behind it.
+///
+/// Exactly one of the two refusals qualifies. A composition-owned keystroke
+/// (`isComposing`, or [`IME_PROCESS_KEY`]) is text the composition events
+/// already report, and carrying it again is the double delivery the dedupe
+/// rules exist to prevent. An [`UNIDENTIFIED_KEY`] pressed with no composition
+/// open is the opposite case: it is a plain edit — a soft keyboard's letter or
+/// backspace — that winit's web key mapping cannot name, so unless the `input`
+/// behind it is allowed through, nothing about that keystroke reaches the tree
+/// at all.
+pub fn key_path_dropped(key: &str, dom_is_composing: bool) -> bool {
+    !dom_is_composing && key == UNIDENTIFIED_KEY
+}
+
+/// The signal a torn-down overlay owes the compose latch.
+///
+/// Removing the element ends the browser's composition, but silently: the
+/// listeners are removed first (so a focused element's own `blur` cannot
+/// re-enter this bridge), and nothing else reports it. A latch left believing a
+/// composition is live would then suppress the next plain keystroke and leave a
+/// preedit painted in a field the user has moved on from, so the shell
+/// synthesizes the end of the session — with blur semantics, since that is what
+/// losing the element is.
+///
+/// `detached` is [`OverlaySync::detached`] (or `ImeOverlay::close_if_inactive`'s
+/// answer); `composing` is the latch's own
+/// [`is_composing`](crate::app_handler::ComposeLatch::is_composing).
+pub fn teardown_signal(detached: bool, composing: bool) -> Option<DomEditEvent> {
+    (detached && composing).then_some(DomEditEvent::Teardown)
+}
+
+/// The attributes the overlay element is created with for one content type.
+///
+/// The list is fixed except for what the focused field's hint decides, and it
+/// is computed per `ImeOverlay::build` rather than held as a constant because
+/// that hint is per-session state, not a property of the bridge.
+///
+/// # Why the hint is read through its predicates only
+///
+/// [`ImeContentType`] is `#[non_exhaustive]` and its own docs require security
+/// behaviour to branch on [`ImeContentType::is_secret`] /
+/// [`ImeContentType::suppresses_suggestions`] rather than on a variant match: a
+/// `_` arm would silently hand a future secret variant a plain-text element.
+/// Nothing here matches a variant at all, so a variant added upstream is
+/// classified by its own predicates the moment it exists — the same fail-closed
+/// rule the iOS and Android bridges apply to their wire strings, reached here by
+/// having no fallback arm to get wrong.
+///
+/// # What each attribute is for
+///
+/// `type="password"` is the one that matters: it is what makes the browser
+/// treat the element as secure entry, which is also what stops a mobile
+/// keyboard offering the field's text as a suggestion or learning it. The
+/// paired `autocomplete="new-password"` refuses autofill on a secret field,
+/// where a plain `off` is widely ignored. `inputmode="text"` pins the plain
+/// text keyboard for a field that refuses suggestions, so a browser cannot pick
+/// a layout from the element type and bring its own suggestion strip with it.
+/// The rest are the baseline that keeps the browser's text services off *every*
+/// overlay — an autofill dropdown, an autocorrect bubble or a spellcheck
+/// squiggle would render over the canvas anchored to an element the user cannot
+/// see, and a suggestion strip would read text the app never showed it.
+/// `tabindex="-1"` keeps the overlay out of the page's own tab order; it is
+/// focused programmatically or not at all.
+pub fn overlay_attributes(content_type: ImeContentType) -> Vec<(&'static str, &'static str)> {
+    let secret = content_type.is_secret();
+    let mut attributes = vec![
+        ("id", OVERLAY_ID),
+        ("type", if secret { "password" } else { "text" }),
+        ("autocomplete", if secret { "new-password" } else { "off" }),
+        ("autocorrect", "off"),
+        ("autocapitalize", "off"),
+        ("spellcheck", "false"),
+        ("tabindex", "-1"),
+    ];
+    if content_type.suppresses_suggestions() {
+        attributes.push(("inputmode", "text"));
+    }
+    attributes
+}
+
+/// Whether the live element must be replaced before it is used again.
+///
+/// `built` is the content type the element in the document was created with
+/// (`None` when there is no element); `published` is what the focused field
+/// says now. A browser decides secure entry — and the keyboard, suggestion and
+/// autofill behaviour that rides on it — from the element it has, so a hint that
+/// moved is answered with a fresh element rather than a mutated one: the
+/// alternative is an element a browser has already classified as ordinary text
+/// serving a field that has since declared itself secret.
+pub fn overlay_needs_rebuild(built: Option<ImeContentType>, published: ImeContentType) -> bool {
+    built.is_some_and(|built| built != published)
+}
+
+/// The content type a published surface asks for, defaulting to
+/// [`ImeContentType::Normal`] when there is no surface to read one from.
+pub fn published_content_type(ime: Option<&ImeState>) -> ImeContentType {
+    ime.map(|state| state.content_type).unwrap_or_default()
+}
+
 /// Whether a keystroke should cancel the composition in progress instead of
 /// being forwarded or composed.
 pub fn cancels_composition(key: &str, latch_composing: bool) -> bool {
@@ -354,7 +524,7 @@ mod browser {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use frust_core::event::ImeState;
+    use frust_core::event::{ImeContentType, ImeState};
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{
@@ -364,13 +534,10 @@ mod browser {
     use winit::window::Window;
 
     use super::{
-        DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, cancels_composition,
-        forwards_to_canvas, overlay_box, overlay_box_moved, session_is_active,
+        DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync, cancels_composition,
+        forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box, overlay_box_moved,
+        overlay_needs_rebuild, published_content_type, session_is_active,
     };
-
-    /// The element's `id`, so a page inspecting its own DOM (or a bug report's
-    /// screenshot of one) can tell what put an extra `<input>` there.
-    const OVERLAY_ID: &str = "frust-ime-overlay";
 
     /// The style declarations the overlay is created with, beyond its per-frame
     /// geometry.
@@ -396,23 +563,6 @@ mod browser {
         ("overflow", "hidden"),
         ("resize", "none"),
         ("font-size", "16px"),
-    ];
-
-    /// Attributes that keep the browser's own text services off the element.
-    ///
-    /// An autofill dropdown, an autocorrect bubble or a spellcheck squiggle
-    /// would each render over the canvas anchored to an element the user cannot
-    /// see, and the suggestion strip of a mobile keyboard would read text the
-    /// app never showed it. `tabindex="-1"` keeps the overlay out of the page's
-    /// own tab order — it is focused programmatically or not at all.
-    const OVERLAY_ATTRIBUTES: &[(&str, &str)] = &[
-        ("id", OVERLAY_ID),
-        ("type", "text"),
-        ("autocomplete", "off"),
-        ("autocorrect", "off"),
-        ("autocapitalize", "off"),
-        ("spellcheck", "false"),
-        ("tabindex", "-1"),
     ];
 
     /// One registered DOM listener, kept alive for as long as the element is.
@@ -442,6 +592,9 @@ mod browser {
         listeners: Vec<Listener>,
         signals: Rc<Signals>,
         last_box: Option<OverlayBox>,
+        /// The content type the live element was created with, `None` when
+        /// there is no element — the left half of [`overlay_needs_rebuild`].
+        built_content_type: Option<ImeContentType>,
     }
 
     impl ImeOverlay {
@@ -465,6 +618,11 @@ mod browser {
         /// `gesture` marks a pointer press and `composing` is the shell's
         /// compose latch — the element is emptied whenever no composition owns
         /// it, so a session never starts on top of the last one's text.
+        ///
+        /// The returned [`OverlaySync::detached`] is what the caller feeds to
+        /// [`teardown_signal`](super::teardown_signal): both a close and the
+        /// rebuild a content-type change forces remove a live element, and a
+        /// composition the latch still holds has to be ended with it.
         pub fn sync(
             &mut self,
             window: &Arc<Window>,
@@ -472,23 +630,29 @@ mod browser {
             generation: u64,
             gesture: bool,
             composing: bool,
-        ) -> OverlayAction {
+        ) -> OverlaySync {
             // A blur that already tore the session down is observed before the
             // policy runs, so this pass sees the true state of the DOM rather
-            // than re-placing an element the user has left.
+            // than re-placing an element the user has left. The blur itself is
+            // queued for the latch, so this teardown owes it no signal.
             if self.signals.blurred.replace(false) {
                 self.teardown();
                 self.policy.mark_closed();
             }
 
+            let mut detached = false;
             let action = self
                 .policy
                 .poll(session_is_active(ime), generation, gesture);
             match action {
                 OverlayAction::Idle => {}
                 OverlayAction::Open => {
+                    // No content-type check is owed here: every path that
+                    // leaves the policy closed (a blur, a failed create, a
+                    // close) removes the element first, so an opening session
+                    // never inherits one built for a different hint.
                     if self.element.is_none() {
-                        self.build(window);
+                        self.build(window, ime);
                     }
                     if self.element.is_none() {
                         // The DOM refused the element (no body yet, a create
@@ -496,26 +660,51 @@ mod browser {
                         // gesture opens a fresh one rather than leaving the
                         // policy believing an element it does not have is live.
                         self.policy.mark_closed();
-                        return OverlayAction::Idle;
+                        return OverlaySync {
+                            action: OverlayAction::Idle,
+                            detached,
+                        };
                     }
                     self.place(window, ime);
                     self.clear_value(composing);
                     self.focus();
                 }
                 OverlayAction::Update { refocus } => {
+                    // A field that changed its content type needs the browser
+                    // to re-read it, which it only does for an element it has
+                    // not classified yet. The replacement always takes focus
+                    // back, `refocus` or not: the element that held it is gone.
+                    let rebuilt =
+                        overlay_needs_rebuild(self.built_content_type, published_content_type(ime));
+                    if rebuilt {
+                        self.teardown();
+                        detached = true;
+                        self.build(window, ime);
+                        if self.element.is_none() {
+                            self.policy.mark_closed();
+                            return OverlaySync {
+                                action: OverlayAction::Idle,
+                                detached,
+                            };
+                        }
+                    }
                     self.place(window, ime);
                     self.clear_value(composing);
-                    if refocus {
+                    if refocus || rebuilt {
                         self.focus();
                     }
                 }
-                OverlayAction::Close => self.teardown(),
+                OverlayAction::Close => {
+                    detached = self.element.is_some();
+                    self.teardown();
+                }
             }
-            action
+            OverlaySync { action, detached }
         }
 
         /// The frame loop's half of the lifecycle: drop a session the app ended
-        /// without an input event of its own. Returns whether it closed one.
+        /// without an input event of its own. Returns whether it closed one —
+        /// the caller pairs that with [`teardown_signal`](super::teardown_signal).
         pub fn close_if_inactive(&mut self, ime: Option<&ImeState>) -> bool {
             let closing = self.policy.close_if_inactive(session_is_active(ime));
             if closing {
@@ -524,18 +713,31 @@ mod browser {
             closing
         }
 
-        /// Follow the caret while a session is open, without touching focus.
+        /// Follow the caret while a session is open, and drop any value the
+        /// element is still holding. Focus is left alone.
         ///
         /// The frame loop's other half: composition produces no winit event, so
         /// a preedit growing under the user moves the caret with no dispatch to
         /// re-place the element from — and a candidate window left behind at
-        /// the caret's old position is the visible symptom. Focus is
-        /// deliberately not asserted here; see [`OverlayPolicy::poll`] for why
-        /// a frame may never take it.
-        pub fn reposition(&mut self, window: &Arc<Window>, ime: Option<&ImeState>) {
-            if self.element.is_some() && session_is_active(ime) {
-                self.place(window, ime);
+        /// the caret's old position is the visible symptom. The emptying runs
+        /// here too, not only from [`ImeOverlay::sync`], because the last
+        /// keystroke of a session (or a paste into it) is followed by no
+        /// further dispatched event: without this pass its characters sit in
+        /// the DOM value for as long as the field stays focused, where a
+        /// suggestion strip can still read them. Focus is deliberately not
+        /// asserted here; see [`OverlayPolicy::poll`] for why a frame may never
+        /// take it.
+        pub fn reposition(
+            &mut self,
+            window: &Arc<Window>,
+            ime: Option<&ImeState>,
+            composing: bool,
+        ) {
+            if self.element.is_none() || !session_is_active(ime) {
+                return;
             }
+            self.place(window, ime);
+            self.clear_value(composing);
         }
 
         /// Whether an element is currently in the document.
@@ -546,11 +748,17 @@ mod browser {
         /// Create the element, style it, install its listeners and append it to
         /// the document body.
         ///
+        /// The attributes come from the focused field's own content-type hint
+        /// ([`overlay_attributes`]) rather than from a constant, which is why
+        /// the published surface is threaded in here: `type="password"` is only
+        /// read by a browser when it classifies the element, so it has to be
+        /// set on creation.
+        ///
         /// Every step is fallible in a DOM that may not have a body yet; a
         /// failure logs and leaves `element` unset rather than panicking a
         /// page, and [`ImeOverlay::sync`] hands the session back so a later
         /// gesture tries again.
-        fn build(&mut self, window: &Arc<Window>) {
+        fn build(&mut self, window: &Arc<Window>, ime: Option<&ImeState>) {
             let Some(document) = web_sys::window().and_then(|w| w.document()) else {
                 log::debug!("frust-shell-web: no document to host the IME overlay");
                 return;
@@ -568,7 +776,8 @@ mod browser {
                 return;
             };
 
-            for (name, value) in OVERLAY_ATTRIBUTES {
+            let content_type = published_content_type(ime);
+            for (name, value) in overlay_attributes(content_type) {
                 let _ = element.set_attribute(name, value);
             }
             let style = element.style();
@@ -582,6 +791,7 @@ mod browser {
 
             self.install_listeners(&element, window);
             self.element = Some(element);
+            self.built_content_type = Some(content_type);
             self.last_box = None;
         }
 
@@ -664,6 +874,11 @@ mod browser {
                     }
                     if forwards_to_canvas(&key, composing) {
                         redispatch(canvas.as_ref(), "keydown", key_event);
+                    } else if key_path_dropped(&key, composing) {
+                        // Queued rather than flagged: the `input` that carries
+                        // this keystroke's edit is queued too, and the mark is
+                        // only honoured by the signal immediately behind it.
+                        push(&signals, DomEditEvent::KeyDropped, &window);
                     }
                 }
             });
@@ -746,11 +961,16 @@ mod browser {
         }
 
         /// Remove the element and every listener on it, and forget the placed
-        /// box so a later session re-writes its geometry from scratch.
+        /// box and the content type it was built with so a later session
+        /// re-writes both from scratch.
         ///
         /// Listeners come off **before** the element does, so detaching a
         /// focused overlay cannot re-enter this bridge through its own `blur`
-        /// handler and mark a session that is already gone as blurred.
+        /// handler and mark a session that is already gone as blurred. That
+        /// ordering is also why this raises nothing the compose latch could
+        /// observe: a caller that tears an element down while a composition is
+        /// open owes the latch [`DomEditEvent::Teardown`], which
+        /// [`teardown_signal`](super::teardown_signal) decides.
         fn teardown(&mut self) {
             if let Some(element) = self.element.take() {
                 for listener in &self.listeners {
@@ -762,6 +982,7 @@ mod browser {
                 element.remove();
             }
             self.listeners.clear();
+            self.built_content_type = None;
             self.last_box = None;
             self.signals.blurred.set(false);
         }
@@ -770,6 +991,12 @@ mod browser {
     impl Drop for ImeOverlay {
         /// A page that drops the shell must not leave an orphaned `<input>` (and
         /// its listeners) behind in the document.
+        ///
+        /// Unlike the other two teardown sites this one owes the compose latch
+        /// nothing: the overlay is a field of the shell handler, so it is only
+        /// ever dropped with the handler — and with it the latch that would
+        /// have held the session and the widget tree that would have shown the
+        /// preedit.
         fn drop(&mut self) {
             self.teardown();
         }
@@ -823,10 +1050,12 @@ mod browser {
 #[cfg(test)]
 mod tests {
     use super::{
-        MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy, cancels_composition,
-        forwards_to_canvas, overlay_box, overlay_box_moved, session_is_active,
+        DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy,
+        cancels_composition, forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box,
+        overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
+        teardown_signal,
     };
-    use frust_core::event::{EditingState, ImeState};
+    use frust_core::event::{EditingState, ImeContentType, ImeState};
     use kurbo::Rect;
 
     fn active_surface(caret: Option<Rect>) -> ImeState {
@@ -836,6 +1065,21 @@ mod tests {
             caret,
             ..ImeState::default()
         }
+    }
+
+    fn surface_with(content_type: ImeContentType) -> ImeState {
+        ImeState {
+            active: true,
+            content_type,
+            ..ImeState::default()
+        }
+    }
+
+    fn attribute(content_type: ImeContentType, name: &str) -> Option<&'static str> {
+        overlay_attributes(content_type)
+            .into_iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
     }
 
     // --- session lifecycle ---
@@ -973,7 +1217,25 @@ mod tests {
         // Both signals a browser uses for "the input method consumed this".
         assert!(!forwards_to_canvas("a", true));
         assert!(!forwards_to_canvas("Process", false));
+    }
+
+    #[test]
+    fn an_unnamed_keystroke_is_carried_by_the_input_path_instead_of_the_canvas() {
+        // Not forwarded either way — winit's web mapping has no key to make of
+        // it — but only the non-composing one is an edit still owed to the
+        // tree. While composing it is the input method's, and the composition
+        // events already report that text.
         assert!(!forwards_to_canvas("Unidentified", false));
+        assert!(key_path_dropped("Unidentified", false));
+
+        assert!(!forwards_to_canvas("Unidentified", true));
+        assert!(!key_path_dropped("Unidentified", true));
+
+        // Nothing else is carried: a named key reached winit through the
+        // canvas, and `Process` is composition text.
+        assert!(!key_path_dropped("a", false));
+        assert!(!key_path_dropped("Backspace", false));
+        assert!(!key_path_dropped("Process", false));
     }
 
     #[test]
@@ -981,5 +1243,116 @@ mod tests {
         assert!(cancels_composition("Escape", true));
         assert!(!cancels_composition("Escape", false));
         assert!(!cancels_composition("a", true));
+    }
+
+    // --- teardown ---
+
+    #[test]
+    fn a_teardown_ends_the_session_only_when_one_was_open() {
+        // The element going away is the end of the composition, and nothing in
+        // the DOM reports it once the listeners are off.
+        assert_eq!(
+            teardown_signal(true, true),
+            Some(DomEditEvent::Teardown),
+            "a composition survived the element it was being typed into"
+        );
+        // Nothing to end: no composition, or no element removed.
+        assert_eq!(teardown_signal(true, false), None);
+        assert_eq!(teardown_signal(false, true), None);
+        assert_eq!(teardown_signal(false, false), None);
+    }
+
+    // --- the content-type hint ---
+
+    #[test]
+    fn an_obscured_fields_overlay_is_secret_typed_and_a_plain_fields_is_not() {
+        assert_eq!(
+            attribute(ImeContentType::Password, "type"),
+            Some("password")
+        );
+        assert_eq!(
+            attribute(ImeContentType::Password, "autocomplete"),
+            Some("new-password"),
+            "a secret field must refuse autofill, which a plain `off` does not"
+        );
+        assert_eq!(
+            attribute(ImeContentType::Password, "inputmode"),
+            Some("text")
+        );
+
+        assert_eq!(attribute(ImeContentType::Normal, "type"), Some("text"));
+        assert_eq!(
+            attribute(ImeContentType::Normal, "autocomplete"),
+            Some("off")
+        );
+        assert_eq!(
+            attribute(ImeContentType::Normal, "inputmode"),
+            None,
+            "an ordinary field leaves the keyboard choice to the browser"
+        );
+
+        // Non-secret but suggestion-refusing: a plain-text element, pinned to
+        // the plain-text keyboard.
+        assert_eq!(
+            attribute(ImeContentType::NoSuggestions, "type"),
+            Some("text")
+        );
+        assert_eq!(
+            attribute(ImeContentType::NoSuggestions, "inputmode"),
+            Some("text")
+        );
+        assert_eq!(attribute(ImeContentType::Terminal, "type"), Some("text"));
+        assert_eq!(
+            attribute(ImeContentType::Terminal, "inputmode"),
+            Some("text")
+        );
+
+        // The baseline that keeps the browser's text services off every
+        // overlay is unconditional.
+        for hint in [
+            ImeContentType::Normal,
+            ImeContentType::Password,
+            ImeContentType::NoSuggestions,
+            ImeContentType::Terminal,
+        ] {
+            assert_eq!(attribute(hint, "spellcheck"), Some("false"));
+            assert_eq!(attribute(hint, "autocorrect"), Some("off"));
+            assert_eq!(attribute(hint, "autocapitalize"), Some("off"));
+            assert_eq!(attribute(hint, "tabindex"), Some("-1"));
+        }
+    }
+
+    #[test]
+    fn a_hint_change_requests_a_rebuild() {
+        // A browser classifies the element it has; the hint that moved has to
+        // reach it as a new one.
+        assert!(overlay_needs_rebuild(
+            Some(ImeContentType::Normal),
+            ImeContentType::Password
+        ));
+        assert!(overlay_needs_rebuild(
+            Some(ImeContentType::Password),
+            ImeContentType::Normal
+        ));
+        // An unchanged hint keeps the live element (and its DOM focus).
+        assert!(!overlay_needs_rebuild(
+            Some(ImeContentType::Password),
+            ImeContentType::Password
+        ));
+        // Nothing built yet is an open, not a rebuild.
+        assert!(!overlay_needs_rebuild(None, ImeContentType::Password));
+    }
+
+    #[test]
+    fn a_field_that_published_no_hint_reads_as_ordinary_text() {
+        assert_eq!(published_content_type(None), ImeContentType::Normal);
+        assert_eq!(
+            published_content_type(Some(&active_surface(None))),
+            ImeContentType::Normal
+        );
+        assert_eq!(
+            published_content_type(Some(&surface_with(ImeContentType::Password))),
+            ImeContentType::Password
+        );
     }
 }
