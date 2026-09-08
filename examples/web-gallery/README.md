@@ -143,29 +143,42 @@ default-on or opt-in
 Measured against the **primary recipe** (`frust build web --release`,
 `build/web/pkg/app_bg.wasm`) — the artifact this task's browser verification
 actually loaded (see "Embedding" below) — not the manual recipe, though the
-two produce byte-identical `.wasm` (same crate, same `[profile.release]`,
-same `wasm-bindgen`/`wasm-opt` invocation under the hood; only the file
-name/host page differ). `[profile.release]` is this crate's own (`lto =
-"fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, copied
-from the root profile since a standalone workspace never sees it):
+two drive the identical underlying pipeline: same crate, same
+`[profile.release]`, the identical `cargo build`/`wasm-bindgen`/`wasm-opt`
+invocation (compare "Primary recipe" above against "Manual recipe" below —
+`crates/frust-drive/src/web_build/mod.rs`'s `WASM_OPT_FEATURES` list is the
+same seven flags the manual recipe passes by hand); only the file
+name/host page differ. That does not make their *output* byte-identical,
+and it should not be read as such — see the "snapshot, not a constant" note
+below the table, which records two builds of this identical pipeline, from
+unchanged source, producing different byte counts at every stage.
+`[profile.release]` is this crate's own (`lto = "fat"`, `codegen-units = 1`,
+`strip = "symbols"`, `panic = "abort"`, copied from the root profile since a
+standalone workspace never sees it):
 
 | Stage | Size |
 |---|---|
-| `wasm-bindgen` output (unoptimized) | 11,523,553 B ≈ 10.99 MiB |
+| `wasm-bindgen` output (unoptimized) | 11,524,399 B ≈ 10.99 MiB |
 | after `wasm-opt -O` with the feature list above | 10,724,099 B ≈ 10.23 MiB |
 | gzip `-9` of the `wasm-opt`'d file | 4,466,947 B ≈ 4.26 MiB |
 
 **These three numbers are a snapshot, not a constant — re-measure before
-citing one anywhere else.** Measured 2026-09-09 against the deployed
-artifact on `feature/widget-previews-p3`, same recipe as always: `frust
-build web --release` (see "Primary recipe" above) followed by `gzip -9 -c
-build/web/pkg/app_bg.wasm | wc -c`. This table's immediately-prior row
-(11,523,553 / 10,723,170 / 4,466,842 B, measured 2026-09-08 on
-`task/p3-r1-embed-mode`, this same base) moved by 929 B larger optimized /
-105 B larger gzipped with **no source change in between** — build output at
-this size is not byte-stable run to run, which is exactly why a second
-document (`docs/TESTING.md`) copying one of these numbers goes stale the
-moment either file rebuilds, independent of any app-code change; that is
+citing one anywhere else.** All three rows above are from one build's own
+log — the deployed artifact, measured 2026-09-09 against
+`feature/widget-previews-p3` — never mixed across builds; `wasm-opt` shrank
+that build's own unoptimized module from 11,524,399 B to the 10,724,099 B
+row above it. Same recipe as always: `frust build web --release` (see
+"Primary recipe" above) followed by `gzip -9 -c build/web/pkg/app_bg.wasm |
+wc -c`. This table's immediately-prior row (11,523,553 / 10,723,170 /
+4,466,842 B, measured 2026-09-08 on `task/p3-r1-embed-mode`, this same base,
+no source change since) differs from today's row at every stage — 846 B
+larger unoptimized, 929 B larger optimized, 105 B larger gzipped. That is
+the observation: two builds of unchanged source through the identical
+pipeline did not produce byte-identical output. This document does not know
+why — nothing here diagnoses a cause, and none should be assumed — only
+that it happened, which is reason enough that a second document
+(`docs/TESTING.md`) copying one of these numbers goes stale the moment
+either file rebuilds, independent of any app-code change; that is
 why `docs/TESTING.md` no longer quotes a byte count at all (see its own
 `examples/web-gallery` entry). The prior-prior measurement (11,523,550 /
 10,723,407 / 4,466,224 B, the base commit review-round-1 started from — the
