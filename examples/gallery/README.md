@@ -24,7 +24,9 @@ graph being made wasm-clean, which the web-shell work owns.
    the case, wrapping the concrete `View` with `frust_core::any(..)`. Frame
    it with `base::framed` (or `base::framed_in` for a module recording at
    its own viewport) rather than rolling your own wrapper — see "Let the
-   variant reach the pixels" below.
+   variant reach the pixels" below. If the case needs to be genuinely
+   *operated* by a live host rather than just displayed, `Case::build` stays
+   pure and unchanged — see "Adding an interactive case" below instead.
 3. Register the case. `src/base/mod.rs` accepts both module shapes:
    - a module that exposes one `pub(super) const <NAME>: Case` per case
      (`basics`, `text`, `layout`, `styling`) adds each constant to the
@@ -43,6 +45,40 @@ graph being made wasm-clean, which the web-shell work owns.
 
 `tests/registry.rs` enforces that every slug in the registry is unique and
 that every case's `build` constructor actually runs without panicking.
+
+## Adding an interactive case
+
+`Case::build` stays pure for every case — that is what keeps the static
+snapshot oracle byte-comparable, and this section does not change it. But a
+*live* host (`examples/web-gallery`, not the static recorder) can let a case
+be genuinely operated — a toggle that actually toggles, a slider that
+actually drags — by pairing its slug with an entry in the optional side table
+at [`src/interactive.rs`](src/interactive.rs), instead of touching `Case`,
+`Case::build`, or the registry itself:
+
+1. Write a [`frust_core::Component`] whose `State` is the case's retained
+   data and whose `build(&self, state: &mut State)` wires a controlled
+   widget's `on_toggle`/`on_change` to mutate that state — a plain-`()`
+   `Case::build` closure has nowhere to write those callbacks, which is why
+   every registry case's own callbacks are no-ops today.
+2. Host it as `frust_core::any(frust_core::component(YourComponent))`, framed
+   with `interactive::framed`/`interactive::framed_in` (the state-generic
+   mirrors of `base::framed`/`base::framed_in` — a component's subtree is
+   bound to its own `State`, not `()`, so the plain `base` framer cannot wrap
+   it).
+3. Add `(case_slug, your_constructor)` to your own catalog submodule's
+   `pub const INTERACTIVE: &[Entry]` in `src/interactive.rs` — this touches
+   only your own catalog's file, never `PARTS` or another catalog's slice.
+
+`crate::find_interactive(slug)` (re-exported from `interactive::find`) is
+what a live host calls to look up the stateful constructor; `None` means the
+host should fall back to that case's own `Case::build`. `tests/registry.rs`
+asserts every slug registered this way resolves through `crate::find`, so a
+typo'd slug is caught rather than silently registering nothing.
+
+Use this route only when the case exists to demonstrate real interaction in
+the live gallery; every other case — anything the static snapshot alone
+needs to show — stays on the pure route above.
 
 ## Let the variant reach the pixels
 
@@ -65,19 +101,30 @@ exist to show. So:
 
 ## The pure-`View` constraint
 
-A `Case::build` function is a plain `fn() -> frust_core::AnyView<()>` — it
-must NOT reach for the reactive runtime (`use_signal`, `use_context`, an
-`Owner`) or a wall clock. Both consumers of this registry
-(`crates/frust-testing`'s `record_view` today, the wasm gallery app later)
-build a `RenderRoot<(), V>` with **no runtime attached at all**: `rebuild`
-just calls `build()` again on every pass, there is no `Owner` for a signal
-subscription to register against, and there is no clock — a case that reads
-current time or a reactive context would panic (or silently misbehave)
-instead of recording a deterministic frame.
+A `Case::build` function is a plain `fn() -> frust_core::AnyView<()>` — it is
+called fresh on every rebuild pass and never touches the reactive runtime or
+a wall clock. `crates/frust-testing`'s `record_view`, the recorder every case
+in the registry is driven through today, builds a `RenderRoot<(), V>` with no
+reactive runtime and no ambient owner attached at all — `record_view`'s own
+doc comment in `crates/frust-testing/src/frame.rs` says so directly. That is
+not because retained state would panic, though: nothing in `reactive_graph`
+(this workspace pins 0.2.14) panics for want of an ambient owner —
+`Owner::new()` simply creates a parentless owner when there is none to nest
+under. A case that genuinely needs to be operated should reach for the
+interactive side table instead of `Case::build` — see "Adding an interactive
+case" above.
 
-Any animation timing a case needs comes from [`Case::time_ms`] instead: a
-fixed frame timestamp the recorder hands the widget tree, which an animating
-widget differences itself against rather than sampling a live clock.
+The constraint that is real is a CLOCK, not reactivity: the recorder normally
+paints a case exactly once, and `AnimationController::advance`
+(`crates/frust-core/src/anim.rs`) contributes a zero delta on the first call
+after a motion starts, so an unconditionally-started ramp records at
+progress 0 by default. Any animation timing a case needs comes from
+[`Case::time_ms`] instead: a fixed frame timestamp the recorder hands the
+widget tree, which an animating widget differences itself against rather
+than sampling a live clock. A case that pins `time_ms` above
+`Case::DEFAULT_TIME_MS` can ask the recorder for a warm pass to actually
+reach that instant instead of landing on progress 0 — see `Case::warm_frames`
+in `src/case.rs` for the full contract.
 
 ## Slug rule
 
@@ -103,4 +150,6 @@ out-of-tree git dependency, so none of the reasons `examples/huddle` /
   [`theme()`](src/theme.rs)), and writes the result out as a PNG plus a
   manifest.
 - `examples/web-gallery` (a future wasm app) will read the same registry to
-  render an interactive, in-browser widget gallery.
+  render an in-browser widget gallery, consulting `find_interactive` for a
+  case's slug (see "Adding an interactive case" above) before falling back
+  to that case's own `Case::build`.
