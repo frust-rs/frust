@@ -25,6 +25,19 @@
 //! `beui/button`. Slugs are unique across the whole registry — see
 //! `tests/registry.rs`.
 //!
+//! # The live-host escape hatch
+//!
+//! That constraint is what makes a recorded frame deterministic, and it is
+//! also why nothing in this registry can be *operated*: frust's input widgets
+//! are controlled, so a `()`-stated case's `on_toggle`/`on_change` has nowhere
+//! to write and every one of them is a no-op closure. A host that is live
+//! rather than recording (`examples/web-gallery`) may build a case from the
+//! optional slug-keyed [`interactive`] side table instead, whose constructors
+//! carry retained [`frust_core::Component`] state. It is a table beside the
+//! registry, never a field on [`Case`], precisely so [`Case::build`] — and
+//! therefore the snapshot oracle — cannot be reached from it; see that
+//! module's own docs.
+//!
 //! # Dev-only
 //!
 //! Like `crates/frust-testing`, this crate exists to be read by test/tooling
@@ -50,11 +63,13 @@ pub mod beui;
 pub mod case;
 pub mod cupertino;
 pub mod glyph;
+pub mod interactive;
 pub mod material;
 pub mod shadcn;
 pub mod theme;
 
 pub use case::{Case, Design, Variant};
+pub use interactive::find as find_interactive;
 pub use theme::theme;
 
 /// Every design-system case module's `CASES` slice, in the website

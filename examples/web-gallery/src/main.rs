@@ -496,14 +496,15 @@ mod app {
         .on_tap(on_tap))
     }
 
-    /// Hosts one [`Case::build`] (a plain `fn() -> frust::AnyView<()>`, per
+    /// Hosts one case constructor (a plain `fn() -> frust::AnyView<()>`, per
     /// the registry's pure-`View` constraint) inside this app's `AppState`
     /// tree. [`Component`]'s state boundary — "a `ComponentView` implements
     /// `View<Outer>` for **any** outer state, and the subtree it hosts is
     /// diffed against the component's own `State` instead" (see that trait's
     /// module doc) — is exactly the seam a `()`-state case needs to sit
     /// inside an `AppState`-state app without either side knowing about the
-    /// other.
+    /// other. Which constructor it is asked to host — [`Case::build`] or the
+    /// interactive one — is [`case_constructor`]'s decision, not this type's.
     struct CaseHost(fn() -> frust::AnyView<()>);
 
     impl Component for CaseHost {
@@ -514,6 +515,27 @@ mod app {
         fn build(&self, _state: &mut Self::State) -> frust::AnyView<Self::State> {
             (self.0)()
         }
+    }
+
+    /// The constructor a hosted case is actually built from: the registry's
+    /// interactive one when it declares one for this slug, else the case's own
+    /// [`Case::build`].
+    ///
+    /// This app is a LIVE host, not the recorder, and that is the whole
+    /// difference. A `Case::build` is `fn() -> AnyView<()>`, so every input
+    /// widget it constructs is handed a `|_: &mut (), _| {}` callback — frust's
+    /// widgets are controlled (they report a requested value and wait for the
+    /// next rebuild to feed it back), so a click on one changes nothing here,
+    /// which is right for a deterministic recorded frame and wrong for a page
+    /// a person is meant to operate. `frust_gallery::find_interactive` answers
+    /// with a constructor carrying retained `Component` state where one exists.
+    ///
+    /// Both pages resolve through this one function so the chromed and
+    /// embedded routes cannot drift; the `?embed=1` iframe the website's
+    /// preview component builds is the one that matters most, since it is what
+    /// a reader actually touches.
+    fn case_constructor(case: &'static Case) -> fn() -> frust::AnyView<()> {
+        frust_gallery::find_interactive(case.slug).unwrap_or(case.build)
     }
 
     /// The `?case=<slug>` page (the human-browsing default; see
@@ -546,7 +568,7 @@ mod app {
                     1,
                     any(scroll_view(Padding(
                         EdgeInsets::all(16.0),
-                        component(CaseHost(case.build)),
+                        component(CaseHost(case_constructor(case))),
                     ))),
                 ),
             ],
@@ -568,7 +590,7 @@ mod app {
     /// the only way out of an embedded frame is the host page itself (e.g.
     /// navigating the iframe's own `src`), never a tap inside it.
     fn embedded_case_view(case: &'static Case) -> frust::AnyView<AppState> {
-        any(component(CaseHost(case.build)))
+        any(component(CaseHost(case_constructor(case))))
     }
 
     /// The fallback/landing page: a live filter box (keyboard text-entry
