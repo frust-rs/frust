@@ -81,10 +81,14 @@ fn every_interactive_constructor_builds() {
 
 #[test]
 fn find_interactive_returns_none_for_a_case_with_no_stateful_constructor() {
-    // `radio` is in the registry and deliberately NOT in the side table, so a
-    // host must fall back to its own `Case::build`.
-    assert!(frust_gallery::find("radio").is_some());
-    assert!(frust_gallery::find_interactive("radio").is_none());
+    // `divider` is in the registry and deliberately NOT in the side table, so
+    // a host must fall back to its own `Case::build`. The example has to be a
+    // case that can never acquire state — a painted rule takes no input, so
+    // there is nothing for a stateful constructor to hold. Do not repoint this
+    // at a widget with an affordance: an input case that looks static today is
+    // one conversion away from turning this assertion into a false alarm.
+    assert!(frust_gallery::find("divider").is_some());
+    assert!(frust_gallery::find_interactive("divider").is_none());
     assert!(frust_gallery::find_interactive("does-not-exist").is_none());
 }
 
