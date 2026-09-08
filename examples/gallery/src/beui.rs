@@ -10,27 +10,33 @@
 //! case's frame without ever filling it, so the recorder's per-variant
 //! `surface` clear stays visible around whatever the case paints.
 //!
-//! # Motion: what a single recorded frame can and cannot show
+//! # Motion: which frame a preview captures
 //!
 //! beUI is a *motion* catalog — nearly every component here is a static design
 //! plus an animation — so which frame a preview captures matters more than it
-//! does for the baseline set. It is also the constraint this module is most
-//! boxed in by, and the boxing is worth stating precisely rather than papering
-//! over with a hopeful [`Case::time_ms`]:
+//! does for the baseline set.
 //!
-//! `crates/frust-testing/src/frame.rs`'s recorder does exactly one
-//! `rebuild` -> `layout_with_text` -> `paint` pass, and
 //! `frust_beui::motion::Presence` (plus every `Ramp`-driven lane built on it)
 //! **latches its start time on the first paint that steps it** — deliberately,
 //! so a ramp is timed from the frame it first painted rather than from a
-//! rebuild several frames earlier. On a single-frame recording that latch
-//! makes `elapsed` zero no matter what `time_ms` says, so an entrance ramp
-//! always reports progress 0 and a mid-entrance frame is simply not
-//! expressible here. `crate::base::animation` records the same finding for the
-//! baseline motion wrappers, from the other direction (they mount *settled*).
+//! rebuild several frames earlier. That latch used to be decisive here:
+//! `crates/frust-testing/src/frame.rs`'s recorder painted exactly one
+//! `rebuild` -> `layout_with_text` -> `paint` pass, so `elapsed` was zero no
+//! matter what [`Case::time_ms`] said, an entrance ramp always reported
+//! progress 0, and a mid-entrance frame was not expressible at all.
 //!
-//! Every case below therefore composes its component in a state that is
-//! **already at rest on mount**, and keeps [`Case::DEFAULT_TIME_MS`]:
+//! It is no longer decisive. The recorder now paints
+//! [`Case::warm_frames`] discarded passes before the captured one, and a case
+//! opts in simply by pinning a non-zero [`Case::time_ms`] — the warm count is
+//! *derived* from that field, so there is no second field to set. The first
+//! (discarded) paint latches the ramp at zero and the captured paint sees the
+//! whole of `time_ms` as its elapsed, which is exactly the reading a lane
+//! needs. Two cases below take it; see *The two cases the warm pass rescues*.
+//!
+//! Warming buys a case nothing when its component is already at rest on
+//! mount, or when what it is missing is a pointer or a live clock rather than
+//! elapsed time. Every other case therefore keeps [`Case::DEFAULT_TIME_MS`],
+//! and for a reason that is compositional rather than about timing:
 //!
 //! * `message_bubble`'s `animate_in` is left `false` (its default), which
 //!   paints both lanes settled.
@@ -44,32 +50,40 @@
 //! * `tilt_card` records flat — its tilt is `PointerTracker`-driven and there
 //!   is no pointer in a recorded frame, so flat *is* its rest state.
 //!
-//! A `time_ms` other than the default would be decoration on this registry, not
-//! information, so none of these cases sets one. Capturing a genuine
-//! mid-motion beUI frame needs a recorder that paints a warm-up frame before
-//! the captured one — a `Case`/recorder change, outside this module's remit.
+//! For those, a `time_ms` other than the default would be decoration on this
+//! registry rather than information, so none of them sets one.
 //!
-//! # The two cases the latch visibly costs
+//! # The two cases the warm pass rescues
 //!
-//! Neither is a skip the CPU oracle reports — the frames below are exactly
-//! what the components paint on their first frame, so they are recorded
-//! honestly rather than faked, and listed here so a reader finds the reason
-//! next to the case rather than in a commit message. Both would be fixed by
-//! the same warm-up frame the section above describes; neither can be fixed
-//! from this module.
+//! Both used to record a frame that was honest but nearly empty — exactly what
+//! the component paints on its own first frame, never faked, and never a skip
+//! the CPU oracle reports. Both now pin a `time_ms` past the end of their own
+//! motion, so the poster shows the settled component instead. The timings
+//! below are the point each one's slowest lane finishes, not a round number
+//! picked for looks.
 //!
-//! * **`beui/command-palette` records blank.**
-//!   `frust_beui::blocks::command_palette` is a modal, and its panel and scrim
-//!   are both staged by `Presence`, so both report progress 0. The `PNG` is the
-//!   variant's cleared surface and nothing else. There is no seam to avoid it
-//!   with: the palette builds its own `ModalConfig` internally and
-//!   `CommandPaletteView` publishes no way to replace the enter ramp.
-//! * **`beui/wallet-card` records without its balance figure.** The balance is
-//!   painted as per-grapheme cells on a `Stagger` cascade whose origin is
-//!   `WalletCardWidget::privacy_start`, latched the same way, so every cell is
-//!   at reveal 0. Everything else on the card — the account row, the delta
-//!   pill, the action row — is settled and correct. `balance_hidden` does not
-//!   help: the mask cells ride the same cascade.
+//! * **`beui/command-palette`, `time_ms: 400`** — was a blank frame: the
+//!   palette is a modal whose panel and scrim are both `Presence`-staged, so
+//!   both reported progress 0 and the `PNG` was the variant's cleared surface
+//!   and nothing else. Its slowest lane is the panel's own
+//!   `PALETTE_PANEL_SPRING`, which `Ramp::settle` estimates at ~382ms — well
+//!   past `PALETTE_SCRIM_FADE` (180ms) and past the row cascade
+//!   (`PALETTE_STAGGER` 18ms a slot into a 160ms `PALETTE_ROW_ENTER`, so
+//!   under 250ms for this case's four rows however the group headings are
+//!   slotted). 400ms therefore clears all three, and `Ramp::progress` snaps
+//!   the spring exactly onto 1.0 rather than leaving it a thousandth short.
+//!   The poster now shows the open panel over its scrim.
+//! * **`beui/wallet-card`, `time_ms: 1_000`** — was missing its balance
+//!   figure: the balance paints as per-grapheme cells on a `Stagger` cascade
+//!   whose origin is `WalletCardWidget::privacy_start`, latched the same way,
+//!   so every cell sat at reveal 0. (`balance_hidden` does not help — the mask
+//!   cells ride the same cascade.) `"$12,480.25"` is ten cells at
+//!   `WALLET_ITEM_STAGGER` (35ms) apart over a `SPRING_PANEL` that settles in
+//!   ~556ms, so the run ends at ~871ms. 1000ms clears it, and is also an exact
+//!   multiple of `WALLET_PULSE_PERIOD` — the unread halo is driven off
+//!   absolute frame time and cycles forever rather than settling, so landing
+//!   on its period start keeps that dot pixel-identical to the old poster and
+//!   leaves the balance as the only thing that changed.
 //!
 //! # The inverted-chrome ink gap: `dynamic-island`
 //!
@@ -496,12 +510,16 @@ fn dynamic_island_case() -> AnyView<()> {
 
 /// The palette, open, over its scrim.
 ///
-/// Recorded blank on purpose: the palette is a modal, both its lanes are
-/// `Presence`-staged, and a `Presence` latches its start on the frame it first
-/// paints — so a one-frame recording is its progress-0 frame. See the module
-/// docs' *The one component that records blank*. The case is still registered
-/// so the page has a row in the manifest and the gap is visible rather than
-/// silently missing.
+/// Recorded at `time_ms: 400`, past every one of its entrance lanes, because
+/// the palette is a modal and both its lanes are `Presence`-staged: at rest it
+/// records its own progress-0 frame, which is a blank surface. See the module
+/// docs' *The two cases the warm pass rescues* for the timing.
+///
+/// The list is taller than the panel's own `PALETTE_MAX_HEIGHT_FRACTION`
+/// allows, so the last row is cut mid-height *by the panel*, not by this
+/// case's frame — a command palette clipping its own scrollable list is the
+/// component behaving correctly, and the scrim stays visible on all four
+/// sides.
 fn command_palette_case() -> AnyView<()> {
     let items = vec![
         command_palette_item("New project")
@@ -532,10 +550,11 @@ fn command_palette_case() -> AnyView<()> {
 /// action row. No panel is open — the switcher and the search picker share one
 /// box and both open on a `Presence`.
 ///
-/// The balance figure itself does **not** appear: it rides a per-grapheme
-/// `Stagger` cascade whose origin latches on the first paint, so every cell is
-/// at reveal 0 in a one-frame recording. See the module docs' *The two cases
-/// the latch visibly costs*.
+/// The balance figure rides a per-grapheme `Stagger` cascade whose origin
+/// latches on the first paint, so at rest every cell records at reveal 0 and
+/// the figure is simply absent. This case pins `time_ms: 1_000` — past the end
+/// of that cascade, and on the unread pulse's own period boundary. See the
+/// module docs' *The two cases the warm pass rescues*.
 fn wallet_card_case() -> AnyView<()> {
     let accounts = vec![
         wallet_account(
@@ -594,7 +613,7 @@ pub const CASES: &[Case] = &[
         title: "beUI Command Palette",
         size: Size::new(480.0, 360.0),
         scale: Case::DEFAULT_SCALE,
-        time_ms: Case::DEFAULT_TIME_MS,
+        time_ms: 400,
         design: Design::Beui,
         build: command_palette_case,
     },
@@ -675,7 +694,7 @@ pub const CASES: &[Case] = &[
         title: "beUI Wallet Card",
         size: Size::new(400.0, 340.0),
         scale: Case::DEFAULT_SCALE,
-        time_ms: Case::DEFAULT_TIME_MS,
+        time_ms: 1_000,
         design: Design::Beui,
         build: wallet_card_case,
     },
