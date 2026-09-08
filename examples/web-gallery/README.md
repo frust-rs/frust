@@ -189,6 +189,14 @@ MiB predating the web shell's IME bridge and CLI web build landing) remain
 useful history for the same reason — read as history, never as today's
 number.
 
+**Every row above predates the design-system font registration** that
+`src/main.rs` now performs, and that registration is not free: it grows the
+module by ~1.22 MB uncompressed and ~0.53 MiB gzipped, measured before and
+after on the manual recipe in one sitting. The "Text on `wasm32`" section
+below carries that before/after pair and explains why the bytes were not
+already linked in; read it together with this table rather than assuming
+either number still describes the other's build.
+
 **Verdict for the live-preview default:** unchanged by this task — a ~10.2
 MiB (~4.3 MiB gzipped) module is still too large to load eagerly per
 preview instance; g3-02's lazy-iframe-with-PNG-poster design (load only on
@@ -377,11 +385,14 @@ already live for every case's default-styled text. So the legible text
 above is that framework-level fix actually working, not an unexplained
 platform/GPU difference; this passage no longer needs the Linux rig re-run
 it originally called for. See the "Text on `wasm32`" section below for the
-corrected, current state (`Monospace`/`Serif`/`Emoji` remain unmapped and
-still show the original defect — and cases in the registry DO request
-`Monospace`: every `glyph/*` case does, so all 14 render no text here).
-Note this rig exercised only `Base` cases, which is why that was not
-observed at the time.
+corrected, current state (the `Monospace`/`Serif`/`Emoji` *generics* remain
+unmapped; the named families in front of the `Monospace` tail — Glyph's two
+faces and the shadcn/beUI mono slots — are registered by this binary itself
+now, and their cases do render text, measured there case by case).
+Note this rig exercised only `Base` cases, which is exactly why the
+14 blank `glyph/*` cases went unobserved at the time — see that section's
+own browser evidence, which reproduces the defect first and then measures
+the fix.
 
 **Not run, and not claimable from this Mac:** Safari 26. There is no Safari
 automation available in this environment (Playwright's `webkit` channel is
@@ -590,94 +601,178 @@ the "container/colored_box" case's blue rounded rect render pixel-correct;
 every label on both pages is a solid-white box the same shape and size the
 text would have occupied.
 
-## Text on `wasm32`: `SystemUi`/`SansSerif` now render; `Monospace`/`Serif`/`Emoji` still do not
+## Text on `wasm32`: `SystemUi`/`SansSerif` and the bundled design-system faces render; the `Monospace`/`Serif`/`Emoji` generics still do not
 
-**Discovered by a prior task, not by this one — and fixed at the framework
-level since (review-round-1 correction, this pass):** every text-bearing
-Frust widget defaults to `frust_text::FontFamily::SystemUi`
-(`TextStyle::default()`) unless a caller sets `.family(...)` explicitly, and
-— as of this crate's base commit — **no case in the whole `frust-gallery`
-registry does** (`grep -rn '\.family(' examples/gallery/src` is empty). On
+**The generic-slot half was discovered by a prior task and fixed at the
+framework level:** every text-bearing Frust widget defaults to
+`frust_text::FontFamily::SystemUi` (`TextStyle::default()`) unless a caller
+sets `.family(...)` explicitly, and no case in the whole `frust-gallery`
+registry does (`grep -rn '\.family(' examples/gallery/src` is empty). On
 desktop that resolves through fontique's real system-font backend; on
 `wasm32-unknown-unknown`, `fontique` 0.11.1 ships a backend its own source
 literally comments as a "Dummy system font backend for targets like
 wasm32-unknown-unknown" (`fontique-0.11.1/src/backend/mod.rs`), whose
-generic-family map is empty by default. **That is now fixed for `SystemUi`
-and `SansSerif`** — see `docs/LIMITATIONS.md`'s
-`web-generic-family-partial-fallback` entry for the authoritative record:
-`crates/frust-shell-web`'s `install_default_fonts` registers a bundled
-Inter Variable face as the `SystemUi`/`SansSerif` generic-family fallback
+generic-family map is empty by default. `crates/frust-shell-web`'s
+`install_default_fonts` now registers a bundled Inter Variable face as the
+`SystemUi`/`SansSerif` generic-family fallback
 (`frust_text::register_generic_fallback`) unconditionally, before the shell
-builds its own `TextContext` — no per-app opt-in required, and this app
-does not opt in to anything for it. `Monospace`, `Serif`, and `Emoji`
-remain **unmapped** by design (a proportional face substituted for
-`Monospace` would silently regress `TextInput`/code-display layout, and the
-bundled face set has neither a serif nor an emoji face) — text explicitly
-requesting one of those three still resolves zero glyphs on this target —
-and cases in this registry do. Both Glyph faces are
-`stack_with_generic([...], GenericSlot::Monospace)`
-(`plugins/glyph/src/tokens/scales.rs`) and every Glyph type token uses one
-of them, so all 14 `glyph/*` cases render no text here; the `shadcn` and
-`beui` mono slots carry the same tail. The CPU-rendered snapshots look
-correct because the host has the real faces, so a `glyph/*` page must not
-be given a live preview until this binary registers "Space Mono"/"IBM Plex
-Mono" itself — it cannot inherit them, since the registry's Glyph cases are
-built without `frust_glyph::install` (`examples/gallery/src/glyph.rs`), the
-only seam that registers them.
+builds its own `TextContext` — no per-app opt-in, and this app does not opt
+in to anything for it. `Monospace`, `Serif` and `Emoji` remain **unmapped**
+by design (a proportional face substituted for `Monospace` would silently
+regress `TextInput`/code-display layout, and the bundled face set has
+neither a serif nor an emoji face) — see `docs/LIMITATIONS.md`'s
+`web-generic-family-partial-fallback` entry for the authoritative record.
 
-This app's own hand-rolled workaround, from before the framework fix above
-landed, is now **redundant** — `frust-shell-web`'s own doc comment on
-`install_default_fonts` says so explicitly ("this is the same face
-`examples/web-gallery` already ships and hand-registers for the identical
-purpose — once an app (or a shell) calls this seam, that hand registration
-is redundant and can be dropped in favor of this default") — but it is left
-in place here: dropping it is outside this task's `write_files` scope, and
-a named-family lookup winning over the generic fallback makes keeping it
-harmless rather than wrong:
+### What this binary now registers itself
 
-- `src/main.rs`'s `label()` helper wraps `frust::text` with an explicit
-  `.family(FontFamily::named("Inter Variable"))` (the bundled face's real
-  name-table entry — not `"Inter"`; same fact `plugins/shadcn`'s
-  `tokens::theme::INTER_FAMILY` documents, not depended on directly since it
-  is not re-exported past that crate's `tokens` module).
-- `frust_widgets::button`'s internal label still has no family-override
-  builder, so a `button()` call renders through the generic fallback rather
-  than a named one — harmless now that the fallback resolves real glyphs,
-  but this app still never calls `button()`; `nav_row()` in `src/main.rs`
-  hand-rolls the same affordance out of `GestureDetector` + `container` +
-  `label()`, entirely within this crate's own write scope.
-- The bundled face itself
-  (`plugins/shadcn/fonts/inter/InterVariable.ttf`, `include_bytes!`'d — a
-  *read* of an existing repo asset, not a new write-scope file) is
-  registered once via `frust::register_app_fonts` in `AppState::new`,
-  before the shell constructs (matching the timing contract
-  `frust::register_app_fonts`'s own doc and `frust_shadcn::install`'s
-  identical pattern both spell out).
+A design system's text does not go through a bare generic slot: it goes
+through `FontFamily::stack_with_generic([<named family>], <generic>)`, whose
+named half resolves only against faces somebody registered. Nothing
+registers them here by inheritance — the registry builds its design-system
+cases directly rather than through each plugin's `install()`
+(`examples/gallery/src/glyph.rs` explains why), and `install()` is the only
+seam that registers them. So every stack whose generic tail is `Monospace`
+fell through to nothing and rendered **zero glyphs**, under CPU posters that
+look perfectly correct because the poster host has the real faces.
 
-A hosted `Case`'s own internal text now renders on this target too, but
-only where its family tails a slot the shell maps. A `Design::Base` case
-goes through the identical `SystemUi`/`Theme::neutral()` default path this
-app's own chrome does, and the shell's generic-family fallback applies
-process-wide rather than only to labels this crate authors. A non-`Base`
-case does not take that path at all: `AppState::new` installs the case's
-own design-system theme through `frust::set_default_theme`. Material,
-shadcn and beUI body text tails `SansSerif` and renders; Cupertino sets no
-family of its own and keeps the `SystemUi` default; Glyph tails
-`Monospace` and renders nothing. A case's
-shapes, images, layout and theme colours have always rendered correctly; its
-default-styled labels now do too, on **both** backend arms (this was a
-`frust-text`/`fontique` defect, orthogonal to the WebGL2-specific
-glyph-atlas defect above). A case resolving to `Monospace`/`Serif`/`Emoji`
-still gets no glyphs for that text, and the 14 `glyph/*` cases do resolve
-to `Monospace` — see above.
+`src/main.rs`'s `register_design_system_fonts` closes that: it hands the
+bundled Glyph, shadcn and beUI faces to `frust::register_app_fonts` in
+`AppState::new`, before `run_app` constructs the shell (the timing contract
+`register_app_fonts`' own doc states). It deliberately does **not** call any
+plugin's `install()`, which would also `set_default_theme` and fight this
+app's own per-case seeding. Per design system, checked against each
+plugin's own font module and manifest rather than assumed from Glyph's
+shape:
 
-**Remaining follow-up, if one is still wanted:** `docs/LIMITATIONS.md`'s
-`web-generic-family-partial-fallback` entry already names its own trigger
-for removal — "a bundled monospace/serif/emoji policy, or a page-side
+| Design | Mono/named exposure | Bundling | Registered here |
+|---|---|---|---|
+| Glyph | **Both** type faces are `stack_with_generic([Space Mono \| IBM Plex Mono], Monospace)` (`plugins/glyph/src/tokens/scales.rs`) — all 14 `glyph/*` cases | 7 faces, unconditional `include_bytes!`, no feature gate; `font_data` re-exported at the crate root | **Yes** |
+| shadcn | `mono_family()` = `[JetBrains Mono] + Monospace` (`tokens/theme.rs`), used by `kbd`/`questionnaire` shortcut badges; body text tails `SansSerif` and always rendered | 2 faces, unconditional; `font_data` at crate root | **Yes** |
+| beUI | `mono_family()` = `[Geist Mono] + Monospace` (`tokens/theme.rs`), used by `code-block`, loaders, `number`, agents blocks; body tails `SansSerif` | 2 faces, unconditional; `font_data` at crate root | **Yes** |
+| Material | **No `Monospace` slot at all** — its one stack is `[Roboto Flex] + SansSerif`, which the shell already maps. Roboto Mono is bundled but no type token selects it | 2 faces, unconditional — but `mod tokens;` is **private** and the crate root does not re-export `font_data`, so there is no public accessor | No — not exposed to this defect, and could not be registered if it were |
+| Cupertino | **Does** declare one — `FontFamily::stack(["SF Pro Display" \| "SF Pro Text", "SF Pro"])` on every type role (`plugins/cupertino/src/tokens.rs`'s `sf_family_for_size`, applied by `apply_type`, wired through `type_scale` into `baseline`). A named stack with **no** generic tail, so it resolves through parley's own fallback once those names miss rather than through a mapped generic slot; its cases render | **None at all** — no `fonts/` directory, no `include_bytes!`, no `font_data` | No — nothing exists to register |
+
+**Correction, since the wrong version of the Cupertino row shipped first.**
+Earlier drafts of this file, `src/main.rs` and `Cargo.toml` all said
+Cupertino "declares no font family anywhere". That was false, and it came
+from grepping for `stack_with_generic`/`GenericSlot::` and reading the empty
+result as "no family" — Cupertino uses plain `FontFamily::stack(...)`, which
+that pattern cannot see. The conclusion (nothing to register) survives, but
+only for the reason in the table above: it bundles no font files. A `grep`
+that returns nothing is evidence about the pattern, not about the code.
+
+**This does not map a generic.** Registering a named face and mapping a
+generic slot are different things, and only the first happens here: text
+that resolves to a bare `Monospace`, `Serif` or `Emoji` generic with no
+named face in front of it still renders nothing on this target. The
+`docs/LIMITATIONS.md` entry stands unchanged, and its stated trigger for
+removal ("a bundled monospace/serif/emoji policy, or a page-side
 font-loading seam that lets an app supply those faces without paying for
-them in every binary" — covering the one gap left open above. No further
-follow-up is needed for `SystemUi`/`SansSerif`; that half of the original
-recommendation here has already landed.
+them in every binary") is still the open item.
+
+### Browser evidence: measured text, not a canvas that appeared
+
+The reason this defect survived a full phase and three review rounds is that
+the browser checks ran `Base` cases only, and the readiness probe asserts a
+canvas *appeared* — which it does whether or not a single glyph resolves.
+The measurement below therefore asserts on rendered text: real Chrome
+(Playwright, `channel: "chrome"`, headed, DPR 1, `colorScheme: light`) loads
+`?case=<slug>&embed=1&theme=light` from the manual recipe's own artifact,
+screenshots the shell's canvas, and computes **horizontal-edge density**
+(fraction of pixels whose luminance differs from the next pixel's by more
+than 24/255 — text is overwhelmingly the source of such edges) for the live
+capture and for the case's committed CPU poster in the website's
+`static/preview/`.
+
+**Edge density is a fraction of the whole canvas, so it only means anything
+with the capture viewport stated.** Each case was captured at its own
+manifest size, one browser context per case, DPR 1 — the sizes in the table
+below. A larger viewport spreads the same case over more empty pixels and
+drives every figure down together (measuring these cases at 900x700 returns
+roughly a seventh of these numbers), so compare the before/after pair and
+the ratio, never an absolute against a differently-sized run.
+
+Live and poster are not expected to reach parity either: the embed view
+anchors a case top-left while the poster centres it in the frame, so the
+`Base` control's own live/poster edge ratio (0.386) is the ceiling this
+comparison can reach, and it is the bar the design-system cases are read
+against.
+
+| Case | Viewport (CSS px, DPR 1) | Live edges before | Live edges after | Poster edges | Live/poster before → after |
+|---|---|---|---|---|---|
+| `glyph/term-block` | 360x240 | 0.0011 | 0.0139 | 0.0343 | 0.033 → **0.405** |
+| `glyph/list` | 360x420 | 0.0019 | 0.0107 | 0.0300 | 0.062 → **0.358** |
+| `beui/code-block` | 420x280 | 0.0010 | 0.0067 | 0.0183 | 0.054 → **0.366** |
+| `shadcn/questionnaire` | 420x320 | 0.0097 | 0.0099 | 0.0278 | 0.350 → **0.356** |
+| `button` (`Base` control) | 360x240 | 0.0078 | 0.0078 | 0.0203 | 0.385 → **0.386** |
+
+Read alongside the captures themselves: before, `glyph/term-block` drew the
+terminal chrome and its three window dots over an empty collapsed body,
+against a poster showing four lines of shell transcript — after, all four
+lines are there. `beui/code-block` went from a header strip (`TYPESCRIPT`,
+`Ready` — both sans) above an empty code area to line numbers plus three
+syntax-coloured lines. `shadcn/questionnaire` moves barely at all in
+aggregate, correctly: only its three shortcut badges are mono, and they went
+from empty rings to `A`/`B`/`C`. The `Base` control does not move at all,
+which is the point of including it.
+
+### It is not free: +1.22 MB uncompressed, +0.53 MiB gzipped
+
+The bytes are bundled unconditionally by all three plugins, but they were
+**not** all in the artifact beforehand — only the faces something reachable
+still referenced. Each plugin's `native_typefaces` binding names one or two
+specific faces (Glyph: Space Mono Regular + IBM Plex Mono Regular; shadcn:
+Inter; beUI: Geist), and the linker dropped the rest as unreachable.
+Measured on the manual recipe (`cargo build --release --target
+wasm32-unknown-unknown` → `wasm-bindgen` → `wasm-opt`, `wasm-bindgen-cli`
+0.2.128 / `wasm-opt` 132 / `cargo` 1.98.1), same host, same base commit,
+back to back:
+
+| Stage | Before | After | Delta |
+|---|---|---|---|
+| `wasm-bindgen` output | 11,535,394 B | 12,760,170 B | +1,224,776 B (+10.6%) |
+| after `wasm-opt -O` | 10,730,018 B | 11,951,777 B | +1,221,759 B (+11.4%) |
+| gzip `-9` (what a reader downloads) | 4,467,316 B | 5,027,473 B | +560,157 B (+12.5%) |
+
+That delta is exactly the previously-dropped faces: the three plugins bundle
+2,543,516 B of TTFs, of which 1,321,172 B were already linked through
+`native_typefaces`, leaving 1,222,344 B unreachable — within 585 B of the
+measured `wasm-opt`-stage growth. So the honest version of "the bytes are
+already linked in" is: *a fifth of them were.* Registering the rest costs
+about half a megabyte on the wire, which is a real input to the
+live-preview download budget the site advertises, not a rounding error. The
+lever if that proves too expensive is registering fewer faces (each family's
+Regular only, accepting synthesized weights) rather than fewer families —
+dropping a family reopens the blank-text defect for its whole page set.
+These numbers are a snapshot of one host and one pair of builds; re-measure
+before citing them elsewhere, exactly as the "Binary size" table above says
+of its own.
+
+### The app's own label face
+
+`src/main.rs`'s `LABEL_FONT_BYTES` still `include_bytes!`es
+`plugins/shadcn/fonts/inter/InterVariable.ttf` and registers it by name for
+this app's own chrome (`label()`/`nav_row()` name `"Inter Variable"`
+explicitly — the variable release's real name-table entry, not `"Inter"`).
+It is now redundant twice over: the shell's generic fallback covers it, and
+`register_design_system_fonts` registers shadcn's own copy of the identical
+file. It is kept so this app's chrome does not depend on a plugin's bundle.
+
+**Retiring it saves approximately nothing, and an earlier draft of this
+section was wrong to advertise a "~0.88 MB" win.** There is no duplicate to
+reclaim: identical `include_bytes!` constants merge, so the two sites —
+`LABEL_FONT_BYTES` here and `plugins/shadcn`'s own `INTER_VARIABLE` — are
+one copy in the artifact. Measured, not assumed: three 4096-byte probes
+taken at 1/4, 1/2 and 3/4 through `InterVariable.ttf` each match **exactly
+once** in the shipped module, the same result the single-site
+`SpaceMono-Regular` control gives, while `RobotoMono.ttf` (bundled by
+Material, never registered) matches **zero** times — the control that shows
+the probe can tell present from absent. The same merging argument retires
+the claim, previously in `Cargo.toml`, that `include_bytes!`ing the plugins'
+TTFs here instead of depending on the plugins would have cost ~2.5 MB extra:
+it would have cost the same ~1.22 MB, and the real reasons to prefer the
+dependency rows are drift and provenance, not size. Retiring
+`LABEL_FONT_BYTES` remains worth doing for clarity; budget no bytes for it.
 
 ## Registry size: 107 cases, not 35
 
