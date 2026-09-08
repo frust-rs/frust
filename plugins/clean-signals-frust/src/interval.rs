@@ -13,10 +13,11 @@
 //! under `#[cfg(target_arch = "wasm32")]` (the only place leptos's
 //! `spawn_local` — a single-threaded, browser-owned executor — runs) and a
 //! no-op under every other target (SSR has no client-side scope to poll).
-//! Frust is **native-only** (desktop/Android/iOS; no `wasm32` shell), and
-//! `frust::spawn_local` always drains through a real UI-thread task queue
-//! (`ReactiveRuntime::pump_local`) regardless of target — so this is the
-//! **unconditional** implementation, with no `cfg` split at all.
+//! Frust supports both native and `wasm32` targets — `frust::spawn_local`
+//! routes to the native UI-thread task queue (`ReactiveRuntime::pump_local`)
+//! on desktop/Android/iOS, and to the browser's microtask executor
+//! (via `wasm_bindgen_futures::spawn_local`) on `wasm32`. This module is
+//! **unconditional** (no `cfg` split), so the same code works for both platforms.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
