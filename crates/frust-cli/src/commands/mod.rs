@@ -46,6 +46,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             deeplink_scheme,
             deeplink_host,
             arch,
+            platforms,
             design_system,
         } => create::run(create::CreateArgs {
             dir,
@@ -58,6 +59,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             deeplink_scheme,
             deeplink_host,
             arch: arch.map(|a| a.as_str().to_string()),
+            platforms,
             design_system,
         }),
         Command::Clean => {
@@ -65,9 +67,18 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             clean::run_in(&*runner, &cwd)
         }
         Command::Tui => tui::run(),
-        Command::Run { build, watch } => {
-            run::run_in(&*runner, build, cli.device_id.clone(), watch, verbose)
-        }
+        Command::Run {
+            build,
+            watch,
+            no_open,
+        } => run::run_in(
+            &*runner,
+            build,
+            cli.device_id.clone(),
+            watch,
+            verbose,
+            no_open,
+        ),
         Command::Build { target } => {
             let cwd = std::env::current_dir().context("reading current directory")?;
             build::run_in(&*runner, &cwd, target)

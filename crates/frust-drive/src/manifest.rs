@@ -2,18 +2,19 @@
 //!
 //! One deserialiser for every manifest section the drive pipelines consume
 //! (`[app]`, `[android]`, `[ios]`, `[signing]`, `[desktop]`, `[macos]`,
-//! `[windows]`, `[linux]`), replacing the two near-identical
+//! `[windows]`, `[linux]`, `[web]`), replacing the two near-identical
 //! `[app]`/`[android]` and `[app]`/`[ios]` structs `android_run::project`
 //! and `ios_run::project` each used to carry — those modules now own only
 //! their id-resolution logic and read the manifest through [`load`].
 //!
 //! Unknown sections are ignored (`[deeplink]`, `[flavors]` are documentation
 //! for the platform templates, not tooling input), but `[signing]` and its
-//! `[signing.env]` subtable, and the desktop-shell sections
-//! (`[desktop]`/`[macos]`/`[windows]`/`[linux]`), are `deny_unknown_fields`: a
-//! typo in a section that decides whether a release artifact is really
-//! signed, or that feeds the desktop packaging pipeline, must fail loudly
-//! rather than silently fall back to the default.
+//! `[signing.env]` subtable, the desktop-shell sections
+//! (`[desktop]`/`[macos]`/`[windows]`/`[linux]`), and `[web]`, are
+//! `deny_unknown_fields`: a typo in a section that decides whether a release
+//! artifact is really signed, or that feeds the desktop packaging or the
+//! browser build pipeline, must fail loudly rather than silently fall back to
+//! the default.
 //!
 //! `ios_build::team` keeps its own deliberately-partial `[ios] team` parse —
 //! it must tolerate manifests this reader rejects (it runs before, and
@@ -43,6 +44,8 @@ pub struct Manifest {
     pub windows: Option<WindowsSection>,
     #[serde(default)]
     pub linux: Option<LinuxSection>,
+    #[serde(default)]
+    pub web: Option<WebSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +196,105 @@ pub struct LinuxSection {
     pub categories: Option<Vec<String>>,
 }
 
+/// The default `[web] host-dir` — where a scaffolded project keeps the
+/// host-page sources (`index.html` + `frust_web.js`) a browser build
+/// assembles around its wasm output. Matches the directory
+/// `templates/app/web.tmpl/` renders to, so a freshly scaffolded project
+/// needs no `[web]` section at all to build.
+const DEFAULT_WEB_HOST_DIR: &str = "web";
+
+/// The default `[web] out-dir` — where an assembled browser build lands,
+/// relative to the project root. Sibling of the platform build outputs and
+/// deliberately NOT `[web] host-dir`: the host-page sources are checked in,
+/// the assembled site is generated, and overwriting the former with the
+/// latter would make a rebuild eat the sources it reads.
+const DEFAULT_WEB_OUT_DIR: &str = "build/web";
+
+/// The default `[web] port` for a local static preview server. Not 8080 —
+/// that port is in constant use by unrelated local services, and a default
+/// that collides is a default nobody keeps.
+const DEFAULT_WEB_PORT: u16 = 8000;
+
+/// `[web]` — browser-target build configuration, the wasm counterpart of the
+/// desktop packaging sections above.
+///
+/// Every field is optional with a documented default, so the whole section
+/// may be absent (what `frust create` scaffolds): the defaults describe
+/// exactly the layout `templates/app/web.tmpl/` produces and the recipe
+/// `platform/web/README.md` documents (`cargo build --target
+/// wasm32-unknown-unknown` + `wasm-bindgen --target web --out-dir
+/// <out-dir>/pkg --out-name <out-name>`). Read each one through its
+/// accessor rather than matching the field directly, the same contract
+/// [`MacosSection`] carries.
+///
+/// `deny_unknown_fields` for the same reason the desktop sections are: a
+/// silently-ignored `out_name` (snake) would send a build to the default
+/// module name while the author believes it renamed it, and the mismatch
+/// only surfaces as a 404 in a browser console.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct WebSection {
+    /// Directory holding the checked-in host-page sources, relative to the
+    /// project root. Defaults to [`DEFAULT_WEB_HOST_DIR`] — read through
+    /// [`WebSection::host_dir_or_default`].
+    #[serde(default)]
+    pub host_dir: Option<String>,
+    /// Directory an assembled browser build is written to, relative to the
+    /// project root. Defaults to [`DEFAULT_WEB_OUT_DIR`] — read through
+    /// [`WebSection::out_dir_or_default`].
+    #[serde(default)]
+    pub out_dir: Option<String>,
+    /// `wasm-bindgen --out-name`: the basename of the generated JS glue
+    /// module (`<out-dir>/pkg/<out-name>.js`), which is also what the host
+    /// page's `?module=` default must point at. Defaults to the project's
+    /// own `[app] name` — read through [`WebSection::out_name_or`], which
+    /// takes that fallback, because this section cannot see `[app]` itself.
+    #[serde(default)]
+    pub out_name: Option<String>,
+    /// Run `wasm-opt` over the generated `.wasm`. Absent means "whatever the
+    /// build mode defaults to" (`BuildMode::wasm_opt_default` — release
+    /// only), so this key is an override in BOTH directions: `true` opts a
+    /// debug build in, `false` opts a release build out. Read through
+    /// [`WebSection::wasm_opt_enabled`].
+    #[serde(default)]
+    pub wasm_opt: Option<bool>,
+    /// Port a local static preview server binds. Defaults to
+    /// [`DEFAULT_WEB_PORT`] — read through [`WebSection::port_or_default`].
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+impl WebSection {
+    /// [`WebSection::host_dir`], or [`DEFAULT_WEB_HOST_DIR`].
+    pub fn host_dir_or_default(&self) -> &str {
+        self.host_dir.as_deref().unwrap_or(DEFAULT_WEB_HOST_DIR)
+    }
+
+    /// [`WebSection::out_dir`], or [`DEFAULT_WEB_OUT_DIR`].
+    pub fn out_dir_or_default(&self) -> &str {
+        self.out_dir.as_deref().unwrap_or(DEFAULT_WEB_OUT_DIR)
+    }
+
+    /// [`WebSection::out_name`], or `app_name` — pass `[app] name`, the
+    /// crate name a scaffolded project's host page already points its
+    /// `?module=` default at.
+    pub fn out_name_or<'a>(&'a self, app_name: &'a str) -> &'a str {
+        self.out_name.as_deref().unwrap_or(app_name)
+    }
+
+    /// [`WebSection::wasm_opt`], or `mode_default` — pass
+    /// `BuildMode::wasm_opt_default`, so an absent key follows the build
+    /// mode and an explicit key overrides it either way.
+    pub fn wasm_opt_enabled(&self, mode_default: bool) -> bool {
+        self.wasm_opt.unwrap_or(mode_default)
+    }
+
+    /// [`WebSection::port`], or [`DEFAULT_WEB_PORT`].
+    pub fn port_or_default(&self) -> u16 {
+        self.port.unwrap_or(DEFAULT_WEB_PORT)
+    }
+}
+
 /// `<project_root>/frust.toml`.
 pub fn path(project_root: &Path) -> PathBuf {
     project_root.join("frust.toml")
@@ -248,6 +350,7 @@ mod tests {
         assert!(m.macos.is_none());
         assert!(m.windows.is_none());
         assert!(m.linux.is_none());
+        assert!(m.web.is_none());
     }
 
     #[test]
@@ -395,6 +498,81 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+    }
+
+    /// The `[web]` section is optional in full: an absent section behaves
+    /// exactly like an empty one, and every default is the layout
+    /// `templates/app/web.tmpl/` scaffolds.
+    #[test]
+    fn web_section_is_optional_and_its_defaults_describe_the_scaffolded_layout() {
+        let m = parse("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n").unwrap();
+        assert!(m.web.is_none());
+
+        let web = WebSection::default();
+        assert_eq!(web.host_dir_or_default(), "web");
+        assert_eq!(web.out_dir_or_default(), "build/web");
+        assert_eq!(web.out_name_or(&m.app.name), "myapp");
+        assert_eq!(web.port_or_default(), 8000);
+        // The assembled build must not be written over the checked-in host
+        // page sources it reads.
+        assert_ne!(web.out_dir_or_default(), web.host_dir_or_default());
+    }
+
+    #[test]
+    fn parses_a_round_trip_of_every_web_key() {
+        let m = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [web]\nhost-dir = \"page\"\nout-dir = \"dist\"\nout-name = \"bundle\"\n\
+             wasm-opt = true\nport = 9000\n",
+        )
+        .unwrap();
+
+        let web = m.web.unwrap();
+        assert_eq!(web.host_dir_or_default(), "page");
+        assert_eq!(web.out_dir_or_default(), "dist");
+        assert_eq!(web.out_name_or("myapp"), "bundle");
+        assert_eq!(web.port_or_default(), 9000);
+        assert_eq!(web.wasm_opt, Some(true));
+    }
+
+    /// `wasm-opt` is an override in both directions: absent follows the
+    /// build mode's own default, present wins over it either way.
+    #[test]
+    fn web_wasm_opt_absent_follows_the_mode_default_and_present_overrides_it() {
+        let absent = WebSection::default();
+        assert!(absent.wasm_opt_enabled(true));
+        assert!(!absent.wasm_opt_enabled(false));
+
+        let on = parse("[app]\nname = \"a\"\norg = \"o\"\n\n[web]\nwasm-opt = true\n")
+            .unwrap()
+            .web
+            .unwrap();
+        assert!(on.wasm_opt_enabled(false));
+
+        let off = parse("[app]\nname = \"a\"\norg = \"o\"\n\n[web]\nwasm-opt = false\n")
+            .unwrap()
+            .web
+            .unwrap();
+        assert!(!off.wasm_opt_enabled(true));
+    }
+
+    /// Kebab-case-strict like every desktop key: a snake_case `out_name`
+    /// silently ignored would send the build to the default module name
+    /// while the author believes it renamed it — a mismatch that only shows
+    /// up as a 404 in a browser console.
+    #[test]
+    fn a_typo_in_the_web_section_is_a_hard_error() {
+        for line in [
+            "out_name = \"bundle\"",
+            "outdir = \"dist\"",
+            "wasmopt = true",
+        ] {
+            let err = parse(&format!(
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[web]\n{line}\n"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+        }
     }
 
     #[test]

@@ -10,30 +10,75 @@
 //! and `net` tokio features fail to compile there (see `Cargo.toml`'s
 //! target-gated `tokio` rows). [`ReactiveRuntime::init`] therefore builds a
 //! bare current-thread runtime instead of the multi-thread pool, and
-//! installs `any_spawner`'s `wasm-bindgen` executor
-//! (`Executor::init_wasm_bindgen()`, called explicitly — unlike the native
-//! `tokio` feature, `wasm-bindgen` has no automatic default) instead of the
-//! custom [`ForgeExecutor`](crate::executor::ForgeExecutor): `spawn_local`
-//! then routes straight to `wasm_bindgen_futures::spawn_local`, driven by the
-//! browser's own microtask queue, so [`pump_local`](ReactiveRuntime::pump_local)
-//! has nothing of this crate's own to drain on that arm. The current-thread
-//! runtime is never driven (nothing calls `block_on`), so it exists only to
-//! give [`handle`](ReactiveRuntime::handle)/[`spawn_blocking`] a real
-//! `tokio::runtime::Handle` to type-check against — `use_task`'s background
-//! half and `spawn_blocking` have **no working wasm equivalent yet**: a task
-//! handed to this handle is silently never polled, rather than failing
-//! loudly. Treat that as an open gap, not a proven path.
+//! installs a wasm [`CustomExecutor`](any_spawner::CustomExecutor) (built
+//! inline here, not the native [`ForgeExecutor`](crate::executor::ForgeExecutor))
+//! whose `spawn` **and** `spawn_local` both route straight to
+//! `wasm_bindgen_futures::spawn_local` — a browser has one JS thread, so
+//! "spawn on a thread pool" and "spawn on the local microtask queue" are the
+//! same operation there, and `Send` futures need no different handling than
+//! `!Send` ones. This is the one call site that makes `wasm-bindgen-futures`
+//! (`Cargo.toml`'s wasm-only rows) a real direct dependency rather than a
+//! transitively-resolved one. Because both paths are driven by the browser's
+//! own microtask queue, [`pump_local`](ReactiveRuntime::pump_local) has
+//! nothing of this crate's own to drain on this arm, and `poll_local` is a
+//! no-op. The current-thread runtime is never driven (nothing calls
+//! `block_on`), so it exists only to give
+//! [`handle`](ReactiveRuntime::handle)/[`spawn_blocking`] a real
+//! `tokio::runtime::Handle` to type-check against.
+//!
+//! **What still doesn't work on wasm32.** `frust::spawn`/`frust::spawn_local`
+//! now run for real (above). [`spawn_blocking`] and `use_task`'s background
+//! half do not: `wasm32-unknown-unknown` has no OS threads, so there is no
+//! blocking pool to hand CPU-bound work to. `spawn_blocking` fails loudly
+//! (panics, naming the API and target) on this target rather than silently
+//! swallowing the closure — see its own docs. Treat that as an open gap, not
+//! a proven path.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use any_spawner::Executor;
+#[cfg(target_family = "wasm")]
+use any_spawner::{CustomExecutor, PinnedFuture, PinnedLocalFuture};
 use reactive_graph::owner::Owner;
 use tokio::runtime::{Builder, Handle, Runtime};
 
 use crate::executor;
 #[cfg(not(target_family = "wasm"))]
 use crate::executor::ForgeExecutor;
+
+/// The wasm [`any_spawner`] executor (see the module docs for why it exists
+/// instead of `any_spawner::Executor::init_wasm_bindgen()` and instead of the
+/// native [`ForgeExecutor`](crate::executor::ForgeExecutor)). A unit struct —
+/// nothing to hold, since `wasm_bindgen_futures::spawn_local` is a free
+/// function reachable from anywhere.
+#[cfg(target_family = "wasm")]
+struct WasmExecutor;
+
+#[cfg(target_family = "wasm")]
+impl CustomExecutor for WasmExecutor {
+    /// `Send` futures also go to `wasm_bindgen_futures::spawn_local`: a
+    /// browser has one JS thread, so there is no separate thread-pool
+    /// destination to route `Send` futures to the way the native
+    /// [`ForgeExecutor`](crate::executor::ForgeExecutor) does. This is the
+    /// call site that makes `wasm-bindgen-futures` a real direct dependency
+    /// (see `Cargo.toml`'s wasm-only rows).
+    fn spawn(&self, fut: PinnedFuture<()>) {
+        wasm_bindgen_futures::spawn_local(fut);
+    }
+
+    /// `!Send` futures route the same way — `wasm_bindgen_futures::spawn_local`
+    /// requires only `Future<Output = ()> + 'static`, which `PinnedFuture`
+    /// (this crate's `spawn` path) already satisfies too.
+    fn spawn_local(&self, fut: PinnedLocalFuture<()>) {
+        wasm_bindgen_futures::spawn_local(fut);
+    }
+
+    /// Nothing to drain: every task spawned above is driven by the browser's
+    /// own microtask queue, not a queue this crate owns (see the module
+    /// docs).
+    fn poll_local(&self) {}
+}
 
 /// A thread-safe, cheaply-cloneable "wake up and pump soon" callback. On
 /// desktop this is a winit `EventLoopProxy` send; on mobile (continuous frame
@@ -61,9 +106,9 @@ fn build_background_runtime() -> Runtime {
 
 /// Wasm: a bare current-thread runtime with no driver enabled (see the module
 /// docs for why) — nothing ever calls `block_on` on it, so it exists purely
-/// to give [`ReactiveRuntime::handle`]/[`spawn_blocking`] a real
-/// `tokio::runtime::Handle` to type-check against, not a functioning
-/// executor.
+/// to give [`ReactiveRuntime::handle`] a real `tokio::runtime::Handle` to
+/// type-check against, not a functioning executor. [`spawn_blocking`] never
+/// reaches this handle on wasm32 (it panics first — see its own docs).
 #[cfg(target_family = "wasm")]
 fn build_background_runtime() -> Runtime {
     Builder::new_current_thread()
@@ -137,10 +182,12 @@ impl ReactiveRuntime {
                     let _ = Executor::init_custom_executor(ForgeExecutor::new(handle));
                 }
                 // No automatic wasm default exists (see module docs); install
-                // `any_spawner`'s `wasm-bindgen` executor explicitly.
+                // the wasm `CustomExecutor` explicitly. `AlreadySet` on a
+                // repeated install (e.g. a relaunched shell in the same
+                // process) is handled the same benign way as the native arm.
                 #[cfg(target_family = "wasm")]
                 {
-                    let _ = Executor::init_wasm_bindgen();
+                    let _ = Executor::init_custom_executor(WasmExecutor);
                 }
                 rt
             }
@@ -278,29 +325,48 @@ impl ReactiveRuntime {
 /// cannot be interrupted (there is no safe way to unwind arbitrary blocking
 /// code) — the same limitation every runtime has.
 ///
-/// **No working wasm equivalent yet.** `wasm32-unknown-unknown` has no OS
-/// threads, so there is no blocking pool for `Handle::spawn_blocking` to hand
-/// work to (see the module docs) — the returned `JoinHandle` is real and
-/// type-checks, but on that target nothing ever drives the current-thread
-/// runtime backing it, so the closure is never actually run and the handle
-/// never resolves. Treat this as an open gap on wasm, not a proven path.
+/// **No working wasm equivalent yet — fails loudly.** `wasm32-unknown-unknown`
+/// has no OS threads, so there is no blocking pool for `Handle::spawn_blocking`
+/// to hand work to (see the module docs). Rather than returning an inert
+/// `JoinHandle` that silently never resolves, this function panics up front
+/// on that target (see Panics below), before ever reaching tokio. Treat this
+/// as an open gap on wasm, not a proven path — the eventual fix is a
+/// browser-thread/Web-Worker-backed `JoinHandle`, not yet built.
 ///
 /// # Panics
 ///
-/// Panics if [`ReactiveRuntime::init`] has not run yet — the same
-/// wiring-bug-not-runtime-condition contract as `spawn_local` off the UI
-/// thread.
+/// - Panics if [`ReactiveRuntime::init`] has not run yet — the same
+///   wiring-bug-not-runtime-condition contract as `spawn_local` off the UI
+///   thread.
+/// - **Always panics on `wasm32`** (see above), independent of `init` state.
 pub fn spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    let rt = ReactiveRuntime::get().expect(
-        "frust-reactive: spawn_blocking called before ReactiveRuntime::init — \
-         this is a wiring bug: initialize the reactive runtime (the shell does \
-         this on startup) before spawning work",
-    );
-    rt.handle.spawn_blocking(f)
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = f;
+        panic!(
+            "frust-reactive: spawn_blocking called on wasm32 — \
+             wasm32-unknown-unknown has no OS threads, so there is no \
+             blocking thread pool to hand this closure to. This is an \
+             unimplemented gap on this target, not a wiring bug: route the \
+             work through a different mechanism until a \
+             browser-thread/Web-Worker-backed JoinHandle lands for \
+             `frust::spawn_blocking`."
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let rt = ReactiveRuntime::get().expect(
+            "frust-reactive: spawn_blocking called before ReactiveRuntime::init — \
+             this is a wiring bug: initialize the reactive runtime (the shell does \
+             this on startup) before spawning work",
+        );
+        rt.handle.spawn_blocking(f)
+    }
 }
 
 #[cfg(test)]

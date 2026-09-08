@@ -99,8 +99,10 @@ license = "MIT OR Apache-2.0"
 #
 # The pin itself (30.0.1) is LAW — docs/DEVELOPMENT.md's Version-Pin Policy,
 # row owned by docs/RENDER_DEVELOPMENT.md. Moving features between this row
-# and the per-target tables is not a bump and leaves `Cargo.lock` untouched
-# (the lock is the union over all targets and records no features).
+# and the per-target tables is not a bump; however, `crates/frust-gpu/Cargo.toml`'s
+# wasm target rows introduce wasm-only transitive crates in Cargo.lock:
+# gl_generator, glow, glutin_wgl_sys, khronos-egl, khronos_api, wgpu-core-deps-wasm, xml-rs.
+# Narrowing the wasm predicate (e.g. to exclude emscripten) does not change this set.
 wgpu = { version = "30.0.1", default-features = false, features = [
     "std",
     "parking_lot",

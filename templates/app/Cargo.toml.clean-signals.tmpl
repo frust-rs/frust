@@ -3,11 +3,15 @@ name = "{{ project_name }}"
 version = "0.1.0"
 edition = "2024"
 publish = false
+{%- if platform_windows %}
 # Windows-only resource embedding (taskbar/exe icon, FileVersion/
 # ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
 # isn't itself platform-conditional (Cargo has no such thing) and stays a
-# no-op off Windows.
+# no-op off Windows. Rendered only when the windows platform is selected —
+# mirrors the default `Cargo.toml.tmpl`'s conditional (see that file for the
+# full rationale).
 build = "windows/build.rs"
+{%- endif %}
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
@@ -63,14 +67,41 @@ clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = 
 # this variant must declare the feature too or a release build fails on an
 # unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
 log = "0.4"
+{%- if platform_windows %}
 
 # `windows/build.rs`'s resource embedder. `winres` (the older, commonly
 # referenced crate for this) was last published 2021-09-28 — stale — so this
 # uses the actively maintained `winresource` fork instead. A
 # `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
-# never touches a macOS/Linux build.
+# never touches a macOS/Linux build. Rendered only alongside the `build =
+# "windows/build.rs"` key above — mirrors the default `Cargo.toml.tmpl`'s
+# conditional.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+{%- endif %}
+
+# Browser (`wasm32-unknown-unknown`) row. `src/lib.rs`'s `frust::app!` binds
+# a fourth platform beside Android/iOS/desktop: on this target it expands to
+# `frust::web_app!`, whose generated entry point is annotated
+# `#[wasm_bindgen(start)]` — wasm-bindgen's own module-init hook, which the
+# browser calls once it has instantiated the compiled `.wasm`. The facade
+# routes the ATTRIBUTE itself through a hidden re-export
+# (`frust::__wasm_bindgen`), but the attribute macro then expands, inside
+# THIS crate, to glue that names `wasm_bindgen::` paths absolutely — so the
+# app crate needs its own dependency edge on the crate regardless. Nothing
+# else here is browser-only: every other dependency above compiles for
+# `wasm32` unchanged, `clean-signals` and `clean-signals-frust` included (the
+# controller lifecycle and `async_view` run on the browser's own single
+# threaded executor, which the reactive runtime already selects there).
+#
+# Version-Pin Policy (`docs/DEVELOPMENT.md`): this pin is EXACT and must
+# equal the `wasm-bindgen-cli` version that post-processes the build, a
+# schema-version contract stricter than semver — a mismatch fails the
+# `wasm-bindgen` step outright rather than degrading. `=0.2.128` is the
+# version Frust's own web crates and `examples/web-gallery` pin; upgrade the
+# CLI and every one of those rows together, never this row alone.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
 
 [features]
 # Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).

@@ -47,6 +47,12 @@ pub struct AppState {
     /// backend that hasn't landed on this target yet). Every save below
     /// degrades to a silent no-op when this is `None` — losing persistence
     /// is never a reason to panic or block the app from booting.
+    ///
+    /// In a browser this is always `None`: the plugin compiles for `wasm32`
+    /// unchanged, but its file backend finds no user data directory there,
+    /// so `SharedPreferences::standard()` returns an `Err` and the notes
+    /// live for the lifetime of the tab. Swapping in a `localStorage`-backed
+    /// store is app-level work, not something this scaffold assumes.
     prefs: Option<SharedPreferences>,
 }
 
@@ -61,7 +67,14 @@ impl AppState {
                 // Fall back to empty state rather than panicking — an old
                 // scaffold or a not-yet-implemented backend just means this
                 // run won't persist notes.
-                eprintln!("preferences unavailable, notes won't persist this run: {err}");
+                //
+                // `log::warn!`, not `eprintln!`: stderr is a silent no-op in
+                // a browser, and the `log` facade reaches every platform's
+                // real sink (the browser console through the web shell's own
+                // bridge, logcat on Android, stderr on desktop). `warn` is
+                // also the one level a `--release` build keeps — see
+                // `Cargo.toml`'s `lean` feature.
+                log::warn!("preferences unavailable, notes won't persist this run: {err}");
                 None
             }
         };
@@ -117,7 +130,7 @@ impl AppState {
         };
         let texts: Vec<String> = self.notes.iter().map(|(_, text)| text.clone()).collect();
         if let Err(err) = prefs.set_string_list(NOTES_KEY, texts) {
-            eprintln!("failed to save notes: {err}");
+            log::warn!("failed to save notes: {err}");
         }
     }
 
@@ -127,7 +140,7 @@ impl AppState {
             return;
         };
         if let Err(err) = prefs.set_string(DRAFT_KEY, self.draft.clone()) {
-            eprintln!("failed to save draft: {err}");
+            log::warn!("failed to save draft: {err}");
         }
     }
 }
@@ -211,11 +224,15 @@ impl Component for {{ title_case_name | replace(" ", "") }}App {
 }
 
 // The generated app's sole entry point: one line binds
-// `{{ title_case_name | replace(" ", "") }}App` to all three platforms — the
+// `{{ title_case_name | replace(" ", "") }}App` to all four platforms — the
 // Android JNI exports (`target_os = "android"` only), the iOS C-ABI exports
-// (unconditional; self-gated to `target_os = "ios"`), and (on desktop) the
-// hidden `__frust_main` that `main.rs` calls. Never edit this line or
-// `main.rs` — add screens/state to `app_logic`/`AppState` above instead.
+// (unconditional; self-gated to `target_os = "ios"`), the browser's
+// `#[wasm_bindgen(start)]` entry (`target_arch = "wasm32"` only, through
+// `frust::web_app!`), and (on desktop) the hidden `__frust_main` that
+// `main.rs` calls. Never edit this line or `main.rs` — add screens/state to
+// `app_logic`/`AppState` above instead. `main.rs`'s own `wasm32` arm exists
+// only to keep this library — and the browser entry generated below — in
+// that binary target's link graph; see its comment for why.
 // The `setup` block runs once, on the UI thread, before the root
 // component's `Component::init` (`frust_glyph::install`'s own doc comment
 // has the full ordering contract); `frust_glyph::install()` is what makes

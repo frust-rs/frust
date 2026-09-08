@@ -141,9 +141,23 @@ pub const MAX_ATLAS_INDEX: u32 = 0xFF;
 /// The descriptor for an atlas array of `width` x `height` texels over
 /// `layers` array layers.
 ///
-/// `layers` is raised to at least one: a texture with zero array layers cannot
-/// be created, and a renderer that has made no image resident still has to
-/// have something to bind.
+/// `layers` is raised to at least **two**, not one. A texture with zero array
+/// layers cannot be created at all, which would be reason enough for a floor
+/// of one — but wgpu-hal 30.0.1's GLES backend picks a texture's GL target
+/// from the descriptor alone and never consults the view dimension a caller
+/// binds it through (`get_info_from_desc`, wgpu-hal `src/gles/mod.rs:513-530`:
+/// `(false, 1) => TEXTURE_2D`). A one-layer array descriptor therefore binds
+/// as plain `GL_TEXTURE_2D` while [`super::atlas`]'s strip shader always
+/// samples this texture as a `sampler2DArray`
+/// (`crates/frust-engine/shaders/strip.wgsl`'s `texture_2d_array<f32>`
+/// binding) — target and sampler disagree, the texture reads as incomplete
+/// per GLES 3.0 §3.8.2, and every sample returns `(0, 0, 0, 1)`: a solid box
+/// instead of a glyph, a solid black rect instead of an image. Two layers is
+/// the smallest depth the heuristic reads as `TEXTURE_2D_ARRAY`, so it is the
+/// floor a renderer with a single resident image or glyph page still has to
+/// allocate at. See wgpu upstream issues #1614 and #1574; this is a
+/// workaround, not the fix, and is meant to come out once wgpu-hal honours
+/// the view dimension (tracked in `docs/LIMITATIONS.md`).
 #[must_use]
 pub fn atlas_texture_descriptor(
     width: u32,
@@ -155,7 +169,7 @@ pub fn atlas_texture_descriptor(
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
-            depth_or_array_layers: layers.max(1),
+            depth_or_array_layers: layers.max(2),
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -224,7 +238,10 @@ pub struct AtlasArray {
 }
 
 impl AtlasArray {
-    /// An atlas array of `width` x `height` texels with a single layer.
+    /// An atlas array of `width` x `height` texels with at least two layers due to
+    /// the floor raised by wgpu-hal 30.0.1's GLES backend heuristic — one resident
+    /// layer is still the logical minimum, but a second layer is allocated to work
+    /// around a target-selection bug in `get_info_from_desc` (see [`atlas_texture_descriptor`]).
     #[must_use]
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         Self::with_layers(device, width, height, 1)
@@ -788,8 +805,14 @@ impl AtlasPlaceholders {
     }
 }
 
-/// A 1x1 sampled-only texture's view, as a plain 2D texture or a single-layer
-/// 2D array.
+/// A 1x1 sampled-only texture's view, as a plain 2D texture or a 2D array.
+///
+/// The array variant allocates **two** layers, not one, for the same reason
+/// [`atlas_texture_descriptor`] does: wgpu-hal 30.0.1's GLES backend derives
+/// the GL target from the descriptor's layer count alone, and a one-layer
+/// array descriptor binds as `GL_TEXTURE_2D` rather than
+/// `GL_TEXTURE_2D_ARRAY` (see that function's doc comment for the file:line
+/// and upstream issue refs). Only layer zero of the two is ever sampled here.
 fn placeholder(
     device: &wgpu::Device,
     label: &'static str,
@@ -801,7 +824,7 @@ fn placeholder(
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: if array { 2 } else { 1 },
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -1286,7 +1309,47 @@ mod tests {
         let descriptor = atlas_texture_descriptor(0, 0, 0);
         assert_eq!(descriptor.size.width, 1);
         assert_eq!(descriptor.size.height, 1);
-        assert_eq!(descriptor.size.depth_or_array_layers, 1);
+        assert_eq!(descriptor.size.depth_or_array_layers, 2);
+    }
+
+    /// The layer floor is two, not one — a fix for wgpu-hal 30.0.1's GLES
+    /// backend, not an arbitrary minimum.
+    ///
+    /// `get_info_from_desc` (wgpu-hal `src/gles/mod.rs:513-530`) chooses the GL
+    /// target from `TextureDescriptor::size.depth_or_array_layers` alone —
+    /// `(false, 1) => TEXTURE_2D`, never consulting the view dimension a caller
+    /// later binds the texture through. A one-layer atlas array descriptor
+    /// therefore creates a plain `GL_TEXTURE_2D`, while
+    /// `crates/frust-engine/shaders/strip.wgsl` always samples this texture as
+    /// `texture_2d_array<f32>` (`sampler2DArray` once naga lowers it to GLSL).
+    /// Target and sampler disagreeing makes the texture incomplete per GLES
+    /// 3.0 §3.8.2, so every sample reads `(0, 0, 0, 1)`: a solid box in place
+    /// of a glyph, a solid black rect in place of an image — reproduced on
+    /// Chrome's WebGL2 backend by the examples/web-spike probe and fixed
+    /// by this floor. Tracked upstream as wgpu issues #1614 and #1574; a later
+    /// tidy-up must not "simplify" this back to `max(1)` without wgpu-hal
+    /// fixing the heuristic first (see `docs/LIMITATIONS.md`).
+    #[test]
+    fn the_layer_floor_is_two_because_wgpu_hal_gles_ignores_the_view_dimension() {
+        assert_eq!(
+            atlas_texture_descriptor(64, 64, 0)
+                .size
+                .depth_or_array_layers,
+            2
+        );
+        assert_eq!(
+            atlas_texture_descriptor(64, 64, 1)
+                .size
+                .depth_or_array_layers,
+            2
+        );
+        assert_eq!(
+            atlas_texture_descriptor(64, 64, 3)
+                .size
+                .depth_or_array_layers,
+            3,
+            "a request already past the floor is not clamped down to it"
+        );
     }
 
     #[test]

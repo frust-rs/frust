@@ -9,6 +9,14 @@
 
 use std::collections::HashMap;
 
+/// The Rust target triple every browser build compiles to — the single
+/// spelling shared by the drive-side web build, `frust doctor`'s toolchain
+/// check, and the recipe `platform/web/README.md` documents. There is no
+/// second wasm triple in play here: `wasm32-unknown-emscripten` and
+/// `wasm32-wasip1` are neither what `wasm-bindgen --target web` consumes nor
+/// what `crates/frust-shell-web` builds against.
+pub const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
+
 /// The three user-facing build modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildMode {
@@ -39,6 +47,42 @@ impl BuildMode {
             BuildMode::Profile => "Profile",
             BuildMode::Release => "Release",
         }
+    }
+
+    /// The cargo output-directory segment this mode's artifact lands in
+    /// (`target/[<triple>/]{debug,profile,release}/`).
+    ///
+    /// Cargo names the `dev` profile's directory `debug`, not `dev`, and a
+    /// custom profile's directory after the profile itself — so this is
+    /// `debug`/`profile`/`release`, deliberately NOT derived from
+    /// [`BuildMode::cargo_profile_arg`] (whose debug arm is empty).
+    ///
+    /// The wasm counterpart of [`BuildMode::gradle_infix`] /
+    /// [`BuildMode::xcode_configuration`]: a browser build has no
+    /// project-generator of its own to name a configuration for, and instead
+    /// has to locate the `.wasm` cargo produced at
+    /// `target/{WASM_TARGET_TRIPLE}/<this>/<crate>.wasm` before handing it to
+    /// `wasm-bindgen`.
+    pub fn cargo_profile_dir(&self) -> &'static str {
+        match self {
+            BuildMode::Debug => "debug",
+            BuildMode::Profile => "profile",
+            BuildMode::Release => "release",
+        }
+    }
+
+    /// Whether a browser build runs `wasm-opt` over the generated `.wasm` by
+    /// default in this mode: release only.
+    ///
+    /// `wasm-opt` is a whole-module optimizer — minutes on a large module,
+    /// and it discards the name section a debug build's stack traces are
+    /// read through — so a debug/profile browser build wants it off (fast
+    /// rebuilds, readable panics) and a shipped release build wants it on.
+    /// A `[web] wasm-opt` key overrides this either way
+    /// (`manifest::WebSection::wasm_opt_enabled` takes this as its
+    /// `mode_default`); it is a default, not a policy.
+    pub fn wasm_opt_default(&self) -> bool {
+        matches!(self, BuildMode::Release)
     }
 
     /// The Xcode `-configuration` value for this mode, before any
@@ -333,6 +377,39 @@ mod tests {
         assert_eq!(BuildMode::Debug.xcode_configuration(), "Debug");
         assert_eq!(BuildMode::Profile.xcode_configuration(), "Profile");
         assert_eq!(BuildMode::Release.xcode_configuration(), "Release");
+    }
+
+    #[test]
+    fn cargo_profile_dir_matches_each_mode() {
+        // `dev` profile -> `debug/`, not `dev/` — the one place the cargo
+        // directory name and the profile name disagree.
+        assert_eq!(BuildMode::Debug.cargo_profile_dir(), "debug");
+        assert_eq!(BuildMode::Profile.cargo_profile_dir(), "profile");
+        assert_eq!(BuildMode::Release.cargo_profile_dir(), "release");
+    }
+
+    /// The wasm artifact path a browser build has to resolve, assembled from
+    /// the two constants this module owns — proof they compose into the
+    /// layout `platform/web/README.md`'s recipe reads from.
+    #[test]
+    fn wasm_artifact_dir_composes_from_the_triple_and_the_profile_dir() {
+        assert_eq!(WASM_TARGET_TRIPLE, "wasm32-unknown-unknown");
+        assert_eq!(
+            format!(
+                "target/{WASM_TARGET_TRIPLE}/{}",
+                BuildMode::Release.cargo_profile_dir()
+            ),
+            "target/wasm32-unknown-unknown/release"
+        );
+    }
+
+    /// `wasm-opt` is a release-only default: a debug or profile browser
+    /// build keeps its name section (readable panics) and its fast rebuild.
+    #[test]
+    fn wasm_opt_defaults_to_release_only() {
+        assert!(!BuildMode::Debug.wasm_opt_default());
+        assert!(!BuildMode::Profile.wasm_opt_default());
+        assert!(BuildMode::Release.wasm_opt_default());
     }
 
     #[test]

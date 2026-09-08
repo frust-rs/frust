@@ -43,3 +43,10 @@ pub mod metrics;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;
+/// Browser build assembly (`cargo build --target wasm32-unknown-unknown` +
+/// `wasm-bindgen` + an optional `wasm-opt` pass into a servable artifact
+/// directory), the static development server that hands that directory to a
+/// browser, and the host-toolchain preflight both depend on. The web tier's
+/// counterpart to [`desktop_build`]; unlike it, host-independent — a browser
+/// artifact is the same on every OS.
+pub mod web_build;

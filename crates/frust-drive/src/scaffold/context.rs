@@ -177,7 +177,22 @@ impl TemplateContext {
                 self.frust_embedding_android_dir(),
             ),
             ("frust_embedding_ios_dir", self.frust_embedding_ios_dir()),
+            ("web_module_name", self.web_module_name().to_string()),
         ])
+    }
+
+    /// The `wasm-bindgen --out-name` a browser build of this project
+    /// produces, and therefore the module the generated host page's
+    /// `?module=` default points at (`./pkg/<this>.js`).
+    ///
+    /// The crate name, because that is what `wasm-bindgen`'s own default
+    /// `--out-name` would be and what `manifest::WebSection::out_name_or`
+    /// falls back to (`[app] name`, which the scaffolded `frust.toml`
+    /// renders from this same `project_name`). One derivation, named once:
+    /// the generated page and the generated build config agree on the module
+    /// name without either reading the other.
+    pub fn web_module_name(&self) -> &str {
+        &self.project_name
     }
 
     /// Placeholder values usable as *literal path segments* (the
@@ -292,6 +307,54 @@ impl TemplateContext {
             frust_path_from_project_subdir(&self.frust_path)
         )
     }
+}
+
+/// The render-context keys the platform-inclusion axis exposes to every app
+/// `.tmpl` file — `{{ platform_windows }}`, `{{ platform_android }}`, etc. —
+/// one entry per [`crate::scaffold::ScaffoldPlatform`] variant, merged into
+/// [`TemplateContext::render_vars`]'s map by
+/// [`crate::scaffold::generate_with_platforms`] before rendering.
+///
+/// [`crate::scaffold::ScaffoldPlatform`] gates whether a whole
+/// `<platform>.tmpl/` subtree is emitted at all, but a platform-agnostic
+/// file that is ALWAYS emitted (`Cargo.toml`) can still carry content that
+/// only makes sense when a particular platform subtree exists (the
+/// `windows/build.rs` wiring) — these keys are what let such a file branch
+/// on the selection without the manifest-loop's coarser whole-file
+/// include/exclude.
+///
+/// Each value is `""` (falsy — minijinja treats an empty string as falsy,
+/// same as Jinja2) when the platform is not selected, and a non-empty
+/// marker string (truthy) when it is, so a template writes the natural
+/// `{% if platform_windows %} ... {% endif %}` rather than a string
+/// comparison.
+pub fn platform_render_vars(
+    platforms: &[super::ScaffoldPlatform],
+) -> BTreeMap<&'static str, String> {
+    use super::ScaffoldPlatform;
+
+    fn flag(platforms: &[ScaffoldPlatform], platform: ScaffoldPlatform) -> String {
+        if platforms.contains(&platform) {
+            "true".to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    BTreeMap::from([
+        (
+            "platform_android",
+            flag(platforms, ScaffoldPlatform::Android),
+        ),
+        ("platform_ios", flag(platforms, ScaffoldPlatform::Ios)),
+        ("platform_macos", flag(platforms, ScaffoldPlatform::Macos)),
+        (
+            "platform_windows",
+            flag(platforms, ScaffoldPlatform::Windows),
+        ),
+        ("platform_linux", flag(platforms, ScaffoldPlatform::Linux)),
+        ("platform_web", flag(platforms, ScaffoldPlatform::Web)),
+    ])
 }
 
 /// Values substituted into a **design-system** template's `.tmpl` file
@@ -795,6 +858,50 @@ mod tests {
     #[test]
     fn design_system_path_vars_are_empty() {
         assert!(test_design_system_context().path_vars().is_empty());
+    }
+
+    #[test]
+    fn platform_render_vars_carries_one_falsy_or_truthy_entry_per_platform() {
+        use super::super::ScaffoldPlatform;
+
+        let vars = platform_render_vars(&[ScaffoldPlatform::Windows, ScaffoldPlatform::Web]);
+        assert_eq!(vars.len(), ScaffoldPlatform::ALL.len());
+        assert_eq!(vars.get("platform_windows").unwrap(), "true");
+        assert_eq!(vars.get("platform_web").unwrap(), "true");
+        for key in [
+            "platform_android",
+            "platform_ios",
+            "platform_macos",
+            "platform_linux",
+        ] {
+            assert_eq!(vars.get(key).unwrap(), "", "{key}");
+        }
+    }
+
+    #[test]
+    fn platform_render_vars_over_the_default_set_marks_every_platform_but_web() {
+        use super::super::ScaffoldPlatform;
+
+        let vars = platform_render_vars(ScaffoldPlatform::DEFAULT);
+        assert_eq!(vars.get("platform_web").unwrap(), "");
+        for key in [
+            "platform_android",
+            "platform_ios",
+            "platform_macos",
+            "platform_windows",
+            "platform_linux",
+        ] {
+            assert_eq!(vars.get(key).unwrap(), "true", "{key}");
+        }
+    }
+
+    #[test]
+    fn platform_render_vars_over_an_empty_set_marks_nothing() {
+        use super::super::ScaffoldPlatform;
+
+        let vars = platform_render_vars(&[]);
+        assert_eq!(vars.len(), ScaffoldPlatform::ALL.len());
+        assert!(vars.values().all(|v| v.is_empty()));
     }
 
     mod resolve_frust_crate_path_tests {

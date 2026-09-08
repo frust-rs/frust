@@ -87,6 +87,18 @@ pub enum Command {
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
 
+        /// Comma-separated list of target platforms to include in the
+        /// scaffold (e.g. `android,ios,macos,windows,linux,web`). Accepted
+        /// values are the platform tags from `scaffold::known_platform_tags()`;
+        /// unknown tags are rejected. Omit to use the default platform set
+        /// (android, ios, macos, windows, linux — all except web), which
+        /// preserves byte-identical output for existing projects. Including
+        /// `web` adds a `web/` host page alongside the native platform
+        /// projects; subsequent `frust build web` produces a browser-runnable
+        /// artifact in `build/web`.
+        #[arg(long = "platforms", value_name = "LIST")]
+        platforms: Option<String>,
+
         /// Scaffold an out-of-tree **design-system** crate instead of an
         /// app: a themed widget catalog crate depending on nothing but
         /// `frust`, with no platform (`android`/`ios`) project. `dir` is
@@ -111,7 +123,8 @@ pub enum Command {
     /// managing Frust projects.
     Tui,
     /// Build → install → launch → stream logs on a connected device;
-    /// no Android device selected → `cargo run` passthrough.
+    /// no Android device selected → `cargo run` passthrough; `-d web`
+    /// builds for the browser and serves the artifact directory instead.
     Run {
         #[command(flatten)]
         build: BuildFlags,
@@ -126,6 +139,14 @@ pub enum Command {
         /// watch loop has no device-side kill/rebuild/relaunch story yet).
         #[arg(long)]
         watch: bool,
+
+        /// With `-d web`, skip opening a browser at the served URL once the
+        /// dev server is up. Ignored for every other target — no other
+        /// `run` lane ever opens one. The dev server always binds and prints
+        /// its URL either way; this only controls the automatic
+        /// `xdg-open`/`open`/`start` launch.
+        #[arg(long = "no-open")]
+        no_open: bool,
     },
     /// Produce a distributable artifact — release-signed
     /// APK/AAB via Gradle, or an iOS app/IPA via `xcodebuild`. Defaults to
@@ -234,6 +255,18 @@ pub enum BuildTarget {
         /// `cargo-packager` (`docs/CLI_DEVELOPMENT.md`'s Version Pins).
         #[arg(long)]
         installer: bool,
+    },
+    /// Browser build: `cargo build --target wasm32-unknown-unknown` +
+    /// `wasm-bindgen --target web` + an optional `wasm-opt` pass, producing
+    /// the servable artifact directory `frust run -d web` (or any static
+    /// host) serves. No host lock — unlike `macos`/`windows`/`linux`, every
+    /// desktop OS can cross-compile to `wasm32-unknown-unknown`. Defaults to
+    /// release mode, like every other `frust build` target; `--features` is
+    /// not yet plumbed through the browser pipeline (see
+    /// `commands::build::reject_unplumbed_features`).
+    Web {
+        #[command(flatten)]
+        build: BuildFlags,
     },
 }
 
@@ -511,15 +544,54 @@ mod tests {
         assert_eq!(ArchArg::CleanSignals.as_str(), "clean-signals");
     }
 
+    /// `--platforms web` is accepted as a valid platforms string.
+    #[test]
+    fn parses_create_with_platforms_web() {
+        let cli = Cli::parse_from(["frust", "create", "myapp", "--platforms", "web"]);
+        match cli.command.unwrap() {
+            Command::Create { platforms, .. } => {
+                assert_eq!(platforms.as_deref(), Some("web"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// `--platforms android,web` is accepted as a valid comma-separated list.
+    #[test]
+    fn parses_create_with_multiple_platforms() {
+        let cli = Cli::parse_from(["frust", "create", "myapp", "--platforms", "android,web"]);
+        match cli.command.unwrap() {
+            Command::Create { platforms, .. } => {
+                assert_eq!(platforms.as_deref(), Some("android,web"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// Omitting `--platforms` defaults to `None` (the default platform set).
+    #[test]
+    fn parses_create_without_platforms_defaults_to_none() {
+        let cli = Cli::parse_from(["frust", "create", "myapp"]);
+        match cli.command.unwrap() {
+            Command::Create { platforms, .. } => assert_eq!(platforms, None),
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_run_with_defaults() {
         let cli = Cli::parse_from(["frust", "run"]);
         match cli.command.unwrap() {
-            Command::Run { build, watch } => {
+            Command::Run {
+                build,
+                watch,
+                no_open,
+            } => {
                 assert!(!build.build.debug);
                 assert!(!build.build.profile);
                 assert!(!build.build.release);
                 assert!(!watch);
+                assert!(!no_open);
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -564,6 +636,7 @@ mod tests {
             vec!["frust", "build", "appbundle"],
             vec!["frust", "build", "ios"],
             vec!["frust", "build", "macos"],
+            vec!["frust", "build", "web"],
         ] {
             let cli = Cli::parse_from(argv.clone());
             let flags = match cli.command.unwrap() {
@@ -575,7 +648,8 @@ mod tests {
                     | BuildTarget::Ipa { build, .. }
                     | BuildTarget::Macos { build, .. }
                     | BuildTarget::Windows { build, .. }
-                    | BuildTarget::Linux { build, .. } => build,
+                    | BuildTarget::Linux { build, .. }
+                    | BuildTarget::Web { build, .. } => build,
                 },
                 other => panic!("expected Run/Build, got {other:?}"),
             };
@@ -664,6 +738,29 @@ mod tests {
         let cli = Cli::parse_from(["frust", "run", "--watch"]);
         match cli.command.unwrap() {
             Command::Run { watch, .. } => assert!(watch),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// `-d web --no-open` — the browser dev-server lane's own flag surface,
+    /// parsed the same device-style way every other `frust run` target is.
+    #[test]
+    fn parses_run_with_device_web_and_no_open_flag() {
+        let cli = Cli::parse_from(["frust", "-d", "web", "run", "--no-open"]);
+        assert_eq!(cli.device_id.as_deref(), Some("web"));
+        match cli.command.unwrap() {
+            Command::Run { no_open, .. } => assert!(no_open),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// Omitting `--no-open` defaults to `false` — the dev server opens a
+    /// browser automatically unless told not to.
+    #[test]
+    fn parses_run_without_no_open_flag_defaults_to_false() {
+        let cli = Cli::parse_from(["frust", "-d", "web", "run"]);
+        match cli.command.unwrap() {
+            Command::Run { no_open, .. } => assert!(!no_open),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -873,6 +970,47 @@ mod tests {
                 assert!(!build.build.release);
             }
             other => panic!("expected Build/Linux, got {other:?}"),
+        }
+    }
+
+    /// `build web` has no `--installer`/`--target-platform`/`--simulator`
+    /// flags of its own — the plain `BuildFlags` funnel only, mirroring the
+    /// desktop targets' shape without the installer axis (there is no
+    /// installer format for a browser artifact directory).
+    #[test]
+    fn parses_build_web_defaults() {
+        let cli = Cli::parse_from(["frust", "build", "web"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Web { build },
+            } => {
+                assert!(!build.build.debug);
+                assert!(!build.build.profile);
+                assert!(!build.build.release);
+                assert!(build.extra_features().is_empty());
+            }
+            other => panic!("expected Build/Web, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_web_with_release_and_build_name() {
+        let cli = Cli::parse_from([
+            "frust",
+            "build",
+            "web",
+            "--release",
+            "--build-name",
+            "1.2.3",
+        ]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Web { build },
+            } => {
+                assert!(build.build.release);
+                assert_eq!(build.build.build_name.as_deref(), Some("1.2.3"));
+            }
+            other => panic!("expected Build/Web, got {other:?}"),
         }
     }
 

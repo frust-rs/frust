@@ -3524,7 +3524,7 @@ round 0 Major 4 (`workflow/reviews/features/material-3-expressive-phase-1/REVIEW
 only `FontWeight`/`FontStyle`/`FontSize`/`LetterSpacing`/`LineHeight` as
 default run properties — no `FontVariations` or `FontWidth`
 (`crates/frust-text/src/context.rs:129-137`) — even though the pinned parley
-0.11.1 supports both (`style/mod.rs:77,85`). This is a seam gap in
+0.11.0 supports both (`style/mod.rs:77,85`). This is a seam gap in
 frust-text, not a limitation of the underlying shaping engine.
 
 **Applies to**: any catalog or app wanting to drive a variable font's `wdth`
@@ -3544,7 +3544,7 @@ discoverable rather than silently baked into the type scale.
 **Evidence**: `crates/frust-text/src/style.rs:246-264` (`TextStyle`, no
 variations/width field); `crates/frust-text/src/context.rs:129-137`
 (`push_style_defaults`, no `FontVariations`/`FontWidth` push); pinned
-parley 0.11.1 `style/mod.rs:77,85`; Material 3 Expressive Phase 1 wave 3
+parley 0.11.0 `style/mod.rs:77,85`; Material 3 Expressive Phase 1 wave 3
 record (`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`).
 
 ---
@@ -4554,16 +4554,25 @@ black rect. The desktop Vulkan/Metal/DX12 backends are unaffected; this is
 WebGL2-only, and it is the one thing standing between the browser tier and a
 full GO (`engine-webgl2-unhosted` above).
 
-**Accepted because**: the workaround — a two-layer atlas floor, which keys
-off the exact condition wgpu-hal's own heuristic checks — is designed and
-verified end to end (`examples/web-spike/RESULTS.md` § 17.4: the WebGL2 arm
-then renders shaped text, images, gradients, blur and layers identically to
-the WebGPU arm, with the host Vulkan engine goldens unaffected), but is
-filed as its own card (w0-08) and not yet landed.
+**Accepted because**: the workaround has landed (card w0-08) — `atlas_texture_descriptor`
+(`crates/frust-engine/src/gpu/atlas.rs`) now floors `layers` at 2, and both
+1x1 array placeholders (`gpu/atlas.rs::placeholder`, `renderer.rs::placeholder_view`)
+allocate 2 layers, keyed off the exact condition wgpu-hal's own heuristic checks
+(`the_layer_floor_is_two_because_wgpu_hal_gles_ignores_the_view_dimension` pins
+the reason so a later tidy-up cannot silently restore the one-layer floor); verified
+end to end (`examples/web-spike/RESULTS.md` § 17.4: the WebGL2 arm renders shaped
+text, images, gradients, blur and layers identically to the WebGPU arm, with the
+host Vulkan engine goldens unaffected). The memory cost is one extra atlas layer,
+paid only in the single-resident-layer case: 4 MiB at the MOBILE 1024² tier, 16 MiB
+at the DESKTOP 2048² tier (both RGBA8), plus 4→8 bytes for the two 1x1 placeholders.
+This entry remains as the record of the upstream constraint itself — `wgpu-hal`
+30.0.1's GLES backend still derives a texture's GL target from the descriptor alone
+(`get_info_from_desc`, wgpu-hal `src/gles/mod.rs:513`; upstream issues #1614/#1574) —
+not as an open defect in frust.
 
-**Trigger for removal**: card w0-08 lands (the two-layer atlas floor), or a
-future wgpu-hal honours the requested view dimension instead of the
-descriptor's own layer count, removing the need for the floor entirely.
+**Trigger for removal**: a wgpu-hal release that honours the requested view
+dimension instead of the descriptor's own layer count, removing the need for
+the floor entirely.
 
 ### `engine-shader-quad-goldens-uncomparable` — a shader quad renders on the engine but no golden oracle can score it
 
@@ -5011,26 +5020,41 @@ v1 contract rather than diverging from it; a multi-touch protocol is a
 **Trigger for removal**: `frust_core::event::PointerEvent` gains a
 per-contact id, adopted by every shell together.
 
-### `web-systemui-font-unresolved` — `FontFamily::SystemUi` and every generic family resolve no glyph on `wasm32`
+### `web-generic-family-partial-fallback` — `Monospace`, `Serif` and `Emoji` still resolve no glyph on `wasm32`; `SystemUi`/`SansSerif` are covered by a bundled fallback face
 
-**Observed** (evidence: `examples/web-gallery/README.md` § "A font defect
-and how this app works around it"): fontique 0.11.1 ships a "Dummy system
-font backend for targets like wasm32-unknown-unknown" whose generic-family
-map is empty, so `TextStyle::default()`'s `FontFamily::SystemUi` — and
-`Theme::neutral()`'s own generic `SansSerif` stack — resolves zero glyphs in
-the browser; registering a bundled font through `frust::register_app_fonts`
-does not change this, since nothing populates the generic-family map
-itself. Every widget that does not call `.family(...)` explicitly renders
-invisible text, on both the WebGPU and WebGL2 arms.
+**Observed** (evidence: `crates/frust-shell-web/src/fonts.rs`;
+`crates/frust-text/src/context.rs`'s `register_generic_fallback`, re-exported
+from `lib.rs`): fontique 0.11.0 ships a "Dummy system font backend for
+targets like wasm32-unknown-unknown" whose generic-family map is empty, so a
+generic `FontFamily` slot resolves no glyph on the web tier by default.
+`frust-text` now exposes `register_generic_fallback`, applied by every
+`TextContext` through `sync_app_fonts`; `frust-shell-web`'s
+`install_default_fonts` calls it once at start-up with a bundled Inter
+Variable face (SIL Open Font License 1.1, `crates/frust-shell-web/fonts/`),
+mapped to `GenericSlot::SystemUi` and `GenericSlot::SansSerif` only.
+`Monospace`, `Serif` and `Emoji` remain unmapped on `wasm32` by design: a
+proportional face substituted for `Monospace` would silently regress
+`TextInput`/code-display layout, and the crate ships neither a serif nor an
+emoji face. An app's own named-family registration still wins over the
+fallback, since a named lookup always resolves before a generic one.
 
-**Accepted because**: `examples/web-gallery` demonstrates a working
-per-call `.family(...)` override as an app-level workaround; the underlying
-fix (a `wasm32` generic-family seam in `frust-text`, or a fallback-family
-hook in the widget set) is out of this task's write scope.
+**Applies to**: any `frust-shell-web` app relying on the `Monospace`,
+`Serif`, or `Emoji` generic family without registering its own face for
+it — that text still resolves no glyphs. Every `frust-shell-web` wasm
+binary also carries the bundled face's 879,708 bytes (~860 KB) via
+`include_bytes!` with no opt-out today, whether or not an app ever uses the
+fallback.
 
-**Trigger for removal**: `frust-text`'s `TextContext` gains a way to
-populate fontique's generic-family map from an app-registered face on
-`wasm32`, or the widget set gains a fallback-family hook.
+**Accepted because**: `SystemUi`/`SansSerif` — the default and by far the
+most common generic request — are now fixed at the framework level rather
+than left to a per-app workaround; extending the same mechanism to
+`Monospace`/`Serif`/`Emoji` needs a bundled face for each (a further
+per-binary size cost) or a page-side font-loading seam, neither of which
+this task's scope covered.
+
+**Trigger for removal**: a bundled monospace/serif/emoji policy, or a
+page-side font-loading seam that lets an app supply those faces without
+paying for them in every binary.
 
 ### `web-canvas-inline-style-resize` — an unstyled host page's canvas never tracks a live browser resize
 

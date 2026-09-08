@@ -3,11 +3,16 @@ name = "{{ project_name }}"
 version = "0.1.0"
 edition = "2024"
 publish = false
+{%- if platform_windows %}
 # Windows-only resource embedding (taskbar/exe icon, FileVersion/
 # ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
 # isn't itself platform-conditional (Cargo has no such thing) and stays a
-# no-op off Windows.
+# no-op off Windows. Rendered only when the windows platform is selected
+# (`--platforms`, `ScaffoldPlatform::Windows`): Cargo compiles a `build`
+# script's source for the HOST on every target it builds, so this key must
+# not survive a selection that never emits `windows/build.rs` at all.
 build = "windows/build.rs"
+{%- endif %}
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
@@ -67,14 +72,42 @@ frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-prefe
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
 # `frust-perf` output.
 log = "0.4"
+{%- if platform_windows %}
 
 # `windows/build.rs`'s resource embedder. `winres` (the older, commonly
 # referenced crate for this) was last published 2021-09-28 — stale — so this
 # uses the actively maintained `winresource` fork instead. A
 # `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
-# never touches a macOS/Linux build.
+# never touches a macOS/Linux build. Rendered only alongside the `build =
+# "windows/build.rs"` key above, for the same reason: this build-dependency
+# is meaningless without the script that reads it.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+{%- endif %}
+
+# Browser (`wasm32-unknown-unknown`) row. `src/lib.rs`'s `frust::app!` binds
+# a fourth platform beside Android/iOS/desktop: on this target it expands to
+# `frust::web_app!`, whose generated entry point is annotated
+# `#[wasm_bindgen(start)]` — wasm-bindgen's own module-init hook, which the
+# browser calls once it has instantiated the compiled `.wasm`. The facade
+# routes the ATTRIBUTE itself through a hidden re-export
+# (`frust::__wasm_bindgen`), but the attribute macro then expands, inside
+# THIS crate, to glue that names `wasm_bindgen::` paths absolutely — so the
+# app crate needs its own dependency edge on the crate regardless. Nothing
+# else here is browser-only: every other dependency above compiles for
+# `wasm32` unchanged (`frust-shared-preferences` included — its file backend
+# simply finds no user data directory in a browser and
+# `SharedPreferences::standard()` returns an `Err` that `src/lib.rs` already
+# degrades to "notes won't persist this run").
+#
+# Version-Pin Policy (`docs/DEVELOPMENT.md`): this pin is EXACT and must
+# equal the `wasm-bindgen-cli` version that post-processes the build, a
+# schema-version contract stricter than semver — a mismatch fails the
+# `wasm-bindgen` step outright rather than degrading. `=0.2.128` is the
+# version Frust's own web crates and `examples/web-gallery` pin; upgrade the
+# CLI and every one of those rows together, never this row alone.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
 
 [features]
 # Release-lean log ceiling — see the `log` dependency above for why this is a

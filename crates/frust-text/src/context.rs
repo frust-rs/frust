@@ -13,17 +13,24 @@
 //! one (`frust_widgets::textinput`). [`APP_FONTS`] is the process-wide record
 //! that keeps those two in agreement about registered app fonts — see its docs
 //! for the layering rationale.
+//!
+//! # Generic-family fallback registry
+//!
+//! [`GENERIC_FALLBACKS`] is the process-wide counterpart for the *generic*
+//! font-family map (fontique's `SystemUi`/`SansSerif`/`Monospace`/`Serif`/
+//! `Emoji` slots) rather than a named family — see [`register_generic_fallback`]
+//! for why a host needs this seam on `wasm32`.
 
 use std::sync::Mutex;
 
-use parley::fontique::Blob;
+use parley::fontique::{Blob, GenericFamily};
 use parley::style::StyleProperty;
 use peniko::Brush;
 
 use crate::layout::TextLayout;
 use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
 use crate::style::{
-    TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
+    GenericSlot, TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
     to_parley_style, to_parley_weight,
 };
 
@@ -92,6 +99,112 @@ pub enum FontError {
 /// fontique's own parse, never a copy of the font bytes.
 static APP_FONTS: Mutex<Vec<Blob<u8>>> = Mutex::new(Vec::new());
 
+/// One [`register_generic_fallback`] call's payload: the raw font bytes plus
+/// the generic slot(s) it should be appended to.
+struct PendingGenericFallback {
+    blob: Blob<u8>,
+    generics: Vec<GenericSlot>,
+}
+
+/// The process-wide record of every [`register_generic_fallback`] call
+/// accepted so far, in registration order and **never drained** — the
+/// generic-family counterpart of [`APP_FONTS`], applied by
+/// [`TextContext::sync_app_fonts`] (and so, for free, by [`TextContext::new`])
+/// to every context's `fontique::Collection` generic-family map rather than
+/// its named-family table.
+static GENERIC_FALLBACKS: Mutex<Vec<PendingGenericFallback>> = Mutex::new(Vec::new());
+
+/// Registers `data` (raw font bytes) as a fallback face for each generic
+/// family slot in `generics`, applied to every [`TextContext`] — existing,
+/// on its next [`TextContext::sync_app_fonts`], and future, seeded for free
+/// by [`TextContext::new`] — via `fontique::Collection::append_generic_families`.
+///
+/// # Why this exists
+///
+/// [`TextContext::new`] builds `parley::FontContext::new()`'s fontique
+/// collection with the platform's real system-font backend on every target
+/// except `wasm32-unknown-unknown`, where fontique falls back to a dummy
+/// backend whose generic-family map is empty: [`crate::FontFamily::SystemUi`]
+/// (this crate's default family) and any bare [`GenericSlot`] then resolve to
+/// nothing and shape zero glyph runs. This function is the seam a host (a
+/// shell) calls once at startup with a bundled face to give a generic slot
+/// something to resolve to on that target; a platform whose backend already
+/// populates the generic map is unaffected unless it opts in too, since the
+/// registered face is only ever *appended* — never a replacement.
+///
+/// A stack that names a concrete family
+/// ([`crate::FontFamily::Named`]/[`crate::FontFamily::NamedWithGeneric`],
+/// registered via [`TextContext::register_fonts`]) still resolves before a
+/// generic fallback, since a named lookup is always tried first.
+///
+/// No-op (records nothing) when `generics` is empty. Bytes fontique cannot
+/// parse into any face register zero families when eventually applied, so
+/// this is a harmless no-op then too — the same "no error surface" contract
+/// [`TextContext::sync_app_fonts`] already follows for app fonts.
+pub fn register_generic_fallback(data: Vec<u8>, generics: &[GenericSlot]) {
+    if generics.is_empty() {
+        return;
+    }
+    let mut slot = GENERIC_FALLBACKS.lock().unwrap_or_else(|e| e.into_inner());
+    slot.push(PendingGenericFallback {
+        blob: Blob::from(data),
+        generics: generics.to_vec(),
+    });
+}
+
+/// Converts a Frust [`GenericSlot`] into parley's `GenericFamily` — the
+/// [`register_generic_fallback`] seam's own copy of
+/// `crate::style::generic_slot_to_parley` (private to that module), so this
+/// module still speaks only [`GenericSlot`] outward.
+fn generic_slot_to_parley(slot: GenericSlot) -> GenericFamily {
+    match slot {
+        GenericSlot::Monospace => GenericFamily::Monospace,
+        GenericSlot::SansSerif => GenericFamily::SansSerif,
+        GenericSlot::Serif => GenericFamily::Serif,
+        GenericSlot::SystemUi => GenericFamily::SystemUi,
+        GenericSlot::Emoji => GenericFamily::Emoji,
+    }
+}
+
+/// Applies `entries[*watermark..]` to `font_ctx`'s generic-family map,
+/// registering each entry's face and appending it to every generic slot the
+/// entry requested, then advances `*watermark` to `entries.len()`. A no-op,
+/// returning `false`, when `*watermark` already equals `entries.len()`.
+///
+/// Pure over its arguments — no process-wide state — so [`TextContext`]'s
+/// [`TextContext::sync_app_fonts`] can drive it against the shared
+/// [`GENERIC_FALLBACKS`] record for production use, while a test drives it
+/// against a locally built `entries`/`watermark` pair to exercise the exact
+/// registration/append logic without leaking a face into the process-wide
+/// record — [`register_generic_fallback`] never drains, so a test call
+/// through the real seam would otherwise remain registered for, and change
+/// the font resolution of, every other `TextContext` built later in the same
+/// test binary process.
+fn apply_generic_fallbacks(
+    font_ctx: &mut parley::FontContext,
+    entries: &[PendingGenericFallback],
+    watermark: &mut usize,
+) -> bool {
+    if *watermark == entries.len() {
+        return false;
+    }
+    let mut applied = false;
+    for entry in &entries[*watermark..] {
+        let registered = font_ctx.collection.register_fonts(entry.blob.clone(), None);
+        for (family_id, _faces) in registered {
+            applied = true;
+            for &generic in &entry.generics {
+                font_ctx.collection.append_generic_families(
+                    generic_slot_to_parley(generic),
+                    std::iter::once(family_id),
+                );
+            }
+        }
+    }
+    *watermark = entries.len();
+    applied
+}
+
 /// Owns parley's font matching and layout scratch state.
 ///
 /// This is deliberately not `Clone`/`Sync`: it is expensive per-instance state
@@ -110,6 +223,12 @@ pub struct TextContext {
     /// its watermark into that append-only record. Bumped by
     /// [`Self::sync_app_fonts`] and [`Self::register_fonts`].
     app_fonts_applied: usize,
+    /// How many of [`GENERIC_FALLBACKS`]' entries this context has already
+    /// applied — its watermark into that append-only record, mirroring
+    /// `app_fonts_applied`. Bumped by [`Self::sync_app_fonts`] only; unlike an
+    /// app font, a generic fallback has no direct `register_*` method of its
+    /// own on `TextContext`.
+    generic_fallbacks_applied: usize,
     /// How many [`Self::measure_uncached`] passes this context has run — the
     /// observable hook the truncation walk's measurement bound is asserted
     /// against (an uncached measure is invisible to [`ShapeCacheStats`], which
@@ -203,13 +322,17 @@ impl TextContext {
     ///
     /// The seeding step ([`Self::sync_app_fonts`]) is what makes a *private*
     /// context (a `TextInput`'s) shape with the same app fonts the shell-owned
-    /// context does, however late it is constructed — see [`APP_FONTS`].
+    /// context does, however late it is constructed — see [`APP_FONTS`]. It
+    /// also applies every pending [`register_generic_fallback`] entry, so a
+    /// generic-family fallback a shell registered before this call is already
+    /// live in the returned context — see [`GENERIC_FALLBACKS`].
     pub fn new() -> Self {
         let mut cx = Self {
             font_ctx: parley::FontContext::new(),
             layout_ctx: parley::LayoutContext::new(),
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
             app_fonts_applied: 0,
+            generic_fallbacks_applied: 0,
             #[cfg(test)]
             measurements: 0,
         };
@@ -621,41 +744,68 @@ impl TextContext {
         Ok(families)
     }
 
-    /// Registers every app font this context is missing (see [`APP_FONTS`]),
-    /// returning whether at least one face actually registered.
+    /// Registers every app font this context is missing (see [`APP_FONTS`])
+    /// and applies every [`register_generic_fallback`] entry it is missing
+    /// (see [`GENERIC_FALLBACKS`]), returning whether either actually
+    /// changed this context's resolution.
     ///
-    /// Cheap when there is nothing to do — one lock and a length compare, no
-    /// allocation and no font parsing — so a widget owning a private context
-    /// can call it once per layout pass to pick up a font registered *after*
-    /// the context was built (the shells' per-frame late drain).
+    /// Cheap when there is nothing to do — a lock and a length compare per
+    /// record, no allocation and no font parsing — so a widget owning a
+    /// private context can call it once per layout pass to pick up a font (or
+    /// fallback) registered *after* the context was built (the shells'
+    /// per-frame late drain).
     ///
     /// A `true` return carries the same caller-visible relayout contract as
     /// [`Self::register_fonts`]: this context's shape cache is cleared, but a
     /// layout retained *outside* it (a [`crate::TextEditor`]'s parley layout)
     /// must be re-shaped by its owner.
     pub fn sync_app_fonts(&mut self) -> bool {
+        let mut applied = self.sync_generic_fallbacks();
+
         let slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
-        if self.app_fonts_applied == slot.len() {
-            return false;
-        }
-        let mut applied = false;
-        for blob in &slot[self.app_fonts_applied..] {
-            if !self
-                .font_ctx
-                .collection
-                .register_fonts(blob.clone(), None)
-                .is_empty()
-            {
-                applied = true;
+        if self.app_fonts_applied != slot.len() {
+            for blob in &slot[self.app_fonts_applied..] {
+                if !self
+                    .font_ctx
+                    .collection
+                    .register_fonts(blob.clone(), None)
+                    .is_empty()
+                {
+                    applied = true;
+                }
             }
+            self.app_fonts_applied = slot.len();
         }
-        self.app_fonts_applied = slot.len();
         drop(slot);
 
         if applied {
             self.clear_shape_cache();
         }
         applied
+    }
+
+    /// Applies every [`GENERIC_FALLBACKS`] entry this context is missing,
+    /// appending each face's registered family(ies) to every generic slot the
+    /// entry requested. Idempotent: an entry already applied to this context
+    /// (tracked by [`Self::generic_fallbacks_applied`], a watermark into that
+    /// append-only record, exactly like [`Self::app_fonts_applied`]) is never
+    /// re-registered, so a repeated [`Self::sync_app_fonts`] call never
+    /// double-appends the same family into a generic slot's fallback list.
+    ///
+    /// Returns whether at least one face actually registered — the same
+    /// signal [`Self::sync_app_fonts`] folds together with the app-font half
+    /// to decide whether to clear the shape cache.
+    ///
+    /// Thin wrapper over [`apply_generic_fallbacks`], the pure logic this
+    /// drives against the process-wide [`GENERIC_FALLBACKS`] record — see
+    /// that function's docs for why the split exists.
+    fn sync_generic_fallbacks(&mut self) -> bool {
+        let slot = GENERIC_FALLBACKS.lock().unwrap_or_else(|e| e.into_inner());
+        apply_generic_fallbacks(
+            &mut self.font_ctx,
+            &slot,
+            &mut self.generic_fallbacks_applied,
+        )
     }
 
     /// Drops every cached shaped layout, forcing the next [`Self::layout`]
@@ -753,6 +903,123 @@ mod tests {
         assert!(
             shaped_font_bytes(&mut older, "0123456789", &s) == TUFFY,
             "an already-built context must pick the app font up on sync_app_fonts"
+        );
+    }
+
+    /// The generic-fallback registry, exercised against a collection built
+    /// with `system_fonts: false` — the same empty-generic-family-map shape
+    /// `wasm32`'s dummy fontique backend has (see
+    /// [`register_generic_fallback`]'s docs) — since a real host's system
+    /// collection already has a resolvable `SystemUi`, so it could never
+    /// reproduce the defect this seam fixes.
+    #[test]
+    fn generic_fallback_maps_requested_slots_and_is_idempotent() {
+        use parley::fontique::{Collection, CollectionOptions, GenericFamily};
+
+        // Entries built locally, driven straight through `apply_generic_fallbacks`
+        // rather than the real `register_generic_fallback` seam — that seam
+        // writes to the process-wide `GENERIC_FALLBACKS` record, which is
+        // never drained, so a real call here would keep applying this face to
+        // every other test's (real-system-font) `TextContext` built later in
+        // this same test binary process and could change which face they
+        // resolve. See `apply_generic_fallbacks`'s docs.
+        let entries = vec![PendingGenericFallback {
+            blob: Blob::from(TUFFY.to_vec()),
+            generics: vec![GenericSlot::SystemUi, GenericSlot::SansSerif],
+        }];
+        let mut watermark = 0;
+
+        // A systemless collection: fontique's own stand-in for the wasm32
+        // dummy backend's empty generic-family map.
+        let mut font_ctx = parley::FontContext {
+            collection: Collection::new(CollectionOptions {
+                system_fonts: false,
+                ..Default::default()
+            }),
+            source_cache: Default::default(),
+        };
+
+        let applied = apply_generic_fallbacks(&mut font_ctx, &entries, &mut watermark);
+        assert!(
+            applied,
+            "registering a parseable face must report at least one applied family"
+        );
+
+        let system_ui: Vec<_> = font_ctx
+            .collection
+            .generic_families(GenericFamily::SystemUi)
+            .collect();
+        assert_eq!(
+            system_ui.len(),
+            1,
+            "SystemUi must resolve to exactly the registered fallback face"
+        );
+        assert!(
+            font_ctx
+                .collection
+                .generic_families(GenericFamily::Monospace)
+                .next()
+                .is_none(),
+            "Monospace must stay unmapped — only SystemUi/SansSerif were requested"
+        );
+
+        // The defect under test: SystemUi-styled text on an otherwise-empty
+        // system collection must still shape into glyph runs.
+        let mut cx = TextContext {
+            font_ctx,
+            layout_ctx: parley::LayoutContext::new(),
+            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
+            app_fonts_applied: 0,
+            generic_fallbacks_applied: watermark,
+            #[cfg(test)]
+            measurements: 0,
+        };
+        let layout = cx.layout("Hello", &style(20.0), None);
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        assert!(
+            !runs.is_empty(),
+            "SystemUi text must shape with the registered fallback face even \
+             when the system font collection is empty"
+        );
+
+        // Idempotence: a second apply with nothing new pending must not
+        // re-append the same family into the generic-family list.
+        let applied_again = apply_generic_fallbacks(&mut cx.font_ctx, &entries, &mut watermark);
+        assert!(
+            !applied_again,
+            "nothing new is pending — a repeat apply must be a no-op"
+        );
+        let system_ui_after: Vec<_> = cx
+            .font_ctx
+            .collection
+            .generic_families(GenericFamily::SystemUi)
+            .collect();
+        assert_eq!(
+            system_ui_after, system_ui,
+            "a repeat apply must not double-register the fallback family"
+        );
+    }
+
+    #[test]
+    fn register_generic_fallback_is_a_noop_with_no_generics() {
+        // Deliberately the *empty-generics* case only: `register_generic_fallback`
+        // writes to the process-wide, never-drained `GENERIC_FALLBACKS` record,
+        // so a call naming a real slot here would keep applying for the rest of
+        // this test binary's run — see `apply_generic_fallbacks`'s docs and the
+        // isolated-collection test above, which exercises the real
+        // registration/append behavior without that leak.
+        let before = GENERIC_FALLBACKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        register_generic_fallback(vec![1, 2, 3], &[]);
+        let after = GENERIC_FALLBACKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(
+            before, after,
+            "no generic slots requested — nothing should be queued"
         );
     }
 

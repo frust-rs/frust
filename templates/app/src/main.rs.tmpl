@@ -1,15 +1,23 @@
 //! Desktop preview entry point.
 //!
-//! Never hand-edit this file: `frust::app!` (in `lib.rs`) generates the
-//! hidden `__frust_main` this one line calls — add screens/state to
-//! `lib.rs` instead.
+//! Never hand-edit this file: `frust::app!` (in `lib.rs`) generates both the
+//! hidden `__frust_main` this file's desktop `main` calls and the browser
+//! entry its `wasm32` `main` keeps alive — add screens/state to `lib.rs`
+//! instead.
 
-// On Android the app is driven by the JNI bridge (`frust::app!` in
-// `lib.rs`), not this desktop preview binary — and `__frust_main` is
-// compiled out for the Android target. Gate the desktop `main` accordingly,
-// and provide an empty `main` on Android so this crate's bin target still
-// compiles when `cargo ndk` builds every target for `aarch64-linux-android`.
-#[cfg(not(target_os = "android"))]
+// Two targets drive the app from somewhere other than this binary, and on
+// both of them `frust::app!` compiles `__frust_main` out:
+//
+// - **Android**: the app is driven by the JNI bridge `frust::app!` generates
+//   in `lib.rs`, reached through this crate's `cdylib`; `cargo ndk` still
+//   builds every target, so the bin needs a `main` that compiles.
+// - **`wasm32-unknown-unknown`**: the browser instantiates the compiled
+//   module and calls the `#[wasm_bindgen(start)]` entry `frust::app!`
+//   generates in `lib.rs` (through `frust::web_app!`). Nothing ever calls
+//   `main` there either — but this bin target is not inert on that target
+//   the way it is on Android, for the reason the `wasm32` arm below
+//   documents.
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 fn main() {
     {{ project_name }}::__frust_main();
 }
@@ -17,3 +25,22 @@ fn main() {
 #[cfg(target_os = "android")]
 fn main() {}
 
+// The browser arm. On `wasm32-unknown-unknown` this crate's `[lib]` (a
+// `cdylib`) and this `[[bin]]` compile to the SAME output file name —
+// `<target>/wasm32-unknown-unknown/<profile>/{{ project_name }}.wasm` — and
+// cargo reports an "output filename collision" and writes one of them there,
+// in an order nothing downstream can choose. That file is what a browser
+// build hands to `wasm-bindgen`, so an empty `main` here means the shipped
+// module may be a few-kilobyte stub that instantiates and does nothing: the
+// app initializes, mounts no canvas, and logs no error.
+//
+// The binding below is a reference, never a call: it puts `lib.rs`'s
+// browser entry — and with it the whole library — into THIS binary's link
+// graph, so the binary is a complete, startable module whichever of the two
+// cargo writes. The browser still starts the app through wasm-bindgen's own
+// module-init hook, exactly as it does for the library; `main` itself is
+// never reached.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    let _entry: fn() = {{ project_name }}::__frust_web_start;
+}
