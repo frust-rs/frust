@@ -186,10 +186,23 @@ fn card_case() -> AnyView<()> {
 
 /// `glyph/command-palette` — a live query over a short filtered list, built
 /// directly (not through the navigator-pushed `show_command_palette`).
+///
+/// The hint is spelled out as `"Cmd+D"` rather than the literal `⌘D`.
+/// Neither bundled Glyph face — Space Mono nor IBM Plex Mono
+/// (`plugins/glyph/src/tokens/scales.rs`) — carries U+2318 PLACE OF INTEREST
+/// SIGN (confirmed against both faces' `cmap` tables), so the raw symbol
+/// falls back to `.notdef` and paints as an empty box. Registering a
+/// symbol-covering fallback face was considered and rejected: the live tier
+/// is payload-constrained (the lp-00 fonts already cost +560,157 B gzipped),
+/// and reachability, not bundling, is what the wasm linker keeps, so a new
+/// face earns its weight back into the bundle the moment anything reaches
+/// it. A spelled-out hint costs nothing and keeps this case eligible for the
+/// live tier; the one loss is that the catalog no longer demonstrates the
+/// literal glyph the real widget would show on a Mac keyboard.
 fn command_palette_case() -> AnyView<()> {
     framed(
         command_palette::<(), _, _>(
-            vec![PaletteItem::new("Deploy").hint("⌘D")],
+            vec![PaletteItem::new("Deploy").hint("Cmd+D")],
             |_: &mut (), _: String| {},
             |_: &mut (), _: usize| {},
         )
