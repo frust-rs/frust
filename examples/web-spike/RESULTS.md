@@ -775,6 +775,16 @@ correct, permissive answer here — it does not *add* SIMD/threads/etc. to the
 module (nothing in this graph emits them), it only stops the validator from
 rejecting features the input already legitimately uses.
 
+> **Correction, 2026-09-08** (found on binaryen 132 during the browser manual
+> gate): the last sentence held for `wasm-opt` 130 and no longer does. `-all`
+> means "every proposal this binaryen knows about", and binaryen 131 added the
+> *compact import section* — so on a newer optimizer the flag does change the
+> output, emitting an import kind browsers reject outright (`Invalid import
+> kind 126`) while still exiting 0. Name the proposals instead; the list lives
+> in `WASM_OPT_FEATURES` (`crates/frust-drive/src/web_build/mod.rs`) and in
+> `examples/web-gallery/README.md`. The sizes below stand — they were measured
+> on 130, where `-all` and the named list produce the same module.
+
 **Sizes** (bytes; MiB rounded to 2 places; gzip at `-9`):
 
 | Row | Raw (post-`wasm-bindgen` `*_bg.wasm`, the artifact the browser actually loads) | Gzipped |

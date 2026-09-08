@@ -40,17 +40,33 @@ From this directory:
 cargo build --release --target wasm32-unknown-unknown
 wasm-bindgen --target web --out-dir pkg --out-name web_gallery \
   target/wasm32-unknown-unknown/release/web-gallery.wasm
-wasm-opt -O --all-features -o pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
+wasm-opt -O \
+  --enable-bulk-memory --enable-bulk-memory-opt \
+  --enable-nontrapping-float-to-int --enable-sign-ext \
+  --enable-mutable-globals --enable-multivalue --enable-reference-types \
+  -o pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
 ```
 
-Host tool versions this was built and measured with: `wasm-bindgen-cli`
+Host tool versions the sizes below were measured with: `wasm-bindgen-cli`
 0.2.128 (must equal the crate's own `=0.2.128` pin — see `Cargo.toml`),
-`wasm-opt` 130, `cargo` 1.98.1 (the repo's pinned toolchain).
+`wasm-opt` 132, `cargo` 1.98.1 (the repo's pinned toolchain).
 
-`wasm-opt` needs `--all-features` (bare `-O` refuses to parse this
-`rustc`/`wasm-opt` combination's output — the same finding
-`examples/web-spike/RESULTS.md` § 16.1 records) and must run **after**
-`wasm-bindgen`, never before. To actually *ship* the optimized artifact
+`wasm-opt` must be told which proposals to accept — bare `-O` refuses to
+parse this `rustc`/`wasm-opt` combination's output, the finding
+`examples/web-spike/RESULTS.md` § 16.1 records — and must run **after**
+`wasm-bindgen`, never before. Name them, as above, rather than reaching for
+`--all-features`: that flag means "everything this binaryen knows about", and
+since binaryen 131 that includes the compact import section, which makes the
+optimizer emit an import kind no browser will instantiate —
+
+```
+CompileError: WebAssembly.instantiateStreaming(): Invalid import kind 126,
+enable with --experimental-wasm-compact-imports
+```
+
+— while still exiting 0, so the breakage shows up only when the page loads.
+`frust build web` runs the same named list (`WASM_OPT_FEATURES` in
+`crates/frust-drive/src/web_build/mod.rs`); keep the two together. To actually *ship* the optimized artifact
 (rather than only measure it), copy it over the unoptimized one afterward —
 `wasm-bindgen`'s generated `pkg/web_gallery.js` always imports
 `./pkg/web_gallery_bg.wasm` by that fixed name:
@@ -66,12 +82,16 @@ never sees it):
 
 | Stage | Size |
 |---|---|
-| `wasm-bindgen` output (`web_gallery_bg.wasm`, unoptimized) | 9,793,587 B ≈ 9.34 MiB |
-| after `wasm-opt -O --all-features` | 9,138,696 B ≈ 8.72 MiB |
-| gzip of the `wasm-opt`'d file | 3,869,894 B ≈ 3.69 MiB |
+| `wasm-bindgen` output (`web_gallery_bg.wasm`, unoptimized) | 11,535,811 B ≈ 11.00 MiB |
+| after `wasm-opt -O` with the feature list above | 10,730,424 B ≈ 10.23 MiB |
+| gzip `-9` of the `wasm-opt`'d file | 4,465,581 B ≈ 4.26 MiB |
+
+Measured 2026-09-08 on `dev` after the web shell's IME bridge and CLI web
+build landed; the earlier rows this table carried (9.34 / 8.72 / 3.69 MiB)
+predate both.
 
 One binary contains the whole 35-case registry (see "A discrepancy with the
-card's '107 cases'" below) plus the JS glue (`web_gallery.js`, 156,613 B,
+card's '107 cases'" below) plus the JS glue (`web_gallery.js`, 162,382 B,
 uncompressed) is separate and tiny by comparison. For scale,
 `examples/web-spike`'s own five-crate render-engine probe (no widgets, no
 `frust-gallery`, no design-system plugins) measured 5.44 MiB / 1.93 MiB
