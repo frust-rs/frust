@@ -1,8 +1,8 @@
 # frust-gallery
 
 The shared widget/page **case registry** both the static snapshot generator
-(`crates/frust-testing`'s widget-snapshots bin) and the future browser
-gallery app (`examples/web-gallery`, wasm) read. It is a plain library —
+(`crates/frust-testing`'s widget-snapshots bin) and the browser gallery app
+(`examples/web-gallery`, wasm) read. It is a plain library —
 dev-only, never shipped in an app's own dependency graph.
 
 Its own manifest declares no `frust-render`/`frust-gpu`/`wgpu` dependency:
@@ -11,8 +11,11 @@ renderer graph is still a **transitive** dependency, though — each of the
 five design-system plugins this crate uses for [`theme()`](src/theme.rs)
 depends on the `frust` facade, and the facade carries `frust-render` ->
 `frust-gpu` -> `wgpu` (`cargo tree -p frust-gallery -e normal -i wgpu`).
-So `wasm32` compilability is not established today; it depends on that
-graph being made wasm-clean, which the web-shell work owns.
+`wasm32` compilability of that graph is already established, not merely
+aspirational: `examples/web-gallery` (a standalone workspace, outside this
+crate's own manifest) already builds this whole registry — all five
+design-system plugins included — for `wasm32-unknown-unknown` and measures
+the resulting binary; see that crate's own README.md for the numbers.
 
 ## Adding a case
 
@@ -149,7 +152,7 @@ out-of-tree git dependency, so none of the reasons `examples/huddle` /
   each one through `record_view` under both light and dark themes (via
   [`theme()`](src/theme.rs)), and writes the result out as a PNG plus a
   manifest.
-- `examples/web-gallery` (a future wasm app) will read the same registry to
-  render an in-browser widget gallery, consulting `find_interactive` for a
-  case's slug (see "Adding an interactive case" above) before falling back
-  to that case's own `Case::build`.
+- `examples/web-gallery` (a wasm app) reads the same registry to render an
+  in-browser widget gallery, consulting `find_interactive` for a case's slug
+  (see "Adding an interactive case" above) before falling back to that
+  case's own `Case::build`.

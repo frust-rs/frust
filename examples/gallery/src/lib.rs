@@ -1,14 +1,14 @@
 //! `frust-gallery`: the shared widget/page CASE REGISTRY both the static
 //! snapshot generator (`crates/frust-testing`'s widget-snapshots bin) and the
-//! future browser gallery app (`examples/web-gallery`) read.
+//! browser gallery app (`examples/web-gallery`) read.
 //!
 //! # The pure-`View` constraint
 //!
 //! Every [`Case::build`] is a plain `fn() -> `[`frust_core::AnyView`]`<()>` —
 //! it is called fresh on every rebuild pass and never touches a reactive
 //! runtime or a wall clock. That mirrors `crates/frust-testing/src/frame.rs`'s
-//! `record_view`, the recorder both consumers of this registry drive a case
-//! through: it builds a `RenderRoot<(), V>`, calls `build()` again on every
+//! `record_view`, the recorder every case in the registry is driven through
+//! today: it builds a `RenderRoot<(), V>`, calls `build()` again on every
 //! rebuild pass (`layout_with_text` shapes text against a supplied
 //! `TextContext`, `paint` records into a `SceneBuilder`), with no reactive
 //! runtime and no ambient owner attached at all — `record_view`'s own doc
@@ -63,9 +63,12 @@
 //! `frust` facade, though, and the facade pulls `frust-render` ->
 //! `frust-gpu` -> `wgpu`, so the renderer graph IS in this crate's
 //! transitive dependencies (`cargo tree -p frust-gallery -e normal -i wgpu`
-//! shows the path). Compiling this crate for `wasm32` is therefore not yet
-//! established: it depends on that graph being made wasm-clean, which the
-//! web-shell work owns.
+//! shows the path). That graph's `wasm32` compilability is already
+//! established, not merely aspirational: `examples/web-gallery` (a
+//! standalone workspace, outside this crate's own manifest) already builds
+//! this whole registry — all five design-system plugins included — for
+//! `wasm32-unknown-unknown` and measures the resulting binary; see that
+//! crate's own README.md for the numbers.
 //!
 //! See `README.md` for how to add a case.
 
