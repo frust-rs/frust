@@ -26,6 +26,22 @@
 //!                -> image::RgbaImage
 //! ```
 //!
+//! # Warm frames
+//!
+//! [`FrameSpec::warm_frames`] carries the one thing a poster of an *animating*
+//! case needs and a single paint cannot give it. A staged animation's first
+//! `advance` only seeds its clock, so a one-paint recording lands at progress
+//! 0 however late [`Case::time_ms`] is — the poster shows an invisible or
+//! unsettled widget. [`frame_spec`] takes the count from the registry
+//! ([`Case::warm_frames`], which derives it from a non-zero `time_ms`) and
+//! [`crate::frame::frame`] runs that many discarded paints before the captured
+//! one.
+//!
+//! This costs the determinism claim below nothing: the count is fixed per case
+//! and the warm timestamps are integer arithmetic over it, so the extra passes
+//! are as reproducible as the captured one. Every case in today's registry
+//! records at rest and asks for zero.
+//!
 //! Layout stays LOGICAL and the device scale composes at PAINT — [`crate::frame`]'s
 //! split, inherited wholesale. That is why [`render_spec`] leaves
 //! [`crate::render::RenderSpec::scale`] at `1.0`: [`FrameSpec::scale`] is already
@@ -120,15 +136,22 @@ pub fn snapshot_text_context() -> TextContext {
 }
 
 /// The deterministic frame inputs `case` records under: its own logical
-/// viewport, its own device scale, and its own fixed timestamp
-/// ([`Case::time_ms`], converted to the [`FrameTime`] nanosecond clock an
-/// animating widget differences itself against).
+/// viewport, its own device scale, its own fixed timestamp ([`Case::time_ms`],
+/// converted to the [`FrameTime`] nanosecond clock an animating widget
+/// differences itself against), and its own warm-pass count.
+///
+/// The warm count comes from the registry rather than from here
+/// ([`Case::warm_frames`]): whether a case's widget stages an animation is a
+/// property of the case, not of the tool recording it. A case at rest — every
+/// case in today's registry — asks for zero, which is the single paint this
+/// generator has always done.
 #[must_use]
 pub fn frame_spec(case: &Case) -> FrameSpec {
     FrameSpec {
         size: case.size,
         scale: case.scale,
         time: FrameTime::from_nanos(case.time_ms.saturating_mul(1_000_000)),
+        warm_frames: case.warm_frames(),
     }
 }
 
@@ -908,5 +931,96 @@ mod tests {
         let first = render_case(case, Variant::Dark, &mut fonts).expect("first render");
         let second = render_case(case, Variant::Dark, &mut fonts).expect("second render");
         assert_eq!(first.image.as_raw(), second.image.as_raw());
+    }
+
+    #[test]
+    fn a_case_at_rest_records_the_single_paint_this_generator_always_did() {
+        let spec = frame_spec(a_case());
+        assert_eq!(spec.time, FrameTime::ZERO);
+        assert_eq!(
+            spec.warm_frames, 0,
+            "no warm pass for a case at rest — otherwise every committed \
+             poster would move"
+        );
+    }
+
+    /// The registry-wide version of the claim above, checked against the whole
+    /// case list rather than one seed case: introducing warm frames must not
+    /// have changed the frame inputs of anything already published.
+    #[test]
+    fn no_case_in_the_registry_records_a_warm_pass_today() {
+        let warmed: Vec<&str> = frust_gallery::cases()
+            .iter()
+            .filter(|case| frame_spec(case).warm_frames > 0)
+            .map(|case| case.slug)
+            .collect();
+        assert!(
+            warmed.is_empty(),
+            "these cases' posters are no longer the frame that was published: {warmed:?}"
+        );
+    }
+
+    /// A `Case` whose widget genuinely STAGES a motion: a button in its
+    /// `loading` state carries a repeating 900ms linear spinner whose arc
+    /// angle follows an `AnimationController`. The implicit wrappers in the
+    /// registry's own animation module seed themselves already settled, so
+    /// they are the wrong subject for this claim; this one is not.
+    fn a_staged_spinner() -> frust_core::AnyView<()> {
+        frust_core::any(frust_widgets::button("Hello", |_: &mut ()| {}).loading(true))
+    }
+
+    /// The end-to-end proof, at the level of the PIXELS a poster is made of:
+    /// the same widget rendered through [`render_case`] — the exact function
+    /// the `widget-snapshots` binary calls — differs once its case opts in.
+    ///
+    /// Without this, everything above only shows that a count travels through
+    /// a struct. The registry ships no opted-in case yet (that is asserted
+    /// separately), so the subject is built here rather than borrowed.
+    #[test]
+    fn opting_a_case_in_changes_the_poster_it_renders() {
+        let at_rest = Case {
+            time_ms: Case::DEFAULT_TIME_MS,
+            build: a_staged_spinner,
+            ..*a_case()
+        };
+        let staged = Case {
+            // A quarter of the spinner's 900ms period — unmistakably not the
+            // frame it starts on.
+            time_ms: 225,
+            build: a_staged_spinner,
+            ..*a_case()
+        };
+        assert_eq!(frame_spec(&at_rest).warm_frames, 0);
+        assert_eq!(frame_spec(&staged).warm_frames, Case::STAGED_WARM_FRAMES);
+
+        let mut fonts = snapshot_text_context();
+        let cold = render_case(&at_rest, Variant::Light, &mut fonts).expect("at-rest render");
+        let warmed = render_case(&staged, Variant::Light, &mut fonts).expect("staged render");
+        assert_ne!(
+            cold.image.as_raw(),
+            warmed.image.as_raw(),
+            "a case that pins a later point in its animation must record a \
+             different poster — if these match, the warm pass never reached \
+             the recorder and `time_ms` is still doing nothing"
+        );
+    }
+
+    /// The wiring, proved on a case that does opt in: `frame_spec` must carry
+    /// the registry's count through, not hard-code zero.
+    #[test]
+    fn a_case_pinning_a_later_timestamp_carries_its_warm_count_into_the_spec() {
+        let staged = Case {
+            time_ms: 400,
+            ..*a_case()
+        };
+        let spec = frame_spec(&staged);
+        assert_eq!(spec.time, FrameTime::from_nanos(400_000_000));
+        assert_eq!(spec.warm_frames, Case::STAGED_WARM_FRAMES);
+        assert_eq!(
+            spec.warm_time(0),
+            FrameTime::ZERO,
+            "the warm pass seeds the clock at zero, leaving the capture its \
+             own 400ms to advance through"
+        );
     }
 }

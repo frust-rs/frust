@@ -56,6 +56,11 @@ pub struct Case {
     /// The fixed frame timestamp, in milliseconds, an animating case is
     /// recorded at. [`Case::DEFAULT_TIME_MS`] (0, i.e. rest) unless a case
     /// deliberately pins a later point in an animation.
+    ///
+    /// Setting this above zero is also how a case asks the STATIC recorder for
+    /// a warm pass — see [`Case::warm_frames`], which derives its count from
+    /// this field, and which is what makes a non-zero value take effect at
+    /// all.
     pub time_ms: u64,
     /// Which design system (and, transitively via [`crate::theme::theme`],
     /// which theme) this case renders under.
@@ -74,4 +79,122 @@ impl Case {
     /// The default fixed frame time a case is recorded at: 0ms (rest, no
     /// animation offset).
     pub const DEFAULT_TIME_MS: u64 = 0;
+
+    /// The warm-pass count a case that pins a non-zero [`Case::time_ms`] is
+    /// recorded with: one.
+    ///
+    /// One is what a staged ramp needs and all it needs — a single discarded
+    /// paint to seed the animation's clock, so the captured paint is the
+    /// second `advance` and sees the whole of `time_ms` as its delta. A count
+    /// above one only matters for a motion that INTEGRATES per frame (a
+    /// spring), where several small deltas and one large one are not the same
+    /// answer; expressing that per case would need a real field here, which
+    /// is the follow-up described on [`Case::warm_frames`].
+    pub const STAGED_WARM_FRAMES: u8 = 1;
+
+    /// How many discarded warm paints the static recorder runs before
+    /// capturing this case's frame.
+    ///
+    /// # Why a non-zero `time_ms` needs this at all
+    ///
+    /// A one-paint recorder cannot show a staged animation at anything but
+    /// its start. `AnimationController::advance`
+    /// (`crates/frust-core/src/anim.rs`) derives its delta from the previous
+    /// `advance`, so the first call after a motion starts only seeds the
+    /// clock and contributes a zero delta — and a presence driver that
+    /// latches its `started` instant on its first paint
+    /// (`plugins/beui/src/motion/presence.rs`) does the same. Recording a
+    /// case at `time_ms: 400` therefore used to produce *the identical frame*
+    /// as recording it at `0`: the poster showed an invisible or unsettled
+    /// widget, and the declared timestamp did nothing.
+    ///
+    /// So the two halves are inseparable, and this derives one from the
+    /// other: a case that pins a later point in an animation gets the warm
+    /// pass that makes that point reachable, and a case at rest
+    /// ([`Case::DEFAULT_TIME_MS`]) gets none. Every case in today's registry
+    /// is at rest, so nothing this derives changes a committed pixel.
+    ///
+    /// # How a case opts in
+    ///
+    /// By setting its own `time_ms`, at its literal in the registry — no
+    /// second field, and no edit anywhere else:
+    ///
+    /// ```text
+    /// time_ms: 400,   // was: Case::DEFAULT_TIME_MS
+    /// ```
+    ///
+    /// The number is the point in the animation the poster should show,
+    /// usually at or just past where the motion settles.
+    ///
+    /// # Why the count is derived rather than declared
+    ///
+    /// A `warm_frames: u8` field on [`Case`] would read better at the literal,
+    /// but every literal in the registry spells out all of its fields and none
+    /// carries a `..` base, so adding one field is an edit to all 107 of them
+    /// across 17 modules. (Functional-record-update syntax IS admissible in
+    /// these `const` slices — that was checked, not assumed — but it only
+    /// helps literals already written to use it.) Deriving the count keeps the
+    /// capability and its opt-in to the recorder and this file; promoting it
+    /// to a real field is the follow-up to take when a case genuinely needs a
+    /// count of its own.
+    ///
+    /// # Not the browser gallery's concern
+    ///
+    /// `examples/web-gallery` runs a live event loop with a real clock, so its
+    /// animations advance on their own; warming exists for the STATIC
+    /// recorder, which paints each case a fixed number of times and stops.
+    #[must_use]
+    pub const fn warm_frames(&self) -> u8 {
+        if self.time_ms > Self::DEFAULT_TIME_MS {
+            Self::STAGED_WARM_FRAMES
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case_at(time_ms: u64) -> Case {
+        Case {
+            slug: "warm-frames-probe",
+            title: "Warm frames probe",
+            size: Case::DEFAULT_SIZE,
+            scale: Case::DEFAULT_SCALE,
+            time_ms,
+            design: Design::Base,
+            build: || frust_core::any(frust_widgets::text("Hello")),
+        }
+    }
+
+    #[test]
+    fn a_case_at_rest_asks_for_no_warm_pass() {
+        assert_eq!(case_at(Case::DEFAULT_TIME_MS).warm_frames(), 0);
+    }
+
+    #[test]
+    fn a_case_pinning_a_later_point_asks_for_one_warm_pass() {
+        assert_eq!(case_at(1).warm_frames(), Case::STAGED_WARM_FRAMES);
+        assert_eq!(case_at(400).warm_frames(), Case::STAGED_WARM_FRAMES);
+    }
+
+    /// The registry-wide claim this card rests on: every case ships at rest,
+    /// so introducing the warm pass moves no committed poster. A case that
+    /// later opts in will fail this and must say so in its own review — which
+    /// is the point of asserting it rather than trusting it.
+    #[test]
+    fn no_case_in_the_registry_opts_into_a_warm_pass_yet() {
+        let opted_in: Vec<&str> = crate::cases()
+            .iter()
+            .filter(|case| case.warm_frames() > 0)
+            .map(|case| case.slug)
+            .collect();
+        assert!(
+            opted_in.is_empty(),
+            "these cases now record a warm pass, so their posters have moved \
+             and must be named in the change that opted them in: {opted_in:?}"
+        );
+    }
 }
