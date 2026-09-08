@@ -80,8 +80,7 @@ embedding route (below).
 
 Output lands in `build/web/` (`pkg/app.js`, `pkg/app_bg.wasm`, the staged
 `index.html`/`frust_web.js`) — see "Generated output" below for why it is
-**not** committed, and the one `.gitignore` gap this task cannot close
-itself.
+**not** committed.
 
 ### Manual recipe (no `frust` build required)
 
@@ -221,13 +220,9 @@ python3 -m http.server 8931 --bind 127.0.0.1 --directory ../..
 
 `pkg/` and `target/` are generated and **must not be committed** — this
 standalone workspace's own `.gitignore` already covers both (`efe979c5`).
-**`build/` is a new gap this task's `frust build web` recipe introduces and
-this task cannot close**: `.gitignore` is not in this task's `write_files`
-(`Cargo.toml`, `README.md`, `index.html`, `src/main.rs`); the conductor
-should add a `/build/` line alongside the existing `/pkg/`/`/target/` ones.
-This task's own worktree does not commit a `build/` directory (removed
-before hand-off), but the next person to run `frust build web --release`
-here will produce one that `git status` flags until that line lands.
+`build/`, which the `frust build web` recipe writes, is covered the same way
+(`066e9c30`) — the `.gitignore` line was added separately because
+`.gitignore` was outside this task's own `write_files`.
 
 ## Embedding (this task, g3-01)
 
@@ -617,4 +612,4 @@ not yet exercised by any case in the registry.
 | `README.md` | This file. |
 | `pkg/` | `wasm-bindgen`/`wasm-opt` output (manual recipe). Generated; **not committed** (`.gitignore`-covered — see "Serve" above). |
 | `target/` | Cargo build output. Generated; **not committed** (`.gitignore`-covered). |
-| `build/` | `frust build web --release`'s own output directory (primary recipe). Generated; **not committed**, but **not yet `.gitignore`-covered** — see "Generated output" note above the "Embedding" section for the gap this task cannot close itself. |
+| `build/` | `frust build web --release`'s own output directory (primary recipe). Generated; **not committed**, and `.gitignore`-covered alongside `pkg/` and `target/`. |

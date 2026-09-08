@@ -73,7 +73,7 @@ The repository already contains substantial non-pixel coverage:
   text cases, incl. `examples/material3-demo`'s standalone page goldens).
 - `examples/gallery` (package `frust-gallery`): a hand-authored widget/page case registry, a
   dev-only root workspace member shared by the website's static snapshot generator and the
-  future browser gallery. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
+  browser gallery below. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
   CPU oracle to a light/dark PNG plus `manifest.json` per case — a documentation-asset
   generator, not a golden class (no committed baseline, no promotion); its `--check` mode
   re-renders and byte-compares, proving same-host determinism only. Run via
