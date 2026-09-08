@@ -68,9 +68,10 @@ checks remain). Per host:
 
 A gate for `crates/frust-shell-web`, run against `examples/web-gallery` per its own README's
 Build/Serve sections (`cargo build --release --target wasm32-unknown-unknown`, then
-`wasm-bindgen --target web ...` and `wasm-opt -O --all-features ...`, served by anything that
-sends `.wasm` as `application/wasm`) — the README has the full recipe, including the
-ship-the-optimized-artifact copy step; do not restate it here. No automated pixel gate exists for
+`wasm-bindgen --target web ...` and `wasm-opt -O` with the named feature list, served by
+anything that sends `.wasm` as `application/wasm`) — the README has the full recipe, including
+the feature flags (never `--all-features`, which on binaryen 131+ emits an import kind browsers
+refuse) and the ship-the-optimized-artifact copy step; do not restate it here. No automated pixel gate exists for
 this surface — a person must look. Check:
 
 - [ ] Chrome, default (WebGPU): pointer, wheel, touch-drag scroll, and keyboard text entry

@@ -630,6 +630,34 @@ fn wasm_bindgen(
     Ok(())
 }
 
+/// The wasm proposals `wasm-opt` is told to accept, named one by one.
+///
+/// Deliberately not `--all-features`. That blanket flag means "everything
+/// this binaryen knows about", which grows with the tool: binaryen 131 added
+/// the compact import section, so `--all-features` started emitting import
+/// kind 126 — a module no shipping browser will instantiate
+/// (`WebAssembly.instantiateStreaming(): Invalid import kind 126`). Because
+/// `wasm-opt` still exits 0, the pipeline below would rename that module over
+/// the good one and report it as optimized, and the build would only fail at
+/// page load. Naming the proposals keeps the flag set pinned to what browsers
+/// actually ship, whatever the installed binaryen has learned since.
+///
+/// The list is what this toolchain's own output needs — `memory.copy` and
+/// `i64.trunc_sat_*` are the two a bare `-O` rejects — plus the rest of the
+/// `wasm32-unknown-unknown` baseline. Being wrong in this direction is safe:
+/// a proposal the module uses and this list omits makes `wasm-opt` refuse the
+/// input, which is a note ([`WebBuildNote::WasmOptFailed`]) that keeps the
+/// unoptimized module, not a broken artifact that ships.
+const WASM_OPT_FEATURES: &[&str] = &[
+    "--enable-bulk-memory",
+    "--enable-bulk-memory-opt",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-multivalue",
+    "--enable-reference-types",
+];
+
 /// Optimizes `wasm` in place, or records why it did not run.
 ///
 /// Runs **after** `wasm-bindgen` (the module doc's step 4). Whether it runs
@@ -637,10 +665,10 @@ fn wasm_bindgen(
 /// function assumes it is wanted and only ever records why the *tool itself*
 /// declined.
 ///
-/// `-O --all-features` is the invocation `examples/web-gallery/README.md`
-/// derived: bare `-O` refuses to parse the module this toolchain combination
-/// produces, so the feature flag is not an optimization choice but the thing
-/// that makes the tool accept the input at all.
+/// The feature flags are not an optimization choice but the thing that makes
+/// the tool accept the input at all: a bare `-O` refuses to parse the module
+/// this toolchain combination produces. Which flags, and why not the blanket
+/// one, is [`WASM_OPT_FEATURES`].
 ///
 /// Writes to a sibling `.opt.wasm` and renames it over the original only on
 /// success, because `wasm-bindgen`'s generated glue imports the module by
@@ -660,13 +688,9 @@ fn run_wasm_opt(
     let optimized = wasm.with_extension("opt.wasm");
     let input = wasm.to_string_lossy().to_string();
     let output = optimized.to_string_lossy().to_string();
-    let argv = vec![
-        "-O",
-        "--all-features",
-        "-o",
-        output.as_str(),
-        input.as_str(),
-    ];
+    let mut argv = vec!["-O"];
+    argv.extend_from_slice(WASM_OPT_FEATURES);
+    argv.extend_from_slice(&["-o", output.as_str(), input.as_str()]);
 
     let mut prefixed = |line: &str| on_line(&format!("[wasm-opt] {line}"));
     let out = match runner.run_streaming("wasm-opt", &argv, Some(project_dir), &[], &mut prefixed) {
@@ -1269,10 +1293,16 @@ mod tests {
             "{}",
             calls[1]
         );
-        // `--all-features` is what makes wasm-opt accept this toolchain's
-        // output at all, not an optimization preference.
+        // The feature flags are what make wasm-opt accept this toolchain's
+        // output at all, not an optimization preference — and they are named
+        // one by one on purpose (`WASM_OPT_FEATURES`).
         assert!(
-            calls[2].starts_with("wasm-opt -O --all-features -o "),
+            calls[2].starts_with("wasm-opt -O --enable-"),
+            "{}",
+            calls[2]
+        );
+        assert!(
+            calls[2].contains(&format!("{} -o ", WASM_OPT_FEATURES.join(" "))),
             "{}",
             calls[2]
         );
@@ -1412,6 +1442,43 @@ mod tests {
             before: BINDGEN_WASM_LEN as u64,
             after: OPTIMIZED_WASM_LEN as u64,
         }));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The optimizer is told which proposals to accept by name, and never
+    /// with the blanket flag.
+    ///
+    /// `--all-features` means "everything this binaryen knows", which on 131+
+    /// includes the compact import section: `wasm-opt` then exits 0 having
+    /// written a module the browser refuses (`Invalid import kind 126`), and
+    /// the pipeline renames it over the good one and calls it optimized. The
+    /// argv is the only place that decision is visible, so it is the thing
+    /// this asserts.
+    #[test]
+    fn wasm_opt_names_its_features_and_never_asks_for_all_of_them() {
+        let (root, project, target) = checkout("wasm-opt-features");
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let call = runner
+            .invocations()
+            .into_iter()
+            .find(|call| call.starts_with("wasm-opt"))
+            .expect("a release build runs wasm-opt");
+        assert!(
+            !call.contains("--all-features"),
+            "the blanket flag ships a module browsers reject: {call}"
+        );
+        for feature in WASM_OPT_FEATURES {
+            assert!(call.contains(feature), "{feature} missing from {call}");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
