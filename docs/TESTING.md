@@ -78,6 +78,11 @@ The repository already contains substantial non-pixel coverage:
   generator, not a golden class (no committed baseline, no promotion); its `--check` mode
   re-renders and byte-compares, proving same-host determinism only. Run via
   `scripts/widget-snapshots.sh`.
+- `examples/web-gallery`: the frust.dev website's live-preview app, rendering the same
+  `examples/gallery` case registry in-browser via `frust build web --release`; its build
+  artifact — 10,723,407 B after `wasm-opt`, 4,466,224 B gzipped — is what decided the
+  website mounts live previews click-to-run rather than automatically. The build recipe
+  and full size history are recorded in its own `examples/web-gallery/README.md`, not here.
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.
