@@ -1,20 +1,31 @@
 //! `frust-gallery`: the shared widget/page CASE REGISTRY both the static
 //! snapshot generator (`crates/frust-testing`'s widget-snapshots bin) and the
-//! future browser gallery app (`examples/web-gallery`) read.
+//! browser gallery app (`examples/web-gallery`) read.
 //!
 //! # The pure-`View` constraint
 //!
 //! Every [`Case::build`] is a plain `fn() -> `[`frust_core::AnyView`]`<()>` —
-//! no reactive runtime, no owner, and no wall clock. That mirrors
-//! `crates/frust-testing/src/frame.rs`'s `record_view`, the recorder both
-//! consumers of this registry drive a case through: it builds a
-//! `RenderRoot<(), V>` with no runtime attached at all
-//! (`root.rebuild(logic, state)` just calls `build()` again, `layout_with_text`
-//! shapes text against a supplied `TextContext`, `paint` records into a
-//! `SceneBuilder`) — so a case that reached for `use_signal`/`use_context`/a
-//! system clock would panic the moment it tried to record a frame. Time is
-//! captured instead through [`Case::time_ms`], a fixed [`frust_core::FrameTime`]
-//! input an animating widget differences itself against, never sampled live.
+//! it is called fresh on every rebuild pass and never touches a reactive
+//! runtime or a wall clock. That mirrors `crates/frust-testing/src/frame.rs`'s
+//! `record_view`, the recorder every case in the registry is driven through
+//! today: it builds a `RenderRoot<(), V>`, calls `build()` again on every
+//! rebuild pass (`layout_with_text` shapes text against a supplied
+//! `TextContext`, `paint` records into a `SceneBuilder`), with no reactive
+//! runtime and no ambient owner attached at all — `record_view`'s own doc
+//! comment says so directly. That does not mean retained state panics here:
+//! nothing in `reactive_graph` 0.2.14 (the version this workspace pins)
+//! panics for want of an ambient owner — `Owner::new()` simply creates a
+//! parentless owner when there is none to nest under. The constraint that IS
+//! real is a CLOCK, not reactivity: the recorder normally paints a case
+//! exactly once, and `AnimationController::advance` contributes a zero delta
+//! on the first call after a motion starts (`crates/frust-core/src/anim.rs`),
+//! so an unconditionally-started ramp records at progress 0 by default. Time
+//! is captured instead through [`Case::time_ms`], a fixed
+//! [`frust_core::FrameTime`] input an animating widget differences itself
+//! against, never sampled live — and a case that pins `time_ms` above
+//! [`Case::DEFAULT_TIME_MS`] can ask the recorder for a warm pass to actually
+//! land on that instant instead of progress 0; see [`Case::warm_frames`] for
+//! the full contract.
 //!
 //! # The slug rule
 //!
@@ -52,9 +63,12 @@
 //! `frust` facade, though, and the facade pulls `frust-render` ->
 //! `frust-gpu` -> `wgpu`, so the renderer graph IS in this crate's
 //! transitive dependencies (`cargo tree -p frust-gallery -e normal -i wgpu`
-//! shows the path). Compiling this crate for `wasm32` is therefore not yet
-//! established: it depends on that graph being made wasm-clean, which the
-//! web-shell work owns.
+//! shows the path). That graph's `wasm32` compilability is already
+//! established, not merely aspirational: `examples/web-gallery` (a
+//! standalone workspace, outside this crate's own manifest) already builds
+//! this whole registry — all five design-system plugins included — for
+//! `wasm32-unknown-unknown` and measures the resulting binary; see that
+//! crate's own README.md for the numbers.
 //!
 //! See `README.md` for how to add a case.
 
