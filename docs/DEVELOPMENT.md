@@ -63,17 +63,14 @@ test -p frust-cli --test profile_sync`); a `[profile.dev.package."*"]` wildcard
 **Release-profile hardening.** `[profile.release]` (the same five hand-synced manifests) sets
 `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
 `opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a 5% bar
-against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh` below). **No
-design-system cargo features.** `frust` carries `default = []` (only the tooling opt-ins
-`perf-trace`/`devtools`) — there is no catalog feature to enable or disable. The three built-in
-design systems — `frust-glyph`/`frust-material`/`frust-cupertino`
-(`plugins/{glyph,material,cupertino}`) — are ordinary sibling plugin crates an app depends on
-beside `frust`, each installed via its own `install()` call (see *Run*'s design-system-install
-gate below); each also resolves `kurbo`/`peniko` via `{ workspace = true }`, riding the same
-single pin as every other crate rather than declaring one of its own. **Widget-authoring test
-fixtures.** `frust-widgets`' non-default `test-support` feature compiles in the crate's GPU-free
-container-widget fixtures (`frust_widgets::test_support`), so a design system built outside this
-crate can test its own containers the same way; off by default in a normal app build.
+against a render-stack CPU-perf carve-out (`scripts/size-report.sh` below). **No design-system
+cargo features.** `frust` carries `default = []` (only the tooling opt-ins `perf-trace`/`devtools`).
+The built-in design systems (`frust-glyph`/`frust-material`/`frust-cupertino`) are ordinary sibling
+plugin crates an app depends on beside `frust`, each installed via its own `install()` call (see
+*Run*'s design-system-install gate below). **Widget-authoring test fixtures.** `frust-widgets`'
+non-default `test-support` feature compiles in GPU-free container-widget fixtures
+(`frust_widgets::test_support`) so an out-of-tree design system can test its own containers too;
+off by default in a normal app build.
 
 ## Run
 
@@ -92,18 +89,14 @@ clippy, from its own directory) is part of *Test* below.
 
 **Design-system install gate.** `examples/huddle`'s appearance settings expose a four-way
 `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check (desktop, Android, iOS)
-plus a reduced-motion pass round out the manual gate above — no automated check exists for
-either. `examples/huddle` seeds its own Glyph first-launch default via `frust_glyph::install()`
-(`app!`'s setup block); a shell with no design system installed falls back to `Theme::neutral()`.
+plus a reduced-motion pass round out the manual gate above — no automated check exists for either.
+A shell with no design system installed falls back to `Theme::neutral()`.
 
-**shadcn gallery.** `cargo run -p shadcn-demo` (a root-workspace member, unlike `huddle` — no
-`cd`/standalone gate needed) opens the `frust-shadcn` catalog's desktop gallery: the manual visual
-gate for shadcn/ui component changes, the same shape as huddle's above.
-
-**material3 gallery.** `cd examples/material3-demo && cargo run` (a standalone workspace, unlike
-`shadcn-demo` above — no `-p`) opens the `frust-material` catalog's desktop gallery: the manual
-visual gate for Material 3 Expressive component changes and theme configuration; `frust run -d
-<device-id>` builds/installs/launches it on Android or iOS from the same directory.
+**shadcn gallery.** `cargo run -p shadcn-demo` (root-workspace member — no `cd`/standalone gate
+needed) opens the `frust-shadcn` catalog's desktop gallery, the same manual-visual-gate shape as
+huddle's above. **material3 gallery.** `cd examples/material3-demo && cargo run` (standalone
+workspace — no `-p`) opens the `frust-material` catalog's desktop gallery; `frust run -d
+<device-id>` from the same directory builds/installs/launches it on Android or iOS.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):
@@ -129,28 +122,48 @@ unlocking/pairing/Developer Mode). `run` defaults to debug (`build` defaults to 
 device selected it falls back to a streamed `cargo run` (desktop preview, or `--watch` below) —
 first Android/iOS builds take a few minutes.
 
-**`--features <spec>` passthrough**
-(`run`, `build apk|appbundle|ios|ipa`; repeatable/comma-splittable; appended after the
-mode's own feature selection; refused on `build macos|windows|linux`; the four release lanes
-additionally refuse a devtools-enabling token and reject one outside cargo's strict feature
-charset) is detailed in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md). **High refresh-rate
-hints.** A generated app's iOS `CADisplayLink` requests a 30–120Hz
-`preferredFrameRateRange`; Android calls `Surface.setFrameRate()` (API 30+) with the
-display's max rate — both hints, unverifiable on the iOS Simulator or most Android
+**`--features <spec>` passthrough** (`run`, `build apk|appbundle|ios|ipa`; repeatable/comma-
+splittable; appended after the mode's own feature selection; refused on `build
+macos|windows|linux`; the four release lanes additionally refuse a devtools-enabling token) is
+detailed in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md). **High refresh-rate hints.** A generated
+app's iOS `CADisplayLink` requests a 30–120Hz `preferredFrameRateRange`; Android calls
+`Surface.setFrameRate()` (API 30+) — both unverifiable on the iOS Simulator or most Android
 emulators (60Hz-only).
 
 **TUI workbench.** Bare `frust` in an interactive terminal, or the explicit `frust tui`, opens the
 ratatui workbench (scaffold/build/doctor/clean as supervised sessions, a fuzzy command palette, a
-bootstrap wizard, Add Plugin — `?` opens the full keybinding help overlay). Opening the workbench
-immediately runs device discovery, the doctor preflight, and the bootstrap report in the invoking
-directory, and records the active project — the cwd-detected one, or (when the invoking directory
-isn't a Frust project) a re-stamp of the persisted most-recently-opened project, with no entry
-recorded if neither exists — in the recent-projects store (`~/.config/frust/tui.toml`), the
-implicit side effects of the new default entry point. Both stdin and stdout must be TTYs: a non-interactive
-bare `frust` prints help and exits 2, while a non-interactive `frust tui` returns a clean error
-instead of touching terminal state. A per-session perf sparkline parses `frust-perf` lines once
-`FRUST_TRACE` is set. `cargo test -p frust-tui` covers engine/render logic; live-terminal gestures
-and a fresh-machine bootstrap walk are a **manual gate** for a person at a real desk, not CI.
+bootstrap wizard, Add Plugin — `?` opens the full keybinding help overlay). Opening it immediately
+runs device discovery, the doctor preflight, and the bootstrap report in the invoking directory,
+and records the active project (cwd-detected, or a re-stamp of the persisted most-recently-opened
+one) in `~/.config/frust/tui.toml`. Both stdin and stdout must be TTYs: a non-interactive bare
+`frust` prints help and exits 2; a non-interactive `frust tui` errors cleanly instead. A per-session
+perf sparkline parses `frust-perf` lines once `FRUST_TRACE` is set. `cargo test -p frust-tui` covers
+engine/render logic; live-terminal gestures and a fresh-machine bootstrap walk are a **manual gate**
+for a person at a real desk, not CI.
+
+## Web
+
+```bash
+frust build web [--release]      # wasm32 build -> wasm-bindgen -> optional wasm-opt -> host page
+frust run -d web [--no-open]     # the same build, served at http://127.0.0.1:<port> (loopback), then blocks on Ctrl-C
+frust create --platforms web     # opt-in web scaffold (templates/app/web.tmpl; absent from the default platform set)
+```
+
+`frust doctor` prints an informational "Web" heading that never affects its exit code. `[web]`
+`frust.toml` keys and the dev server's containment/security posture: [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
+
+**MANUAL WEB GATE** (browser matrix; no automated pixel gate exists — a person must look, like this
+guide's other manual gates). Serve `examples/web-gallery` or a `--platforms web` scaffold per its
+README / [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)'s Browser manual gate, and check:
+
+- [ ] Chrome, default (WebGPU): pointer/wheel/touch-drag/keyboard reach the app; theme, resize and
+      DPR track live; the index page's counter advances with zero input.
+- [ ] Chrome, forced to WebGL2 (`?arm=webgl` — `--disable-features=WebGPU` does **not** reach this
+      fallback, so the query param is the only way): shapes, text, gradients, blur, layers correct.
+- [ ] Safari 26 and Firefox on Windows/macOS (WebGPU): same checks as the Chrome/WebGPU row above.
+      Firefox on Linux (its own WebGL2 fallback): same checks as the Chrome/WebGL2 row.
+- [ ] IME: focus the search box, type ASCII, compose Japanese `nihongo` → にほんご → 日本語 (Enter
+      commits once, Escape cancels); blurring the field removes `#frust-ime-overlay` from the DOM.
 
 ## Dev Loop
 
@@ -252,13 +265,11 @@ root one (*Version-Pin Policy*) — the same shape `examples/shadertoy`, `exampl
 `examples/web-gallery`, and `examples/web-spike` gate under, per their own READMEs (the latter two
 against the wasm32 target, see *Prerequisites*). `huddle` and `clean-signals-frust` git+rev-pin
 `clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
-`design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
-(from its own directory) to print **no** `frust feature "..."` line — no longer a catalog-off
-proof (`frust` carries no catalog feature anywhere for any dependent to print), but the
-out-of-tree-realism check that this workspace resolves `frust` exactly the way a real
-third-party design-system crate would, with nothing implicitly re-enabled by feature
-unification (that workspace's own README carries the full rationale). This gate is separate
-from `frust build apk`/`run`'s pipeline gate (*Run*).
+`design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app` (from its
+own directory) to print **no** `frust feature "..."` line — the out-of-tree-realism check that this
+workspace resolves `frust` exactly the way a real third-party design-system crate would, with
+nothing implicitly re-enabled by feature unification (that workspace's own README carries the full
+rationale). Separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-gpu` and `frust-engine` are
 plain (non-feature-gated) dependencies of `frust-render` now, so their host-only tests already ride
@@ -358,11 +369,10 @@ cargo check --target aarch64-apple-darwin \
 # by construction (`yeslogic-fontconfig-sys` needs a pkg-config sysroot).
 ```
 
-**Containerized recipe** for the two cross-checks above on a host without mingw-w64 (e.g.
-devbox): `docker run --rm -v "$PWD":/src -w /src rust:1-bookworm bash -c 'apt-get update &&
-apt-get install -y gcc-mingw-w64-x86-64 && rustup target add x86_64-pc-windows-gnu
-aarch64-apple-darwin && <the two cargo check commands above>'`. Proven both ways: host-side
-(mingw-w64 + `rustup target add x86_64-pc-windows-gnu`) and via this container recipe.
+**Containerized recipe** for the two cross-checks above on a host without mingw-w64 (e.g. devbox):
+`docker run --rm -v "$PWD":/src -w /src rust:1-bookworm bash -c 'apt-get update && apt-get
+install -y gcc-mingw-w64-x86-64 && rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin &&
+<the two cargo check commands above>'`.
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification (TalkBack/VoiceOver)
@@ -373,11 +383,10 @@ aarch64-apple-ios-sim -p <crate> [--lib | --test <name>]` — `frust-iap` (`--li
 engine's Simulator gate (`-p frust-testing --test ios_sim`; *Known Issues* below) use it.
 
 **Neither compile gate above touches Kotlin or Swift.** `cargo check --target
-aarch64-linux-android`/`aarch64-apple-ios*` only type-checks the Rust `frust-*` graph —
-a Kotlin type error in the embedding module or a plugin's Gradle module ships through a
-fully green cargo gate undetected. The only gate that actually compiles Kotlin is a real
-Gradle build (`frust build apk --debug`, or the ignored `build_e2e`/scaffold tests
-above); compiling Swift needs an Xcode build (macOS only).
+aarch64-linux-android`/`aarch64-apple-ios*` only type-checks the Rust `frust-*` graph — a Kotlin
+type error in the embedding module or a plugin's Gradle module ships through a green cargo gate
+undetected. Only a real Gradle build (`frust build apk --debug`, or the ignored `build_e2e`/scaffold
+tests above) compiles Kotlin; compiling Swift needs an Xcode build (macOS only).
 
 ### Per-unit device gates
 
@@ -390,23 +399,20 @@ ride the gate chain above.
 
 ## Benchmarks
 
-`benchmarks/` is a paired Frust-vs-Flutter measurement suite, out-of-tree from the crate
-workspace: `frust_bench/` (standalone Cargo package, gate from its own directory like
-`examples/huddle`) and `flutter_bench/` (Flutter SDK, tested against 3.44.2 stable)
-implement the same scenarios — eight timed UI scenarios (S1–S8) plus two DB op-latency
-scenarios (D1/D2) — driven by `harness/`'s shared scripts. `benchmarks/` is scoped strictly
-to this paired-comparison protocol; the exploratory, single-sided terminal-grid and
-IME-capability probes live in `examples/playground` instead.
+`benchmarks/` is a paired Frust-vs-Flutter measurement suite, out-of-tree from the crate workspace:
+`frust_bench/` (standalone Cargo package, gate from its own directory like `examples/huddle`) and
+`flutter_bench/` (Flutter SDK 3.44.2 stable) implement the same scenarios — eight timed UI
+scenarios (S1–S8) plus two DB op-latency scenarios (D1/D2) — via `harness/`'s shared scripts. The
+exploratory, single-sided terminal-grid and IME-capability probes live in `examples/playground`
+instead.
 
 ```bash
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
 ```
 
-`benchmarks/PROTOCOL.md` is the published methodology (device matrix, run counts, statistics,
-fairness gates, raw-line formats); `benchmarks/RESULTS.md` is the filled record of actual device
-runs (never placeholder/projected numbers), with every methodology deviation labeled per run.
-**macOS `mktemp` caveat.** `harness/run.sh`'s `mktemp` only expands correctly under GNU mktemp —
-BSD/macOS returns the template unexpanded, silently colliding runs; alias `mktemp` to `gmktemp`
+`benchmarks/PROTOCOL.md` is the published methodology; `benchmarks/RESULTS.md` is the filled
+record of actual device runs (never placeholder/projected numbers). **macOS `mktemp` caveat.**
+`harness/run.sh`'s `mktemp` only expands correctly under GNU mktemp — alias it to `gmktemp`
 (`brew install coreutils`) until fixed.
 
 ## Instrumentation
@@ -425,12 +431,11 @@ BSD/macOS returns the template unexpanded, silently colliding runs; alias `mktem
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/SHELLS_ARCHITECTURE.md`'s `frust-shell-common` kill-switch data flow) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
 
-`FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf startup ...`
-line, then periodic `frust-perf frame ...` summaries; on a platform-view page it
-also emits a rate-limited `frust-perf platform-view tail depth=...` line from the
-Android scroll-sync tail. `frust-camera`'s backends separately `log::debug!` the
-platform's own expected frame-rate range at session configure (`FRUST_LOG=debug`),
-so a stream's fps reading can be compared against it.
+`FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf startup ...` line, then
+periodic `frust-perf frame ...` summaries; on a platform-view page it also emits a rate-limited
+`frust-perf platform-view tail depth=...` line from the Android scroll-sync tail. `frust-camera`'s
+backends separately `log::debug!` the platform's expected frame-rate range (`FRUST_LOG=debug`), so
+a stream's fps reading can be compared against it.
 
 `scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds the arm64-v8a release
 `.so` via `cargo ndk`, reporting unstripped/stripped size, an APK/AAB per-ABI `.so`+dex breakdown
@@ -494,10 +499,9 @@ must declare the same floor; the numbers are repeated in an in-file comment at e
 
 **A mismatch fails in one of two ways, depending on direction** (both verified empirically):
 
-- **App below library → hard build error.** AGP's manifest merger refuses it:
-  `uses-sdk:minSdkVersion 24 cannot be smaller than version 26 declared in library
-  [:frust-embedding] … as the library might be using APIs not available in 24`.
-  `:app:processDebugMainManifest` fails; nothing is produced.
+- **App below library → hard build error.** AGP's manifest merger refuses it
+  (`uses-sdk:minSdkVersion 24 cannot be smaller than version 26 declared in library
+  [:frust-embedding] …`); `:app:processDebugMainManifest` fails and nothing is produced.
 - **Library below app → silent behaviour change.** No error; the library just misses APIs it could
   have used, exactly as `IME_FLAG_NO_PERSONALIZED_LEARNING` did (below).
 
@@ -528,19 +532,18 @@ wiring `lintDebug` into the Android gate, and deciding whether `InlinedApi` shou
 here, is open work (*Verifying a floor change* below covers why its exit code proves nothing).
 
 **One** API becomes available at this floor and is deliberately **not** adopted: `SeekBar.setMin`
-(API 26) — `plugins/native-widgets/src/controls/slider.rs` keeps its Rust-side range mapping; see
-that module doc for why. Two things the floor does **not** unlock still need their existing
-workarounds: `Font.Builder(ByteBuffer)` is **API 29**, so `typeface.rs` still writes a cache file;
-and `BiometricPrompt` is **API 28+**, so `secure-storage`'s gate stays and
-`NotAvailable(UnsupportedApiLevel)` remains reachable on 26 and 27.
+(API 26) — `plugins/native-widgets/src/controls/slider.rs` keeps its Rust-side range mapping (see
+that module doc). Two things the floor does **not** unlock still need their existing workarounds:
+`Font.Builder(ByteBuffer)` (API 29, so `typeface.rs` still writes a cache file) and
+`BiometricPrompt` (API 28+, so `secure-storage`'s `NotAvailable(UnsupportedApiLevel)` gate stays
+reachable on 26/27).
 
 ### Migrating an already-scaffolded app
 
 An app scaffolded against an older floor carries `minSdk = 24`. **The bump is mandatory, not
-optional** — a scaffolded app consumes the embedding as a Gradle *project* dependency
-(`implementation(project(":frust-embedding"))`), so an app at 24 against the 26 library fails the
-manifest merger outright. Set `minSdk = 26` in the app's `app/build.gradle.kts`; there is no other
-migration step.
+optional** — a scaffolded app consumes the embedding as a Gradle *project* dependency, so an app at
+24 against the 26 library fails the manifest merger outright. Set `minSdk = 26` in
+`app/build.gradle.kts`; there is no other migration step.
 
 **Verifying a floor change:** `cargo` cannot see any of this. Run, from an app dir:
 
@@ -557,34 +560,30 @@ concluding anything.
 
 ### Formatting
 
-The codebase is formatted with `rustfmt` using default settings (no `rustfmt.toml`);
-`cargo fmt --check` is part of the verify gate above.
+`rustfmt` with default settings (no `rustfmt.toml`); `cargo fmt --check` is part of the verify
+gate above.
 
 ### Android emulator GPU on Apple Silicon
 
-An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
-`vkQueueSubmit` in the emulator's gfxstream/MoltenVK Vulkan driver (an emulator/driver
-limitation, not a Frust bug). Use a physical device, or boot with `-gpu swiftshader`
-(software Vulkan; slower but correct).
+An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on `vkQueueSubmit` in
+the emulator's gfxstream/MoltenVK Vulkan driver (an emulator/driver limitation, not a Frust bug).
+Use a physical device, or boot with `-gpu swiftshader` (software Vulkan; slower but correct).
 
 ### iOS Simulator uniform-buffer alignment clamp
 
 The Simulator's GPU (Apple2 Metal feature family) renders correctly under `frust-engine` — it
 needs neither `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION` (`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is
-deliberately empty), the pair the deleted vello-classic tier required and this GPU lacks (gate
-`engine-p6-ios-simulator-renders`, re-verified on wgpu 30.0.1 by `engine-p8-wgpu30-ios-simulator-renders`,
-*Test* above). One residue remains: the Simulator's Metal validation misreports its own
-uniform-buffer offset alignment, so a device request there is forced back up to 256 bytes
-(`frust-gpu::context`'s `effective_limits`) — kept until upstream
-[gfx-rs/wgpu#10189](https://github.com/gfx-rs/wgpu/pull/10189) ships. Physical devices are
-unaffected (iPhone 13 mini, iPhone SE).
+deliberately empty), the pair the deleted vello-classic tier required and this GPU lacks. One
+residue remains: the Simulator's Metal validation misreports its own uniform-buffer offset
+alignment, so a device request there is forced back up to 256 bytes (`frust-gpu::context`'s
+`effective_limits`) — kept until upstream [gfx-rs/wgpu#10189](https://github.com/gfx-rs/wgpu/pull/10189)
+ships. Physical devices are unaffected (iPhone 13 mini, iPhone SE).
 
 ### Android release build may not pick up `--define`
 
-A `--release` Android build threads `--define`s into the `cargo ndk` compile via
-Gradle's `environment(...)`, but has been observed to drop them (e.g. `FRUST_TRACE=1`
-missing from the artifact). Workaround: export the same key/value pairs in the build
-shell's environment first; fix pending.
+A `--release` Android build threads `--define`s into the `cargo ndk` compile via Gradle's
+`environment(...)`, but has been observed to drop them (e.g. `FRUST_TRACE=1` missing from the
+artifact). Workaround: export the same key/value pairs in the build shell's environment first.
 
 ### Bitmap-strike color emoji do not render on the engine (COLR emoji do)
 

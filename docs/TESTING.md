@@ -290,9 +290,14 @@ Store independent baselines for:
 - `engine-metal-macos/`: the Mac M4 rig's engine class — baselines promoted
   across the unit/widget/page/text corpus and, since the p6-d1 verification
   round, the filter family too.
-- No browser/WebGL2 golden class exists — that arm was cancelled before
-  landing, not merely unimplemented (`docs/LIMITATIONS.md`'s
-  `engine-webgl2-unhosted`); do not document one as shipping.
+- No independent `engine-webgl2-*` golden class exists, but the arm is covered: `crates/frust-testing`'s
+  non-default `webgl` feature (`tests/wasm_goldens.rs`, `tests/wasm_binary_invariants.rs`) runs the unit
+  corpus through `frust-engine` on a real `wgpu::Backend::Gl` adapter via `wasm-bindgen-test` in headless
+  Chrome (chromedriver) — run recipe in [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s
+  `FRUST_ENGINE_DOWNLEVEL` row. It compares against the existing `cpu/` class above rather than owning
+  one of its own: each baseline is `include_bytes!`'d straight from `testing/goldens/cpu/` (no filesystem
+  in a browser), held to the same P1 bar `engine-vulkan-nvidia-t400/`/`engine-metal-macos/` are. See
+  [LIMITATIONS.md](LIMITATIONS.md)'s `engine-webgl2-atlas-target` for the one residual upstream constraint.
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the
