@@ -100,12 +100,48 @@ wasm-bindgen-futures = { workspace = true }
 # `std::thread::sleep` on this target and nothing else in the graph carries a
 # timer future.
 js-sys = { workspace = true }
-# `window.setTimeout(...)` — the other half of that same wait, and the only web
-# API this crate calls directly today (winit owns the canvas, the event
-# handlers and the animation-frame registration). The feature list is trimmed
-# to exactly that: `Window` alone, no `Document`, no `HtmlCanvasElement`, no
-# `console` — each of those belongs to work that actually touches the DOM.
-web-sys = { workspace = true, features = ["Window"] }
+# The two places this crate talks to the browser directly: `window.setTimeout`
+# (the bring-up retry's wait, `src/render.rs`) and the hidden-input IME overlay
+# (`src/ime.rs`), which winit has no seam for at all. The list names exactly
+# what those two call and nothing else — winit still owns the canvas, the
+# pointer/keyboard handlers and the animation-frame registration, and no
+# `console` row appears here because logging goes through `src/logging.rs`.
+#
+# Features only: the `web-sys` VERSION is untouched, and it stays the same
+# lockstep partner of the `=0.2.128` `wasm-bindgen` pin above that it already
+# was (see that row's derivation). Rows are one-per-line and grouped by what
+# needs them, since a bare alphabetical list says nothing about why any of
+# them is here.
+web-sys = { workspace = true, features = [
+    # `window.setTimeout`, and `window.document()` for the overlay element.
+    "Window",
+    # Creating the overlay `<input>`, reaching `<body>` to host it, and the
+    # `Node`/`Element`/`EventTarget`/`HtmlElement` ladder that append, attribute,
+    # style, focus and remove calls hang off.
+    "Document",
+    "Node",
+    "Element",
+    "EventTarget",
+    "HtmlElement",
+    "HtmlInputElement",
+    # The element's inline geometry (`position: fixed`, and the caret box
+    # written on every reposition).
+    "CssStyleDeclaration",
+    # The canvas: its viewport origin (`getBoundingClientRect`) converts the
+    # widget's logical caret box into the overlay's CSS placement, and it is the
+    # element winit's own keyboard listeners sit on, so it is also where the
+    # overlay re-dispatches a keystroke it received.
+    "HtmlCanvasElement",
+    "DomRect",
+    # The composition bridge itself: the base `Event` every listener takes, the
+    # composition/`input` events carrying the marked and committed text, and the
+    # keyboard event plus its init dictionary for that re-dispatch.
+    "Event",
+    "CompositionEvent",
+    "InputEvent",
+    "KeyboardEvent",
+    "KeyboardEventInit",
+] }
 # stderr is a silent no-op in a browser: `console_log` routes the `log` facade
 # to `console.*` and `console_error_panic_hook` routes panics to
 # `console.error` (the facade's `web_app!` bootstrap installs both; the shell's

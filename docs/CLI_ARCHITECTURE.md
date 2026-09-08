@@ -51,6 +51,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::metrics` | Pure `/proc`/`/sys`/`adb` parsers plus a `MetricsSampler` background-thread stream, feeding `frust-tui`'s DevTools System/Network tabs and `frust-mcp`'s `metrics` tool (Linux desktop + Android only in v1, no build-feature gate). Honest about scope: network counters are namespace-wide (desktop) or device-wide (Android), never per-process — see [LIMITATIONS.md](LIMITATIONS.md) |
 | `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream; `android_run::spawn_session` and the iOS pipelines' `spawn_session`/`spawn_physical_session` return the launched app's identity (`AndroidLaunch{stream, package}` / `IosLaunch`) so a caller can address that exact app later without re-deriving it — `frust-tui`'s `Supervisor` uses both to best-effort terminate the app on stop (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), and `frust-mcp`'s iOS-Simulator teardown uses `IosLaunch` the same way |
 | `frust-drive::desktop_run` | The workspace's single desktop-preview launch-plan construction site: `DesktopPlan` (program, argv, cwd, and child env together, since a `--profile` preview needs both `--features frust/perf-trace` and `FRUST_TRACE=1`). Consumed by `frust-cli run`'s desktop fallback, `frust-tui`'s supervisor (reshaped into its own `LaunchPlan`), and `frust-mcp`'s `spawn_desktop_session` — no front-end resolves its own invocation |
+| `frust-drive::web_build` | The browser tier's counterpart to `desktop_build`, requiring no app manifest: resolves and verifies the host page (the project's own `[web] host-dir` or the framework's `platform/web`, reached through the project's `frust` path dependency) and guards the artifact directory against overlapping it, `src/`, or the resolved page *before* compiling; `cargo build --target wasm32-unknown-unknown` → `wasm-bindgen --target web` into `<out-dir>/pkg/` → an optional `wasm-opt` pass strictly after `wasm-bindgen` (release-default, `[web] wasm-opt` overrides either way) → stages `index.html`/`frust_web.js`. `preflight` reports the same environment/manifest/host-page checks `frust doctor`'s Web heading renders |
+| `frust-drive::web_build::serve` | The static dev server `frust run -d web` starts after a build: loopback-only (`127.0.0.1`), Host-header validated (`localhost`/`127.0.0.1`/`[::1]`), segment-by-segment path containment (refuses `..`, drive prefixes, `:`, post-checked), `application/wasm` + no-store + `X-Content-Type-Options: nosniff`, and a control-character-scrubbed request log — `std::net::TcpListener` plus a request parser, no HTTP crate, matching `frust-drive`'s zero-framework-dependency charter. The host page's own `?module=` override is validated separately, in `platform/web/index.html` (same-origin, relative, under `./pkg/`, no `..`) |
 | `frust-drive::plugin` | Static plugin registry plus the idempotent project-mutation engine that applies it |
 | `frust-drive::interrupt` | The process-wide SIGINT/SIGTERM/SIGHUP + panic-hook owner; scrubs registered secret files before the process dies |
 | `frust-mcp::config` | `McpConfig` — port (`DEFAULT_MCP_PORT` 4848; `0` lets the OS assign an ephemeral one); bind address is hard-coded to `127.0.0.1`, never configurable |
@@ -232,6 +234,15 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   (CI, a Gradle signing plugin) and warns on every release build instead of promising a signature it
   can't verify. `key.properties` + the four `ANDROID_*` variables remain as a fallback for a hand-run
   `./gradlew` (e.g. from Android Studio) — that path carries no Frust promise.
+- `build web`/`run -d web`: `frust build web [--release]` drives `web_build::build` through the
+  injected `ProcessRunner`. `frust run -d web [--no-open]` — `web` is a reserved device id matched
+  case-insensitively before ordinary device discovery — runs that same build, serves the resulting
+  directory (`web_build::serve`), best-effort opens it in the host's default browser through the
+  same `ProcessRunner` seam (spawned, never waited on), then blocks until Ctrl-C; `--features` is
+  refused outright, mirroring `build macos|windows|linux`'s `reject_unplumbed_features` above. `frust
+  create --platforms web` renders `templates/app/web.tmpl`, opt-in and absent from the default
+  platform set. `frust doctor`'s Web heading renders `web_build::preflight`'s rows purely
+  informationally — they never affect `doctor`'s exit code.
 - `tui` (explicit subcommand, or the bare-`frust` default above): `Command::Tui` hands off entirely
   to `frust-tui`'s own async runtime (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), which may in
   turn start `frust_mcp::serve_embedded` and/or `frust_dap::serve_embedded` over its own

@@ -4481,15 +4481,24 @@ threads are unavailable — `wasm32-unknown-unknown` without the unstable
 already falls back to draining the queue synchronously on the calling
 thread. Correct, but on wasm every "warm-up" call is a blocking compile with
 no background overlap; the mechanism buys nothing there, it only avoids
-silently skipping the work.
+silently skipping the work. **Measured** (evidence: `examples/web-spike/RESULTS.md`
+§ 16.3, three cold runs per arm in Chrome): the first `submit` after bring-up —
+the one that pays this synchronous fallback — costs 10.2ms median on WebGPU and
+16.7ms median on WebGL2, against a 0.6-1.4ms steady-state `submit` on both
+backends once every variant is compiled — roughly 13-19x, once, not a per-frame
+cost. The console line this fallback prints (`frust-gpu: could not spawn the
+pipeline warm-up thread ...; building the listed variants inline`) is recorded
+verbatim in that section's transcripts.
 
-**Accepted because**: the fallback is already correct by construction (no
-thread, no crash, no silently-skipped compile), and no wasm target exists yet
-to measure the synchronous cost against — see `engine-webgl2-unhosted` below.
+**Accepted because**: single-digit-to-low-double-digit milliseconds, paid once
+at bring-up and never per frame, is the same order of magnitude the desktop
+tiers already pay for their own first-use pipeline compile (see
+`engine-dx12-cold-start` above) — the fallback is correct by construction and
+now measured cheap rather than merely assumed so.
 
-**Trigger for removal**: the Web Shell plan reaching a wasm target, either
-accepting the synchronous warm-up cost as measured or adding a
-Worker-backed pool.
+**Trigger for removal**: a `SharedArrayBuffer`/Worker-backed pool that gives
+`wasm32` a real background thread for this queue, if the measured cost above
+ever needs to shrink further.
 
 ### `engine-dx12-cold-start` — the engine's pipeline warm-up pays its whole cost inside the first-ever DX12 launch; every later launch is cheap (MEASURED)
 
@@ -4514,31 +4523,6 @@ warm-up-in-first-frame design costs more up front than nothing, but still
 lands the first-ever launch faster than classic's, and every launch after
 the first is markedly cheaper on the engine.
 
-### `engine-webgl2-unhosted` — the engine plan itself records no browser/WebGL2 number; that measurement now lives in the Web Shell plan
-
-**Observed** (evidence: `benchmarks/harness/webgl2_arm.md` and the retired
-"Arm 7 — Browser WebGL2: NO-GO" section of `benchmarks/RESULTS.md`, in git history (`git show f64be636:benchmarks/RESULTS.md`);
-no `p7-07` commit ever landed): OPEN #1 (engine plan, decided 2026-08-29) is **(b)** — the
-engine plan itself adds no wgpu `gles`/`webgpu` feature and hosts no wasm shell, so it
-recorded no browser number of its own. The desktop stand-in the engine plan DID land is
-`FRUST_ENGINE_DOWNLEVEL=1` (`crates/frust-gpu/src/caps.rs`), rehearsing
-`downlevel_webgl2_defaults()`'s limit profile against the desktop Metal
-backend — it answers the WebGL2 *limits* question without a browser. The
-browser measurement itself has since landed under the Web Shell plan:
-`examples/web-spike/RESULTS.md` §§ 1-17 puts Chrome WebGPU at **GO** (shapes
-and shaped text both correct) and Chrome WebGL2 at **PARTIAL NO-GO** (shapes
-correct, text broken — see `engine-webgl2-atlas-target` below).
-
-**Accepted because**: splitting the browser measurement into the Web Shell
-plan was a deliberate scope decision, not a default, and that plan has since
-delivered it; `FRUST_ENGINE_DOWNLEVEL=1` still gives the downlevel design
-rules a desktop-measurable proxy for the limits half of the question.
-
-**Trigger for removal**: `engine-webgl2-atlas-target`'s workaround (card
-w0-08) lands and WebGL2 reaches a full GO, at which point this entry and
-that one both fold into a plain "measured, WebGL2 GO" note rather than two
-accepted-limitation entries.
-
 ### `engine-webgl2-atlas-target` — wgpu-hal's GLES backend binds a one-layer atlas as `GL_TEXTURE_2D`, so every glyph and atlas image reads as blank on WebGL2
 
 **Observed** (evidence: `examples/web-spike/RESULTS.md` § 17; upstream wgpu
@@ -4550,11 +4534,11 @@ with `depth_or_array_layers == 1` until a second layer is needed, sampled
 through a `sampler2DArray` (`D2Array` view) — target and sampler disagree,
 so GLES 3.0's incomplete-texture rule makes every sample read `(0,0,0,1)`:
 every cached glyph paints as a solid box, every atlas image as an opaque
-black rect. The desktop Vulkan/Metal/DX12 backends are unaffected; this is
-WebGL2-only, and it is the one thing standing between the browser tier and a
-full GO (`engine-webgl2-unhosted` above).
+black rect. The desktop Vulkan/Metal/DX12 backends are unaffected; this was
+the one thing standing between the browser tier and a full WebGL2 match with
+WebGPU (2026-09-08).
 
-**Accepted because**: the workaround has landed (card w0-08) — `atlas_texture_descriptor`
+**Accepted because**: the workaround has landed — `atlas_texture_descriptor`
 (`crates/frust-engine/src/gpu/atlas.rs`) now floors `layers` at 2, and both
 1x1 array placeholders (`gpu/atlas.rs::placeholder`, `renderer.rs::placeholder_view`)
 allocate 2 layers, keyed off the exact condition wgpu-hal's own heuristic checks
@@ -4562,7 +4546,11 @@ allocate 2 layers, keyed off the exact condition wgpu-hal's own heuristic checks
 the reason so a later tidy-up cannot silently restore the one-layer floor); verified
 end to end (`examples/web-spike/RESULTS.md` § 17.4: the WebGL2 arm renders shaped
 text, images, gradients, blur and layers identically to the WebGPU arm, with the
-host Vulkan engine goldens unaffected). The memory cost is one extra atlas layer,
+host Vulkan engine goldens unaffected) and held in place by an ongoing automated
+gate — `crates/frust-testing`'s `webgl` feature (`tests/wasm_goldens.rs`,
+`tests/wasm_binary_invariants.rs`) renders the same corpus in headless Chrome and
+PASSED on the Linux rig (see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s
+`FRUST_ENGINE_DOWNLEVEL` row). The memory cost is one extra atlas layer,
 paid only in the single-resident-layer case: 4 MiB at the MOBILE 1024² tier, 16 MiB
 at the DESKTOP 2048² tier (both RGBA8), plus 4→8 bytes for the two 1x1 placeholders.
 This entry remains as the record of the upstream constraint itself — `wgpu-hal`
@@ -4984,26 +4972,101 @@ one-time startup line is missing, not ongoing frame telemetry.
 **Trigger for removal**: `frust_shell_common::perf::SystemClock`/
 `StartupSpans` gain a `web_time`-backed `wasm32` arm.
 
-### `web-ime-a11y-devtools` — the web shell has no IME, no accessibility tree, and no devtools loopback
+### `web-a11y-devtools` — the web shell has no accessibility tree and no devtools loopback
 
 **Observed** (evidence: `crates/frust-shell-web/src/app_handler.rs`'s
-`sync_ime`/`push_semantics`/`pump_devtools`): winit's web backend emits no
-`WindowEvent::Ime` at all, so no IME composition reaches the shell (a
-hidden-input bridge is the Phase 3 seam this leaves in place, not yet
-built); AccessKit ships no web adapter, so the semantics pass publishes
-nothing (a canvas app needs its tree mirrored into real DOM/ARIA elements,
-a whole subsystem this shell does not attempt); and the in-app devtools
-service is a loopback TCP listener a `wasm32` build has no sockets for, so
+`push_semantics`/`pump_devtools`): AccessKit ships no web adapter, so the
+semantics pass publishes nothing — a canvas app needs its whole tree
+mirrored into real DOM/ARIA elements to be readable by a screen reader at
+all, and no browser AccessKit backend exists to do that (a canvas-wide gap
+across the industry — every canvas-rendered web framework hits the same
+wall, not a frust-specific omission); and the in-app devtools service is a
+loopback TCP listener a `wasm32` build has no sockets for, so
 `frust-shell-web` forwards no `devtools` cargo feature at all
-(`crates/frust/Cargo.toml`'s `devtools` feature list omits it).
+(`crates/frust/Cargo.toml`'s `devtools` feature list omits it). (2026-09-08)
 
 **Accepted because**: each gap is a documented no-op with a stated call
 site for the eventual real implementation, not a silent absence — see
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
 
-**Trigger for removal**: a real web IME bridge (hidden editable element), a
-DOM/ARIA semantics mirror, and a WebSocket-based devtools transport, each
-its own future card.
+**Trigger for removal**: a DOM/ARIA semantics mirror, and a WebSocket-based
+devtools transport, each its own future change.
+
+### `web-ime-residual-gaps` — the web IME bridge ships, but gaps remain
+
+**Observed** (evidence: `crates/frust-shell-web/src/ime.rs`'s module doc,
+"Cases deliberately not handled"; [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s
+Web IME bridge): the hidden-`<input>` overlay bridge (real browser
+composition — CJK marked text, dead keys, mobile autocorrect — turned into
+`ImeEvent::Compose`/`Commit`) is implemented and unit-tested, but: (1) it is
+**device-unverified** — the build host that landed it has no browser rig, so
+no real CJK/IME input has ever been driven through a live browser session,
+and two rules the IME bridge review added on 2026-09-08 rest entirely on that
+unobserved ground. The first is the **unnamed-keystroke rule**: a `keydown`
+the browser reports as `Unidentified` — what a mobile soft keyboard sends for
+most of its keys — is not forwarded to the canvas, and the edit it produced is
+taken from the `input` signal behind it instead (an `insert*` carrying data
+becomes its characters, delivered once as a key event), which is the only
+route by which a soft keyboard's letters reach the tree at all. The mark that
+arms the carry lives no longer than the signal drain that queued it and is
+ended by any keystroke the key path does deliver, so an unnamed keystroke
+that changed nothing cannot attach to a later keystroke's echo; that bound is
+reasoned from browsers queueing a keystroke's `keydown` and `input` in the
+same task, not measured, and the rule itself is derived from winit 0.30.13's
+web key mapping producing nothing for an unnamed key, not from a keyboard
+watched doing it. The second is the **commit window**: an empty-data
+`compositionend` no longer retracts the preedit on the spot, because several
+browsers end a composition that way and deliver its text on the `input`
+immediately behind it (mobile predictive text, Safari); the preedit is
+instead held for the rest of that one signal drain, and an `insert*` `input`
+arriving inside it commits. The window's width is reasoned from browsers
+firing both signals in the same task, not measured. (2) a mobile browser's
+visual-viewport jump when its soft keyboard opens is not followed — the
+overlay is placed in layout-viewport coordinates and drifts from the focused
+field until the next reposition; (3) the plain-key re-dispatch this bridge
+relies on is coupled to winit's own choice to attach `keydown`/`keyup` to the
+canvas element rather than `document` — a future winit release moving that
+attachment point would silently break the re-dispatch; (4) **a soft
+keyboard's Backspace is lost**: it arrives unnamed like the letters, but the
+overlay element is emptied on every frame no composition owns, so the
+deletion finds nothing to delete and the browser raises no `input` for it —
+nothing reaches the tree. A carry for `deleteContentBackward` was added and
+then withdrawn on 2026-09-08 as unreachable by construction; the candidate
+fix (keep a sentinel character in the element for a deletion to consume,
+refilled as it is consumed) changes what the input method sees and has to be
+watched on a device first; (5) a field published as `Password` is served by a
+`type="password"` element, and such an element may receive no composition at
+all — many browsers and keyboards switch secure entry to a plain layout, as
+the native platforms do — so a secret field takes text through the key path
+and the unnamed-keystroke rule only. A hint that moves under a focused field
+is answered from the frame loop as well as from a dispatched event: the
+replacement inherits the DOM focus the old element held, and on a mobile
+browser that `focus()` runs outside a gesture, so the soft keyboard may close
+until the next tap. (2026-09-08)
+
+**Accepted because**: the composition/commit/cancel contract itself is real
+and tested (unlike the no-op it replaces), and each residual is independently
+scoped; none blocks ordinary text entry, and (4) blocks only deletion from a
+soft keyboard — a hardware Backspace, and every deletion inside a
+composition, still work. `ImeContentType` is no longer among them — the
+overlay is built from the focused field's hint, so a secret field gets a real
+`type="password"` element and a suggestion-refusing one gets
+`inputmode="text"`.
+
+**Trigger for removal**: a browser device gate exercising CJK composition
+end-to-end (closes 1). It must include, as manual checks: Safari — compose CJK
+text and let predictive text commit it (the commit window); Android Chrome —
+type on the soft keyboard with no hardware keyboard attached (the
+unnamed-keystroke rule: each letter exactly once), then press its Backspace
+(expected: no deletion, which is gap 4 — a deletion that does land is
+evidence the sentinel design is not needed); and a field published as
+`Password` — confirm the overlay element is `type="password"`, that the
+keyboard offers it no suggestions, and record whether composition is
+available on it (gap 5). Then: the overlay reading `visualViewport` offsets
+(closes 2); a conformance test pinning winit's canvas-attachment choice, or an
+upstream `WindowEvent::Ime` implementation removing the need for the bridge
+entirely (closes 3); the sentinel design landed with that Android evidence
+(closes 4).
 
 ### `web-touch-single-contact` — the web shell tracks only one touch contact at a time
 
@@ -5079,3 +5142,92 @@ a code change.
 **Trigger for removal**: `frust-shell-web` grows a canvas-sizing option
 (adopt a host-provided CSS class, or clear its own inline style after
 creation) that removes the need for a host page to work around it.
+
+### `web-webgpu-webgl2-runtime-fallback` — the browser tier renders on WebGPU when the page has one, and falls back to WebGL2 automatically otherwise
+
+**Observed** (evidence: `crates/frust-gpu/src/context.rs`'s `ContextOptions::default`/
+`RenderContext::with_options`, which every shell — including `frust-shell-web` —
+takes unmodified: `backends` defaults to `wgpu::Backends::from_env().unwrap_or_default()`,
+i.e. `Backends::all()` on `wasm32` since no process environment exists there;
+`wgpu` 30.0.1's own `Instance::new` (`wgpu-30.0.1/src/api/instance.rs`) then
+selects its real WebGPU backend only when the requested set includes
+`BROWSER_WEBGPU` **and** the page's own `navigator.gpu` property is present,
+falling through to the ordinary `wgpu-core`/GLES path — this crate's WebGL2
+arm — otherwise): a plain `frust::web_app!` build makes no browser-detection
+choice of its own; the fallback is `wgpu`'s, decided once at `Instance::new`,
+not a frust-side branch. As of this writing, Firefox ships WebGPU by default
+on Windows, with macOS support following behind the same rollout; Linux and
+Android do not yet have it by default — whichever is true for a given
+Firefox build, this mechanism is what a user actually gets: WebGPU when
+`navigator.gpu` exists, WebGL2 (full parity — see `engine-webgl2-atlas-target`
+above) when it does not. The forced-WebGL2 arm (Chrome's `?arm=webgl` query
+param) is proven in `examples/web-spike/RESULTS.md`; the unforced,
+browser-driven fallback branch itself is exercised only by the manual browser
+gate ([DEVELOPMENT.md](DEVELOPMENT.md)), not by an automated suite — the
+`frust-testing` `webgl` gate selects the GL backend directly via its own
+feature/build configuration rather than through a WebGPU-less browser.
+(2026-09-08)
+
+**Accepted because**: the fallback is `wgpu`'s own upstream selection
+contract, not frust code to maintain, and the WebGL2 destination it falls
+through to is now a full-parity render rather than a degraded one.
+
+**Trigger for removal**: an automated cross-browser CI matrix (e.g. a hosted
+Firefox/WebDriver runner) exercising the unforced default path on a
+WebGPU-less engine, rather than relying on the manual gate alone.
+
+### `web-no-plugins-native-widgets-platform-views-v1` — no OS-capability plugin, native-widgets control, or platform view works on the browser tier in v1
+
+**Observed** (evidence: `plugins/clipboard/src/lib.rs`'s per-target
+`set_text`/`get_text` arms, whose total-cover
+`#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos",
+target_os = "linux", target_os = "windows")))]` fallback — the one `wasm32`
+actually compiles under — returns
+`ClipboardError::NotAvailable(Unavailability::UnsupportedPlatform)` rather
+than doing anything; `plugins/native-widgets/src/lib.rs`'s
+`#[cfg(target_os = "android")]`/`#[cfg(target_os = "ios")]`-only modules,
+with no third arm for any other target; `crates/frust-shell-web/src/`
+naming no `platform_view` module at all, unlike every concrete shell in
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)): the OS-capability plugin
+tier (shared-preferences, secure-storage, camera, clipboard, haptics, iap,
+database, i18n), the native-widgets control plugin, and platform-view
+embedding are each mobile/desktop-only today. A browser app either gets a
+typed "unsupported" answer where a plugin bothers to report one (clipboard —
+see `web-clipboard-unavailable-v1` below), or simply cannot depend on the
+crate meaningfully at all (native-widgets has no non-mobile arm to compile).
+(2026-09-08)
+
+**Accepted because**: v1's browser tier scope is rendering, input, theme and
+resize (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s Web tier); a
+web backend for a specific plugin — clipboard's secure-context Clipboard
+API, a File-System-Access-backed storage plugin, a DOM-based control set
+standing in for native-widgets — is each its own future scope, not a
+same-shape port of the mobile/desktop implementation.
+
+**Trigger for removal**: tracked per plugin as each grows a real web
+backend, rather than closed as one blanket entry.
+
+### `web-clipboard-unavailable-v1` — `frust-clipboard` has no web backend; every call reports `UnsupportedPlatform`
+
+**Observed** (evidence: `plugins/clipboard/src/lib.rs`'s `set_text`/
+`get_text`/`set_text_sensitive`, each `#[cfg]`-arm-selected per target with a
+`wasm32`-covering total-cover fallback returning
+`Err(ClipboardError::NotAvailable(Unavailability::UnsupportedPlatform))`):
+unlike Android/iOS/macOS/Linux/Windows, which each resolve to a real backend
+(`ClipboardManager`/`UIPasteboard`/`arboard`), the crate compiles cleanly for
+`wasm32-unknown-unknown` but every operation is a typed refusal. The
+browser's own clipboard surface (the async Clipboard API,
+`navigator.clipboard.readText`/`writeText`) is a **secure-context** API
+gated behind a user gesture and, for reads, a permission prompt — a
+materially different contract from every other platform's synchronous
+plugin call, which this crate has not yet been reshaped to accommodate.
+(2026-09-08)
+
+**Accepted because**: a typed `NotAvailable` refusal is the same shape the
+crate already uses for any unsupported platform (see `set_text`'s "Total-cover
+fallback" comment) — a caller already has to handle it, and no app-visible
+crash or silent no-op results.
+
+**Trigger for removal**: a `wasm32` backend built on the async Clipboard API,
+which will also need `ClipboardError`'s synchronous return type reshaped to
+carry the API's own asynchrony and permission-prompt outcomes.

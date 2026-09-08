@@ -1,11 +1,12 @@
-//! Browser input on a focusable canvas (w1-04 owns this module).
+//! Browser input on a focusable canvas.
 //!
 //! winit 0.30.13's web backend emits separate mouse and touch variants (no
 //! unified pointer API at this pin), wheel deltas in line or pixel units, and
-//! plain keyboard events; IME/composition is Phase 3's hidden-input overlay.
+//! plain keyboard events; it emits no IME event at all, so composition is
+//! bridged around it by [`crate::ime`]'s hidden-input overlay instead.
 //!
 //! The mouse/wheel/keyboard halves of that story are the winit-generic
-//! [`crate::app_handler::InputState`] ported from `frust-shell-desktop` (w1-01):
+//! [`crate::app_handler::InputState`] ported from `frust-shell-desktop`:
 //! this crate's `WindowEvent` handler just calls into it. `WindowEvent::Touch`
 //! has no such twin — `frust-shell-desktop` never receives one (winit reports
 //! no touch on any desktop backend it targets), so touch mapping is

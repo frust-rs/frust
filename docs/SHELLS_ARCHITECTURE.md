@@ -50,6 +50,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-web::pacing` | Pure paced-wake decision logic composing the browser's two wake mechanisms (`requestAnimationFrame` redraws, `ControlFlow::WaitUntil` deadlines) |
 | `frust-shell-web::render` | The single-thread inline frame executor (`WebFrameExecutor`) over the wgpu surface: swapchain reconciliation, encode/acquire/submit, and the cold-page adapter-retry bring-up |
 | `frust-shell-web::input` | Single-contact `TouchTracker`, matching the mobile shells' v1 touch contract — the one input mapping with no `frust-shell-desktop` twin |
+| `frust-shell-web::ime` | The hidden-`<input>` overlay bridging real browser composition into `ImeEvent::Compose`/`Commit`, and the canvas re-dispatch that keeps plain typing on winit's existing key path — see Cross-cutting host signals below |
 | `frust-shell-web::logging` | Routes the `log` facade to the browser console (`console_log`/`console_error_panic_hook`), idempotent against the facade's own install, plus a `?log=` query-param level knob |
 
 ## Layer Dependencies
@@ -363,16 +364,44 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   platform touch point mapping the framework's `CursorIcon` onto winit's own vocabulary; a mobile
   shell never reads the resolved value. Web carries the identical request/resolve contract and a
   real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its
-  IME/semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
+  semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
   and Cursor section for the request/resolve contract.
-- **Web host signals with no browser counterpart:** IME (winit's web backend never emits
-  `WindowEvent::Ime`; a real bridge is the Phase 3 hidden-input overlay), accessibility (AccessKit
-  ships no web adapter — a canvas app needs its semantics mirrored into real DOM/ARIA elements),
-  and the in-app devtools UI-thread hop (a `wasm32` build has no sockets for its loopback listener,
-  so `frust-shell-web` forwards no `devtools` cargo feature at all) are each a documented no-op
-  rather than a silent gap (`crates/frust-shell-web/src/app_handler.rs`'s
-  `sync_ime`/`push_semantics`/`pump_devtools`). See [LIMITATIONS.md](LIMITATIONS.md)
-  `web-ime-a11y-devtools`.
+- **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (its `web_sys` backend
+  implements none of the IME setters — upstream issue 4424 is open with no timeline), so
+  `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under
+  `document.body` (`opacity: 0`, `pointer-events: none`), opened when the focused widget publishes
+  an active `ImeState` (`focus_ime_generation`) and removed when it stops. Its attributes come from
+  the focused field's `ImeContentType`: a secret field gets `type="password"` plus
+  `autocomplete="new-password"`, a suggestion-refusing field adds `inputmode="text"`, and a hint
+  that moves tears the element down and rebuilds it rather than mutating it, since a browser only
+  reads `type` when it classifies an element it has not seen before — checked from a dispatched
+  event and from the frame loop alike, so a focus move a signal drove (no input event behind it)
+  is answered on the next frame: the replacement inherits the DOM focus the old element held, and
+  an element that had lost focus is closed instead, a frame never taking focus for the user; the
+  frame loop's reposition pass clears the element's value on every pass no composition owns. Composition tracking is an
+  explicit `ComposeSession` (Idle/Open/PendingEmptyEnd): in `Open`, a `compositionend` carrying data
+  commits directly, but an *empty* one does not retract the preedit on the spot — several browsers
+  end a composition that way and deliver its text on the `input` immediately behind it — so it moves
+  to `PendingEmptyEnd`, which holds the preedit for the rest of that one signal-drain pass and lets
+  the next `insert*` `input` resolve it as the commit, while anything else resolves it as one clear.
+  winit's own `keydown`/`keyup` listeners stay attached to the canvas element rather than
+  `document`, so the overlay re-dispatches each plain keystroke it receives onto the canvas as a
+  copy — except a `keydown` the browser reports as `Unidentified` (what a mobile soft keyboard sends
+  for most of its keys), which is never re-dispatched; its edit is instead taken from the `input`
+  signal behind it (an `insert*` carrying data becomes its characters) and delivered once as a key
+  event, by a mark that lives no longer than the signal drain that queued it and is ended by any
+  keystroke the key path does deliver. A soft keyboard's Backspace is the known gap: the element is
+  emptied every frame, so the deletion has nothing to consume and raises no `input`. Removing the element mid-composition ends the
+  latch's session and retracts the preedit, the same as a blur. Not yet wired: the mobile
+  visual-viewport jump when a soft keyboard opens, and multiple simultaneous editables. The bridge
+  is compile- and unit-tested but device-unverified — this build host has no browser rig — see
+  [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
+- **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
+  adapter — a canvas app needs its semantics mirrored into real DOM/ARIA elements) and the in-app
+  devtools UI-thread hop (a `wasm32` build has no sockets for its loopback listener, so
+  `frust-shell-web` forwards no `devtools` cargo feature at all) are each a documented no-op rather
+  than a silent gap (`crates/frust-shell-web/src/app_handler.rs`'s `push_semantics`/`pump_devtools`).
+  See [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
 - **Platform-view embedding:** paint-time view frames feed the `platform_view` differ, which
   exposes a command backlog each shell's FFI layer polls and applies to the native view hierarchy,
   frame-paired to keep geometry in sync.
