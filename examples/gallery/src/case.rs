@@ -111,8 +111,9 @@ impl Case {
     /// So the two halves are inseparable, and this derives one from the
     /// other: a case that pins a later point in an animation gets the warm
     /// pass that makes that point reachable, and a case at rest
-    /// ([`Case::DEFAULT_TIME_MS`]) gets none. Every case in today's registry
-    /// is at rest, so nothing this derives changes a committed pixel.
+    /// ([`Case::DEFAULT_TIME_MS`]) gets none. A case that opts in moves its
+    /// committed poster, so it must also be named in the opt-in allowlist the
+    /// tests below assert against — a poster cannot move silently.
     ///
     /// # How a case opts in
     ///
@@ -180,21 +181,51 @@ mod tests {
         assert_eq!(case_at(400).warm_frames(), Case::STAGED_WARM_FRAMES);
     }
 
-    /// The registry-wide claim this card rests on: every case ships at rest,
-    /// so introducing the warm pass moves no committed poster. A case that
-    /// later opts in will fail this and must say so in its own review — which
-    /// is the point of asserting it rather than trusting it.
+    /// Every case that records a warm pass, each named by the change that
+    /// opted it in. Opting a case in moves a published frust.dev poster, so
+    /// the list exists to make that deliberate: a case cannot start warming
+    /// without an edit here, and the edit is where the reason is recorded.
+    const WARM_PASS_OPT_INS: &[&str] = &[
+        // si-10: recorded completely blank. The palette panel and its scrim
+        // are both `Presence`-staged, so both captured at progress 0.
+        "beui/command-palette",
+        // si-10: recorded without its balance figure, which arrives on a
+        // ten-cell stagger over a spring settling at roughly 556 ms.
+        "beui/wallet-card",
+    ];
+
+    /// The property that protects the 214 committed posters: warming is
+    /// opt-in, and every opt-in is named. This replaced a plain emptiness
+    /// assertion once the first two cases opted in; asserting containment
+    /// rather than equality lets a case be listed here in the same change
+    /// that decides against opting it in.
     #[test]
-    fn no_case_in_the_registry_opts_into_a_warm_pass_yet() {
-        let opted_in: Vec<&str> = crate::cases()
+    fn every_case_that_records_a_warm_pass_is_named_in_the_allowlist() {
+        let unnamed: Vec<&str> = crate::cases()
             .iter()
             .filter(|case| case.warm_frames() > 0)
             .map(|case| case.slug)
+            .filter(|slug| !WARM_PASS_OPT_INS.contains(slug))
             .collect();
         assert!(
-            opted_in.is_empty(),
+            unnamed.is_empty(),
             "these cases now record a warm pass, so their posters have moved \
-             and must be named in the change that opted them in: {opted_in:?}"
+             and must be named in WARM_PASS_OPT_INS by the change that opted \
+             them in: {unnamed:?}"
+        );
+    }
+
+    /// A slug in the allowlist that matches no case is a typo, and a typo
+    /// here silently widens the allowlist rather than narrowing it.
+    #[test]
+    fn every_allowlisted_slug_exists_in_the_registry() {
+        let unknown: Vec<&&str> = WARM_PASS_OPT_INS
+            .iter()
+            .filter(|slug| crate::find(slug).is_none())
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "unknown slugs in WARM_PASS_OPT_INS: {unknown:?}"
         );
     }
 }
