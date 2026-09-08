@@ -318,11 +318,16 @@ fn tabs_case() -> AnyView<()> {
     ))
 }
 
-/// `glyph/term-block` — a prompt/output/comment transcript, unstaggered (a
-/// staggered reveal only replays on a fresh widget build, never settles in a
-/// single-paint snapshot — see the [module docs](self)'s font-registration
-/// note for the same single-frame-paint constraint applied to a different
-/// widget).
+/// `glyph/term-block` — a prompt/output/comment transcript, unstaggered.
+///
+/// The per-line reveal is opt-in ([`term_block`]'s `staggered`, left at its
+/// `false` default here), so this case's widget builds no
+/// `AnimationController` at all and there is no clock for a [`Case::time_ms`]
+/// to move. Warming it would change nothing even if it did: a *settled*
+/// stagger paints every line at full alpha, which is exactly what the
+/// unstaggered widget already paints. Measured rather than argued — recorded
+/// at `time_ms: 400` with the warm pass active, both variants came back
+/// byte-identical.
 fn term_block_case() -> AnyView<()> {
     framed(term_block(vec![
         TermLine::prompt("frust build apk --release"),
@@ -332,9 +337,14 @@ fn term_block_case() -> AnyView<()> {
     ]))
 }
 
-/// `glyph/toast` — three severities of the transient message itself (not the
-/// host, whose enter fade never advances past its first frame in this
-/// single-paint harness — see [`toast_host`](frust_glyph::toast_host)).
+/// `glyph/toast` — three severities of the transient message itself, not the
+/// host.
+///
+/// The enter/hold/exit timeline belongs to
+/// [`toast_host`](frust_glyph::toast_host); the bare toast this case composes
+/// reads no frame time in `paint` whatsoever, so it has nothing a warm pass or
+/// a [`Case::time_ms`] could advance. Measured the same way as
+/// [`term_block_case`]: `time_ms: 400` recorded byte-identical PNGs.
 fn toast_case() -> AnyView<()> {
     framed(FlexView::new(
         Axis::Vertical,
