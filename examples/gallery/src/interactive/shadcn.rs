@@ -678,12 +678,24 @@ fn dropdown_menu_case() -> AnyView<()> {
 /// nothing else.
 ///
 /// One field, and it is the whole conversion. [`TooltipHover`] is a `Clone`
-/// handle over an `Rc<Cell<_>>` holding the phase (idle / opening-since /
-/// open / closing-since) and the trigger's rect; the trigger writes it from
-/// paint, the layer reads it from layout. Building it inside the case function
-/// hands every rebuild a brand-new latch at phase `Idle`, which is why the
-/// recorded case has to force it open — a hover would be forgotten before the
-/// 700ms it is being timed against had elapsed.
+/// handle over an `Rc<Cell<_>>`, and what that cell holds is the pair's
+/// *published* state — the trigger's rect, whether the panel should show, and
+/// whether the pointer is over the panel. It does **not** hold the delay
+/// machine: the `Idle`/`Opening(_)`/`Open`/`Closing(_)` phase is a field on
+/// `TooltipTriggerWidget` itself (`plugins/shadcn/src/components/tooltip.rs`),
+/// retained across rebuilds like any other widget's state. The trigger writes
+/// the latch from paint; the layer reads it from layout.
+///
+/// That split is what makes building the latch inside the case function wrong.
+/// Both `TooltipTriggerView::rebuild` and `TooltipLayerView::rebuild` adopt the
+/// view's handle (`element.hover = self.hover.clone()`), so a fresh latch per
+/// build hands the pair a default cell — shut, no rect captured, not over the
+/// panel — while the trigger's own surviving phase says otherwise, and the two
+/// disagree until the trigger's next paint republishes. The recorded case
+/// covers that with `set_open(true)` on every build, and *that* override is
+/// what pins the panel open and leaves a real hover nothing to change.
+/// Seeding the latch once removes the desync and the need for the override
+/// together.
 struct TooltipState {
     hover: TooltipHover,
 }
@@ -871,8 +883,9 @@ impl ModalState {
 /// workaround rather than part of the component. Calling the sugar keeps this
 /// case honest about what an app writes.
 ///
-/// The recorded footer's lone "Cancel" now cancels, as do the close X, the
-/// scrim and Escape.
+/// The recorded footer's lone "Cancel" now cancels, as do the close X and the
+/// scrim. Escape works too, but only once a press has landed inside the panel
+/// — see [`SheetCase`], whose footer names it explicitly, for why.
 struct DialogCase;
 
 impl Component for DialogCase {
@@ -963,6 +976,28 @@ fn drawer_case() -> AnyView<()> {
 /// an `on_close` is wired". The recorded case wires neither, so its footer
 /// named three dead affordances rather than three separate bugs. The footer
 /// text is left word for word.
+///
+/// # The one part of that sentence still short of true
+///
+/// The scrim and the X work unconditionally. **Escape works only after a press
+/// has landed inside the panel**, and a preview opened cold and never touched
+/// will not close on it. The gate is focus, not dismissability:
+/// `ModalWidget::event` claims focus on a pointer `Down` and nowhere else —
+/// that call is the only `request_focus` in
+/// `plugins/shadcn/src/overlay/modal.rs`, and there is no mount-time claim —
+/// so a `Stack`-mounted panel holds no focus until something is pressed in it,
+/// and a key event routed to the focused widget never reaches it. The
+/// navigator route (`show_sheet` and friends) does not have this problem,
+/// because pushing the page takes focus with it; a registry case has no
+/// controller to push one.
+///
+/// Wiring `on_dismiss` is still what makes Escape reachable *at all* — under
+/// `dismissable() == false` the branch could never fire in any state — so this
+/// is a caveat on an improvement, not a defect introduced here. Closing it
+/// properly means having `ModalWidget` claim focus on mount for the `Stack`
+/// route, which is a plugin change and outside this file's scope; it is
+/// reported rather than worked around, and the footer text is left alone
+/// because the sentence becomes true the moment a reader touches the panel.
 struct SheetCase;
 
 impl Component for SheetCase {
