@@ -72,9 +72,15 @@
 //! ahead of `Case::build`.
 //! Measured in headless Chrome over a screencast of the page load: both twins
 //! slide in over roughly 500 ms, across ~30 changing frames. Two warm passes
-//! would let the pin come off here as well at no cost to the poster (measured
-//! byte-identical), which needs a per-case warm count rather than the single
-//! one `Case::warm_frames` derives today.
+//! would let the pin come off here as well at no cost to the poster — but the
+//! count is only half of that condition. `FrameSpec::warm_time` spaces the warm
+//! schedule across `time_ms` instead of stepping it by the ramp's duration, so
+//! the LAST warm pass lands at `time_ms` × (count − 1) / count, and it is that
+//! pass, not the capture, that has to reach the 500 ms `Slide` for the
+//! capture's own layout to read a settled `progress`. Measured at count 2:
+//! `time_ms: 800` moves these posters, `1_000` and `1_200` leave them
+//! byte-identical. Two passes therefore want `time_ms` ≥ 2 × duration, not
+//! merely a count of two.
 //!
 //! # Three cases the RECORDER cannot open — they animate fine live
 //!
@@ -100,11 +106,15 @@
 //! entrance work, so all three stay at `Case::DEFAULT_TIME_MS` here.
 //!
 //! None of this is a LIVE limitation. `PanelWidget::ramp`
-//! (`plugins/shadcn/src/components/popover.rs`) and
-//! `TooltipTriggerWidget::paint` (`plugins/shadcn/src/components/tooltip.rs`)
-//! both call `ctx.request_frame()` while their ramp is running, so in a browser
-//! these entrances play out over many frames exactly as the catalog documents.
-//! Stuck here means stuck in the RECORDER.
+//! (`plugins/shadcn/src/components/popover.rs`) and `TooltipLayerWidget::ramp`
+//! (`plugins/shadcn/src/components/tooltip.rs`, called from that widget's own
+//! `paint`) both call `ctx.request_frame()` while their presence ramp is
+//! running, so in a browser these entrances play out over many frames exactly
+//! as the catalog documents. `TooltipTriggerWidget::paint` asks for frames too,
+//! but for the hover *delay* (`HoverPhase::Opening`/`Closing`) and the latch
+//! flip, not for the ramp — the 700 ms wait and the fade are two different
+//! clocks, and only the recorder is missing both. Stuck here means stuck in the
+//! RECORDER.
 
 use frust_core::{AnyView, any};
 use frust_shadcn::overlay::modal::DRAWER_MAX_HEIGHT_FRACTION;

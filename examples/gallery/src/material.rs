@@ -109,9 +109,19 @@ use crate::case::{Case, Design};
 //   behind. With one warm pass the captured pass therefore lays the panel out
 //   at progress 0, off its own edge, and then paints it there at the full
 //   opacity its now-settled ramp asks for: a poster that is scrim and nothing
-//   else (measured, both variants). Two warm passes fix it exactly — measured
-//   byte-identical to the pinned poster — so this waits on a per-case warm
-//   count, the follow-up [`Case::warm_frames`] already names. This one is paid
+//   else (measured, both variants). Two warm passes fix it exactly — but the
+//   count alone is not the condition, and a follow-up scoped off the count
+//   alone would fail. `FrameSpec::warm_time` spaces the warm schedule across
+//   `time_ms` rather than stepping it by the ramp's duration, so the LAST warm
+//   pass lands at `time_ms` × (count − 1) / count, and it is that pass, not the
+//   capture, that has to reach the entrance's own duration for the capture's
+//   LAYOUT to read a settled `progress`. Measured at count 2 against the 500 ms
+//   `Slide`: `time_ms: 800` moves all six of those PNGs, while `1_000` and
+//   `1_200` leave them byte-identical. Two passes therefore want `time_ms` ≥
+//   2 × duration — a `warm_frames: 2` bolted onto a 400 ms `time_ms` would fail
+//   for that reason rather than disproving the fix. So this waits on a per-case
+//   warm count, the follow-up [`Case::warm_frames`] already names, arriving
+//   with a `time_ms` to match. This one is paid
 //   for live as well, unlike shadcn's edge cases: there is no
 //   [`crate::interactive`] twin for `material/sheet` either, so a browser
 //   renders this pinned constructor and the sheet is simply open on arrival
