@@ -2211,7 +2211,10 @@ impl ListViewWidget {
             InputEvent::Housekeeping => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }
-            InputEvent::Key(_) | InputEvent::Ime(_) => {
+            // Focus-routed events — keyboard, IME, and the clipboard verbs an
+            // `EditCommand` carries — reach the focused row through
+            // `route_event`'s own focus branch, never a hit test.
+            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }
             InputEvent::Scroll { delta, .. } => {
@@ -6840,5 +6843,49 @@ mod tests {
             ballistic_frames < spline_frames / 2.0,
             "the pinned curve ran {ballistic_frames} frames of a {spline_frames}-frame spline"
         );
+    }
+
+    /// The windowing list's mirror of `ScrollWidget`'s focus bypass: a clipboard
+    /// verb reaches the focused *row* through `route_event`'s focus branch, not
+    /// the gesture machinery and not a hit test.
+    #[test]
+    fn an_edit_command_reaches_the_focused_row() {
+        use crate::text_input;
+        use frust_core::EditCommand;
+
+        struct Field {
+            value: String,
+        }
+        fn logic(state: &mut Field) -> ListView<Field> {
+            let value = state.value.clone();
+            list_view(3, 50.0, move |_| {
+                let value = value.clone();
+                any::<Field, _>(text_input(value, |s: &mut Field, v: String| {
+                    s.value = v;
+                }))
+            })
+        }
+
+        let mut state = Field {
+            value: "hello".to_string(),
+        };
+        let mut root: RenderRoot<Field, ListView<Field>> = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // Tap the first row so it holds the recorded focus path.
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 10.0));
+        assert!(root.is_focus_active(), "the tap focused the row's field");
+
+        root.event(&mut state, &InputEvent::EditCommand(EditCommand::SelectAll));
+        root.event(&mut state, &InputEvent::EditCommand(EditCommand::Copy));
+
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("hello"),
+            "the copy was answered by the focused row, through this router"
+        );
+        assert_eq!(state.value, "hello", "a copy edits nothing");
     }
 }

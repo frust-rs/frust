@@ -1171,9 +1171,10 @@ impl ScrollWidget {
                 self.child.event_child(ctx, event);
                 EventResult::Ignored
             }
-            // Focus-routed events (Key/Ime) bypass the scroll gesture machinery
-            // and go straight to the child if it holds the recorded focus path.
-            InputEvent::Key(_) | InputEvent::Ime(_) => {
+            // Focus-routed events (Key/Ime, and the clipboard verbs an
+            // `EditCommand` carries) bypass the scroll gesture machinery and go
+            // straight to the child if it holds the recorded focus path.
+            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
                 if self.child.is_focused() {
                     self.child.event_child(ctx, event)
                 } else {
@@ -3793,5 +3794,48 @@ mod tests {
             "a rebuild whose view carries no .physics(...) leaves the widget's physics untouched"
         );
         assert!(!w.scrolling);
+    }
+
+    /// A focused editable inside the viewport must see a clipboard verb: an
+    /// `EditCommand` is focus-routed, so it takes the same bypass `Key`/`Ime`
+    /// take rather than the gesture machinery (and never a hit test).
+    #[test]
+    fn an_edit_command_reaches_the_focused_child() {
+        use crate::text_input;
+        use frust_core::{EditCommand, RenderRoot};
+
+        struct Field {
+            value: String,
+        }
+        fn logic(state: &mut Field) -> ScrollView<Field> {
+            scroll_view(text_input(
+                state.value.clone(),
+                |s: &mut Field, v: String| {
+                    s.value = v;
+                },
+            ))
+        }
+
+        let mut state = Field {
+            value: "hello".to_string(),
+        };
+        let mut root: RenderRoot<Field, ScrollView<Field>> = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 100.0));
+
+        // Tap the field through the viewport so it holds the recorded focus path.
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 10.0));
+        assert!(root.is_focus_active(), "the tap focused the child field");
+
+        root.event(&mut state, &InputEvent::EditCommand(EditCommand::SelectAll));
+        root.event(&mut state, &InputEvent::EditCommand(EditCommand::Copy));
+
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("hello"),
+            "the copy was answered by the child, through this router"
+        );
+        assert_eq!(state.value, "hello", "a copy edits nothing");
     }
 }

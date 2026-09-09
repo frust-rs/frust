@@ -41,9 +41,10 @@
 //! A `Down` inside the field requests focus, places the caret, and publishes an
 //! [`ImeState`] so the shell can drive the platform input method — the focus/IME
 //! channel `docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle owns. Keyboard
-//! editing (`Key`) and IME composition/state-sync (`Ime`) route down the focus
-//! path; after any edit the widget fires `on_change`, resets the caret to
-//! visible, and republishes the IME surface.
+//! editing (`Key`), IME composition/state-sync (`Ime`) and clipboard commands
+//! ([`EditCommand`]) all route down that focus path, never a hit test; after any
+//! edit the widget fires `on_change`, resets the caret to visible, and
+//! republishes the IME surface.
 //!
 //! The caret blinks while focused, its phase measured in `paint` from the shell
 //! frame clock ([`PaintCtx::frame_time`] — no wall-clock reads in widget code).
@@ -63,6 +64,42 @@
 //! decorative loop the caret is also the edit-point cue, so freezing it dark
 //! would hide where typing lands. The IME surface republishes every painted frame
 //! regardless, and blinking resumes once the token clears.
+//!
+//! # Clipboard and selection commands
+//!
+//! Copy, cut, paste and select-all reach the field two ways, and both end in the
+//! same [`handle_command`](TextInputWidget::handle_command):
+//!
+//! * as a decoded [`EditCommand`] on [`InputEvent::EditCommand`] — what a shell
+//!   dispatches for a platform edit menu, an Android `ACTION_PROCESS_TEXT`, a
+//!   hardware clipboard key, or a chord it decided to decode itself;
+//! * as a chord this widget decodes from a plain `Key`, because a desktop shell
+//!   forwards `Cmd+C` as a keystroke like any other. `ctrl` **or** `meta` plus
+//!   `c`/`x`/`v`/`a` (ASCII case-insensitive) covers every desktop platform
+//!   uniformly — Flutter is platform-strict here (meta on macOS/iOS, ctrl
+//!   elsewhere) and a shell wanting that strictness decodes the chord and sends
+//!   an [`EditCommand`] instead. [`NamedKey::Copy`]/[`Cut`](NamedKey::Cut)/
+//!   [`Paste`](NamedKey::Paste), `Ctrl+Insert`, `Shift+Insert` and
+//!   `Shift+Delete` are the legacy spellings of the same three verbs; `alt` is
+//!   never a chord modifier, and any other chorded character is consumed rather
+//!   than typed.
+//!
+//! **The clipboard itself lives in the shell**, so the two directions are
+//! asymmetric (see [`EditCommand`]): a copy/cut answers by writing into the
+//! pass's clipboard slot ([`EventCtx::write_clipboard`]), while a paste is
+//! *asked for* ([`EventCtx::request_paste`]) and arrives on a later pass with
+//! its text already read. Nothing here touches a host clipboard.
+//!
+//! **Refusals are the field's own call.** An obscured field copies and cuts
+//! nothing — neither the real buffer nor its bullet mirror is worth handing out
+//! — a collapsed selection makes copy and cut no-ops, and a paste sanitised down
+//! to nothing ([`frust_text::sanitize_paste`], which denies newlines in a
+//! single-line field and normalises CRLF in a multi-line one) inserts nothing.
+//! Each is still *handled*: the verb was understood and answered with "nothing".
+//! A disabled or read-only field never sees a command at all, because it never
+//! holds focus (which is also why a read-only field cannot be copied from —
+//! Material 3 and the HIG would keep it focusable, and this widget deliberately
+//! does not).
 //!
 //! # Multi-line mode
 //!
@@ -185,11 +222,13 @@ use std::time::Duration;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, FrameTime,
-    ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene,
-    PointerPhase, SemanticsCtx, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, EditCommand, EditingState, EventCtx, EventResult,
+    FrameTime, ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
+    PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
-use frust_text::{EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, utf16_to_byte};
+use frust_text::{
+    EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, sanitize_paste, utf16_to_byte,
+};
 use frust_theme::Theme;
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
@@ -1054,11 +1093,37 @@ impl TextInputWidget {
         match key {
             Key::Character(s) => {
                 if modifiers.ctrl || modifiers.meta {
-                    // The only editing shortcut wired for v1 is select-all; other
-                    // chorded characters (copy/paste, …) are consumed, not typed.
-                    if s.eq_ignore_ascii_case("a") {
-                        self.apply_edit(ctx, EditOp::SelectAll);
+                    // Chord decoding is **platform-uniform**: ctrl OR meta arms
+                    // the clipboard verbs on every OS, so a Mac keyboard's Cmd+C
+                    // works under Linux and a terminal habit's Ctrl+C works on
+                    // macOS. Flutter is platform-strict instead (meta on
+                    // macOS/iOS, ctrl elsewhere); a shell that wants exactly that
+                    // decodes the chord itself and dispatches an
+                    // [`EditCommand`] — the route the platform edit menus and the
+                    // hardware clipboard keys already take, and the one that
+                    // always wins, since this branch only sees what a shell chose
+                    // to forward as a key. Alt is deliberately not a chord
+                    // modifier: it composes characters.
+                    if s.eq_ignore_ascii_case("c") {
+                        return self.handle_command(ctx, &EditCommand::Copy);
                     }
+                    if s.eq_ignore_ascii_case("x") {
+                        return self.handle_command(ctx, &EditCommand::Cut);
+                    }
+                    if s.eq_ignore_ascii_case("v") {
+                        // Only the shell can read the host clipboard, so a paste
+                        // is *asked for* here and arrives on a later pass as
+                        // `EditCommand::Paste` (`EventCtx::request_paste`).
+                        ctx.request_paste();
+                        return EventResult::Handled;
+                    }
+                    if s.eq_ignore_ascii_case("a") {
+                        return self.handle_command(ctx, &EditCommand::SelectAll);
+                    }
+                    // Every other chorded character (Cmd+Z, Ctrl+B, …) stays
+                    // consumed rather than typed: a chord is never literal text,
+                    // and swallowing it here keeps an unimplemented verb from
+                    // inserting a stray letter.
                     return EventResult::Handled;
                 }
                 self.apply_edit(ctx, EditOp::Insert(s.clone()));
@@ -1068,7 +1133,17 @@ impl TextInputWidget {
                 let select = modifiers.shift;
                 match named {
                     NamedKey::Backspace => self.apply_edit(ctx, EditOp::Backdelete),
-                    NamedKey::Delete => self.apply_edit(ctx, EditOp::Delete),
+                    NamedKey::Delete => {
+                        // Shift+Delete is the legacy cut chord (Windows/Linux/
+                        // X11), but only on its own: Ctrl+Delete and
+                        // Ctrl+Shift+Delete are OS/browser-level gestures, never
+                        // a field cut, so anything chorded past shift falls
+                        // through to the plain forward-delete.
+                        if modifiers.shift && !modifiers.ctrl && !modifiers.meta {
+                            return self.handle_command(ctx, &EditCommand::Cut);
+                        }
+                        self.apply_edit(ctx, EditOp::Delete)
+                    }
                     NamedKey::ArrowLeft => self.apply_edit(ctx, EditOp::MoveLeft { select }),
                     NamedKey::ArrowRight => self.apply_edit(ctx, EditOp::MoveRight { select }),
                     NamedKey::Home => self.apply_edit(ctx, EditOp::Home { select }),
@@ -1117,10 +1192,116 @@ impl TextInputWidget {
                     NamedKey::Tab => {
                         return EventResult::Ignored;
                     }
+                    // The dedicated hardware clipboard keys arrive already
+                    // decoded, so they need no chord to read — they resolve to
+                    // exactly the verbs the chords above do.
+                    NamedKey::Copy => return self.handle_command(ctx, &EditCommand::Copy),
+                    NamedKey::Cut => return self.handle_command(ctx, &EditCommand::Cut),
+                    NamedKey::Paste => ctx.request_paste(),
+                    NamedKey::Insert => {
+                        // The legacy Insert chords: Shift+Insert pastes,
+                        // Ctrl+Insert copies (shift wins when both are held).
+                        // A bare Insert would toggle overtype, which this field
+                        // does not implement, so it is left unconsumed rather
+                        // than silently swallowed.
+                        if modifiers.shift {
+                            ctx.request_paste();
+                        } else if modifiers.ctrl {
+                            return self.handle_command(ctx, &EditCommand::Copy);
+                        } else {
+                            return EventResult::Ignored;
+                        }
+                    }
                 }
                 EventResult::Handled
             }
         }
+    }
+
+    /// The text a copy or a cut may hand the host clipboard: the current
+    /// selection, or `None` when the selection is collapsed **or** the field is
+    /// obscured.
+    ///
+    /// The obscured refusal reads neither editor: not the real one (the secret
+    /// is not this widget's to hand out — the whole point of the mode) and not
+    /// the masked mirror either, since a run of bullets is a worse answer than
+    /// no answer at all — it looks like a successful copy and pastes garbage.
+    fn clipboard_selection(&self) -> Option<String> {
+        if self.obscured {
+            return None;
+        }
+        self.editor.selected_text().map(str::to_owned)
+    }
+
+    /// Handle a decoded clipboard/selection command (already focus-gated by the
+    /// caller) — see the [module docs](self)' "Clipboard and selection commands".
+    ///
+    /// Every arm funnels through one [`finish_edit`](Self::finish_edit), so the
+    /// after-edit bookkeeping is a keystroke's: the blink resets, the masked
+    /// mirror re-derives, the IME surface republishes, a redraw is requested, and
+    /// `on_change` fires **exactly once and only if the text actually changed** —
+    /// which is what keeps a copy (and a refused cut, and a paste emptied by
+    /// sanitising) from reporting an edit that never happened. The controlled-
+    /// value contract is untouched: like every other edit here, a command reports
+    /// a *requested* value and the app's own `on_change` value still wins on the
+    /// next `rebuild`.
+    ///
+    /// # Refusals
+    ///
+    /// Each one still returns [`EventResult::Handled`]: the command was
+    /// understood and answered with "nothing", which is not the same as leaving
+    /// it for someone else.
+    ///
+    /// * **Obscured** — copy and cut write nothing and change nothing
+    ///   ([`clipboard_selection`](Self::clipboard_selection)). Paste is
+    ///   unaffected: writing *into* a password field is ordinary.
+    /// * **Collapsed selection** — copy and cut are no-ops. A cut in particular
+    ///   must not fall back to deleting a grapheme the way its `Backdelete`
+    ///   would if the selection were empty.
+    /// * **Empty after sanitising** — a paste of nothing but newlines into a
+    ///   single-line field inserts nothing rather than applying an empty edit.
+    fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &EditCommand) -> EventResult {
+        // A non-interactive field holds no focus path for this command to route
+        // along ([`Widget::event`]'s top gate releases it), so a cut needs no
+        // editable check of its own — this pins that invariant rather than
+        // re-testing it.
+        debug_assert!(
+            self.interactive(),
+            "an EditCommand reached a disabled or read-only field"
+        );
+        let before = self.editor.text().to_string();
+        match cmd {
+            EditCommand::Copy => {
+                if let Some(text) = self.clipboard_selection() {
+                    ctx.write_clipboard(text);
+                }
+            }
+            EditCommand::Cut => {
+                if let Some(text) = self.clipboard_selection() {
+                    ctx.write_clipboard(text);
+                    // `Backdelete` over a non-collapsed selection removes the
+                    // selection itself, so the write and the delete describe the
+                    // same run of text.
+                    self.editor.apply(EditOp::Backdelete, &mut self.text_ctx);
+                }
+            }
+            EditCommand::Paste(text) => {
+                // A single-line field denies newlines outright and a multi-line
+                // one normalises CRLF/CR — `frust_text::sanitize_paste` owns both
+                // rules, and `max_visible_lines` is what says which field this is.
+                let text = sanitize_paste(text, self.max_visible_lines.is_none());
+                if !text.is_empty() {
+                    // `Insert` replaces the selection, exactly like typing does.
+                    self.editor
+                        .apply(EditOp::Insert(text.into_owned()), &mut self.text_ctx);
+                }
+            }
+            EditCommand::SelectAll => {
+                self.editor.apply(EditOp::SelectAll, &mut self.text_ctx);
+            }
+        }
+        self.finish_edit(ctx, before);
+        EventResult::Handled
     }
 
     /// Handle an IME event (already focus-gated by the caller).
@@ -1716,6 +1897,16 @@ impl Widget for TextInputWidget {
                 }
                 self.focused = true;
                 self.handle_ime(ctx, e)
+            }
+            // A clipboard verb is focus-routed like `Key`/`Ime` and gated the
+            // same way: an unfocused field ignores it rather than answering for
+            // a selection the user is not looking at.
+            InputEvent::EditCommand(cmd) => {
+                if !ctx.has_focus() {
+                    return EventResult::Ignored;
+                }
+                self.focused = true;
+                self.handle_command(ctx, cmd)
             }
             InputEvent::Scroll { .. } => EventResult::Ignored,
             // A leaf with nothing deferred: the broadcast is a harmless
@@ -4885,5 +5076,366 @@ mod tests {
             ime.editing.text, "hunter2",
             "sanity: this is the real first publication, not a stale one"
         );
+    }
+
+    // --- Clipboard and selection commands ---
+
+    /// A decoded clipboard verb, focus-routed like a key — the same event
+    /// `frust-testing`'s `edit_command` builds, spelled locally because
+    /// `frust-widgets` takes no edge on that crate.
+    fn edit(cmd: EditCommand) -> InputEvent {
+        InputEvent::EditCommand(cmd)
+    }
+
+    /// Focus the field, type `text`, then drag-select the whole buffer — the
+    /// selection a copy/cut acts on, produced the way a user produces it.
+    fn focused_with_selection(
+        state: &mut AppState,
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+        text: &str,
+    ) {
+        root.event(state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in text.chars() {
+            root.event(state, &ch(&c.to_string()));
+        }
+        // Press at the left edge (before the first glyph), drag past the last.
+        root.event(state, &pointer(PointerPhase::Down, 0.0, 10.0));
+        root.event(state, &pointer(PointerPhase::Move, 290.0, 10.0));
+        root.event(state, &pointer(PointerPhase::Up, 290.0, 10.0));
+    }
+
+    /// The ctrl/meta chord modifier the clipboard shortcuts key off.
+    fn meta() -> Modifiers {
+        Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn chord(text: &str, modifiers: Modifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Character(text.to_string()),
+            modifiers,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn copy_writes_the_selection_and_edits_nothing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+        assert_eq!(
+            widget(&root).editor.selected_text(),
+            Some("abc"),
+            "the drag selected the whole buffer"
+        );
+        let changes = state.changes;
+
+        root.event(&mut state, &edit(EditCommand::Copy));
+
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "abc", "a copy mutates nothing");
+        assert_eq!(state.changes, changes, "a copy is not an edit");
+        assert_eq!(state.value, "abc");
+    }
+
+    #[test]
+    fn cut_writes_the_selection_removes_it_and_reports_one_change() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+        let changes = state.changes;
+
+        root.event(&mut state, &edit(EditCommand::Cut));
+
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "", "the selection is gone");
+        assert_eq!(state.changes, changes + 1, "one on_change, not two");
+        assert_eq!(state.value, "");
+    }
+
+    #[test]
+    fn copy_and_cut_do_nothing_without_a_selection() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in ["a", "b"] {
+            root.event(&mut state, &ch(c));
+        }
+        let changes = state.changes;
+
+        root.event(&mut state, &edit(EditCommand::Copy));
+        assert!(root.take_clipboard_write().is_none());
+        // A collapsed cut must not fall back to deleting the grapheme its
+        // `Backdelete` would otherwise take.
+        root.event(&mut state, &edit(EditCommand::Cut));
+        assert!(root.take_clipboard_write().is_none());
+
+        assert_eq!(widget(&root).editor.text(), "ab");
+        assert_eq!(state.changes, changes, "neither verb fired on_change");
+    }
+
+    #[test]
+    fn paste_into_a_single_line_field_strips_newlines_and_replaces_the_selection() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "xy");
+        let changes = state.changes;
+
+        root.event(&mut state, &edit(EditCommand::Paste("a\nb".to_string())));
+
+        assert_eq!(
+            widget(&root).editor.text(),
+            "ab",
+            "the newline is denied and the selection replaced"
+        );
+        assert_eq!(state.changes, changes + 1, "one edit, one on_change");
+        assert_eq!(state.value, "ab");
+    }
+
+    #[test]
+    fn paste_into_a_multiline_field_keeps_the_newline() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(&mut state, &edit(EditCommand::Paste("a\nb".to_string())));
+
+        assert_eq!(widget(&root).editor.text(), "a\nb");
+        assert_eq!(state.changes, 1);
+    }
+
+    #[test]
+    fn a_paste_sanitised_to_nothing_changes_nothing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        let changes = state.changes;
+
+        let outcome = root.event(&mut state, &edit(EditCommand::Paste("\n".to_string())));
+
+        assert!(outcome.handled, "the verb was understood, and answered");
+        assert_eq!(widget(&root).editor.text(), "a", "nothing was inserted");
+        assert_eq!(state.changes, changes, "an empty paste is not an edit");
+    }
+
+    #[test]
+    fn select_all_via_the_command_selects_the_whole_buffer_without_typing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in ["a", "b", "c"] {
+            root.event(&mut state, &ch(c));
+        }
+        let changes = state.changes;
+
+        root.event(&mut state, &edit(EditCommand::SelectAll));
+
+        assert_eq!(widget(&root).editor.selected_text(), Some("abc"));
+        assert_eq!(state.changes, changes);
+        assert_eq!(widget(&root).editor.text(), "abc");
+    }
+
+    #[test]
+    fn an_obscured_field_refuses_copy_and_cut_but_still_pastes() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(true, true, false);
+        let mut root = options_root(&mut logic, &mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in ["a", "b", "c"] {
+            root.event(&mut state, &ch(c));
+        }
+        root.event(&mut state, &edit(EditCommand::SelectAll));
+        assert_eq!(widget(&root).editor.selected_text(), Some("abc"));
+        let changes = state.changes;
+
+        // Neither the real buffer nor the bullet mirror may reach the clipboard.
+        root.event(&mut state, &edit(EditCommand::Copy));
+        assert!(root.take_clipboard_write().is_none());
+        root.event(&mut state, &edit(EditCommand::Cut));
+        assert!(root.take_clipboard_write().is_none());
+        assert_eq!(
+            widget(&root).editor.text(),
+            "abc",
+            "a refused cut deletes nothing"
+        );
+        assert_eq!(state.changes, changes);
+
+        // Writing *into* a password field is ordinary: the paste still lands,
+        // replacing the (still intact) selection.
+        root.event(&mut state, &edit(EditCommand::Paste("zz".to_string())));
+        assert_eq!(widget(&root).editor.text(), "zz");
+        assert_eq!(state.changes, changes + 1);
+    }
+
+    #[test]
+    fn meta_c_copies_and_meta_x_cuts() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+
+        root.event(&mut state, &chord("c", meta()));
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "abc");
+
+        root.event(&mut state, &chord("X", meta()));
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("abc"),
+            "the chord is ASCII case-insensitive"
+        );
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn ctrl_v_and_shift_insert_request_a_paste_and_type_nothing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!root.take_paste_request());
+
+        root.event(&mut state, &chord("v", ctrl()));
+        assert!(root.take_paste_request(), "Ctrl+V asks the shell to read");
+        assert_eq!(widget(&root).editor.text(), "", "and types no 'v'");
+
+        root.event(&mut state, &named(NamedKey::Insert, shift()));
+        assert!(
+            root.take_paste_request(),
+            "Shift+Insert is the legacy paste"
+        );
+
+        root.event(&mut state, &named(NamedKey::Paste, Modifiers::default()));
+        assert!(root.take_paste_request(), "so is the hardware Paste key");
+
+        assert_eq!(state.changes, 0, "asking for a paste is not an edit");
+    }
+
+    #[test]
+    fn ctrl_insert_copies_and_shift_delete_cuts() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+
+        root.event(&mut state, &named(NamedKey::Insert, ctrl()));
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "abc");
+
+        root.event(&mut state, &named(NamedKey::Delete, shift()));
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "", "Shift+Delete is a cut");
+    }
+
+    #[test]
+    fn ctrl_shift_delete_stays_a_forward_delete() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in ["a", "b"] {
+            root.event(&mut state, &ch(c));
+        }
+        // Caret home, then Ctrl+Shift+Delete: an OS-level gesture, never a cut.
+        root.event(&mut state, &named(NamedKey::Home, Modifiers::default()));
+        root.event(
+            &mut state,
+            &named(
+                NamedKey::Delete,
+                Modifiers {
+                    shift: true,
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+            ),
+        );
+
+        assert!(root.take_clipboard_write().is_none(), "nothing was copied");
+        assert_eq!(widget(&root).editor.text(), "b", "the grapheme ahead went");
+    }
+
+    #[test]
+    fn the_hardware_copy_and_cut_keys_resolve_to_the_same_verbs() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+
+        root.event(&mut state, &named(NamedKey::Copy, Modifiers::default()));
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "abc");
+
+        root.event(&mut state, &named(NamedKey::Cut, Modifiers::default()));
+        assert_eq!(root.take_clipboard_write().as_deref(), Some("abc"));
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn a_bare_insert_edits_nothing_and_is_left_unconsumed() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+
+        let outcome = root.event(&mut state, &named(NamedKey::Insert, Modifiers::default()));
+
+        assert!(!outcome.handled, "no overtype mode to toggle: not ours");
+        assert!(!root.take_paste_request());
+        assert_eq!(widget(&root).editor.text(), "a");
+    }
+
+    #[test]
+    fn an_unrecognized_chord_is_still_consumed_and_never_typed() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        let changes = state.changes;
+
+        let outcome = root.event(&mut state, &chord("z", meta()));
+
+        assert!(
+            outcome.handled,
+            "an undecoded chord is swallowed, not typed"
+        );
+        assert_eq!(widget(&root).editor.text(), "a", "no 'z' was inserted");
+        assert_eq!(state.changes, changes);
+        assert!(root.take_clipboard_write().is_none());
+        assert!(!root.take_paste_request());
+    }
+
+    #[test]
+    fn an_unfocused_field_ignores_every_edit_command() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        for cmd in [
+            EditCommand::SelectAll,
+            EditCommand::Paste("hi".to_string()),
+            EditCommand::Copy,
+            EditCommand::Cut,
+        ] {
+            let outcome = root.event(&mut state, &edit(cmd));
+            assert!(!outcome.handled, "a focus-routed verb reaches nobody");
+        }
+
+        assert!(root.take_clipboard_write().is_none());
+        assert_eq!(widget(&root).editor.text(), "");
+        assert_eq!(state.changes, 0);
+        assert!(!widget(&root).focused);
     }
 }
