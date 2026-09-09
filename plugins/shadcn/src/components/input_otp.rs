@@ -54,12 +54,17 @@
 //! the next `rebuild` feeds the confirmed string back down
 //! (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
 //!
+//! # Paste support
+//!
+//! A pasted string is walked character by character, with `self.mode.accepts`
+//! filtering each one. Accepted chars fill the slots in order from the active
+//! slot forward through the same insertion path a typed key uses, firing
+//! `on_change` once with the final code and `on_complete` once if the code
+//! becomes complete. An OTP field does not copy out: `Copy`, `Cut`, and
+//! `SelectAll` are consumed (Handled) with no effect.
+//!
 //! # What the port deliberately does not carry
 //!
-//! - **No paste.** Upstream's `<input>` gets the platform's paste for free;
-//!   frust delivers no clipboard event a widget can read, so a multi-character
-//!   fill has no route in. Typing, deleting and caret motion are the whole
-//!   keyboard surface.
 //! - **No `pattern` regex.** The source's `REGEXP_ONLY_DIGITS` /
 //!   `REGEXP_ONLY_DIGITS_AND_CHARS` presets are the only two anyone passes, so
 //!   they are an [`InputOtpMode`] enum rather than a regex engine.
@@ -70,10 +75,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EventCtx,
-    EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase,
-    Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, erase_callback_arg,
-    text::TextStyle,
+    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EditCommand,
+    EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget,
+    erase_callback_arg, text::TextStyle,
 };
 use frust::{FrameTime, Theme};
 
@@ -521,6 +526,35 @@ impl InputOtpWidget {
         self.caret = at.min(self.value.chars().count());
     }
 
+    /// Paste `text` by filtering accepted characters and filling slots from the
+    /// active slot forward, the same way individual keystrokes would. Reports
+    /// once with the final value.
+    fn paste(&mut self, ctx: &mut EventCtx, text: &str) -> bool {
+        let mut chars: Vec<char> = self.value.chars().collect();
+        let mut at = self.caret.min(chars.len());
+        let mut changed = false;
+
+        for c in text.chars() {
+            if !self.mode.accepts(c) {
+                continue;
+            }
+            if chars.len() >= self.length {
+                break;
+            }
+            chars.insert(at, c);
+            at += 1;
+            changed = true;
+        }
+
+        if changed {
+            self.caret = at;
+            self.report(ctx, chars.into_iter().collect());
+            true
+        } else {
+            false
+        }
+    }
+
     /// The cursor this control asks for in its current state.
     fn cursor(&self) -> CursorIcon {
         if self.disabled {
@@ -772,6 +806,25 @@ impl Widget for InputOtpWidget {
                         // A Cancel arm clears internal flags only — never the
                         // value, never a callback.
                         self.captured = false;
+                        EventResult::Handled
+                    }
+                }
+            }
+            InputEvent::EditCommand(cmd) => {
+                if self.disabled {
+                    return EventResult::Ignored;
+                }
+                match cmd {
+                    EditCommand::Paste(text) => {
+                        if self.paste(ctx, text) {
+                            self.reset_blink();
+                            ctx.request_redraw();
+                        }
+                        EventResult::Handled
+                    }
+                    EditCommand::Copy | EditCommand::Cut | EditCommand::SelectAll => {
+                        // An OTP field does not copy out; these commands are
+                        // consumed with no effect.
                         EventResult::Handled
                     }
                 }
@@ -1264,6 +1317,91 @@ mod tests {
         confirm(&mut w, &prev, "1");
         assert_eq!(w.value, "1");
         assert_eq!(w.caret, 1, "a rejected edit takes the caret with it");
+    }
+
+    #[test]
+    fn paste_fills_slots_skipping_rejected_characters() {
+        let (mut w, size) = laid_out(&view(""));
+        let mut state = Codes::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("12 34-56".into())),
+        );
+        assert_eq!(state.changes.last().unwrap(), "123456");
+        assert_eq!(state.completed, vec!["123456".to_string()]);
+        // Confirm the value through rebuild to complete the cycle
+        let prev = view("");
+        confirm(&mut w, &prev, "123456");
+        assert_eq!(w.value, "123456");
+    }
+
+    #[test]
+    fn paste_stops_when_slots_are_full() {
+        let (mut w, size) = laid_out(&view(""));
+        let mut state = Codes::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("1234567".into())),
+        );
+        assert_eq!(state.changes.last().unwrap(), "123456");
+        // The app owns the value: confirm it through rebuild
+        let prev = view("");
+        confirm(&mut w, &prev, "123456");
+        assert_eq!(w.value, "123456");
+    }
+
+    #[test]
+    fn paste_into_partial_code_fills_from_the_active_slot() {
+        let (mut w, size) = laid_out(&view("12"));
+        let mut state = Codes::default();
+        w.caret = 2; // After the "12"
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("34 56".into())),
+        );
+        assert_eq!(state.changes.last().unwrap(), "123456");
+        assert_eq!(state.completed, vec!["123456".to_string()]);
+        // Confirm the value through rebuild
+        let prev = view("12");
+        confirm(&mut w, &prev, "123456");
+        assert_eq!(w.value, "123456");
+    }
+
+    #[test]
+    fn copy_cut_selectall_are_consumed_with_no_effect() {
+        let (mut w, size) = laid_out(&view("123"));
+        let mut state = Codes::default();
+        let cmds = [
+            ("Copy", EditCommand::Copy),
+            ("Cut", EditCommand::Cut),
+            ("SelectAll", EditCommand::SelectAll),
+        ];
+        for (name, cmd) in cmds {
+            let before = state.changes.len();
+            let result = dispatch(&mut w, &mut state, size, &InputEvent::EditCommand(cmd));
+            assert_eq!(result, EventResult::Handled);
+            assert_eq!(state.changes.len(), before, "no effect from {}", name);
+        }
+    }
+
+    #[test]
+    fn paste_with_disabled_field_is_ignored() {
+        let (mut w, size) = laid_out(&view("").disabled(true));
+        let mut state = Codes::default();
+        let result = dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("123456".into())),
+        );
+        assert_eq!(result, EventResult::Ignored);
+        assert!(state.changes.is_empty());
     }
 
     // ---- Root-driven: cursor, focus, semantics ------------------------------
