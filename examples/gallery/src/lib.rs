@@ -82,7 +82,7 @@ pub mod material;
 pub mod shadcn;
 pub mod theme;
 
-pub use case::{Case, Design, Variant};
+pub use case::{Case, Design, Variant, WARM_PASS_OPT_INS};
 pub use interactive::find as find_interactive;
 pub use theme::theme;
 

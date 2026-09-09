@@ -945,18 +945,27 @@ mod tests {
     }
 
     /// The registry-wide version of the claim above, checked against the whole
-    /// case list rather than one seed case: introducing warm frames must not
-    /// have changed the frame inputs of anything already published.
+    /// case list rather than one seed case, and checked from the RECORDER's
+    /// side: whatever the registry says a case asks for, the frame inputs this
+    /// generator derives are what actually move a poster.
+    ///
+    /// This asserted emptiness until the first two cases opted in. It now
+    /// asserts against `frust_gallery::WARM_PASS_OPT_INS`, the same list the
+    /// registry's own guard uses, rather than keeping a second copy — the
+    /// second copy is exactly what let this assertion go stale while the
+    /// registry-side one was being updated.
     #[test]
-    fn no_case_in_the_registry_records_a_warm_pass_today() {
-        let warmed: Vec<&str> = frust_gallery::cases()
+    fn every_case_recording_a_warm_pass_is_named_in_the_registry_allowlist() {
+        let unnamed: Vec<&str> = frust_gallery::cases()
             .iter()
             .filter(|case| frame_spec(case).warm_frames > 0)
             .map(|case| case.slug)
+            .filter(|slug| !frust_gallery::WARM_PASS_OPT_INS.contains(slug))
             .collect();
         assert!(
-            warmed.is_empty(),
-            "these cases' posters are no longer the frame that was published: {warmed:?}"
+            unnamed.is_empty(),
+            "these cases' posters are no longer the frame that was published, \
+             and are not named in frust_gallery::WARM_PASS_OPT_INS: {unnamed:?}"
         );
     }
 

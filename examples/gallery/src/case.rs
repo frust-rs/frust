@@ -154,6 +154,25 @@ impl Case {
     }
 }
 
+/// Every case that records a warm pass, each named by the change that opted it
+/// in. Opting a case in moves a published frust.dev poster, so the list exists
+/// to make that deliberate: a case cannot start warming without an edit here,
+/// and the edit is where the reason is recorded.
+///
+/// Public because the guard is asserted from two crates. `frust-testing` owns
+/// the recorder and checks the frame inputs it derives; this crate owns the
+/// registry and checks the cases themselves. Both must agree on which posters
+/// are allowed to have moved, and a second hand-maintained copy of that list
+/// is precisely how the first version of this guard went stale.
+pub const WARM_PASS_OPT_INS: &[&str] = &[
+    // si-10: recorded completely blank. The palette panel and its scrim are
+    // both `Presence`-staged, so both captured at progress 0.
+    "beui/command-palette",
+    // si-10: recorded without its balance figure, which arrives on a ten-cell
+    // stagger over a spring settling at roughly 556 ms.
+    "beui/wallet-card",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,19 +200,6 @@ mod tests {
         assert_eq!(case_at(400).warm_frames(), Case::STAGED_WARM_FRAMES);
     }
 
-    /// Every case that records a warm pass, each named by the change that
-    /// opted it in. Opting a case in moves a published frust.dev poster, so
-    /// the list exists to make that deliberate: a case cannot start warming
-    /// without an edit here, and the edit is where the reason is recorded.
-    const WARM_PASS_OPT_INS: &[&str] = &[
-        // si-10: recorded completely blank. The palette panel and its scrim
-        // are both `Presence`-staged, so both captured at progress 0.
-        "beui/command-palette",
-        // si-10: recorded without its balance figure, which arrives on a
-        // ten-cell stagger over a spring settling at roughly 556 ms.
-        "beui/wallet-card",
-    ];
-
     /// The property that protects the 214 committed posters: warming is
     /// opt-in, and every opt-in is named. This replaced a plain emptiness
     /// assertion once the first two cases opted in; asserting containment
@@ -205,7 +211,7 @@ mod tests {
             .iter()
             .filter(|case| case.warm_frames() > 0)
             .map(|case| case.slug)
-            .filter(|slug| !WARM_PASS_OPT_INS.contains(slug))
+            .filter(|slug| !super::WARM_PASS_OPT_INS.contains(slug))
             .collect();
         assert!(
             unnamed.is_empty(),
@@ -219,7 +225,7 @@ mod tests {
     /// here silently widens the allowlist rather than narrowing it.
     #[test]
     fn every_allowlisted_slug_exists_in_the_registry() {
-        let unknown: Vec<&&str> = WARM_PASS_OPT_INS
+        let unknown: Vec<&&str> = super::WARM_PASS_OPT_INS
             .iter()
             .filter(|slug| crate::find(slug).is_none())
             .collect();
