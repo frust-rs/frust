@@ -130,6 +130,35 @@ pub trait AppTree {
     /// nothing is focused or no IME surface was published.
     fn ime_state(&self) -> Option<ImeState>;
 
+    /// Take (and clear) the text a widget asked to put on the host clipboard
+    /// (delegates to [`RenderRoot::take_clipboard_write`]).
+    ///
+    /// The shell half of the clipboard channel: a focused editable answers a
+    /// copy/cut by writing its selection into the pass's clipboard slot
+    /// ([`frust_core::EventCtx::write_clipboard`]), and the shell — the only side
+    /// with a host clipboard to talk to — drains it here **immediately after
+    /// every [`AppTree::event`]/[`AppTree::ime_apply`]**, beside
+    /// [`AppTree::ime_state`]. `None` means no widget copied, and a shell with no
+    /// clipboard wired yet may simply not call this.
+    ///
+    /// **Destructive**, unlike the level reads around it: a clipboard write is an
+    /// edge, so a caller that drains and drops the result loses that write.
+    fn take_clipboard_write(&mut self) -> Option<String>;
+
+    /// Take (and clear) whether a widget asked the shell to read the host
+    /// clipboard back to it (delegates to [`RenderRoot::take_paste_request`]).
+    ///
+    /// The inverse direction, drained in the same place: on `true` the shell reads
+    /// its host clipboard and dispatches
+    /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`](frust_core::EditCommand::Paste)`(text))`
+    /// back through [`AppTree::event`] — a *new* dispatch, since the read may be
+    /// asynchronous. That answer is focus-routed and therefore self-cancelling: if
+    /// focus moved or was released while the read was in flight it reaches no
+    /// widget and is dropped, so the shell never has to track who asked.
+    ///
+    /// **Destructive**, for [`AppTree::take_clipboard_write`]'s reason.
+    fn take_paste_request(&mut self) -> bool;
+
     /// Store the app's active theme, threaded into every subsequent
     /// layout/paint pass (delegates to [`RenderRoot::set_theme`]).
     ///
@@ -350,6 +379,14 @@ where
         self.root.ime_state()
     }
 
+    fn take_clipboard_write(&mut self) -> Option<String> {
+        self.root.take_clipboard_write()
+    }
+
+    fn take_paste_request(&mut self) -> bool {
+        self.root.take_paste_request()
+    }
+
     fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.root.set_theme(theme);
     }
@@ -522,6 +559,17 @@ mod tests {
         fn ime_state(&self) -> Option<ImeState> {
             unimplemented!()
         }
+        // The clipboard drains answer honestly instead of panicking like their
+        // neighbours: "no widget asked" is a real answer a tree can give (it is
+        // what a shell reads on every pass in which nothing copied), so a
+        // hypothetical driver calling them on this double should see the empty
+        // channel rather than a panic.
+        fn take_clipboard_write(&mut self) -> Option<String> {
+            None
+        }
+        fn take_paste_request(&mut self) -> bool {
+            false
+        }
         fn set_theme(&mut self, _theme: Box<dyn Any>) {
             unimplemented!()
         }
@@ -572,6 +620,85 @@ mod tests {
             EdgeInsets::new(0.0, 24.0, 0.0, 34.0),
             EdgeInsets::ZERO,
         ));
+    }
+
+    /// A leaf that answers a clipboard verb the way a real editable does: it
+    /// writes its "selection" on a copy and asks for the host clipboard on a
+    /// paste command it cannot satisfy itself.
+    struct ClipboardWidget;
+    impl Widget for ClipboardWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, _bc: &BoxConstraints) -> Size {
+            Size::ZERO
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(
+            &mut self,
+            ctx: &mut frust_core::EventCtx,
+            event: &InputEvent,
+        ) -> frust_core::EventResult {
+            match event {
+                InputEvent::EditCommand(frust_core::EditCommand::Copy) => {
+                    ctx.write_clipboard("selection".to_string());
+                    frust_core::EventResult::Handled
+                }
+                InputEvent::EditCommand(frust_core::EditCommand::SelectAll) => {
+                    ctx.request_paste();
+                    frust_core::EventResult::Handled
+                }
+                _ => frust_core::EventResult::Ignored,
+            }
+        }
+    }
+
+    struct ClipboardView;
+    impl View<NonDefaultState> for ClipboardView {
+        type Element = ClipboardWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClipboardWidget {
+            ClipboardWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ClipboardWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn erased_app_delegates_the_clipboard_drains_to_the_root() {
+        // The shell-facing half of the clipboard channel: a shell drains these
+        // through `AppTree` and never touches `RenderRoot` directly.
+        let mut app = new_boxed_app_with(
+            || NonDefaultState { label: "clip" },
+            |_state: &mut NonDefaultState| ClipboardView,
+        );
+        app.rebuild();
+        app.layout(Size::new(10.0, 10.0), &mut () as &mut dyn Any);
+
+        assert!(app.take_clipboard_write().is_none(), "nothing copied yet");
+        assert!(!app.take_paste_request());
+
+        app.event(&InputEvent::EditCommand(frust_core::EditCommand::Copy));
+        assert_eq!(app.take_clipboard_write().as_deref(), Some("selection"));
+        assert!(
+            app.take_clipboard_write().is_none(),
+            "the drain is one-shot through the erasure too"
+        );
+
+        app.event(&InputEvent::EditCommand(frust_core::EditCommand::SelectAll));
+        assert!(app.take_paste_request());
+        assert!(!app.take_paste_request());
+    }
+
+    #[test]
+    fn app_tree_clipboard_drains_report_an_empty_channel_on_the_minimal_tree() {
+        // Unlike its `unimplemented!()` neighbours these answer, because "no
+        // widget asked" is a real answer a tree with no clipboard can give.
+        let mut tree = MinimalTree;
+        assert!(tree.take_clipboard_write().is_none());
+        assert!(!tree.take_paste_request());
     }
 
     #[test]

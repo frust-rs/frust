@@ -115,6 +115,24 @@ pub use frust_widgets::{
     text, text_input,
 };
 
+/// The clipboard/selection command vocabulary, flat-re-exported from
+/// `frust-core::event` (and also available through
+/// [`authoring::EditCommand`]).
+///
+/// [`InputEvent::EditCommand`](authoring::InputEvent) delivers one of
+/// [`EditCommand::Copy`], [`EditCommand::Cut`], [`EditCommand::Paste`] or
+/// [`EditCommand::SelectAll`] down the focus chain, already decoded by the shell
+/// from the platform's own gesture — `Cmd+C` on macOS, `Ctrl+C` or `Ctrl+Insert`
+/// elsewhere, a hardware clipboard key, an Android `ACTION_PROCESS_TEXT`, an iOS
+/// edit-menu tap — so app and design-system code never decodes a chord itself.
+///
+/// Lifted flat rather than left inside [`authoring`] for [`CursorIcon`]'s reason:
+/// a design system's own context menu or toolbar builder names these verbs in
+/// its public API without being a widget author. `Paste` carries its text
+/// because the shell has already read the host clipboard; its [`Debug`] redacts
+/// that text, since a paste payload can be a password or a token.
+pub use frust_core::EditCommand;
+
 /// Platform-view embedding (platform-views feature): reserve
 /// layout space for a native view (a map, a video player, ...) composited
 /// alongside the frust surface. [`platform_view`] takes the
@@ -412,6 +430,19 @@ pub mod authoring {
         PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget,
         WidgetId, any,
     };
+
+    /// The clipboard/selection vocabulary an editable widget matches on —
+    /// [`InputEvent::EditCommand`] carries one of these four verbs, already
+    /// decoded from whatever chord, hardware key or edit-menu tap produced it.
+    /// A widget answers copy/cut through
+    /// [`EventCtx::write_clipboard`](frust_core::EventCtx::write_clipboard) and
+    /// asks for a paste through
+    /// [`EventCtx::request_paste`](frust_core::EventCtx::request_paste); the shell
+    /// owns the host clipboard at both ends. Also re-exported flat as
+    /// [`frust::EditCommand`](crate::EditCommand), for the same reason
+    /// [`CursorIcon`] is: a design system's public API can name a verb without
+    /// authoring a widget.
+    pub use frust_core::EditCommand;
 
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
     /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a

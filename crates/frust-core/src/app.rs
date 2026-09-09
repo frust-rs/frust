@@ -22,8 +22,8 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    CursorIcon, CursorPass, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
-    PointerButton, PointerEvent, PointerPhase,
+    CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton,
+    PointerEvent, PointerPhase, RequestPass,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -301,6 +301,31 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// beside it: the shell compares the value it last applied (see
     /// [`RenderRoot::cursor`]).
     cursor: CursorIcon,
+    /// The text the tree last asked the shell to put on the host clipboard, or
+    /// `None` once drained — the cursor's write-only sibling, resolved from the
+    /// same kind of per-pass slot ([`EventCtx::write_clipboard`]) by the same
+    /// [`RequestPass`] bracket.
+    ///
+    /// **One-shot, unlike [`cursor`](RenderRoot::cursor).** A cursor is a *level*
+    /// (a standing shape a shell re-applies when it differs); a clipboard write
+    /// is an *edge* (a thing to do once), so the accessor
+    /// [`RenderRoot::take_clipboard_write`] drains it and a shell that forgets to
+    /// call it merely delays the write rather than repeating it.
+    ///
+    /// A pass that writes replaces whatever stood here undrained — the newest
+    /// copy is the one the user meant, and the shell is expected to drain after
+    /// every dispatch — while a pass that writes nothing leaves it alone rather
+    /// than silently discarding a write nobody has taken yet.
+    pending_clipboard_write: Option<String>,
+    /// Whether the tree has asked the shell to read the host clipboard back to it
+    /// ([`EventCtx::request_paste`]), until drained by
+    /// [`RenderRoot::take_paste_request`].
+    ///
+    /// The data-free twin of [`pending_clipboard_write`](RenderRoot::pending_clipboard_write),
+    /// and one-shot for the same reason. Raised by any pass in which a widget
+    /// asked and lowered only by the drain, so a shell that skips a drain answers
+    /// late rather than losing the paste.
+    pending_paste_request: bool,
     /// The IME surface the focused widget last published (via
     /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
@@ -436,6 +461,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             cursor: CursorIcon::Default,
+            pending_clipboard_write: None,
+            pending_paste_request: false,
             ime_state: None,
             focus_ime_gen: 0,
             platform_view_frames: Vec::new(),
@@ -627,6 +654,53 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// pointer motion.
     pub fn cursor(&self) -> CursorIcon {
         self.cursor
+    }
+
+    /// Take (and clear) the text the tree asked the shell to put on the host
+    /// clipboard — the drain a shell performs immediately after every
+    /// [`RenderRoot::event`], beside [`cursor()`](RenderRoot::cursor) and
+    /// [`ime_state()`](RenderRoot::ime_state).
+    ///
+    /// `Some` exactly when some widget called
+    /// [`EventCtx::write_clipboard`](crate::event::EventCtx::write_clipboard)
+    /// during a pass since the last drain (answering a
+    /// [`EditCommand::Copy`](crate::event::EditCommand::Copy)/[`Cut`](crate::event::EditCommand::Cut),
+    /// or a chord the widget decoded itself). The shell hands the text to its host
+    /// clipboard — winit's `arboard` on desktop, `ClipboardManager` on Android,
+    /// `UIPasteboard` on iOS — and does nothing at all on `None`.
+    ///
+    /// **Destructive**, unlike [`cursor()`](RenderRoot::cursor): a clipboard write
+    /// is an edge, not a standing level, so a caller that drains and drops the
+    /// result loses that write. Draining twice after one pass yields `None` the
+    /// second time.
+    ///
+    /// A widget that never copies leaves this `None` forever, so a shell with no
+    /// clipboard (the mobile shells before their own clipboard work lands) may
+    /// call it and discard the result, or not call it at all.
+    pub fn take_clipboard_write(&mut self) -> Option<String> {
+        self.pending_clipboard_write.take()
+    }
+
+    /// Take (and clear) whether the tree asked the shell to read the host
+    /// clipboard back to it — drained beside
+    /// [`take_clipboard_write`](RenderRoot::take_clipboard_write) after every
+    /// [`RenderRoot::event`].
+    ///
+    /// `true` exactly when some widget called
+    /// [`EventCtx::request_paste`](crate::event::EventCtx::request_paste) during a
+    /// pass since the last drain. The shell answers by reading its host clipboard
+    /// and dispatching
+    /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`](crate::event::EditCommand::Paste)`(text))`
+    /// — a *new* dispatch, because the read may be asynchronous and the pass that
+    /// asked is over. That answer is focus-routed, so it reaches no widget and is
+    /// harmlessly dropped if focus moved or was released in between; the shell
+    /// therefore never has to check who asked.
+    ///
+    /// **Destructive**, for [`take_clipboard_write`](RenderRoot::take_clipboard_write)'s
+    /// reason. A pass may both write and request (a cut that immediately re-reads,
+    /// or a widget answering two chords) — the two drains are independent.
+    pub fn take_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_paste_request)
     }
 
     /// The IME surface the focused widget published, for the shell to drive the
@@ -1385,6 +1459,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// call a desktop shell makes straight after this pass returns, with no frame
     /// involved, and folding it in would repaint the tree on every hover move.
     ///
+    /// The **clipboard channel** rides the same bracket and is the fifth thing
+    /// this pass resolves: whatever the dispatch asked for through
+    /// [`EventCtx::write_clipboard`](crate::event::EventCtx::write_clipboard) and
+    /// [`EventCtx::request_paste`](crate::event::EventCtx::request_paste) lands in
+    /// [`RenderRoot::take_clipboard_write`] / [`RenderRoot::take_paste_request`],
+    /// which a shell drains immediately after this returns, beside
+    /// [`RenderRoot::cursor`] and [`RenderRoot::ime_state`]. Unlike the cursor,
+    /// both commit on **every** pass rather than on a pointer `Move` alone — a
+    /// copy can be answered from a key chord, a context-menu tap, or an
+    /// [`InputEvent::EditCommand`] — and both are one-shot drains rather than
+    /// standing levels. Like the cursor, neither folds into `needs_redraw`:
+    /// talking to the host clipboard paints nothing (a `Cut` that mutates the
+    /// document asks for its own redraw, for the mutation).
+    ///
     /// # Reentrancy
     ///
     /// This pass **never rebuilds or repaints**. Event handlers mutate `state`
@@ -1449,7 +1537,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // that re-entered this method could not silently eat the enclosing pass's
         // request — see that guard.
         let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
-        let cursor_slot = CursorPass::enter();
+        // The same bracket carries the clipboard channel (a write and a paste
+        // request), which differs only in when it commits: every pass, not the
+        // pointer-move subset, since a copy can be answered from a key chord or an
+        // `EditCommand` that never moved a pointer. See `RequestPass`.
+        let request_slot = RequestPass::enter();
 
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
@@ -1538,7 +1630,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
                 PointerPhase::Move => {}
             },
-            InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_) => {
+            InputEvent::Scroll { .. }
+            | InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_) => {
                 if focus_req {
                     self.set_focus_active(true);
                 }
@@ -1593,10 +1688,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // pointer moving off every requesting widget resolves to. Drained
         // unconditionally so a request made on a non-cursor pass cannot survive
         // into the next one; only a cursor pass commits it.
-        let requested = cursor_slot.take();
+        let requested = request_slot.take();
         if cursor_pass {
-            self.cursor = requested.unwrap_or_default();
+            self.cursor = requested.cursor.unwrap_or_default();
         }
+        // The clipboard half of the same drain, committed on **every** pass: a copy
+        // is answered from whatever event decoded it, and there is no
+        // "clipboard pass" the way there is a cursor pass. Both fields are
+        // one-shot (see their docs) — a write from this pass supersedes one still
+        // standing undrained, and a request is raised but never lowered here, so a
+        // shell that skipped a drain answers late rather than losing the paste.
+        if let Some(text) = requested.clipboard_write {
+            self.pending_clipboard_write = Some(text);
+        }
+        self.pending_paste_request |= requested.paste_request;
         // A hover that ended with *nothing* taking it needs one repaint no widget
         // can ask for: the pointer moved onto empty chrome (or a press/lift/cancel
         // cleared the link), so the old claimant's `event()` was never called and
@@ -5539,5 +5644,398 @@ mod tests {
         h.dispatch(PointerPhase::Up, 50.0, 45.0);
         h.move_over(Leaf::Bottom);
         assert_eq!(h.cursor(), CursorIcon::Text);
+    }
+
+    use crate::event::{EditCommand, Key, KeyEvent, Modifiers, NamedKey};
+
+    // --- Clipboard: the per-pass write / paste-request channels ---------------
+    //
+    // The cursor's two siblings, resolved by the same bracket but committed on
+    // every pass rather than on a pointer `Move` alone, and drained one-shot
+    // rather than read as a standing level. The fixture is the cursor pair's
+    // shape with focus in place of hit testing, because a clipboard verb is
+    // focus-routed: two stacked leaves, a container that can speak before or
+    // after routing (the last-writer case) or ask for a paste of its own (the
+    // two-channels-in-one-pass case).
+
+    /// How the clipboard fixture's container speaks relative to its children.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ContainerClipboard {
+        /// Says nothing at all — the ordinary container.
+        Silent,
+        /// Writes *before* routing, so whatever the child writes comes later.
+        WritesBeforeRouting(&'static str),
+        /// Writes *after* routing, deliberately overriding its child.
+        WritesAfterRouting(&'static str),
+        /// Asks for a paste before routing — a toolbar refreshing whether its
+        /// paste button should be enabled, which is how a write and a request
+        /// legitimately ride one pass.
+        AsksForPaste,
+    }
+
+    /// A focusable editable stand-in: claims focus on a `Down`, answers a
+    /// copy/cut by writing its "selection", and asks for the clipboard when it
+    /// sees the hardware [`NamedKey::Paste`] key it decoded itself.
+    struct ClipboardLeaf {
+        /// What this leaf would copy.
+        text: &'static str,
+        /// Every [`EditCommand`] this leaf was handed, in order — the proof of
+        /// who the focus routing actually reached.
+        seen: Rc<RefCell<Vec<EditCommand>>>,
+    }
+
+    impl crate::widget::Widget for ClipboardLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::EditCommand(cmd) => {
+                    self.seen.borrow_mut().push(cmd.clone());
+                    match cmd {
+                        // The widget owns the selection, so it is the only thing
+                        // that can say what "copy" means.
+                        EditCommand::Copy | EditCommand::Cut => {
+                            ctx.write_clipboard(self.text.to_string());
+                        }
+                        // A paste arrives with its text already read by the shell,
+                        // and select-all touches no clipboard at all.
+                        EditCommand::Paste(_) | EditCommand::SelectAll => {}
+                    }
+                    EventResult::Handled
+                }
+                // The hardware clipboard key, decoded by the widget rather than by
+                // the shell: it carries no text, so the widget asks for some.
+                InputEvent::Key(k) if k.key == Key::Named(NamedKey::Paste) => {
+                    ctx.request_paste();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// Two stacked clipboard leaves, routed by focus for a focus-routed event and
+    /// by hit test for a pointer one, plus the container's own optional request.
+    struct ClipboardPair {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+        own: ContainerClipboard,
+    }
+
+    impl crate::widget::Widget for ClipboardPair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match self.own {
+                ContainerClipboard::WritesBeforeRouting(text) => {
+                    ctx.write_clipboard(text.to_string())
+                }
+                ContainerClipboard::AsksForPaste => ctx.request_paste(),
+                _ => {}
+            }
+            let result = self.route(ctx, event);
+            if let ContainerClipboard::WritesAfterRouting(text) = self.own {
+                ctx.write_clipboard(text.to_string());
+            }
+            result
+        }
+    }
+
+    impl ClipboardPair {
+        /// Focus routing for a focus-routed event, hit testing for the rest —
+        /// the two branches every real container has.
+        fn route(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_focus_routed() {
+                for pod in [&mut self.top, &mut self.bottom] {
+                    if pod.is_focused() {
+                        return pod.event_child(ctx, event);
+                    }
+                }
+                return EventResult::Ignored;
+            }
+            let pos = event.position();
+            let blurs = matches!(
+                event,
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down
+            );
+            let mut result = EventResult::Ignored;
+            let mut hit = false;
+            for pod in [&mut self.top, &mut self.bottom] {
+                if !hit && pod.contains(pos) {
+                    hit = true;
+                    result = pod.event_child(ctx, event);
+                } else if blurs {
+                    // A `Down` that lands elsewhere blurs the chain, exactly as
+                    // `frust-widgets`' routers do.
+                    pod.set_focused(false);
+                }
+            }
+            result
+        }
+    }
+
+    /// The fixture's view. It carries the two `seen` logs rather than letting the
+    /// harness reach into the built tree for them: `Widget` has no downcast, and
+    /// a shared handle is the same way the hover fixture's probe is watched.
+    #[derive(Clone)]
+    struct ClipboardPairView {
+        own: ContainerClipboard,
+        top_seen: Rc<RefCell<Vec<EditCommand>>>,
+        bottom_seen: Rc<RefCell<Vec<EditCommand>>>,
+    }
+
+    impl View<()> for ClipboardPairView {
+        type Element = ClipboardPair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClipboardPair {
+            ClipboardPair {
+                top: crate::widget::ChildPod::new(Box::new(ClipboardLeaf {
+                    text: "top selection",
+                    seen: self.top_seen.clone(),
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(ClipboardLeaf {
+                    text: "bottom selection",
+                    seen: self.bottom_seen.clone(),
+                })),
+                own: self.own,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut ClipboardPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// A `RenderRoot` over the clipboard fixture, plus the two leaves' `seen`
+    /// logs (cloned out of the built widgets, which the root owns).
+    struct ClipboardHarness {
+        root: RenderRoot<(), ClipboardPairView>,
+        state: (),
+        top_seen: Rc<RefCell<Vec<EditCommand>>>,
+        bottom_seen: Rc<RefCell<Vec<EditCommand>>>,
+    }
+
+    impl ClipboardHarness {
+        fn new(own: ContainerClipboard) -> Self {
+            let mut root: RenderRoot<(), ClipboardPairView> = RenderRoot::new();
+            let mut state = ();
+            let view = ClipboardPairView {
+                own,
+                top_seen: Rc::new(RefCell::new(Vec::new())),
+                bottom_seen: Rc::new(RefCell::new(Vec::new())),
+            };
+            let (top_seen, bottom_seen) = (view.top_seen.clone(), view.bottom_seen.clone());
+            root.rebuild(&mut move |_: &mut ()| view.clone(), &mut state);
+            root.layout(Size::new(100.0, 60.0));
+            ClipboardHarness {
+                root,
+                state,
+                top_seen,
+                bottom_seen,
+            }
+        }
+
+        /// Focus a leaf the way a user does: a `Down` inside its bounds.
+        fn focus(&mut self, leaf: Leaf) {
+            let y = match leaf {
+                Leaf::Top => 15.0,
+                Leaf::Bottom => 45.0,
+            };
+            self.root
+                .event(&mut self.state, &pointer(PointerPhase::Down, 50.0, y));
+        }
+
+        fn dispatch(&mut self, event: &InputEvent) -> EventOutcome {
+            self.root.event(&mut self.state, event)
+        }
+    }
+
+    #[test]
+    fn a_copy_reaches_the_focused_leaf_alone_and_its_text_drains_once() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        assert!(
+            h.root.take_clipboard_write().is_none(),
+            "a focusing tap writes nothing"
+        );
+
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(
+            h.top_seen.borrow().as_slice(),
+            &[EditCommand::Copy],
+            "the focused leaf received the command"
+        );
+        assert!(
+            h.bottom_seen.borrow().is_empty(),
+            "and the unfocused sibling never saw it — focus routing, not hit testing"
+        );
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("top selection")
+        );
+        assert_eq!(
+            h.root.take_clipboard_write(),
+            None,
+            "the drain is one-shot: a clipboard write is an edge, not a level"
+        );
+    }
+
+    #[test]
+    fn a_copy_follows_the_focus_when_it_moves() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        h.focus(Leaf::Bottom);
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Cut));
+        assert!(
+            h.top_seen.borrow().is_empty(),
+            "the blurred leaf is out of the routed path"
+        );
+        assert_eq!(h.bottom_seen.borrow().as_slice(), &[EditCommand::Cut]);
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("bottom selection")
+        );
+    }
+
+    #[test]
+    fn a_paste_request_drains_once_and_its_answer_is_an_ordinary_dispatch() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        assert!(
+            !h.root.take_paste_request(),
+            "a focusing tap asks for nothing"
+        );
+
+        // The widget decoded the hardware Paste key itself and asked the shell.
+        h.dispatch(&InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Paste),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        }));
+        assert!(h.root.take_paste_request());
+        assert!(
+            !h.root.take_paste_request(),
+            "the flag is one-shot, so a shell answers a request once"
+        );
+
+        // The shell's answer is a new, focus-routed dispatch carrying the text.
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Paste(
+            "from the host".to_string(),
+        )));
+        assert_eq!(
+            h.top_seen.borrow().as_slice(),
+            &[EditCommand::Paste("from the host".to_string())]
+        );
+        assert!(
+            !h.root.take_paste_request(),
+            "answering a request does not raise a new one"
+        );
+        assert!(
+            h.root.take_clipboard_write().is_none(),
+            "and a paste writes nothing back to the host clipboard"
+        );
+    }
+
+    #[test]
+    fn a_paste_answered_after_a_blur_reaches_nobody() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        h.dispatch(&InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Paste),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        }));
+        assert!(h.root.take_paste_request());
+
+        // Focus is released while the shell's clipboard read is in flight: a
+        // `Down` on empty chrome past both leaves blurs the chain.
+        h.dispatch(&pointer(PointerPhase::Down, 50.0, 100.0));
+        assert!(!h.root.is_focus_active(), "the tap blurred the field");
+
+        // The shell answers anyway — it never has to track who asked, because the
+        // answer is focus-routed and simply reaches no widget.
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Paste(
+            "from the host".to_string(),
+        )));
+        assert!(h.top_seen.borrow().is_empty());
+        assert!(h.bottom_seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_last_clipboard_write_of_a_pass_wins_at_the_root() {
+        // A container that writes BEFORE routing yields to its child, exactly as
+        // `set_cursor` does: the innermost widget the route reaches speaks last.
+        let mut h = ClipboardHarness::new(ContainerClipboard::WritesBeforeRouting("container"));
+        h.focus(Leaf::Top);
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("top selection")
+        );
+
+        // A container that writes AFTER routing deliberately overrides it.
+        let mut h = ClipboardHarness::new(ContainerClipboard::WritesAfterRouting("container"));
+        h.focus(Leaf::Top);
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(h.root.take_clipboard_write().as_deref(), Some("container"));
+    }
+
+    #[test]
+    fn a_write_and_a_paste_request_ride_one_pass_independently() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::AsksForPaste);
+        h.focus(Leaf::Top);
+        // The focusing tap already carried the container's ask; drain it so the
+        // assertion below is about the copy pass alone.
+        assert!(h.root.take_paste_request());
+
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("top selection"),
+            "the leaf's write landed"
+        );
+        assert!(
+            h.root.take_paste_request(),
+            "and the container's request landed in the same pass"
+        );
+    }
+
+    #[test]
+    fn a_pass_that_asks_for_neither_leaves_both_empty() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        // A select-all is a real clipboard verb that touches no clipboard, and a
+        // pointer move touches nothing at all.
+        h.dispatch(&InputEvent::EditCommand(EditCommand::SelectAll));
+        h.dispatch(&pointer(PointerPhase::Move, 50.0, 15.0));
+        assert_eq!(h.top_seen.borrow().as_slice(), &[EditCommand::SelectAll]);
+        assert_eq!(h.root.take_clipboard_write(), None);
+        assert!(!h.root.take_paste_request());
+    }
+
+    #[test]
+    fn an_edit_command_moves_focus_only_when_the_dispatch_asks() {
+        // The bookkeeping arm `EditCommand` shares with `Key`/`Ime`: unlike a
+        // `Down`, it neither claims nor blurs by itself.
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        assert!(h.root.is_focus_active());
+        let gen_before = h.root.focus_ime_generation();
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert!(
+            h.root.is_focus_active(),
+            "a clipboard verb leaves the focus session exactly as it found it"
+        );
+        assert_eq!(h.root.focus_ime_generation(), gen_before);
     }
 }

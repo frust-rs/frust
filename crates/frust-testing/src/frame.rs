@@ -62,7 +62,8 @@
 use std::any::Any;
 
 use frust_core::{
-    FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot, View,
+    EditCommand, FrameTime, InputEvent, Key, KeyEvent, Modifiers, PaintScene, PointerButton,
+    PointerEvent, PointerPhase, RenderRoot, View,
 };
 use frust_scene::{Command, Scene, SceneBuilder};
 use frust_text::{FontFamily, TextContext, TextStyle};
@@ -299,6 +300,37 @@ pub fn pointer(phase: PointerPhase, p: Point) -> InputEvent {
         position: p,
         button: PointerButton::Primary,
     })
+}
+
+/// A synthetic key press of `key` under `modifiers` — the focus-routed shape a
+/// shell normalizes a platform key event to before it reaches a
+/// [`RenderRoot`](frust_core::RenderRoot).
+///
+/// Never auto-repeat (`repeat: false`): a corpus case pins a *state*, and a
+/// held key is a timing behaviour no deterministic frame can express. Focus is
+/// the case's own setup — this event is delivered down the recorded focus chain
+/// with no hit test, so a case pairs it with [`tap_at`] to focus the field
+/// first, exactly as a real interaction would.
+#[must_use]
+pub fn key(key: Key, modifiers: Modifiers) -> InputEvent {
+    InputEvent::Key(KeyEvent {
+        key,
+        modifiers,
+        repeat: false,
+    })
+}
+
+/// A synthetic clipboard/selection command — the *decoded* form a shell
+/// dispatches after resolving a platform chord, hardware key, or edit-menu tap
+/// (see [`EditCommand`](frust_core::EditCommand)).
+///
+/// Focus-routed like [`key`], and the reason a case can pin a pasted field
+/// without a host clipboard: the text rides the event
+/// ([`EditCommand::Paste`](frust_core::EditCommand::Paste)), so nothing here
+/// reads platform state.
+#[must_use]
+pub fn edit_command(cmd: EditCommand) -> InputEvent {
+    InputEvent::EditCommand(cmd)
 }
 
 /// A pointer-DOWN at `p` with no matching up — how a case pins a *pressed*
