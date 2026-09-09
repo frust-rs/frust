@@ -171,6 +171,23 @@ pub const WARM_PASS_OPT_INS: &[&str] = &[
     // si-10: recorded without its balance figure, which arrives on a ten-cell
     // stagger over a spring settling at roughly 556 ms.
     "beui/wallet-card",
+    // si-07: this poster does NOT move — it is listed because the guard is on
+    // the warm pass, not on the pixels. The case dropped its
+    // `OverlayEntrance::None` pin so the live catalog page animates, and the
+    // warm pass is what keeps the recorded frame settled instead of blank
+    // (measured: blank without it). `time_ms: 400` is double the entrance's
+    // own `MaterialMotion::SHORT_4` (200 ms); the ramp is a `Duration` drive,
+    // which snaps to exactly 1.0 the moment its delta reaches its duration, so
+    // the poster is byte-identical to the pinned one it replaces.
+    "material/dialog",
+    // si-07: the same undo on shadcn's side, and the same non-move —
+    // `fade-in-0 zoom-in-95` is 200 ms (`FADE_ZOOM_MS`), captured at 400 ms,
+    // byte-identical to the pinned poster it replaces. Dropping the pin also
+    // let this case go back to the sugared `dialog()` instead of rebuilding
+    // that constructor's chrome by hand. Unlike `material/dialog`, this one
+    // changes nothing in a browser: `crate::interactive::shadcn` shadows the
+    // slug and a live host resolves that twin ahead of `Case::build`.
+    "shadcn/dialog",
 ];
 
 #[cfg(test)]

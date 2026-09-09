@@ -30,7 +30,7 @@
 //! # The three cases the recorded catalog calls "stuck"
 //!
 //! `crate::shadcn`'s module docs describe `dropdown-menu`, `select` and
-//! `tooltip` as permanently stuck at zero presence, because neither
+//! `tooltip` as recording at zero presence, because neither
 //! `PanelStyle::entrance` nor a tooltip ramp override is `pub` outside
 //! `frust_shadcn`. That diagnosis is exactly right **for the recorder** and
 //! does not carry over here, so this module needs no plugin API change:
@@ -57,12 +57,14 @@
 //! # What this module does not do
 //!
 //! `dialog`, `drawer` and `sheet` are *open/close state* here. Restoring the
-//! entrance animation suppressed in their recorded twins
-//! (`ModalEntrance::None`, pinned for the same single-paint reason) is a
-//! separate task against `crate::shadcn`, and this module does not anticipate
-//! it: it calls the sugared `dialog()`/`drawer()`/`sheet()` constructors,
-//! whose own `config()` is what those recorded cases hand-roll anyway, and
-//! lets the entrance be whatever the constructors ship.
+//! entrance animation suppressed in their recorded twins was a separate task
+//! against `crate::shadcn` (si-07), and this module never anticipated it: it
+//! calls the sugared `dialog()`/`drawer()`/`sheet()` constructors and lets the
+//! entrance be whatever the constructors ship. That task has since landed for
+//! `dialog`, whose recorded twin now calls the same sugar; `drawer` and `sheet`
+//! keep `ModalEntrance::None`, because their `Slide` is driven in layout and
+//! the recorder's warm pass runs one pass behind it. Nothing here had to change
+//! either way.
 //!
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
@@ -877,11 +879,12 @@ impl ModalState {
 
 /// The `dialog` case with a dismiss that dismisses.
 ///
-/// The panel is `dialog()`'s own composition — the recorded case hand-rolls
-/// the identical `ModalConfig::centered(MAX_WIDTH_LG).close_button(true)` only
-/// so it can append `.entrance(ModalEntrance::None)`, which is a recorder
-/// workaround rather than part of the component. Calling the sugar keeps this
-/// case honest about what an app writes.
+/// The panel is `dialog()`'s own composition. The recorded case used to
+/// hand-roll the identical `ModalConfig::centered(MAX_WIDTH_LG)
+/// .close_button(true)` so it could append `.entrance(ModalEntrance::None)`, a
+/// recorder workaround rather than part of the component; si-07 removed both,
+/// so the two now call the same sugar. Calling it keeps this case honest about
+/// what an app writes.
 ///
 /// The recorded footer's lone "Cancel" now cancels, as do the close X and the
 /// scrim. Escape works too, but only once a press has landed inside the panel
