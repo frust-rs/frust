@@ -52,12 +52,18 @@
 //!
 //! Upstream has three insertion paths: keystrokes, `onPaste`, and the SMS
 //! one-time-code autofill that arrives as a whole `onChange` value. **Keystrokes
-//! and paste exist here; autofill does not.** When a platform clipboard manager or
-//! autofill system routes pasted text through `InputEvent::EditCommand(Paste(...))`,
-//! this widget extracts ASCII digits and fills slots from the active position
-//! forward, stopping when full, firing callbacks as the final digit would. Copy,
-//! Cut, and SelectAll commands are consumed with no effect — the OTP field has no
-//! copy semantics (no selection, no clipboard write) and reveals nothing of its content
+//! and paste exist here; autofill does not.** A paste can start two ways: a
+//! platform clipboard manager or autofill system routes it in directly, or this
+//! widget decodes the paste chord itself at the key layer — ctrl-or-meta+V, the
+//! dedicated `NamedKey::Paste`, and the legacy Shift+Insert (see
+//! `handle_key`) — and *asks* the shell for the clipboard
+//! (`EventCtx::request_paste`), since only the shell can touch the host
+//! clipboard. Either way the text lands through
+//! `InputEvent::EditCommand(Paste(...))`, and this widget extracts ASCII
+//! digits and fills slots from the active position forward, stopping when
+//! full, firing callbacks as the final digit would. Copy, Cut, and SelectAll
+//! commands are consumed with no effect — the OTP field has no copy semantics
+//! (no selection, no clipboard write) and reveals nothing of its content
 //! to assistive tech beyond what `aria_label` records.
 //! The autofill signal still has no route; an app that needs an SMS code set
 //! `value` itself.
@@ -1123,12 +1129,49 @@ impl Widget for OtpInputWidget {
 }
 
 impl OtpInputWidget {
-    /// The keyboard surface — upstream's `onKeyDown` less its clipboard arms.
+    /// The keyboard surface — upstream's `onKeyDown`, with one deliberate
+    /// exception to its chord bail.
+    ///
+    /// Upstream's blanket `if (e.metaKey || e.ctrlKey || e.altKey) return`
+    /// costs it nothing on a browser's own Ctrl/Cmd+V: a DOM paste event
+    /// fires from the OS independently of `keydown`, so bailing there still
+    /// lets the paste land. Desktop has no such second channel — the shell
+    /// only reads its clipboard when a widget asks
+    /// (`EventCtx::request_paste`) — so the bail is faithful for every other
+    /// chord and wrong for this one. The paste chords are decoded first, in
+    /// exactly the shape `TextInput::handle_key` uses
+    /// (`crates/frust-widgets/src/textinput.rs`): ctrl-or-meta + `v` (ASCII
+    /// case-insensitive), the dedicated `NamedKey::Paste`, and the legacy
+    /// Shift+Insert. `alt` is never a chord modifier, matching TextInput — it
+    /// composes characters. Every other chord — Ctrl/Cmd+C/X/A included —
+    /// still falls through to the bail below and does nothing, which is
+    /// `handle_command`'s refusal for the same three verbs restated at the
+    /// key layer.
+    ///
     /// Returns whether the key belonged to this control.
     fn handle_key(&mut self, ctx: &mut EventCtx, key: &KeyEvent) -> bool {
-        // `if (e.metaKey || e.ctrlKey || e.altKey) return`: a shortcut chord is
-        // not an edit.
         let modifiers = &key.modifiers;
+        match &key.key {
+            Key::Character(text)
+                if (modifiers.ctrl || modifiers.meta) && text.eq_ignore_ascii_case("v") =>
+            {
+                ctx.request_paste();
+                return true;
+            }
+            Key::Named(NamedKey::Paste) => {
+                ctx.request_paste();
+                return true;
+            }
+            Key::Named(NamedKey::Insert) if modifiers.shift => {
+                ctx.request_paste();
+                return true;
+            }
+            _ => {}
+        }
+
+        // `if (e.metaKey || e.ctrlKey || e.altKey) return`: a shortcut chord is
+        // not an edit. The three paste chords above are the one exception,
+        // decoded before this bail so they are not swallowed here.
         if modifiers.ctrl || modifiers.alt || modifiers.meta {
             return false;
         }
@@ -1314,6 +1357,35 @@ mod tests {
 
     fn named(k: NamedKey) -> InputEvent {
         key(Key::Named(k))
+    }
+
+    fn chorded(k: Key, modifiers: Modifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: k,
+            modifiers,
+            repeat: false,
+        })
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn meta() -> Modifiers {
+        Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
     }
 
     fn paste(text: &str) -> InputEvent {
@@ -2202,6 +2274,94 @@ mod tests {
         assert!(
             disabled.components[3] < enabled.components[3],
             "the hairline dims: {enabled:?} -> {disabled:?}"
+        );
+    }
+
+    // ---- Paste chord (the desktop trigger) -----------------------------------
+    //
+    // `Bare`'s raw `EventCtx` (used for the editing model above) is never
+    // bracketed by a `RequestPass`, so `EventCtx::request_paste`'s flag is
+    // only observable through a real `RenderRoot` — the same reason focus and
+    // semantics live in this root-driven section rather than the one above.
+
+    #[test]
+    fn ctrl_v_asks_the_shell_to_paste_and_types_nothing() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.dispatch(&chorded(Key::Character("v".to_string()), ctrl()));
+        assert!(
+            h.root.take_paste_request(),
+            "ctrl+V must ask the shell for the clipboard"
+        );
+        assert!(h.state.changes.is_empty(), "no digit was typed");
+        assert!(h.state.completes.is_empty());
+    }
+
+    #[test]
+    fn meta_v_asks_the_shell_to_paste_and_types_nothing() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        // Uppercase, the way a Shift+Cmd+V chord would arrive — the decode is
+        // ASCII case-insensitive.
+        h.dispatch(&chorded(Key::Character("V".to_string()), meta()));
+        assert!(
+            h.root.take_paste_request(),
+            "meta+V must ask the shell for the clipboard"
+        );
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn named_paste_key_asks_the_shell_to_paste() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.dispatch(&named(NamedKey::Paste));
+        assert!(h.root.take_paste_request());
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn shift_insert_asks_the_shell_to_paste() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.dispatch(&chorded(Key::Named(NamedKey::Insert), shift()));
+        assert!(
+            h.root.take_paste_request(),
+            "Shift+Insert is the legacy paste chord"
+        );
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_ctrl_x_and_ctrl_a_ask_for_nothing_and_change_nothing() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.type_digit('1');
+        for c in ["c", "x", "a"] {
+            h.dispatch(&chorded(Key::Character(c.to_string()), ctrl()));
+            assert!(
+                !h.root.take_paste_request(),
+                "ctrl+{c} must never ask for a paste"
+            );
+        }
+        assert_eq!(h.state.value, "1", "copy/cut/select-all changed nothing");
+        assert_eq!(
+            h.state.changes,
+            vec!["1".to_string()],
+            "no extra callback fired"
+        );
+        assert!(h.state.completes.is_empty());
+    }
+
+    #[test]
+    fn a_plain_digit_still_types_once_the_paste_chords_are_decoded() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.type_digit('7');
+        assert_eq!(h.state.value, "7");
+        assert!(
+            !h.root.take_paste_request(),
+            "a plain digit never asks for a paste"
         );
     }
 
