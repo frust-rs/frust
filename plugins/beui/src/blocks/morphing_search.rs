@@ -1313,9 +1313,20 @@ impl Widget for MorphingSearchWidget {
         if !self.config.open {
             return EventResult::Ignored;
         }
+        if let InputEvent::Key(key) = event {
+            return self.handle_key(ctx, event, key);
+        }
+        // The IME session and the clipboard verbs an `EditCommand` carries both
+        // belong to the field outright — `Key` is handled above, since the
+        // widget's own navigation keys intercept before falling through to
+        // `handle_key`'s own field forward. Branch on the shared predicate
+        // rather than enumerating `Ime`/`EditCommand`: Phase 3 of this plan
+        // adds another focus-routed-adjacent variant (`InputEvent::Overlay`),
+        // and an enumerated list would need to grow again.
+        if event.is_focus_routed() {
+            return route_event_single(&mut self.field, ctx, event);
+        }
         match event {
-            InputEvent::Key(key) => self.handle_key(ctx, event, key),
-            InputEvent::Ime(_) => route_event_single(&mut self.field, ctx, event),
             InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p),
             _ => EventResult::Ignored,
         }
@@ -1523,7 +1534,7 @@ mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, escape, ft_ms, light, pointer, reduced};
     use frust::authoring::text::TextContext;
-    use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey};
+    use frust::authoring::{EditCommand, Key, KeyEvent, Modifiers, NamedKey};
     use frust_core::RenderRoot;
     use std::any::Any;
 
@@ -1949,6 +1960,42 @@ mod tests {
         h.key(NamedKey::Enter);
         assert_eq!(h.state.selected, vec![1], "\"Billing\" is item 1");
         assert!(!h.state.open, "a selection closes the panel");
+    }
+
+    /// `EditCommand::Paste` is focus-routed exactly like `Key`/`Ime`: a
+    /// clipboard paste dispatched at the panel while the field holds focus
+    /// must reach it, closing the gap where a `Ctrl+V` chord's
+    /// `ctx.request_paste()` succeeds but the shell's separate top-level
+    /// `EditCommand::Paste(text)` dispatch it triggers is then swallowed here.
+    #[test]
+    fn a_paste_edit_command_reaches_the_focused_field() {
+        let mut h = Harness::new();
+        h.open();
+        h.focus_panel();
+        h.event(InputEvent::EditCommand(EditCommand::Paste(
+            "billing".to_string(),
+        )));
+        h.settle();
+        assert_eq!(
+            h.state.query, "billing",
+            "the pasted text must reach the focused field"
+        );
+    }
+
+    /// Guard against over-forwarding: the panel's own navigation keys must
+    /// still be intercepted before anything reaches the field, even while the
+    /// field holds focus — `is_focus_routed()` only widens the catch-all arm
+    /// *after* `handle_key`'s own interception, it must never bypass it.
+    #[test]
+    fn arrow_down_moves_the_highlight_not_the_field_while_focused() {
+        let mut h = Harness::new();
+        h.open();
+        h.focus_panel();
+        h.key(NamedKey::ArrowDown);
+        assert_eq!(
+            h.state.query, "",
+            "ArrowDown must not reach the focused field as typed text"
+        );
     }
 
     #[test]
