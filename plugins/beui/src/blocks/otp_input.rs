@@ -1173,27 +1173,27 @@ impl OtpInputWidget {
         match cmd {
             EditCommand::Paste(text) => {
                 let was_complete = self.is_complete();
-                let digits: Vec<char> = text.chars().filter(char::is_ascii_digit).collect();
-                for (idx, digit) in digits.iter().enumerate() {
-                    // Stop if we've filled all slots
-                    if self.active >= self.length {
+                let digits = text.chars().filter(char::is_ascii_digit);
+                let mut changed = false;
+                for digit in digits {
+                    self.slots[self.active] = Some(digit);
+                    changed = true;
+                    // `active` always names the next slot to write, clamped at
+                    // the last slot — the same invariant `insert()` maintains
+                    // for a typed digit. A paste that fills the last slot
+                    // parks `active` there too, matching the typed path, and
+                    // stops rather than overwriting it with the next digit.
+                    if self.active < self.length - 1 {
+                        self.active += 1;
+                    } else {
                         break;
                     }
-                    self.slots[self.active] = Some(*digit);
-                    // Advance to the next slot unless we just filled the last digit in the paste
-                    if idx < digits.len() - 1 {
-                        // More digits to come; advance if possible
-                        if self.active < self.length - 1 {
-                            self.active += 1;
-                        } else {
-                            // At the last slot with more digits; stop filling
-                            break;
-                        }
-                    }
                 }
-                self.commit(ctx, was_complete);
-                self.blink_reset_pending = true;
-                ctx.request_redraw();
+                if changed {
+                    self.commit(ctx, was_complete);
+                    self.blink_reset_pending = true;
+                    ctx.request_redraw();
+                }
                 EventResult::Handled
             }
             EditCommand::Copy | EditCommand::Cut | EditCommand::SelectAll => {
@@ -1649,7 +1649,22 @@ mod tests {
         bare.dispatch(&paste("345"));
         bare.round_trip();
         assert_eq!(bare.state.value, "12345");
-        assert_eq!(bare.widget.active, 4);
+        assert_eq!(
+            bare.widget.active, 5,
+            "parked on the next empty slot, not the last pasted one"
+        );
+    }
+
+    #[test]
+    fn typing_after_a_partial_paste_fills_the_next_empty_slot_not_the_last_pasted_one() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.dispatch(&paste("123"));
+        bare.round_trip();
+        assert_eq!(bare.widget.active, 3);
+        // Regression for the caret invariant: a typed digit must land in the
+        // next empty slot, not overwrite the last slot the paste just filled.
+        bare.type_digit('4');
+        assert_eq!(bare.state.value, "1234");
     }
 
     #[test]
@@ -1658,6 +1673,30 @@ mod tests {
         bare.dispatch(&paste("a1b2c3"));
         bare.round_trip();
         assert_eq!(bare.state.value, "123");
+    }
+
+    #[test]
+    fn paste_with_no_digits_reports_no_change() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        assert_eq!(bare.dispatch(&paste("")), EventResult::Handled);
+        bare.round_trip();
+        assert!(
+            bare.state.changes.is_empty(),
+            "an empty paste is not an edit"
+        );
+        assert_eq!(bare.state.value, "");
+    }
+
+    #[test]
+    fn paste_with_only_non_digits_reports_no_change() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        assert_eq!(bare.dispatch(&paste("abc")), EventResult::Handled);
+        bare.round_trip();
+        assert!(
+            bare.state.changes.is_empty(),
+            "a paste with nothing to write is not an edit"
+        );
+        assert_eq!(bare.state.value, "");
     }
 
     #[test]
