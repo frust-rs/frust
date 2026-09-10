@@ -836,9 +836,15 @@ impl Widget for CommandWidget {
         if let InputEvent::Key(key) = event {
             return self.handle_key(ctx, event, key);
         }
-        // Everything else the field owns goes to the field (IME, and pointer
-        // events inside the input row).
-        if matches!(event, InputEvent::Ime(_)) {
+        // Every other focus-routed event — IME composition, and the clipboard
+        // verbs an `EditCommand` carries — belongs to the field outright (`Key`
+        // is handled above, since the palette's own navigation keys intercept
+        // before falling through to `handle_key`'s own field forward). Branch
+        // on the shared predicate rather than enumerating `Ime`/`EditCommand`:
+        // Phase 3 of this plan adds another focus-routed-adjacent variant
+        // (`InputEvent::Overlay`), and an enumerated list would need to grow
+        // again.
+        if event.is_focus_routed() {
             return route_event_single(&mut self.pods[0], ctx, event);
         }
         let size = ctx.size();
@@ -968,7 +974,9 @@ pub fn show_command_dialog<State, B, R>(
 mod tests {
     use super::*;
     use crate::overlay::modal::tests::{Recorder, WINDOW, escape, pointer};
-    use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent, text::TextContext};
+    use frust::authoring::{
+        EditCommand, KeyEvent, Modifiers, PointerButton, PointerEvent, text::TextContext,
+    };
     use frust::{Brightness, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1218,6 +1226,75 @@ mod tests {
             dispatch(&mut w, &mut state, &escape()),
             EventResult::Ignored,
             "the host dismisses on Escape; the field must not eat it"
+        );
+    }
+
+    /// `EditCommand::Paste` is focus-routed exactly like `Key`/`Ime`: a
+    /// clipboard paste dispatched at the widget while the field holds focus
+    /// must reach it, closing the gap where a `Ctrl+V` chord's
+    /// `ctx.request_paste()` succeeds but the shell's separate top-level
+    /// `EditCommand::Paste(text)` dispatch it triggers is then swallowed here.
+    #[test]
+    fn a_paste_edit_command_reaches_the_focused_field() {
+        let mut w = build(&view(""));
+        layout(&mut w);
+        let mut state = AppState::default();
+        // Tap the input row so the field holds the recorded focus path.
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        assert!(w.pods[0].is_focused(), "the tap focused the field");
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::EditCommand(EditCommand::Paste("bi".to_string())),
+        );
+        assert_eq!(
+            state.query, "bi",
+            "the pasted text must reach the focused field"
+        );
+    }
+
+    /// Guard against over-forwarding: the palette's own navigation keys must
+    /// still be intercepted before anything reaches the field, even while the
+    /// field holds focus — `is_focus_routed()` only widens the catch-all arm
+    /// *after* `handle_key`'s own interception, it must never bypass it.
+    #[test]
+    fn arrow_keys_move_the_highlight_not_the_field_while_the_field_is_focused() {
+        let mut w = build(&view(""));
+        layout(&mut w);
+        let mut state = AppState::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        assert!(w.pods[0].is_focused(), "the tap focused the field");
+        let highlight_before = w.highlight;
+        dispatch(
+            &mut w,
+            &mut state,
+            &key_event(Key::Named(NamedKey::ArrowDown)),
+        );
+        assert_ne!(
+            w.highlight, highlight_before,
+            "ArrowDown must still move the palette's own highlight"
+        );
+        assert_eq!(
+            state.query, "",
+            "ArrowDown must not reach the focused field as a caret move"
         );
     }
 
