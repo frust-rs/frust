@@ -2588,6 +2588,7 @@ version = "0.1.0"
 dependencies = [
  "accesskit_winit",
  "anyhow",
+ "arboard",
  "frust-core",
  "frust-paths",
  "frust-reactive",

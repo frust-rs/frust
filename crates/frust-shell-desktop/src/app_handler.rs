@@ -40,8 +40,8 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    CursorIcon, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers,
-    NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    CursorIcon, EditCommand, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent,
+    Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
@@ -451,6 +451,9 @@ where
         paced_wake: None,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
         window_metrics: WindowMetricsPublisher::new(),
+        // Created lazily on first use — see the `clipboard` field's doc.
+        clipboard: None,
+        clipboard_unavailable_logged: false,
     };
 
     // Construction-time font drain: apply any fonts registered via
@@ -757,6 +760,14 @@ fn mouse_button_should_dispatch(
 /// or `None` for a named key we carry no editing semantics for
 /// (function keys, media keys, etc. — those fall through to `KeyboardInput`
 /// being dropped rather than misreported as text).
+///
+/// `Copy`/`Cut`/`Paste`/`Insert` are the dedicated hardware clipboard keys
+/// some full-size/multimedia keyboards carry (see each [`NamedKey`] variant's
+/// own doc) — mapped straight through like every other editing-semantics key
+/// here, so [`map_key_event`] delivers them as [`Key::Named`] and the
+/// `KeyboardInput` arm dispatches an [`InputEvent::Key`] the tree's own
+/// chord decode turns into an [`InputEvent::EditCommand`], the same as it
+/// would for a `Cmd+C`/`Ctrl+C` modifier chord.
 fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
     Some(match key {
         WinitNamedKey::Enter => NamedKey::Enter,
@@ -770,6 +781,10 @@ fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::End => NamedKey::End,
         WinitNamedKey::Escape => NamedKey::Escape,
         WinitNamedKey::Tab => NamedKey::Tab,
+        WinitNamedKey::Copy => NamedKey::Copy,
+        WinitNamedKey::Cut => NamedKey::Cut,
+        WinitNamedKey::Paste => NamedKey::Paste,
+        WinitNamedKey::Insert => NamedKey::Insert,
         _ => return None,
     })
 }
@@ -817,6 +832,25 @@ fn map_modifiers(state: ModifiersState) -> Modifiers {
 /// composed text, not `KeyboardInput.text`). `repeat` passes through unfiltered
 /// — callers decide whether to honor auto-repeat. Only key-down (`Pressed`)
 /// events map; releases produce `None` (spec: `KeyEvent` has no up/down phase).
+///
+/// # The ctrl/meta `text`-less fallback
+///
+/// Winit's `KeyEvent.text` is documented as the resolved text a keypress
+/// *would* produce, but it is not populated on every backend while a
+/// Ctrl (or, on macOS, Cmd) chord is held — an unmodified `Ctrl+C` can arrive
+/// with `text: None` even though `logical_key` is still
+/// `Key::Character("c")` (the unshifted letter the key produces with no
+/// modifier). Requiring `text` unconditionally would silently drop the whole
+/// chord instead of letting a widget's own decode see it as
+/// `Key::Character("c")` with `modifiers.ctrl` set. So when `logical_key`
+/// is itself a [`WinitKey::Character`] and `text` came back empty while
+/// ctrl or meta is held, this falls back to the logical key's own string
+/// instead of giving up — the same text a keypress with no modifier held
+/// would have produced. Unconditionally trusting `logical_key` regardless of
+/// modifiers would be wrong (it is the *unmodified* character, not
+/// necessarily what plain typing should insert), so the fallback stays
+/// scoped to the documented ctrl/meta case rather than replacing the `text`
+/// path outright.
 fn map_key_event(
     logical_key: &WinitKey,
     text: Option<&str>,
@@ -840,6 +874,15 @@ fn map_key_event(
             Key::Character(text.unwrap_or(" ").to_string())
         }
         WinitKey::Named(named) => Key::Named(map_named_key(*named)?),
+        // The ctrl/meta `text`-less fallback (see this function's doc) — scoped
+        // to `Character` keys only, so `Unidentified`/`Dead` still requires a
+        // resolved `text` payload exactly as before.
+        WinitKey::Character(resolved) if text.is_none() && (modifiers.ctrl || modifiers.meta) => {
+            if composing {
+                return None;
+            }
+            Key::Character(resolved.to_string())
+        }
         _ => {
             if composing {
                 return None;
@@ -1142,6 +1185,35 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// a decorated desktop window. Mobile's own standalone `WindowInsets`
     /// context is unaffected.
     window_metrics: WindowMetricsPublisher,
+    /// The host clipboard handle — created lazily, on first use, by
+    /// [`ShellHandler::clipboard_mut`], and then held for the **rest of the
+    /// process's lifetime**. `None` until that first use, or forever if
+    /// `arboard::Clipboard::new()` failed once (see
+    /// [`clipboard_unavailable_logged`](ShellHandler::clipboard_unavailable_logged)).
+    ///
+    /// Deliberately not constructed per call the way
+    /// `plugins/clipboard/src/desktop.rs`'s `DesktopClipboard` backend does —
+    /// that shape is wrong for this shell. On X11/Wayland the clipboard's
+    /// content is served *live* by whichever process last claimed ownership
+    /// of the selection; when that process exits (or, here, drops its
+    /// `Clipboard` instance) the content disappears unless a clipboard
+    /// manager (`klipper`, `xfce4-clipman`, `CopyQ`, …) is running to adopt
+    /// it first. A per-call instance would drop the copy this process just
+    /// made the moment `set_text` returned, losing it instantly on any
+    /// desktop without a clipboard manager. Holding one instance for the
+    /// whole process keeps that content alive exactly as long as the app is
+    /// running, which is the correct lifetime for an interactive desktop
+    /// shell (unlike the plugin, which has no comparable "for as long as the
+    /// app runs" owner to hold it).
+    clipboard: Option<arboard::Clipboard>,
+    /// Whether an `arboard::Clipboard::new()` failure has already been
+    /// logged once via [`log::warn!`]. Checked (and set) by
+    /// [`ShellHandler::clipboard_mut`] so a host with no reachable clipboard
+    /// mechanism (e.g. a headless Linux session with neither X11 nor
+    /// Wayland) gets exactly one warning for the whole run rather than one
+    /// per copy/cut/paste attempt — every action after the first failure is
+    /// a silent no-op.
+    clipboard_unavailable_logged: bool,
 }
 
 impl<State, Logic, V, E> ShellHandler<State, Logic, V, E>
@@ -1156,9 +1228,12 @@ where
     /// event pass never repaints, it only sets `needs_redraw`, which we turn into
     /// a single `request_redraw()` so the `Wait` loop wakes for exactly one frame.
     ///
-    /// Also re-syncs the platform IME ([`ShellHandler::sync_ime`]) after every
-    /// dispatch: a focus change, blur, or caret move can all happen as
-    /// a side effect of any event, not just keyboard/IME ones.
+    /// Also re-syncs the platform IME ([`ShellHandler::sync_ime`]), the
+    /// cursor shape ([`ShellHandler::sync_cursor`]), and the host clipboard
+    /// ([`ShellHandler::sync_clipboard`]) after every dispatch, in that
+    /// order: a focus change, blur, caret move, cursor request, or clipboard
+    /// write/paste-request can all happen as a side effect of any event, not
+    /// just keyboard/IME/pointer ones.
     ///
     /// The event pass itself runs under the reactive root [`Owner`] — see
     /// [`event_under_owner`], which is what makes `use_context` work from a
@@ -1169,6 +1244,7 @@ where
         let outcome = event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
         self.sync_ime(window);
         self.sync_cursor(window);
+        self.sync_clipboard(window);
         if outcome.needs_redraw {
             window.request_redraw();
         }
@@ -1235,6 +1311,81 @@ where
             if self.ime_sync.cursor_area != Some(area) {
                 window.set_ime_cursor_area(area.0, area.1);
                 self.ime_sync.cursor_area = Some(area);
+            }
+        }
+    }
+
+    /// Return the process-lifetime [`arboard::Clipboard`], creating it on the
+    /// first call and caching it in [`ShellHandler::clipboard`] for every
+    /// later one — see that field's doc for why one long-lived instance,
+    /// never one per call.
+    ///
+    /// `arboard::Clipboard::new()` failing (no reachable clipboard mechanism
+    /// — e.g. a headless Linux session with neither X11 nor Wayland) is
+    /// logged exactly once via [`log::warn!`], gated by
+    /// [`ShellHandler::clipboard_unavailable_logged`]; every call after that
+    /// first failure returns `None` with no further attempt and no further
+    /// log line, matching this file's "log once, then silent no-op" shape
+    /// for a host-integration failure that isn't recoverable mid-run.
+    fn clipboard_mut(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() && !self.clipboard_unavailable_logged {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
+                Err(err) => {
+                    log::warn!(
+                        "frust-shell-desktop: host clipboard unavailable ({err}); \
+                         copy/cut/paste will silently no-op for the rest of this run"
+                    );
+                    self.clipboard_unavailable_logged = true;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    /// Drain the tree's one-shot clipboard write / paste-request slots
+    /// ([`RenderRoot::take_clipboard_write`]/[`RenderRoot::take_paste_request`])
+    /// and act on the host clipboard, after every dispatch — beside
+    /// [`sync_ime`](ShellHandler::sync_ime) and
+    /// [`sync_cursor`](ShellHandler::sync_cursor), for the same reason: either
+    /// slot can fill as a side effect of any event, not just a keyboard one
+    /// (a widget's own chord decode, an edit-menu command, …).
+    ///
+    /// A `set_text`/`get_text` failure is logged via [`log::warn!`] and then
+    /// dropped — never a panic. The paste answer is dispatched as a **fresh,
+    /// top-level, non-reentrant** call to [`ShellHandler::dispatch`]: the only
+    /// way [`RenderRoot::take_paste_request`] ever comes back `true` is a
+    /// widget calling `EventCtx::request_paste` during a pass, and the
+    /// `EditCommand::Paste` dispatch this method issues in answer never
+    /// itself calls `request_paste` — no widget answers a paste it just
+    /// received by asking for another one — so this recursion is bounded to
+    /// depth one and can never loop.
+    ///
+    /// [`RenderRoot::take_clipboard_write`]: frust_core::RenderRoot::take_clipboard_write
+    /// [`RenderRoot::take_paste_request`]: frust_core::RenderRoot::take_paste_request
+    fn sync_clipboard(&mut self, window: &Window) {
+        if let Some(text) = self.root.take_clipboard_write()
+            && let Some(clipboard) = self.clipboard_mut()
+            && let Err(err) = clipboard.set_text(text)
+        {
+            log::warn!(
+                "frust-shell-desktop: failed to write the host clipboard ({err}); the copy/cut is lost"
+            );
+        }
+
+        if self.root.take_paste_request()
+            && let Some(clipboard) = self.clipboard_mut()
+        {
+            match clipboard.get_text() {
+                Ok(text) => {
+                    self.dispatch(window, InputEvent::EditCommand(EditCommand::Paste(text)));
+                }
+                Err(err) => {
+                    log::warn!(
+                        "frust-shell-desktop: failed to read the host clipboard for a paste \
+                         ({err}); the paste is dropped"
+                    );
+                }
             }
         }
     }
@@ -2332,6 +2483,11 @@ mod tests {
         assert_eq!(map_named_key(WinitNamedKey::End), Some(NamedKey::End));
         assert_eq!(map_named_key(WinitNamedKey::Escape), Some(NamedKey::Escape));
         assert_eq!(map_named_key(WinitNamedKey::Tab), Some(NamedKey::Tab));
+        // The dedicated hardware clipboard keys.
+        assert_eq!(map_named_key(WinitNamedKey::Copy), Some(NamedKey::Copy));
+        assert_eq!(map_named_key(WinitNamedKey::Cut), Some(NamedKey::Cut));
+        assert_eq!(map_named_key(WinitNamedKey::Paste), Some(NamedKey::Paste));
+        assert_eq!(map_named_key(WinitNamedKey::Insert), Some(NamedKey::Insert));
     }
 
     #[test]
@@ -2414,6 +2570,96 @@ mod tests {
                 repeat: false,
             })
         );
+    }
+
+    #[test]
+    fn map_key_event_falls_back_to_the_logical_key_when_ctrl_withholds_text() {
+        // Winit's `KeyEvent.text` is documented not populated on every
+        // backend while Ctrl is held (an unmodified `Ctrl+C`); the logical
+        // `Character` key still carries the unmodified letter, so the chord
+        // must still reach the widget rather than being dropped.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character("c".to_string()),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_falls_back_to_the_logical_key_when_meta_withholds_text() {
+        // The same fallback applies to `meta` (Cmd on macOS) — `Cmd+C`.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers {
+                meta: true,
+                ..Modifiers::default()
+            },
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character("c".to_string()),
+                modifiers: Modifiers {
+                    meta: true,
+                    ..Modifiers::default()
+                },
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_drops_a_textless_character_with_no_ctrl_or_meta() {
+        // The fallback is scoped to the documented ctrl/meta case — a
+        // textless `Character` key with neither modifier held stays dropped,
+        // exactly as before this fallback existed.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn map_key_event_ctrl_fallback_still_drops_while_composing() {
+        // The composing dedupe rule applies to the fallback path too.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            true, // composing
+        );
+        assert_eq!(event, None);
     }
 
     #[test]

@@ -427,6 +427,18 @@ objc2-ui-kit = "0.3"
 # 1.88 floor. `wl-clipboard-rs`'s native-Wayland `wayland-data-control`
 # feature is deliberately NOT enabled (see `plugins/clipboard/src/desktop.rs`'s
 # module doc) — the tripwire is `cargo check -p frust-clipboard`.
+#
+# Also consumed by `frust-shell-desktop`'s `ShellHandler`, which holds ONE
+# `arboard::Clipboard` for the process lifetime rather than constructing one
+# per call the way `plugins/clipboard/src/desktop.rs` does — on X11/Wayland
+# the clipboard's content is served live by whichever process last claimed
+# the selection, so a per-call instance would drop that ownership (and so
+# the content just copied) the moment `set_text` returned, on a desktop with
+# no clipboard manager running; see
+# `crates/frust-shell-desktop/src/app_handler.rs`'s `clipboard`-field doc.
+# Same `default-features = false` / no-`wayland-data-control` shape, no
+# version change from either consumer; the tripwire for this arm is `cargo
+# check -p frust-shell-desktop`.
 arboard = { version = "=3.6.1", default-features = false }
 # frust-database's default (`engine-sqlite`) backend — rusqlite's `bundled`
 # feature compiles SQLite 3.53.2 from source via `cc` rather than linking a
