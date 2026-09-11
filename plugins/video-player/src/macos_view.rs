@@ -1,7 +1,7 @@
 //! The macOS native video view: a Rust-defined, layer-backed `NSView`
 //! subclass hosting an `AVPlayerLayer`, wrapped in a
 //! [`frust_plugin::desktop::DesktopViewFactory`] that the macOS desktop shell
-//! (Phase 2, `crates/frust-shell-macos/src/platform_view.rs` — not yet
+//! (a `crates/frust-shell-macos` platform-view host that is not yet
 //! written) resolves by `view_type` (see [`crate::VIEW_TYPE`]).
 //!
 //! Written in Rust with `objc2`'s `define_class!`, reaching its session's
@@ -47,7 +47,7 @@
 //! call in [`VideoPlayerNSView::new`], left for whoever picks up that Cargo
 //! change.
 //!
-//! # The retain contract with the shell (frozen — v2-02 must match)
+//! # The retain contract with the shell (frozen — the macOS shell host must match)
 //!
 //! Mirrors `crates/frust-plugin/src/desktop.rs`'s documented contract
 //! exactly, and `plugins/native-widgets/src/apple/factory.rs`'s Apple-side
@@ -75,7 +75,7 @@
 //!   all — it borrows the still-shell-owned pointer as a `&VideoPlayerNSView`
 //!   and mutates the existing view in place.
 //!
-//! A future `crates/frust-shell-macos/src/platform_view.rs` (v2-02) must take
+//! A future `crates/frust-shell-macos` platform-view host must take
 //! the pointer `create` returns with `Retained::from_raw` while its slot
 //! lives, and hand that same pointer back through `dispose` — exactly one
 //! retain exchanged, matching this module's half of the accounting.

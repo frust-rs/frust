@@ -13,7 +13,7 @@
 //! platform **main thread** — reached through [`on_main`], which runs a body
 //! inline when the caller is already there and `dispatch_async`es it onto
 //! `dispatch_get_main_queue()` when it is not. Three things fall out of that,
-//! and together they are the contract v3-02/v3-03 build on:
+//! and together they are the contract the iOS and macOS view factories build on:
 //!
 //! - **Nothing blocks.** No path here ever waits on the main queue
 //!   (`exec_async`, never `exec_sync`), so [`crate::VideoPlayer::open`] and
@@ -44,7 +44,7 @@
 //! is the `retain` a `Retained::clone` performs while lifting a handle out of
 //! the map: a refcount bump runs no user code and so cannot re-enter here.
 //!
-//! # The accessor contract (frozen — v3-02 and v3-03 depend on it)
+//! # The accessor contract (frozen — both view factories depend on it)
 //!
 //! [`player_for`] answers a live session's retained `AVPlayer` and `None` for
 //! an unknown, not-yet-constructed, or closed id. It is callable on the main
@@ -58,7 +58,7 @@
 //! [`crate::PlayerSession::params_json`] writes
 //! `{"session":N,"fit":"contain"|"cover"}`. Neither literal is repeated here.
 //!
-//! # What v3-02/v3-03 can assume this module publishes
+//! # What the view factories can assume this module publishes
 //!
 //! The observation set is fixed, and every entry below lands on the main
 //! thread as a [`crate::PlayerEvent`]:
@@ -616,7 +616,7 @@ impl BackendSession for AppleSession {
 /// Callable only on the main thread: an `AVPlayerLayer` could not be attached
 /// from anywhere else, so an off-thread call is a caller bug — logged and
 /// answered `None` rather than asserted.
-// No caller until the view factories exist (v3-02/v3-03); this is the frozen
+// The view factories are its only callers; this is the frozen
 // seam they are written against.
 #[allow(dead_code)]
 pub(crate) fn player_for(session: i32) -> Option<Retained<AVPlayer>> {
