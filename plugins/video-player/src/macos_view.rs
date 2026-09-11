@@ -1,21 +1,600 @@
-//! Placeholder for the macOS native video view: the layer-backed `NSView`
-//! subclass hosting an `AVPlayerLayer`, plus the factory the desktop
-//! platform-view registry resolves under [`crate::VIEW_TYPE`] — the same
-//! bare name iOS publishes to the ObjC runtime, since an app names one
-//! factory for both.
+//! The macOS native video view: a Rust-defined, layer-backed `NSView`
+//! subclass hosting an `AVPlayerLayer`, wrapped in a
+//! [`frust_plugin::desktop::DesktopViewFactory`] that the macOS desktop shell
+//! (Phase 2, `crates/frust-shell-macos/src/platform_view.rs` — not yet
+//! written) resolves by `view_type` (see [`crate::VIEW_TYPE`]).
 //!
 //! Written in Rust with `objc2`'s `define_class!`, reaching its session's
-//! player through [`crate::apple::player_for`]. The hosted view is an opaque
-//! native sibling (the platform-view Mode A contract), so the frust slot
-//! paints nothing beneath it.
+//! player through [`crate::apple::player_for`] — no C export, no Swift, and
+//! nothing here is `#[unsafe(no_mangle)]`. The hosted view is an opaque
+//! native sibling (`crate`'s *The picture is a platform view* section, Mode
+//! A): the frust slot behind it paints nothing, and AppKit composites this
+//! view's layer above the frust surface.
+//!
+//! # Layer-hosting choice: `setLayer`, not a sublayer
+//!
+//! [`VideoPlayerNSView`] makes the `AVPlayerLayer` its own backing layer
+//! (`setLayer:` + `setWantsLayer(true)`) rather than adding it as a sublayer
+//! resized from an overridden `layout`. That is the simpler of the two shapes
+//! the card offered: AppKit already keeps a view's *backing* layer's frame in
+//! sync with the view's bounds on every resize (that is what "backing layer"
+//! means), so nothing here has to override `layout`, `setFrame:`, or
+//! `resizeSubviewsWithOldSize:` to keep the picture filling the view — the
+//! shell's own `setFrame:` calls on this view are enough. A sublayer would
+//! need exactly that override to achieve the same thing, for no benefit here
+//! (this view hosts nothing else — no chrome, no siblings).
+//!
+//! `layerContentsRedrawPolicy` is pinned to
+//! [`NSViewLayerContentsRedrawPolicy::Never`] so AppKit never asks the view
+//! to redraw over the player layer (there is nothing for `drawRect:` to
+//! paint here — the layer *is* the content).
+//!
+//! # Deviation: no explicit black letterbox background (Cargo.toml unchanged)
+//!
+//! The card's objective asked for `CALayer::setBackgroundColor` with a
+//! `CGColor` so the letterbox bars under `contain` fit are black rather than
+//! see-through. That call is real on `CALayer`, but in `objc2-quartz-core`
+//! 0.3 it is gated `#[cfg(feature = "objc2-core-graphics")]` — a feature
+//! **not** enabled on this crate's `objc2-quartz-core` dependency (only
+//! `std`, `CALayer`, `CAMediaTiming` are), and adding it is out of this
+//! task's scope (task instructions: do not add objc2 features to
+//! `Cargo.toml`; report instead). So this module does **not** paint a black
+//! background: an uncovered letterbox area shows whatever is beneath this
+//! opaque native sibling instead of black. **Reported loudly, not silently
+//! dropped** — see the completion summary; the fix is a one-line Cargo.toml
+//! addition (`objc2-quartz-core`'s `objc2-core-graphics` feature) plus a
+//! `CALayer::setBackgroundColor(Some(&CGColor::new_srgb(0.0, 0.0, 0.0, 1.0)))`
+//! call in [`VideoPlayerNSView::new`], left for whoever picks up that Cargo
+//! change.
+//!
+//! # The retain contract with the shell (frozen — v2-02 must match)
+//!
+//! Mirrors `crates/frust-plugin/src/desktop.rs`'s documented contract
+//! exactly, and `plugins/native-widgets/src/apple/factory.rs`'s Apple-side
+//! precedent for the same shape:
+//!
+//! - [`MacosVideoFactory::create`] builds a [`VideoPlayerNSView`], retains it
+//!   itself (every `Retained<T>` already carries a live retain), and hands
+//!   that **same +1 retain** to the shell by consuming it with
+//!   [`objc2::rc::Retained::into_raw`] and wrapping the raw pointer in a
+//!   [`DesktopViewHandle`]. Nothing here calls an extra `retain` — the +1
+//!   `create` promises *is* the `Retained` it already owned.
+//! - The shell owns that +1 for as long as the slot lives (per
+//!   `frust_plugin::desktop`'s module doc, touching it only on the main
+//!   thread) and is responsible for eventually handing the identical pointer
+//!   back to [`MacosVideoFactory::dispose`].
+//! - [`MacosVideoFactory::dispose`] takes the +1 back with
+//!   [`objc2::rc::Retained::from_raw`] on the exact pointer `create` handed
+//!   out, detaches the player, and lets the `Retained` drop — one retain out,
+//!   one release in, net zero. The `AVPlayer` itself is unaffected either way
+//!   (crate doc's Apple accessor contract, and `apple.rs`'s A6 semantics): a
+//!   view's retain of the layer's `player` property is independent of
+//!   [`crate::apple::player_for`]'s own registry entry, so disposing this
+//!   view never stops playback.
+//! - [`MacosVideoFactory::update_params`] never touches the retain count at
+//!   all — it borrows the still-shell-owned pointer as a `&VideoPlayerNSView`
+//!   and mutates the existing view in place.
+//!
+//! A future `crates/frust-shell-macos/src/platform_view.rs` (v2-02) must take
+//! the pointer `create` returns with `Retained::from_raw` while its slot
+//! lives, and hand that same pointer back through `dispose` — exactly one
+//! retain exchanged, matching this module's half of the accounting.
+//!
+//! # Main-thread-only, matching `frust_plugin::desktop`'s contract
+//!
+//! Every [`frust_plugin::desktop::DesktopViewFactory`] method, and therefore
+//! every method on [`MacosVideoFactory`], is called by the shell only on the
+//! platform main thread — the same thread `NSView`/`AVPlayerLayer` require.
+//! [`VideoPlayerNSView`] is declared `MainThreadOnly` accordingly, and
+//! [`MacosVideoFactory::create`] independently checks
+//! [`objc2::MainThreadMarker::new`] before building one (the one call the
+//! card calls out explicitly, since it is the call that would otherwise
+//! construct a `MainThreadOnly` view from an unproven thread). No method here
+//! blocks, and each is wrapped in `catch_unwind` so a panic cannot unwind
+//! into AppKit (`docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the
+//! same discipline `plugins/native-widgets/src/apple/factory.rs` documents
+//! for its own three-method factory).
+//!
+//! # `unsafe`
+//!
+//! Confined to this module: `define_class!`'s `#[unsafe(super(...))]`, the
+//! `initWithFrame:` super-call (`NSView`'s designated initializer, sent once
+//! to a freshly allocated instance whose ivars are already set — the
+//! `crates/frust-shell-macos/src/appkit_glue.rs` / `plugins/camera/src/apple.rs`
+//! precedent for calling a super initializer from a `define_class!` type),
+//! every AVFoundation message send (`objc2` marks all of them `unsafe`, per
+//! `crate::apple`'s own `unsafe` note), reading the two `AVLayerVideoGravity`
+//! `extern` statics (edition-2024 marks reading an `extern` constant static
+//! unsafe), and the raw-pointer retain hand-off described above.
+//!
+//! # What is tested, and where
+//!
+//! [`field_int`]/[`field_str`]/[`parse_params`] are pure functions with no
+//! ObjC dependency, host-run below. [`ensure_registered`] registering exactly
+//! one factory under [`crate::VIEW_TYPE`] is also host-run (`std::sync`
+//! underneath, no ObjC runtime touched by *registration* itself — only by
+//! what the registered factory later does). The retain-accounting half of
+//! this crate's ACCEPTANCE (`create`/`update_params`/`dispose` exercised
+//! against a real `NSView`) needs a live `MainThreadMarker`, which the Rust
+//! test harness never grants: every `#[test]` runs on its own worker thread,
+//! never the process's actual main thread, so `MainThreadMarker::new()` is
+//! `None` in every test here regardless of host. That half is therefore
+//! **compile-checked only** (`cargo check --target aarch64-apple-darwin
+//! --all-targets` / `cargo clippy` the same), owed to a real run on Ed's Mac
+//! — this module's tests do not attempt to fake it.
+//!
+//! This module also does not itself run on this Linux host: it is
+//! `#[cfg(target_os = "macos")]`-gated at [`crate`], so it compiles here only
+//! by cross-checking against `aarch64-apple-darwin`, and its tests compile
+//! but never execute outside that target.
 
-// The registration hook below has no caller until the factory it registers
-// exists.
-#![allow(dead_code)]
+use std::cell::Cell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::NonNull;
+use std::sync::{Arc, Once};
+
+use objc2::rc::Retained;
+use objc2::runtime::{NSObject, NSObjectProtocol};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_app_kit::{NSResponder, NSView, NSViewLayerContentsRedrawPolicy};
+use objc2_av_foundation::{
+    AVLayerVideoGravity, AVLayerVideoGravityResizeAspect, AVLayerVideoGravityResizeAspectFill,
+    AVPlayer, AVPlayerLayer,
+};
+use objc2_foundation::NSRect;
+use objc2_quartz_core::CALayer;
+
+use frust_plugin::desktop::{
+    DesktopViewFactory, DesktopViewHandle, RegisterError, register_view_factory,
+};
+
+use crate::VideoFit;
+
+define_class!(
+    // SAFETY:
+    // - `NSView` (transitively `NSResponder`/`NSObject`) has no subclassing
+    //   requirements this class violates.
+    // - `VideoPlayerNSView` implements no `Drop`, so the macro generates no
+    //   `dealloc` override; the ivars (a `Retained<AVPlayerLayer>` plus two
+    //   `Cell`s) are dropped by the ordinary ivar teardown the macro already
+    //   emits.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    // Created and touched only on the platform main thread (module doc's
+    // *Main-thread-only* section) — the same confinement `NSView` itself
+    // imposes.
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ViewState]
+    struct VideoPlayerNSView;
+
+    unsafe impl NSObjectProtocol for VideoPlayerNSView {}
+);
+
+/// [`VideoPlayerNSView`]'s ivars: the `AVPlayerLayer` it hosts for its whole
+/// lifetime, plus the two params fields [`update_view_params`] diffs against
+/// so an unchanged session/fit is a no-op rather than a redundant re-attach.
+struct ViewState {
+    /// The player layer this view was built around — created once in
+    /// [`VideoPlayerNSView::new`] and installed as the view's own backing
+    /// layer; never replaced afterward. [`VideoPlayerNSView::attach`] and
+    /// [`VideoPlayerNSView::detach`] only ever change its `player` property.
+    /// Kept here rather than re-derived from `NSView::layer()` on every call,
+    /// since that getter answers a plain `CALayer` and would need an
+    /// unchecked downcast every time.
+    layer: Retained<AVPlayerLayer>,
+    /// The session id most recently attached; `0` means "no session"
+    /// (`crate::apple`'s own reservation — every real id is minted from `1`).
+    session: Cell<i32>,
+    /// The fit most recently applied, so a params update with an unchanged
+    /// `fit` skips re-touching `videoGravity`.
+    fit: Cell<VideoFit>,
+}
+
+impl VideoPlayerNSView {
+    /// Build a fresh, detached view: an `AVPlayerLayer` with no player yet,
+    /// installed as this view's own backing layer.
+    ///
+    /// Created with a zero frame — this view never sizes itself; the
+    /// embedding shell positions and resizes it with its own `setFrame:`
+    /// once the platform-view slot's layout is known, exactly like every
+    /// other platform-view host in this workspace
+    /// (`plugins/native-widgets/src/apple/factory.rs`'s dead-slot `UIView`,
+    /// which is likewise frameless until the host places it).
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: a class-side AVFoundation constructor, called with no
+        // player yet — `attach` supplies one immediately after construction,
+        // before this view is ever exposed through a `DesktopViewHandle`.
+        let layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(None) };
+        let ivars = ViewState {
+            layer,
+            session: Cell::new(0),
+            fit: Cell::new(VideoFit::default()),
+        };
+        let this = Self::alloc(mtm).set_ivars(ivars);
+        // SAFETY: `initWithFrame:` is `NSView`'s designated initializer,
+        // sent exactly once to a freshly allocated instance whose ivars are
+        // already set (the `ActivationObserver`/`PlayerObserver` precedent
+        // for calling a super initializer through `define_class!`).
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+
+        // Module doc's *Layer-hosting choice*: assign the layer, THEN turn
+        // `wantsLayer` on (the order Apple's own `NSView.wantsLayer`/
+        // `NSView.layer` docs specify), then forbid AppKit from ever
+        // redrawing over it.
+        let layer_ref: &CALayer = &this.ivars().layer;
+        this.setLayer(Some(layer_ref));
+        this.setWantsLayer(true);
+        this.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::Never);
+
+        this
+    }
+
+    /// Attach `player` to this view's layer, retaining it there
+    /// (`AVPlayerLayer.player` is a strong property) independently of
+    /// [`crate::apple::player_for`]'s own registry entry.
+    fn attach(&self, player: &AVPlayer) {
+        // SAFETY: a plain property write on a layer this view owns for its
+        // whole lifetime, on the main thread (module doc's *Main-thread-only*
+        // section).
+        unsafe { self.ivars().layer.setPlayer(Some(player)) };
+    }
+
+    /// Detach whatever player is currently attached. Idempotent — detaching
+    /// an already-detached view is a harmless `setPlayer(None)` on top of
+    /// `None`.
+    fn detach(&self) {
+        // SAFETY: as `attach`.
+        unsafe { self.ivars().layer.setPlayer(None) };
+    }
+
+    /// Apply `fit`'s `videoGravity` and record it, so a later params update
+    /// with the same fit is a no-op (`ViewState::fit`).
+    fn set_fit(&self, fit: VideoFit) {
+        self.ivars().fit.set(fit);
+        match video_gravity_for(fit) {
+            Some(gravity) => {
+                // SAFETY: a plain property write on a layer this view owns,
+                // on the main thread.
+                unsafe { self.ivars().layer.setVideoGravity(gravity) };
+            }
+            None => log::error!(
+                "frust-video-player: macos AVLayerVideoGravity constant for {fit:?} was nil — \
+                 leaving the previous videoGravity in place"
+            ),
+        }
+    }
+
+    /// The session id most recently [`Self::attach`]ed, or `0` for none.
+    fn session(&self) -> i32 {
+        self.ivars().session.get()
+    }
+
+    /// Record `session` as the id most recently attached — called alongside
+    /// [`Self::attach`]/[`Self::detach`], never on its own.
+    fn set_session(&self, session: i32) {
+        self.ivars().session.set(session);
+    }
+
+    /// The fit most recently [`Self::set_fit`].
+    fn fit(&self) -> VideoFit {
+        self.ivars().fit.get()
+    }
+}
+
+/// `fit`'s `AVLayerVideoGravity`, or `None` if AVFoundation's own constant
+/// answered nil (never observed in practice — both statics are linker-
+/// provided wherever AVFoundation is linked — but the accessor is a plain
+/// `Option` read, so this is answered rather than asserted).
+fn video_gravity_for(fit: VideoFit) -> Option<&'static AVLayerVideoGravity> {
+    // SAFETY: reading `extern` AVFoundation constant statics (edition-2024
+    // marks that unsafe); both are non-null wherever AVFoundation is linked.
+    unsafe {
+        match fit {
+            VideoFit::Contain => AVLayerVideoGravityResizeAspect,
+            VideoFit::Cover => AVLayerVideoGravityResizeAspectFill,
+        }
+    }
+}
+
+/// The macOS desktop-view factory for [`crate::VIEW_TYPE`]: builds, updates
+/// and disposes [`VideoPlayerNSView`]s (module doc's *retain contract*).
+///
+/// Zero-sized and stateless by design — every session's state lives in
+/// [`crate::apple`]'s own registry, resolved fresh through
+/// [`crate::apple::player_for`] on each call, and every view's own state
+/// lives in its `ViewState` ivars. `Send + Sync` (the trait's bound) costs
+/// nothing to satisfy: there is nothing here to share incorrectly.
+struct MacosVideoFactory;
+
+impl DesktopViewFactory for MacosVideoFactory {
+    /// Build a new [`VideoPlayerNSView`] for the session/fit named in
+    /// `params_json`, or answer a dead slot (`None`) — never panic across
+    /// this boundary (module doc's *Main-thread-only* section).
+    fn create(&self, params_json: &str) -> Option<DesktopViewHandle> {
+        let outcome = catch_unwind(AssertUnwindSafe(|| create_view(params_json)));
+        match outcome {
+            Ok(handle) => handle,
+            Err(_) => {
+                log::warn!(
+                    "frust-video-player: panic caught in macos create — returning a dead slot"
+                );
+                None
+            }
+        }
+    }
+
+    /// Re-attach on a session change, re-apply `videoGravity` on a fit
+    /// change — both diffed against the view's own `ViewState`.
+    fn update_params(&self, view: &DesktopViewHandle, params_json: &str) {
+        let outcome = catch_unwind(AssertUnwindSafe(|| update_view_params(view, params_json)));
+        if outcome.is_err() {
+            log::warn!(
+                "frust-video-player: panic caught in macos update_params — the view keeps its \
+                 previous session/fit"
+            );
+        }
+    }
+
+    /// Take the +1 retain `create` handed out back, detach, and drop
+    /// (module doc's *retain contract*). The attached `AVPlayer` keeps
+    /// running — disposing the view is not the same as closing the session
+    /// (`crate::apple`'s A6 semantics).
+    fn dispose(&self, view: DesktopViewHandle) {
+        let outcome = catch_unwind(AssertUnwindSafe(|| dispose_view(view)));
+        if outcome.is_err() {
+            log::warn!(
+                "frust-video-player: panic caught in macos dispose — the view's native \
+                 references may leak"
+            );
+        }
+    }
+}
+
+/// The typed half of [`MacosVideoFactory::create`].
+fn create_view(params_json: &str) -> Option<DesktopViewHandle> {
+    let Some((session, fit)) = parse_params(params_json) else {
+        log::warn!("frust-video-player: macos create received unparsable params {params_json:?}");
+        return None;
+    };
+
+    let Some(player) = crate::apple::player_for(session) else {
+        log::debug!(
+            "frust-video-player: macos create for unknown/closed session {session} — dead slot"
+        );
+        return None;
+    };
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::error!(
+            "frust-video-player: macos create called off the main thread — dead slot (the shell \
+             must call DesktopViewFactory::create only from the main thread)"
+        );
+        return None;
+    };
+
+    let view = VideoPlayerNSView::new(mtm);
+    view.attach(&player);
+    view.set_fit(fit);
+    view.set_session(session);
+
+    // Consume the `Retained` into the raw pointer the shell now owns a +1
+    // over (module doc's *retain contract*); `Retained::into_raw` never
+    // answers null.
+    let ptr = Retained::into_raw(view);
+    let ptr = NonNull::new(ptr).expect("Retained::into_raw never returns null");
+    // SAFETY: `ptr` is the +1-retained `VideoPlayerNSView` (an `NSView`)
+    // pointer just produced above; it stays valid until this same pointer
+    // reaches `dispose`, and it is touched only on the main thread (this
+    // whole function already required one).
+    Some(unsafe { DesktopViewHandle::from_raw(ptr.cast()) })
+}
+
+/// The typed half of [`MacosVideoFactory::update_params`].
+fn update_view_params(handle: &DesktopViewHandle, params_json: &str) {
+    let Some((session, fit)) = parse_params(params_json) else {
+        log::warn!(
+            "frust-video-player: macos update_params received unparsable params {params_json:?}"
+        );
+        return;
+    };
+
+    // SAFETY: `handle` wraps a live `VideoPlayerNSView` pointer `create`
+    // produced and no `dispose` has yet consumed (the shell's own contract);
+    // this borrows it without taking ownership, and only on the main thread
+    // (`DesktopViewFactory`'s contract, which this whole call already
+    // requires).
+    let view = unsafe { &*handle.as_ptr().cast::<VideoPlayerNSView>() };
+
+    if view.session() != session {
+        match crate::apple::player_for(session) {
+            Some(player) => view.attach(&player),
+            None => {
+                log::debug!(
+                    "frust-video-player: macos update_params for unknown/closed session \
+                     {session} — detaching"
+                );
+                view.detach();
+            }
+        }
+        view.set_session(session);
+    }
+
+    if view.fit() != fit {
+        view.set_fit(fit);
+    }
+}
+
+/// The typed half of [`MacosVideoFactory::dispose`].
+fn dispose_view(handle: DesktopViewHandle) {
+    let ptr = handle.into_raw().cast::<VideoPlayerNSView>().as_ptr();
+    // SAFETY: `ptr` is exactly the pointer `create` handed to the shell with
+    // a +1 retain (module doc's retain contract), and `dispose` is called at
+    // most once per handle (the shell's own contract) — this reclaims that
+    // same retain rather than fabricating a new one, and only on the main
+    // thread (`DesktopViewFactory`'s contract).
+    let view = unsafe { Retained::from_raw(ptr) };
+    match view {
+        Some(view) => {
+            view.detach();
+            // `view` drops here, releasing the +1 `create` handed out. The
+            // attached `AVPlayer` is unaffected (module doc's retain
+            // contract).
+        }
+        None => log::error!("frust-video-player: macos dispose received a null view pointer"),
+    }
+}
 
 /// Register the macOS video-view factory with the desktop platform-view
 /// registry, once.
 ///
-/// A no-op placeholder today. The real implementation registers lazily and
-/// is idempotent, so the session open path can call it unconditionally.
-pub(crate) fn ensure_registered() {}
+/// Idempotent: the second and every later call is a cheap `Once` check.
+/// [`RegisterError::AlreadyRegistered`] is logged at debug level rather than
+/// treated as a problem — [`crate::apple`]'s `AppleBackend::open` calls this
+/// unconditionally on every session open (module doc's *Factory registration
+/// is lazy*, `crate::apple`'s own doc), so every open after the first would
+/// otherwise "fail" this by design.
+pub(crate) fn ensure_registered() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if let Err(RegisterError::AlreadyRegistered(view_type)) =
+            register_view_factory(crate::VIEW_TYPE, Arc::new(MacosVideoFactory))
+        {
+            log::debug!(
+                "frust-video-player: macos view factory already registered for {view_type:?}"
+            );
+        }
+    });
+}
+
+/// Parse `{"session":N,"fit":"contain"|"cover"}` — the frozen Apple params
+/// payload [`crate::PlayerSession::params_json`] writes (`crate`'s own doc).
+/// `None` only when `session` is missing or not an integer; an absent or
+/// unrecognized `fit` defaults to [`VideoFit::Contain`] (`VideoFit`'s own
+/// documented default), matching how a slot with no fit specified yet should
+/// behave.
+fn parse_params(json: &str) -> Option<(i32, VideoFit)> {
+    let session = field_int(json, "session")?;
+    let fit = match field_str(json, "fit") {
+        Some("cover") => VideoFit::Cover,
+        _ => VideoFit::Contain,
+    };
+    Some((session, fit))
+}
+
+/// Read `key`'s integer value out of a flat JSON object, e.g.
+/// `field_int(r#"{"session":42}"#, "session") == Some(42)`. A tiny
+/// hand-rolled reader rather than `serde` (this crate is a platform plugin —
+/// `frust-plugin` + FFI crates only — and both ends of this payload are this
+/// crate's own, the same rule `plugins/native-widgets/src/runtime.rs`'s
+/// `Params` documents for its own flat-JSON reader). Deliberately narrower
+/// than that reader: this payload is two fixed keys with no nesting and no
+/// string escaping to worry about, so a plain substring search is enough.
+fn field_int(json: &str, key: &str) -> Option<i32> {
+    let marker = format!("\"{key}\":");
+    let start = json.find(&marker)? + marker.len();
+    let rest = &json[start..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Read `key`'s string value out of a flat JSON object, e.g.
+/// `field_str(r#"{"fit":"cover"}"#, "fit") == Some("cover")`. See
+/// [`field_int`]'s doc for why this is hand-rolled; unlike a general JSON
+/// string reader this performs no escape decoding, which is sound here only
+/// because both values this module ever reads (`"contain"`/`"cover"`) are
+/// escape-free by construction.
+fn field_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("\"{key}\":\"");
+    let start = json.find(&marker)? + marker.len();
+    let rest = &json[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_plugin::desktop::lookup_view_factory;
+
+    #[test]
+    fn field_int_reads_a_positive_session_id() {
+        assert_eq!(
+            field_int(r#"{"session":42,"fit":"contain"}"#, "session"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn field_int_reads_a_negative_value() {
+        assert_eq!(
+            field_int(r#"{"session":-3,"fit":"cover"}"#, "session"),
+            Some(-3)
+        );
+    }
+
+    #[test]
+    fn field_int_is_none_for_a_missing_key() {
+        assert_eq!(field_int(r#"{"fit":"contain"}"#, "session"), None);
+    }
+
+    #[test]
+    fn field_int_is_none_for_a_non_numeric_value() {
+        assert_eq!(field_int(r#"{"session":"nope"}"#, "session"), None);
+    }
+
+    #[test]
+    fn field_str_reads_the_fit_value() {
+        assert_eq!(
+            field_str(r#"{"session":1,"fit":"cover"}"#, "fit"),
+            Some("cover")
+        );
+    }
+
+    #[test]
+    fn field_str_is_none_for_a_missing_key() {
+        assert_eq!(field_str(r#"{"session":1}"#, "fit"), None);
+    }
+
+    #[test]
+    fn parse_params_reads_session_and_fit() {
+        assert_eq!(
+            parse_params(r#"{"session":7,"fit":"cover"}"#),
+            Some((7, VideoFit::Cover))
+        );
+        assert_eq!(
+            parse_params(r#"{"session":7,"fit":"contain"}"#),
+            Some((7, VideoFit::Contain))
+        );
+    }
+
+    #[test]
+    fn parse_params_defaults_to_contain_for_an_unrecognized_or_missing_fit() {
+        assert_eq!(
+            parse_params(r#"{"session":7,"fit":"bogus"}"#),
+            Some((7, VideoFit::Contain))
+        );
+        assert_eq!(
+            parse_params(r#"{"session":7}"#),
+            Some((7, VideoFit::Contain))
+        );
+    }
+
+    #[test]
+    fn parse_params_is_none_without_a_session() {
+        assert_eq!(parse_params(r#"{"fit":"cover"}"#), None);
+    }
+
+    /// `ensure_registered` registers exactly one factory under
+    /// [`crate::VIEW_TYPE`], and is idempotent. Host-runnable on this Mac:
+    /// registration is plain `std::sync`, touching no ObjC runtime state
+    /// (module doc's *What is tested* section explains why the
+    /// `create`/`update_params`/`dispose` retain accounting is NOT exercised
+    /// here).
+    #[test]
+    fn ensure_registered_registers_exactly_one_factory_under_view_type() {
+        ensure_registered();
+        ensure_registered();
+        assert!(lookup_view_factory(crate::VIEW_TYPE).is_some());
+    }
+}
