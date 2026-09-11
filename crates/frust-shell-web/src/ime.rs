@@ -78,28 +78,36 @@
 //! nobody else, so the overlay is also where copy, cut and paste are read —
 //! the canvas could not receive them. Three more listeners, all synchronous:
 //!
-//! * `paste` reads `clipboardData.getData("text/plain")` (no permission, no
-//!   promise) and cancels the browser's own insertion, so no `insertFromPaste`
-//!   `input` follows and the element's value never moves. The text reaches the
-//!   tree as [`DomEditEvent::Paste`].
-//! * `copy`/`cut` write the focused field's own selection with
-//!   `clipboardData.setData` and cancel the default action. They must finish
-//!   inside the callback — Safari honours a clipboard write from nowhere else —
-//!   so they cannot ask the tree anything: they read the selection the shell
-//!   last published ([`clipboard_selection`], refreshed on every dispatch and
-//!   every frame). `cut` additionally queues
-//!   [`EditCommand::Cut`](frust_core::event::EditCommand::Cut) so the widget
-//!   deletes what was taken.
-//! * A secret field and a collapsed selection are both refused — and a refusal
-//!   cancels the event exactly as a write does ([`clipboard_write_action`]).
-//!   An obscured field publishes its *real* text on its [`ImeState`] (the mask
-//!   is a paint-time affair), so this refusal is the whole of what keeps a
-//!   password off the host clipboard on this shell; leaving the browser's own
-//!   copy to run would hand it whatever the element itself holds, which is not
-//!   reliably nothing — the value is emptied only while no composition owns
-//!   it, and a `type="password"` element can still carry a preedit. The
-//!   refusal reads the content-type hint rather than matching a variant, for
-//!   [`overlay_attributes`]'s fail-closed reason.
+//! * `paste` cancels the browser's own insertion first and reads
+//!   `clipboardData.getData("text/plain")` after (no permission, no promise),
+//!   so no `insertFromPaste` `input` follows and the element's value never
+//!   moves — not even when the read comes back with nothing. The text reaches
+//!   the tree as [`DomEditEvent::Paste`].
+//! * `copy`/`cut` write with `clipboardData.setData` and cancel the default
+//!   action. They must finish inside the callback — Safari honours a clipboard
+//!   write from nowhere else — so they cannot ask the tree anything, and take
+//!   their text from one of two places instead ([`clipboard_write_action`]):
+//!   the [`ClipboardHandoff`] the shell filled for the gesture already in
+//!   flight, or, for a gesture the tree never saw (a browser edit menu's own
+//!   copy), the selection the shell last published ([`clipboard_selection`],
+//!   refreshed on every dispatch and every frame). `cut` queues
+//!   [`EditCommand::Cut`](frust_core::event::EditCommand::Cut) only in that
+//!   second case — a handed-off write is the answer to a gesture the widget
+//!   has already applied, and asking for the delete again would be a second
+//!   edit.
+//! * A secret field and a collapsed selection are both refused on that second
+//!   source — and a refusal cancels the event exactly as a write does
+//!   ([`clipboard_write_action`]). An obscured field publishes its *real* text
+//!   on its [`ImeState`] (the mask is a paint-time affair), so this refusal is
+//!   what keeps a password off the host clipboard for a gesture that reached
+//!   no widget to be refused by; leaving the browser's own copy to run would
+//!   hand it whatever the element itself holds, which is not reliably nothing
+//!   — the value is emptied only while no composition owns it, and a
+//!   `type="password"` element can still carry a preedit. The refusal reads
+//!   the content-type hint rather than matching a variant, for
+//!   [`overlay_attributes`]'s fail-closed reason. A handed-off write carries
+//!   no such refusal, and must not: it is a widget's own answer, and a widget
+//!   that means to withhold an obscured field's text withholds it there.
 //! * `beforecopy`/`beforecut` cancel unconditionally and answer nothing else.
 //!   Cancelling one is how a page tells Blink and WebKit that it will produce
 //!   the clipboard data itself, which is the only thing that enables the
@@ -107,6 +115,40 @@
 //!   overlay's permanent state, since nothing here ever selects it. Gecko
 //!   defines neither event, which is why nothing downstream may depend on
 //!   them: they widen where the DOM answers a copy, they do not decide it.
+//!
+//! # A cut may not delete text it never wrote out
+//!
+//! A keyboard cut is answered in two halves that run inside one browser task,
+//! in a fixed order. The canvas re-dispatch reaches the widget first: it puts
+//! the cut text in the tree's one-shot clipboard slot *and* deletes the
+//! selection in the same pass, and the shell republishes the field's surface
+//! behind it. Only once that `keydown` has returned does the browser run its
+//! default action and raise `cut`. The published selection is collapsed by
+//! then — so a callback that re-derived its text from that snapshot would
+//! write nothing, and the text the widget had already deleted would ride
+//! `navigator.clipboard.writeText` alone. That call is undefined outside a
+//! secure context, which is a page where the cut would destroy text it put
+//! nowhere.
+//!
+//! So while a copy or cut keystroke is in flight the tree's own write is not
+//! issued asynchronously: it is handed to the listener through
+//! [`ClipboardHandoff`], which the `copy`/`cut` callback drains synchronously
+//! inside the gesture — the write this design calls the reliable one, now the
+//! primary route for both verbs rather than the copy's alone.
+//! `navigator.clipboard.writeText` becomes the fallback the next drain issues
+//! for a handoff nobody came for (an engine that raised no event), and a
+//! `setData` that fails puts the text back for that same fallback to take, so
+//! the gesture has a route out either way. One consequence: the two writes are
+//! alternatives rather than a pair, and a copy reaches the host clipboard
+//! exactly once.
+//!
+//! What this does not cover is an engine that raises no `cut` for the
+//! overlay's collapsed selection *and* withholds the async clipboard — a
+//! non-secure page on an engine with no `beforecut` to claim the verb with.
+//! There every route refuses after the widget has already deleted. Holding the
+//! delete back until a write is confirmed is the only answer left, and the
+//! confirmation is asynchronous, so it would have to be pushed back into the
+//! widget across the shell/widget seam this bridge does not cross.
 //!
 //! # Which clipboard gestures leave the key path
 //!
@@ -126,10 +168,12 @@
 //!   `beforecopy`/`beforecut`) or for a *ranged* selection, and the overlay has
 //!   neither by construction, so the event may never arrive at all; a bridge
 //!   that waited for it would drop the gesture on the floor, which is what
-//!   made `Cmd`/`Ctrl`+`c` a no-op. Where the event does arrive the gesture is
-//!   answered twice, and the duplicate is suppressed downstream by the
-//!   synchronous-write mark
-//!   ([`crate::app_handler::clipboard_write_to_issue`]) rather than here.
+//!   made `Cmd`/`Ctrl`+`c` a no-op. The keystroke that keeps the key path
+//!   marks the [`ClipboardHandoff`] on its way past
+//!   ([`hands_write_to_dom_event`]), so the two halves of the gesture describe
+//!   one write rather than two: the widget's own answer is what the DOM
+//!   callback writes, and nothing is issued asynchronously unless that
+//!   callback never runs ([`crate::app_handler::clipboard_write_route`]).
 //!
 //! A withheld keydown is dropped rather than cancelled — the browser's own
 //! default action is what fires the clipboard event at all. `Ctrl`/`Cmd`+`a`
@@ -520,11 +564,13 @@ pub enum ClipboardVerb {
 /// The clipboard verb one keystroke means, or `None` for a keystroke that means
 /// no clipboard verb at all.
 ///
-/// `ctrl_or_meta` is `ctrlKey || metaKey` off the event — one flag rather than
-/// two because the platforms differ only in which of them carries the chord,
-/// and a widget decoding either answers the same verb. `shift` is the event's
-/// own `shiftKey`, needed because two of the legacy gestures are spelled with
-/// it alone.
+/// `ctrl`, `meta` and `shift` are the event's own `ctrlKey`, `metaKey` and
+/// `shiftKey`. The two chord modifiers are taken apart rather than folded into
+/// one flag because the widget's table does not treat them alike everywhere:
+/// the letters answer to either (the platforms differ only in which of them
+/// carries the chord), while the legacy `Insert` copy answers to `Ctrl` alone
+/// — `Cmd`+`Insert` is no verb on any platform, and reading it as a copy would
+/// have this bridge claim a gesture the widget behind it drops.
 ///
 /// # The table
 ///
@@ -537,7 +583,7 @@ pub enum ClipboardVerb {
 /// | `Ctrl`/`Cmd`+`c` | copy |
 /// | `Ctrl`/`Cmd`+`x` | cut |
 /// | `Ctrl`/`Cmd`+`v` | paste |
-/// | `Ctrl`/`Cmd`+`Insert` | copy |
+/// | `Ctrl`+`Insert` | copy |
 /// | `Shift`+`Insert` | paste |
 /// | `Shift`+`Delete` | cut |
 /// | `Copy` / `Cut` / `Paste` | the key's own verb |
@@ -549,8 +595,8 @@ pub enum ClipboardVerb {
 /// browser gesture rather than a field cut. A bare `Insert` toggles overtype,
 /// which is no clipboard verb, and the dedicated keys carry their verb with no
 /// modifier at all.
-pub fn clipboard_verb(key: &str, ctrl_or_meta: bool, shift: bool) -> Option<ClipboardVerb> {
-    if ctrl_or_meta {
+pub fn clipboard_verb(key: &str, ctrl: bool, meta: bool, shift: bool) -> Option<ClipboardVerb> {
+    if ctrl || meta {
         if key.eq_ignore_ascii_case("c") {
             return Some(ClipboardVerb::Copy);
         }
@@ -567,10 +613,12 @@ pub fn clipboard_verb(key: &str, ctrl_or_meta: bool, shift: bool) -> Option<Clip
         "Cut" => Some(ClipboardVerb::Cut),
         "Paste" => Some(ClipboardVerb::Paste),
         // The legacy chords, which a browser still runs its own clipboard
-        // command for.
+        // command for. `Ctrl`+`Insert` is the copy on every platform that has
+        // the gesture at all — the widget reads `Cmd`+`Insert` as nothing, and
+        // so does this.
         "Insert" if shift => Some(ClipboardVerb::Paste),
-        "Insert" if ctrl_or_meta => Some(ClipboardVerb::Copy),
-        "Delete" if shift && !ctrl_or_meta => Some(ClipboardVerb::Cut),
+        "Insert" if ctrl => Some(ClipboardVerb::Copy),
+        "Delete" if shift && !ctrl && !meta => Some(ClipboardVerb::Cut),
         _ => None,
     }
 }
@@ -588,8 +636,27 @@ pub fn clipboard_verb(key: &str, ctrl_or_meta: bool, shift: bool) -> Option<Clip
 /// The keystroke is dropped rather than cancelled — the browser's own default
 /// action is what *fires* the `paste` event, so cancelling the keydown would
 /// leave nothing to answer.
-pub fn withheld_from_key_path(key: &str, ctrl_or_meta: bool, shift: bool) -> bool {
-    clipboard_verb(key, ctrl_or_meta, shift) == Some(ClipboardVerb::Paste)
+pub fn withheld_from_key_path(key: &str, ctrl: bool, meta: bool, shift: bool) -> bool {
+    clipboard_verb(key, ctrl, meta, shift) == Some(ClipboardVerb::Paste)
+}
+
+/// Whether a keystroke's clipboard write belongs to a DOM `copy`/`cut`
+/// callback rather than to `navigator.clipboard.writeText`.
+///
+/// True for the two verbs that write — a copy and a cut — and for nothing
+/// else. Both keep the key path ([`withheld_from_key_path`]), so the widget
+/// answers the keystroke first and fills the tree's clipboard slot inside the
+/// same browser task; this is what tells the drain behind it that the text is
+/// owed to a callback still to come rather than to a promise, and so what
+/// fills the [`ClipboardHandoff`].
+///
+/// A paste is not one of them: it carries no write at all, and it never
+/// reaches the canvas in the first place.
+pub fn hands_write_to_dom_event(key: &str, ctrl: bool, meta: bool, shift: bool) -> bool {
+    matches!(
+        clipboard_verb(key, ctrl, meta, shift),
+        Some(ClipboardVerb::Copy | ClipboardVerb::Cut)
+    )
 }
 
 /// The signal a torn-down overlay owes the compose latch.
@@ -763,8 +830,15 @@ pub fn session_is_active(ime: Option<&ImeState>) -> bool {
     ime.is_some_and(|state| state.active)
 }
 
-/// The text a `copy` or a `cut` may put on the clipboard, read straight off the
-/// surface the focused widget last published — or `None` for the three refusals.
+/// The text a `copy` or a `cut` may put on the clipboard when no widget answer
+/// was handed to it, read straight off the surface the focused widget last
+/// published — or `None` for the three refusals.
+///
+/// This is the second of [`clipboard_write_action`]'s two sources, and the one
+/// that answers a gesture the tree never saw: a browser edit menu's copy, a
+/// touch callout's cut. A gesture that did reach the tree brings its own text
+/// through the [`ClipboardHandoff`] instead, which is authoritative where this
+/// snapshot can be a step behind the edit the same gesture already applied.
 ///
 /// Borrowed rather than owned so the per-frame refresh that feeds the listeners
 /// allocates only when the answer actually changes.
@@ -790,9 +864,12 @@ pub fn session_is_active(ime: Option<&ImeState>) -> bool {
 ///   time at the one boundary that cannot ask it. Read through
 ///   [`ImeContentType::is_secret`] for [`overlay_attributes`]'s fail-closed
 ///   reason: a secret variant added upstream is refused the day it exists.
-/// * **A collapsed or absent selection** — copying nothing is not a copy, and the
-///   listener answers by leaving the browser's own default action alone rather
-///   than writing an empty string over whatever the clipboard already held.
+/// * **A collapsed or absent selection** — copying nothing is not a copy, so
+///   nothing is handed to `setData` and whatever the clipboard already held
+///   stays there. The event is still cancelled, exactly as it is for a write
+///   and for the secret refusal above: the browser's own default action would
+///   copy the *element*, which is not reliably empty (see
+///   [`ClipboardWriteAction::cancel`]).
 pub fn clipboard_selection(ime: Option<&ImeState>) -> Option<&str> {
     let state = ime?;
     if state.content_type.is_secret() {
@@ -821,17 +898,34 @@ pub fn clipboard_selection(ime: Option<&ImeState>) -> Option<&str> {
         .filter(|selected| !selected.is_empty())
 }
 
-/// What a `copy`/`cut` callback must do, decided from the selection snapshot
-/// the shell last published ([`clipboard_selection`], held for the listeners
-/// because a callback cannot ask the tree anything).
+/// What a `copy`/`cut` callback must do, decided from the two things it can
+/// reach without asking the tree: the [`ClipboardHandoff`] the shell filled for
+/// a gesture already in flight, and the selection snapshot it last published
+/// ([`clipboard_selection`]).
 ///
 /// The callback itself is DOM-only and so untestable on the build host; this
 /// is its whole decision, lifted out where it can be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipboardWriteAction<'a> {
     /// The text to hand `clipboardData.setData`, or `None` for a refusal —
-    /// no field focused, a collapsed selection, or a secret one.
+    /// nothing handed over and no field focused, a collapsed selection, or a
+    /// secret one.
     pub write: Option<&'a str>,
+    /// Whether a `cut` still owes the widget the delete half of the gesture —
+    /// the [`DomEditEvent::EditCommand`] its listener queues.
+    ///
+    /// True only for a write taken from the selection snapshot, which is what
+    /// a gesture the tree never saw looks like: the browser resolved a cut of
+    /// its own (an edit menu, a touch callout), the text is on the clipboard
+    /// now, and nothing has deleted it yet.
+    ///
+    /// False for a handed-off write, and that is the whole reason the source
+    /// is tracked: the tree filled the handoff by *answering* the gesture, so
+    /// the deletion is already in the document and queuing a second `Cut`
+    /// would edit the field twice for one keystroke.
+    ///
+    /// Meaningless to a `copy`, which queues nothing either way.
+    pub delete_owed: bool,
     /// Whether the browser's own copy/cut must be cancelled.
     ///
     /// Always, and the refusal is why it is a field rather than an assumption
@@ -847,24 +941,113 @@ pub struct ClipboardWriteAction<'a> {
     ///
     /// Set exactly when something was written, because a write leaves the
     /// synchronous-write mark behind it and that mark is consumed by a drain
-    /// ([`crate::app_handler::clipboard_write_to_issue`]) — one that a copy
-    /// would otherwise never get, since it changes no pixel and queues no
-    /// signal, and the loop parks until something asks for a turn. A mark
-    /// nobody comes to take is not a dedupe but a trap: the next app-driven
-    /// copy of the same text would be read as that write's own echo and
-    /// silently dropped.
+    /// ([`crate::app_handler::clipboard_write_route`]) — one that a copy would
+    /// otherwise never get, since it changes no pixel and queues no signal,
+    /// and the loop parks until something asks for a turn. A mark nobody comes
+    /// to take is not a dedupe but a trap: the next app-driven copy of the
+    /// same text would be read as that write's own echo and silently dropped.
     pub request_frame: bool,
 }
 
-/// The action a `copy`/`cut` callback takes for one published selection.
+/// The action a `copy`/`cut` callback takes, given whatever the shell handed
+/// it for the gesture in flight and the selection it last published.
 ///
-/// See [`ClipboardWriteAction`] for what each field means and why a refusal
-/// still cancels.
-pub fn clipboard_write_action(selection: Option<&str>) -> ClipboardWriteAction<'_> {
+/// `handed_over` wins. It is the tree's own answer to *this* gesture — the
+/// text the focused widget put in the clipboard slot when the re-dispatched
+/// keystroke reached it — whereas `selection` is a snapshot that the same
+/// gesture's edit may already have invalidated: a cut deletes its selection
+/// before the browser raises `cut`, leaving the snapshot collapsed and this
+/// function's only other source empty. Preferring the handoff is therefore
+/// what keeps a cut from deleting text it never wrote out.
+///
+/// See [`ClipboardWriteAction`] for what each field means, why a refusal still
+/// cancels, and why only the `selection` source leaves a delete owed.
+pub fn clipboard_write_action<'a>(
+    handed_over: Option<&'a str>,
+    selection: Option<&'a str>,
+) -> ClipboardWriteAction<'a> {
+    let write = handed_over.or(selection);
     ClipboardWriteAction {
-        write: selection,
+        write,
+        delete_owed: handed_over.is_none() && write.is_some(),
         cancel: true,
-        request_frame: selection.is_some(),
+        request_frame: write.is_some(),
+    }
+}
+
+/// The one-slot handoff between the shell's clipboard drain and the overlay's
+/// synchronous `copy`/`cut` write.
+///
+/// # What it is for
+///
+/// A clipboard keystroke is answered by the widget first and by the DOM
+/// second, both inside one browser task (winit's web backend dispatches the
+/// re-dispatched keystroke synchronously). The widget's answer — the text it
+/// put in the tree's one-shot clipboard slot — is therefore already known when
+/// the `copy`/`cut` callback runs, and it is the only description of the
+/// gesture that a cut's own deletion has not invalidated. This carries it
+/// across: the drain leaves the text here, the callback takes it, and
+/// `navigator.clipboard.writeText` is left as the fallback for a gesture whose
+/// event never arrives.
+///
+/// # The gesture mark
+///
+/// The drain cannot tell a keystroke's write from an app-driven one by looking
+/// at the tree, so the keydown listener says so on the way past
+/// ([`hands_write_to_dom_event`]) and the drain takes that mark. Without it an
+/// app-driven copy — a toolbar button, with no DOM event coming for it ever —
+/// would be parked here waiting for a callback that never runs, and issued a
+/// frame late, outside the user gesture that a browser wants an async
+/// clipboard write to ride.
+///
+/// Pure state, so the whole protocol is exercised on the build host; the
+/// browser half only owns the [`RefCell`](std::cell::RefCell) around it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClipboardHandoff {
+    gesture: bool,
+    text: Option<String>,
+}
+
+impl ClipboardHandoff {
+    /// An empty handoff with no gesture in flight.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark a copy/cut keystroke as in flight, from the keydown listener that
+    /// is about to re-dispatch it onto the canvas.
+    pub fn mark_gesture(&mut self) {
+        self.gesture = true;
+    }
+
+    /// Take the mark, for the drain deciding where this pass's clipboard write
+    /// is owed.
+    ///
+    /// Taken rather than read on every drain, whether or not the tree wrote
+    /// anything: a mark left standing would send the next app-driven copy —
+    /// with no DOM event behind it — to a callback that never runs.
+    pub fn take_gesture(&mut self) -> bool {
+        std::mem::take(&mut self.gesture)
+    }
+
+    /// Leave `text` for the `copy`/`cut` callback still to come.
+    ///
+    /// The caller [`take`](Self::take)s first on the same pass, so nothing
+    /// waiting is ever overwritten: a handoff the DOM did not come for leaves
+    /// as the asynchronous fallback before this one arrives.
+    pub fn offer(&mut self, text: String) {
+        self.text = Some(text);
+    }
+
+    /// Take whatever is waiting — the callback claiming it for its synchronous
+    /// write, or the next drain finding it unclaimed and issuing the
+    /// asynchronous fallback instead.
+    ///
+    /// One method for both because the slot cannot tell them apart and must
+    /// not: what makes a text the callback's is only that the callback got
+    /// here first, inside the gesture, which is exactly when it can write.
+    pub fn take(&mut self) -> Option<String> {
+        self.text.take()
     }
 }
 
@@ -895,11 +1078,11 @@ mod browser {
     use winit::window::Window;
 
     use super::{
-        DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync, StaleOverlay,
-        cancels_composition, clipboard_selection, clipboard_write_action, forwards_to_canvas,
-        key_path_dropped, overlay_attributes, overlay_box, overlay_box_moved,
-        overlay_needs_rebuild, published_content_type, session_is_active, stale_overlay_action,
-        withheld_from_key_path,
+        ClipboardHandoff, DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync,
+        StaleOverlay, cancels_composition, clipboard_selection, clipboard_write_action,
+        forwards_to_canvas, hands_write_to_dom_event, key_path_dropped, overlay_attributes,
+        overlay_box, overlay_box_moved, overlay_needs_rebuild, published_content_type,
+        session_is_active, stale_overlay_action, withheld_from_key_path,
     };
 
     /// The style declarations the overlay is created with, beyond its per-frame
@@ -957,14 +1140,26 @@ mod browser {
         /// drain that follows it — the drain the write itself asks for, so that
         /// there is always one.
         ///
-        /// A `cut` writes the clipboard itself and then asks the widget to
-        /// delete the selection; the widget answers a `Cut` by writing the same
-        /// text into the tree's own clipboard slot, which the shell would
-        /// otherwise hand to `navigator.clipboard.writeText` a second time — a
-        /// promise that may well be refused for arriving outside a user
-        /// gesture, and that can only re-write text already there. So the shell
-        /// compares the two and skips the redundant half.
+        /// What it guards is the echo of a cut the *DOM* resolved on its own: a
+        /// browser edit menu's cut writes the clipboard from inside the
+        /// callback and then asks the widget to delete what was taken, and the
+        /// widget answers a `Cut` by writing the same text into the tree's own
+        /// clipboard slot. Handing that back to
+        /// `navigator.clipboard.writeText` would re-write text already on the
+        /// clipboard, from outside the gesture that authorised it — refused on
+        /// some browsers, pointless on all of them. So the shell compares the
+        /// two and skips the redundant half.
+        ///
+        /// A keystroke's own two halves need no such comparison: the tree's
+        /// write reaches the callback through [`Signals::handoff`] instead of
+        /// being issued beside it, so there is never a second write to
+        /// suppress.
         synchronous_write: RefCell<Option<String>>,
+        /// The bridge carrying a keystroke's own clipboard write from the drain
+        /// that took it out of the tree to the `copy`/`cut` callback that can
+        /// write it synchronously — see [`ClipboardHandoff`], which holds the
+        /// whole protocol and its reasoning.
+        handoff: RefCell<ClipboardHandoff>,
     }
 
     /// The hidden-input IME overlay: at most one element, alive for exactly as
@@ -997,8 +1192,8 @@ mod browser {
         }
 
         /// Take the text a `copy`/`cut` listener already wrote to the clipboard
-        /// itself, so the shell can tell the tree's own pending write apart from
-        /// a duplicate of it — see [`Signals::synchronous_write`].
+        /// itself, so the shell can tell a write the tree made on its own apart
+        /// from the echo of that one — see [`Signals::synchronous_write`].
         ///
         /// Taken on every drain whether or not the tree wrote anything, and
         /// every synchronous write asks for the drain that takes it: together
@@ -1009,6 +1204,32 @@ mod browser {
         /// `Cut` it queued is still in the queue behind it.
         pub fn take_synchronous_write(&self) -> Option<String> {
             self.signals.synchronous_write.borrow_mut().take()
+        }
+
+        /// Take the mark a copy/cut keystroke left on its way to the canvas:
+        /// whether the write this drain is about to find in the tree belongs to
+        /// a DOM callback still to come — see [`ClipboardHandoff`].
+        pub fn take_clipboard_gesture(&self) -> bool {
+            self.signals.handoff.borrow_mut().take_gesture()
+        }
+
+        /// Leave the tree's clipboard write for the `copy`/`cut` callback that
+        /// will put it on the host clipboard synchronously, and ask for the
+        /// frame that issues the asynchronous fallback if no callback comes.
+        pub fn hand_off_clipboard_write(&self, window: &Arc<Window>, text: String) {
+            self.signals.handoff.borrow_mut().offer(text);
+            window.request_redraw();
+        }
+
+        /// Take back a handed-off write no `copy`/`cut` callback claimed — the
+        /// gesture is over, so the text is owed to
+        /// `navigator.clipboard.writeText` after all.
+        ///
+        /// Called at the top of every drain, so the fallback is decided on the
+        /// first turn after the gesture: the keystroke's own `keyup`, or the
+        /// frame the handoff asked for.
+        pub fn take_unclaimed_clipboard_write(&self) -> Option<String> {
+            self.signals.handoff.borrow_mut().take()
         }
 
         /// A handle that can queue a [`DomEditEvent::Paste`] after this borrow
@@ -1342,14 +1563,17 @@ mod browser {
                 let signals = Rc::clone(&self.signals);
                 let window = Arc::clone(window);
                 move |event| {
+                    // Cancel the browser's own insertion first, and whatever
+                    // the read below answers: the overlay's value is thrown
+                    // away rather than read, and an `insertFromPaste` `input`
+                    // behind this would be taken for a keystroke by the carry
+                    // rule. A paste this bridge cannot carry is a dropped
+                    // paste, never one the element applies to itself.
+                    event.prevent_default();
                     let Some(text) = pasted_text(&event) else {
                         return;
                     };
-                    // Cancel the browser's own insertion: the overlay's value is
-                    // thrown away rather than read, and an `insertFromPaste`
-                    // `input` behind this would be taken for a keystroke by the
-                    // carry rule. The text reaches the tree from here instead.
-                    event.prevent_default();
+                    // The text reaches the tree from here instead.
                     push(&signals, DomEditEvent::Paste(text), &window);
                 }
             });
@@ -1370,7 +1594,10 @@ mod browser {
                 move |event| {
                     // Only a write that actually happened may delete anything —
                     // a refused cut (a secret field, no selection) leaves the
-                    // document alone as well as the clipboard.
+                    // document alone as well as the clipboard — and only one
+                    // the *DOM* resolved on its own: a write handed over by the
+                    // shell is the answer to a gesture the widget has already
+                    // applied, so asking for the delete again would cut twice.
                     if write_selection(&signals, &event, &window) {
                         push(
                             &signals,
@@ -1415,20 +1642,17 @@ mod browser {
                     };
                     let key = key_event.key();
                     let composing = key_event.is_composing();
-                    if withheld_from_key_path(
-                        &key,
-                        key_event.ctrl_key() || key_event.meta_key(),
-                        key_event.shift_key(),
-                    ) {
+                    let ctrl = key_event.ctrl_key();
+                    let meta = key_event.meta_key();
+                    let shift = key_event.shift_key();
+                    if withheld_from_key_path(&key, ctrl, meta, shift) {
                         // A paste gesture: the DOM raises `paste` for it
                         // reliably and the listener above answers it, so
                         // forwarding it as well would hand a widget the same
                         // verb a second time. A copy or a cut is not withheld
-                        // — that event may never come — and the duplicate it
-                        // can produce is suppressed by the synchronous-write
-                        // mark instead. Deliberately not cancelled: the
-                        // browser's own default action is what fires the
-                        // `paste` at all.
+                        // — that event may never come. Deliberately not
+                        // cancelled: the browser's own default action is what
+                        // fires the `paste` at all.
                         return;
                     }
                     if cancels_composition(&key, composing) {
@@ -1436,6 +1660,25 @@ mod browser {
                         return;
                     }
                     if forwards_to_canvas(&key, composing) {
+                        if hands_write_to_dom_event(&key, ctrl, meta, shift) {
+                            // A copy or a cut, about to reach the widget that
+                            // answers it — which happens before this listener
+                            // returns, and so before the browser raises the
+                            // `copy`/`cut` this marks as the one that will do
+                            // the writing. The drain behind the widget's answer
+                            // hands the text to that callback rather than
+                            // issuing it asynchronously beside it: one gesture,
+                            // one write, and a cut's write on the only route
+                            // that needs no secure context. See
+                            // `ClipboardHandoff`.
+                            //
+                            // Marked here rather than above so it describes a
+                            // keystroke the widget really is about to see: one
+                            // the composition owns reaches no widget, and a DOM
+                            // event raised for it is a gesture the tree never
+                            // saw, answered from the published selection.
+                            signals.handoff.borrow_mut().mark_gesture();
+                        }
                         redispatch(canvas.as_ref(), "keydown", key_event);
                     } else if key_path_dropped(&key, composing) {
                         // Queued rather than flagged: the `input` that carries
@@ -1648,35 +1891,53 @@ mod browser {
         }
     }
 
-    /// Put the focused field's selection on the clipboard from inside a
-    /// `copy`/`cut` callback, reporting whether it was written.
+    /// Put this gesture's text on the clipboard from inside a `copy`/`cut`
+    /// callback, reporting whether a `cut` must still ask the widget to delete
+    /// what was taken.
     ///
     /// Everything here has to finish before the callback returns — that is the
-    /// only window in which Safari honours a clipboard write — so the text comes
-    /// from the snapshot the shell republishes each pass
-    /// ([`ImeOverlay::publish_selection`]) rather than from the tree. The
-    /// decision itself is [`clipboard_write_action`]'s, where it is testable on
-    /// the build host; this is the DOM half that carries it out.
+    /// only window in which Safari honours a clipboard write — so neither
+    /// source can be the tree itself: the text is either the one the shell
+    /// handed over for the gesture already in flight ([`ClipboardHandoff`]) or
+    /// the snapshot it republishes each pass
+    /// ([`ImeOverlay::publish_selection`]). The decision between them is
+    /// [`clipboard_write_action`]'s, where it is testable on the build host;
+    /// this is the DOM half that carries it out.
     ///
     /// The event is cancelled on every path, refusals included: the browser's
     /// own copy takes the *element*, which holds a live preedit whenever a
     /// composition owns it, so leaving the default action to run is what would
     /// put a secret field's marked text on the host clipboard. A write also
     /// asks for a frame, which is the drain that takes the mark it leaves.
+    ///
+    /// A handed-off write that the browser then refuses is put back rather
+    /// than dropped: the widget has already deleted it, and the drain behind
+    /// this callback is what offers it to `navigator.clipboard.writeText`
+    /// instead. Losing it here is the one outcome a cut may not have.
     fn write_selection(
         signals: &Rc<Signals>,
         event: &web_sys::Event,
         window: &Arc<Window>,
     ) -> bool {
+        let handed_over = signals.handoff.borrow_mut().take();
         let selection = signals.selection.borrow().clone();
-        let action = clipboard_write_action(selection.as_deref());
+        let action = clipboard_write_action(handed_over.as_deref(), selection.as_deref());
         if action.cancel {
             event.prevent_default();
         }
         let Some(text) = action.write else {
             return false;
         };
+        let restore = |signals: &Rc<Signals>| {
+            if let Some(text) = handed_over.clone() {
+                signals.handoff.borrow_mut().offer(text);
+                // The drain that takes it back has to come from somewhere: this
+                // callback may be the last thing in the task.
+                window.request_redraw();
+            }
+        };
         let Some(clipboard) = event.dyn_ref::<ClipboardEvent>() else {
+            restore(signals);
             return false;
         };
         let Some(data) = clipboard.clipboard_data() else {
@@ -1684,13 +1945,16 @@ mod browser {
                 "frust-shell-web: a copy/cut arrived with no clipboardData; nothing is written \
                  and the browser's own action stays cancelled"
             );
+            restore(signals);
             return false;
         };
         if let Err(err) = data.set_data("text/plain", text) {
             log::warn!(
                 "frust-shell-web: the browser refused the clipboard write ({err:?}); \
-                 the copy is lost"
+                 a write handed over for a keystroke falls back to the asynchronous \
+                 clipboard, and a copy read off the selection is lost"
             );
+            restore(signals);
             return false;
         }
         *signals.synchronous_write.borrow_mut() = Some(text.to_owned());
@@ -1700,7 +1964,7 @@ mod browser {
             // otherwise ask for one.
             window.request_redraw();
         }
-        true
+        action.delete_owed
     }
 
     /// The marked/committed text off a composition event, empty when the
@@ -1745,12 +2009,12 @@ mod browser {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardVerb, DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy,
-        StaleOverlay, cancels_composition, clipboard_selection, clipboard_verb,
-        clipboard_write_action, displaced_composition_signal, forwards_to_canvas, key_path_dropped,
-        overlay_attributes, overlay_box, overlay_box_moved, overlay_needs_rebuild,
-        published_content_type, session_is_active, stale_overlay_action, teardown_signal,
-        withheld_from_key_path,
+        ClipboardHandoff, ClipboardVerb, DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox,
+        OverlayPolicy, StaleOverlay, cancels_composition, clipboard_selection, clipboard_verb,
+        clipboard_write_action, displaced_composition_signal, forwards_to_canvas,
+        hands_write_to_dom_event, key_path_dropped, overlay_attributes, overlay_box,
+        overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
+        stale_overlay_action, teardown_signal, withheld_from_key_path,
     };
     use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
     use kurbo::Rect;
@@ -2104,59 +2368,109 @@ mod tests {
 
     // --- the clipboard route ---
 
-    /// `(key, ctrl_or_meta, shift, verb)` — every gesture a browser runs a
+    /// `(key, ctrl, meta, shift, verb)` — every gesture a browser runs a
     /// clipboard command for, and the near misses around them.
     ///
     /// It is the table `frust-widgets`' text field decodes from the same
     /// keystrokes; the two must agree, or a gesture the widget answers as one
-    /// verb would be classified here as another.
-    const VERB_TABLE: &[(&str, bool, bool, Option<ClipboardVerb>)] = &[
+    /// verb would be classified here as another. The two chord modifiers are
+    /// separate columns because the widget's table separates them: its letters
+    /// answer to `ctrl` or `meta`, its `Insert` copy to `ctrl` alone.
+    const VERB_TABLE: &[(&str, bool, bool, bool, Option<ClipboardVerb>)] = &[
         // The platform chords, in both polarities of the modifier.
-        ("c", true, false, Some(ClipboardVerb::Copy)),
-        ("x", true, false, Some(ClipboardVerb::Cut)),
-        ("v", true, false, Some(ClipboardVerb::Paste)),
-        ("c", false, false, None),
-        ("x", false, false, None),
-        ("v", false, false, None),
+        ("c", true, false, false, Some(ClipboardVerb::Copy)),
+        ("x", true, false, false, Some(ClipboardVerb::Cut)),
+        ("v", true, false, false, Some(ClipboardVerb::Paste)),
+        ("c", false, true, false, Some(ClipboardVerb::Copy)),
+        ("x", false, true, false, Some(ClipboardVerb::Cut)),
+        ("v", false, true, false, Some(ClipboardVerb::Paste)),
+        ("c", false, false, false, None),
+        ("x", false, false, false, None),
+        ("v", false, false, false, None),
         // Shift adds the capital a browser reports, not a different verb.
-        ("C", true, true, Some(ClipboardVerb::Copy)),
-        ("X", true, true, Some(ClipboardVerb::Cut)),
-        ("V", true, true, Some(ClipboardVerb::Paste)),
+        ("C", true, false, true, Some(ClipboardVerb::Copy)),
+        ("X", false, true, true, Some(ClipboardVerb::Cut)),
+        ("V", true, false, true, Some(ClipboardVerb::Paste)),
         // The dedicated keys carry their verb with no modifier at all.
-        ("Copy", false, false, Some(ClipboardVerb::Copy)),
-        ("Cut", false, false, Some(ClipboardVerb::Cut)),
-        ("Paste", false, false, Some(ClipboardVerb::Paste)),
-        ("Copy", true, true, Some(ClipboardVerb::Copy)),
+        ("Copy", false, false, false, Some(ClipboardVerb::Copy)),
+        ("Cut", false, false, false, Some(ClipboardVerb::Cut)),
+        ("Paste", false, false, false, Some(ClipboardVerb::Paste)),
+        ("Copy", true, true, true, Some(ClipboardVerb::Copy)),
         // The legacy Insert chords. Shift wins when both are held, exactly as
         // the widget decodes it, and a bare Insert is overtype, not a verb.
-        ("Insert", true, false, Some(ClipboardVerb::Copy)),
-        ("Insert", false, true, Some(ClipboardVerb::Paste)),
-        ("Insert", true, true, Some(ClipboardVerb::Paste)),
-        ("Insert", false, false, None),
+        // `Cmd`+`Insert` is nobody's gesture: the widget reads only `ctrl`
+        // there, and a Mac with a PC keyboard attached is where the two tables
+        // would otherwise disagree.
+        ("Insert", true, false, false, Some(ClipboardVerb::Copy)),
+        ("Insert", false, true, false, None),
+        ("Insert", true, true, false, Some(ClipboardVerb::Copy)),
+        ("Insert", false, false, true, Some(ClipboardVerb::Paste)),
+        ("Insert", true, false, true, Some(ClipboardVerb::Paste)),
+        ("Insert", false, true, true, Some(ClipboardVerb::Paste)),
+        ("Insert", false, false, false, None),
         // Shift+Delete is the legacy cut, but only on its own: anything
         // chorded past shift is an OS or browser gesture, and a plain Delete
         // is a forward delete.
-        ("Delete", false, true, Some(ClipboardVerb::Cut)),
-        ("Delete", true, true, None),
-        ("Delete", false, false, None),
+        ("Delete", false, false, true, Some(ClipboardVerb::Cut)),
+        ("Delete", true, false, true, None),
+        ("Delete", false, true, true, None),
+        ("Delete", false, false, false, None),
         // Select-all reaches no clipboard and the DOM raises nothing for it.
-        ("a", true, false, None),
-        ("a", true, true, None),
+        ("a", true, false, false, None),
+        ("a", false, true, true, None),
         // Ordinary typing, and a key that means nothing clipboard-shaped.
-        ("a", false, false, None),
-        ("Escape", true, false, None),
-        ("Enter", false, true, None),
+        ("a", false, false, false, None),
+        ("Escape", true, false, false, None),
+        ("Enter", false, false, true, None),
     ];
 
     #[test]
     fn every_clipboard_gesture_reads_as_the_verb_it_means() {
-        for &(key, ctrl_or_meta, shift, verb) in VERB_TABLE {
+        for &(key, ctrl, meta, shift, verb) in VERB_TABLE {
             assert_eq!(
-                clipboard_verb(key, ctrl_or_meta, shift),
+                clipboard_verb(key, ctrl, meta, shift),
                 verb,
-                "key={key:?} ctrl_or_meta={ctrl_or_meta} shift={shift}"
+                "key={key:?} ctrl={ctrl} meta={meta} shift={shift}"
             );
         }
+    }
+
+    #[test]
+    fn the_legacy_insert_copy_answers_to_ctrl_alone() {
+        // `frust-widgets`' own decode reads `NamedKey::Insert` as a copy for
+        // `modifiers.ctrl` and for nothing else, so `Cmd`+`Insert` — reachable
+        // on a Mac with an external PC keyboard — is no verb at all. Reading it
+        // as a copy here would have the bridge claim a gesture the widget
+        // behind it drops, and the two tables are asserted identical.
+        assert_eq!(
+            clipboard_verb("Insert", false, true, false),
+            None,
+            "Cmd+Insert is not the widget's copy"
+        );
+        assert!(
+            !hands_write_to_dom_event("Insert", false, true, false),
+            "a gesture that is no verb hands nothing to a DOM callback"
+        );
+        // The chord that *is* the legacy copy, and the shift row that outranks
+        // it, both unchanged.
+        assert_eq!(
+            clipboard_verb("Insert", true, false, false),
+            Some(ClipboardVerb::Copy)
+        );
+        assert_eq!(
+            clipboard_verb("Insert", true, false, true),
+            Some(ClipboardVerb::Paste)
+        );
+        // The letters do answer to either modifier — the platforms differ only
+        // in which one carries the chord, and the widget decodes both.
+        assert_eq!(
+            clipboard_verb("c", false, true, false),
+            Some(ClipboardVerb::Copy)
+        );
+        assert_eq!(
+            clipboard_verb("c", true, false, false),
+            Some(ClipboardVerb::Copy)
+        );
     }
 
     #[test]
@@ -2166,23 +2480,31 @@ mod tests {
         // deliver the gesture twice. Everything else — a copy, a cut, and every
         // keystroke that is no clipboard verb at all — keeps the key path,
         // because the DOM may raise nothing for it.
-        for &(key, ctrl_or_meta, shift, verb) in VERB_TABLE {
-            let withheld = withheld_from_key_path(key, ctrl_or_meta, shift);
+        for &(key, ctrl, meta, shift, verb) in VERB_TABLE {
+            let withheld = withheld_from_key_path(key, ctrl, meta, shift);
             assert_eq!(
                 withheld,
                 verb == Some(ClipboardVerb::Paste),
-                "key={key:?} ctrl_or_meta={ctrl_or_meta} shift={shift}"
+                "key={key:?} ctrl={ctrl} meta={meta} shift={shift}"
+            );
+            // The two verbs that write are exactly the two whose write the DOM
+            // callback makes, so the keystroke marks the handoff on its way
+            // past and the drain behind it hands the text over.
+            assert_eq!(
+                hands_write_to_dom_event(key, ctrl, meta, shift),
+                matches!(verb, Some(ClipboardVerb::Copy | ClipboardVerb::Cut)),
+                "key={key:?} ctrl={ctrl} meta={meta} shift={shift}"
             );
         }
         // Named for the regression they are: a browser enables its copy/cut
         // command only for a page that claims the verb or for a ranged
         // selection, and the overlay offers neither, so withholding these
         // dropped the gesture entirely.
-        assert!(!withheld_from_key_path("c", true, false));
-        assert!(!withheld_from_key_path("x", true, false));
+        assert!(!withheld_from_key_path("c", true, false, false));
+        assert!(!withheld_from_key_path("x", true, false, false));
         // Shift+Insert is a paste like any other: carrying it on the key path
         // as well as answering the DOM `paste` inserted the clipboard twice.
-        assert!(withheld_from_key_path("Insert", false, true));
+        assert!(withheld_from_key_path("Insert", false, false, true));
     }
 
     #[test]
@@ -2191,7 +2513,7 @@ mod tests {
         // `publish_selection` left it — the secret case end to end, not just
         // `clipboard_selection` in isolation.
         let secret = selected("hunter2", 0, 7, ImeContentType::Password);
-        let refusal = clipboard_write_action(clipboard_selection(Some(&secret)));
+        let refusal = clipboard_write_action(None, clipboard_selection(Some(&secret)));
         assert_eq!(refusal.write, None, "a secret field hands out nothing");
         assert!(
             refusal.cancel,
@@ -2202,23 +2524,116 @@ mod tests {
             !refusal.request_frame,
             "a refusal writes nothing and so leaves no mark for a drain to take"
         );
+        assert!(
+            !refusal.delete_owed,
+            "a cut that wrote nothing may delete nothing"
+        );
 
         // The same refusal for a collapsed selection and for no field at all.
         let caret = selected("abc", 2, 2, ImeContentType::Normal);
         assert_eq!(
-            clipboard_write_action(clipboard_selection(Some(&caret))).write,
+            clipboard_write_action(None, clipboard_selection(Some(&caret))).write,
             None
         );
-        assert!(clipboard_write_action(clipboard_selection(Some(&caret))).cancel);
-        assert!(clipboard_write_action(clipboard_selection(None)).cancel);
+        assert!(clipboard_write_action(None, clipboard_selection(Some(&caret))).cancel);
+        assert!(clipboard_write_action(None, clipboard_selection(None)).cancel);
 
         // An ordinary field writes, cancels, and owes the drain that takes its
         // mark.
         let plain = selected("hunter2", 0, 7, ImeContentType::Normal);
-        let write = clipboard_write_action(clipboard_selection(Some(&plain)));
+        let write = clipboard_write_action(None, clipboard_selection(Some(&plain)));
         assert_eq!(write.write, Some("hunter2"));
         assert!(write.cancel);
         assert!(write.request_frame);
+    }
+
+    #[test]
+    fn a_cut_writes_the_text_the_widget_took_not_the_selection_it_left() {
+        // The exact state a keyboard cut leaves behind when the browser gets
+        // round to raising `cut`: the widget has already written "abc" into the
+        // tree's slot (the shell holds it as a handoff) and already deleted the
+        // selection, so the surface the shell last published carries a
+        // collapsed one and `clipboard_selection` answers nothing.
+        let after_delete = selected("", 0, 0, ImeContentType::Normal);
+        let snapshot = clipboard_selection(Some(&after_delete));
+        assert_eq!(snapshot, None, "the cut collapsed its own selection");
+
+        let action = clipboard_write_action(Some("abc"), snapshot);
+        assert_eq!(
+            action.write,
+            Some("abc"),
+            "the handoff is what the callback writes: deriving the text from \
+             the snapshot here writes nothing, and the text is already gone \
+             from the document"
+        );
+        assert!(action.cancel);
+        assert!(action.request_frame);
+        assert!(
+            !action.delete_owed,
+            "the widget applied this gesture already — a second Cut would \
+             delete a second time"
+        );
+
+        // A copy is the same shape minus the deletion: both sources agree, and
+        // the handoff still wins, so there is one write rather than one per
+        // source.
+        let copied = selected("abc", 0, 3, ImeContentType::Normal);
+        let copy = clipboard_write_action(Some("abc"), clipboard_selection(Some(&copied)));
+        assert_eq!(copy.write, Some("abc"));
+        assert!(!copy.delete_owed);
+    }
+
+    #[test]
+    fn a_cut_the_dom_resolved_alone_still_owes_the_widget_its_delete() {
+        // No handoff: nothing reached the tree, so this is a gesture the
+        // browser resolved on its own — an edit menu's cut, a touch callout —
+        // and the published selection is the only description of it there is.
+        let selection = selected("abc", 0, 3, ImeContentType::Normal);
+        let action = clipboard_write_action(None, clipboard_selection(Some(&selection)));
+        assert_eq!(action.write, Some("abc"));
+        assert!(
+            action.delete_owed,
+            "the clipboard has the text and nothing has deleted it yet"
+        );
+    }
+
+    #[test]
+    fn a_handed_over_write_is_issued_asynchronously_only_when_no_callback_takes_it() {
+        // The keystroke marks the gesture on its way to the canvas, and the
+        // drain behind it takes that mark exactly once.
+        let mut handoff = ClipboardHandoff::new();
+        handoff.mark_gesture();
+        assert!(
+            handoff.take_gesture(),
+            "the drain reads the keystroke's mark"
+        );
+        assert!(
+            !handoff.take_gesture(),
+            "a mark left standing would park the next app-driven copy for a \
+             callback that never comes"
+        );
+
+        // The engine that raises the event: the callback takes the text inside
+        // the gesture, and the drain that follows finds nothing to fall back
+        // with — one write reaches the host.
+        handoff.offer("abc".to_string());
+        assert_eq!(handoff.take(), Some("abc".to_string()), "the callback's");
+        assert_eq!(
+            handoff.take(),
+            None,
+            "no asynchronous write is owed for text the DOM already wrote"
+        );
+
+        // The engine that raises none (no beforecut to claim the verb with, a
+        // collapsed overlay selection): nothing claimed the text, so the next
+        // drain finds it and `writeText` gets its chance after all.
+        handoff.offer("abc".to_string());
+        assert_eq!(
+            handoff.take(),
+            Some("abc".to_string()),
+            "the fallback the drain issues"
+        );
+        assert_eq!(handoff.take(), None);
     }
 
     #[test]
