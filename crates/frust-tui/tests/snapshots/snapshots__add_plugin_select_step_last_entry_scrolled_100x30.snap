@@ -7,13 +7,13 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (6-14 of 14)        │▓▓                
- DEVICES ↻ r      │    ( ) clipboard                                             │▓▓                
-   none found     │        Synchronous plain-text clipboard access               │▓▓                
-                  │    ( ) haptics                                               │▓▓                
- SESSIONS         │        Minimal haptic feedback (selection tick, impact,      │▓▓                
-   none running   │    ( ) iap                                                   │▓▓                
-                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
+                  │  Choose a plugin to add to this project  (7-15 of 15)        │▓▓                
+ DEVICES ↻ r      │    ( ) haptics                                               │▓▓                
+   none found     │        Minimal haptic feedback (selection tick, impact,      │▓▓                
+                  │    ( ) iap                                                   │▓▓                
+ SESSIONS         │        In-app purchases and subscriptions over Play Billing  │▓▓                
+   none running   │    ( ) video-player                                          │▓▓                
+                  │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
  ACTIONS          │    ( ) database                                              │▓▓                
    New project · n│        Embedded SQL database (SQLite via rusqlite;           │▓▓                
    Add plugin · a │    ( ) i18n                                                  │▓▓                
