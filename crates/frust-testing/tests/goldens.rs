@@ -36,10 +36,10 @@ use frust_core::{
     SelectionToolbarPolicy, SelectionToolbarRequest, install_selection_toolbar_builder_if_unset,
     set_selection_toolbar_policy,
 };
-use frust_scene::Scene;
+use frust_scene::{Command, Scene};
 use frust_testing::ORACLE_ID;
 use frust_testing::case::{CaseSpec, Tolerance};
-use frust_testing::corpus::{CorpusCase, render_case, unit_cases};
+use frust_testing::corpus::{CorpusCase, Expect, Probe, render_case, unit_cases};
 use frust_testing::frame::{
     FrameSpec, SAMPLE_TEXT_LONG, foreign_font_runs, frame, glyph_run_count, physical_case,
     pin_type_scale, pinned_text_style, pointer, test_text_context,
@@ -51,8 +51,8 @@ use frust_testing::render::SceneRenderer;
 use frust_text::{TextContext, TextStyle};
 use frust_theme::Theme;
 use frust_widgets::{EdgeInsets, Padding, PaddingView, text_input};
-use kurbo::{Point, Size};
-use peniko::Color;
+use kurbo::{Point, Rect, Size};
+use peniko::{Brush, Color};
 
 /// The golden class the CPU oracle's baselines live in
 /// (`testing/goldens/cpu/`).
@@ -388,15 +388,16 @@ fn rfc3339_now_has_the_shape_golden_meta_promises() {
 }
 
 // -----------------------------------------------------------------------
-// A long-press selection-toolbar golden through the real `RenderRoot` route
+// A long-press selection-toolbar case through the real `RenderRoot` route
 // -----------------------------------------------------------------------
 //
 // Everything above renders `unit_cases()` — scenes recorded by hand through a
 // bare `SceneBuilder`, which cannot express a gesture. This one case drives a
 // REAL `frust_widgets::text_input` through the same `rebuild`/`layout`/`paint`
-// loop a shell runs, across several frames and a `Housekeeping` broadcast, and
-// pins the result as its own dedicated `cpu/` baseline — deliberately outside
-// `frust_testing::run_cpu_goldens`'s shared pipeline (see the font note below).
+// loop a shell runs, across several frames and a `Housekeeping` broadcast —
+// deliberately outside `frust_testing::run_cpu_goldens`'s shared pipeline (see
+// "Why this case carries no golden" below for why it never becomes a stored
+// `cpu/` baseline the way `unit_cases()` does).
 //
 // `frust_testing::frame::frame` already interleaves events between two frames
 // of the SAME root today (it takes `root: &mut RenderRoot` by reference, and
@@ -420,23 +421,35 @@ fn rfc3339_now_has_the_shape_golden_meta_promises() {
 // lands on the SECOND word, not the first, so the gesture is proven to select
 // the word under the press point rather than always the first one.
 //
-// # The toolbar's own labels are a KNOWN, pre-existing font gap
+// # Why this case carries no golden
 //
 // The baseline toolbar's four button labels ("Cut"/"Copy"/"Paste"/"Select
 // all", `crates/frust-widgets/src/selection_toolbar.rs`'s `LABELS`) are drawn
 // through `crate::text::text(label)`, which — like `frust_widgets::button`/
 // `checkbox`/`radio`'s own labels — hardcodes `TextStyle::default()`
-// (`FontFamily::SystemUi`) with no seam to override it. `docs/TESTING.md`'s
-// Deterministic Inputs section and `frust_testing::corpus::widget`'s own
-// module docs both name this residual gap and note the corpus's usual
-// workaround (pass an empty label) does not apply here: the toolbar's labels
-// are not this test's to set at all. This golden therefore captures whatever
-// the host's `SystemUi` fallback draws for those four words — a pre-existing,
-// out-of-scope (`frust-widgets`) limitation, not something this
-// `frust-testing`-only task can close; it is also why this case is driven by
-// hand rather than through `run_cpu_goldens`, whose shared pipeline would
-// reject the frame outright on its own `foreign_font_runs` check before ever
-// comparing a baseline.
+// (`FontFamily::SystemUi`) with no seam to override it: nothing outside
+// `frust-widgets` can point those four labels at the bundled test face
+// instead, and the corpus's usual workaround (pass an empty label) does not
+// apply either, since the labels are not this test's own string to set. A
+// frame that paints them therefore always carries a `Command::GlyphRun`
+// shaped against whichever font the *running host* resolves for
+// `FontFamily::SystemUi` — `frame::foreign_font_runs`'s own check (used above
+// by `no_case_shapes_against_a_host_font` and `run_corpus`) exists precisely
+// to reject that shape, because a PNG of it is only ever a snapshot of one
+// runner's fallback font, not a portable `cpu/` baseline any other host could
+// reproduce byte-for-byte.
+//
+// This is a current limitation of the baseline selection toolbar (and every
+// other baseline widget whose label hardcodes `TextStyle::default()`), not
+// something a test in this crate can close by itself — closing it needs a
+// style seam on those labels so a caller (this crate included) can pin their
+// family the same way every other corpus case already pins its own text.
+// Until then, this case is verified structurally instead of by golden
+// comparison below: which word got selected and whether a pod actually
+// floated above the field are read from the scene's own recorded commands
+// and from pixel probes placed where NO glyph — from either font — ever
+// paints, and the toolbar's four label runs are confirmed present by their
+// count, never by their shape.
 
 /// Serialises every test in this file that writes the process-global
 /// selection-toolbar policy/builder slots (`frust_core::selection_toolbar`).
@@ -607,6 +620,14 @@ fn record_text_input_selection_toolbar_long_press(scene: &mut Scene) {
 
 /// The [`CorpusCase`] [`record_text_input_selection_toolbar_long_press`]
 /// backs: a 320x160 window at scale 1, the crate's tight default tolerance.
+///
+/// Carries two [`Probe`]s rather than none — see "Why this case carries no
+/// golden" above for why a stored baseline is off the table, but a probe is
+/// not: both pixels below are picked at points empirically clear of every
+/// glyph this frame ever paints (verified by rendering this exact case and
+/// walking its output — see [`text_input_selection_toolbar_long_press`]'s own
+/// doc comment for the coordinates' derivation), so neither one depends on
+/// which font drew anything nearby.
 fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
     CorpusCase {
         spec: physical_case(
@@ -619,7 +640,28 @@ fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
             Tolerance::new(),
         ),
         record: record_text_input_selection_toolbar_long_press,
-        probes: &[],
+        probes: &[
+            Probe {
+                x: 14,
+                y: 55,
+                expect: Expect::Exact([239, 239, 239, 255]),
+                why: "the toolbar pill's own rounded-rect fill (frust_theme's neutral \
+                      `surface_container`), sampled in its left padding gap — 6px inside the \
+                      pill's own left edge and 6px before the first label's glyphs ever start \
+                      (`crate::selection_toolbar`'s `PAD_X`), so this pixel is pure fill on any \
+                      host regardless of what font drew the label beside it",
+            },
+            Probe {
+                x: 134,
+                y: 106,
+                expect: Expect::Exact([192, 201, 209, 255]),
+                why: "the selected word's own highlight (`frust_theme`'s neutral `primary` at \
+                      the field's selection alpha, over the field's own `surface` background), \
+                      sampled past the last glyph of the second \"Hello\" but still inside the \
+                      selection rect — a coordinate that could only read this color if the \
+                      SECOND word (not the first, and not nothing) got selected",
+            },
+        ],
         eroded_interior: false,
         about: "a stationary long-press on the second word of a focused field selects it and \
                 floats the baseline selection toolbar above it, through the real RenderRoot \
@@ -627,49 +669,120 @@ fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
     }
 }
 
-/// The golden itself: seeds under `UPDATE_GOLDENS=1`, otherwise compares
-/// byte-for-byte (within the case's own tolerance) against
-/// `testing/goldens/cpu/text_input_selection_toolbar_long_press.png`.
+/// Structural + probe assertions in place of a golden — see this section's
+/// own module docs, "Why this case carries no golden".
 ///
-/// Driven by hand rather than through [`run_corpus`]/`run_cpu_goldens`'s
-/// shared pipeline — see this section's own module docs for why the shared
-/// pipeline's `foreign_font_runs` gate would reject this frame outright (the
-/// toolbar's own labels are unavoidably drawn against a host font).
+/// # What each assertion actually catches, and how that was checked
+///
+/// - **Exactly one translucent fill, past the first word's own width.** The
+///   scene's only two `Command::FillRect`s are the selection highlight
+///   (translucent — `frust_widgets::textinput`'s selection alpha) and the
+///   caret (opaque); filtering on translucency alone isolates the highlight
+///   without touching a single glyph. Verified by temporarily pressing the
+///   FIRST "Hello" instead of the second (a local edit to this test's own
+///   `press` computation, reverted before this was committed): the highlight
+///   then starts at `x0` inside the first word's own span, and the `x0 >
+///   FIELD_PAD_X + word_width` assertion below caught it immediately.
+/// - **A rounded pod above the selection.** The scene's only
+///   `Command::RoundedRect` whose bottom edge sits at or above the
+///   selection's own top edge is the toolbar pill (the field's two chrome
+///   `RoundedRect`s both start BELOW the selection). Verified by temporarily
+///   changing the comparison to the field's own top inset instead of the
+///   selection's top (off by the 1px the real placement overlaps it by): the
+///   pod stopped being found and the assertion failed as expected.
+/// - **Five glyph runs.** One content run ("Hello, Hello", never wraps at
+///   this width) plus the four label runs
+///   [`text_input_selection_toolbar_long_press_native_policy_floats_no_pod`]
+///   already counts independently via its framework-vs-native delta of 4.
+///   Verified by temporarily asserting `6` instead of `5`: failed with the
+///   real count, `5`.
+/// - **The two pixel probes** (declared on the case itself — see
+///   [`text_input_selection_toolbar_long_press_case`]'s own doc comment).
+///   Their coordinates and expected bytes were read back from this exact
+///   case rendered on the CPU oracle, then re-verified by nudging a probe's
+///   expected byte by a visible amount and confirming
+///   [`CorpusCase::failed_probes`] reports the mismatch.
 #[test]
 fn text_input_selection_toolbar_long_press() {
     let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install_baseline_toolbar_builder_if_unset();
     set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
 
-    let mut oracle = CpuOracle::new();
     let case = text_input_selection_toolbar_long_press_case();
+    let scene = case.scene();
+
+    // The selection highlight is the scene's only TRANSLUCENT `FillRect` —
+    // the caret (the other `FillRect` this widget ever paints) is opaque.
+    let highlights: Vec<Rect> = scene
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            Command::FillRect {
+                rect,
+                brush: Brush::Solid(color),
+                ..
+            } if color.components[3] < 1.0 => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        highlights.len(),
+        1,
+        "expected exactly one selection-highlight fill; found {}: {highlights:?}",
+        highlights.len()
+    );
+    let highlight = highlights[0];
+
+    let (mut tcx, family) = test_text_context();
+    let style = pinned_text_style(&family, TEXT_FONT_SIZE, TEXT_INK);
+    let word_width = tcx.layout("Hello", &style, None).size().width;
+    assert!(
+        highlight.x0 > FIELD_PAD_X + word_width,
+        "the long press must select the SECOND \"Hello\", not the first: the highlight starts \
+         at x={} but the first word's own span ends at x={} — {highlight:?}",
+        highlight.x0,
+        FIELD_PAD_X + word_width
+    );
+    assert!(
+        (highlight.width() - word_width).abs() < 1.0,
+        "the highlight should span exactly one word ({word_width}px wide), not {} — {highlight:?}",
+        highlight.width()
+    );
+
+    // The toolbar pill: the scene's only `RoundedRect` that sits at or above
+    // the selection it floats over (the field's own two chrome `RoundedRect`s
+    // both start below it).
+    let pods: Vec<Rect> = scene
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            Command::RoundedRect { rect, .. } if rect.y1 <= highlight.y0 => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pods.len(),
+        1,
+        "expected exactly one rounded pod floating above the selection; found {}: {pods:?}",
+        pods.len()
+    );
+
+    assert_eq!(
+        glyph_run_count(&scene),
+        5,
+        "expected 1 content run (\"Hello, Hello\") + the toolbar's 4 label runs \
+         (Cut/Copy/Paste/Select all)"
+    );
+
+    // The two pixel probes declared on the case: the pill's own fill, and the
+    // highlight's own blend, both sampled where no glyph — from either font
+    // — ever paints (see the case's own doc comment).
+    let mut oracle = CpuOracle::new();
     let image = render_case(&mut oracle, &case)
         .unwrap_or_else(|err| panic!("case `{}` failed to render: {err:#}", case.spec.name))
         .expect("this case renders on the CPU oracle (no backend skip set)");
-
     let probe_failures = case.failed_probes(&image);
     assert!(probe_failures.is_empty(), "{}", probe_failures.join("\n"));
-
-    let update = update_goldens_enabled();
-    let meta = golden_meta(&oracle, &case.spec);
-    let outcome = compare_golden(
-        CPU_CLASS,
-        &case.spec,
-        &image,
-        &meta,
-        case.eroded_interior,
-        update,
-    )
-    .unwrap_or_else(|err| panic!("case `{}`: {err:#}", case.spec.name));
-
-    if outcome.updated {
-        println!("goldens: promoted `{}`", case.spec.name);
-    }
-    assert!(
-        outcome.passed,
-        "case `{}` mismatched its baseline under tolerance {:?}: {:?}; artifacts in {:?}",
-        case.spec.name, case.spec.tolerance, outcome.report, outcome.artifact_dir
-    );
 }
 
 /// A second, non-golden assertion: the identical gesture sequence under
