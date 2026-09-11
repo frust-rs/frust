@@ -428,14 +428,19 @@ objc2-ui-kit = "0.3"
 # feature is deliberately NOT enabled (see `plugins/clipboard/src/desktop.rs`'s
 # module doc) — the tripwire is `cargo check -p frust-clipboard`.
 #
-# Also consumed by `frust-shell-desktop`'s `ShellHandler`, which holds ONE
-# `arboard::Clipboard` for the process lifetime rather than constructing one
-# per call the way `plugins/clipboard/src/desktop.rs` does — on X11/Wayland
-# the clipboard's content is served live by whichever process last claimed
-# the selection, so a per-call instance would drop that ownership (and so
-# the content just copied) the moment `set_text` returned, on a desktop with
-# no clipboard manager running; see
-# `crates/frust-shell-desktop/src/app_handler.rs`'s `clipboard`-field doc.
+# Also consumed by `frust-shell-desktop`, which holds ONE `arboard::Clipboard`
+# for the process lifetime — owned by its `frust-clipboard` WORKER THREAD, not
+# by `ShellHandler` — rather than constructing one per call the way
+# `plugins/clipboard/src/desktop.rs` does. On X11/Wayland the clipboard's
+# content is served live by whichever process last claimed the selection, so a
+# per-call instance would drop that ownership (and so the content just copied)
+# the moment `set_text` returned, on a desktop with no clipboard manager
+# running; see `crates/frust-shell-desktop/src/app_handler.rs`'s
+# `ClipboardWorker` doc. NOTE the coexistence constraint the two consumers now
+# carry between them: one long-lived instance on a background thread plus
+# per-call instances on the UI thread can be live concurrently, which
+# `plugins/clipboard` records as observed to crash arboard's macOS backend —
+# documented at both consumers, not yet closed.
 # Same `default-features = false` / no-`wayland-data-control` shape, no
 # version change from either consumer; the tripwire for this arm is `cargo
 # check -p frust-shell-desktop`.

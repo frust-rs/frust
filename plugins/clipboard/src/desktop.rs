@@ -17,6 +17,33 @@
 //! on platforms (Windows) where the clipboard is a single global object only
 //! one thread may hold at a time.
 //!
+//! # Coexistence with `frust-shell-desktop`'s clipboard worker
+//!
+//! Recorded 2026-09-11, and NOT yet closed. `arboard`'s own
+//! docs say "Any number of `Clipboard` instances are allowed to exist at a
+//! single point in time", which is what licenses the construct-per-call shape
+//! above — but this module's own `conformance` test records the counter-case:
+//! two instances driven *concurrently from different threads* was observed to
+//! crash, because arboard's macOS `NSPasteboard` backend is not documented safe
+//! for concurrent access from independent instances.
+//!
+//! `frust-shell-desktop` now holds one `arboard::Clipboard` open for the
+//! process lifetime on a dedicated `frust-clipboard` worker thread, so that it
+//! can read the host clipboard without blocking the winit event loop (measured
+//! at 24 s on X11 against an unresponsive selection owner). An app that uses a
+//! clipboard-capable widget — `TextInput`, or either OTP widget — and ALSO
+//! calls this backend directly can therefore have both instances live on
+//! different threads at the same instant, with no lock or arbiter between them.
+//! The window is widest during exactly the slow-clipboard case the shell's
+//! worker exists to tolerate.
+//!
+//! Before that worker existed, both paths ran on the UI thread and were
+//! serialised by construction, so this is a new constraint rather than a
+//! pre-existing one. Closing it properly means giving the process ONE arbiter
+//! — most likely routing this backend through the shell's worker when a shell
+//! is present, while keeping it standalone when there is none. Until then,
+//! treat the combination as unsupported on desktop.
+//!
 //! # X11/Wayland clipboard lifetime (Linux)
 //!
 //! Per `arboard`'s own documentation (`SetExtLinux::wait`'s doc, not enabled

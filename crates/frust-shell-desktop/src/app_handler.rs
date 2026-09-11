@@ -593,6 +593,32 @@ fn clipboard_warning(err: &ClipboardError, elapsed: Duration) -> String {
 /// [`EventLoopProxy`](winit::event_loop::EventLoopProxy), while the unit tests
 /// below pass a fake clipboard and a collecting closure — which is as far into
 /// this plumbing as anything can reach without a window.
+/// Re-opens the paste coalescing gate ([`ClipboardWorker::read_in_flight`]) as
+/// it drops.
+///
+/// The gate closes before a [`ClipboardRequest::Read`] is sent and must re-open
+/// once the answer — or the decision not to send one — is behind us. Doing that
+/// in `Drop` rather than on the way out of the match arm is what stops a panic
+/// inside a platform clipboard backend from wedging paste for the rest of the
+/// run: the worker thread unwinds, this guard still runs, the gate re-opens,
+/// and the next paste request therefore reaches
+/// [`ShellHandler::send_clipboard_request`], whose failing send is what detects
+/// the dead worker and warns. Left on the success path instead, the flag would
+/// stay `true` forever and
+/// [`ShellHandler::request_clipboard_read`] would coalesce every later paste
+/// away silently, with no warning and no route to recovery.
+///
+/// Release builds pin `panic = "abort"`, so the process is gone either way and
+/// this guard is a debug-build concern — which is precisely where a developer
+/// needs the diagnosis.
+struct ReadGate<'a>(&'a AtomicBool);
+
+impl Drop for ReadGate<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 fn clipboard_loop<A: ClipboardAccess>(
     requests: &Receiver<ClipboardRequest>,
     access: &mut A,
@@ -604,6 +630,10 @@ fn clipboard_loop<A: ClipboardAccess>(
         let started = Instant::now();
         match request {
             ClipboardRequest::Read => {
+                // Re-opens the coalescing gate on the way out of this arm —
+                // including out of a panic unwinding from the backend. See
+                // `ReadGate` and `ShellHandler::request_clipboard_read`.
+                let _gate = ReadGate(read_in_flight);
                 match access.read() {
                     Ok(text) => answer(ShellUserEvent::ClipboardPaste(PasteText(text))),
                     Err(err) => {
@@ -612,10 +642,6 @@ fn clipboard_loop<A: ClipboardAccess>(
                         }
                     }
                 }
-                // Re-open the coalescing gate only once the answer — or the
-                // decision not to send one — is behind us. See
-                // `ShellHandler::request_clipboard_read`.
-                read_in_flight.store(false, Ordering::Release);
             }
             ClipboardRequest::Write(text) => {
                 if let Err(err) = access.write(&text)
@@ -2812,6 +2838,54 @@ mod tests {
             read_in_flight,
         );
         answers
+    }
+
+    /// A [`ClipboardAccess`] whose read panics the way a platform backend can,
+    /// instead of returning an `Err` — the one case [`ReadGate`] exists for.
+    struct PanickingClipboard;
+
+    impl ClipboardAccess for PanickingClipboard {
+        fn read(&mut self) -> Result<String, ClipboardError> {
+            panic!("the platform clipboard backend panicked");
+        }
+
+        fn write(&mut self, _text: &str) -> Result<(), ClipboardError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_panicking_read_still_reopens_the_coalescing_gate() {
+        // Seeded `true` the way `request_clipboard_read` leaves it before the
+        // request goes out. Before `ReadGate`, a panic out of the backend left
+        // the flag stuck `true` for the rest of the run: `request_clipboard_read`
+        // then took its coalescing branch every time, returning WITHOUT ever
+        // attempting the channel send whose failure is what reports a dead
+        // worker — so paste died silently, with no warning and no recovery.
+        let read_in_flight = AtomicBool::new(true);
+
+        // The panic is the point of the test, so keep its backtrace out of the
+        // suite's output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(ClipboardRequest::Read)
+                .expect("the receiver is still alive");
+            drop(tx);
+            clipboard_loop(&rx, &mut PanickingClipboard, &mut |_| {}, &read_in_flight);
+        }));
+        std::panic::set_hook(hook);
+
+        assert!(
+            unwound.is_err(),
+            "the backend panic must propagate and end the worker, not be swallowed",
+        );
+        assert!(
+            !read_in_flight.load(Ordering::Acquire),
+            "the coalescing gate must re-open on an unwind, so the next paste request \
+             reaches send_clipboard_request and its failing send reports the dead worker",
+        );
     }
 
     #[test]
