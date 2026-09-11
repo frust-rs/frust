@@ -28,16 +28,31 @@
 //! whose probes FAIL is never promoted — a baseline is only ever written from
 //! a frame that already satisfies its absolute assertions.
 
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use frust_core::{
+    FrameTime, InputEvent, PointerPhase, RenderRoot, SelectionToolbarBuilder,
+    SelectionToolbarPolicy, SelectionToolbarRequest, install_selection_toolbar_builder_if_unset,
+    set_selection_toolbar_policy,
+};
+use frust_scene::{Command, Scene};
 use frust_testing::ORACLE_ID;
-use frust_testing::case::CaseSpec;
-use frust_testing::corpus::{CorpusCase, render_case, unit_cases};
-use frust_testing::frame::foreign_font_runs;
+use frust_testing::case::{CaseSpec, Tolerance};
+use frust_testing::corpus::{CorpusCase, Expect, Probe, render_case, unit_cases};
+use frust_testing::frame::{
+    FrameSpec, SAMPLE_TEXT_LONG, foreign_font_runs, frame, glyph_run_count, physical_case,
+    pin_type_scale, pinned_text_style, pointer, test_text_context,
+};
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
 use frust_testing::oracle_cpu::CpuOracle;
 use frust_testing::render::SceneRenderer;
+use frust_text::{TextContext, TextStyle};
+use frust_theme::Theme;
+use frust_widgets::{EdgeInsets, Padding, PaddingView, text_input};
+use kurbo::{Point, Rect, Size};
+use peniko::{Brush, Color};
 
 /// The golden class the CPU oracle's baselines live in
 /// (`testing/goldens/cpu/`).
@@ -370,4 +385,469 @@ fn rfc3339_now_has_the_shape_golden_meta_promises() {
     assert_eq!(&stamp[10..11], "T", "{stamp}");
     let year: i64 = stamp[..4].parse().expect("year");
     assert!(year >= 2026, "{stamp} predates this test being written");
+}
+
+// -----------------------------------------------------------------------
+// A long-press selection-toolbar case through the real `RenderRoot` route
+// -----------------------------------------------------------------------
+//
+// Everything above renders `unit_cases()` — scenes recorded by hand through a
+// bare `SceneBuilder`, which cannot express a gesture. This one case drives a
+// REAL `frust_widgets::text_input` through the same `rebuild`/`layout`/`paint`
+// loop a shell runs, across several frames and a `Housekeeping` broadcast —
+// deliberately outside `frust_testing::run_cpu_goldens`'s shared pipeline (see
+// "Why this case carries no golden" below for why it never becomes a stored
+// `cpu/` baseline the way `unit_cases()` does).
+//
+// `frust_testing::frame::frame` already interleaves events between two frames
+// of the SAME root today (it takes `root: &mut RenderRoot` by reference, and
+// `RenderRoot::event` is public and callable directly between calls, exactly
+// as `frame::press_at`/`tap_at` already do) — so no new helper was needed in
+// `src/frame.rs` for this case; it is driven with the existing `frame`/
+// `pointer` exports alone.
+//
+// # Text: why "Hello, Hello", not the literal example text
+//
+// The bundled `NotoSans-Subset.ttf` face carries only the codepoints
+// `testing/fonts/LICENSES.md`'s subset command lists: space, comma, `H`, `e`,
+// `l`, `o`, `é`, U+0302 — i.e. exactly enough to shape "Hello" (capital H) and
+// nothing else; `b`/`r`/`a`/`v`/`n`/`w`/`d`/`t` are not in the face at all. A
+// field reading a longer sentence would shape those glyphs against a HOST
+// font, which is exactly the non-portable frame `frame::foreign_font_runs`
+// exists to reject. [`SAMPLE_TEXT_LONG`](frust_testing::frame::SAMPLE_TEXT_LONG)
+// ("Hello, Hello") is this crate's own established stand-in for "a field with
+// more than one word" (see `frust_testing::corpus::widget`'s `field_stack`,
+// which already uses it for the identical reason): a stationary long-press
+// lands on the SECOND word, not the first, so the gesture is proven to select
+// the word under the press point rather than always the first one.
+//
+// # Why this case carries no golden
+//
+// The baseline toolbar's four button labels ("Cut"/"Copy"/"Paste"/"Select
+// all", `crates/frust-widgets/src/selection_toolbar.rs`'s `LABELS`) are drawn
+// through `crate::text::text(label)`, which — like `frust_widgets::button`/
+// `checkbox`/`radio`'s own labels — hardcodes `TextStyle::default()`
+// (`FontFamily::SystemUi`) with no seam to override it: nothing outside
+// `frust-widgets` can point those four labels at the bundled test face
+// instead, and the corpus's usual workaround (pass an empty label) does not
+// apply either, since the labels are not this test's own string to set. A
+// frame that paints them therefore always carries a `Command::GlyphRun`
+// shaped against whichever font the *running host* resolves for
+// `FontFamily::SystemUi` — `frame::foreign_font_runs`'s own check (used above
+// by `no_case_shapes_against_a_host_font` and `run_corpus`) exists precisely
+// to reject that shape, because a PNG of it is only ever a snapshot of one
+// runner's fallback font, not a portable `cpu/` baseline any other host could
+// reproduce byte-for-byte.
+//
+// This is a current limitation of the baseline selection toolbar (and every
+// other baseline widget whose label hardcodes `TextStyle::default()`), not
+// something a test in this crate can close by itself — closing it needs a
+// style seam on those labels so a caller (this crate included) can pin their
+// family the same way every other corpus case already pins its own text.
+// Until then, this case is verified structurally instead of by golden
+// comparison below: which word got selected and whether a pod actually
+// floated above the field are read from the scene's own recorded commands
+// and from pixel probes placed where NO glyph — from either font — ever
+// paints, and the toolbar's four label runs are confirmed present by their
+// count, never by their shape.
+
+/// Serialises every test in this file that writes the process-global
+/// selection-toolbar policy/builder slots (`frust_core::selection_toolbar`).
+/// `cargo test` runs one binary's tests on parallel threads sharing a single
+/// process, so two of them installing a builder or flipping the policy would
+/// see each other's writes — mirrors `frust_core::selection_toolbar`'s own
+/// `TEST_LOCK` and `frust_widgets::textinput`'s `TOOLBAR_LOCK`, the identical
+/// idiom for the identical reason; neither is reachable from this crate (both
+/// are private to their own crate's test module), so this is its own lock
+/// rather than a second name for one of theirs.
+static TOOLBAR_LOCK: Mutex<()> = Mutex::new(());
+
+/// The window every long-press toolbar frame lays out against, in LOGICAL px.
+const TOOLBAR_WINDOW: Size = Size::new(320.0, 160.0);
+
+/// How far the field is inset from the window's top, in LOGICAL px — the
+/// room the toolbar needs to place itself ABOVE the field's own selection
+/// (`crate::overlay::place`'s above-else-below rule) rather than falling back
+/// below it. Also, combined with [`TOOLBAR_WINDOW`]'s height, exactly the
+/// "sized 320x80" box the field lays out inside (a 320-wide, loose-height-80
+/// deflated constraint — [`crates/frust-widgets/src/padding.rs`]'s `Padding`
+/// deflates the incoming box by its insets).
+const FIELD_TOP_INSET: f64 = 80.0;
+
+/// The field's explicit horizontal/vertical inner padding
+/// ([`frust_widgets::TextInputView::padding`]) — set explicitly here (rather
+/// than left at the widget's own private defaults) so this test's own press-
+/// point arithmetic is exact rather than dependent on an internal constant it
+/// cannot name from outside the `frust-widgets` crate.
+const FIELD_PAD_X: f64 = 12.0;
+/// See [`FIELD_PAD_X`].
+const FIELD_PAD_Y: f64 = 10.0;
+
+/// The field's content text size, in logical px.
+const TEXT_FONT_SIZE: f32 = 24.0;
+
+/// Ink for the field's own (corpus-authored) text.
+const TEXT_INK: Color = Color::from_rgb8(0x14, 0x14, 0x18);
+
+/// A `FrameTime` `ms` milliseconds from the origin — mirrors
+/// `frust_widgets::textinput`'s own private `ft_ms` test helper.
+fn ft_ms(ms: f64) -> FrameTime {
+    FrameTime::from_nanos((ms * 1_000_000.0) as u64)
+}
+
+/// Installs `frust_widgets::selection_toolbar` (the real baseline builder,
+/// not a double) into the process-global builder slot if nothing is there
+/// yet — the seam a design system's own bootstrap calls, installed here by
+/// hand since the facade bootstrap that would otherwise do it never runs in
+/// a test binary. Call under [`TOOLBAR_LOCK`].
+fn install_baseline_toolbar_builder_if_unset() {
+    let builder: SelectionToolbarBuilder =
+        Arc::new(|request: &SelectionToolbarRequest, _window: Size| {
+            frust_widgets::selection_toolbar(request)
+        });
+    install_selection_toolbar_builder_if_unset(builder);
+}
+
+/// Builds the one-field root [`record_text_input_selection_toolbar_long_press`]
+/// drives, and the absolute (window-space) point a `Down` must land on to hit
+/// the SECOND "Hello" — computed by shaping the identical prefix/word through
+/// the SAME bundled font/style the field itself resolves at layout time,
+/// rather than a hand-guessed pixel offset.
+fn press_point_on_second_word(tcx: &mut TextContext, style: &TextStyle) -> Point {
+    let prefix_width = tcx.layout("Hello, ", style, None).size().width;
+    let word_width = tcx.layout("Hello", style, None).size().width;
+    let content_height = tcx.layout(SAMPLE_TEXT_LONG, style, None).size().height;
+    Point::new(
+        FIELD_PAD_X + prefix_width + word_width / 2.0,
+        FIELD_TOP_INSET + FIELD_PAD_Y + content_height / 2.0,
+    )
+}
+
+/// Records the long-press sequence into `scene`, reading whatever
+/// [`frust_core::selection_toolbar_policy`] is currently installed (set by the
+/// caller, under [`TOOLBAR_LOCK`]) — a plain `fn(&mut Scene)`, so it doubles
+/// as a [`CorpusCase::record`].
+///
+/// The sequence: `Down` on the second word, paint at t=0 (seeds the
+/// long-press epoch), paint at t=550ms (past the widget's 500ms threshold —
+/// crosses it and latches the deferred-callback flush),
+/// dispatch [`InputEvent::Housekeeping`] (fires the hold: selects the word,
+/// opens the toolbar), paint at t=600ms (mounts and paints the pod) — the
+/// one frame this function actually records. A warm-up frame at t=0 runs
+/// first, before the `Down`, because a pointer event can only hit geometry a
+/// previous layout pass produced (`frust_testing::corpus::widget`'s own
+/// `record_with_events` states the identical rule).
+fn record_text_input_selection_toolbar_long_press(scene: &mut Scene) {
+    let (mut tcx, family) = test_text_context();
+    let style = pinned_text_style(&family, TEXT_FONT_SIZE, TEXT_INK);
+    let press = press_point_on_second_word(&mut tcx, &style);
+
+    let theme = pin_type_scale(Theme::neutral(), &family);
+    let mut root: RenderRoot<(), PaddingView<()>> = RenderRoot::new();
+    root.set_theme(Box::new(theme));
+    let mut state = ();
+    let field_style = style.clone();
+    let mut logic = move |_: &mut ()| {
+        Padding(
+            EdgeInsets {
+                left: 0.0,
+                top: FIELD_TOP_INSET,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            text_input::<(), _>(SAMPLE_TEXT_LONG.to_string(), |_: &mut (), _: String| {})
+                .text_style(field_style.clone())
+                .padding(FIELD_PAD_X, FIELD_PAD_Y),
+        )
+    };
+
+    let spec_at = |ms: f64| FrameSpec {
+        size: TOOLBAR_WINDOW,
+        scale: 1.0,
+        time: ft_ms(ms),
+    };
+
+    // Warm-up: lay out/paint once before the press lands on real geometry.
+    let mut warmup = Scene::new();
+    frame(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        &spec_at(0.0),
+        &mut warmup,
+    );
+
+    let _ = root.event(&mut state, &pointer(PointerPhase::Down, press));
+
+    // This paint seeds the long-press epoch from its own frame time.
+    let mut seeded = Scene::new();
+    frame(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        &spec_at(0.0),
+        &mut seeded,
+    );
+
+    // Past the widget's 500ms threshold: marks the hold elapsed and latches
+    // the flush the `Housekeeping` broadcast below rides out on.
+    let mut crossing = Scene::new();
+    frame(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        &spec_at(550.0),
+        &mut crossing,
+    );
+
+    let _ = root.event(&mut state, &InputEvent::Housekeeping);
+
+    // The word is now selected and the toolbar wants to open; this final
+    // rebuild mounts the pod and this paint registers/places it — the one
+    // frame this function records.
+    frame(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        &spec_at(600.0),
+        scene,
+    );
+}
+
+/// The [`CorpusCase`] [`record_text_input_selection_toolbar_long_press`]
+/// backs: a 320x160 window at scale 1, the crate's tight default tolerance.
+///
+/// Carries two [`Probe`]s rather than none — see "Why this case carries no
+/// golden" above for why a stored baseline is off the table, but a probe is
+/// not: both pixels below are picked at points empirically clear of every
+/// glyph this frame ever paints (verified by rendering this exact case and
+/// walking its output — see [`text_input_selection_toolbar_long_press`]'s own
+/// doc comment for the coordinates' derivation), so neither one depends on
+/// which font drew anything nearby.
+fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
+    CorpusCase {
+        spec: physical_case(
+            "text_input_selection_toolbar_long_press",
+            &FrameSpec {
+                size: TOOLBAR_WINDOW,
+                scale: 1.0,
+                time: FrameTime::ZERO,
+            },
+            Tolerance::new(),
+        ),
+        record: record_text_input_selection_toolbar_long_press,
+        probes: &[
+            Probe {
+                x: 14,
+                y: 55,
+                expect: Expect::Exact([239, 239, 239, 255]),
+                why: "the toolbar pill's own rounded-rect fill (frust_theme's neutral \
+                      `surface_container`), sampled in its left padding gap — 6px inside the \
+                      pill's own left edge and 6px before the first label's glyphs ever start \
+                      (`crate::selection_toolbar`'s `PAD_X`), so this pixel is pure fill on any \
+                      host regardless of what font drew the label beside it",
+            },
+            Probe {
+                x: 134,
+                y: 106,
+                expect: Expect::Exact([192, 201, 209, 255]),
+                why: "the selected word's own highlight (`frust_theme`'s neutral `primary` at \
+                      the field's selection alpha, over the field's own `surface` background), \
+                      sampled past the last glyph of the second \"Hello\" but still inside the \
+                      selection rect — a coordinate that could only read this color if the \
+                      SECOND word (not the first, and not nothing) got selected",
+            },
+        ],
+        eroded_interior: false,
+        about: "a stationary long-press on the second word of a focused field selects it and \
+                floats the baseline selection toolbar above it, through the real RenderRoot \
+                rebuild/layout/paint route and a Housekeeping broadcast",
+    }
+}
+
+/// Structural + probe assertions in place of a golden — see this section's
+/// own module docs, "Why this case carries no golden".
+///
+/// # What each assertion actually catches, and how that was checked
+///
+/// - **Exactly one translucent fill, past the first word's own width.** The
+///   scene's only two `Command::FillRect`s are the selection highlight
+///   (translucent — `frust_widgets::textinput`'s selection alpha) and the
+///   caret (opaque); filtering on translucency alone isolates the highlight
+///   without touching a single glyph. Verified by temporarily pressing the
+///   FIRST "Hello" instead of the second (a local edit to this test's own
+///   `press` computation, reverted before this was committed): the highlight
+///   then starts at `x0` inside the first word's own span, and the `x0 >
+///   FIELD_PAD_X + word_width` assertion below caught it immediately.
+/// - **A rounded pod above the selection.** The scene's only
+///   `Command::RoundedRect` whose bottom edge sits at or above the
+///   selection's own top edge is the toolbar pill (the field's two chrome
+///   `RoundedRect`s both start BELOW the selection). Verified by temporarily
+///   changing the comparison to the field's own top inset instead of the
+///   selection's top (off by the 1px the real placement overlaps it by): the
+///   pod stopped being found and the assertion failed as expected.
+/// - **Five glyph runs.** One content run ("Hello, Hello", never wraps at
+///   this width) plus the four label runs
+///   [`text_input_selection_toolbar_long_press_native_policy_floats_no_pod`]
+///   already counts independently via its framework-vs-native delta of 4.
+///   Verified by temporarily asserting `6` instead of `5`: failed with the
+///   real count, `5`.
+/// - **The two pixel probes** (declared on the case itself — see
+///   [`text_input_selection_toolbar_long_press_case`]'s own doc comment).
+///   Their coordinates and expected bytes were read back from this exact
+///   case rendered on the CPU oracle, then re-verified by nudging a probe's
+///   expected byte by a visible amount and confirming
+///   [`CorpusCase::failed_probes`] reports the mismatch.
+#[test]
+fn text_input_selection_toolbar_long_press() {
+    let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    install_baseline_toolbar_builder_if_unset();
+    set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+
+    let case = text_input_selection_toolbar_long_press_case();
+    let scene = case.scene();
+
+    // The selection highlight is the scene's only TRANSLUCENT `FillRect` —
+    // the caret (the other `FillRect` this widget ever paints) is opaque.
+    let highlights: Vec<Rect> = scene
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            Command::FillRect {
+                rect,
+                brush: Brush::Solid(color),
+                ..
+            } if color.components[3] < 1.0 => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        highlights.len(),
+        1,
+        "expected exactly one selection-highlight fill; found {}: {highlights:?}",
+        highlights.len()
+    );
+    let highlight = highlights[0];
+
+    let (mut tcx, family) = test_text_context();
+    let style = pinned_text_style(&family, TEXT_FONT_SIZE, TEXT_INK);
+    let word_width = tcx.layout("Hello", &style, None).size().width;
+    assert!(
+        highlight.x0 > FIELD_PAD_X + word_width,
+        "the long press must select the SECOND \"Hello\", not the first: the highlight starts \
+         at x={} but the first word's own span ends at x={} — {highlight:?}",
+        highlight.x0,
+        FIELD_PAD_X + word_width
+    );
+    assert!(
+        (highlight.width() - word_width).abs() < 1.0,
+        "the highlight should span exactly one word ({word_width}px wide), not {} — {highlight:?}",
+        highlight.width()
+    );
+
+    // The toolbar pill: the scene's only `RoundedRect` that sits at or above
+    // the selection it floats over (the field's own two chrome `RoundedRect`s
+    // both start below it).
+    let pods: Vec<Rect> = scene
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            Command::RoundedRect { rect, .. } if rect.y1 <= highlight.y0 => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pods.len(),
+        1,
+        "expected exactly one rounded pod floating above the selection; found {}: {pods:?}",
+        pods.len()
+    );
+
+    assert_eq!(
+        glyph_run_count(&scene),
+        5,
+        "expected 1 content run (\"Hello, Hello\") + the toolbar's 4 label runs \
+         (Cut/Copy/Paste/Select all)"
+    );
+
+    // The two pixel probes declared on the case: the pill's own fill, and the
+    // highlight's own blend, both sampled where no glyph — from either font
+    // — ever paints (see the case's own doc comment).
+    let mut oracle = CpuOracle::new();
+    let image = render_case(&mut oracle, &case)
+        .unwrap_or_else(|err| panic!("case `{}` failed to render: {err:#}", case.spec.name))
+        .expect("this case renders on the CPU oracle (no backend skip set)");
+    let probe_failures = case.failed_probes(&image);
+    assert!(probe_failures.is_empty(), "{}", probe_failures.join("\n"));
+}
+
+/// A second, non-golden assertion: the identical gesture sequence under
+/// [`SelectionToolbarPolicy::Native`] must paint no toolbar pod at all — the
+/// platform draws its own menu instead. Checked by glyph-run count rather
+/// than pixels: the framework route paints exactly 4 extra glyph runs (the
+/// toolbar's Cut/Copy/Paste/Select all labels) that the native route must
+/// never paint, whatever those 4 runs look like on this host (see this
+/// section's module docs on why their font is not pinned).
+///
+/// Verified locally (three scratch edits to
+/// `crates/frust-widgets/src/textinput.rs`, each reverted before this test
+/// was committed — that file is out of this task's write scope) that this
+/// assertion actually bites, and exactly how far its sensitivity reaches:
+///
+/// - Deleting ONLY `TextInputWidget::sync_toolbar`'s `selection_toolbar_policy()
+///   == SelectionToolbarPolicy::Framework` conjunct (the build-side gate) did
+///   **not** fail this test.
+/// - Deleting ONLY `TextInputWidget::paint`'s matching conjunct around
+///   `self.toolbar.paint(..)` (the paint-side gate) also did **not** fail it.
+/// - Deleting BOTH at once **did** fail it (`framework=5, native=5`).
+///
+/// The field enforces `Native` at two independently-sufficient layers, and
+/// this test observes only their PAINTED, black-box effect — from outside the
+/// `frust-widgets` crate there is no seam to see "a pod was mounted" other
+/// than its own painted pixels, and a pod paint's registration is gated by
+/// the SECOND (paint-side) check regardless of what the first decided. So,
+/// contrary to a plausible-sounding but unverified claim that the build-side
+/// conjunct alone "is the gate that decides", the two checks are redundant
+/// from this vantage: either one alone still fully suppresses the toolbar,
+/// and only defeating the native route's protection at BOTH layers is
+/// observable here. That is still a real, non-vacuous regression this test
+/// catches — it is just not sensitive to a single-layer regression, which a
+/// `frust-widgets`-internal test (with access to the private `toolbar`/
+/// `toolbar_view` fields) would need to cover on its own side of the
+/// boundary.
+#[test]
+fn text_input_selection_toolbar_long_press_native_policy_floats_no_pod() {
+    let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    install_baseline_toolbar_builder_if_unset();
+
+    set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+    let mut framework_scene = Scene::new();
+    record_text_input_selection_toolbar_long_press(&mut framework_scene);
+    let framework_labels = glyph_run_count(&framework_scene);
+
+    set_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+    let mut native_scene = Scene::new();
+    record_text_input_selection_toolbar_long_press(&mut native_scene);
+    let native_labels = glyph_run_count(&native_scene);
+
+    // Leave the process-global policy as the rest of the suite expects to
+    // find it, whatever happens above.
+    set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+
+    assert!(
+        framework_labels > native_labels,
+        "the framework route must paint strictly more glyph runs than native \
+         (framework={framework_labels}, native={native_labels})"
+    );
+    assert_eq!(
+        native_labels + 4,
+        framework_labels,
+        "the framework route paints exactly 4 extra glyph runs — the toolbar's own \
+         Cut/Copy/Paste/Select all labels — that the native route (the platform draws its \
+         own menu) must never paint: framework={framework_labels}, native={native_labels}"
+    );
 }
