@@ -28,7 +28,8 @@ use crate::event::{
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::overlay::{
-    OutsideTap, OverlayEntry, OverlayHit, OverlayInput, OverlayPaintPass, sort_into_paint_order,
+    OutsideTap, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPaintPass,
+    sort_into_paint_order,
 };
 use crate::selection_toolbar::{SelectionToolbarPass, SelectionToolbarRequest};
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
@@ -277,6 +278,30 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// a widget publishing an inactive IME surface, or the generic-unmount orphan
     /// drain in [`RenderRoot::rebuild`] (see [`release_focus_session_in`]).
     focus_active: bool,
+    /// Which branch the live focus/IME session belongs to: `None` for the main
+    /// tree, `Some(key)` for the floated surface whose pod holds the recorded
+    /// focus path. The identity `focus_active` deliberately does not carry — one
+    /// bool cannot say *whose* session it is, and a surface's chain and the main
+    /// tree's are not siblings any container's blur sweep can reach across.
+    ///
+    /// **Resolved, never guessed.** The only authoritative view of a pod's
+    /// recorded link the root ever gets is the pod itself, which it holds for
+    /// exactly the length of [`RenderRoot::paint_overlays`] — so that pass writes
+    /// this, from [`crate::widget::ChildPod::is_focused`], and the event pass only
+    /// ever *clears* it (a hit-tested claim is the main tree's by construction,
+    /// and a release ends the session outright). An overlay-pass focus request
+    /// cannot be attributed at the root: the bubble is a bare flag, and a field
+    /// in the main tree re-claiming its own session through a floated toolbar
+    /// raises exactly the same one as an editable inside the surface claiming it
+    /// for the first time.
+    ///
+    /// Consequence, and it is the reason the record is worth keeping: the main
+    /// tree's paint seeding converges one pass after the claim, exactly like the
+    /// self-correction a field makes when a container-routed blur never reached
+    /// its `event`. The alternative — biasing the seed on the unattributable
+    /// bubble — would blur a field mid-session every time it answered its own
+    /// selection toolbar.
+    focus_surface: Option<OverlayKey>,
     /// Whether the last completed hover pass left some widget in the tree holding
     /// the hover link. Root-level mirror of the per-pod hover stamp (the hover
     /// analog of `focus_active`), seeded into every event/paint pass so nothing
@@ -518,6 +543,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             window_size: Size::ZERO,
             pointer_captured: false,
             focus_active: false,
+            focus_surface: None,
             hover_active: false,
             // Past a fresh pod's `0` stamp — see the field doc.
             hover_epoch: 1,
@@ -860,6 +886,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             &mut self.ime_state,
             &mut self.focus_ime_gen,
         );
+        // No session, no owner. The paint pass's own release sites go through
+        // the free function above while holding disjoint borrows and cannot
+        // reach this field; they do not need to, since the pass that released
+        // re-resolves the owner from the pods before it ends (see
+        // `paint_overlays`).
+        self.focus_surface = None;
         // A selection toolbar describes the *focused* field's selection, so the
         // session ending is the toolbar ending — and it must end on the event
         // pass that blurred, not a frame later when the next paint happens to
@@ -1302,7 +1334,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let overlay_pass = OverlayPaintPass::enter();
         let toolbar_pass = SelectionToolbarPass::enter();
 
-        let mut outcome = self.paint_main_tree(scene, frame_time);
+        let (mut outcome, main_tree_published) = self.paint_main_tree(scene, frame_time);
 
         // Drain what the main tree registered and paint it above everything.
         // Sorting is stable, so the band decides and registration order breaks
@@ -1311,7 +1343,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         sort_into_paint_order(&mut entries);
         // Retain the routing half — never the pods — for the next event pass.
         self.overlay_hits = entries.iter().map(OverlayHit::of).collect();
-        self.paint_overlays(&entries, scene, frame_time, &mut outcome);
+        self.paint_overlays(
+            &entries,
+            scene,
+            frame_time,
+            &mut outcome,
+            main_tree_published,
+        );
         // Release the owners' pod clones before the pass ends: the root holds no
         // overlay pod at rest, so a pod's lifetime stays exactly its owner's.
         drop(entries);
@@ -1332,13 +1370,19 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// length, while painting an overlay pod needs the root's fields again to
     /// merge outcomes and extend the per-pass channels. Nothing about the pass
     /// itself changed when it moved here.
+    ///
+    /// Reports, beside the outcome, whether an **active** IME surface published
+    /// from the main tree was stored this pass — the one thing the overlay pass
+    /// afterwards cannot work out for itself, and what lets it tell a stored
+    /// surface belonging to the branch that just lost the session from one a pod
+    /// published on its own account (see [`RenderRoot::paint_overlays`]).
     fn paint_main_tree(
         &mut self,
         scene: &mut dyn PaintScene,
         frame_time: FrameTime,
-    ) -> PaintOutcome {
+    ) -> (PaintOutcome, bool) {
         let Some(root_id) = self.root_id else {
-            return PaintOutcome::default();
+            return (PaintOutcome::default(), false);
         };
         // Disjoint field borrows: the theme (immut) vs the tree (mut).
         let theme = self.theme.as_deref();
@@ -1368,7 +1412,19 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
-            ctx.set_has_focus(self.focus_active);
+            //
+            // ANDed with "the session is the main tree's" (`focus_surface`): a
+            // session a floated pod owns leaves the tree's own recorded links
+            // standing — no press was hit-tested through the containers, so none
+            // of them ran the blur sweep that would have cleared them — and
+            // seeding those links from the bare mirror is what lets a field the
+            // user has left go on painting a caret and go on republishing the
+            // surface it published while it still had the session. Clearing the
+            // seed is the root's half of retiring that chain: `paint_child`
+            // composes it with every link below, so one `false` here reads
+            // through the whole tree.
+            let main_tree_owns_session = self.focus_active && self.focus_surface.is_none();
+            ctx.set_has_focus(main_tree_owns_session);
             // Thread the hover mirror + live epoch the same way: the root widget's
             // own hover comes from the mirror (a leaf root can claim hover itself),
             // and deeper links are resolved per-pod by `ChildPod::paint_child`
@@ -1413,10 +1469,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // nothing anyway, but the guard means we never even take it), and an
             // active publish from a widget whose pod focus was just cleared
             // still cannot resurrect the surface that blur dropped.
-            if self.focus_active
-                && let Some(ime) = ctx.take_ime_state()
-            {
+            //
+            // `main_tree_owns_session` narrows the same guard by provenance: a
+            // publish is a claim about *the* session, and the tree makes it only
+            // while the session is the tree's. A floated pod holding the
+            // recorded focus path is the other case, and it publishes through
+            // `paint_overlays` under the mirror-image rule.
+            let mut published_from_main_tree = false;
+            if main_tree_owns_session && let Some(ime) = ctx.take_ime_state() {
                 if ime.active {
+                    published_from_main_tree = true;
                     store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, Some(ime));
                 } else {
                     release_focus_session_in(
@@ -1451,7 +1513,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // it here (and clear it) so a dirty-driven shell schedules the frame
             // that finishes the flush — see the `deferred_frame` field doc.
             let deferred_frame = std::mem::take(&mut self.deferred_frame);
-            PaintOutcome {
+            let outcome = PaintOutcome {
                 needs_frame: ctx.needs_frame() || deferred_frame,
                 needs_layout,
                 // Aggregate tick class: paced-only iff a frame was requested and
@@ -1466,9 +1528,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // resolves it against the live theme's cap — see
                 // `PaintCtx::request_frame_paced_at`.
                 paced_interval: ctx.paced_interval(),
-            }
+            };
+            (outcome, published_from_main_tree)
         } else {
-            PaintOutcome::default()
+            (PaintOutcome::default(), false)
         }
     }
 
@@ -1487,14 +1550,28 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// The pod borrow is taken per entry and released before the next: the root
     /// must never hold one across a pass boundary, nor across another entry's
     /// paint (two entries may belong to the same owner).
+    ///
+    /// It is also the one pass that can answer *whose* the focus/IME session is,
+    /// because it is the one pass holding the pods: it resolves
+    /// [`RenderRoot::focus_surface`] from their recorded links, refuses an IME
+    /// publish from a pod that holds none, and retires a surface the main tree
+    /// published for a session that has since moved to one of them.
+    ///
+    /// `main_tree_published` is [`RenderRoot::paint_main_tree`]'s report of
+    /// whether the surface standing in `ime_state` is one the tree published in
+    /// this same pass — the provenance the retirement needs and cannot recover
+    /// from the value itself.
     fn paint_overlays(
         &mut self,
         entries: &[OverlayEntry],
         scene: &mut dyn PaintScene,
         frame_time: FrameTime,
         outcome: &mut PaintOutcome,
+        main_tree_published: bool,
     ) {
         if entries.is_empty() {
+            // Nothing is floated, so nothing floated owns the session.
+            self.focus_surface = None;
             return;
         }
         // The same disjoint field borrows the main pass takes, for the same
@@ -1507,6 +1584,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let hover_active = self.hover_active;
         let hover_epoch = self.hover_epoch;
 
+        // The surface whose pod holds the recorded focus path, resolved as the
+        // pods go past, and whether that pod described the session itself this
+        // pass. Later entries win a contest: they paint on top, so a link left
+        // standing on a lower surface is the stale one.
+        let mut holder: Option<OverlayKey> = None;
+        let mut holder_published = false;
+
         for entry in entries {
             let mut ctx = PaintCtx::new(entry.window_rect.origin(), entry.window_rect.size());
             ctx.set_frame_time(frame_time);
@@ -1518,10 +1602,26 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // context is, so a focused editable inside a floated pod observes its
             // focus (and a hovered one its hover) through the ordinary
             // `ChildPod::paint_child` composition.
+            //
+            // The mirror alone, deliberately: the pod's own link is ANDed onto it
+            // inside `paint_child`, which is the same composition that decides
+            // the main tree's, so a pod that holds no link reads unfocused
+            // whatever the mirror says.
             ctx.set_has_focus(self.focus_active);
             ctx.set_hovered(hover_active);
             ctx.set_hover_epoch(hover_epoch);
-            entry.pod.borrow_mut().paint_child(&mut ctx, scene);
+            // Read before the paint, in the same borrow: nothing in a paint pass
+            // moves the focus path, and the answer is what decides whether this
+            // pod may describe the session below.
+            let pod_holds_focus = {
+                let mut pod = entry.pod.borrow_mut();
+                let holds = pod.is_focused();
+                pod.paint_child(&mut ctx, scene);
+                holds
+            };
+            if pod_holds_focus {
+                holder = Some(entry.key);
+            }
 
             // Fold this pod's continuation-frame request into the frame's outcome
             // on the two lattices the tree's own aggregation uses: `needs_frame`
@@ -1551,9 +1651,22 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // verbatim: accept a publish only while a session is actually active
             // (never resurrect a surface a blur cleared), and treat an inactive
             // publish as the session ending rather than as a value.
+            //
+            // Plus the rule a floated surface needs and a child of the tree gets
+            // for free: the publisher must hold the recorded focus path. Paint
+            // descends into every pod unconditionally and the bubble up
+            // `paint_child` carries a published surface whatever the publisher's
+            // link says, so without this check the last pod painted decides what
+            // the shell is configured with — a surface belonging to a field it
+            // has nothing to do with, secure-text configuration and all. It is
+            // also why this refuses the *inactive* publish just the same: ending
+            // a session is a claim about it too, and a pod that does not hold it
+            // makes neither.
             if self.focus_active
+                && pod_holds_focus
                 && let Some(ime) = ctx.take_ime_state()
             {
+                holder_published = true;
                 if ime.active {
                     store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, Some(ime));
                 } else {
@@ -1572,6 +1685,22 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             self.platform_view_frames.extend(ctx.take_platform_views());
             self.input_shields.extend(ctx.take_input_shields());
         }
+
+        // The session has moved to a floated surface since the last pass, and
+        // the surface described it with nothing of its own (a button in a
+        // popover takes focus and publishes no surface at all). What stands in
+        // `ime_state` is then the retiring branch's — published earlier in this
+        // very pass, while its links still read focused — so it goes with the
+        // session it belonged to instead of standing as the shell's idea of a
+        // live one. `main_tree_published` is what makes that attribution safe:
+        // a surface a pod published on its own account is never dropped here.
+        let moved_to_surface = holder.is_some() && holder != self.focus_surface;
+        if moved_to_surface && main_tree_published && !holder_published {
+            self.store_ime_state(None);
+        }
+        // Resolved from the links themselves, never from the focus request that
+        // opened the session — see the field's doc.
+        self.focus_surface = if self.focus_active { holder } else { None };
     }
 
     /// Resolve this paint pass's selection-toolbar publish into the shell-facing
@@ -1919,6 +2048,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     }
                     if focus_req {
                         self.set_focus_active(true);
+                        // A hit-tested press reached the claimant through the
+                        // containers, so the session is the main tree's — the one
+                        // attribution the event pass can make without help, and
+                        // what makes the next paint seed the tree's links again
+                        // the moment focus comes back to it (see `focus_surface`).
+                        self.focus_surface = None;
                     } else {
                         // Blur: no widget on the tapped path took focus. The
                         // canonical release — flag and surface drop together, as
@@ -1960,7 +2095,40 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             InputEvent::Overlay(overlay) => {
                 // Honoured: a text field inside a popover may claim focus, and the
                 // session it opens is an ordinary one.
+                //
+                // What it must not do is stack on top of the session it
+                // supersedes. A hit-tested press has the containers' blur sweep
+                // under it, which clears every focused child but the one the
+                // press kept; a press inside a floated surface reaches no
+                // container's hit test, so nothing retires the chain the claim
+                // replaces and two branches go on believing they are focused —
+                // one of them still describing its own IME surface to the shell.
+                // The root retires it in the two places it has standing to: here,
+                // when its record already names a *different* surface as the
+                // owner, and in `paint_overlays`, which resolves that record from
+                // the pods themselves and stops seeding the main tree's links the
+                // pass after the session leaves it.
+                //
+                // The other repair — running the blur sweep for this event, with
+                // the claiming surface's owner kept — was not taken: that sweep
+                // belongs to the containers, which run it over the children they
+                // hold when a pointer `Down` passes through them. The root has no
+                // mutable route to a `focused` link below its own pod, so from
+                // here it is not a sweep at all but a change to how every
+                // container routes a broadcast.
+                //
+                // The record is deliberately not *written* here: an overlay-pass
+                // focus request cannot be attributed at the root (see
+                // `focus_surface`) — a field in the tree re-claiming its own
+                // session through a floated toolbar raises exactly the flag an
+                // editable inside the surface raises to take it away.
                 if focus_req {
+                    if self.focus_surface.is_some_and(|owner| owner != overlay.key) {
+                        // A session another surface owns, which *is* attributable:
+                        // retire it whole rather than let the new claim inherit
+                        // the surface the old one published.
+                        self.release_focus_session();
+                    }
                     self.set_focus_active(true);
                 }
                 // Honoured: an **explicit** `EventCtx::release_focus` from inside
@@ -1987,13 +2155,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // routed by the capture path — which is what lets a drag begun
                 // inside a surface continue outside it, and what closes it on the
                 // `Up` through the arm above.
-                if captured
-                    && matches!(
-                        overlay.kind,
-                        OverlayEventKind::Pointer(pointer)
-                            if pointer.phase == PointerPhase::Down
-                    )
-                {
+                //
+                // Whatever phase claimed it, not `Down` alone. The pods record
+                // their own `active` path on any phase, so a capture claimed on a
+                // `Move` left the surface latched and the root's mirror clear:
+                // the pre-pass kept hit-testing, the follow-ups kept missing the
+                // latched surface, and the `Up` that would have released it never
+                // arrived — leaving the surface free to divert every later
+                // pointer event its owner is reached by. Mirroring the claim on
+                // any phase is what routes those follow-ups, and that `Up`, back
+                // down the capture path to the surface that opened it.
+                if captured {
                     self.pointer_captured = true;
                 }
             }
@@ -2284,7 +2456,7 @@ impl<State: 'static, V: View<State>> Default for RenderRoot<State, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::ScrollDelta;
+    use crate::event::{ImeContentType, ScrollDelta};
     use crate::overlay::OverlayKey;
 
     /// Application state for the tests.
@@ -6542,6 +6714,17 @@ mod tests {
         /// "stop registering and the surface stops existing".
         register: bool,
         on_down: OwnerReaction,
+        /// The same, for a `Move` inside the surface — a drag threshold latching
+        /// a capture mid-gesture, the shape that claims one on no `Down` at all.
+        on_move: OwnerReaction,
+        /// Whether the leaf INSIDE the pod claims focus on a `Down` of its own —
+        /// the editable-in-a-popover shape, distinct from `on_down`'s claim,
+        /// which the owner makes on the surface's behalf.
+        pod_claims_focus: bool,
+        /// Whether that leaf republishes an active IME surface on every paint.
+        /// Stated unconditionally, so the fixture can publish from a pod holding
+        /// no focus link at all — the provenance case.
+        pod_publishes_ime: bool,
     }
 
     impl SurfaceSpec {
@@ -6555,6 +6738,9 @@ mod tests {
                 outside_tap: OutsideTap::Ignore,
                 register: true,
                 on_down: OwnerReaction::Nothing,
+                on_move: OwnerReaction::Nothing,
+                pod_claims_focus: false,
+                pod_publishes_ime: false,
             }
         }
     }
@@ -6572,6 +6758,11 @@ mod tests {
         sibling: Vec<InputEvent>,
         /// What the sibling read from `EventCtx::has_focus` on each event.
         sibling_focus: Vec<bool>,
+        /// What the pod's leaf read from `PaintCtx::has_focus` on each paint.
+        pod_paint_focus: Vec<bool>,
+        /// The same read for the main-tree sibling. The two together answer
+        /// "which branches believe they are focused".
+        sibling_paint_focus: Vec<bool>,
         /// The window size the owner observed in its own (child) layout.
         child_window_size: Option<Size>,
     }
@@ -6580,9 +6771,28 @@ mod tests {
 
     /// The leaf inside a floated pod: paints its label at the pod's absolute
     /// origin and records what reaches it.
+    ///
+    /// Optionally an editable — it claims focus on a `Down` of its own and
+    /// republishes an IME surface on every paint. The publish is deliberately
+    /// ungated: a pod describing a session it holds no focus link for is
+    /// precisely what the root has to answer for.
     struct OverlayContentWidget {
         label: &'static str,
         log: Log,
+        claims_focus: bool,
+        publishes_ime: bool,
+    }
+
+    impl OverlayContentWidget {
+        /// What such a pod publishes: an ordinary field's surface, carrying no
+        /// secure-text configuration of its own.
+        fn surface() -> ImeState {
+            ImeState {
+                active: true,
+                content_type: ImeContentType::Normal,
+                ..Default::default()
+            }
+        }
     }
 
     impl crate::widget::Widget for OverlayContentWidget {
@@ -6591,9 +6801,19 @@ mod tests {
         }
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             scene.draw_text(ctx.origin(), self.label);
+            self.log.borrow_mut().pod_paint_focus.push(ctx.has_focus());
+            if self.publishes_ime {
+                ctx.publish_ime_state(Self::surface());
+            }
         }
-        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
             self.log.borrow_mut().pod.push((self.label, event.clone()));
+            if self.claims_focus
+                && let InputEvent::Pointer(pointer) = event
+                && pointer.phase == PointerPhase::Down
+            {
+                ctx.request_focus();
+            }
             EventResult::Handled
         }
     }
@@ -6637,6 +6857,8 @@ mod tests {
                                 crate::widget::ChildPod::new(Box::new(OverlayContentWidget {
                                     label: spec.label,
                                     log,
+                                    claims_focus: spec.pod_claims_focus,
+                                    publishes_ime: spec.pod_publishes_ime,
                                 })),
                             )),
                         });
@@ -6691,12 +6913,15 @@ mod tests {
             self.log.borrow_mut().owner.push(event.clone());
             match &overlay.kind {
                 OverlayEventKind::Pointer(pointer) => {
-                    if pointer.phase == PointerPhase::Down {
-                        match surface.spec.on_down {
-                            OwnerReaction::Nothing => {}
-                            OwnerReaction::Capture => ctx.capture_pointer(),
-                            OwnerReaction::Focus => ctx.request_focus(),
-                        }
+                    let reaction = match pointer.phase {
+                        PointerPhase::Down => Some(surface.spec.on_down),
+                        PointerPhase::Move => Some(surface.spec.on_move),
+                        _ => None,
+                    };
+                    match reaction {
+                        Some(OwnerReaction::Capture) => ctx.capture_pointer(),
+                        Some(OwnerReaction::Focus) => ctx.request_focus(),
+                        Some(OwnerReaction::Nothing) | None => {}
                     }
                     // Window space → the pod's own space is one subtraction: the
                     // registered rect's origin.
@@ -6722,10 +6947,26 @@ mod tests {
 
     /// The main-tree sibling: painted AFTER the owner, claims focus on a `Down`
     /// inside it, and records what it sees.
+    ///
+    /// It stands in for a secure text field: the surface it publishes carries
+    /// [`ImeContentType::Password`], and it republishes that surface on every
+    /// paint for as long as the pass seeds it focused — the shipped field's
+    /// republish-and-self-correct shape, in miniature.
     struct SiblingLeafWidget {
         log: Log,
         /// The selection-toolbar request to publish each paint, if any.
         publish: Option<crate::selection_toolbar::SelectionToolbarRequest>,
+    }
+
+    impl SiblingLeafWidget {
+        /// The secure surface this field describes its session with.
+        fn surface() -> ImeState {
+            ImeState {
+                active: true,
+                content_type: ImeContentType::Password,
+                ..Default::default()
+            }
+        }
     }
 
     impl crate::widget::Widget for SiblingLeafWidget {
@@ -6734,6 +6975,13 @@ mod tests {
         }
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             scene.draw_text(ctx.origin(), "sibling");
+            self.log
+                .borrow_mut()
+                .sibling_paint_focus
+                .push(ctx.has_focus());
+            if ctx.has_focus() {
+                ctx.publish_ime_state(Self::surface());
+            }
             if let Some(request) = self.publish {
                 ctx.publish_selection_toolbar(request);
             }
@@ -6748,10 +6996,7 @@ mod tests {
                 && pointer.phase == PointerPhase::Down
             {
                 ctx.request_focus();
-                ctx.publish_ime_state(ImeState {
-                    active: true,
-                    ..Default::default()
-                });
+                ctx.publish_ime_state(Self::surface());
                 return EventResult::Handled;
             }
             EventResult::Ignored
@@ -6935,6 +7180,23 @@ mod tests {
             log.pod.clear();
             log.sibling.clear();
             log.sibling_focus.clear();
+            log.pod_paint_focus.clear();
+            log.sibling_paint_focus.clear();
+        }
+
+        /// What the pod's leaf and the main-tree sibling each read from
+        /// `PaintCtx::has_focus` on the most recent frame — "which branches
+        /// believe they are focused", read from the branches themselves.
+        fn branch_focus(&self) -> (bool, bool) {
+            let log = self.log.borrow();
+            (
+                *log.pod_paint_focus
+                    .last()
+                    .expect("the pod painted at least once"),
+                *log.sibling_paint_focus
+                    .last()
+                    .expect("the sibling painted at least once"),
+            )
         }
 
         /// The overlay events the owner received, as `(key, kind)`.
@@ -7251,6 +7513,33 @@ mod tests {
         assert!(!h.root.is_pointer_captured());
     }
 
+    /// A capture claimed on a phase other than `Down` is a capture all the
+    /// same. The pods record their own active path on any phase, so a root that
+    /// mirrored the `Down` alone left the surface latched with no `Up` able to
+    /// reach it — and a latched surface diverts every later pointer event its
+    /// owner is reached by.
+    #[test]
+    fn a_capture_claimed_on_a_move_inside_a_surface_reaches_the_root() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.on_move = OwnerReaction::Capture;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.dispatch(&pointer(PointerPhase::Move, 150.0, 30.0));
+        assert!(
+            h.root.is_pointer_captured(),
+            "the root mirrors a claim the surface made mid-gesture"
+        );
+
+        // Which is what ends it: the mirrored capture short-circuits the overlay
+        // pre-pass, so the `Up` routes down the capture path — outside the
+        // surface's own rect, where a hit test would never have delivered it.
+        h.dispatch(&pointer(PointerPhase::Up, 30.0, 120.0));
+        assert!(
+            !h.root.is_pointer_captured(),
+            "and the gesture closes on the ordinary pointer arm"
+        );
+    }
+
     #[test]
     fn a_focus_request_from_inside_a_surface_opens_a_session() {
         let mut spec = SurfaceSpec::floating("popover", floating_rect());
@@ -7264,6 +7553,120 @@ mod tests {
             h.root.is_focus_active(),
             "a text field inside a popover may claim focus — the overlay arm \
              honours the request even though it refuses the blur"
+        );
+    }
+
+    /// The case the test above cannot express: the claim arrives while ANOTHER
+    /// branch already holds the session. Honouring it without retiring what it
+    /// supersedes leaves two branches believing they are focused — and leaves
+    /// the root describing, to the shell, a field that no longer owns anything.
+    #[test]
+    fn a_pod_focus_claim_retires_the_branch_it_supersedes() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        // A secure field in the main tree takes the session first.
+        h.down(30.0, 120.0);
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (false, true),
+            "only the field's own branch reads focused while it holds the session"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "and the surface the shell configures its keyboard from is the \
+             secure one that field published"
+        );
+
+        // Now the editable inside the floated surface claims focus.
+        h.down(150.0, 30.0);
+        assert!(h.root.is_focus_active(), "the claim is honoured");
+
+        // Which branch owns the session is resolved from the pods themselves,
+        // at the end of the paint that floats them, so the main tree observes
+        // the retirement on the next pass — the same one-frame convergence a
+        // container-routed blur gives a field whose `event` never ran.
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (true, true),
+            "the pass that resolves it still seeded the main tree from the \
+             session it had at its start"
+        );
+        assert_eq!(
+            h.root.ime_state(),
+            None,
+            "but the surface that field published for the session it just lost \
+             does NOT stand: the branch that took the session described none of \
+             its own, so the shell is left configuring nothing rather than a \
+             secure field nobody is in"
+        );
+
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (true, false),
+            "exactly one branch believes it is focused: the one that claimed it"
+        );
+        assert!(
+            h.root.is_focus_active(),
+            "and the session the pod opened is still the live one"
+        );
+    }
+
+    /// A pod publishing an IME surface it holds no focus link for describes
+    /// nobody's session. Accepting it would let a surface overwrite a focused
+    /// field's — including the content type that configures the platform
+    /// keyboard as a secure one.
+    #[test]
+    fn a_pod_publish_cannot_overwrite_the_surface_of_a_field_it_does_not_own() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        // Publishes on every paint, and never claims focus.
+        spec.pod_publishes_ime = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(30.0, 120.0);
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "the focused field's own surface"
+        );
+
+        h.frame();
+
+        assert!(
+            h.root.is_focus_active(),
+            "the field still holds the session"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "and it still describes it: the publishing pod holds no focus link, \
+             so its surface is not the session's"
+        );
+    }
+
+    /// The provenance rule is a check, not a refusal: a pod that DOES hold the
+    /// recorded focus path publishes exactly like a field in the tree.
+    #[test]
+    fn a_pod_that_holds_the_focus_path_publishes_its_own_surface() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        spec.pod_publishes_ime = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(30.0, 120.0);
+        h.down(150.0, 30.0);
+        h.frame();
+
+        assert!(h.root.is_focus_active());
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Normal),
+            "the surface published by the branch that owns the session"
         );
     }
 
