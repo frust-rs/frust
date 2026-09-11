@@ -2207,8 +2207,10 @@ impl ListViewWidget {
         match event {
             // A broadcast reaches every realized child unconditionally and is
             // never consumed — `route_event` owns that contract, so this arm just
-            // hands it over ahead of the gesture machinery.
-            InputEvent::Housekeeping => {
+            // hands it over ahead of the gesture machinery. A floated surface's
+            // own input is the second broadcast and rides the same arm: an
+            // overlay owner in a realized row has to hear it.
+            InputEvent::Housekeeping | InputEvent::Overlay(_) => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }
             // Focus-routed events — keyboard, IME, and the clipboard verbs an
@@ -2958,6 +2960,71 @@ mod tests {
     }
 
     // --- (2) A window shift relocates survivors (state preserved). ---
+
+    #[test]
+    fn an_overlay_broadcast_reaches_every_realized_row() {
+        use frust_core::{OverlayEvent, OverlayEventKind, OverlayKey};
+
+        /// A row that counts the floated-surface broadcasts it receives — an
+        /// overlay owner living in a realized row.
+        struct Owner(Rc<Cell<u32>>);
+        struct OwnerW(Rc<Cell<u32>>);
+        impl View<()> for Owner {
+            type Element = OwnerW;
+            fn build(&self, _c: &mut BuildCtx<'_>) -> OwnerW {
+                OwnerW(self.0.clone())
+            }
+            fn rebuild(&self, _p: &Self, e: &mut OwnerW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+                e.0 = self.0.clone();
+                ChangeFlags::NONE
+            }
+        }
+        impl Widget for OwnerW {
+            fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(200.0, 50.0))
+            }
+            fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+            fn event(&mut self, _ctx: &mut EventCtx, e: &InputEvent) -> EventResult {
+                if matches!(e, InputEvent::Overlay(_)) {
+                    self.0.set(self.0.get() + 1);
+                    // Reporting `Handled` must not stop the next row hearing it.
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+        }
+
+        let seen = Rc::new(Cell::new(0u32));
+        let seen_l = seen.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let seen = seen_l.clone();
+            list_view(1000, 50.0, move |_| any::<(), _>(Owner(seen.clone())))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+        let realized = list_widget(&root).children.len();
+        assert!(realized > 1, "the fixture realizes a window of rows");
+
+        let outcome = root.event(
+            &mut state,
+            &InputEvent::Overlay(OverlayEvent {
+                key: OverlayKey::next(),
+                kind: OverlayEventKind::OutsideDown,
+            }),
+        );
+        assert_eq!(
+            seen.get() as usize,
+            realized,
+            "every realized row heard it, with no first-handler-wins short-circuit"
+        );
+        assert!(
+            !outcome.handled,
+            "a broadcast is never consumed, whatever a row returned"
+        );
+    }
 
     #[test]
     fn window_shift_relocates_survivors_preserving_state() {
