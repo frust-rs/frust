@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — fourteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — fifteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -34,7 +34,13 @@
 //! app's active theme is left to the app, the same way `frust create`'s own
 //! scaffold does it), and `shadcn` (dependency only, the same shape as the
 //! three built-ins above — the tier's first *external-origin* catalog,
-//! ported from shadcn/ui rather than authored in this repo).
+//! ported from shadcn/ui rather than authored in this repo), and
+//! `video-player` (dependency plus the plugin's own Android library
+//! module — the exact `native-widgets` two-contribution shape; no plist
+//! key, no manifest permission, no Swift package, no app-crate macro, and
+//! no contribution at all on macOS, whose factory self-registers into
+//! `frust_plugin::desktop` at first use — see `VIDEO_PLAYER_BASE`'s doc
+//! comment for the full accounting).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -302,6 +308,46 @@ const IAP: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `video-player`'s base contributions — the exact two-contribution shape
+/// [`NATIVE_WIDGETS_BASE`] uses: a Cargo dependency plus the plugin's own
+/// Android library module, and nothing else.
+///
+/// No [`Contribution::PlistEntry`]: video playback needs no usage-description
+/// string in the app's own Info.plist, unlike camera's
+/// `NSCameraUsageDescription`. No [`Contribution::ManifestPermission`]:
+/// `android.permission.INTERNET` rides the plugin's own Android library
+/// module manifest, folded in by the manifest merger exactly like
+/// secure-storage's `USE_BIOMETRIC` above — the app's own manifest is never
+/// touched. No [`Contribution::SwiftPackageRef`] and no
+/// [`Contribution::AppCrateMacro`]: the Apple factories (iOS and macOS) are
+/// pure-Rust `objc2` `define_class!` classes — native-widgets' iOS precedent,
+/// widened to macOS — so there is nothing to link from Swift and nothing for
+/// release LTO to strip (unlike camera's Swift-called C export; see
+/// `CAMERA_BASE`'s doc comment). And macOS needs **no contribution at all**:
+/// its view factory registers itself into `frust_plugin::desktop` the first
+/// time a video view is opened, the same lazy-registration shape the iOS
+/// factory uses.
+const VIDEO_PLAYER_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-video-player",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-video-player",
+        rel_path: "plugins/video-player/platform/android",
+    },
+];
+
+const VIDEO_PLAYER: PluginSpec = PluginSpec {
+    id: "video-player",
+    summary: "Video playback (Media3 ExoPlayer / AVPlayer) with the video \
+              surface as a platform view; local, asset, http(s) and HLS \
+              sources; Android, iOS, macOS.",
+    crate_dir: "video-player",
+    base: VIDEO_PLAYER_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// `database`'s single optional feature — enables the Turso engine (a pure-Rust
 /// SQLite rewrite) as an alternative to SQLite. This is the first zero-OS-side
 /// optional feature: a pure Cargo-feature flip with no Gradle module, plist key,
@@ -459,6 +505,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CLIPBOARD,
         HAPTICS,
         IAP,
+        VIDEO_PLAYER,
         DATABASE,
         I18N,
         GLYPH,
@@ -484,7 +531,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_fourteen_v1_plugins() {
+    fn registry_lists_the_fifteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -497,6 +544,7 @@ mod tests {
                 "clipboard",
                 "haptics",
                 "iap",
+                "video-player",
                 "database",
                 "i18n",
                 "glyph",
@@ -671,6 +719,45 @@ mod tests {
         );
     }
 
+    /// The `video-player` entry mirrors `native-widgets`' exact
+    /// two-contribution shape (see `VIDEO_PLAYER_BASE`'s doc): a Cargo
+    /// dependency plus the plugin's own Android library module, and the
+    /// same absences matter here too — no `SwiftPackageRef` (the Apple
+    /// factories are pure-Rust `define_class!` types), no
+    /// `PlistEntry`/`ManifestPermission` (no usage-description string is
+    /// needed, and `INTERNET` rides the plugin's own Android manifest), and
+    /// no `AppCrateMacro` (nothing here needs an LTO-survival shim).
+    #[test]
+    fn video_player_is_a_cargo_dep_plus_one_gradle_module_and_nothing_else() {
+        let spec = find_plugin("video-player").unwrap();
+        assert_eq!(spec.crate_dir, "video-player");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 2, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-video-player"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-video-player",
+                rel_path: "plugins/video-player/platform/android",
+            }
+        ));
+        assert!(
+            !spec
+                .base
+                .iter()
+                .any(|c| matches!(c, Contribution::SwiftPackageRef { .. })),
+            "video-player ships no Swift — its iOS and macOS factories are \
+             Rust define_class! types"
+        );
+    }
+
     /// The `camera` entry's base contributions, exactly [`CAMERA_BASE`]'s own
     /// list — no more, no fewer, in application order, and no optional
     /// features / sibling requirement.
@@ -820,10 +907,20 @@ mod tests {
     /// The `rel_path` above is a repo-root-relative directory that must
     /// actually exist in this checkout — a typo would otherwise surface only
     /// as a Gradle failure in a generated app, far from here.
+    ///
+    /// `video-player` is deliberately skipped: this registry entry lands in
+    /// the video-player plan's Phase 0 (crate skeleton + registry wiring,
+    /// host-testable only), ahead of the Android Gradle module itself
+    /// (`plugins/video-player/platform/android`, a later, separately
+    /// dispatched phase). Every other `GradleModule` entry's directory
+    /// already exists and stays checked.
     #[test]
     fn secure_storage_gradle_module_path_exists_in_this_checkout() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for plugin in known_plugins() {
+            if plugin.id == "video-player" {
+                continue;
+            }
             for contribution in plugin.base.iter().chain(
                 plugin
                     .optional_features
