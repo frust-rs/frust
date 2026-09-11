@@ -1502,6 +1502,8 @@ impl Widget for KeyProbeWidget {
             // broadcast to run, so it simply falls through (see
             // `InputEvent::Housekeeping`'s own doc for the routing contract).
             InputEvent::Housekeeping => EventResult::Ignored,
+            // A broadcast for some portal owner elsewhere; this probe hosts none.
+            InputEvent::Overlay(_) => EventResult::Ignored,
         }
     }
 }
