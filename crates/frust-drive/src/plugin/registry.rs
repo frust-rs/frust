@@ -918,9 +918,6 @@ mod tests {
     fn secure_storage_gradle_module_path_exists_in_this_checkout() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for plugin in known_plugins() {
-            if plugin.id == "video-player" {
-                continue;
-            }
             for contribution in plugin.base.iter().chain(
                 plugin
                     .optional_features
