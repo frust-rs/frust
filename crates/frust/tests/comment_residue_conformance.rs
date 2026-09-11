@@ -1182,9 +1182,7 @@ mod scan_behavior {
             "a definite article makes it a label, not an enumeration"
         );
         assert!(
-            phase_violation(
-                "accepted limitation (`docs/LIMITATIONS.md`, Phase 5 of this arc)"
-            ),
+            phase_violation("accepted limitation (`docs/LIMITATIONS.md`, Phase 5 of this arc)"),
             "bare capitalized Phase N not followed by domain pattern — the \
              selection_toolbar.rs case that the widened rule now catches"
         );
