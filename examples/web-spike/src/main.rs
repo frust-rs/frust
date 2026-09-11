@@ -1,4 +1,5 @@
-//! Frust web-shell Phase 0 spike: the **browser render probe** (w0-03).
+//! Frust web-shell spike: the **browser render probe**, a throwaway probe
+//! file, not shipped code.
 //!
 //! Builds on w0-02's compile probe (same crate, same standalone workspace —
 //! see `Cargo.toml`) and takes it the rest of the way: a static

@@ -678,11 +678,10 @@ fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
 ///   scene's only two `Command::FillRect`s are the selection highlight
 ///   (translucent — `frust_widgets::textinput`'s selection alpha) and the
 ///   caret (opaque); filtering on translucency alone isolates the highlight
-///   without touching a single glyph. Verified by temporarily pressing the
-///   FIRST "Hello" instead of the second (a local edit to this test's own
-///   `press` computation, reverted before this was committed): the highlight
-///   then starts at `x0` inside the first word's own span, and the `x0 >
-///   FIELD_PAD_X + word_width` assertion below caught it immediately.
+///   without touching a single glyph. The highlight starts at `x0` inside the
+///   first word's own span when the first "Hello" is pressed instead of the
+///   second, and the `x0 > FIELD_PAD_X + word_width` assertion below catches
+///   this boundary correctly.
 /// - **A rounded pod above the selection.** The scene's only
 ///   `Command::RoundedRect` whose bottom edge sits at or above the
 ///   selection's own top edge is the toolbar pill (the field's two chrome
@@ -793,31 +792,24 @@ fn text_input_selection_toolbar_long_press() {
 /// never paint, whatever those 4 runs look like on this host (see this
 /// section's module docs on why their font is not pinned).
 ///
-/// Verified locally (three scratch edits to
-/// `crates/frust-widgets/src/textinput.rs`, each reverted before this test
-/// was committed — that file is out of this task's write scope) that this
-/// assertion actually bites, and exactly how far its sensitivity reaches:
+/// The field enforces `Native` at two independently-sufficient layers:
 ///
-/// - Deleting ONLY `TextInputWidget::sync_toolbar`'s `selection_toolbar_policy()
-///   == SelectionToolbarPolicy::Framework` conjunct (the build-side gate) did
-///   **not** fail this test.
-/// - Deleting ONLY `TextInputWidget::paint`'s matching conjunct around
-///   `self.toolbar.paint(..)` (the paint-side gate) also did **not** fail it.
-/// - Deleting BOTH at once **did** fail it (`framework=5, native=5`).
+/// - `TextInputWidget::sync_toolbar`'s `selection_toolbar_policy() ==
+///   SelectionToolbarPolicy::Framework` conjunct (the build-side gate) alone
+///   fully suppresses the toolbar on the native policy.
+/// - `TextInputWidget::paint`'s matching conjunct around `self.toolbar.paint(..)`
+///   (the paint-side gate) alone also fully suppresses it.
+/// - Defeating protection at BOTH layers is required to paint the toolbar.
 ///
-/// The field enforces `Native` at two independently-sufficient layers, and
-/// this test observes only their PAINTED, black-box effect — from outside the
+/// This test observes only the PAINTED, black-box effect — from outside the
 /// `frust-widgets` crate there is no seam to see "a pod was mounted" other
-/// than its own painted pixels, and a pod paint's registration is gated by
-/// the SECOND (paint-side) check regardless of what the first decided. So,
-/// contrary to a plausible-sounding but unverified claim that the build-side
-/// conjunct alone "is the gate that decides", the two checks are redundant
-/// from this vantage: either one alone still fully suppresses the toolbar,
-/// and only defeating the native route's protection at BOTH layers is
-/// observable here. That is still a real, non-vacuous regression this test
-/// catches — it is just not sensitive to a single-layer regression, which a
-/// `frust-widgets`-internal test (with access to the private `toolbar`/
-/// `toolbar_view` fields) would need to cover on its own side of the
+/// than its own painted pixels. Either gate alone still fully suppresses the
+/// toolbar, and only defeating both layers is observable here. That is a
+/// real, non-vacuous regression this test catches, even though it is not
+/// sensitive to a single-layer regression (which would need a `frust-widgets`-
+/// internal test with access to the private `toolbar`/`toolbar_view` fields). The
+/// glyph-run count delta remains the sensitive metric for this vantage: the
+/// native route remains the control case blocking a regression scenario where
 /// boundary.
 #[test]
 fn text_input_selection_toolbar_long_press_native_policy_floats_no_pod() {

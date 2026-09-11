@@ -44,8 +44,8 @@
 //! a design system (or an app) installing its own translated builder via
 //! [`frust_core::set_selection_toolbar_builder`]/
 //! [`frust_core::install_selection_toolbar_builder_if_unset`] is how this
-//! baseline is meant to be replaced for a localized app. Tracked as an
-//! accepted limitation (`docs/LIMITATIONS.md`, Phase 5 of this arc).
+//! baseline is meant to be replaced for a localized app. This baseline never
+//! localises its own four labels.
 
 use frust_core::accesskit::{Action, Role};
 use frust_core::{
