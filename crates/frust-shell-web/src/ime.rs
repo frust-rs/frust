@@ -72,6 +72,39 @@
 //!    with the next keystroke the key path does deliver; it never reaches a
 //!    later keystroke's own echo.
 //!
+//! # The clipboard route rides the same element
+//!
+//! A browser hands clipboard access to the focused *editable* element and to
+//! nobody else, so the overlay is also where copy, cut and paste are read —
+//! the canvas could not receive them. Three more listeners, all synchronous:
+//!
+//! * `paste` reads `clipboardData.getData("text/plain")` (no permission, no
+//!   promise) and cancels the browser's own insertion, so no `insertFromPaste`
+//!   `input` follows and the element's value never moves. The text reaches the
+//!   tree as [`DomEditEvent::Paste`].
+//! * `copy`/`cut` write the focused field's own selection with
+//!   `clipboardData.setData` and cancel the default action. They must finish
+//!   inside the callback — Safari honours a clipboard write from nowhere else —
+//!   so they cannot ask the tree anything: they read the selection the shell
+//!   last published ([`clipboard_selection`], refreshed on every dispatch and
+//!   every frame). `cut` additionally queues
+//!   [`EditCommand::Cut`](frust_core::event::EditCommand::Cut) so the widget
+//!   deletes what was taken.
+//! * A secret field and a collapsed selection are both refused outright, with
+//!   no `preventDefault`: an obscured field publishes its *real* text on its
+//!   [`ImeState`] (the mask is a paint-time affair), so the refusal here is
+//!   what keeps a password off the clipboard, and it is made from the
+//!   content-type hint rather than from a variant match for
+//!   [`overlay_attributes`]'s fail-closed reason.
+//!
+//! The two chords the DOM events already carry — `Ctrl`/`Cmd` with `c`, `x` or
+//! `v` — are therefore **not** re-dispatched onto the canvas
+//! ([`is_clipboard_chord`]), or the same gesture would arrive twice, once as a
+//! clipboard event and once as a key event a widget decodes. Their keydown is
+//! left un-cancelled, which is what lets the browser run the default action
+//! that fires the clipboard event at all. `Ctrl`/`Cmd`+`a` keeps its key path:
+//! select-all touches no clipboard and the DOM raises nothing for it.
+//!
 //! # Cases handled here
 //!
 //! * **Focus/blur races between the canvas and the overlay.** A click on the
@@ -145,7 +178,8 @@
 //! * **Multiple simultaneous editable fields.** One session at a time, matching
 //!   what [`ImeState`] itself publishes.
 
-use frust_core::event::{ImeContentType, ImeState};
+use frust_core::event::{EditCommand, ImeContentType, ImeState};
+use frust_text::utf16_to_byte;
 use kurbo::Rect;
 
 /// The DOM `key` value a browser reports for a keystroke its input method
@@ -231,6 +265,16 @@ pub enum DomEditEvent {
     /// [`teardown_signal`]. Synthesized rather than observed: the listeners
     /// come off before the element does, so no `blur` is raised for it.
     Teardown,
+    /// `paste`, or an asynchronous `navigator.clipboard.readText()` the tree
+    /// asked for: the text the host clipboard handed over, already read by the
+    /// time it is queued. An empty one is queued too — whether nothing is worth
+    /// inserting is the receiving widget's rule, not this bridge's.
+    Paste(String),
+    /// A clipboard gesture the DOM resolved for us, as the framework verb it
+    /// means — today only [`EditCommand::Cut`], queued by the `cut` listener
+    /// after it has already written the selection out, so the widget deletes
+    /// what the browser just took.
+    EditCommand(EditCommand),
 }
 
 /// What the shell must do to the overlay element for one dispatched event.
@@ -426,6 +470,36 @@ pub fn key_path_dropped(key: &str, dom_is_composing: bool) -> bool {
     !dom_is_composing && key == UNIDENTIFIED_KEY
 }
 
+/// The three DOM `key` values that mean copy, cut and paste when the platform's
+/// clipboard modifier is held. Compared case-insensitively: a browser reports
+/// `"C"` for `Cmd`+`Shift`+`c`, and the chord means the same thing either way.
+const CLIPBOARD_CHORD_KEYS: [&str; 3] = ["c", "x", "v"];
+
+/// Whether a keystroke is one of the clipboard chords the DOM already reports
+/// as a `copy`/`cut`/`paste` event of its own, and so must **not** be
+/// re-dispatched onto the canvas.
+///
+/// `ctrl_or_meta` is `ctrlKey || metaKey` off the event — one flag rather than
+/// two because the platforms differ only in which of them carries the chord,
+/// and a widget decoding either would answer the same verb.
+///
+/// Forwarding one of these would deliver the same gesture twice: once through
+/// the clipboard event this bridge answers synchronously, and once as a key
+/// event a text widget decodes into the very same [`EditCommand`]. The
+/// keystroke is dropped rather than cancelled — the browser's own default
+/// action is what *fires* the clipboard event, so cancelling the keydown would
+/// leave nothing to answer.
+///
+/// `Ctrl`/`Cmd`+`a` is deliberately absent: select-all reaches no clipboard, the
+/// DOM raises no event for it, and the key path is the only thing that can
+/// carry it.
+pub fn is_clipboard_chord(key: &str, ctrl_or_meta: bool) -> bool {
+    ctrl_or_meta
+        && CLIPBOARD_CHORD_KEYS
+            .iter()
+            .any(|chord| key.eq_ignore_ascii_case(chord))
+}
+
 /// The signal a torn-down overlay owes the compose latch.
 ///
 /// Removing the element ends the browser's composition, but silently: the
@@ -445,6 +519,29 @@ pub fn key_path_dropped(key: &str, dom_is_composing: bool) -> bool {
 /// does not depend on the caller having drained and settled the queue first.
 pub fn teardown_signal(detached: bool, session_open: bool) -> Option<DomEditEvent> {
     (detached && session_open).then_some(DomEditEvent::Teardown)
+}
+
+/// The signal a clipboard edit owes a composition it interrupts.
+///
+/// A paste (or a cut) arriving while a session is still in flight displaces it:
+/// the preedit is marked text the input method never committed, and the browser
+/// will not commit it on the way out — a `paste` cancels the composition rather
+/// than ending it with data. So the edit is preceded by the signal that retracts
+/// the preedit, which is exactly what [`DomEditEvent::Cancel`] already means,
+/// and the latch's own rules settle both states the same way a non-`insert*`
+/// continuation does: an open session clears, and a grace window resolves as the
+/// cancel it looked like. Feeding the two in order is what keeps the pasted text
+/// from landing inside a marked region a later commit would replace.
+///
+/// `session_open` is the latch's own `has_open_session` — open *or* holding the
+/// grace window, the same input [`teardown_signal`] takes and for the same
+/// reason: either state still has a preedit on screen.
+pub fn displaced_composition_signal(
+    event: &DomEditEvent,
+    session_open: bool,
+) -> Option<DomEditEvent> {
+    let clipboard = matches!(event, DomEditEvent::Paste(_) | DomEditEvent::EditCommand(_));
+    (clipboard && session_open).then_some(DomEditEvent::Cancel)
 }
 
 /// The attributes the overlay element is created with for one content type.
@@ -574,8 +671,66 @@ pub fn session_is_active(ime: Option<&ImeState>) -> bool {
     ime.is_some_and(|state| state.active)
 }
 
+/// The text a `copy` or a `cut` may put on the clipboard, read straight off the
+/// surface the focused widget last published — or `None` for the three refusals.
+///
+/// Borrowed rather than owned so the per-frame refresh that feeds the listeners
+/// allocates only when the answer actually changes.
+///
+/// # Why the shell slices this itself
+///
+/// A `copy`/`cut` callback has one chance to write the clipboard: Safari
+/// honours `setData` from inside the event and nowhere else, and the answer
+/// cannot wait for a dispatch into the tree and back. The published
+/// [`ImeState`] is the one authoritative copy of the focused field's text and
+/// selection the shell already holds, and its offsets are UTF-16 code units at
+/// this seam (see [`EditingState`](frust_core::event::EditingState)), so the
+/// slice is converted through [`utf16_to_byte`] rather than indexed directly —
+/// an emoji ahead of the selection is two units and four bytes, and treating
+/// one for the other would cut a character in half.
+///
+/// # The three refusals
+///
+/// * **No surface** — nothing is focused, so there is nothing to copy.
+/// * **A secret field** — an obscured widget publishes its *real* text here (the
+///   mask is a paint-time affair), so this is the guard that keeps a password
+///   off the host clipboard, and it is the widget's own refusal made a second
+///   time at the one boundary that cannot ask it. Read through
+///   [`ImeContentType::is_secret`] for [`overlay_attributes`]'s fail-closed
+///   reason: a secret variant added upstream is refused the day it exists.
+/// * **A collapsed or absent selection** — copying nothing is not a copy, and the
+///   listener answers by leaving the browser's own default action alone rather
+///   than writing an empty string over whatever the clipboard already held.
+pub fn clipboard_selection(ime: Option<&ImeState>) -> Option<&str> {
+    let state = ime?;
+    if state.content_type.is_secret() {
+        return None;
+    }
+    let editing = &state.editing;
+    // The `-1` sentinel is "no selection", and equal anchors are a caret.
+    if editing.selection_base < 0
+        || editing.selection_extent < 0
+        || editing.selection_base == editing.selection_extent
+    {
+        return None;
+    }
+    // A selection dragged backwards reports its anchors reversed; the clipboard
+    // wants the run of text, which has no direction.
+    let first = editing.selection_base.min(editing.selection_extent) as usize;
+    let last = editing.selection_base.max(editing.selection_extent) as usize;
+    let start = utf16_to_byte(&editing.text, first);
+    let end = utf16_to_byte(&editing.text, last);
+    // `get` rather than an index: both offsets are already clamped to a char
+    // boundary, and a surface that disagreed with its own text is a dropped
+    // copy here rather than a panicked page.
+    editing
+        .text
+        .get(start..end)
+        .filter(|selected| !selected.is_empty())
+}
+
 #[cfg(target_arch = "wasm32")]
-pub use browser::ImeOverlay;
+pub use browser::{ImeOverlay, PasteSink};
 
 /// The browser half: the element itself, its listeners, and the queue they feed.
 ///
@@ -590,21 +745,21 @@ mod browser {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use frust_core::event::{ImeContentType, ImeState};
+    use frust_core::event::{EditCommand, ImeContentType, ImeState};
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{
-        CompositionEvent, Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent,
-        KeyboardEventInit,
+        ClipboardEvent, CompositionEvent, Element, HtmlCanvasElement, HtmlInputElement,
+        KeyboardEvent, KeyboardEventInit,
     };
     use winit::platform::web::WindowExtWebSys;
     use winit::window::Window;
 
     use super::{
         DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync, StaleOverlay,
-        cancels_composition, forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box,
-        overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
-        stale_overlay_action,
+        cancels_composition, clipboard_selection, forwards_to_canvas, is_clipboard_chord,
+        key_path_dropped, overlay_attributes, overlay_box, overlay_box_moved,
+        overlay_needs_rebuild, published_content_type, session_is_active, stale_overlay_action,
     };
 
     /// The style declarations the overlay is created with, beyond its per-frame
@@ -649,6 +804,26 @@ mod browser {
     struct Signals {
         queue: RefCell<VecDeque<DomEditEvent>>,
         blurred: Cell<bool>,
+        /// What a `copy`/`cut` callback would put on the clipboard: the focused
+        /// field's selection as of the last dispatch or frame
+        /// ([`clipboard_selection`]), `None` for each of its refusals.
+        ///
+        /// Pushed here rather than pulled from the tree because the callback
+        /// cannot reach the tree: it must write the clipboard before it returns
+        /// (Safari's rule), and a round trip through a dispatch is not
+        /// available inside a DOM event.
+        selection: RefCell<Option<String>>,
+        /// The text such a callback last wrote *synchronously*, held for the one
+        /// drain that follows it.
+        ///
+        /// A `cut` writes the clipboard itself and then asks the widget to
+        /// delete the selection; the widget answers a `Cut` by writing the same
+        /// text into the tree's own clipboard slot, which the shell would
+        /// otherwise hand to `navigator.clipboard.writeText` a second time — a
+        /// promise that may well be refused for arriving outside a user
+        /// gesture, and that can only re-write text already there. So the shell
+        /// compares the two and skips the redundant half.
+        synchronous_write: RefCell<Option<String>>,
     }
 
     /// The hidden-input IME overlay: at most one element, alive for exactly as
@@ -680,6 +855,47 @@ mod browser {
             self.signals.queue.borrow_mut().pop_front()
         }
 
+        /// Take the text a `copy`/`cut` listener already wrote to the clipboard
+        /// itself, so the shell can tell the tree's own pending write apart from
+        /// a duplicate of it — see [`Signals::synchronous_write`].
+        ///
+        /// Taken on every drain whether or not the tree wrote anything, which is
+        /// what bounds the mark to one drain: a later identical copy is a
+        /// genuine write and must not be skipped for a note this one left. A
+        /// teardown deliberately does not clear it — the element going away does
+        /// not un-write the clipboard, and the `Cut` it queued is still in the
+        /// queue behind it.
+        pub fn take_synchronous_write(&self) -> Option<String> {
+            self.signals.synchronous_write.borrow_mut().take()
+        }
+
+        /// A handle that can queue a [`DomEditEvent::Paste`] after this borrow
+        /// has ended — what an asynchronous `navigator.clipboard.readText()`
+        /// resolves into. See [`PasteSink`].
+        pub fn paste_sink(&self, window: &Arc<Window>) -> PasteSink {
+            PasteSink {
+                signals: Rc::clone(&self.signals),
+                window: Arc::clone(window),
+            }
+        }
+
+        /// Refresh what a `copy`/`cut` callback would write, from the surface
+        /// the focused widget published this pass.
+        ///
+        /// Runs from both lifecycle paths (a dispatched event and the frame
+        /// loop), because a selection moves under either: a drag reaches the
+        /// tree as an event, a signal-driven select-all does not. The guard is
+        /// not an optimization but a bound on cost — a field's selected text
+        /// would otherwise be cloned on every frame a session is open, for a
+        /// value that changes only when the user moves the selection.
+        fn publish_selection(&self, ime: Option<&ImeState>) {
+            let selection = clipboard_selection(ime);
+            let mut slot = self.signals.selection.borrow_mut();
+            if slot.as_deref() != selection {
+                *slot = selection.map(str::to_owned);
+            }
+        }
+
         /// Reconcile the element against the focused widget's published
         /// surface, for one dispatched input event.
         ///
@@ -707,6 +923,10 @@ mod browser {
                 self.teardown();
                 self.policy.mark_closed();
             }
+
+            // Ahead of the lifecycle below, so a close leaves the listeners of
+            // an element that is about to go away with nothing to copy.
+            self.publish_selection(ime);
 
             let mut detached = false;
             let action = self
@@ -845,6 +1065,7 @@ mod browser {
             ime: Option<&ImeState>,
             composing: bool,
         ) {
+            self.publish_selection(ime);
             if self.element.is_none() || !session_is_active(ime) {
                 return;
             }
@@ -912,7 +1133,10 @@ mod browser {
         /// Each listener converts its event to a [`DomEditEvent`] and asks for
         /// one frame: a composition produces no winit event at all, so without
         /// that request the loop — which parks on `ControlFlow::Wait` — would
-        /// never wake to apply it.
+        /// never wake to apply it. The `copy` listener is the one exception
+        /// that queues nothing: the clipboard is written inside the callback and
+        /// the document does not change, so there is nothing for a frame to
+        /// show.
         fn install_listeners(&mut self, element: &HtmlInputElement, window: &Arc<Window>) {
             let canvas = window.canvas();
 
@@ -966,6 +1190,50 @@ mod browser {
                 }
             });
 
+            // The clipboard trio. A browser delivers these to the focused
+            // editable element and to nothing else, which is why they hang off
+            // the overlay rather than off the canvas or the document — see the
+            // module doc's clipboard section.
+            self.add_listener(element, "paste", {
+                let signals = Rc::clone(&self.signals);
+                let window = Arc::clone(window);
+                move |event| {
+                    let Some(text) = pasted_text(&event) else {
+                        return;
+                    };
+                    // Cancel the browser's own insertion: the overlay's value is
+                    // thrown away rather than read, and an `insertFromPaste`
+                    // `input` behind this would be taken for a keystroke by the
+                    // carry rule. The text reaches the tree from here instead.
+                    event.prevent_default();
+                    push(&signals, DomEditEvent::Paste(text), &window);
+                }
+            });
+            self.add_listener(element, "copy", {
+                let signals = Rc::clone(&self.signals);
+                move |event| {
+                    // Nothing is queued: the selection is already on the
+                    // clipboard and the document is unchanged.
+                    write_selection(&signals, &event);
+                }
+            });
+            self.add_listener(element, "cut", {
+                let signals = Rc::clone(&self.signals);
+                let window = Arc::clone(window);
+                move |event| {
+                    // Only a write that actually happened may delete anything —
+                    // a refused cut (a secret field, no selection) leaves the
+                    // document alone as well as the clipboard.
+                    if write_selection(&signals, &event) {
+                        push(
+                            &signals,
+                            DomEditEvent::EditCommand(EditCommand::Cut),
+                            &window,
+                        );
+                    }
+                }
+            });
+
             // The two key listeners carry the forwarding contract: winit's own
             // handlers sit on the canvas, which a focused overlay is not a
             // descendant of, so a keystroke reaches them only if it is
@@ -980,6 +1248,14 @@ mod browser {
                     };
                     let key = key_event.key();
                     let composing = key_event.is_composing();
+                    if is_clipboard_chord(&key, key_event.ctrl_key() || key_event.meta_key()) {
+                        // The DOM raises its own `copy`/`cut`/`paste` for this
+                        // gesture and the listeners above answer it; forwarding
+                        // it as well would hand a widget the same verb a second
+                        // time. Deliberately not cancelled — the browser's own
+                        // default action is what fires those events.
+                        return;
+                    }
                     if cancels_composition(&key, composing) {
                         push(&signals, DomEditEvent::Cancel, &window);
                         return;
@@ -994,6 +1270,10 @@ mod browser {
                     }
                 }
             });
+            // No clipboard-chord exclusion here: a release carries no editing
+            // semantics at all on this shell (`map_key_event` maps only
+            // `Pressed`), so the copy of a `Cmd`+`c` keyup reaches winit and
+            // becomes nothing.
             self.add_listener(element, "keyup", {
                 let canvas = canvas.clone();
                 move |event| {
@@ -1097,6 +1377,9 @@ mod browser {
             self.built_content_type = None;
             self.last_box = None;
             self.signals.blurred.set(false);
+            // The listeners that would have read it are gone; a fresh session
+            // publishes its own before its first event.
+            *self.signals.selection.borrow_mut() = None;
         }
     }
 
@@ -1123,10 +1406,110 @@ mod browser {
             .is_some_and(|active| &active == AsRef::<Element>::as_ref(element))
     }
 
+    /// A handle onto the overlay's signal queue that outlives the borrow it was
+    /// taken from.
+    ///
+    /// The one asynchronous edge in this bridge: a paste the *tree* asked for
+    /// (a toolbar tap, an edit menu) is answered by
+    /// `navigator.clipboard.readText()`, whose promise resolves in a later task,
+    /// long after the `&mut ImeOverlay` that started it is gone. Shaped as a
+    /// handle rather than a callback so the queue stays the single ordering
+    /// point: the resolved text is queued exactly like a `paste` listener's,
+    /// asks for the frame that drains it, and reaches the tree through the same
+    /// path.
+    ///
+    /// It outlives the element, too, and deliberately: a session torn down
+    /// between the request and its answer leaves the queue standing, and the
+    /// paste is delivered to whatever holds focus then — the same thing that
+    /// happens to a clipboard read on every other shell.
+    pub struct PasteSink {
+        signals: Rc<Signals>,
+        window: Arc<Window>,
+    }
+
+    impl PasteSink {
+        /// Queue the text a clipboard read resolved to, and ask for the frame
+        /// that drains it.
+        pub fn deliver(&self, text: String) {
+            push(&self.signals, DomEditEvent::Paste(text), &self.window);
+        }
+    }
+
     /// Queue one signal and ask for the frame that applies it.
     fn push(signals: &Rc<Signals>, event: DomEditEvent, window: &Arc<Window>) {
         signals.queue.borrow_mut().push_back(event);
         window.request_redraw();
+    }
+
+    /// The plain text a `paste` event carries, or `None` when the browser
+    /// offered none.
+    ///
+    /// `text/plain` only, deliberately: the framework's whole paste vocabulary
+    /// is [`EditCommand::Paste`](frust_core::event::EditCommand::Paste), which
+    /// carries a `String`, so asking for `text/html` would produce something no
+    /// widget could apply. An empty string is a real answer (the clipboard held
+    /// nothing, or nothing textual) and is carried through — whether it is worth
+    /// inserting is the receiving widget's rule.
+    ///
+    /// This read needs no permission and no promise: the text is on the event
+    /// because the user's own gesture put it there.
+    fn pasted_text(event: &web_sys::Event) -> Option<String> {
+        let Some(clipboard) = event.dyn_ref::<ClipboardEvent>() else {
+            return None;
+        };
+        let Some(data) = clipboard.clipboard_data() else {
+            log::debug!("frust-shell-web: a paste arrived with no clipboardData; it is dropped");
+            return None;
+        };
+        match data.get_data("text/plain") {
+            Ok(text) => Some(text),
+            Err(err) => {
+                log::warn!(
+                    "frust-shell-web: the browser refused the pasted text ({err:?}); \
+                     the paste is dropped"
+                );
+                None
+            }
+        }
+    }
+
+    /// Put the focused field's selection on the clipboard from inside a
+    /// `copy`/`cut` callback, reporting whether it was written.
+    ///
+    /// Everything here has to finish before the callback returns — that is the
+    /// only window in which Safari honours a clipboard write — so the text comes
+    /// from the snapshot the shell republishes each pass
+    /// ([`ImeOverlay::publish_selection`]) rather than from the tree.
+    ///
+    /// A refusal leaves the event **uncancelled**, so the browser's own default
+    /// action still runs: with the overlay empty and unselected that copies
+    /// nothing, which is the right answer for a field with no selection and the
+    /// safe one for a secret field, whose text is never handed out from here.
+    fn write_selection(signals: &Rc<Signals>, event: &web_sys::Event) -> bool {
+        let selection = signals.selection.borrow().clone();
+        let Some(text) = selection else {
+            return false;
+        };
+        let Some(clipboard) = event.dyn_ref::<ClipboardEvent>() else {
+            return false;
+        };
+        let Some(data) = clipboard.clipboard_data() else {
+            log::debug!(
+                "frust-shell-web: a copy/cut arrived with no clipboardData; the browser's own \
+                 default action stands"
+            );
+            return false;
+        };
+        if let Err(err) = data.set_data("text/plain", &text) {
+            log::warn!(
+                "frust-shell-web: the browser refused the clipboard write ({err:?}); \
+                 the copy is lost"
+            );
+            return false;
+        }
+        event.prevent_default();
+        *signals.synchronous_write.borrow_mut() = Some(text);
+        true
     }
 
     /// The marked/committed text off a composition event, empty when the
@@ -1172,11 +1555,12 @@ mod browser {
 mod tests {
     use super::{
         DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox, OverlayPolicy, StaleOverlay,
-        cancels_composition, forwards_to_canvas, key_path_dropped, overlay_attributes, overlay_box,
-        overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
-        stale_overlay_action, teardown_signal,
+        cancels_composition, clipboard_selection, displaced_composition_signal, forwards_to_canvas,
+        is_clipboard_chord, key_path_dropped, overlay_attributes, overlay_box, overlay_box_moved,
+        overlay_needs_rebuild, published_content_type, session_is_active, stale_overlay_action,
+        teardown_signal,
     };
-    use frust_core::event::{EditingState, ImeContentType, ImeState};
+    use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
     use kurbo::Rect;
 
     fn active_surface(caret: Option<Rect>) -> ImeState {
@@ -1191,6 +1575,20 @@ mod tests {
     fn surface_with(content_type: ImeContentType) -> ImeState {
         ImeState {
             active: true,
+            content_type,
+            ..ImeState::default()
+        }
+    }
+
+    fn selected(text: &str, base: i32, extent: i32, content_type: ImeContentType) -> ImeState {
+        ImeState {
+            active: true,
+            editing: EditingState {
+                text: text.to_string(),
+                selection_base: base,
+                selection_extent: extent,
+                ..EditingState::default()
+            },
             content_type,
             ..ImeState::default()
         }
@@ -1509,6 +1907,105 @@ mod tests {
         assert_eq!(
             published_content_type(Some(&surface_with(ImeContentType::Password))),
             ImeContentType::Password
+        );
+    }
+
+    // --- the clipboard route ---
+
+    #[test]
+    fn the_clipboard_chords_stay_with_the_dom_and_select_all_stays_on_the_key_path() {
+        // Each of the three has a DOM event of its own, which the overlay
+        // answers; re-dispatching would deliver the gesture a second time.
+        for key in ["c", "x", "v"] {
+            assert!(is_clipboard_chord(key, true), "{key} with the chord held");
+            // Shift adds the capital, not a different verb.
+            assert!(is_clipboard_chord(&key.to_uppercase(), true));
+            // The same letter typed as text is text.
+            assert!(!is_clipboard_chord(key, false));
+        }
+        // Select-all reaches no clipboard and the DOM raises nothing for it, so
+        // the key path is the only thing that can carry it.
+        assert!(!is_clipboard_chord("a", true));
+        assert!(!is_clipboard_chord("Escape", true));
+    }
+
+    #[test]
+    fn a_copy_slices_the_selection_by_utf16_offsets() {
+        // "a😀bc" is 5 UTF-16 units and 7 bytes: the emoji is one unit pair and
+        // four bytes, so a byte-indexed slice of the same numbers would cut it
+        // in half (and panic).
+        let surface = selected("a😀bc", 1, 4, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&surface)), Some("😀b"));
+
+        // A selection dragged backwards reports its anchors reversed; the
+        // clipboard wants the run of text, which has no direction.
+        let backwards = selected("a😀bc", 4, 1, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&backwards)), Some("😀b"));
+
+        // The whole field, and a selection that ends past the text it was
+        // published for (a surface racing its own edit) — clamped, never
+        // panicking.
+        let whole = selected("a😀bc", 0, 5, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&whole)), Some("a😀bc"));
+        let overrun = selected("a😀bc", 0, 99, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&overrun)), Some("a😀bc"));
+    }
+
+    #[test]
+    fn a_secret_field_refuses_to_hand_its_selection_to_the_clipboard() {
+        // An obscured widget publishes its *real* text here — the mask is a
+        // paint-time affair — so this refusal is the whole of what keeps a
+        // password off the host clipboard on this shell.
+        let secret = selected("hunter2", 0, 7, ImeContentType::Password);
+        assert_eq!(clipboard_selection(Some(&secret)), None);
+        // The same text in an ordinary field is an ordinary copy.
+        let plain = selected("hunter2", 0, 7, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&plain)), Some("hunter2"));
+    }
+
+    #[test]
+    fn a_collapsed_selection_or_no_field_at_all_is_not_a_copy() {
+        // A caret is not a selection: copying nothing must not overwrite what
+        // the clipboard already holds.
+        let caret = selected("abc", 2, 2, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&caret)), None);
+        // The `-1` sentinel is "no selection at all".
+        let none = selected("abc", -1, -1, ImeContentType::Normal);
+        assert_eq!(clipboard_selection(Some(&none)), None);
+        // Nothing focused.
+        assert_eq!(clipboard_selection(None), None);
+    }
+
+    #[test]
+    fn a_clipboard_edit_retracts_a_composition_it_lands_on() {
+        // The preedit is marked text the input method never committed, and a
+        // paste is not the commit — so the session ends the way a cancel does,
+        // before the pasted text lands.
+        let paste = DomEditEvent::Paste("hi".to_string());
+        assert_eq!(
+            displaced_composition_signal(&paste, true),
+            Some(DomEditEvent::Cancel)
+        );
+        assert_eq!(
+            displaced_composition_signal(&DomEditEvent::EditCommand(EditCommand::Cut), true),
+            Some(DomEditEvent::Cancel)
+        );
+        // Nothing in flight: the ordinary case owes no retraction.
+        assert_eq!(displaced_composition_signal(&paste, false), None);
+        // Every other signal is the composition machinery's own, and settles
+        // through the latch's own rules rather than this one.
+        assert_eq!(
+            displaced_composition_signal(
+                &DomEditEvent::CompositionEnd {
+                    data: String::new()
+                },
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            displaced_composition_signal(&DomEditEvent::Blur, true),
+            None
         );
     }
 }
