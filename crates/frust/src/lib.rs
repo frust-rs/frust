@@ -105,15 +105,52 @@ pub use frust_widgets::{
     IconButtonView, IconData, IconSource, IconView, IconWidget, Image, ImageError, ImageFit,
     ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
-    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
-    PushOptions, Radio, RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView,
-    ScaffoldView, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SpringDescription, Stack, StackView, TextInput,
-    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
-    VisibilityCallback, button, checkbox, colored_box, container, divider, flexible, hero, icon,
-    icon_button, inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider,
-    text, text_input,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView,
+    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox, SizedBoxView,
+    Slider, SliderView, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
+    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, button, checkbox,
+    colored_box, container, divider, flexible, hero, icon, icon_button, inflexible, keyed,
+    list_view, overlay_portal, radio, safe_area, scaffold, scroll_view, slider, text, text_input,
 };
+
+/// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:
+/// which z-band a floated surface sits in, whether the pointer reaches it, and
+/// what a press landing outside it delivers.
+///
+/// [`overlay_portal`] floats a surface above the whole app, anchored to its
+/// child's bounds and painted after the entire main tree — so it escapes both
+/// the child's paint order and every ancestor's clip, and follows the child
+/// across scroll and relayout with nothing subscribed. The surface is mounted
+/// while [`OverlayPortalView::overlay`] is `Some`; a widget that hosts a
+/// surface of its own instead reaches for `authoring::OverlaySlot`.
+///
+/// Lifted flat for [`EditCommand`]'s reason: an app or design system naming a
+/// band, an input class or a light-dismiss policy is configuring a portal, not
+/// authoring a widget.
+///
+/// ```
+/// use frust::{
+///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, any, overlay_portal, text,
+/// };
+///
+/// struct App {
+///     hovering: bool,
+/// }
+///
+/// // A tooltip: above its trigger, in the topmost band, and transparent to the
+/// // pointer so hovering the trigger is never interrupted by its own tip.
+/// fn trigger(state: &mut App) -> impl View<App> + use<> {
+///     overlay_portal(text("Save"))
+///         .overlay(state.hovering.then(|| any(text("Save the document"))))
+///         .placement(OverlayPlacement::on(OverlaySide::Top))
+///         .band(OverlayBand::Tooltip)
+///         .input(OverlayInput::Transparent)
+/// }
+/// # let _ = trigger;
+/// ```
+pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
 
 /// The clipboard/selection command vocabulary, flat-re-exported from
 /// `frust-core::event` (and also available through

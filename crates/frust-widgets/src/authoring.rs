@@ -189,6 +189,25 @@ use crate::ChildKey;
 pub use crate::image::ImageSource;
 pub use crate::text::ThemeTextColor;
 
+/// The overlay-portal authoring surface: the slot a widget that floats its own
+/// surface holds, what that surface is anchored to, and the placement geometry
+/// every anchored pattern needs.
+///
+/// Promoted here rather than left to each design system because all three of
+/// them had derived the same geometry independently: a design system's popover,
+/// menu, tooltip and context menu place a surface through [`place`] and host it
+/// through [`OverlaySlot`], reaching both through `frust::authoring` alone.
+pub use crate::overlay::{
+    OverlayAlign, OverlayAnchor, OverlayPlacement, OverlaySide, OverlaySlot, place,
+};
+
+/// The overlay registry's own vocabulary, re-exported from `frust-core` so a
+/// design system naming a band, an input class, a light-dismiss policy or a
+/// surface identity does it through this one module: an
+/// [`OverlaySlot`]'s setters take exactly these types, and a widget that cannot
+/// name them cannot configure one.
+pub use frust_core::{OutsideTap, OverlayBand, OverlayInput, OverlayKey};
+
 /// Pressed-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17 — supersedes material-web
 /// v0.192's 12%).
@@ -1106,6 +1125,25 @@ mod authoring_surface_tests {
 
         // The shared press-overlay opacity.
         let _pressed: f32 = crate::authoring::PRESSED_OPACITY;
+
+        // The overlay portal: the placement math, the request it takes, the
+        // slot an owner hosts its floated surface in, and the registry
+        // vocabulary that slot is configured with.
+        let _place: fn(
+            kurbo::Rect,
+            kurbo::Size,
+            kurbo::Rect,
+            crate::authoring::OverlayPlacement,
+        ) -> kurbo::Rect = crate::authoring::place;
+        let _side: crate::authoring::OverlaySide = crate::authoring::OverlaySide::Top;
+        let _align: crate::authoring::OverlayAlign = crate::authoring::OverlayAlign::Center;
+        let _anchor: crate::authoring::OverlayAnchor = crate::authoring::OverlayAnchor::Owner;
+        let slot: crate::authoring::OverlaySlot<()> = crate::authoring::OverlaySlot::new();
+        let _key: crate::authoring::OverlayKey = slot.key();
+        let _band: crate::authoring::OverlayBand = crate::authoring::OverlayBand::Floating;
+        let _input: crate::authoring::OverlayInput = crate::authoring::OverlayInput::Interactive;
+        let _tap: crate::authoring::OutsideTap =
+            crate::authoring::OutsideTap::Notify { consume: true };
 
         // Child visitation: the trait, its three shape impls, and the macro
         // that writes the `Widget::visit_children` body from them.

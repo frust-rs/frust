@@ -42,6 +42,7 @@ mod image;
 mod list_view;
 pub mod motion;
 pub mod nav;
+mod overlay;
 mod padding;
 pub mod physics;
 mod platform_view;
@@ -85,6 +86,10 @@ pub use nav::router::{
     Router, shell_route,
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec, TransitionState};
+pub use overlay::{
+    DEFAULT_OFFSET, DEFAULT_PADDING, OverlayAlign, OverlayAnchor, OverlayPlacement,
+    OverlayPortalView, OverlayPortalWidget, OverlaySide, OverlaySlot, overlay_portal, place,
+};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use physics::effect::OverscrollEffect;
 pub use physics::parity::{
