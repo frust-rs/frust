@@ -152,8 +152,16 @@ impl BackendSession for MockSession {
         self.record(Command::SetLooping(looping))
     }
 
+    /// Record the close, then publish `Idle` — matching the post-close
+    /// contract every backend answers (`android.rs`'s `AndroidSession::close`,
+    /// `apple.rs`'s `teardown`). Called at most once per session
+    /// ([`crate::backend::BackendSession::close`]'s own doc), so this needs
+    /// no idempotence of its own.
     fn close(&self) {
         lock(&self.state.commands).push(Command::Close);
+        self.state
+            .shared
+            .publish(PlayerEvent::StateChanged(PlaybackState::Idle));
     }
 
     fn id(&self) -> u32 {

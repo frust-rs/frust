@@ -54,7 +54,14 @@
 //!
 //! - [`Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnState`]`(env, class, session: jint, state: jint)`
 //!   — `0` Idle / `1` Loading / `2` Paused / `3` Playing / `4` Buffering /
-//!   `5` Ended / `6` Error, decoded by [`PlaybackState::from_code`].
+//!   `5` Ended / `6` Error, decoded by [`PlaybackState::from_code`]. The
+//!   **initial** Loading is owned by this module, not the host: [`AndroidBackend::open`]
+//!   publishes it itself right after registering the session (matching
+//!   `apple.rs`), so the post-open snapshot is `Loading` on every thread
+//!   regardless of when — or whether — the host's own first callback lands.
+//!   A state the host reports that already equals the snapshot's current
+//!   state, Loading included, is therefore a harmless duplicate and is
+//!   dropped rather than redelivered — see [`should_publish_state`].
 //! - [`Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnPosition`]`(env, class, session: jint, positionMs: jlong, durationMs: jlong)`
 //!   — `durationMs` is [`DURATION_UNKNOWN`] (`-1`), or any negative value,
 //!   while the duration is not known (a live stream never resolves one).
@@ -89,9 +96,13 @@
 //! map the exports publish through. [`AndroidBackend::open`] inserts an
 //! entry the moment `openPlayer` answers — **before** returning the session,
 //! since the host starts loading immediately and its first state callback
-//! may land while `open` is still returning — and [`AndroidSession::close`]
-//! removes it *after* `close` returns, so a callback the host emits during
-//! its own teardown still reaches the snapshot.
+//! may land while `open` is still returning — then immediately publishes the
+//! initial `Loading` itself (see the contract table above), and
+//! [`AndroidSession::close`] removes it *after* `close` returns, so a
+//! callback the host emits during its own teardown still reaches the
+//! snapshot; the removal is followed by publishing `Idle`, so a closed
+//! session's snapshot reads `Idle` on this backend just as it does on
+//! `apple.rs` and the mock.
 //!
 //! An [`AndroidSession`] itself holds only the integer id plus its own
 //! [`Shared`] handle, and no JNI reference at all: every command re-attaches
@@ -247,6 +258,15 @@ impl PlayerBackend for AndroidBackend {
         // still returning (module doc's *Session registry*).
         lock(&SESSIONS).insert(code, Arc::clone(&shared));
 
+        // Published from Rust, matching `apple.rs`'s `open`: the post-open
+        // snapshot must be `Loading` regardless of what the host managed to
+        // deliver by the time this call returns. No listener can exist yet
+        // either way — `PlayerSession` is not built until this call returns
+        // — so this publish reaches nobody, and only seeds the snapshot. Any
+        // Loading the host later reports for this session is a no-op
+        // duplicate ([`should_publish_state`]).
+        shared.publish(PlayerEvent::StateChanged(PlaybackState::Loading));
+
         Ok(AndroidSession { id: code, shared })
     }
 }
@@ -359,7 +379,9 @@ impl BackendSession for AndroidSession {
         })
     }
 
-    /// Release the host's player, then drop the registry entry.
+    /// Release the host's player, drop the registry entry, then publish
+    /// `Idle` — the post-close contract every backend answers the same way
+    /// (module doc's *Session registry*).
     ///
     /// Returns nothing, so a refusal is logged rather than reported — and a
     /// repeat call is harmless: the host answers
@@ -369,6 +391,12 @@ impl BackendSession for AndroidSession {
     /// `close` still reaches the snapshot, and only when it is still *this*
     /// session's entry: a host that reuses an id for a later session must
     /// not have that newer registration removed by an older session's close.
+    /// `Idle` is published only when this call is the one that actually
+    /// removed the entry — [`crate::backend::BackendSession::close`]'s own
+    /// doc already guarantees this runs at most once per session, so that
+    /// condition is a defensive match with the registry rather than a second
+    /// idempotence mechanism, and it also keeps a reused id's newer session
+    /// from having its own state overwritten by an older close.
     fn close(&self) {
         if let Err(err) = self.command("FrustVideoPlayerHost.close", |env, class, session| {
             env.call_static_method(
@@ -385,12 +413,19 @@ impl BackendSession for AndroidSession {
             );
         }
 
-        let mut sessions = lock(&SESSIONS);
-        if sessions
-            .get(&self.id)
-            .is_some_and(|registered| Arc::ptr_eq(registered, &self.shared))
-        {
-            sessions.remove(&self.id);
+        let removed = {
+            let mut sessions = lock(&SESSIONS);
+            let is_this_session = sessions
+                .get(&self.id)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &self.shared));
+            if is_this_session {
+                sessions.remove(&self.id);
+            }
+            is_this_session
+        };
+        if removed {
+            self.shared
+                .publish(PlayerEvent::StateChanged(PlaybackState::Idle));
         }
     }
 
@@ -516,6 +551,18 @@ fn video_size_event(width: i32, height: i32) -> Option<PlayerEvent> {
     let width = u32::try_from(width).ok().filter(|w| *w > 0)?;
     let height = u32::try_from(height).ok().filter(|h| *h > 0)?;
     Some(PlayerEvent::VideoSize { width, height })
+}
+
+/// Whether a state the host reports through `nativeOnState` is actually new,
+/// or a duplicate of what the snapshot already answers.
+///
+/// The initial Loading is published by [`AndroidBackend::open`] itself
+/// (module doc's contract table), so the host's own first callback — Loading
+/// most of all, but any repeat is the same kind of no-op — must not be
+/// redelivered as a second event a listener would see twice for one real
+/// transition.
+fn should_publish_state(current: PlaybackState, reported: PlaybackState) -> bool {
+    current != reported
 }
 
 /// Lock `mutex`, recovering from poisoning rather than propagating it — a
@@ -723,7 +770,17 @@ pub extern "system" fn Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnS
         log::trace!("frust-video-player: nativeOnState(session={session}, state={state})");
         if let Some(shared) = session_shared(session, "nativeOnState") {
             match PlaybackState::from_code(state) {
-                Some(state) => shared.publish(PlayerEvent::StateChanged(state)),
+                Some(reported) => {
+                    let current = shared.snapshot().state;
+                    if should_publish_state(current, reported) {
+                        shared.publish(PlayerEvent::StateChanged(reported));
+                    } else {
+                        log::trace!(
+                            "frust-video-player: nativeOnState(session={session}) repeated \
+                             {reported:?} — dropped as a duplicate"
+                        );
+                    }
+                }
                 None => log::warn!(
                     "frust-video-player: nativeOnState(session={session}) reported unknown state \
                      {state} — ignored"
@@ -824,10 +881,10 @@ mod tests {
 
     use super::{
         COMMAND_OK, COMMAND_UNKNOWN_SESSION, DURATION_UNKNOWN, SOURCE_KIND_ASSET, SOURCE_KIND_FILE,
-        SOURCE_KIND_URL, command_result, open_error, position_arg, position_event, source_args,
-        video_size_event,
+        SOURCE_KIND_URL, command_result, open_error, position_arg, position_event,
+        should_publish_state, source_args, video_size_event,
     };
-    use crate::{PlayerEvent, VideoError, VideoFit, VideoSource};
+    use crate::{PlaybackState, PlayerEvent, VideoError, VideoFit, VideoSource};
 
     /// Each source maps to its contract `sourceKind`, with the string the
     /// host resolves left exactly as the caller wrote it.
@@ -979,5 +1036,37 @@ mod tests {
             crate::params_json_with(crate::SESSION_KEY, 7, VideoFit::Cover),
             r#"{"sessionId":7,"fit":"cover"}"#
         );
+    }
+
+    /// A state equal to what the snapshot already reports — Loading most of
+    /// all, the one `open` publishes itself before the host's own callback
+    /// can land — is a duplicate and must not be republished.
+    #[test]
+    fn should_publish_state_drops_a_repeat_of_the_current_state() {
+        assert!(!should_publish_state(
+            PlaybackState::Loading,
+            PlaybackState::Loading
+        ));
+        assert!(!should_publish_state(
+            PlaybackState::Playing,
+            PlaybackState::Playing
+        ));
+    }
+
+    /// An actual transition is always published, whatever the two states are.
+    #[test]
+    fn should_publish_state_admits_a_real_transition() {
+        assert!(should_publish_state(
+            PlaybackState::Loading,
+            PlaybackState::Paused
+        ));
+        assert!(should_publish_state(
+            PlaybackState::Playing,
+            PlaybackState::Buffering
+        ));
+        assert!(should_publish_state(
+            PlaybackState::Idle,
+            PlaybackState::Loading
+        ));
     }
 }

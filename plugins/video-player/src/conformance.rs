@@ -337,8 +337,40 @@ fn every_control_call_after_close_reports_closed() {
     assert_eq!(session.set_rate(2.0), Err(VideoError::Closed));
     assert_eq!(session.set_volume(0.1), Err(VideoError::Closed));
     assert_eq!(session.set_looping(false), Err(VideoError::Closed));
-    // The last published state stays readable after close.
-    assert_eq!(session.snapshot().state, PlaybackState::Loading);
+    // A closed session reads Idle — the backend publishes it as the last
+    // thing its own close does.
+    assert_eq!(session.snapshot().state, PlaybackState::Idle);
+}
+
+#[test]
+fn closing_publishes_idle_to_the_snapshot_and_listener() {
+    let session = open();
+    let (events, _handle) = recording_listener(&session);
+
+    session.close();
+
+    assert_eq!(session.snapshot().state, PlaybackState::Idle);
+    assert_eq!(
+        *events.lock().expect("events"),
+        vec![PlayerEvent::StateChanged(PlaybackState::Idle)]
+    );
+}
+
+#[test]
+fn a_second_close_publishes_nothing_more() {
+    let session = open();
+    let (events, _handle) = recording_listener(&session);
+
+    session.close();
+    session.close();
+    drop(session);
+
+    // Idempotent at the wrapper: the backend's own close — and so its Idle
+    // publish — runs exactly once, matching `close_is_idempotent_and_closes_exactly_once`.
+    assert_eq!(
+        *events.lock().expect("events"),
+        vec![PlayerEvent::StateChanged(PlaybackState::Idle)]
+    );
 }
 
 #[test]

@@ -50,14 +50,23 @@ use crate::{
 /// A handle obtained from [`Self::new`] holds the *only* reference to its
 /// [`crate::ListenerHandle`], so dropping it (or letting it go out of scope)
 /// unregisters the listener immediately — the five signals simply stop
-/// receiving updates and keep reporting whatever they last saw. This does
-/// **not** close the underlying session; call [`Self::close`] explicitly
-/// (or drop the [`crate::PlayerSession`] itself) to release the platform
-/// player. A handle obtained from [`use_video_player`] shares that
+/// receiving updates and keep reporting whatever they last saw. The handle
+/// also owns the [`crate::PlayerSession`] it was built from, so dropping the
+/// last handle drops that session too, and the session's own `Drop` closes
+/// the platform player. The listener is always unregistered *before* the
+/// session goes (field order below is load-bearing), so the `Idle` a
+/// backend publishes as its close completes never reaches the signals.
+/// Call [`Self::close`] explicitly to release the player while the handle
+/// is still alive. A handle obtained from [`use_video_player`] shares that
 /// reference with a registered `on_cleanup`, so an *early* drop of the
 /// returned handle alone does not unregister the listener — see that
 /// function's own doc.
 pub struct VideoPlayerHandle {
+    // Declared first so it drops first: Rust drops fields in declaration
+    // order, and the listener must be unregistered before `session` — the
+    // last strong reference in ordinary use — closes the backend and
+    // publishes its final `Idle`.
+    listener: Arc<ListenerHandle>,
     session: Arc<PlayerSession>,
     /// The session's lifecycle state, seeded from [`PlayerSnapshot::state`]
     /// and updated on every [`PlayerEvent::StateChanged`] — also written to
@@ -79,14 +88,6 @@ pub struct VideoPlayerHandle {
     /// other state — updated on [`PlayerEvent::Error`] in the same write
     /// that also sets [`Self::state`] to [`PlaybackState::Error`].
     pub error: RwSignal<Option<VideoError>>,
-    /// The registration keeping the listener above installed, `Arc`-shared
-    /// (rather than a bare [`crate::ListenerHandle`]) so [`use_video_player`]
-    /// can hold a second reference for its `on_cleanup` registration without
-    /// this type needing to implement `Clone` itself — see that function's
-    /// doc for why a bare, uniquely-owned handle cannot serve both "return
-    /// it to the caller" and "also drop it from `on_cleanup`" at once.
-    /// Unregistration happens when the *last* reference drops.
-    listener: Arc<ListenerHandle>,
 }
 
 impl VideoPlayerHandle {

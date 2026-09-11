@@ -230,7 +230,12 @@ impl Default for PlayerOptions {
 /// [`PlaybackState::from_code`] is the only place they are decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackState {
-    /// Nothing loaded yet — a session's state before its backend publishes.
+    /// Nothing loaded: a session's state before its backend has published
+    /// anything, and again after [`PlayerSession::close`] — every backend
+    /// publishes `Idle` as the last thing its own close does, so a closed
+    /// session's [`PlayerSession::snapshot`] reads `Idle` regardless of
+    /// platform, and every control call issued after close reports
+    /// [`VideoError::Closed`] rather than reaching it.
     Idle,
     /// The item is being prepared; no frame is available yet.
     Loading,
@@ -504,8 +509,11 @@ impl PlayerSession {
     /// later call does nothing, and dropping a session runs exactly this,
     /// so an app that never calls it still releases the player.
     ///
-    /// Every control call after this reports [`VideoError::Closed`];
-    /// [`Self::snapshot`] keeps answering with the last published state.
+    /// Every control call after this reports [`VideoError::Closed`], and
+    /// [`Self::snapshot`] answers [`PlaybackState::Idle`]: every backend
+    /// (Android, Apple, and the test mock) publishes `Idle` as the last thing
+    /// its own close does, so a closed session reads the same way regardless
+    /// of platform.
     ///
     /// Unlike the control methods this is *not* refused from inside a
     /// listener: it returns nothing, so it could not report a refusal, and
