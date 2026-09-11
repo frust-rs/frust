@@ -101,6 +101,67 @@
 //! Material 3 and the HIG would keep it focusable, and this widget deliberately
 //! does not).
 //!
+//! # Selection gestures and the toolbar
+//!
+//! Four gestures reach the selection, and only two of them raise the toolbar:
+//!
+//! * a **stationary long-press** ([`LONG_PRESS_MS`](crate::gesture) held within
+//!   [`TOUCH_SLOP`]) selects the word under the press point and opens the
+//!   toolbar — Android's gesture, and the only one a touch-only device has;
+//! * a **double-tap** (a second press within
+//!   [`DOUBLE_TAP_MS`](crate::gesture) and [`TOUCH_SLOP`] of the last one)
+//!   selects the word and deliberately opens **nothing**: it is a selection
+//!   gesture, and a bar appearing under a word the user is about to type over
+//!   is in the way;
+//! * a **tap inside an existing selection** keeps that selection and toggles
+//!   the toolbar on the release — fire-on-up-inside like every other baseline
+//!   widget, so a drag that starts inside a selection is still an ordinary
+//!   caret drag;
+//! * a **secondary press** claims focus (starting a session if there was none —
+//!   the desktop context-menu gesture; no mobile shell delivers `Secondary`),
+//!   moves no caret, and toggles the toolbar.
+//!
+//! Everything else puts it away: any text change, a blur or focus release, a
+//! scroll, Escape, any primary `Down`, and any applied [`EditCommand`]. A
+//! `Cancel` is the one exception — it clears the in-flight gesture and touches
+//! neither the selection nor the toolbar, per the never-mutate-on-cancel
+//! convention.
+//!
+//! **The long-press timer is measured across paints**, exactly as
+//! [`crate::gesture`]'s is and for the same reason: only the paint pass carries
+//! a clock ([`PaintCtx::frame_time`]). A press records its epoch on the first
+//! paint after the `Down`, and the paint that observes the threshold crossed
+//! marks the hold elapsed, latches
+//! [`frust_core::mark_pending_result_flush`] and requests a plain
+//! continuation frame — plain, not the blink's paced one, because a long-press
+//! must fire at its threshold in wall time even on a frame-gated shell, and
+//! even while `reduce_motion` has frozen the blink. The word is actually
+//! selected on the next pass carrying an [`EventCtx`]: the
+//! [`InputEvent::Housekeeping`] broadcast that flush produces, or an in-slop
+//! `Move`/`Up` that arrives first.
+//!
+//! **The toolbar itself is somebody else's widget.** The field hosts an
+//! [`OverlaySlot`] and fills it from the process-wide
+//! [`selection_toolbar_builder`], so `frust-widgets` never names the view that
+//! floats: no builder installed means no pod and no toolbar. The pod is mounted
+//! and dropped in `rebuild` (the only pass with a `BuildCtx`) and only when the
+//! *action set* changes, placed in `paint` against the selection's bounding box
+//! — the union of the displayed
+//! [`selection_rects`](frust_text::TextEditor::selection_rects), or the caret
+//! rect when the selection is collapsed. Its verbs are the field's own call:
+//! copy/cut need a selection and a field that is not
+//! [`obscured`](TextInputView::obscured), cut and paste need an interactive
+//! one, and select-all needs text that is not already wholly selected.
+//!
+//! Under [`SelectionToolbarPolicy::Native`] the field floats nothing and only
+//! publishes the request ([`PaintCtx::publish_selection_toolbar`]) for the
+//! shell to hand to the platform's own edit menu — but it publishes that
+//! request under **both** policies, so the two routes diverge downstream of one
+//! code path. A verb the pod dispatches
+//! ([`EventCtx::dispatch_edit_command`]) is drained in the same pass by
+//! [`EventCtx::take_edit_commands`] and applied through the same
+//! [`handle_command`](TextInputWidget::handle_command) a keyboard chord takes.
+//!
 //! # Multi-line mode
 //!
 //! [`TextInputView::multiline(max_visible_lines)`](TextInputView::multiline)
@@ -222,9 +283,11 @@ use std::time::Duration;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, EditCommand, EditingState, EventCtx, EventResult,
-    FrameTime, ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
-    PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, EditCommand, EditingState, EventCtx,
+    EventResult, FrameTime, ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx,
+    NamedKey, OutsideTap, OverlayBand, OverlayInput, PaintCtx, PaintScene, PointerPhase,
+    SelectionToolbarActions, SelectionToolbarPolicy, SelectionToolbarRequest, SemanticsCtx,
+    TOUCH_SLOP, View, Widget, selection_toolbar_builder, selection_toolbar_policy,
 };
 use frust_text::{
     EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, sanitize_paste, utf16_to_byte,
@@ -234,6 +297,8 @@ use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 
 use crate::authoring::presses;
+use crate::gesture::{DOUBLE_TAP_MS, LONG_PRESS_MS};
+use crate::overlay::{OverlayAlign, OverlayAnchor, OverlayPlacement, OverlaySide, OverlaySlot};
 
 /// Default corner radius of the field chrome, in logical px. Overridable
 /// per-instance with [`TextInputView::corner_radius`] — see the module docs'
@@ -261,6 +326,11 @@ const CARET_W: f32 = 1.5;
 const BLINK_MS: f64 = 500.0;
 /// Default field width when the incoming constraints are horizontally unbounded.
 const DEFAULT_WIDTH: f64 = 200.0;
+/// Gap between the selection's bounding box and the floated toolbar, in logical
+/// px — wider than [`crate::DEFAULT_OFFSET`]'s neutral 4px because this anchor
+/// is a run of text rather than a widget's own edge, and a bar sitting 4px off
+/// a line of glyphs reads as touching it.
+const TOOLBAR_GAP: f64 = 8.0;
 
 /// Field background (unthemed fallback; a theme resolves this from `surface`).
 const BG: Color = Color::WHITE;
@@ -644,6 +714,25 @@ impl<State: 'static> TextInputView<State> {
     }
 }
 
+/// The live long-press timer for one press — the field's own copy of
+/// [`crate::gesture`]'s paint-clock recogniser, in the one shape a text field
+/// needs (see the module docs' "Selection gestures and the toolbar").
+///
+/// `Copy` so an event arm can read it by value rather than holding a borrow of
+/// the widget it is about to reassign, exactly as `gesture.rs`'s own recogniser
+/// state does.
+#[derive(Clone, Copy)]
+struct HoldState {
+    /// The frame time the press was first painted at, seeded by that paint
+    /// because the event pass that armed the hold carries no clock. `None`
+    /// until the press has been painted once.
+    started_at: Option<FrameTime>,
+    /// Set by the paint that observes `frame_time - started_at` reaching
+    /// [`LONG_PRESS_MS`]; the word is selected on the next pass that carries an
+    /// [`EventCtx`].
+    elapsed: bool,
+}
+
 /// The retained widget for a [`TextInputView`].
 pub struct TextInputWidget {
     /// The editing engine, always holding the **real** (never masked) text.
@@ -749,8 +838,92 @@ pub struct TextInputWidget {
     /// [`TextInputView::focus_ring_width`]. `None` = `paint` uses
     /// `border_width` while focused too (unchanged appearance).
     focus_ring_width: Option<f64>,
+    /// The portal slot the selection toolbar floats through — see the [module
+    /// docs](self)' "Selection gestures and the toolbar". `()`-stated: the pod
+    /// is built by a process-global builder that knows nothing about this
+    /// field's application state, and speaks back through the edit-command
+    /// queue rather than a callback.
+    toolbar: OverlaySlot<()>,
+    /// The view currently mounted in `toolbar`, kept so the next `rebuild` has
+    /// something to reconcile (or tear down) against — the builder hands back a
+    /// fresh view each call, so there is nothing else to diff with.
+    toolbar_view: Option<AnyView<()>>,
+    /// The action set `toolbar_view` was built for, and the whole rebuild
+    /// guard: an anchor that moved or a selection that grew within the same
+    /// verbs re-places the pod without rebuilding it. `None` = nothing is
+    /// wanted (which is also the state a wanted-but-unbuildable toolbar records,
+    /// so a missing builder is complained about once per state change rather
+    /// than once per frame — see [`TextInputWidget::sync_toolbar`]).
+    toolbar_view_actions: Option<SelectionToolbarActions>,
+    /// Whether the field currently wants its selection toolbar shown. The
+    /// gestures raise it, the hide rules drop it, and `rebuild` turns it into a
+    /// mounted pod (see the [module docs](self)).
+    toolbar_open: bool,
+    /// The selection's bounding box in **absolute window space** as of the last
+    /// paint — what was published, and what the request handed to the builder
+    /// on the next `rebuild` carries. A rebuild runs before the paint that
+    /// would refresh it, so this is deliberately one frame behind; the pod's
+    /// actual placement is recomputed from the live anchor every paint.
+    toolbar_anchor: Rect,
+    /// The window size the last `layout` saw — the second half of the builder's
+    /// argument pair (a toolbar may size or clamp itself against the window it
+    /// floats in), recorded here because `View::rebuild` sees no `LayoutCtx`.
+    window_size: Size,
+    /// Widget-local position of the live primary press, and the flag that says
+    /// the press is still a *tap*: a `Move` past [`TOUCH_SLOP`] clears it, so a
+    /// release with it still set is a press that never wandered.
+    press_pos: Option<Point>,
+    /// The live long-press timer, armed by a primary `Down` inside and cleared
+    /// when it fires, when the press drags past the slop, or when it ends.
+    hold: Option<HoldState>,
+    /// Set when the live press landed inside an existing non-collapsed
+    /// selection, carrying whether the toolbar was open at that moment — the
+    /// toggle's memory, since the press itself already applied the hide rule.
+    /// The release opens the toolbar iff it was closed.
+    tap_in_selection: Option<bool>,
+    /// Set when the light-dismiss notification closed the toolbar for a press
+    /// that is *about to* arrive here as well.
+    ///
+    /// A press outside every floated surface reaches this field **twice**: the
+    /// root delivers [`OutsideTap::Notify`] first, as an overlay broadcast, and
+    /// the press itself second (the registration does not consume it). By the
+    /// time the `Down` arm runs, `toolbar_open` has therefore already been
+    /// cleared — so the tap-in-selection toggle reads this instead, and a
+    /// second tap on a selection closes the bar rather than re-opening it.
+    /// Taken by that arm, and cleared by any blur, so it cannot go stale across
+    /// a press that landed on a sibling and never reached this field at all.
+    outside_press_dismissed: bool,
+    /// The last completed in-slop tap: where it was, and the frame time of the
+    /// last paint before it (the event pass has no clock of its own). A press
+    /// within [`DOUBLE_TAP_MS`] and [`TOUCH_SLOP`] of it is a double-tap.
+    last_tap: Option<(Point, FrameTime)>,
+    /// The frame time of the most recent paint — the event pass's only clock,
+    /// and what both halves of `last_tap` are measured with.
+    last_frame_time: FrameTime,
     on_change: crate::authoring::ErasedArgCallback<String>,
     on_submit: Option<crate::authoring::ErasedArgCallback<String>>,
+}
+
+/// A closed portal slot configured the way a selection toolbar wants it.
+///
+/// `Floating` (a toolbar is not a tooltip: it is the thing the user aims at),
+/// `Interactive` (its whole purpose is being tapped), and
+/// [`OutsideTap::Notify`] **without** consuming — a press elsewhere dismisses
+/// the bar *and* still lands, so the tap that puts it away also moves the caret
+/// where the user pointed. Placement is above the selection, centred, at
+/// [`TOOLBAR_GAP`], flipping below and clamping inside the window when there is
+/// no room (the [`OverlayPlacement`] defaults for both).
+fn new_toolbar_slot() -> OverlaySlot<()> {
+    let mut slot = OverlaySlot::new();
+    slot.set_band(OverlayBand::Floating);
+    slot.set_input(OverlayInput::Interactive);
+    slot.set_outside_tap(OutsideTap::Notify { consume: false });
+    slot.set_placement(
+        OverlayPlacement::on(OverlaySide::Top)
+            .align(OverlayAlign::Center)
+            .offset(TOOLBAR_GAP),
+    );
+    slot
 }
 
 /// Whether `pos` (widget-local) lies within a `size`-sized field.
@@ -984,6 +1157,12 @@ impl TextInputWidget {
         let after = self.editor.text().to_string();
         if after != before {
             (self.on_change)(ctx, after);
+            // Hide rule: a toolbar offers verbs for a *selection*, and an edit
+            // is what makes that selection stale — it either replaced the run
+            // the bar was pointing at or moved it. Selection-only edits (a
+            // caret move, a drag, a word select) leave it alone, which is what
+            // lets a long-press select and open in the same pass.
+            self.hide_toolbar(ctx);
         }
         self.publish(ctx);
         ctx.request_redraw();
@@ -1049,17 +1228,20 @@ impl TextInputWidget {
         )
     }
 
-    /// Place (or extend the selection to) the caret nearest a widget-local
-    /// pointer position.
+    /// Apply a **pointer-resolved** edit op — one whose coordinates address the
+    /// layout the user is looking at rather than the buffer.
     ///
-    /// Unobscured this is just [`EditOp::MoveToPoint`] on the real editor.
-    /// Obscured, the point must be resolved against the *masked* layout — the
-    /// glyphs the user actually sees, whose advances differ from the real
-    /// text's — and the resulting offsets mapped back onto the real buffer, so
-    /// a tap lands on the same character it visually points at.
-    fn move_to_point(&mut self, ctx: &mut EventCtx, x: f32, y: f32, select: bool) {
+    /// Unobscured this is just `op` on the real editor. Obscured, the point has
+    /// to be resolved against the *masked* layout — the glyphs actually on
+    /// screen, whose advances differ from the real text's — and the resulting
+    /// offsets mapped back onto the real buffer, so a press lands on the same
+    /// character it visually points at. Both pointer gestures that reach the
+    /// editor ([`move_to_point`](Self::move_to_point) and
+    /// [`select_word_at_point`](Self::select_word_at_point)) need exactly that
+    /// translation, which is why it lives here once.
+    fn apply_display_op(&mut self, ctx: &mut EventCtx, op: EditOp) {
         if self.mask_editor.is_none() {
-            self.apply_edit(ctx, EditOp::MoveToPoint { x, y, select });
+            self.apply_edit(ctx, op);
             return;
         }
         let (masked_base, masked_extent) = {
@@ -1067,7 +1249,7 @@ impl TextInputWidget {
                 .mask_editor
                 .as_mut()
                 .expect("obscured field has a mask editor");
-            mask.apply(EditOp::MoveToPoint { x, y, select }, &mut self.text_ctx);
+            mask.apply(op, &mut self.text_ctx);
             let m = mask.editing_state_bytes();
             (m.base, m.extent)
         };
@@ -1081,6 +1263,186 @@ impl TextInputWidget {
         self.editor
             .apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
         self.finish_edit(ctx, before);
+    }
+
+    /// Place (or extend the selection to) the caret nearest a widget-local
+    /// pointer position. Masking-aware — see
+    /// [`apply_display_op`](Self::apply_display_op).
+    fn move_to_point(&mut self, ctx: &mut EventCtx, x: f32, y: f32, select: bool) {
+        self.apply_display_op(ctx, EditOp::MoveToPoint { x, y, select });
+    }
+
+    /// Select the whole word under a widget-local pointer position — what a
+    /// long-press and a double-tap both resolve to. Masking-aware for
+    /// [`move_to_point`](Self::move_to_point)'s reason: an obscured field's
+    /// "word" is a run of bullets, and it is the mask's advances that decide
+    /// which run the press is inside.
+    fn select_word_at_point(&mut self, ctx: &mut EventCtx, x: f32, y: f32) {
+        self.apply_display_op(ctx, EditOp::SelectWordAtPoint { x, y });
+    }
+
+    /// Put the toolbar away, repainting only if it was actually up — every hide
+    /// rule in the module docs funnels through here.
+    fn hide_toolbar(&mut self, ctx: &mut EventCtx) {
+        if self.toolbar_open {
+            self.toolbar_open = false;
+            ctx.request_redraw();
+        }
+    }
+
+    /// Forget the in-flight gesture: the hold timer, the press point and the
+    /// tap-in-selection candidate. Touches neither the selection nor the
+    /// toolbar, which is what makes it the whole of a `Cancel`'s work.
+    fn clear_gesture(&mut self) {
+        self.hold = None;
+        self.press_pos = None;
+        self.tap_in_selection = None;
+    }
+
+    /// Whether a press at `pos` continues the last tap into a double-tap:
+    /// within [`TOUCH_SLOP`] of it and within [`DOUBLE_TAP_MS`] of when it
+    /// landed, both measured against the paint clock (`last_frame_time`),
+    /// since the event pass carries none.
+    fn is_double_tap(&self, pos: Point) -> bool {
+        self.last_tap.is_some_and(|(prev, at)| {
+            (pos - prev).hypot() <= TOUCH_SLOP
+                && self.last_frame_time.saturating_sub(at).as_secs_f64() * 1000.0 <= DOUBLE_TAP_MS
+        })
+    }
+
+    /// The offset from the field's own origin to the text content's — what a
+    /// layout-local rect is translated by to become widget-local.
+    fn content_offset(&self, height: f64) -> Vec2 {
+        Vec2::new(self.pad_x, self.content_origin_y(height))
+    }
+
+    /// Whether a widget-local `pos` lands inside the current selection.
+    ///
+    /// Tested against the *displayed* selection rects (the masked mirror's,
+    /// while obscured) for [`move_to_point`](Self::move_to_point)'s reason: the
+    /// user is pointing at glyphs, not at byte offsets. Always false for a
+    /// collapsed selection, which has no rects at all.
+    fn point_in_selection(&self, pos: Point, height: f64) -> bool {
+        let off = self.content_offset(height);
+        self.display()
+            .selection_rects()
+            .iter()
+            .any(|r| (*r + off).contains(pos))
+    }
+
+    /// Where the toolbar is anchored, in **widget-local** space: the bounding
+    /// box of the displayed selection, or the caret rect while the selection is
+    /// collapsed (a secondary press with no selection still needs somewhere to
+    /// hang the bar).
+    fn selection_anchor(&self, height: f64) -> Rect {
+        let rects = self.display().selection_rects();
+        let bounds = rects
+            .into_iter()
+            .reduce(|a, b| a.union(b))
+            .or_else(|| self.display().cursor_rect(self.caret_width))
+            .unwrap_or(Rect::ZERO);
+        bounds + self.content_offset(height)
+    }
+
+    /// Which verbs the toolbar may offer for the current state.
+    ///
+    /// The field's own call, not the toolbar's (see
+    /// [`SelectionToolbarActions`]): an obscured field hands out neither the
+    /// real buffer nor its bullet mirror, so copy and cut are refused there
+    /// exactly as [`clipboard_selection`](Self::clipboard_selection) refuses
+    /// them; cut and paste additionally need an interactive field; and
+    /// select-all is pointless with no text or with all of it already selected.
+    fn toolbar_actions(&self) -> SelectionToolbarActions {
+        let text = self.editor.text();
+        let selected = self.editor.selected_text();
+        let has_selection = selected.is_some();
+        // A selection is one contiguous slice of the buffer, so covering its
+        // whole length is the same statement as covering all of it.
+        let all_selected = selected.is_some_and(|s| s.len() == text.len());
+        SelectionToolbarActions {
+            copy: has_selection && !self.obscured,
+            cut: has_selection && !self.obscured && self.interactive(),
+            paste: self.interactive(),
+            select_all: !text.is_empty() && !all_selected,
+        }
+    }
+
+    /// Fire a long-press whose threshold a paint already observed, reporting
+    /// whether it fired.
+    ///
+    /// Called from the first pass that carries an [`EventCtx`] — the
+    /// [`InputEvent::Housekeeping`] broadcast the marking paint latched, or an
+    /// in-slop `Move`/`Up` that arrived first, whichever wins the race (the
+    /// other finds the hold already cleared and is a no-op).
+    fn fire_hold(&mut self, ctx: &mut EventCtx) -> bool {
+        if !self.hold.is_some_and(|hold| hold.elapsed) {
+            return false;
+        }
+        self.hold = None;
+        // The gesture resolved as a long-press: it is no longer a tap (so it
+        // seeds no double-tap) and no longer a toggle candidate (so the release
+        // does not close what this just opened).
+        self.tap_in_selection = None;
+        let Some(pos) = self.press_pos.take() else {
+            return false;
+        };
+        let (x, y) = self.editor_point(pos, ctx.size().height);
+        // Selects first, opens second: the selection is what the toolbar's own
+        // verbs are computed from, and `finish_edit` inside here resets the
+        // blink and republishes the IME surface as any other edit does.
+        self.select_word_at_point(ctx, x, y);
+        self.toolbar_open = true;
+        ctx.request_redraw();
+        true
+    }
+
+    /// Mount, reconcile or drop the toolbar pod — the `View::rebuild` half of
+    /// hosting it (the only pass carrying a [`BuildCtx`]).
+    ///
+    /// Keyed on the **action set** alone: a moved anchor or a selection that
+    /// grew within the same verbs re-places the existing pod rather than
+    /// rebuilding it, so the toolbar does not flicker while a drag extends a
+    /// selection. A wanted-but-unbuildable toolbar (nothing installed in the
+    /// process-wide builder slot) records the want anyway, so the diagnostic
+    /// below fires once per state change rather than once per frame.
+    fn sync_toolbar(&mut self, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        // Under the Native policy the platform draws it, so the field floats
+        // nothing and only keeps publishing the request from `paint`.
+        let wanted = (self.toolbar_open
+            && self.focused
+            && self.interactive()
+            && selection_toolbar_policy() == SelectionToolbarPolicy::Framework)
+            .then(|| self.toolbar_actions());
+        if wanted == self.toolbar_view_actions {
+            return ChangeFlags::NONE;
+        }
+        let next = wanted.and_then(|actions| match selection_toolbar_builder() {
+            Some(builder) => Some(builder(
+                &SelectionToolbarRequest {
+                    anchor: self.toolbar_anchor,
+                    actions,
+                },
+                self.window_size,
+            )),
+            None => {
+                // Nothing to float: no design system (and no app) installed a
+                // builder, so the framework route has no view to draw. Said
+                // once, in a debug build only — it is a wiring gap worth
+                // hearing about, not an error a release build can act on.
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "frust-widgets: a text field wants a selection toolbar but no builder is \
+                     installed; nothing will float (install one with \
+                     frust_core::set_selection_toolbar_builder)"
+                );
+                None
+            }
+        });
+        let prev = self.toolbar_view.take();
+        let flags = self.toolbar.rebuild(prev.as_ref(), next.as_ref(), ctx);
+        self.toolbar_view = next;
+        self.toolbar_view_actions = wanted;
+        flags
     }
 
     /// Handle a keyboard key event (already focus-gated by the caller).
@@ -1170,6 +1532,9 @@ impl TextInputWidget {
                     NamedKey::Escape => {
                         ctx.release_focus();
                         self.focused = false;
+                        // Escape dismisses the session, and the toolbar with it
+                        // — it is the field's, not a surface of its own.
+                        self.hide_toolbar(ctx);
                         ctx.request_redraw();
                     }
                     // Vertical motion drives the caret across lines in multi-line
@@ -1301,6 +1666,10 @@ impl TextInputWidget {
             }
         }
         self.finish_edit(ctx, before);
+        // A verb answered is a toolbar spent, whichever route delivered it (a
+        // chord, a platform edit menu, or the floated toolbar's own item): the
+        // bar offered these four and one of them has now been taken.
+        self.hide_toolbar(ctx);
         EventResult::Handled
     }
 
@@ -1459,6 +1828,18 @@ impl<State: 'static> View<State> for TextInputView<State> {
             corner_radius: self.corner_radius,
             caret_width: self.caret_width,
             focus_ring_width: self.focus_ring_width,
+            toolbar: new_toolbar_slot(),
+            toolbar_view: None,
+            toolbar_view_actions: None,
+            toolbar_open: false,
+            toolbar_anchor: Rect::ZERO,
+            window_size: Size::ZERO,
+            press_pos: None,
+            hold: None,
+            tap_in_selection: None,
+            outside_press_dismissed: false,
+            last_tap: None,
+            last_frame_time: FrameTime::ZERO,
             on_change: crate::authoring::erase_callback_arg(&self.on_change),
             on_submit: self
                 .on_submit
@@ -1474,7 +1855,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
         &self,
         prev: &Self,
         element: &mut TextInputWidget,
-        _ctx: &mut BuildCtx<'_>,
+        ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures aren't comparable; reinstall the erased adapters unconditionally.
         element.on_change = crate::authoring::erase_callback_arg(&self.on_change);
@@ -1509,6 +1890,12 @@ impl<State: 'static> View<State> for TextInputView<State> {
                 element.release_focus_pending = element.focused;
                 element.focused = false;
                 element.captured = false;
+                // A field that stops being interactive mid-press keeps no
+                // gesture in flight either: the hold timer is capture-gated, so
+                // it could not fire anyway, and leaving it armed would hand the
+                // next press a stale epoch.
+                element.clear_gesture();
+                element.toolbar_open = false;
             }
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
@@ -1523,6 +1910,12 @@ impl<State: 'static> View<State> for TextInputView<State> {
                 element.release_focus_pending = element.focused;
                 element.focused = false;
                 element.captured = false;
+                // A field that stops being interactive mid-press keeps no
+                // gesture in flight either: the hold timer is capture-gated, so
+                // it could not fire anyway, and leaving it armed would hand the
+                // next press a stale epoch.
+                element.clear_gesture();
+                element.toolbar_open = false;
             }
             flags |= ChangeFlags::PAINT;
         }
@@ -1581,7 +1974,19 @@ impl<State: 'static> View<State> for TextInputView<State> {
             element.focus_ring_width = self.focus_ring_width;
             flags |= ChangeFlags::PAINT;
         }
+        // Last: the toolbar's want is computed from the state everything above
+        // may have just changed (a field turned read-only or disabled wants no
+        // toolbar, and a controlled reconcile changes which verbs apply).
+        flags |= element.sync_toolbar(ctx);
         flags
+    }
+
+    fn teardown(&self, element: &mut TextInputWidget, ctx: &mut BuildCtx<'_>) {
+        // The pod is a widget the field mounted; an unmounted field has to tear
+        // it down itself, since nothing else holds a view to tear it through.
+        let prev = element.toolbar_view.take();
+        element.toolbar.rebuild(prev.as_ref(), None, ctx);
+        element.toolbar_view_actions = None;
     }
 }
 
@@ -1644,6 +2049,12 @@ impl Widget for TextInputWidget {
             }
             None => self.content_height() + 2.0 * self.pad_y,
         };
+        // The floated toolbar is laid out against the **window**, never this
+        // field's own constraints — it escapes the field's box entirely (see
+        // `OverlaySlot::layout`). The window size is recorded for the builder,
+        // which `View::rebuild` calls with no `LayoutCtx` in reach.
+        self.window_size = ctx.window_size();
+        self.toolbar.layout(ctx);
         bc.constrain(Size::new(width, height))
     }
 
@@ -1661,6 +2072,37 @@ impl Widget for TextInputWidget {
             self.blink_epoch = now;
             self.blink_reset_pending = false;
         }
+        // The event pass has no clock of its own, so it reads the last painted
+        // frame's — that is what dates a completed tap for the double-tap
+        // window (see the module docs' "Selection gestures and the toolbar").
+        self.last_frame_time = now;
+
+        // The long-press timer, measured across paints exactly as
+        // `crate::gesture`'s is: seed the epoch on the press's first painted
+        // frame, mark it elapsed on the frame that crosses the threshold, and
+        // latch the deferred-callback flush so the very next `RenderRoot::rebuild`
+        // dispatches the `Housekeeping` broadcast the fire rides out on.
+        //
+        // The continuation frames are **plain** requests, not the caret blink's
+        // paced one: a long-press has to fire at its threshold in wall time, so
+        // it must not be throttled by a frame gate, and it must keep running
+        // under `reduce_motion`, which stops the blink's requests entirely.
+        if self.captured
+            && let Some(hold) = self.hold.as_mut()
+        {
+            let start = *hold.started_at.get_or_insert(now);
+            if !hold.elapsed {
+                let held_ms = now.saturating_sub(start).as_secs_f64() * 1000.0;
+                if held_ms >= LONG_PRESS_MS {
+                    hold.elapsed = true;
+                    frust_core::mark_pending_result_flush();
+                }
+                // Requested on the crossing frame too: on a dirty-driven
+                // desktop shell that second request is what actually reaches
+                // the rebuild that drains the latch, with no further input.
+                ctx.request_frame();
+            }
+        }
 
         // The pod's recorded focus path (threaded in via `PaintCtx::has_focus`)
         // is authoritative — not our own `self.focused`, which lags after a
@@ -1677,6 +2119,14 @@ impl Widget for TextInputWidget {
         let focused = ctx.has_focus() && self.interactive();
         if self.focused && !focused {
             self.focused = false;
+            // The toolbar belongs to the session that was just blurred out from
+            // under us, so it goes with it: the pod is dropped on the next
+            // rebuild, and nothing is registered from this paint on. The
+            // toggle's memory goes too — a press that dismissed the bar and
+            // then landed on a sibling never reaches the `Down` arm that would
+            // otherwise take it, and this is where that press ends up observed.
+            self.toolbar_open = false;
+            self.outside_press_dismissed = false;
         }
 
         // Chrome: a border-colored rounded rect with an inset background fills in
@@ -1797,6 +2247,33 @@ impl Widget for TextInputWidget {
         if clip_content {
             scene.pop_clip();
         }
+
+        // The selection toolbar, outside the clip because it is not drawn here
+        // at all: the root paints every registered pod after the whole main
+        // tree, which is the only way the bar escapes this field's box.
+        if focused {
+            // Recomputed every painted frame, open or not: the anchor an
+            // ancestor scrolled or a relayout moved follows for free, and a
+            // toolbar opened during the *next* event pass is built (one rebuild
+            // later) against a rect that is already current.
+            let local_anchor = self.selection_anchor(size.height);
+            self.toolbar_anchor = local_anchor + origin.to_vec2();
+            if self.toolbar_open {
+                // Published under **both** policies — it costs one pointer-sized
+                // write and keeps one code path where the platform edit-menu
+                // route needs the same facts (see `frust_core::selection_toolbar`).
+                ctx.publish_selection_toolbar(SelectionToolbarRequest {
+                    anchor: self.toolbar_anchor,
+                    actions: self.toolbar_actions(),
+                });
+                if selection_toolbar_policy() == SelectionToolbarPolicy::Framework {
+                    // The slot takes the anchor in the field's own local space
+                    // and lifts it into window space with the paint origin.
+                    self.toolbar.set_anchor(OverlayAnchor::Rect(local_anchor));
+                    self.toolbar.paint(ctx, size);
+                }
+            }
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
@@ -1815,34 +2292,103 @@ impl Widget for TextInputWidget {
             }
             return EventResult::Ignored;
         }
+        // The floated toolbar gets first refusal: its own input arrives as an
+        // `InputEvent::Overlay` broadcast addressed to this slot's key, and the
+        // slot answers `Some` for exactly what belongs to the surface.
+        if let Some(result) = self.toolbar.event(ctx, event, &mut ()) {
+            // Drained in the same pass the pod dispatched them in — the queue is
+            // pass-scoped, not a mailbox (`EventCtx::dispatch_edit_command`).
+            let commands = ctx.take_edit_commands();
+            if !commands.is_empty() {
+                for cmd in &commands {
+                    self.handle_command(ctx, cmd);
+                }
+                // Re-claim the session the tap was aimed at. The root never
+                // blurs on an overlay press, so this is belt-and-braces rather
+                // than the load-bearing half — what matters is that a verb
+                // taken from the bar leaves the field exactly as focused as it
+                // found it, which is the whole reason the bar is reachable.
+                if ctx.has_focus() {
+                    ctx.request_focus();
+                }
+            }
+            // A press that landed on nothing floated: the light-dismiss signal
+            // this slot registered `OutsideTap::Notify` for. The press itself
+            // is not consumed, so the field's own `Down` arm still runs below —
+            // this only closes the bar early enough that an outside press on a
+            // *sibling* widget closes it too.
+            if self.toolbar.take_outside_down() {
+                self.outside_press_dismissed = self.toolbar_open;
+                self.hide_toolbar(ctx);
+            }
+            return result;
+        }
         match event {
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
                     if inside(p.position, ctx.size()) {
-                        // Caret placement and selection dragging are
-                        // **primary-only**, deliberately stricter than a
-                        // browser (which places the caret on a right-click
-                        // before opening its context menu): frust has no
-                        // context-menu contract to pair that with yet, so a
-                        // secondary press moves nothing rather than silently
-                        // relocating a caret the user cannot see a menu for.
-                        // It is still consumed, and re-claims an *existing*
-                        // focus session: the root reads any `Down` bubbling no
-                        // claim as a blur, and a right-click must not blur a
-                        // field being typed into or retract its keyboard. It
-                        // never *starts* a session — right-clicking an
-                        // unfocused field raises no keyboard.
+                        // A secondary press is the desktop context-menu gesture
+                        // (no mobile shell delivers one): it claims focus —
+                        // *starting* a session when there was none, which is
+                        // what makes right-clicking an idle field useful —
+                        // moves no caret, and toggles the toolbar over whatever
+                        // is selected, or over the caret when nothing is. The
+                        // caret deliberately stays put where a browser would
+                        // relocate it: the menu opens on the selection the user
+                        // already has, and a right-click that silently collapsed
+                        // it would be the worse surprise.
                         if !presses(p) {
-                            if ctx.has_focus() {
-                                ctx.request_focus();
-                            }
+                            ctx.request_focus();
+                            self.focused = true;
+                            self.toolbar_open = !self.toolbar_open;
+                            // A context press is not part of any tap sequence.
+                            self.clear_gesture();
+                            self.last_tap = None;
+                            self.reset_blink();
+                            self.publish(ctx);
+                            ctx.request_redraw();
                             return EventResult::Handled;
                         }
                         ctx.request_focus();
                         ctx.capture_pointer();
                         self.focused = true;
                         self.captured = true;
+                        // Hide rule: every primary press puts the bar away
+                        // first. What the press turns out to be (a toggle, a
+                        // double-tap, a hold) decides on its own whether to put
+                        // one back up — `was_open` is the toggle's memory.
+                        let was_open =
+                            self.toolbar_open || std::mem::take(&mut self.outside_press_dismissed);
+                        self.toolbar_open = false;
+                        self.press_pos = Some(p.position);
+                        self.hold = None;
+                        self.tap_in_selection = None;
                         let (x, y) = self.editor_point(p.position, ctx.size().height);
+                        // A second press on the same spot within the double-tap
+                        // window selects the word and opens **nothing**: the
+                        // user is selecting, and a bar over the word they are
+                        // about to type over is in the way.
+                        if self.is_double_tap(p.position) {
+                            self.last_tap = None;
+                            self.select_word_at_point(ctx, x, y);
+                            return EventResult::Handled;
+                        }
+                        self.last_tap = None;
+                        self.hold = Some(HoldState {
+                            started_at: None,
+                            elapsed: false,
+                        });
+                        // A press that lands *inside* an existing selection
+                        // neither moves the caret nor collapses it: it is
+                        // either the start of the toolbar toggle (resolved on
+                        // the release, fire-on-up-inside like every other
+                        // baseline widget) or the start of an ordinary caret
+                        // drag, and only the `Move` past the slop can say which.
+                        if self.point_in_selection(p.position, ctx.size().height) {
+                            self.tap_in_selection = Some(was_open);
+                            ctx.request_redraw();
+                            return EventResult::Handled;
+                        }
                         self.move_to_point(ctx, x, y, false);
                         EventResult::Handled
                     } else {
@@ -1852,14 +2398,36 @@ impl Widget for TextInputWidget {
                         if self.focused {
                             ctx.release_focus();
                             self.focused = false;
+                            self.hide_toolbar(ctx);
                             ctx.request_redraw();
                         }
+                        self.clear_gesture();
+                        self.last_tap = None;
+                        self.outside_press_dismissed = false;
                         EventResult::Ignored
                     }
                 }
                 PointerPhase::Move => {
                     if !self.captured {
                         return EventResult::Ignored;
+                    }
+                    // While the press is still within the slop it is a *tap* in
+                    // progress, and a tap must not drag the selection around:
+                    // the only thing an in-slop move can do is deliver a hold
+                    // whose threshold a paint already observed (fire-on-move-
+                    // arrival, so a context menu opens the instant a held
+                    // finger jitters rather than waiting out another frame).
+                    if let Some(down) = self.press_pos {
+                        if (p.position - down).hypot() <= TOUCH_SLOP {
+                            self.fire_hold(ctx);
+                            return EventResult::Handled;
+                        }
+                        // Past the slop: it became a drag. The hold is
+                        // cancelled, the tap-in-selection candidate with it (a
+                        // drag out of a selection is an ordinary caret drag),
+                        // and the press stops being a tap for the double-tap
+                        // window's purposes.
+                        self.clear_gesture();
                     }
                     let (x, y) = self.editor_point(p.position, ctx.size().height);
                     self.move_to_point(ctx, x, y, true);
@@ -1870,6 +2438,27 @@ impl Widget for TextInputWidget {
                         return EventResult::Ignored;
                     }
                     self.captured = false;
+                    // Last chance for a hold whose threshold elapsed with no
+                    // pass to fire it on; it consumes the release outright, so
+                    // a long-press never also resolves as a tap.
+                    if !self.fire_hold(ctx) {
+                        // A release inside a selection the press never left
+                        // toggles the toolbar: up it goes when the press found
+                        // it down, and the press's own hide rule is what closes
+                        // it the second time.
+                        if let Some(was_open) = self.tap_in_selection.take()
+                            && self.press_pos.is_some()
+                        {
+                            self.toolbar_open = !was_open;
+                        }
+                        // Seed the double-tap window, dated by the last painted
+                        // frame — a press that wandered past the slop cleared
+                        // `press_pos` and seeds nothing.
+                        if let Some(down) = self.press_pos {
+                            self.last_tap = Some((down, self.last_frame_time));
+                        }
+                    }
+                    self.clear_gesture();
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -1878,8 +2467,13 @@ impl Widget for TextInputWidget {
                         return EventResult::Ignored;
                     }
                     // A `Cancel` must never touch application state: only clear the
-                    // drag flag and request a redraw.
+                    // drag flag and the in-flight gesture (never the selection,
+                    // and never the toolbar — a gesture stolen mid-press says
+                    // nothing about whether the bar should still be up), and
+                    // request a redraw.
                     self.captured = false;
+                    self.clear_gesture();
+                    self.last_tap = None;
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -1889,6 +2483,7 @@ impl Widget for TextInputWidget {
                     return EventResult::Ignored;
                 }
                 self.focused = true;
+                self.last_tap = None;
                 self.handle_key(ctx, &k.key, k.modifiers)
             }
             InputEvent::Ime(e) => {
@@ -1896,6 +2491,7 @@ impl Widget for TextInputWidget {
                     return EventResult::Ignored;
                 }
                 self.focused = true;
+                self.last_tap = None;
                 self.handle_ime(ctx, e)
             }
             // A clipboard verb is focus-routed like `Key`/`Ime` and gated the
@@ -1906,15 +2502,30 @@ impl Widget for TextInputWidget {
                     return EventResult::Ignored;
                 }
                 self.focused = true;
+                self.last_tap = None;
                 self.handle_command(ctx, cmd)
             }
-            InputEvent::Scroll { .. } => EventResult::Ignored,
-            // A leaf with nothing deferred: the broadcast is a harmless
-            // fall-through (it must not touch the editor, the caret, or focus).
-            InputEvent::Housekeeping => EventResult::Ignored,
-            // A field hosting no overlay of its own ignores a broadcast
-            // addressed to another owner: every non-owner widget follows this
-            // contract and falls through unchanged.
+            // Hide rule: the anchor just moved out from under the bar. The
+            // scroll itself is still somebody else's (this field scrolls
+            // nothing of its own horizontally, and its multi-line offset is
+            // caret-driven), so it stays unconsumed.
+            InputEvent::Scroll { .. } => {
+                self.hide_toolbar(ctx);
+                self.last_tap = None;
+                EventResult::Ignored
+            }
+            // The delivery vehicle for a long-press whose threshold an earlier
+            // paint observed (see the module docs' "Selection gestures and the
+            // toolbar"): the soonest pass carrying a real `EventCtx` when no
+            // pointer event arrived first. Still never consumed — a broadcast
+            // reports `Ignored` whatever it did.
+            InputEvent::Housekeeping => {
+                self.fire_hold(ctx);
+                EventResult::Ignored
+            }
+            // A floated surface's own input, already offered to the slot above:
+            // reaching this arm means the broadcast was addressed to some other
+            // owner's surface, which is none of this field's business.
             InputEvent::Overlay(_) => EventResult::Ignored,
         }
     }
@@ -1961,8 +2572,12 @@ impl Widget for TextInputWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust_core::{FrameTime, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot};
+    use frust_core::{
+        FrameTime, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot, ScrollDelta,
+        SelectionToolbarBuilder, set_selection_toolbar_builder, set_selection_toolbar_policy,
+    };
     use std::any::Any;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct AppState {
@@ -2053,19 +2668,35 @@ mod tests {
     }
 
     #[test]
-    fn a_secondary_press_neither_focuses_nor_moves_the_caret_nor_blurs() {
+    fn a_secondary_press_focuses_opens_the_toolbar_and_moves_no_caret() {
         let mut state = AppState::default();
         let mut root = harness(&mut state);
 
-        // Unfocused: a right-click takes no focus and opens no IME session,
-        // deliberately stricter than a browser (which places a caret first).
+        // Unfocused: a right-click is the desktop context-menu gesture, so it
+        // *starts* a session (a menu over a field nobody is editing is still
+        // the field's menu) and opens the toolbar over the caret.
         root.event(
             &mut state,
             &secondary_pointer(PointerPhase::Down, 10.0, 10.0),
         );
-        assert!(!root.is_focus_active());
-        assert!(!widget(&root).focused);
-        assert!(root.ime_state().is_none());
+        assert!(root.is_focus_active(), "a context press claims focus");
+        assert!(widget(&root).focused);
+        assert!(
+            root.ime_state().is_some_and(|ime| ime.active),
+            "and publishes the session's IME surface like any other focus claim"
+        );
+        assert!(widget(&root).toolbar_open, "and opens the toolbar");
+
+        // Again: the toggle puts it away, leaving the session standing.
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert!(
+            !widget(&root).toolbar_open,
+            "a second context press closes it"
+        );
+        assert!(root.is_focus_active(), "and never blurs the field");
 
         // Focused and typed into: a right-click anywhere in the field leaves the
         // caret where it is, and leaves the live session alone — it is consumed
@@ -2092,6 +2723,7 @@ mod tests {
         assert!(!widget(&root).captured, "and starts no selection drag");
         assert!(root.is_focus_active(), "the typing session survives it");
         assert!(widget(&root).focused);
+        assert!(widget(&root).toolbar_open, "and it opens the toolbar");
     }
 
     #[test]
@@ -2475,8 +3107,12 @@ mod tests {
         // paced (CosmeticLoop) request, the same classification the
         // design-system decorative loops (skeleton/progress/dots/toast) use,
         // since the blink is an indefinite toggle with no endpoint the mobile
-        // frame gate may throttle.
+        // frame gate may throttle. Focused with a *completed* tap: a finger
+        // still down is a live long-press timer, whose continuation frames are
+        // deliberately unpaced (see `the_long_press_timer_requests_plain_frames_
+        // while_the_blink_paces`).
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
         let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(outcome.needs_frame, "a focused field blinks its caret");
         assert!(
@@ -2495,7 +3131,10 @@ mod tests {
         let mut state = AppState::default();
         let mut root = harness(&mut state);
         let mut sink = NullScene;
+        // A completed tap, so no long-press timer is live — see
+        // `blink_requests_frame_only_while_focused`.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
         let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(outcome.needs_frame_paced_only);
         assert_eq!(
@@ -2517,8 +3156,12 @@ mod tests {
         root.set_theme(Box::new(theme));
         let caret_color = Theme::neutral().scheme().primary;
 
-        // Focus seeds `blink_epoch` at the first paint (t=0).
+        // Focus seeds `blink_epoch` at the first paint (t=0). A completed tap,
+        // so the long-press timer — which keeps requesting plain frames
+        // precisely *because* reduce_motion must not stop a gesture from
+        // firing — is not live here.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
         root.paint(&mut NullScene, ft_ms(0.0));
 
         // Mid-cycle from that epoch — an unfrozen caret would be hidden here
@@ -5441,5 +6084,711 @@ mod tests {
         assert_eq!(widget(&root).editor.text(), "");
         assert_eq!(state.changes, 0);
         assert!(!widget(&root).focused);
+    }
+
+    // -----------------------------------------------------------------------
+    // Selection gestures and the floated toolbar
+    // -----------------------------------------------------------------------
+
+    /// Serialises every test that writes the process-global selection-toolbar
+    /// slots. Rust runs a crate's tests in parallel threads sharing one process,
+    /// so two of them installing a builder would see each other's writes —
+    /// `frust_core::selection_toolbar`'s own tests keep the identical lock for
+    /// the identical reason.
+    static TOOLBAR_LOCK: Mutex<()> = Mutex::new(());
+
+    /// What the toolbar double recorded. `Arc<Mutex<_>>` rather than the
+    /// `Rc<RefCell<_>>` a pod fixture would normally use, because a
+    /// [`SelectionToolbarBuilder`] is a process-global `Send + Sync` closure.
+    type ToolbarLog = Arc<Mutex<Vec<String>>>;
+
+    /// The double's fixed size, so a placement assertion has a rect to expect.
+    const PROBE_SIZE: Size = Size::new(120.0, 40.0);
+    /// The colour the double fills itself with — how a scene log tells the
+    /// floated pod's paint apart from the field's own.
+    const PROBE_COLOR: Color = Color::from_rgb8(0x11, 0x22, 0x33);
+    /// The window every toolbar test lays out in (the `harness` window).
+    const TOOLBAR_WINDOW: Size = Size::new(300.0, 200.0);
+
+    /// A recording paint sink that keeps colours and shapes apart, so a test can
+    /// ask both "was the pod painted?" and "where?".
+    #[derive(Default)]
+    struct SceneLog {
+        fills: Vec<(Point, Size, Color)>,
+        rounded: Vec<(Point, Size)>,
+    }
+
+    impl PaintScene for SceneLog {
+        fn fill_rect(&mut self, o: Point, s: Size, c: Color) {
+            self.fills.push((o, s, c));
+        }
+        fn fill_rounded_rect(&mut self, o: Point, s: Size, _r: f64, _c: Color) {
+            self.rounded.push((o, s));
+        }
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    impl SceneLog {
+        /// The pod's own fill, if it was painted at all.
+        fn probe(&self) -> Option<(Point, Size)> {
+            self.fills
+                .iter()
+                .find(|(_, _, c)| *c == PROBE_COLOR)
+                .map(|(o, s, _)| (*o, *s))
+        }
+
+        /// Whether the pod's fill was the **last** thing painted — i.e. it
+        /// floated above the whole main tree instead of being drawn in place.
+        fn probe_painted_last(&self) -> bool {
+            self.fills.last().is_some_and(|(_, _, c)| *c == PROBE_COLOR)
+        }
+
+        /// The field's own chrome rect (the first rounded rect it fills), which
+        /// is where the field was laid out.
+        fn field_rect(&self) -> Rect {
+            let (o, s) = self
+                .rounded
+                .first()
+                .copied()
+                .expect("the field always paints its chrome");
+            Rect::from_origin_size(o, s)
+        }
+    }
+
+    /// The floated toolbar double: a fixed-size rect that records the presses it
+    /// receives and dispatches [`EditCommand::Copy`] on the release, standing in
+    /// for whatever a design system installs.
+    ///
+    /// Deliberately **not** `crate::selection_toolbar`'s real bar: what is under
+    /// test here is the field's hosting of a pod — placement, routing, the
+    /// command drain — not anyone's button layout.
+    struct ProbeToolbar {
+        log: ToolbarLog,
+    }
+
+    /// The double's retained widget.
+    struct ProbeToolbarWidget {
+        log: ToolbarLog,
+    }
+
+    impl View<()> for ProbeToolbar {
+        type Element = ProbeToolbarWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ProbeToolbarWidget {
+            ProbeToolbarWidget {
+                log: Arc::clone(&self.log),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut ProbeToolbarWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.log = Arc::clone(&self.log);
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for ProbeToolbarWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(PROBE_SIZE)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), PROBE_COLOR);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                self.log
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("{:?}@{},{}", p.phase, p.position.x, p.position.y));
+                // Fire on the release, like the real bar's items do.
+                if p.phase == PointerPhase::Up {
+                    ctx.dispatch_edit_command(EditCommand::Copy);
+                }
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// Install the double in the process-global builder slot (and assert the
+    /// framework route), handing back its log. Call under [`TOOLBAR_LOCK`].
+    fn install_probe_toolbar() -> ToolbarLog {
+        let log: ToolbarLog = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&log);
+        let builder: SelectionToolbarBuilder =
+            Arc::new(move |_request: &SelectionToolbarRequest, _window: Size| {
+                frust_core::any(ProbeToolbar {
+                    log: Arc::clone(&captured),
+                })
+            });
+        set_selection_toolbar_builder(builder);
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+        log
+    }
+
+    /// How many presses the double has seen.
+    fn probe_presses(log: &ToolbarLog) -> usize {
+        log.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// One whole frame: rebuild — the only pass carrying a `BuildCtx`, so the
+    /// only one that can mount or drop the toolbar pod — then layout, then paint
+    /// at `ms`. The loop every shipping shell runs.
+    fn toolbar_frame(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+        logic: &mut impl FnMut(&mut AppState) -> TextInputView<AppState>,
+        state: &mut AppState,
+        ms: f64,
+    ) -> SceneLog {
+        root.rebuild(logic, state);
+        root.layout(TOOLBAR_WINDOW);
+        let mut scene = SceneLog::default();
+        root.paint(&mut scene, ft_ms(ms));
+        scene
+    }
+
+    /// A complete in-slop tap at `(x, y)`.
+    fn tap(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+        state: &mut AppState,
+        x: f64,
+        y: f64,
+    ) {
+        root.event(state, &pointer(PointerPhase::Down, x, y));
+        root.event(state, &pointer(PointerPhase::Up, x, y));
+    }
+
+    /// The selected text, or `None` — spelled out so an assertion reads as the
+    /// selection rather than as an editor call.
+    fn selection(root: &RenderRoot<AppState, TextInputView<AppState>>) -> Option<String> {
+        widget(root).editor.selected_text().map(str::to_owned)
+    }
+
+    /// Open the bar with a context press and paint it, asserting a pod really
+    /// got registered — the starting position each hide-rule leg needs.
+    fn open_toolbar(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+        logic: &mut impl FnMut(&mut AppState) -> TextInputView<AppState>,
+        state: &mut AppState,
+        ms: f64,
+    ) {
+        root.event(state, &secondary_pointer(PointerPhase::Down, 20.0, 10.0));
+        assert!(widget(root).toolbar_open, "the leg starts with the bar up");
+        let scene = toolbar_frame(root, logic, state, ms);
+        assert!(scene.probe().is_some(), "…and with a pod really registered");
+    }
+
+    #[test]
+    fn a_stationary_long_press_selects_the_word_and_floats_the_toolbar() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // The press arms the hold; its first painted frame seeds the epoch.
+        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+        assert!(
+            !widget(&root).toolbar_open,
+            "nothing fires before the threshold"
+        );
+
+        // The frame past the threshold marks it elapsed and latches the flush
+        // that becomes the `Housekeeping` broadcast the fire rides out on.
+        toolbar_frame(&mut root, &mut logic, &mut state, LONG_PRESS_MS + 50.0);
+        assert!(
+            frust_core::has_pending_result_flush(),
+            "the crossing paint latches the deferred-callback flush"
+        );
+        root.event(&mut state, &InputEvent::Housekeeping);
+
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "the word under the press point is selected"
+        );
+        assert!(widget(&root).toolbar_open, "and the toolbar is asked for");
+
+        // The pod is mounted by the next rebuild and registered by its paint,
+        // above the whole field rather than inside it.
+        let scene = toolbar_frame(&mut root, &mut logic, &mut state, LONG_PRESS_MS + 70.0);
+        assert!(
+            scene.probe_painted_last(),
+            "the floated pod paints after the main tree: {:?}",
+            scene.fills
+        );
+
+        // The published request is the selection's own bounding box, absolute.
+        let field = scene.field_rect();
+        let w = widget(&root);
+        let expected = w
+            .display()
+            .selection_rects()
+            .into_iter()
+            .reduce(|a, b| a.union(b))
+            .expect("a non-collapsed selection has rects")
+            + Vec2::new(w.pad_x, w.content_origin_y(field.height()))
+            + field.origin().to_vec2();
+        let published = root
+            .selection_toolbar()
+            .expect("an open toolbar publishes its request under either policy");
+        assert_eq!(published.anchor, expected);
+        assert_eq!(
+            published.actions,
+            SelectionToolbarActions {
+                copy: true,
+                cut: true,
+                paste: true,
+                select_all: true,
+            },
+            "a word selected out of a longer line enables all four verbs"
+        );
+    }
+
+    #[test]
+    fn a_drag_past_the_slop_cancels_the_hold_and_selects_instead() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+        // Past the slop well before the threshold: the gesture became a drag.
+        root.event(
+            &mut state,
+            &pointer(PointerPhase::Move, 20.0 + TOUCH_SLOP + 80.0, 10.0),
+        );
+        toolbar_frame(&mut root, &mut logic, &mut state, 200.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, LONG_PRESS_MS + 100.0);
+        assert!(
+            !frust_core::has_pending_result_flush(),
+            "a cancelled hold latches nothing, however long the finger stays down"
+        );
+
+        root.event(&mut state, &InputEvent::Housekeeping);
+        assert!(
+            !widget(&root).toolbar_open,
+            "a drag raises no toolbar of its own"
+        );
+        let selected = selection(&root).expect("the drag extended a selection");
+        assert!(
+            selected.ends_with("world"),
+            "the selection followed the pointer to the end of the line, rather than \
+             snapping to the word under the press: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn a_double_tap_selects_the_word_and_a_late_second_tap_only_places_the_caret() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // A tap, then a second one on the same spot a second later: past the
+        // window, so it is an ordinary caret placement. This leg runs first,
+        // while nothing is selected — a second press landing *inside* a
+        // selection is the toggle gesture, which owns that case.
+        tap(&mut root, &mut state, 20.0, 10.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, 900.0);
+        root.event(&mut state, &pointer(PointerPhase::Down, 21.0, 10.0));
+        assert_eq!(
+            selection(&root),
+            None,
+            "past DOUBLE_TAP_MS the press is just a press"
+        );
+        root.event(&mut state, &pointer(PointerPhase::Up, 21.0, 10.0));
+
+        // The same pair inside the window: the word under it is selected.
+        toolbar_frame(&mut root, &mut logic, &mut state, 1000.0);
+        root.event(&mut state, &pointer(PointerPhase::Down, 21.0, 10.0));
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "the second press of a double-tap selects the word"
+        );
+        assert!(
+            !widget(&root).toolbar_open,
+            "and deliberately raises nothing over the word it just picked"
+        );
+    }
+
+    #[test]
+    fn a_tap_inside_the_selection_toggles_the_toolbar_and_keeps_the_selection() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // Get a selection the honest way, then leave the double-tap window.
+        tap(&mut root, &mut state, 20.0, 10.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, 100.0);
+        tap(&mut root, &mut state, 21.0, 10.0);
+        assert_eq!(selection(&root).as_deref(), Some("hello"));
+        toolbar_frame(&mut root, &mut logic, &mut state, 600.0);
+
+        // A press inside that selection leaves it exactly alone…
+        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "the press neither collapses the selection nor moves the caret"
+        );
+        assert!(
+            !widget(&root).toolbar_open,
+            "and nothing opens on the press itself"
+        );
+        // …and the release raises the bar, fire-on-up-inside.
+        root.event(&mut state, &pointer(PointerPhase::Up, 20.0, 10.0));
+        assert!(widget(&root).toolbar_open, "the release opens the toolbar");
+        assert_eq!(selection(&root).as_deref(), Some("hello"));
+
+        // The same tap again toggles it away, still without disturbing the
+        // selection it is pointing at.
+        toolbar_frame(&mut root, &mut logic, &mut state, 1200.0);
+        tap(&mut root, &mut state, 20.0, 10.0);
+        assert!(
+            !widget(&root).toolbar_open,
+            "a second tap inside the selection closes it"
+        );
+        assert_eq!(selection(&root).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_press_inside_the_floated_toolbar_reaches_the_pod_and_its_copy_reaches_the_field() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // Select a word, then open the bar with a context press — which opens no
+        // capture, so the root's overlay pre-pass is reachable afterwards.
+        tap(&mut root, &mut state, 20.0, 10.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, 100.0);
+        tap(&mut root, &mut state, 21.0, 10.0);
+        assert_eq!(selection(&root).as_deref(), Some("hello"));
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 20.0, 10.0),
+        );
+        let scene = toolbar_frame(&mut root, &mut logic, &mut state, 200.0);
+        assert!(
+            scene.probe_painted_last(),
+            "the pod is registered and floated"
+        );
+
+        // Placed against the selection: centred on it, clear of it by the gap,
+        // and never covering it.
+        let placed = widget(&root).toolbar.window_rect();
+        let anchor = root
+            .selection_toolbar()
+            .expect("the request is published while the bar is up")
+            .anchor;
+        assert_eq!(placed.size(), PROBE_SIZE, "placement never resizes the pod");
+        assert_eq!(
+            placed.y0,
+            anchor.y1 + TOOLBAR_GAP,
+            "flipped below the selection and the gap clear of it — a field at the \
+             top of the window has no room above it"
+        );
+        assert_eq!(
+            placed.x0,
+            crate::DEFAULT_PADDING,
+            "centred on the selection where it fits and shifted back inside the \
+             window's padding where it does not — a 120px bar centred on a word \
+             near the leading edge hangs outside"
+        );
+
+        // A press inside it reaches the pod, and the field keeps its session.
+        let hit = placed.center();
+        root.event(&mut state, &pointer(PointerPhase::Down, hit.x, hit.y));
+        assert_eq!(probe_presses(&log), 1, "the press was routed into the pod");
+        assert!(
+            root.is_focus_active(),
+            "a press on the bar never blurs the field it acts on"
+        );
+        assert!(
+            widget(&root).toolbar_open,
+            "and a press alone takes no verb"
+        );
+
+        // The release dispatches Copy, which the field drains and applies.
+        root.event(&mut state, &pointer(PointerPhase::Up, hit.x, hit.y));
+        assert_eq!(probe_presses(&log), 2);
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("hello"),
+            "the pod's dispatched verb was applied by the field, not by the pod"
+        );
+        assert!(
+            !widget(&root).toolbar_open,
+            "a verb taken closes the bar that offered it"
+        );
+        assert!(root.is_focus_active(), "with the session still standing");
+        assert!(
+            toolbar_frame(&mut root, &mut logic, &mut state, 300.0)
+                .probe()
+                .is_none(),
+            "and the pod is gone from the very next paint"
+        );
+    }
+
+    #[test]
+    fn typing_escape_scrolling_and_an_outside_press_each_put_the_toolbar_away() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // Each leg opens the bar, paints it (so a pod is really registered),
+        // applies one hide rule, and demands it be gone — both from the widget's
+        // own state and from the next painted frame.
+
+        // A text change: the selection the bar was pointing at is stale.
+        open_toolbar(&mut root, &mut logic, &mut state, 100.0);
+        root.event(&mut state, &ch("x"));
+        assert!(!widget(&root).toolbar_open, "typing puts it away");
+        assert!(
+            toolbar_frame(&mut root, &mut logic, &mut state, 120.0)
+                .probe()
+                .is_none(),
+            "and nothing is registered on the next paint"
+        );
+
+        // Escape: the session goes, and the bar with it.
+        open_toolbar(&mut root, &mut logic, &mut state, 200.0);
+        root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+        assert!(!widget(&root).toolbar_open, "Escape puts it away");
+        assert!(!root.is_focus_active());
+        assert!(
+            toolbar_frame(&mut root, &mut logic, &mut state, 220.0)
+                .probe()
+                .is_none()
+        );
+
+        // A scroll: the anchor moved out from under it.
+        open_toolbar(&mut root, &mut logic, &mut state, 300.0);
+        root.event(
+            &mut state,
+            &InputEvent::Scroll {
+                position: Point::new(20.0, 10.0),
+                delta: ScrollDelta::Pixels(0.0, -40.0),
+            },
+        );
+        assert!(!widget(&root).toolbar_open, "a scroll puts it away");
+        assert!(
+            toolbar_frame(&mut root, &mut logic, &mut state, 320.0)
+                .probe()
+                .is_none()
+        );
+
+        // A primary press outside the field: the blur takes it too.
+        open_toolbar(&mut root, &mut logic, &mut state, 400.0);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        assert!(!widget(&root).toolbar_open, "an outside press puts it away");
+        assert!(
+            !root.is_focus_active(),
+            "and blurs the field as it always did"
+        );
+        assert!(
+            toolbar_frame(&mut root, &mut logic, &mut state, 420.0)
+                .probe()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_obscured_field_offers_neither_copy_nor_cut_but_still_offers_paste() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "secret".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, true, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // Focus, select everything, and ask for the bar.
+        tap(&mut root, &mut state, 20.0, 10.0);
+        root.event(&mut state, &edit(EditCommand::SelectAll));
+        assert_eq!(selection(&root).as_deref(), Some("secret"));
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 20.0, 10.0),
+        );
+        toolbar_frame(&mut root, &mut logic, &mut state, 100.0);
+
+        let published = root
+            .selection_toolbar()
+            .expect("an obscured field publishes its request like any other");
+        assert_eq!(
+            published.actions,
+            SelectionToolbarActions {
+                copy: false,
+                cut: false,
+                paste: true,
+                select_all: false,
+            },
+            "the secret is not this widget's to hand out, but writing into it is \
+             ordinary — and everything is already selected"
+        );
+    }
+
+    #[test]
+    fn the_native_policy_publishes_the_request_and_floats_nothing() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        tap(&mut root, &mut state, 20.0, 10.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, 100.0);
+        tap(&mut root, &mut state, 21.0, 10.0);
+        assert_eq!(selection(&root).as_deref(), Some("hello"));
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 20.0, 10.0),
+        );
+        assert!(widget(&root).toolbar_open);
+
+        let scene = toolbar_frame(&mut root, &mut logic, &mut state, 200.0);
+        assert!(
+            scene.probe().is_none(),
+            "the platform draws it: the field floats nothing at all"
+        );
+        assert!(
+            !widget(&root).toolbar.is_open(),
+            "and mounts no pod to float"
+        );
+        assert!(
+            root.selection_toolbar().is_some(),
+            "…while the request a shell hands the platform is published all the same"
+        );
+
+        // Leave the slot as the rest of the process expects to find it.
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+    }
+
+    #[test]
+    fn the_long_press_timer_requests_plain_frames_while_the_blink_paces() {
+        // A finger still down is a live long-press timer, and its continuation
+        // frames are deliberately NOT the blink's paced ones: a frame gate that
+        // throttled them would delay the gesture past its own threshold, and
+        // `reduce_motion` — which stops the blink's requests entirely — must not
+        // stop a gesture from firing at all.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let held = root.paint(&mut NullScene, ft_ms(0.0));
+        assert!(held.needs_frame, "a live hold keeps the frames coming");
+        assert!(
+            !held.needs_frame_paced_only,
+            "a gesture clock is not a cosmetic loop the frame gate may pace"
+        );
+
+        // Released: the hold is gone and only the caret's paced request is left.
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        let idle = root.paint(&mut NullScene, ft_ms(20.0));
+        assert!(
+            idle.needs_frame_paced_only,
+            "with no hold in flight the blink is the only thing asking"
+        );
+
+        // Frozen blink, live hold: the plain request survives reduce_motion.
+        let mut theme = Theme::neutral();
+        theme.motion.reduce_motion = true;
+        root.set_theme(Box::new(theme));
+        // Past the double-tap window, so the next press is an ordinary one that
+        // arms a hold rather than a word-selecting second tap.
+        root.paint(&mut NullScene, ft_ms(400.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let frozen = root.paint(&mut NullScene, ft_ms(420.0));
+        assert!(
+            frozen.needs_frame,
+            "a frozen blink must not freeze the long-press timer"
+        );
+        assert!(!frozen.needs_frame_paced_only);
+    }
+
+    #[test]
+    fn a_cancel_clears_the_hold_without_touching_the_selection_or_the_toolbar() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // A selection, and a bar up over it.
+        tap(&mut root, &mut state, 20.0, 10.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, 100.0);
+        tap(&mut root, &mut state, 21.0, 10.0);
+        assert_eq!(selection(&root).as_deref(), Some("hello"));
+        open_toolbar(&mut root, &mut logic, &mut state, 600.0);
+
+        // A gesture stolen with no press of ours in flight says nothing about
+        // the bar: a Cancel is not one of the hide rules.
+        root.event(&mut state, &pointer(PointerPhase::Cancel, 20.0, 10.0));
+        assert!(
+            widget(&root).toolbar_open,
+            "a Cancel never puts the toolbar away"
+        );
+
+        // And a press the platform steals mid-hold disarms the gesture without
+        // touching the selection it was made over.
+        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Cancel, 20.0, 10.0));
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "a Cancel never touches application state"
+        );
+        assert!(!widget(&root).captured, "it does disarm the drag");
+        assert!(widget(&root).hold.is_none(), "and the hold timer with it");
+        assert!(widget(&root).press_pos.is_none());
+        assert!(widget(&root).tap_in_selection.is_none());
     }
 }
