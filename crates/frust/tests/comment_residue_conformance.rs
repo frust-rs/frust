@@ -102,23 +102,15 @@
 //!     phase-7 conservative default"), while every legitimate domain use
 //!     spells it with a space.
 //!   - A **space-separated** bare-int phase (`Phase 1`, `phase 0`) is banned
-//!     only with a second signal: parenthesized AND capitalized (`(Phase 1
-//!     acceptance: ...)`, `crates/frust-plugin/src/android.rs`), or
-//!     capitalized and preceded by the definite article ("the Phase 4 gate"
-//!     — a *label applied to* something, never an enumeration). Bare
-//!     un-parenthesized `Phase N` is otherwise KEPT, because the real tree
-//!     proves it domain vocabulary in three independent places:
-//!     `crates/frust-render/src/renderer.rs`'s "Phase 1 of the frame"
-//!     encode/present spans, `crates/frust-shell-common/tests/
-//!     pacing_integration.rs`'s "Phase 1 (250ms)" scenario stages (a doc
-//!     comment numbering its own steps — explicitly sanctioned by
-//!     `docs/CODE_STANDARDS.md`), and
-//!     `crates/frust-widgets/src/material/loading_indicator.rs`'s "Phase 0 →
-//!     t exactly 0" animation phase. Case is likewise load-bearing:
-//!     `crates/frust-widgets/src/cupertino/activity_indicator.rs`'s `` "At
-//!     rest (phase 0) spoke 0 is the leading..." `` is an animation
-//!     rest-state citation (lowercase `phase`) that the parenthesized rule
-//!     must not flag.
+//!     when: (1) parenthesized AND capitalized (`(Phase 1 acceptance: ...)`),
+//!     or (2) capitalized and preceded by the definite article ("the Phase 4
+//!     gate"), or (3) capitalized but NOT followed by a recognized
+//!     domain-vocabulary pattern. The three exempted domain patterns are: "Phase
+//!     N of the frame" (renderer-span idiom), "Phase N (" (scenario stages like
+//!     "Phase 1 (250ms)"), and "Phase N →" (animation like "Phase 0 → t exactly
+//!     0"). Bare lowercase `phase` (e.g., "At rest (phase 0) spoke 0...") is
+//!     kept because it denotes domain vocabulary (animation rest-state) rather
+//!     than a plan citation.
 //! - **Plan-task references**: `task-NN`/`task NN` (exactly two digits,
 //!   `task[- ][0-9]{2}\b`) and `task gN` (a single digit, `task g[0-9]\b`,
 //!   the wave-numbering shorthand this repo's own workflow uses) — both
@@ -540,10 +532,36 @@ fn phase_hits(comment: &str, out: &mut Vec<Hit>) {
                 range: idx..bare_end,
                 reason: PHASE_REASON,
             });
+        } else if capitalized && !hyphenated {
+            // Rule E: bare, space-separated, capitalized phase — but exempt known
+            // domain-vocabulary patterns: "Phase N of the frame" (renderer-span
+            // idiom), "Phase N (" (scenario staging like "Phase 1 (250ms)"), and
+            // "Phase N →" (animation). Everything else is likely a plan-phase
+            // citation (e.g., "Phase 5 of this arc").
+            let after_bare = &comment[bare_end..];
+            let trimmed = after_bare.trim_start();
+
+            // Check for "of the frame" — may be preceded by a lowercase letter
+            // like in "Phase 2a of the frame" (frame sub-phase).
+            let is_frame_span = trimmed.starts_with("of the frame") || {
+                // Skip up to one lowercase letter, then check for "of the frame"
+                let after_letter = trimmed
+                    .strip_prefix(|c: char| c.is_ascii_lowercase())
+                    .unwrap_or(trimmed);
+                after_letter.trim_start().starts_with("of the frame")
+            };
+            let is_scenario_stage = trimmed.starts_with('(');
+            let is_animation = trimmed.starts_with('→') || trimmed.starts_with("->");
+
+            if !is_frame_span && !is_scenario_stage && !is_animation {
+                out.push(Hit {
+                    range: idx..bare_end,
+                    reason: PHASE_REASON,
+                });
+            }
         }
-        // Otherwise (bare, un-parenthesized, article-less, or a lowercase
-        // parenthesized int): the renderer-span / scenario-stage /
-        // animation-rest-state idioms — allowlisted.
+        // Otherwise (bare, un-parenthesized, article-less, lowercase, or
+        // exempted domain patterns): allowlisted idioms.
     }
 }
 
@@ -1127,24 +1145,27 @@ mod scan_behavior {
     }
 
     #[test]
-    fn space_separated_bare_int_phase_needs_parens_or_an_article() {
+    fn space_separated_bare_int_phase_needs_domain_pattern_or_other_signal() {
+        // Domain-vocabulary patterns are KEPT:
         assert!(
             !phase_violation("Phase 1 of the frame — the encode span"),
-            "un-parenthesized bare int is the renderer-span idiom"
+            "renderer-span idiom: `Phase N of the frame` is kept"
         );
         assert!(
             !phase_violation("Phase 1 (250ms): a transition and a paced loop both request"),
-            "a test's own numbered scenario stage (pacing_integration.rs)"
+            "scenario-staging idiom: `Phase N (...)` is kept"
         );
         assert!(
             !phase_violation("Phase 0 → t exactly 0."),
-            "an animation phase (loading_indicator.rs)"
+            "animation idiom: `Phase N →` is kept"
         );
         assert!(
             !phase_violation("At rest (phase 0) spoke 0 is the leading one"),
-            "parenthesized but lowercase is the real animation-rest-state idiom \
-             (activity_indicator.rs)"
+            "animation-rest-state idiom: lowercase `(phase N)` is kept"
         );
+
+        // Plan-phase citations are STRIPPED, including bare Phase N without
+        // domain patterns:
         assert!(
             phase_violation("(Phase 1 acceptance: pre-init is a typed error, never a panic)"),
             "parenthesized AND capitalized is a real plan-phase citation (frust-plugin/android.rs)"
@@ -1159,6 +1180,17 @@ mod scan_behavior {
         assert!(
             phase_violation("the Phase 4 gate numbers"),
             "a definite article makes it a label, not an enumeration"
+        );
+        assert!(
+            phase_violation(
+                "accepted limitation (`docs/LIMITATIONS.md`, Phase 5 of this arc)"
+            ),
+            "bare capitalized Phase N not followed by domain pattern — the \
+             selection_toolbar.rs case that the widened rule now catches"
+        );
+        assert!(
+            phase_violation("Phase 2 here is a problem."),
+            "bare capitalized Phase N with no domain pattern is flagged"
         );
     }
 

@@ -181,8 +181,8 @@ pub use frust_core::EditCommand;
 /// see that type's own docs for the two-route split.
 /// [`set_selection_toolbar_builder`] installs the view a `Framework`-policy
 /// pod floats, **replacing** whatever the framework's own baseline (installed
-/// at bootstrap, before the first frame — see `docs/CODE_STANDARDS.md`'s
-/// bootstrap-ordering note) or an earlier design system already installed. A
+/// at bootstrap, before the first frame) or an earlier design system already
+/// installed. A
 /// design system's own installer should reach for
 /// `frust_core::install_selection_toolbar_builder_if_unset` instead — the
 /// cooperative, set-if-unset half of the same pair — so two catalogs linked
