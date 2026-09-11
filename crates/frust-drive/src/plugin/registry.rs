@@ -907,13 +907,6 @@ mod tests {
     /// The `rel_path` above is a repo-root-relative directory that must
     /// actually exist in this checkout — a typo would otherwise surface only
     /// as a Gradle failure in a generated app, far from here.
-    ///
-    /// `video-player` is deliberately skipped: this registry entry lands in
-    /// the video-player plan's Phase 0 (crate skeleton + registry wiring,
-    /// host-testable only), ahead of the Android Gradle module itself
-    /// (`plugins/video-player/platform/android`, a later, separately
-    /// dispatched phase). Every other `GradleModule` entry's directory
-    /// already exists and stays checked.
     #[test]
     fn secure_storage_gradle_module_path_exists_in_this_checkout() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
