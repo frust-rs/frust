@@ -75,6 +75,8 @@ use std::thread::LocalKey;
 
 use kurbo::{Point, Rect, Size, Vec2};
 
+use crate::overlay::OverlayKey;
+
 /// Which physical (or synthetic) button a pointer event carries.
 ///
 /// Touch and pen contacts report [`PointerButton::Primary`]; the secondary /
@@ -409,14 +411,61 @@ pub enum ImeEvent {
     Disabled,
 }
 
+/// What an [`InputEvent::Overlay`] carries into a floated surface.
+///
+/// The key names the surface's owner (see [`OverlayKey`]); the kind is the input
+/// itself, always in **absolute window space** rather than in anyone's local
+/// space — see [`OverlayEventKind`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlayEvent {
+    /// The owner whose registered surface the root hit. Every other widget in
+    /// the tree sees this broadcast and must ignore it.
+    pub key: OverlayKey,
+    /// What happened.
+    pub kind: OverlayEventKind,
+}
+
+/// The input an [`OverlayEvent`] delivers.
+///
+/// # Window space, not local space
+///
+/// Every position here is absolute logical window space, deliberately: the
+/// broadcast reaches the owner by travelling the *main* tree, so the translation
+/// chain it passes through on the way (`ChildPod::event_child` subtracting each
+/// container's origin) describes the owner's position, not the floated pod's.
+/// Translating the payload would therefore corrupt it. The owner instead
+/// subtracts its own registered
+/// [`window_rect`](crate::overlay::OverlayEntry::window_rect) origin before
+/// forwarding into the pod, which is the only offset that means anything — which
+/// is also why [`InputEvent::translated`] returns an overlay event unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverlayEventKind {
+    /// A pointer event inside the surface's rect, positioned in window space.
+    Pointer(PointerEvent),
+    /// A scroll inside the surface's rect, positioned in window space.
+    Scroll {
+        /// Where the scroll occurred, in absolute window space.
+        position: Point,
+        /// How much to scroll.
+        delta: ScrollDelta,
+    },
+    /// A primary press landed outside **every** registered surface — the
+    /// light-dismiss notification, delivered only to entries registered
+    /// [`OutsideTap::Notify`](crate::overlay::OutsideTap::Notify). It carries no
+    /// position: where the press landed is the main tree's business, and an
+    /// owner that wants it can register `consume: false` and watch the press
+    /// arrive there normally.
+    OutsideDown,
+}
+
 /// An input event delivered to the widget tree.
 ///
 /// Pointer gestures and scroll are **hit-tested** (routed by position); keyboard,
 /// IME, and edit-command events are **focus-routed** — delivered straight down
 /// the recorded focus chain with no hit test and no meaningful position (see
 /// [`crate::widget::ChildPod`]'s focus bookkeeping and `frust-widgets`'
-/// `route_event`). [`InputEvent::Housekeeping`] is neither: it is a **broadcast**
-/// that reaches every child unconditionally.
+/// `route_event`). [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`] are
+/// neither: they are **broadcasts** that reach every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A pointer (mouse/touch/pen) gesture event.
@@ -478,17 +527,53 @@ pub enum InputEvent {
     /// codebase ([`crate::widget::TickClass`]), and this variant has nothing to
     /// do with the frame gate.
     Housekeeping,
+    /// **Not user input either**: one floated overlay surface's own input,
+    /// broadcast to the whole tree so it reaches the owner that registered the
+    /// surface, wherever in the tree that owner sits.
+    ///
+    /// # Why a broadcast
+    ///
+    /// The owner of a floated surface is an ordinary widget somewhere in the
+    /// tree, and the pointer that hit its surface is nowhere near its own bounds
+    /// — that is the entire point of floating. Hit-testing the event would
+    /// therefore deliver it to whatever the main tree has under the pointer, and
+    /// focus-routing it would deliver it to a text field that has nothing to do
+    /// with the surface. Broadcasting is the only route that reaches the owner
+    /// without knowing where it is, so this is the **second** broadcast variant
+    /// (see [`InputEvent::is_broadcast`]), and every routing helper's existing
+    /// broadcast-first branch already forwards it correctly with no change.
+    ///
+    /// # Routing contract
+    ///
+    /// **Only the owner whose [`OverlayKey`] matches acts on it; every other
+    /// widget ignores it.** A container forwards it to every child
+    /// unconditionally — no hit test, no capture fast path, no focus gate — and
+    /// reports [`EventResult::Ignored`] regardless, exactly like
+    /// [`Housekeeping`](InputEvent::Housekeeping). A widget that is not an
+    /// overlay owner, or whose key differs, must fall through: the key
+    /// comparison is the whole addressing mechanism.
+    ///
+    /// At the root it is inert in the ways a broadcast must be — it advances no
+    /// hover epoch and never blurs — but, unlike `Housekeeping`, it *is* a real
+    /// user gesture underneath, so a focus request or a pointer capture bubbled
+    /// from inside the surface is honoured (see
+    /// [`crate::app::RenderRoot::event`]).
+    Overlay(OverlayEvent),
 }
 
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
     /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
-    /// [`InputEvent::EditCommand`]) and the
-    /// [`Housekeeping`](InputEvent::Housekeeping) broadcast have no spatial
-    /// position — they are delivered down the focus chain, or to every child, not
-    /// hit-tested — so this reports [`Point::ZERO`] for them; callers must never
-    /// hit-test on it (routing helpers early-return both classes).
+    /// [`InputEvent::EditCommand`]) and the two broadcasts
+    /// ([`Housekeeping`](InputEvent::Housekeeping) and
+    /// [`Overlay`](InputEvent::Overlay)) have no spatial position — they are
+    /// delivered down the focus chain, or to every child, not hit-tested — so
+    /// this reports [`Point::ZERO`] for them; callers must never hit-test on it
+    /// (routing helpers early-return both classes). An overlay event's *payload*
+    /// does carry a position, but in window space rather than in the receiver's
+    /// local space, which is precisely why it is not reported here (see
+    /// [`OverlayEventKind`]).
     pub fn position(&self) -> Point {
         match self {
             InputEvent::Pointer(p) => p.position,
@@ -496,7 +581,8 @@ impl InputEvent {
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
-            | InputEvent::Housekeeping => Point::ZERO,
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => Point::ZERO,
         }
     }
 
@@ -508,7 +594,12 @@ impl InputEvent {
     /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the
     /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
-    /// they are returned unchanged (cloned).
+    /// they are returned unchanged (cloned). An
+    /// [`Overlay`](InputEvent::Overlay) event is returned unchanged for the
+    /// opposite reason — its payload carries a **window-space** position that the
+    /// container chain between the root and the owner must not shift, since that
+    /// chain describes where the *owner* sits and not where the floated surface
+    /// does (see [`OverlayEventKind`]).
     pub fn translated(&self, offset: Vec2) -> InputEvent {
         match self {
             InputEvent::Pointer(p) => InputEvent::Pointer(PointerEvent {
@@ -522,7 +613,8 @@ impl InputEvent {
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
-            | InputEvent::Housekeeping => self.clone(),
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => self.clone(),
         }
     }
 
@@ -541,15 +633,18 @@ impl InputEvent {
 
     /// Whether this event is a broadcast: forwarded to **every** child
     /// unconditionally, with no hit test, no capture fast-path, and no focus
-    /// routing — today exactly [`InputEvent::Housekeeping`].
+    /// routing — [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`].
     ///
     /// Every routing helper branches on this **first**, before its capture,
     /// focus, and hit-test branches (`frust-widgets`'
     /// `route_event`/`route_event_single`, and this crate's own
     /// [`crate::component`] mirror), so a broadcast can never be swallowed by a
-    /// captured child or a `contains()` miss.
+    /// captured child or a `contains()` miss. That existing branch is exactly
+    /// what carries an overlay event to its owner with no router change: the two
+    /// variants differ in what they *mean* (a deferred callback flush vs one
+    /// floated surface's own input), not in how they travel.
     pub fn is_broadcast(&self) -> bool {
-        matches!(self, InputEvent::Housekeeping)
+        matches!(self, InputEvent::Housekeeping | InputEvent::Overlay(_))
     }
 }
 
@@ -894,6 +989,34 @@ thread_local! {
     /// Pass-scoped and thread-local for [`CLIPBOARD_WRITE`]'s reasons.
     static PASTE_REQUEST: Cell<bool> = const { Cell::new(false) };
 
+    /// Edit commands one widget dispatched to another during the request pass
+    /// currently running on this thread — pushed by
+    /// [`EventCtx::dispatch_edit_command`] and drained, in order, by
+    /// [`EventCtx::take_edit_commands`].
+    ///
+    /// **A widget-to-widget channel, not a shell-facing one**, which is what
+    /// makes it different from its three neighbours above: the cursor, the
+    /// clipboard write and the paste request all resolve *at the root* into
+    /// something a shell reads, whereas this queue is drained by another widget
+    /// in the same pass and the root never looks at it. It rides here anyway
+    /// because the two widgets cannot reach each other any other way — a
+    /// selection toolbar floated through [`crate::overlay`] is a pod the *text
+    /// input* owns but does not contain, so the toolbar's "Copy" tap has no
+    /// container path down which to hand the verb back.
+    ///
+    /// **A FIFO, not a last-writer-wins slot**: a toolbar may answer one tap with
+    /// several verbs (a "cut" that is a copy then a delete), and order is
+    /// meaning.
+    ///
+    /// Pass-scoped like its neighbours, and for a sharper reason: an undrained
+    /// command must never re-fire in a later pass — a stale `Cut` applied to
+    /// whatever is selected two gestures later would silently destroy text. A
+    /// pass that ends with the queue non-empty therefore clears it (and says so
+    /// in a debug build — see [`RequestPass::take`]) rather than carrying it.
+    ///
+    /// Thread-local for its neighbours' UI-thread-affinity reason.
+    static EDIT_COMMAND_QUEUE: Cell<Vec<EditCommand>> = const { Cell::new(Vec::new()) };
+
     /// Whether a request pass is open on this thread — `false` at rest, `true` for
     /// the length of one, however many are nested. Owned by [`RequestPass`], which
     /// is the only thing that reads or writes it: [`RequestPass::enter`] captures
@@ -918,7 +1041,7 @@ thread_local! {
 /// stash-and-restore invariant to drift. `T::default()` is each slot's "nobody
 /// asked" state (`None`, `None`, `false`), which is exactly what makes absence
 /// the answer rather than a missing answer.
-struct PassSlot<T: Default + 'static> {
+pub(crate) struct PassSlot<T: Default + 'static> {
     /// The thread-local this half brackets. A `&'static` handle so one generic
     /// body serves every channel — [`LocalKey::with`] needs the `'static`
     /// reference anyway.
@@ -935,7 +1058,7 @@ impl<T: Default + 'static> PassSlot<T> {
     /// `nested` is the shared [`REQUEST_PASS_OPEN`] answer: only an enclosing
     /// pass is owed its value back, since a value found in the slot with no pass
     /// open is a stray (see [`CURSOR_REQUEST`]).
-    fn enter(slot: &'static LocalKey<Cell<T>>, nested: bool) -> Self {
+    pub(crate) fn enter(slot: &'static LocalKey<Cell<T>>, nested: bool) -> Self {
         let stashed = slot.with(|cell| cell.take());
         Self {
             slot,
@@ -944,7 +1067,7 @@ impl<T: Default + 'static> PassSlot<T> {
     }
 
     /// Take what *this* pass recorded in this slot, leaving it empty.
-    fn take(&self) -> T {
+    pub(crate) fn take(&self) -> T {
         self.slot.with(|cell| cell.take())
     }
 }
@@ -953,6 +1076,67 @@ impl<T: Default + 'static> Drop for PassSlot<T> {
     fn drop(&mut self) {
         let restore = std::mem::take(&mut self.restore);
         self.slot.with(|cell| cell.set(restore));
+    }
+}
+
+/// A pass-scoped slot **carrying its own open flag** — [`PassSlot`] made
+/// self-contained, for a channel bracketed by a *different* pass than the event
+/// dispatch.
+///
+/// [`RequestPass`] brackets three channels that open and close together, so one
+/// [`REQUEST_PASS_OPEN`] flag serves all three. A channel scoped to the **paint**
+/// pass instead (the overlay registry and the selection-toolbar publish slot —
+/// see [`crate::overlay`] and [`crate::selection_toolbar`]) cannot share that
+/// flag: a paint pass runs with no event pass open, and an event pass with no
+/// paint pass open, so borrowing the other's flag would answer "is an enclosing
+/// pass of MY kind open?" with another kind's state and either restore a stray
+/// or drop an enclosing pass's work. One flag per bracket is what keeps the
+/// question well-posed.
+///
+/// Everything else is [`PassSlot`]'s, verbatim: enter stashes, [`take`](Self::take)
+/// drains what this pass alone recorded, and `Drop` puts the enclosing pass's
+/// stash back (or leaves the slot clear at the outermost level, so a value
+/// written with no pass open is dropped rather than leaked into the next one).
+///
+/// Unlike [`RequestPass::take`] this drains behind `&self` rather than consuming
+/// the guard: a paint pass resolves its channels *and then* keeps painting
+/// (`RenderRoot::paint` drains the registry, then paints what it drained), so the
+/// bracket has to outlive its own drain.
+pub(crate) struct PassBracket<T: Default + 'static> {
+    /// The value half, which owns the stash/restore invariant.
+    slot: PassSlot<T>,
+    /// This bracket's own "a pass is open" flag.
+    open: &'static LocalKey<Cell<bool>>,
+    /// Whether a pass of this kind was already open when this one entered — put
+    /// back verbatim by `Drop`.
+    was_open: bool,
+}
+
+impl<T: Default + 'static> PassBracket<T> {
+    /// Open a pass over `slot`, tracked by `open`, starting from
+    /// `T::default()` ("nobody has recorded anything").
+    pub(crate) fn enter(
+        slot: &'static LocalKey<Cell<T>>,
+        open: &'static LocalKey<Cell<bool>>,
+    ) -> Self {
+        let was_open = open.with(|flag| flag.replace(true));
+        Self {
+            slot: PassSlot::enter(slot, was_open),
+            open,
+            was_open,
+        }
+    }
+
+    /// Take what *this* pass recorded, leaving the slot empty.
+    pub(crate) fn take(&self) -> T {
+        self.slot.take()
+    }
+}
+
+impl<T: Default + 'static> Drop for PassBracket<T> {
+    fn drop(&mut self) {
+        // The inner `PassSlot` restores the value as it drops, right after this.
+        self.open.with(|flag| flag.set(self.was_open));
     }
 }
 
@@ -1018,6 +1202,11 @@ pub(crate) struct RequestPass {
     clipboard_write: PassSlot<Option<String>>,
     /// The paste-request half.
     paste_request: PassSlot<bool>,
+    /// The widget-to-widget edit-command queue. Bracketed here rather than
+    /// resolved into [`PassRequests`]: the root must never see it (its consumer
+    /// is another widget in the same pass), so this half exists only to bound the
+    /// queue's lifetime to the pass — see [`EDIT_COMMAND_QUEUE`].
+    edit_commands: PassSlot<Vec<EditCommand>>,
     /// Whether a pass was already open when this one entered — put back verbatim
     /// by `Drop`, so an inner pass leaves the enclosing one open and the
     /// outermost leaves the thread at rest.
@@ -1033,6 +1222,7 @@ impl RequestPass {
             cursor: PassSlot::enter(&CURSOR_REQUEST, was_open),
             clipboard_write: PassSlot::enter(&CLIPBOARD_WRITE, was_open),
             paste_request: PassSlot::enter(&PASTE_REQUEST, was_open),
+            edit_commands: PassSlot::enter(&EDIT_COMMAND_QUEUE, was_open),
             was_open,
         }
     }
@@ -1045,6 +1235,24 @@ impl RequestPass {
     /// drained destructively, so a repeat call would report "nobody asked" for a
     /// pass that had already resolved).
     pub(crate) fn take(self) -> PassRequests {
+        // The edit-command queue is drained here but NOT reported: anything left
+        // in it is a command whose intended consumer never called
+        // `EventCtx::take_edit_commands` — a wiring bug in the dispatching
+        // widget, not something the root can act on. Dropping it is the safe
+        // resolution (a command that survived into a later pass would apply to
+        // whatever is selected *then*), and a debug build says so rather than
+        // swallowing it silently.
+        let leaked = self.edit_commands.take();
+        #[cfg(debug_assertions)]
+        if !leaked.is_empty() {
+            eprintln!(
+                "frust-core: {} edit command(s) dispatched but never taken in this \
+                 pass ({leaked:?}); clearing — the dispatching widget's consumer \
+                 must call EventCtx::take_edit_commands in the same pass",
+                leaked.len()
+            );
+        }
+        drop(leaked);
         PassRequests {
             cursor: self.cursor.take(),
             clipboard_write: self.clipboard_write.take(),
@@ -1744,6 +1952,47 @@ impl<'a> EventCtx<'a> {
     /// A `Cut` may write and ask in the same pass; the two slots are independent.
     pub fn request_paste(&mut self) {
         PASTE_REQUEST.with(|slot| slot.set(true));
+    }
+
+    /// Hand an [`EditCommand`] to whichever widget drains the queue later in
+    /// **this** pass — the widget-to-widget half of the clipboard story.
+    ///
+    /// # Why this is not just an `InputEvent::EditCommand`
+    ///
+    /// A selection toolbar and the text input it acts on are two different
+    /// widgets, and the toolbar is a pod its owner floats rather than contains
+    /// (see [`crate::overlay`]), so there is no container path from the toolbar's
+    /// "Copy" tap back down to the field. Re-entering
+    /// [`crate::app::RenderRoot::event`] with a focus-routed
+    /// [`InputEvent::EditCommand`] would be the other option, and is worse: a
+    /// dispatch may not re-enter the root (see that method's reentrancy
+    /// contract), and the toolbar's tap is *already* being routed as an overlay
+    /// broadcast when it decides. So the verb rides a pass-scoped FIFO the owner
+    /// drains the instant its forward returns, and applies to the field itself —
+    /// synchronously, inside the same dispatch.
+    ///
+    /// Order is preserved: commands drain in the order they were dispatched.
+    ///
+    /// A command nobody takes before the pass ends is **dropped** (with a
+    /// debug-build diagnostic) rather than carried into the next pass, where it
+    /// would apply to whatever happened to be selected by then.
+    pub fn dispatch_edit_command(&mut self, cmd: EditCommand) {
+        EDIT_COMMAND_QUEUE.with(|slot| {
+            let mut queue = slot.take();
+            queue.push(cmd);
+            slot.set(queue);
+        });
+    }
+
+    /// Drain everything [`EventCtx::dispatch_edit_command`] queued so far in this
+    /// pass, in dispatch order, leaving the queue empty.
+    ///
+    /// An overlay owner calls this immediately after forwarding an event into its
+    /// floated pod, and applies what comes back to itself. Draining the queue
+    /// (rather than peeking) is what keeps a verb from being applied twice when
+    /// two owners forward in the same pass.
+    pub fn take_edit_commands(&mut self) -> Vec<EditCommand> {
+        EDIT_COMMAND_QUEUE.with(|slot| slot.take())
     }
 
     /// Publish this widget's IME surface (editing state + caret) for the shell.
@@ -2464,6 +2713,172 @@ mod tests {
             copy,
             "a positionless event is returned unchanged by a container's translate"
         );
+    }
+
+    /// An overlay event standing in for one routed into a floated surface.
+    fn overlay(kind: OverlayEventKind) -> InputEvent {
+        InputEvent::Overlay(OverlayEvent {
+            key: OverlayKey::next(),
+            kind,
+        })
+    }
+
+    #[test]
+    fn overlay_is_a_broadcast_and_housekeeping_is_the_only_other_one() {
+        let routed = overlay(OverlayEventKind::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(120.0, 80.0),
+            button: PointerButton::Primary,
+        }));
+        assert!(
+            routed.is_broadcast(),
+            "an overlay event reaches its owner by broadcast, wherever the owner sits"
+        );
+        assert!(
+            !routed.is_focus_routed(),
+            "and not down the focus chain — the surface's owner need not be focused"
+        );
+        assert!(InputEvent::Housekeeping.is_broadcast());
+
+        // ...and nothing else is. Spelled as an exhaustive walk rather than three
+        // spot checks, so a variant added later has to state its own answer here.
+        for event in [
+            InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::ZERO,
+                button: PointerButton::Primary,
+            }),
+            InputEvent::Scroll {
+                position: Point::ZERO,
+                delta: ScrollDelta::Lines(0.0, 1.0),
+            },
+            InputEvent::Key(KeyEvent {
+                key: Key::Named(NamedKey::Enter),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }),
+            InputEvent::Ime(ImeEvent::Enabled),
+            InputEvent::EditCommand(EditCommand::Copy),
+        ] {
+            assert!(
+                !event.is_broadcast(),
+                "only Housekeeping and Overlay broadcast, but {event:?} claims to"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlay_event_carries_no_local_position_and_is_never_translated() {
+        let routed = overlay(OverlayEventKind::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(120.0, 80.0),
+            button: PointerButton::Primary,
+        }));
+        assert_eq!(
+            routed.position(),
+            Point::ZERO,
+            "a broadcast is never hit-tested, so it reports no position to hit-test on"
+        );
+        // The payload's own position is WINDOW space, and the container chain the
+        // broadcast travels describes where the *owner* sits — not where the
+        // floated surface does — so translating it would corrupt it.
+        assert_eq!(
+            routed.translated(Vec2::new(-10.0, -20.0)),
+            routed,
+            "the container chain must not shift a window-space payload"
+        );
+        let scrolled = overlay(OverlayEventKind::Scroll {
+            position: Point::new(120.0, 80.0),
+            delta: ScrollDelta::Pixels(0.0, 12.0),
+        });
+        assert_eq!(scrolled.translated(Vec2::new(5.0, 5.0)), scrolled);
+        let outside = overlay(OverlayEventKind::OutsideDown);
+        assert_eq!(outside.position(), Point::ZERO);
+        assert_eq!(outside.translated(Vec2::new(5.0, 5.0)), outside);
+    }
+
+    #[test]
+    fn edit_commands_drain_in_dispatch_order_within_one_pass() {
+        let pass = RequestPass::enter();
+        let mut count = 0u32;
+        let taken = {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            // The toolbar's "cut" answered as two verbs: order is meaning.
+            ctx.dispatch_edit_command(EditCommand::Copy);
+            ctx.dispatch_edit_command(EditCommand::SelectAll);
+            ctx.dispatch_edit_command(EditCommand::Cut);
+            ctx.take_edit_commands()
+        };
+        assert_eq!(
+            taken,
+            vec![EditCommand::Copy, EditCommand::SelectAll, EditCommand::Cut],
+            "a FIFO, not a last-writer-wins slot"
+        );
+
+        // The drain empties the queue, so a second owner forwarding in the same
+        // pass cannot re-apply the first owner's verbs.
+        let mut second = 0u32;
+        let mut ctx = EventCtx::new(&mut second, Point::ZERO, Size::ZERO);
+        assert!(ctx.take_edit_commands().is_empty());
+        drop(ctx);
+        drop(pass.take());
+    }
+
+    #[test]
+    fn a_leaked_edit_command_is_cleared_with_the_pass_and_never_reaches_the_next() {
+        {
+            let pass = RequestPass::enter();
+            let mut count = 0u32;
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            // Dispatched, and nobody drains it: a wiring bug in the dispatching
+            // widget. The pass resolving is what reports (debug builds) and clears
+            // it — a `Cut` surviving into a later pass would apply to whatever is
+            // selected by then, which is how text gets destroyed silently.
+            ctx.dispatch_edit_command(EditCommand::Cut);
+            drop(ctx);
+            drop(pass.take());
+        }
+
+        let next = RequestPass::enter();
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        assert!(
+            ctx.take_edit_commands().is_empty(),
+            "a leaked command must not survive into the next pass"
+        );
+        drop(ctx);
+        drop(next.take());
+    }
+
+    #[test]
+    fn a_nested_pass_hands_the_enclosing_passs_edit_commands_back() {
+        let outer = RequestPass::enter();
+        let mut count = 0u32;
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.dispatch_edit_command(EditCommand::Copy);
+        }
+        {
+            // A nested dispatch (the overlay pre-pass re-entering `RenderRoot::event`
+            // is the shipped case) starts from an empty queue and must not eat the
+            // enclosing pass's undrained command.
+            let inner = RequestPass::enter();
+            let mut inner_state = 0u32;
+            let mut ctx = EventCtx::new(&mut inner_state, Point::ZERO, Size::ZERO);
+            assert!(ctx.take_edit_commands().is_empty());
+            ctx.dispatch_edit_command(EditCommand::SelectAll);
+            assert_eq!(ctx.take_edit_commands(), vec![EditCommand::SelectAll]);
+            drop(ctx);
+            drop(inner.take());
+        }
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        assert_eq!(
+            ctx.take_edit_commands(),
+            vec![EditCommand::Copy],
+            "the enclosing pass's queue is handed back intact"
+        );
+        drop(ctx);
+        drop(outer.take());
     }
 
     #[test]
