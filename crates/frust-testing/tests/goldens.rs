@@ -416,10 +416,9 @@ fn rfc3339_now_has_the_shape_golden_meta_promises() {
 // exists to reject. [`SAMPLE_TEXT_LONG`](frust_testing::frame::SAMPLE_TEXT_LONG)
 // ("Hello, Hello") is this crate's own established stand-in for "a field with
 // more than one word" (see `frust_testing::corpus::widget`'s `field_stack`,
-// which already uses it for the identical reason) and plays the same
-// structural role the card's own example does: a stationary long-press lands
-// on the SECOND word, not the first, so the gesture is proven to select the
-// word under the press point rather than always the first one.
+// which already uses it for the identical reason): a stationary long-press
+// lands on the SECOND word, not the first, so the gesture is proven to select
+// the word under the press point rather than always the first one.
 //
 // # The toolbar's own labels are a KNOWN, pre-existing font gap
 //
@@ -485,10 +484,9 @@ fn ft_ms(ms: f64) -> FrameTime {
 
 /// Installs `frust_widgets::selection_toolbar` (the real baseline builder,
 /// not a double) into the process-global builder slot if nothing is there
-/// yet — the seam a design system's own bootstrap calls, and the one the card
-/// asks this golden to install for itself since the facade bootstrap that
-/// would otherwise do it never runs in a test binary. Call under
-/// [`TOOLBAR_LOCK`].
+/// yet — the seam a design system's own bootstrap calls, installed here by
+/// hand since the facade bootstrap that would otherwise do it never runs in
+/// a test binary. Call under [`TOOLBAR_LOCK`].
 fn install_baseline_toolbar_builder_if_unset() {
     let builder: SelectionToolbarBuilder =
         Arc::new(|request: &SelectionToolbarRequest, _window: Size| {
@@ -517,9 +515,9 @@ fn press_point_on_second_word(tcx: &mut TextContext, style: &TextStyle) -> Point
 /// caller, under [`TOOLBAR_LOCK`]) — a plain `fn(&mut Scene)`, so it doubles
 /// as a [`CorpusCase::record`].
 ///
-/// The sequence is exactly the card's own: `Down` on the second word, paint
-/// at t=0 (seeds the long-press epoch), paint at t=550ms (past the widget's
-/// 500ms threshold — crosses it and latches the deferred-callback flush),
+/// The sequence: `Down` on the second word, paint at t=0 (seeds the
+/// long-press epoch), paint at t=550ms (past the widget's 500ms threshold —
+/// crosses it and latches the deferred-callback flush),
 /// dispatch [`InputEvent::Housekeeping`] (fires the hold: selects the word,
 /// opens the toolbar), paint at t=600ms (mounts and paints the pod) — the
 /// one frame this function actually records. A warm-up frame at t=0 runs
@@ -608,8 +606,7 @@ fn record_text_input_selection_toolbar_long_press(scene: &mut Scene) {
 }
 
 /// The [`CorpusCase`] [`record_text_input_selection_toolbar_long_press`]
-/// backs — named, sized and toleranced exactly as the card's deliverable
-/// describes (320x160 at scale 1, the crate's tight default tolerance).
+/// backs: a 320x160 window at scale 1, the crate's tight default tolerance.
 fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
     CorpusCase {
         spec: physical_case(
