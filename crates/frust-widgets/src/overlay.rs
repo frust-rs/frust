@@ -40,6 +40,30 @@
 //!   minus the placed rect's origin. That single subtraction is the whole
 //!   translation into the surface.
 //!
+//! # Capture lifetime
+//!
+//! A pod that captures the pointer records the ordinary
+//! [`frust_core::ChildPod::is_active`] link, and [`OverlaySlot`] clears it on
+//! the `Up`/`Cancel` that ends the gesture which opened it — the same rule the
+//! authoring toolkit's `route_event_single` and the component boundary's own
+//! router apply to every other captured child. The slot dispatches into its pod
+//! directly rather than through either helper (the substituted route below
+//! needs a context it builds itself), so it owns that half of the container
+//! contract too.
+//!
+//! The alternative — leaving the link latched and reading the capture off the
+//! dispatch's own flag instead — was not taken. Both of the slot's capture
+//! mirrors read the *edge* into that link rather than its level, so a link that
+//! is set once and never cleared makes the edge observable once per pod
+//! instance rather than once per gesture, and a surface that stays mounted
+//! loses every gesture after the first. The link's *level* has a reader of its
+//! own besides — a pod holding it is refused a hover claim — which a latch that
+//! never falls would strand just as permanently. Restoring the link's lifetime
+//! answers both; re-deriving one mirror would leave the latch standing for the
+//! other. The slot's own "these owner-local pointer events are the surface's"
+//! flag is then derived from the link rather than latched beside it, so the two
+//! cannot drift apart.
+//!
 //! # Not in v1
 //!
 //! * **The pod contributes no semantics.** A pod's nodes would attach under the
@@ -396,6 +420,11 @@ pub struct OverlaySlot<PodState: 'static> {
     owner_origin: Point,
     /// Whether the pod holds the pointer capture, so ordinary pointer events
     /// routed to the owner by the capture path belong to the surface.
+    ///
+    /// Recomputed from the pod's own recorded link by every dispatch through
+    /// `forward` — the one writer while a pod is mounted — rather than latched
+    /// alongside it. Mounting, dropping or replacing the pod resets it for the
+    /// same reason: the link it mirrors goes with the widget that held it.
     captured: bool,
     /// A press landed outside every floated surface and this one asked to hear
     /// about it; drained by [`take_outside_down`](Self::take_outside_down).
@@ -733,11 +762,10 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                     position: pointer.position + self.owner_origin.to_vec2() - origin,
                     ..*pointer
                 });
-                let result = self.forward(ctx, &local, substitute);
-                if matches!(pointer.phase, PointerPhase::Up | PointerPhase::Cancel) {
-                    self.captured = false;
-                }
-                Some(result)
+                // The release that ends the gesture is handled where the pod
+                // is dispatched, so it lands whichever door the event came in
+                // by — this one, or the broadcast arm above.
+                Some(self.forward(ctx, &local, substitute))
             }
             // Keyboard, IME and the clipboard verbs: focus-routed, so they only
             // arrive here at all because the owner is on the recorded focus
@@ -795,11 +823,29 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                 result
             }
         };
-        if pod.is_active() && !was_active {
-            self.captured = true;
+        // Give the link the lifetime every other container gives a captured
+        // child. `event_child` only ever sets it, and this is the one dispatch
+        // path that does not run through a routing helper, so the release has
+        // to happen here or never — and until it does, the two `was_active`
+        // edges above are edges into a latch that never falls.
+        if was_active && releases_capture(local) {
+            pod.set_active(false);
         }
+        self.captured = pod.is_active();
         result
     }
+}
+
+/// Whether `event` is the phase that auto-releases a recorded capture
+/// (`Up`/`Cancel`) — the rule the authoring toolkit's
+/// [`route_event_single`](crate::authoring::route_event_single) applies to every
+/// captured child, restated here because [`OverlaySlot`] dispatches into its pod
+/// without going through it.
+fn releases_capture(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1679,6 +1725,61 @@ mod tests {
         );
     }
 
+    /// The whole gesture, in the log shape the fixture records it in: pressed
+    /// inside the placed rect, dragged well outside it, released there.
+    fn one_gesture(h: &mut Harness, label: &str) {
+        h.clear_log();
+        h.down(40.0, 20.0);
+        assert!(
+            h.root.is_pointer_captured(),
+            "{label}: the capture claimed inside the surface opened a gesture"
+        );
+        h.pointer(PointerPhase::Move, 300.0, 300.0);
+        h.pointer(PointerPhase::Up, 300.0, 300.0);
+        assert_eq!(
+            h.log(),
+            vec![
+                "pod:Down@32,12".to_string(),
+                "pod:Move@292,292".to_string(),
+                "pod:Up@292,292".to_string(),
+            ],
+            "{label}: every phase of the gesture reached the surface"
+        );
+        assert!(
+            !h.root.is_pointer_captured(),
+            "{label}: the Up released the capture"
+        );
+    }
+
+    #[test]
+    fn a_second_gesture_into_the_same_mounted_pod_routes_exactly_like_the_first() {
+        let mut h = Harness::new(Cfg {
+            reaction: Reaction::Capture,
+            ..Cfg::default()
+        });
+        h.frame();
+        // No frame between the two: the pod is the same widget instance, so the
+        // second press meets whatever the first gesture left recorded on it.
+        one_gesture(&mut h, "first gesture");
+        one_gesture(&mut h, "second gesture");
+    }
+
+    #[test]
+    fn a_cancelled_gesture_leaves_the_surface_ready_for_the_next_one() {
+        let mut h = Harness::new(Cfg {
+            reaction: Reaction::Capture,
+            ..Cfg::default()
+        });
+        h.frame();
+        h.down(40.0, 20.0);
+        h.pointer(PointerPhase::Cancel, 300.0, 300.0);
+        assert!(
+            !h.root.is_pointer_captured(),
+            "a Cancel ends the gesture exactly as an Up does"
+        );
+        one_gesture(&mut h, "the gesture after a cancel");
+    }
+
     #[test]
     fn a_press_outside_notifies_the_owner_and_can_still_reach_the_main_tree() {
         let mut h = Harness::new(Cfg {
@@ -1905,7 +2006,7 @@ mod tests {
     /// surface does) and drains whatever the surface dispatched.
     struct ToolbarHost {
         log: Log,
-        claims_focus: bool,
+        reaction: Reaction,
     }
 
     struct ToolbarHostWidget {
@@ -1914,14 +2015,14 @@ mod tests {
         /// reconcile against.
         view: Option<AnyView<()>>,
         log: Log,
-        claims_focus: bool,
+        reaction: Reaction,
     }
 
     impl ToolbarHost {
         fn pod(&self) -> AnyView<()> {
             any(UnitProbe {
                 log: Rc::clone(&self.log),
-                claims_focus: self.claims_focus,
+                reaction: self.reaction,
             })
         }
     }
@@ -1937,7 +2038,7 @@ mod tests {
                 slot,
                 view: Some(view),
                 log: Rc::clone(&self.log),
-                claims_focus: self.claims_focus,
+                reaction: self.reaction,
             }
         }
         fn rebuild(
@@ -1947,7 +2048,7 @@ mod tests {
             ctx: &mut BuildCtx<'_>,
         ) -> ChangeFlags {
             element.log = Rc::clone(&self.log);
-            element.claims_focus = self.claims_focus;
+            element.reaction = self.reaction;
             let view = self.pod();
             let flags = element
                 .slot
@@ -1984,12 +2085,12 @@ mod tests {
     /// and speaks to its owner through the edit-command queue.
     struct UnitProbe {
         log: Log,
-        claims_focus: bool,
+        reaction: Reaction,
     }
 
     struct UnitProbeWidget {
         log: Log,
-        claims_focus: bool,
+        reaction: Reaction,
     }
 
     impl View<()> for UnitProbe {
@@ -1997,7 +2098,7 @@ mod tests {
         fn build(&self, _ctx: &mut BuildCtx<'_>) -> UnitProbeWidget {
             UnitProbeWidget {
                 log: Rc::clone(&self.log),
-                claims_focus: self.claims_focus,
+                reaction: self.reaction,
             }
         }
         fn rebuild(
@@ -2007,7 +2108,7 @@ mod tests {
             _ctx: &mut BuildCtx<'_>,
         ) -> ChangeFlags {
             element.log = Rc::clone(&self.log);
-            element.claims_focus = self.claims_focus;
+            element.reaction = self.reaction;
             ChangeFlags::NONE
         }
     }
@@ -2024,8 +2125,10 @@ mod tests {
                     p.phase, p.position.x, p.position.y
                 ));
                 if p.phase == PointerPhase::Down {
-                    if self.claims_focus {
-                        ctx.request_focus();
+                    match self.reaction {
+                        Reaction::Nothing => {}
+                        Reaction::Capture => ctx.capture_pointer(),
+                        Reaction::Focus => ctx.request_focus(),
                     }
                     ctx.dispatch_edit_command(EditCommand::Copy);
                     ctx.request_redraw();
@@ -2036,13 +2139,13 @@ mod tests {
     }
 
     /// Drive the `()`-state host through a real root.
-    fn unit_harness(claims_focus: bool) -> (RenderRoot<(), ToolbarHost>, Log) {
+    fn unit_harness(reaction: Reaction) -> (RenderRoot<(), ToolbarHost>, Log) {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut root: RenderRoot<(), ToolbarHost> = RenderRoot::new();
         let captured = Rc::clone(&log);
         let mut app_logic = move |_: &mut ()| ToolbarHost {
             log: Rc::clone(&captured),
-            claims_focus,
+            reaction,
         };
         let mut state = ();
         root.rebuild(&mut app_logic, &mut state);
@@ -2053,7 +2156,7 @@ mod tests {
 
     #[test]
     fn a_unit_typed_pod_is_hosted_and_its_edit_commands_reach_the_owner() {
-        let (mut root, log) = unit_harness(false);
+        let (mut root, log) = unit_harness(Reaction::Nothing);
         let mut state = ();
         root.event(
             &mut state,
@@ -2072,7 +2175,7 @@ mod tests {
 
     #[test]
     fn a_focus_claim_from_a_substituted_pod_still_opens_a_session() {
-        let (mut root, _log) = unit_harness(true);
+        let (mut root, _log) = unit_harness(Reaction::Focus);
         let mut state = ();
         assert!(!root.is_focus_active());
         root.event(
@@ -2087,6 +2190,52 @@ mod tests {
             root.is_focus_active(),
             "the substituted context's focus claim is mirrored onto the owner"
         );
+    }
+
+    /// One pointer event into the `()`-state host, which carries no application
+    /// state to thread.
+    fn unit_pointer(root: &mut RenderRoot<(), ToolbarHost>, phase: PointerPhase, x: f64, y: f64) {
+        let mut state = ();
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            }),
+        );
+    }
+
+    #[test]
+    fn a_second_gesture_into_a_substituted_pod_routes_exactly_like_the_first() {
+        let (mut root, log) = unit_harness(Reaction::Capture);
+        // The substituted route has no second road to the owner: the mirror in
+        // `forward` is the only thing that can open the root's gesture, so a
+        // capture it fails to report strands the follow-ups entirely.
+        for label in ["first gesture", "second gesture"] {
+            log.borrow_mut().clear();
+            unit_pointer(&mut root, PointerPhase::Down, 40.0, 50.0);
+            assert!(
+                root.is_pointer_captured(),
+                "{label}: the substituted pod's capture was mirrored onto the owner"
+            );
+            unit_pointer(&mut root, PointerPhase::Move, 300.0, 300.0);
+            unit_pointer(&mut root, PointerPhase::Up, 300.0, 300.0);
+            assert_eq!(
+                log.borrow().clone(),
+                vec![
+                    "pod:Down@32,10".to_string(),
+                    "cmd:Copy".to_string(),
+                    "pod:Move@292,260".to_string(),
+                    "pod:Up@292,260".to_string(),
+                ],
+                "{label}: every phase of the gesture reached the surface"
+            );
+            assert!(
+                !root.is_pointer_captured(),
+                "{label}: the Up released the capture"
+            );
+        }
     }
 
     #[test]
