@@ -3,14 +3,28 @@
 //! its native platform-view slot, so an app writes a video the way it writes
 //! any other widget rather than wiring `view_type`/`params_json` by hand.
 //!
-//! Nothing is published here yet. The module exists so the feature it is
-//! gated by — and therefore the charter line `--no-default-features` holds —
-//! is real and exercised from the first commit: this crate's default build
-//! genuinely depends on `frust`, and its `--no-default-features` build
-//! genuinely does not.
+//! # Charter: why this module exists at all
+//!
+//! This is what makes the crate's `--no-default-features` build the real
+//! platform-plugin charter line rather than an aspirational one (crate root
+//! doc's *Charter* section): the [`handle`]/[`view`] modules below are the
+//! *only* place in this crate that names `frust`, so disabling `frust-api`
+//! genuinely drops the facade dependency from the graph, and enabling it
+//! genuinely adds it back — there is nothing else here riding on the
+//! feature for show.
+//!
+//! # What's here
+//!
+//! [`VideoPlayerHandle`]/[`use_video_player`] ([`handle`]) pair a
+//! [`crate::PlayerSession`] with five `RwSignal`s a component's `build`
+//! reads, kept current by the session's one listener registration —
+//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions' "build reads,
+//! handlers write" rule, applied to a platform callback instead of a
+//! `Widget::event` handler. [`video_view`] ([`view`]) is the one-line
+//! `frust::platform_view` builder over a handle's session.
 
-// The `frust` dependency this feature gates, named so that enabling the
-// feature actually pulls the facade into the graph (and disabling it
-// actually removes it) before any view type here uses it.
-#[allow(unused_imports)]
-use frust as _;
+mod handle;
+mod view;
+
+pub use handle::{VideoPlayerHandle, use_video_player};
+pub use view::video_view;
