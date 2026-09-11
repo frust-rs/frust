@@ -140,6 +140,55 @@
 //! [`InputEvent::Housekeeping`] broadcast that flush produces, or an in-slop
 //! `Move`/`Up` that arrives first.
 //!
+//! **The press runs through explicit phases** ([`Gesture`]), because a press
+//! that a long-press already resolved is neither a tap nor a drag and must not
+//! be mistaken for either. A primary `Down` starts it as `Tap`; wandering past
+//! [`TOUCH_SLOP`] turns it into `Drag`; firing the hold turns it into
+//! `HoldFired`, which **keeps the press point** so the slop guard still has
+//! something to measure against while the finger stays down. That last part is
+//! the whole reason the phase exists: with the point simply forgotten at the
+//! fire, the very next `Move` — even a sub-pixel one — fell through to the
+//! caret-drag path and re-resolved the selection from wherever the pointer
+//! now was. `TOUCH_SLOP` is 18 logical px, several characters at a normal text
+//! size, so that reached across a word boundary: a finger the user was holding
+//! deliberately still could silently widen its own selection while the toolbar
+//! stood over it advertising verbs computed from the narrower one.
+//!
+//! **Post-hold drag semantics are deliberate**, not inherited from the
+//! caret-drag fall-through. A finger still down after a long-press:
+//!
+//! * **within** [`TOUCH_SLOP`] of the press point — does *nothing*. The word
+//!   the hold selected stays exactly as it is, however much the finger jitters.
+//! * **past** [`TOUCH_SLOP`] — extends the selection **by whole words**, and
+//!   keeps tracking the finger in both directions (dragging back toward the
+//!   press point shrinks it again rather than sticking at its widest). This is
+//!   Android's long-press-drag behaviour.
+//!
+//! That word granularity is the *editor's* retained selection anchor doing the
+//! work, not an op this widget picks per move: `EditOp::SelectWordAtPoint`
+//! leaves the selection word-anchored, and the `EditOp::MoveToPoint { select:
+//! true }` each later move issues extends from that anchor at the granularity
+//! it was anchored with — the same op after a plain caret press extends by
+//! cluster instead. It is therefore an assumption about the text engine rather
+//! than a local invariant, and it is pinned by a test
+//! (`a_drag_out_of_a_fired_hold_extends_by_word_and_tracks_back`) so a text-engine
+//! change that dropped it would fail loudly here instead of quietly truncating
+//! every long-press drag to the cluster under the pointer.
+//!
+//! **The double-tap window keeps its own clock alive under `reduce_motion`.**
+//! Both halves of that window are dated from the paint clock
+//! ([`PaintCtx::frame_time`], cached as the event pass's only clock), which
+//! advances only while something is painting — normally the caret blink's own
+//! paced request. `reduce_motion` stops those requests, so an idle focused
+//! field would leave the clock frozen at the moment the tap completed and the
+//! window would never elapse: a press arriving any amount of wall time later
+//! would still measure zero and resolve as a double-tap. While a tap is still
+//! inside its window and the blink is frozen, `paint` therefore requests plain
+//! continuation frames of its own, exactly as the long-press timer does and for
+//! the same reason. Outside `reduce_motion` the blink already pumps the clock,
+//! so the window is quantized to the blink's 500ms cadence rather than measured
+//! to the millisecond — deliberate coarseness, not a second stall.
+//!
 //! **The toolbar itself is somebody else's widget.** The field hosts an
 //! [`OverlaySlot`] and fills it from the process-wide
 //! [`selection_toolbar_builder`], so `frust-widgets` never names the view that
@@ -160,7 +209,54 @@
 //! code path. A verb the pod dispatches
 //! ([`EventCtx::dispatch_edit_command`]) is drained in the same pass by
 //! [`EventCtx::take_edit_commands`] and applied through the same
-//! [`handle_command`](TextInputWidget::handle_command) a keyboard chord takes.
+//! [`handle_command`](TextInputWidget::handle_command) a keyboard chord takes,
+//! under the same focus gate the shell-delivered route enforces — the pod is
+//! only ever mounted over a focused field, and the two routes into
+//! `handle_command` must not disagree about when a verb may land.
+//!
+//! # The clipboard verbs and assistive technology
+//!
+//! The floated toolbar is a **pointer affordance**. It appears only after a
+//! long-press or a tap inside a selection, and the portal deliberately
+//! contributes no semantics for the pod it floats, so nothing about it is
+//! reachable by a screen reader. The verbs are therefore published on the
+//! field's **own** [`Widget::semantics`] node instead, as accesskit *custom*
+//! actions (`accesskit::Action` has no Copy/Cut/Paste/SelectAll of its own —
+//! each verb is a stable id plus a label the client reads out, see
+//! [`A11Y_CUT_ID`]).
+//!
+//! Two rules make that route trustworthy:
+//!
+//! * **It never depends on the bar being up.** The actions are published from
+//!   [`toolbar_actions`](TextInputWidget::toolbar_actions) alone — the same
+//!   predicates the bar is built from — and not from `toolbar_open`. Gating
+//!   them on the bar would mean the verbs existed only for a user who had
+//!   already performed the pointer gesture that raises it.
+//! * **Only enabled verbs are offered.** An obscured field publishes no
+//!   copy/cut, a non-interactive one no cut/paste, and a fully-selected or
+//!   empty field no select-all, exactly as the bar refuses them. An action
+//!   offered and then refused is worse than one never offered.
+//!
+//! **The selection range itself is not published.** accesskit models a text
+//! selection as a pair of `TextPosition`s, and a `TextPosition` must name a
+//! node whose role is `Role::TextRun` — this field contributes a single leaf
+//! node carrying its text as a plain value, with no per-run child nodes for
+//! those positions to point at. Publishing a range would mean restructuring the
+//! field's semantics into a text-run subtree, which is a larger change than
+//! this one and is not attempted here; the gap is stated rather than papered
+//! over with an invented range.
+//!
+//! **What is still missing is the dispatch, and it does not live here.** A
+//! platform adapter reports an invoked custom action as an
+//! `accesskit::ActionRequest` carrying `Action::CustomAction` plus the id in
+//! its `data`, but the shell-to-core seam
+//! (`AppTree::perform_accessibility_action`) forwards only `(node_id, action)`
+//! and drops `data`, and `RenderRoot::perform_accessibility_action` models only
+//! `Click` and `Focus`. Until both are widened, these actions are advertised
+//! but cannot be delivered. The field's own half is complete: every verb has a
+//! route into [`handle_command`](TextInputWidget::handle_command) the moment
+//! one arrives as an [`InputEvent::EditCommand`], which is exactly what a shell
+//! already dispatches for a platform edit menu.
 //!
 //! # Multi-line mode
 //!
@@ -281,7 +377,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust_core::accesskit::Role;
+use frust_core::accesskit::{Action, CustomAction, Role};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, EditCommand, EditingState, EventCtx,
     EventResult, FrameTime, ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx,
@@ -714,6 +810,22 @@ impl<State: 'static> TextInputView<State> {
     }
 }
 
+/// Stable accesskit custom-action ids for the four clipboard verbs the field
+/// publishes on its own semantics node (see [`TextInputWidget::semantics`]).
+///
+/// **Stable is the whole point.** An assistive-technology client holds on to
+/// the id it was offered and sends that number back when the user picks the
+/// action, so renumbering these would silently re-point a remembered "Copy" at
+/// some other verb. They are ordinary small integers because that is what
+/// [`accesskit::ActionData::CustomAction`] carries.
+const A11Y_CUT_ID: i32 = 1;
+/// See [`A11Y_CUT_ID`].
+const A11Y_COPY_ID: i32 = 2;
+/// See [`A11Y_CUT_ID`].
+const A11Y_PASTE_ID: i32 = 3;
+/// See [`A11Y_CUT_ID`].
+const A11Y_SELECT_ALL_ID: i32 = 4;
+
 /// The live long-press timer for one press — the field's own copy of
 /// [`crate::gesture`]'s paint-clock recogniser, in the one shape a text field
 /// needs (see the module docs' "Selection gestures and the toolbar").
@@ -731,6 +843,62 @@ struct HoldState {
     /// [`LONG_PRESS_MS`]; the word is selected on the next pass that carries an
     /// [`EventCtx`].
     elapsed: bool,
+}
+
+/// Which phase the live primary press is in — the gesture state machine's own
+/// word for what the next `Move` is allowed to do.
+///
+/// This is an explicit phase because "where the press landed" and "is this
+/// press still a tap" are two different questions, and one `Option<Point>`
+/// used to answer both: taking the point to say *the hold already fired* also
+/// said *this press became a drag*, which disarmed the slop guard for the rest
+/// of the gesture. [`Gesture::HoldFired`] carries the press point precisely so
+/// that guard outlives the fire.
+///
+/// `Copy` for [`HoldState`]'s reason: an event arm reads the phase by value
+/// rather than holding a borrow of the widget it is about to reassign.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Gesture {
+    /// No live primary press.
+    None,
+    /// A press is down and has stayed within [`TOUCH_SLOP`] of `at`: still a
+    /// *tap*, and a tap must not drag the selection around. A release while
+    /// the press is in this phase is what seeds the double-tap window and what
+    /// resolves the tap-in-selection toolbar toggle.
+    Tap {
+        /// Widget-local position the press landed at.
+        at: Point,
+    },
+    /// The press wandered past [`TOUCH_SLOP`]: every later `Move` extends the
+    /// selection to the pointer. *How far* each move extends is the editor's
+    /// call rather than this phase's — see the module docs' "Selection
+    /// gestures and the toolbar" on the retained selection granularity.
+    Drag,
+    /// The long-press fired and the finger is **still down**. The gesture has
+    /// resolved: it is no longer a tap (it seeds no double-tap and toggles no
+    /// toolbar on release), but it is not a drag either — a finger holding
+    /// still within [`TOUCH_SLOP`] of `at` must leave the word it just
+    /// selected exactly as it is, however much it jitters.
+    HoldFired {
+        /// Widget-local position the press landed at — the point the word was
+        /// selected from, and what the surviving slop guard measures against.
+        at: Point,
+    },
+}
+
+impl Gesture {
+    /// Where the press landed while it is still a *tap*, and `None` in every
+    /// other phase.
+    ///
+    /// The double-tap window and the tap-in-selection toggle both key off this
+    /// rather than off a bare stored point: a press that wandered, and one a
+    /// long-press already resolved, are not taps and must seed neither.
+    fn tap_point(self) -> Option<Point> {
+        match self {
+            Gesture::Tap { at } => Some(at),
+            Gesture::None | Gesture::Drag | Gesture::HoldFired { .. } => None,
+        }
+    }
 }
 
 /// The retained widget for a [`TextInputView`].
@@ -869,10 +1037,11 @@ pub struct TextInputWidget {
     /// argument pair (a toolbar may size or clamp itself against the window it
     /// floats in), recorded here because `View::rebuild` sees no `LayoutCtx`.
     window_size: Size,
-    /// Widget-local position of the live primary press, and the flag that says
-    /// the press is still a *tap*: a `Move` past [`TOUCH_SLOP`] clears it, so a
-    /// release with it still set is a press that never wandered.
-    press_pos: Option<Point>,
+    /// Which phase the live primary press is in — see [`Gesture`]. The slop
+    /// guard, the double-tap window and the tap-in-selection toggle all read
+    /// it, and it is what keeps a fired long-press distinguishable from a
+    /// press that wandered into a drag.
+    gesture: Gesture,
     /// The live long-press timer, armed by a primary `Down` inside and cleared
     /// when it fires, when the press drags past the slop, or when it ends.
     hold: Option<HoldState>,
@@ -1290,12 +1459,12 @@ impl TextInputWidget {
         }
     }
 
-    /// Forget the in-flight gesture: the hold timer, the press point and the
+    /// Forget the in-flight gesture: the hold timer, the press phase and the
     /// tap-in-selection candidate. Touches neither the selection nor the
     /// toolbar, which is what makes it the whole of a `Cancel`'s work.
     fn clear_gesture(&mut self) {
         self.hold = None;
-        self.press_pos = None;
+        self.gesture = Gesture::None;
         self.tap_in_selection = None;
     }
 
@@ -1383,9 +1552,14 @@ impl TextInputWidget {
         // seeds no double-tap) and no longer a toggle candidate (so the release
         // does not close what this just opened).
         self.tap_in_selection = None;
-        let Some(pos) = self.press_pos.take() else {
+        let Some(pos) = self.gesture.tap_point() else {
             return false;
         };
+        // Resolved, *not* forgotten: the press point stays so the `Move` arm's
+        // slop guard still has something to measure against while the finger
+        // is down. Dropping it here is what used to let the very next in-slop
+        // move re-resolve the selection from the pointer.
+        self.gesture = Gesture::HoldFired { at: pos };
         let (x, y) = self.editor_point(pos, ctx.size().height);
         // Selects first, opens second: the selection is what the toolbar's own
         // verbs are computed from, and `finish_edit` inside here resets the
@@ -1834,7 +2008,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             toolbar_open: false,
             toolbar_anchor: Rect::ZERO,
             window_size: Size::ZERO,
-            press_pos: None,
+            gesture: Gesture::None,
             hold: None,
             tap_in_selection: None,
             outside_press_dismissed: false,
@@ -2104,6 +2278,29 @@ impl Widget for TextInputWidget {
             }
         }
 
+        // The double-tap window is measured against this same paint clock, and
+        // that clock only advances while something is painting. While focused
+        // the caret blink normally keeps it moving on its own — but
+        // `reduce_motion` freezes the caret and drops its frame requests
+        // entirely, and an otherwise idle field then leaves `last_frame_time`
+        // standing exactly where the completed tap dated itself. The window
+        // would never elapse: a press arriving any amount of wall time later
+        // would still measure zero and resolve as a double-tap.
+        //
+        // So while a tap is still within its window and nothing else is
+        // pumping the clock, the field asks for its own continuation frames —
+        // the same plain (unpaced) request the long-press timer above makes,
+        // for the same reason. A gesture threshold has to be measured in wall
+        // time even with every animation switched off. Bounded by the window
+        // itself: once it has elapsed, the condition stops holding and the
+        // field goes back to rest.
+        if reduce_motion
+            && let Some((_, at)) = self.last_tap
+            && now.saturating_sub(at).as_secs_f64() * 1000.0 <= DOUBLE_TAP_MS
+        {
+            ctx.request_frame();
+        }
+
         // The pod's recorded focus path (threaded in via `PaintCtx::has_focus`)
         // is authoritative — not our own `self.focused`, which lags after a
         // *container-routed* blur (a sibling tap clears the pod's focus without
@@ -2298,8 +2495,21 @@ impl Widget for TextInputWidget {
         if let Some(result) = self.toolbar.event(ctx, event, &mut ()) {
             // Drained in the same pass the pod dispatched them in — the queue is
             // pass-scoped, not a mailbox (`EventCtx::dispatch_edit_command`).
+            // Drained unconditionally, *then* gated: leaving commands sitting in
+            // a pass-scoped queue would hand them to whoever drains it next.
             let commands = ctx.take_edit_commands();
-            if !commands.is_empty() {
+            // The same focus gate the shell-delivered `InputEvent::EditCommand`
+            // route enforces, and for the same reason: a field answers a
+            // clipboard verb only for a session it actually holds. The pod is
+            // only ever mounted while this field is focused, so this is the
+            // invariant restated rather than a case seen in practice — but the
+            // two routes ending in `handle_command` must not disagree about
+            // when a verb is allowed to land.
+            if !commands.is_empty() && ctx.has_focus() {
+                self.focused = true;
+                // A clipboard verb is not part of any tap sequence, exactly as
+                // on the shell-delivered route.
+                self.last_tap = None;
                 for cmd in &commands {
                     self.handle_command(ctx, cmd);
                 }
@@ -2360,7 +2570,7 @@ impl Widget for TextInputWidget {
                         let was_open =
                             self.toolbar_open || std::mem::take(&mut self.outside_press_dismissed);
                         self.toolbar_open = false;
-                        self.press_pos = Some(p.position);
+                        self.gesture = Gesture::Tap { at: p.position };
                         self.hold = None;
                         self.tap_in_selection = None;
                         let (x, y) = self.editor_point(p.position, ctx.size().height);
@@ -2411,23 +2621,54 @@ impl Widget for TextInputWidget {
                     if !self.captured {
                         return EventResult::Ignored;
                     }
-                    // While the press is still within the slop it is a *tap* in
-                    // progress, and a tap must not drag the selection around:
-                    // the only thing an in-slop move can do is deliver a hold
-                    // whose threshold a paint already observed (fire-on-move-
-                    // arrival, so a context menu opens the instant a held
-                    // finger jitters rather than waiting out another frame).
-                    if let Some(down) = self.press_pos {
-                        if (p.position - down).hypot() <= TOUCH_SLOP {
-                            self.fire_hold(ctx);
-                            return EventResult::Handled;
+                    // The slop guard, and it outlives the long-press fire:
+                    // **both** a still-a-tap press and an already-fired hold
+                    // refuse to touch the selection while the finger stays
+                    // within `TOUCH_SLOP` of where it landed. Only a press
+                    // that actually wandered that far extends anything.
+                    match self.gesture {
+                        Gesture::Tap { at } => {
+                            if (p.position - at).hypot() <= TOUCH_SLOP {
+                                // The one thing an in-slop move can do is
+                                // deliver a hold whose threshold a paint
+                                // already observed (fire-on-move-arrival, so
+                                // the word is selected the instant a held
+                                // finger jitters rather than waiting out
+                                // another frame).
+                                self.fire_hold(ctx);
+                                return EventResult::Handled;
+                            }
+                            // Past the slop: it became a drag. The hold is
+                            // cancelled, the tap-in-selection candidate with it
+                            // (a drag out of a selection is an ordinary caret
+                            // drag), and the press stops being a tap for the
+                            // double-tap window's purposes.
+                            self.hold = None;
+                            self.tap_in_selection = None;
+                            self.gesture = Gesture::Drag;
                         }
-                        // Past the slop: it became a drag. The hold is
-                        // cancelled, the tap-in-selection candidate with it (a
-                        // drag out of a selection is an ordinary caret drag),
-                        // and the press stops being a tap for the double-tap
-                        // window's purposes.
-                        self.clear_gesture();
+                        Gesture::HoldFired { at } => {
+                            if (p.position - at).hypot() <= TOUCH_SLOP {
+                                // A held finger jittering over the word it just
+                                // selected. `TOUCH_SLOP` is 18 logical px —
+                                // several characters wide at a normal text
+                                // size, and wide enough to span a word boundary
+                                // — so re-resolving the selection from here
+                                // would silently redraw it under a finger the
+                                // user is holding deliberately still.
+                                return EventResult::Handled;
+                            }
+                            // The finger left the slop: the user is now
+                            // dragging the long-press selection outward, which
+                            // is an extend like any other (see the module docs'
+                            // "Selection gestures and the toolbar" for the
+                            // granularity that extend carries). Becoming a
+                            // `Drag` is what lets a finger brought back toward
+                            // the press point shrink the selection again
+                            // instead of freezing it at its widest.
+                            self.gesture = Gesture::Drag;
+                        }
+                        Gesture::Drag | Gesture::None => {}
                     }
                     let (x, y) = self.editor_point(p.position, ctx.size().height);
                     self.move_to_point(ctx, x, y, true);
@@ -2447,14 +2688,15 @@ impl Widget for TextInputWidget {
                         // it down, and the press's own hide rule is what closes
                         // it the second time.
                         if let Some(was_open) = self.tap_in_selection.take()
-                            && self.press_pos.is_some()
+                            && self.gesture.tap_point().is_some()
                         {
                             self.toolbar_open = !was_open;
                         }
                         // Seed the double-tap window, dated by the last painted
-                        // frame — a press that wandered past the slop cleared
-                        // `press_pos` and seeds nothing.
-                        if let Some(down) = self.press_pos {
+                        // frame — a press that wandered past the slop, and one
+                        // a long-press resolved, are no longer taps
+                        // (`Gesture::tap_point`) and seed nothing.
+                        if let Some(down) = self.gesture.tap_point() {
                             self.last_tap = Some((down, self.last_frame_time));
                         }
                     }
@@ -2555,12 +2797,55 @@ impl Widget for TextInputWidget {
         // disabled field says `set_disabled()`, a read-only *enabled* field
         // says `set_read_only()`. `!enabled` wins if somehow both flags are
         // set — a disabled field is the stronger claim.
+        // The clipboard verbs, published on the field's OWN node.
+        //
+        // They are deliberately NOT keyed to `toolbar_open`: the floating
+        // toolbar is a *pointer* affordance, and gating the accessible route on
+        // it would mean the verbs existed only for a user who had already
+        // performed the long-press that raises it. The floated pod contributes
+        // no semantics of its own (the overlay portal's deliberate choice), so
+        // this node is the only place the verbs can live.
+        //
+        // The enabled set is `toolbar_actions()` — the same predicates the bar
+        // itself is built from, read once here so the two routes cannot offer
+        // different verbs for the same state.
+        //
+        // accesskit models these as *custom* actions: its `Action` enum has no
+        // Copy/Cut/Paste/SelectAll of its own, so each verb is an id plus a
+        // label the client reads out (see `A11Y_CUT_ID` on why the ids are
+        // stable). Only the enabled ones are published — an action offered and
+        // then refused is worse than one never offered.
+        //
+        // Gated on `interactive()` as a whole, the way mounting the bar is: a
+        // disabled or read-only field never holds the focus a verb routes
+        // along, and `toolbar_actions()` alone would still offer `copy` over a
+        // selection one happened to be showing. Focus itself is deliberately
+        // *not* required — a client explores the tree before it acts, and a
+        // field that advertised nothing until focused would not be discovered.
+        let verbs = self.toolbar_actions();
+        let offered: Vec<CustomAction> = [
+            (A11Y_CUT_ID, "Cut", verbs.cut),
+            (A11Y_COPY_ID, "Copy", verbs.copy),
+            (A11Y_PASTE_ID, "Paste", verbs.paste),
+            (A11Y_SELECT_ALL_ID, "Select all", verbs.select_all),
+        ]
+        .into_iter()
+        .filter(|(_, _, enabled)| *enabled && self.interactive())
+        .map(|(id, description, _)| CustomAction {
+            id,
+            description: description.into(),
+        })
+        .collect();
         let id = ctx.push_node(role, |node| {
             node.set_value(value);
             if !self.enabled {
                 node.set_disabled();
             } else if self.read_only {
                 node.set_read_only();
+            }
+            if !offered.is_empty() {
+                node.add_action(Action::CustomAction);
+                node.set_custom_actions(offered);
             }
         });
         if self.focused {
@@ -3118,6 +3403,57 @@ mod tests {
         assert!(
             outcome.needs_frame_paced_only,
             "the caret blink is a CosmeticLoop request — the frame gate must be able to pace it"
+        );
+    }
+
+    #[test]
+    fn reduce_motion_keeps_the_double_tap_window_pumping_its_own_clock() {
+        // The double-tap window is dated from the paint clock, and under
+        // reduce_motion the caret blink — normally the only thing keeping that
+        // clock moving on an idle focused field — stops requesting frames
+        // entirely. Without a request of its own the window would never
+        // elapse, and a press arriving any amount of wall time later would
+        // still measure zero against a frozen clock and resolve as a
+        // double-tap.
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut root = harness(&mut state);
+        let mut theme = Theme::neutral();
+        theme.motion.reduce_motion = true;
+        root.set_theme(Box::new(theme));
+
+        // Date the completed tap from a painted frame at t=0.
+        root.paint(&mut NullScene, ft_ms(0.0));
+        tap(&mut root, &mut state, 20.0, 10.0);
+        assert!(
+            widget(&root).last_tap.is_some(),
+            "sanity: the tap seeded a double-tap window"
+        );
+
+        // Inside the window: the field asks for the frame that will advance
+        // the clock, even though the caret is frozen and asking for nothing.
+        let inside = root.paint(&mut NullScene, ft_ms(50.0));
+        assert!(
+            inside.needs_frame,
+            "a live double-tap window must pump its own clock under reduce_motion"
+        );
+
+        // Past it: the field goes back to rest rather than spinning frames.
+        let outside = root.paint(&mut NullScene, ft_ms(DOUBLE_TAP_MS + 100.0));
+        assert!(
+            !outside.needs_frame,
+            "an elapsed window stops asking — the request is bounded by the window"
+        );
+
+        // And the window really has elapsed: a press this late is an ordinary
+        // caret placement, not a second tap selecting the word.
+        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        assert_eq!(
+            selection(&root),
+            None,
+            "past DOUBLE_TAP_MS the press is just a press"
         );
     }
 
@@ -5252,6 +5588,135 @@ mod tests {
         );
     }
 
+    /// The clipboard verbs a field's own semantics node currently offers, as
+    /// `(id, label)` pairs in publication order.
+    fn a11y_verbs(
+        root: &RenderRoot<AppState, TextInputView<AppState>>,
+    ) -> (bool, Vec<(i32, String)>) {
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.role(), Role::TextInput | Role::PasswordInput))
+            .expect("a text field node");
+        (
+            node.supports_action(Action::CustomAction),
+            node.custom_actions()
+                .iter()
+                .map(|a| (a.id, a.description.to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn the_clipboard_verbs_ride_the_field_s_own_node_with_the_toolbar_closed() {
+        // The accessible route must not depend on the floating toolbar, which
+        // is a pointer affordance and contributes no semantics of its own.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+        assert!(
+            !widget(&root).toolbar_open,
+            "sanity: a drag-select raises no bar, so this is the closed case"
+        );
+
+        let (supports, offered) = a11y_verbs(&root);
+        assert!(
+            supports,
+            "the field advertises that it takes custom actions at all"
+        );
+        assert_eq!(
+            offered,
+            vec![
+                (A11Y_CUT_ID, "Cut".to_string()),
+                (A11Y_COPY_ID, "Copy".to_string()),
+                (A11Y_PASTE_ID, "Paste".to_string()),
+            ],
+            "an interactive field with all of its text selected offers cut/copy/\
+             paste, and no select-all — exactly the bar's own enabled set"
+        );
+
+        // Invoking one reaches `handle_command`: resolve the advertised id the
+        // way a dispatcher would, deliver it as the `EditCommand` a shell
+        // already sends for a platform edit menu, and watch the verb land.
+        let copy_id = offered
+            .iter()
+            .find(|(_, label)| label == "Copy")
+            .expect("copy was offered")
+            .0;
+        let cmd = match copy_id {
+            A11Y_CUT_ID => EditCommand::Cut,
+            A11Y_COPY_ID => EditCommand::Copy,
+            A11Y_SELECT_ALL_ID => EditCommand::SelectAll,
+            other => panic!("the published id {other} resolves to no verb"),
+        };
+        root.event(&mut state, &edit(cmd));
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("abc"),
+            "the advertised id resolves to a verb that reaches handle_command"
+        );
+    }
+
+    #[test]
+    fn the_published_verbs_track_the_field_s_own_refusals() {
+        // Empty and unfocused: nothing to copy or select, but a paste would
+        // land, so paste alone is offered.
+        let mut state = AppState::default();
+        let mut logic = options_logic(true, false, false);
+        let root = options_root(&mut logic, &mut state);
+        assert_eq!(
+            a11y_verbs(&root).1,
+            vec![(A11Y_PASTE_ID, "Paste".to_string())],
+            "an empty field offers only paste"
+        );
+
+        // Obscured: the mirror is no more handable than the real buffer, so a
+        // selection buys neither copy nor cut.
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, true, false);
+        let mut root = options_root(&mut logic, &mut state);
+        focused_with_selection(&mut state, &mut root, "");
+        assert!(
+            selection(&root).is_some(),
+            "sanity: the refusal below is only meaningful over a real selection"
+        );
+        assert_eq!(
+            a11y_verbs(&root).1,
+            vec![(A11Y_PASTE_ID, "Paste".to_string())],
+            "an obscured field hands out neither the buffer nor its bullets"
+        );
+
+        // Read-only: copy is fine over a selection, cut and paste are not.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let root = options_root(&mut logic, &mut state);
+        let (supports, offered) = a11y_verbs(&root);
+        assert!(
+            !supports && offered.is_empty(),
+            "a non-interactive field holds no focus a verb could route along, \
+             so it advertises none: {offered:?}"
+        );
+
+        // Disabled: same reasoning, and the stronger claim.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(false, false, false);
+        let root = options_root(&mut logic, &mut state);
+        assert!(
+            a11y_verbs(&root).1.is_empty(),
+            "a disabled field advertises no verbs either"
+        );
+    }
+
     #[test]
     fn read_only_reports_read_only_not_disabled_semantics() {
         let mut state = AppState::default();
@@ -6352,6 +6817,129 @@ mod tests {
         );
     }
 
+    /// Drive a field to "the long-press fired, the finger is still down",
+    /// pressing at `press_x`, and hand back the root/state to move from there.
+    fn held_word(
+        logic: &mut impl FnMut(&mut AppState) -> TextInputView<AppState>,
+        state: &mut AppState,
+        press_x: f64,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let mut root = options_root(logic, state);
+        toolbar_frame(&mut root, logic, state, 0.0);
+        root.event(state, &pointer(PointerPhase::Down, press_x, 10.0));
+        toolbar_frame(&mut root, logic, state, 0.0);
+        toolbar_frame(&mut root, logic, state, LONG_PRESS_MS + 50.0);
+        root.event(state, &InputEvent::Housekeeping);
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "the leg starts from a fired hold over the first word"
+        );
+        root
+    }
+
+    #[test]
+    fn an_in_slop_move_after_the_hold_fired_leaves_the_selected_word_alone() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        // Press inside "hello", four characters in.
+        let mut root = held_word(&mut logic, &mut state, 30.0);
+        assert!(widget(&root).toolbar_open, "and with the bar raised");
+        assert_eq!(
+            widget(&root).gesture,
+            Gesture::HoldFired {
+                at: Point::new(30.0, 10.0)
+            },
+            "a fired hold keeps its press point rather than forgetting it"
+        );
+
+        // The finger is still down and jitters 14px — comfortably inside the
+        // 18px TOUCH_SLOP that makes a press "stationary", yet several
+        // characters wide at this text size, so it reaches across the word
+        // boundary into "world". The selection must not notice.
+        let jitter = Point::new(44.0, 10.0);
+        assert!(
+            (jitter - Point::new(30.0, 10.0)).hypot() <= TOUCH_SLOP,
+            "the leg is only meaningful while the jitter stays in slop"
+        );
+        root.event(&mut state, &pointer(PointerPhase::Move, jitter.x, jitter.y));
+
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "a held finger jittering in slop must not re-resolve the selection"
+        );
+        assert_eq!(
+            widget(&root).gesture,
+            Gesture::HoldFired {
+                at: Point::new(30.0, 10.0)
+            },
+            "and the press stays resolved-but-stationary, not promoted to a drag"
+        );
+        assert!(
+            widget(&root).toolbar_open,
+            "so the bar still stands over the selection its verbs were built from"
+        );
+
+        // The release must not resolve as a tap either: a long-press seeds no
+        // double-tap window and toggles no toolbar.
+        root.event(&mut state, &pointer(PointerPhase::Up, jitter.x, jitter.y));
+        assert!(
+            widget(&root).last_tap.is_none(),
+            "a long-press is not a tap"
+        );
+        assert!(
+            widget(&root).toolbar_open,
+            "and the release does not close it"
+        );
+    }
+
+    #[test]
+    fn a_drag_out_of_a_fired_hold_extends_by_word_and_tracks_back() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = held_word(&mut logic, &mut state, 30.0);
+
+        // Past the slop, into the second word. The post-hold drag is
+        // word-granular: it swallows "world" whole rather than cutting the
+        // selection off at the cluster under the pointer. This pins the
+        // retained-granularity assumption the module docs call out — a text
+        // engine that dropped it would truncate every long-press drag here
+        // instead of failing loudly.
+        let out = 30.0 + TOUCH_SLOP + 20.0;
+        root.event(&mut state, &pointer(PointerPhase::Move, out, 10.0));
+        assert_eq!(
+            widget(&root).gesture,
+            Gesture::Drag,
+            "leaving the slop promotes the resolved hold to a drag"
+        );
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello world"),
+            "the drag extends by whole words, not to the cluster under the pointer"
+        );
+
+        // Dragging back toward the press point shrinks it again — the promotion
+        // to `Drag` is what keeps the selection tracking the finger instead of
+        // freezing at its widest.
+        root.event(&mut state, &pointer(PointerPhase::Move, 30.0, 10.0));
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("hello"),
+            "a finger brought back shrinks the selection rather than sticking"
+        );
+    }
+
     #[test]
     fn a_drag_past_the_slop_cancels_the_hold_and_selects_instead() {
         let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -6788,7 +7376,7 @@ mod tests {
         );
         assert!(!widget(&root).captured, "it does disarm the drag");
         assert!(widget(&root).hold.is_none(), "and the hold timer with it");
-        assert!(widget(&root).press_pos.is_none());
+        assert_eq!(widget(&root).gesture, Gesture::None);
         assert!(widget(&root).tap_in_selection.is_none());
     }
 }
