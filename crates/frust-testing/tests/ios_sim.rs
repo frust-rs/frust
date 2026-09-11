@@ -6,10 +6,10 @@
 //!
 //! The iOS Simulator's Metal feature set is `Apple2` only — it never exposes
 //! [`wgpu::DownlevelFlags::INDIRECT_EXECUTION`]. That flag is why this gate
-//! exists: the vello-classic renderer this workspace shipped through Phase 7
-//! required it unconditionally and rendered black on the Simulator BY
-//! CONSTRUCTION (`docs/TESTING.md`'s iOS section — "do not classify a black
-//! Simulator surface as a golden result"). Classic vello is gone now, but
+//! exists: the now-removed vello-classic renderer required it
+//! unconditionally and rendered black on the Simulator BY CONSTRUCTION
+//! (`docs/TESTING.md`'s iOS section — "do not classify a black Simulator
+//! surface as a golden result"). Classic vello is gone now, but
 //! the Simulator adapter's constraint is unchanged, and it is still the
 //! reason this gate has to exist: `frust-engine`'s sparse-strip pipeline
 //! needs none of those downlevel flags at all (`tier.rs`'s

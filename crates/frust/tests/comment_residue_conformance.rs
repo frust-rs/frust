@@ -103,13 +103,25 @@
 //!     spells it with a space.
 //!   - A **space-separated** bare-int phase (`Phase 1`, `phase 0`) is banned
 //!     when: (1) parenthesized AND capitalized (`(Phase 1 acceptance: ...)`),
-//!     or (2) capitalized and preceded by the definite article ("the Phase 4
-//!     gate"), or (3) capitalized but NOT followed by a recognized
-//!     domain-vocabulary pattern. The three exempted domain patterns are: "Phase
-//!     N of the frame" (renderer-span idiom), "Phase N (" (scenario stages like
-//!     "Phase 1 (250ms)"), and "Phase N →" (animation like "Phase 0 → t exactly
-//!     0"). Bare lowercase `phase` (e.g., "At rest (phase 0) spoke 0...") is
-//!     kept because it denotes domain vocabulary (animation rest-state) rather
+//!     (2) capitalized and preceded by the definite article ("the Phase 4
+//!     gate") — a label applied to something, regardless of what follows —
+//!     or (3) capitalized, article-less, and unparenthesized, but the
+//!     surrounding text answers *whose* phase this is with a plan/arc/
+//!     workflow reference: `of this plan`/`of this arc` right after the
+//!     number, `shipped through Phase N` narrating the codebase's own
+//!     release history, or the number paired with a parenthesized workflow
+//!     card id (`w0-03`, `f1-04`) — see [`PHASE_OWNERSHIP_PHRASES`],
+//!     [`phase_shipped_through`], and [`phase_paired_with_card_id`]. Every
+//!     other bare, capitalized, article-less, unparenthesized `Phase N` is
+//!     domain prose KEPT regardless of the punctuation that follows the
+//!     number: a colon-introduced local enumeration ("Phase 1: everything
+//!     that reads the theme...") and a comma-continued clause ("Phase 0, a
+//!     40px wavelength...") name a phase of a thing the code itself has (a
+//!     paint pass, a waveform) exactly as much as "Phase N of the frame" or
+//!     "Phase N (250ms)" do — the discriminator is never the shape that
+//!     follows the number, only whether the text names whose phase it is.
+//!     Bare lowercase `phase` (e.g., "At rest (phase 0) spoke 0...") is kept
+//!     because it denotes domain vocabulary (animation rest-state) rather
 //!     than a plan citation.
 //! - **Plan-task references**: `task-NN`/`task NN` (exactly two digits,
 //!   `task[- ][0-9]{2}\b`) and `task gN` (a single digit, `task g[0-9]\b`,
@@ -185,12 +197,14 @@
 //!   itself.
 //! - An external-repo SHA in a `rev`/pin context (`` rev `910f626` ``).
 //!
-//! "Phase N of the frame" (bare, un-parenthesized) and "phase followed by a
-//! float" (un-parenthesized) are allowlisted by construction inside
-//! [`phase_hits`]'s own state machine rather than as spans — the phase-form
-//! parsing (dotted vs. bare, hyphenated vs. spaced, parenthesized vs. not)
-//! has to happen once regardless, and duplicating it as a standalone
-//! predicate would only be able to disagree with itself.
+//! A bare, capitalized, article-less, unparenthesized "Phase N" is KEPT by
+//! construction inside [`phase_hits`]'s own state machine unless an
+//! ownership signal is present (see the per-pattern breakdown above), and
+//! "phase followed by a float" (un-parenthesized) is exempted the same way
+//! one rule up — not as spans, because the phase-form parsing (dotted vs.
+//! bare, hyphenated vs. spaced, parenthesized vs. not, owned vs. domain) has
+//! to happen once regardless, and duplicating it as a standalone predicate
+//! would only be able to disagree with itself.
 //!
 //! # What this is NOT
 //!
@@ -450,11 +464,57 @@ const REVIEW_ROUND_REASON: &str = "review-round reference (`review round N`)";
 const DEVICE_PARITY_REASON: &str = "device-parity-round reference";
 const REQ_REASON: &str = "plan requirement number (`req N`) alongside a phase reference";
 
+/// Ownership phrases that say *whose* phase a bare `Phase N` mention is — the
+/// only two real-tree shapes for "of this &lt;workflow document&gt;" (see
+/// module doc). Checked as a prefix of the text right after the number, so
+/// this stays a short, literal list instead of trying to catalogue every
+/// domain shape that is NOT one of these (the false-positive mode this rule
+/// replaces).
+const PHASE_OWNERSHIP_PHRASES: &[&str] = &["of this plan", "of this arc"];
+
+/// True if the text immediately before byte offset `idx` in `comment` ends
+/// (word-bounded, case-insensitive) with "shipped through" — the
+/// `crates/frust-testing/tests/ios_sim.rs` idiom that narrates a phase as
+/// something the codebase's own history shipped through, not a thing the
+/// code currently has.
+fn phase_shipped_through(comment: &str, idx: usize) -> bool {
+    const PHRASE: &str = "shipped through";
+    let before = comment[..idx].trim_end().to_ascii_lowercase();
+    before.ends_with(PHRASE) && word_boundary_before(&before, before.len() - PHRASE.len())
+}
+
+/// True if `comment` contains a parenthesized workflow card id — `(`, a
+/// lowercase-letter run, a digit run, a `-`, exactly two digits, `)` (this
+/// repo's own task-id shape: `w0-03`, `f1-04`) — anywhere in the same
+/// comment as a `Phase N` mention. Pairing the number with a card id names
+/// whose phase it is exactly as much as an explicit plan/arc reference does.
+fn phase_paired_with_card_id(comment: &str) -> bool {
+    for idx in find_all(comment, "(") {
+        let rest = &comment[idx + 1..];
+        let letters = rest.chars().take_while(char::is_ascii_lowercase).count();
+        if letters == 0 {
+            continue;
+        }
+        let after_letters = &rest[letters..];
+        let digits = leading_digit_run(after_letters);
+        if digits == 0 {
+            continue;
+        }
+        let Some(after_hyphen) = after_letters[digits..].strip_prefix('-') else {
+            continue;
+        };
+        if leading_digit_run(after_hyphen) == 2 && after_hyphen[2..].starts_with(')') {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pushes every banned plan-phase reference in `comment` (dotted, hyphenated,
-/// or parenthesized/article-labelled bare int) — see the module doc's
-/// per-pattern breakdown. Also the sole place the "Phase N of the frame" /
-/// un-parenthesized-float / lowercase-`(phase 0)` KEEP classes are enforced
-/// (by simply never matching them).
+/// parenthesized/article-labelled bare int, or an ownership-signalled bare
+/// int) — see the module doc's per-pattern breakdown. Also the sole place
+/// the un-parenthesized-float and domain-prose bare-`Phase N` KEEP classes
+/// are enforced (by simply never matching them).
 fn phase_hits(comment: &str, out: &mut Vec<Hit>) {
     let lower = comment.to_ascii_lowercase();
     let mut search_from = 0usize;
@@ -533,27 +593,28 @@ fn phase_hits(comment: &str, out: &mut Vec<Hit>) {
                 reason: PHASE_REASON,
             });
         } else if capitalized && !hyphenated {
-            // Rule E: bare, space-separated, capitalized phase — but exempt known
-            // domain-vocabulary patterns: "Phase N of the frame" (renderer-span
-            // idiom), "Phase N (" (scenario staging like "Phase 1 (250ms)"), and
-            // "Phase N →" (animation). Everything else is likely a plan-phase
-            // citation (e.g., "Phase 5 of this arc").
+            // Rule E: bare, space-separated, capitalized phase, no preceding
+            // article, no parens — KEPT by default. Domain prose enumerates
+            // a numbered phase of a thing the code itself has (a frame span,
+            // a paint pass, a waveform) in any punctuation shape at all —
+            // comma-continued ("Phase 0, a 40px wavelength..."),
+            // colon-introduced ("Phase 1: everything that reads the
+            // theme..."), "of the frame", parenthesized staging, or an
+            // animation arrow are all the same class. Banned only when the
+            // surrounding text answers "whose phase is this" with a
+            // plan/arc/workflow reference (see module doc and the helpers
+            // above) — the discriminator is never the shape after the
+            // number, only whether it is owned by a plan/arc/card.
             let after_bare = &comment[bare_end..];
-            let trimmed = after_bare.trim_start();
+            let trimmed_lower = after_bare.trim_start().to_ascii_lowercase();
+            let owns_a_plan_doc = PHASE_OWNERSHIP_PHRASES
+                .iter()
+                .any(|phrase| trimmed_lower.starts_with(phrase));
 
-            // Check for "of the frame" — may be preceded by a lowercase letter
-            // like in "Phase 2a of the frame" (frame sub-phase).
-            let is_frame_span = trimmed.starts_with("of the frame") || {
-                // Skip up to one lowercase letter, then check for "of the frame"
-                let after_letter = trimmed
-                    .strip_prefix(|c: char| c.is_ascii_lowercase())
-                    .unwrap_or(trimmed);
-                after_letter.trim_start().starts_with("of the frame")
-            };
-            let is_scenario_stage = trimmed.starts_with('(');
-            let is_animation = trimmed.starts_with('→') || trimmed.starts_with("->");
-
-            if !is_frame_span && !is_scenario_stage && !is_animation {
+            if owns_a_plan_doc
+                || phase_shipped_through(comment, idx)
+                || phase_paired_with_card_id(comment)
+            {
                 out.push(Hit {
                     range: idx..bare_end,
                     reason: PHASE_REASON,
@@ -561,7 +622,7 @@ fn phase_hits(comment: &str, out: &mut Vec<Hit>) {
             }
         }
         // Otherwise (bare, un-parenthesized, article-less, lowercase, or
-        // exempted domain patterns): allowlisted idioms.
+        // unowned domain prose): allowlisted idioms.
     }
 }
 
@@ -1146,7 +1207,8 @@ mod scan_behavior {
 
     #[test]
     fn space_separated_bare_int_phase_needs_domain_pattern_or_other_signal() {
-        // Domain-vocabulary patterns are KEPT:
+        // Domain vocabulary is KEPT regardless of the punctuation shape that
+        // follows the number — the discriminator is ownership, not shape:
         assert!(
             !phase_violation("Phase 1 of the frame — the encode span"),
             "renderer-span idiom: `Phase N of the frame` is kept"
@@ -1163,9 +1225,32 @@ mod scan_behavior {
             !phase_violation("At rest (phase 0) spoke 0 is the leading one"),
             "animation-rest-state idiom: lowercase `(phase N)` is kept"
         );
+        assert!(
+            !phase_violation("Phase 0, a 40px wavelength, and a span whose inset start is exactly"),
+            "comma-continued local clause, no ownership signal — the \
+             slider variants.rs waveform case a colon/comma exemption list \
+             would have missed"
+        );
+        assert!(
+            !phase_violation("Phase 1: everything that reads the theme and sits under the pods."),
+            "colon-introduced local enumeration, no ownership signal — the \
+             questionnaire.rs paint-order case"
+        );
+        assert!(
+            !phase_violation("Phase 2: the pods, over the boxes they sit in."),
+            "same paint-order enumeration, second entry"
+        );
+        assert!(
+            !phase_violation(
+                "Phase 3: what strokes over a pod's own opaque fill, plus the actions."
+            ),
+            "same paint-order enumeration, third entry — distinct from the \
+             genuine `Phase 3 of this plan` hits below despite sharing a \
+             number"
+        );
 
-        // Plan-phase citations are STRIPPED, including bare Phase N without
-        // domain patterns:
+        // Plan-phase citations are STRIPPED, including bare Phase N with an
+        // ownership signal:
         assert!(
             phase_violation("(Phase 1 acceptance: pre-init is a typed error, never a panic)"),
             "parenthesized AND capitalized is a real plan-phase citation (frust-plugin/android.rs)"
@@ -1187,8 +1272,24 @@ mod scan_behavior {
              selection_toolbar.rs case that the widened rule now catches"
         );
         assert!(
-            phase_violation("Phase 2 here is a problem."),
-            "bare capitalized Phase N with no domain pattern is flagged"
+            phase_violation(
+                "exists: the vello-classic renderer this workspace shipped through Phase 7"
+            ),
+            "`shipped through Phase N` narrates the codebase's own release \
+             history — an ownership signal even with nothing after the \
+             number (ios_sim.rs)"
+        );
+        assert!(
+            phase_violation("Frust web-shell Phase 0 spike: the browser render probe (w0-03)."),
+            "a phase paired with a parenthesized workflow card id (web-spike/main.rs)"
+        );
+        assert!(
+            phase_violation("rather than enumerating `Ime`/`EditCommand`: Phase 3 of this plan"),
+            "an explicit `of this plan` right after the number (morphing_search.rs)"
+        );
+        assert!(
+            phase_violation("Phase 3 of this plan adds another focus-routed-adjacent variant"),
+            "same ownership phrase, mid-sentence (command.rs)"
         );
     }
 
@@ -1424,6 +1525,17 @@ mod scan_behavior {
             )
             .is_some(),
             "`req N` and the phase signal it is gated on, on opposite sides of the break"
+        );
+        assert!(
+            wrapped_violation(
+                "        // predicate rather than enumerating `Ime`/`EditCommand`: Phase 3 of",
+                "        // this plan adds another focus-routed-adjacent variant",
+                &ids,
+            )
+            .is_some(),
+            "the `of this plan` ownership phrase wrapped away from its bare \
+             Phase N (command_palette.rs) — per-line alone this reads as \
+             pure domain prose, only the joined line answers whose phase it is"
         );
     }
 
