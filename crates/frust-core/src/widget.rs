@@ -569,6 +569,17 @@ pub struct LayoutCtx<'a> {
     /// render root threads down carries it unchanged to every widget in the
     /// tree. Defaults to the zero inset in bare-core tests and pre-insets apps.
     window_insets: WindowInsets,
+    /// The window's logical size, threaded down by the render root
+    /// ([`crate::app::RenderRoot::layout`]) exactly like `window_insets` above —
+    /// one layout context reaches the whole tree, so the value is set once at the
+    /// root and every widget reads the same one. [`Size::ZERO`] in bare-core
+    /// tests and before the first layout, a supported state.
+    ///
+    /// Its consumer is the overlay portal: a widget that floats a pod
+    /// ([`crate::overlay`]) lays that pod out against the *window*, not against
+    /// its own constraints, because the pod will be painted at an absolute window
+    /// rect rather than inside its owner. See [`LayoutCtx::window_size`].
+    window_size: Size,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -580,6 +591,7 @@ impl<'a> LayoutCtx<'a> {
             text_ctx: None,
             theme: None,
             window_insets: WindowInsets::default(),
+            window_size: Size::ZERO,
         }
     }
 
@@ -593,6 +605,7 @@ impl<'a> LayoutCtx<'a> {
             text_ctx: Some(text_ctx),
             theme: None,
             window_insets: WindowInsets::default(),
+            window_size: Size::ZERO,
         }
     }
 
@@ -606,6 +619,7 @@ impl<'a> LayoutCtx<'a> {
             text_ctx,
             theme,
             window_insets: WindowInsets::default(),
+            window_size: Size::ZERO,
         }
     }
 
@@ -656,6 +670,31 @@ impl<'a> LayoutCtx<'a> {
     /// so no per-child adjustment is needed.
     pub(crate) fn set_window_insets(&mut self, insets: WindowInsets) {
         self.window_insets = insets;
+    }
+
+    /// The window's logical size for this layout pass (a cheap copy).
+    ///
+    /// Global and origin-independent like [`LayoutCtx::window_insets`], so every
+    /// widget in the tree reads the same value regardless of where it sits or
+    /// what constraints its parent handed it; [`Size::ZERO`] when no root has laid
+    /// out yet (bare-core leaf tests).
+    ///
+    /// **The constraint an overlay pod is laid out against.** A widget floating a
+    /// pod through [`crate::overlay`] sizes it with
+    /// `BoxConstraints::loose(ctx.window_size())` rather than with its own `bc`:
+    /// the pod escapes its owner's box entirely, so the owner's constraints say
+    /// nothing about how much room the floated surface has, and the window is the
+    /// only bound that does.
+    pub fn window_size(&self) -> Size {
+        self.window_size
+    }
+
+    /// Seed the window size lent by the render root
+    /// ([`crate::app::RenderRoot::layout`]). One layout context is threaded down
+    /// the whole tree, so this is set once at the root and inherited unchanged,
+    /// exactly like [`LayoutCtx::set_window_insets`].
+    pub(crate) fn set_window_size(&mut self, size: Size) {
+        self.window_size = size;
     }
 }
 
@@ -1396,6 +1435,62 @@ impl<'a> PaintCtx<'a> {
     /// channel (see [`PaintCtx::report_input_shield`]).
     pub fn take_input_shields(&mut self) -> Vec<Rect> {
         std::mem::take(&mut self.input_shields)
+    }
+
+    /// Float `entry`'s pod above the whole app for this frame, and register its
+    /// rect for the next frame's input routing.
+    ///
+    /// # The owner must not paint the pod
+    ///
+    /// A registered pod is painted by [`crate::app::RenderRoot::paint`], **after**
+    /// the main tree — that is the only way it escapes its owner's paint order
+    /// and every ancestor's clip. An owner that also paints it itself draws the
+    /// surface twice: once clipped in place, once floated.
+    ///
+    /// # Per pass, in registration order
+    ///
+    /// The registry is cleared when each paint pass begins, so a surface stays
+    /// alive only while its owner keeps registering it — there is nothing to
+    /// unregister, and an owner that stops (or is unmounted) simply disappears
+    /// from the routing table after the next paint. Within a
+    /// [band](crate::overlay::OverlayBand), later registration paints and
+    /// hit-tests above earlier; the band itself outranks registration order.
+    ///
+    /// [`OverlayEntry::window_rect`](crate::overlay::OverlayEntry::window_rect)
+    /// is absolute logical window space, so an owner computes it from
+    /// [`PaintCtx::origin`] — the only absolute anchor a widget has. Recomputing
+    /// it every paint is what makes an anchored surface follow its owner with no
+    /// subscription of any kind.
+    ///
+    /// Registering outside a root-driven paint pass (a leaf unit test painting a
+    /// bare [`PaintCtx`]) is harmless: the entry is dropped by the next real
+    /// pass's clear rather than leaking into it.
+    pub fn register_overlay(&mut self, entry: crate::overlay::OverlayEntry) {
+        crate::overlay::register(entry);
+    }
+
+    /// Publish "there is a selection here, and these verbs apply" for this frame.
+    ///
+    /// Resolved by [`crate::app::RenderRoot::paint`] into
+    /// [`RenderRoot::selection_toolbar`](crate::app::RenderRoot::selection_toolbar)
+    /// plus a generation a shell diffs
+    /// ([`selection_toolbar_generation`](crate::app::RenderRoot::selection_toolbar_generation)),
+    /// for the platform edit-menu route.
+    ///
+    /// **Publish under either policy.** A field drawing its own toolbar through
+    /// the overlay portal ([`crate::selection_toolbar::SelectionToolbarPolicy::Framework`])
+    /// publishes this too: it costs one pointer-sized write, and it keeps a single
+    /// code path rather than one per route.
+    ///
+    /// Pass-scoped and last-writer-wins, like every other paint-time request: a
+    /// pass in which nothing publishes resolves to "no selection", which is what
+    /// puts the toolbar away when a selection collapses without any widget having
+    /// to retract anything.
+    pub fn publish_selection_toolbar(
+        &mut self,
+        request: crate::selection_toolbar::SelectionToolbarRequest,
+    ) {
+        crate::selection_toolbar::publish(request);
     }
 
     /// Report a tagged ("hero") element's absolute paint `bounds` and read back

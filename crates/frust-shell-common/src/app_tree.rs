@@ -13,6 +13,7 @@ use frust_core::accesskit;
 use frust_core::anim::FrameTime;
 use frust_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use frust_core::insets::WindowInsets;
+use frust_core::selection_toolbar::SelectionToolbarRequest;
 use frust_core::view::{ChangeFlags, View};
 use frust_core::widget::PlatformViewFrame;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
@@ -158,6 +159,43 @@ pub trait AppTree {
     ///
     /// **Destructive**, for [`AppTree::take_clipboard_write`]'s reason.
     fn take_paste_request(&mut self) -> bool;
+
+    /// The selection-toolbar request the focused field published during the most
+    /// recent [`AppTree::paint`] (delegates to
+    /// [`RenderRoot::selection_toolbar`]); `None` when no field has a selection
+    /// worth a toolbar.
+    ///
+    /// The shell half of the **platform edit-menu** route: on a host with a
+    /// system edit menu (iOS `UIEditMenuInteraction`), a shell reads this beside
+    /// [`AppTree::ime_state`] and presents the host menu at the request's anchor
+    /// rect, converting the logical rect to the platform's own units itself. A
+    /// **level**, not an edge — pair it with
+    /// [`AppTree::selection_toolbar_generation`] to notice changes cheaply.
+    ///
+    /// A field drawing its *own* toolbar publishes this too (one code path for
+    /// both routes), so a shell must gate on
+    /// `frust_core::selection_toolbar::selection_toolbar_policy()`, not on the
+    /// presence of a request.
+    ///
+    /// **Defaulted to `None`** like the getters below, so an [`AppTree`] impl
+    /// that predates this channel still compiles and reads an empty one.
+    fn selection_toolbar(&self) -> Option<SelectionToolbarRequest> {
+        None
+    }
+
+    /// A monotonically-increasing generation bumped on every **actual** change of
+    /// [`AppTree::selection_toolbar`], its clearing included (delegates to
+    /// [`RenderRoot::selection_toolbar_generation`]).
+    ///
+    /// The [`AppTree::focus_ime_generation`] contract one channel over: a shell
+    /// caches the last value it acted on and re-presents the host menu only when
+    /// it moves, which is what keeps a standing selection — republished every
+    /// frame it stands — from re-presenting the menu on every vsync.
+    ///
+    /// **Defaulted to `0`**, the same additive shape as its neighbour above.
+    fn selection_toolbar_generation(&self) -> u64 {
+        0
+    }
 
     /// Store the app's active theme, threaded into every subsequent
     /// layout/paint pass (delegates to [`RenderRoot::set_theme`]).
@@ -387,6 +425,14 @@ where
         self.root.take_paste_request()
     }
 
+    fn selection_toolbar(&self) -> Option<SelectionToolbarRequest> {
+        self.root.selection_toolbar()
+    }
+
+    fn selection_toolbar_generation(&self) -> u64 {
+        self.root.selection_toolbar_generation()
+    }
+
     fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.root.set_theme(theme);
     }
@@ -590,6 +636,16 @@ mod tests {
             unimplemented!()
         }
         // set_insets deliberately NOT overridden — exercises the default no-op.
+    }
+
+    #[test]
+    fn app_tree_selection_toolbar_defaults_to_absent() {
+        // Compiles (both defaults exist, so a pre-toolbar `AppTree` impl outside
+        // this crate is unaffected) and reads the empty channel: no request, and
+        // a generation a shell can diff from frame zero.
+        let tree = MinimalTree;
+        assert!(tree.selection_toolbar().is_none());
+        assert_eq!(tree.selection_toolbar_generation(), 0);
     }
 
     #[test]
