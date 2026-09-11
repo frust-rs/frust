@@ -1,6 +1,8 @@
 package dev.frust
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.res.Configuration
 import android.database.ContentObserver
@@ -13,6 +15,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.Selection
 import android.text.SpannableStringBuilder
+import android.util.Log
 import android.view.Choreographer
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -48,6 +51,21 @@ import org.json.JSONObject
  * composition mechanics against a mirror [Editable], pushes the whole editing
  * state into Rust via `nativeImeApply`, then pulls the reconciled state back via
  * `nativeImeState` to keep the `InputMethodManager` synchronised.
+ *
+ * Clipboard access is this side's job (`ClipboardManager` is a system service
+ * with no Rust-reachable counterpart): the framework publishes copy/paste
+ * intent, [syncClipboard] drains it once per frame, and every inbound verb —
+ * the IME's own actions ([FrustInputConnection.performContextMenuAction]), a
+ * hardware `Ctrl` chord ([onKeyDown]), and the answer to a paste request —
+ * arrives through the one `nativeEditCommand` seam.
+ *
+ * **The selection toolbar is the framework's, not the platform's.** Frust draws
+ * its own bar over a selection
+ * (`frust_core::SelectionToolbarPolicy::Framework`, the default), so this view
+ * deliberately installs **no `ActionMode.Callback` and no `GestureDetector`**.
+ * Adding either would raise a second, competing toolbar over the framework's
+ * own and take the long-press that summons it — the same choice Flutter makes
+ * on this platform.
  *
  * `androidx.core` backs the inset listener
  * ([dispatchInsets]) and status/nav-bar icon contrast
@@ -150,6 +168,21 @@ class FrustSurfaceView(
         private const val CONTENT_TYPE_NORMAL = "normal"
         private const val CONTENT_TYPE_NO_SUGGESTIONS = "noSuggestions"
         private const val CONTENT_TYPE_TERMINAL = "terminal"
+
+        /**
+         * `nativeEditCommand`'s fixed command ABI, decoded on the Rust side by
+         * `frust_shell_android::ffi_support::edit_command_from_code` — DO NOT
+         * renumber without changing both sides. An unrecognised code is
+         * dropped there rather than defaulted to a verb, since every verb here
+         * edits the focused field's document.
+         */
+        private const val EDIT_COMMAND_COPY = 0
+        private const val EDIT_COMMAND_CUT = 1
+        private const val EDIT_COMMAND_PASTE = 2
+        private const val EDIT_COMMAND_SELECT_ALL = 3
+
+        /** logcat tag for this view's best-effort clipboard diagnostics. */
+        private const val TAG = "frust"
 
         /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
@@ -255,6 +288,34 @@ class FrustSurfaceView(
     private external fun nativeImeState(handle: Long): String?
 
     private external fun nativeImeAction(handle: Long, action: Int)
+
+    // Clipboard exports. The host clipboard is the JVM's
+    // (`ClipboardManager` is a system service with no Rust-reachable
+    // counterpart), so the framework publishes intent and this side performs
+    // the actual read/write — see [syncClipboard].
+
+    // Drains (and clears) the text a focused editable asked to put on the
+    // system clipboard, or null when nothing was copied / there is no live
+    // handle. A one-shot edge: a drained value that is dropped here is lost.
+    private external fun nativeTakeClipboardWrite(handle: Long): String?
+
+    // Drains (and clears) whether a focused editable asked this side to read
+    // the system clipboard back to it. The answer is delivered as a separate
+    // [nativeEditCommand] paste call rather than a return value, because the
+    // read happens here and may legitimately yield nothing.
+    private external fun nativeTakePasteRequest(handle: Long): Boolean
+
+    // One decoded clipboard/selection verb for the focused editable. `cmd` is a
+    // fixed numeric ABI shared with the Rust `nativeEditCommand` glue — DO NOT
+    // renumber without changing both sides:
+    //   0 = copy
+    //   1 = cut
+    //   2 = paste (`text` carries the clipboard content)
+    //   3 = select all
+    // `text` is read only for a paste and is null for every other verb. An
+    // unrecognised code is dropped on the Rust side, never defaulted to a verb.
+    // See [EDIT_COMMAND_COPY] and friends for the constants to pass.
+    private external fun nativeEditCommand(handle: Long, cmd: Int, text: String?)
 
     // Appearance: flip the app's theme brightness between
     // light and dark. `dark` mirrors Configuration.UI_MODE_NIGHT_YES — see
@@ -482,6 +543,17 @@ class FrustSurfaceView(
 
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
+    /**
+     * The system clipboard, resolved per access like [imm] rather than cached:
+     * both are system services whose instance is not this view's to own across
+     * a configuration change, and both are only touched on user-driven paths
+     * (never per frame — [syncClipboard]'s per-frame poll is a JNI call, and it
+     * only reaches this property when the framework actually asked for a copy
+     * or a paste).
+     */
+    private val clipboard: ClipboardManager
+        get() = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
@@ -871,8 +943,22 @@ class FrustSurfaceView(
      * an `InputConnection`-only editor would otherwise drop. Single-line v1
      * fields treat Enter as submit (`imeOptions = IME_ACTION_DONE`), so route it
      * to the existing `nativeImeAction` seam rather than inserting a newline.
-     * Only Enter is intercepted while a field is focused; every other key falls
-     * through to the default handling (soft-keyboard input stays the IME's job).
+     *
+     * The hardware **clipboard chords** (`Ctrl+C`/`X`/`V`/`A`) are intercepted
+     * on the same terms and decoded here into [nativeEditCommand] verbs, so the
+     * framework never has to know which chord means copy on which host. A
+     * *soft* keyboard never sends these — Gboard drives copy/paste through
+     * [FrustInputConnection.performContextMenuAction] (or plain `commitText`)
+     * instead — so this path exists exclusively for a physical keyboard and for
+     * injected `adb shell input keyevent` presses.
+     *
+     * Only Enter and those four chords are intercepted while a field is
+     * focused; every other key falls through to the default handling
+     * (soft-keyboard input stays the IME's job). The `imeActive` gate is what
+     * keeps a chord from being swallowed when no editable is focused: the
+     * framework routes an edit command to the focus path, so with nothing
+     * focused there would be nobody to answer it, and consuming the press would
+     * take it away from the host activity for nothing.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (handle != 0L && imeActive &&
@@ -882,7 +968,52 @@ class FrustSurfaceView(
             pollImeAfterDispatch()
             return true
         }
+        if (handle != 0L && imeActive && event.isCtrlPressed) {
+            val command = when (keyCode) {
+                KeyEvent.KEYCODE_C -> EDIT_COMMAND_COPY
+                KeyEvent.KEYCODE_X -> EDIT_COMMAND_CUT
+                KeyEvent.KEYCODE_V -> EDIT_COMMAND_PASTE
+                KeyEvent.KEYCODE_A -> EDIT_COMMAND_SELECT_ALL
+                else -> null
+            }
+            if (command != null) {
+                dispatchEditCommand(command)
+                return true
+            }
+        }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /**
+     * Send one decoded clipboard/selection verb to the focused editable and
+     * reconcile the IME mirror in the same pass — the shared body behind both
+     * host-driven routes ([onKeyDown]'s hardware chords and
+     * [FrustInputConnection.performContextMenuAction]'s IME menu actions).
+     *
+     * A paste reads the clipboard here, on the JVM side that owns it, and is
+     * simply not sent when the read yields nothing ([readClipboardText]
+     * documents when that happens). The press is still reported consumed by the
+     * callers in that case: the user asked a focused field to paste, and
+     * letting the chord fall through to the platform afterwards would be a
+     * second, unrelated interpretation of the same press.
+     *
+     * The synchronous [pollImeAfterDispatch] is the same two-step shape
+     * [FrustInputConnection.performEditorAction] uses: the verb changed the
+     * field's text or selection *during this event pass*, and without the poll
+     * the mirror [Editable] would keep the pre-edit state until some other IME
+     * callback happened to push it back to Rust.
+     */
+    private fun dispatchEditCommand(command: Int) {
+        if (command == EDIT_COMMAND_PASTE) {
+            val text = readClipboardText()
+            if (text.isNullOrEmpty()) {
+                return
+            }
+            nativeEditCommand(handle, command, text)
+        } else {
+            nativeEditCommand(handle, command, null)
+        }
+        pollImeAfterDispatch()
     }
 
     /** A custom editor view MUST return true here to be offered an InputConnection. */
@@ -1022,6 +1153,113 @@ class FrustSurfaceView(
     }
 
     /**
+     * Drain the framework's two clipboard slots and act on them — the JVM half
+     * of the clipboard channel, called once per frame from [doFrame] directly
+     * after the post-dispatch IME reconcile.
+     *
+     * Both drains are one-shot edges on the Rust side, so a frame that skips
+     * this would lose a copy outright; both are also plain JNI reads that
+     * answer null/false on an idle frame, the same cost bar
+     * [pollSystemUiState] already sets. `ClipboardManager` itself is only
+     * touched when a drain actually reports something.
+     *
+     * The paste direction is deliberately a *second* dispatch rather than a
+     * return value: the framework asks ([nativeTakePasteRequest]), this side
+     * reads the clipboard, and the text goes back in through
+     * [nativeEditCommand]. A read that yields nothing — an empty clipboard, or
+     * the Android 10+ focus gate in [readClipboardText] — simply dispatches
+     * nothing, which is why the request does not have to be remembered
+     * anywhere: it is answered or it is dropped, and the framework's own
+     * request slot is already clear either way.
+     *
+     * **No ActionMode and no GestureDetector anywhere in this view**: the
+     * selection toolbar over a selection is drawn by the framework
+     * (`frust_core::SelectionToolbarPolicy::Framework`, the default), which is
+     * what publishes the copy/paste intent this method drains. Do not add a
+     * native `ActionMode.Callback` or a `GestureDetector` long-press here —
+     * they would present a *second*, competing toolbar over the framework's own
+     * and steal the gesture that raises it.
+     */
+    private fun syncClipboard() {
+        nativeTakeClipboardWrite(handle)?.let { writeClipboardText(it) }
+        if (nativeTakePasteRequest(handle)) {
+            // The same body the hardware Ctrl+V and the IME's own paste action
+            // take: read here, dispatch only when there is something to insert,
+            // then reconcile the mirror in this pass.
+            dispatchEditCommand(EDIT_COMMAND_PASTE)
+        }
+    }
+
+    /**
+     * Put `text` on the system clipboard as a plain-text clip.
+     *
+     * Best-effort by design: `setPrimaryClip` is a binder call into another
+     * process, and a failing one (a clip too large for the transaction buffer,
+     * a clipboard service killed under memory pressure, an OEM policy refusing
+     * the write) must not take down the Choreographer callback this runs on.
+     * The failure is logged without the text — a copied password is exactly as
+     * sensitive as a pasted one.
+     *
+     * The clip is labelled `"text"` and written as plain text: this side never
+     * has styled content to preserve, since the framework hands over a plain
+     * `String`. On Android 13+ the system itself shows a "copied" confirmation
+     * for this write — nothing here suppresses or duplicates it.
+     */
+    private fun writeClipboardText(text: String) {
+        try {
+            clipboard.setPrimaryClip(ClipData.newPlainText("text", text))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "clipboard write failed", e)
+        }
+    }
+
+    /**
+     * Read the system clipboard's primary clip as plain text, or null when
+     * there is nothing usable to paste.
+     *
+     * Three platform behaviours this deliberately lives with:
+     *
+     * * **The focus gate (Android 10+).** `getPrimaryClip` returns null unless
+     *   the calling app currently has input focus. A paste attempted while the
+     *   window is not focused legitimately yields nothing; it is not an error
+     *   state to report to the user, and a null return is indistinguishable
+     *   here from an empty clipboard on purpose.
+     * * **The read toast (Android 12+).** The system shows a
+     *   "<app> pasted from <app>" toast the first time an app reads *another*
+     *   app's clip through `getPrimaryClip`. That is by design and not worth
+     *   engineering around: this method is only ever reached from a
+     *   user-initiated paste. `hasPrimaryClip` (and `getPrimaryClipDescription`)
+     *   do NOT raise it, which is why the emptiness gate runs first: the cheap
+     *   check costs the user nothing, and only the real read — which happens
+     *   solely because a paste was asked for — ever crosses that line.
+     * * **A refused read.** A `SecurityException` (a device policy or profile
+     *   restriction) is caught rather than propagated: the paste simply does
+     *   not happen, and the frame loop survives.
+     *
+     * `coerceToText` rather than `text`, so a copied URI or an intent-bearing
+     * clip still pastes as its human-readable text instead of silently
+     * refusing.
+     */
+    private fun readClipboardText(): String? {
+        return try {
+            if (!clipboard.hasPrimaryClip()) {
+                return null
+            }
+            val clip = clipboard.primaryClip
+            if (clip == null || clip.itemCount == 0) {
+                return null
+            }
+            clip.getItemAt(0)?.coerceToText(context)?.toString()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "clipboard read refused", e)
+            null
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "clipboard read failed", e)
+            null
+        }
+    }
+
+    /**
      * Per-frame poll of the process-wide system-UI override slot
      * (`frust::set_system_ui_mode`) — decodes
      * `nativeSystemUiState`'s packed `(generation, mode)` `u64` and hands a
@@ -1108,6 +1346,14 @@ class FrustSurfaceView(
             // field's published state; a no-op when they already match, so normal
             // typing never triggers a spurious restart.
             pollImeAfterDispatch()
+            // Per-frame clipboard drain: the framework's copy/paste
+            // intent is a one-shot edge, so a frame that skipped this would
+            // drop a copy outright. Two cheap JNI reads on an idle frame (the
+            // `pollSystemUiState` cost bar below); `ClipboardManager` is
+            // touched only when a drain actually reports something. Placed
+            // after the IME reconcile so a paste dispatched here still sees the
+            // mirror the poll just settled.
+            syncClipboard()
             // Per-frame system-UI poll: cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
@@ -1349,6 +1595,41 @@ class FrustSurfaceView(
                 sync()
             }
             return handled
+        }
+
+        /**
+         * Answer the IME's own clipboard affordances — the paste/copy/cut/
+         * select-all actions a soft keyboard raises (Gboard's clipboard chip,
+         * a keyboard's own edit strip, an accessibility service) — by decoding
+         * the `android.R.id.*` action into a framework edit command.
+         *
+         * This is the route that matters on Android: an IME sends
+         * `performContextMenuAction` rather than typing the clipboard's
+         * contents, and `BaseInputConnection`'s default implementation only
+         * knows how to act on a real `TextView`, so without this override the
+         * action would reach the mirror [Editable] and never the framework's
+         * field.
+         *
+         * `pasteAsPlainText` is answered identically to `paste`: this side
+         * coerces every clip to plain text on the way in
+         * ([readClipboardText]), so the framework has no styled paste to strip.
+         * Anything else (`startSelectingText`, `switchInputMethod`, a future
+         * action) falls through to `super`, which keeps the mirror's own
+         * behaviour rather than silently claiming an action we do not perform.
+         */
+        override fun performContextMenuAction(id: Int): Boolean {
+            if (handle == 0L) {
+                return super.performContextMenuAction(id)
+            }
+            val command = when (id) {
+                android.R.id.paste, android.R.id.pasteAsPlainText -> EDIT_COMMAND_PASTE
+                android.R.id.copy -> EDIT_COMMAND_COPY
+                android.R.id.cut -> EDIT_COMMAND_CUT
+                android.R.id.selectAll -> EDIT_COMMAND_SELECT_ALL
+                else -> return super.performContextMenuAction(id)
+            }
+            dispatchEditCommand(command)
+            return true
         }
 
         override fun beginBatchEdit(): Boolean {
