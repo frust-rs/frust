@@ -1912,6 +1912,10 @@ impl Widget for TextInputWidget {
             // A leaf with nothing deferred: the broadcast is a harmless
             // fall-through (it must not touch the editor, the caret, or focus).
             InputEvent::Housekeeping => EventResult::Ignored,
+            // A field hosting no overlay of its own ignores a broadcast
+            // addressed to another owner: every non-owner widget follows this
+            // contract and falls through unchanged.
+            InputEvent::Overlay(_) => EventResult::Ignored,
         }
     }
 
