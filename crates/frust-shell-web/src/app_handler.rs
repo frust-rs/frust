@@ -166,11 +166,12 @@ pub fn mouse_button_should_dispatch(
 /// The four clipboard keys are carried like every other editing key, and the
 /// browser is where they are rarest: a page sees the dedicated `Copy`/`Cut`/
 /// `Paste` keys only from a keyboard that has them, and `Insert` only from the
-/// legacy `Ctrl`/`Shift`+`Insert` chords a widget decodes itself. The platform
-/// `Ctrl`/`Cmd`+`c`/`x`/`v` chords do **not** arrive here at all while a text
-/// field is focused — the DOM answers those as clipboard events on the IME
-/// overlay instead, which is why they are never re-dispatched onto the canvas
-/// ([`crate::ime::is_clipboard_chord`]).
+/// legacy `Ctrl`/`Shift`+`Insert` chords a widget decodes itself. While a text
+/// field is focused, which of them reach here at all is decided by the verb
+/// they mean ([`crate::ime::clipboard_verb`]): a copy or a cut arrives as an
+/// ordinary key event, because the DOM may raise no clipboard event for it,
+/// while every paste gesture is withheld and answered as a DOM `paste` on the
+/// IME overlay instead.
 pub fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
     Some(match key {
         WinitNamedKey::Enter => NamedKey::Enter,
@@ -863,12 +864,16 @@ fn dom_edit_command(event: &crate::ime::DomEditEvent) -> Option<EditCommand> {
 /// into the tree's slot, which is the value this function is handed. Re-issuing
 /// it would ask a browser to write text that is already on the clipboard, from
 /// outside the gesture that authorised it — refused on some browsers, pointless
-/// on all of them.
+/// on all of them. A `copy` the DOM reports is the same shape: the keystroke
+/// behind it also reaches the widget as a key event (only a paste gesture is
+/// withheld from the key path — [`crate::ime::withheld_from_key_path`]), and
+/// the two halves describe one gesture.
 ///
 /// Text that merely *looks* like a duplicate is still a real write: the
 /// comparison is against one drain's own synchronous write, which the caller
-/// takes and discards every pass, so a second copy of the same selection a
-/// moment later is issued normally.
+/// takes and discards every pass and which the write itself asks for a drain
+/// to take, so a second copy of the same selection a moment later is issued
+/// normally instead of being read as the first one's echo.
 pub fn clipboard_write_to_issue(
     pending: Option<String>,
     synchronous: Option<&str>,
@@ -1685,8 +1690,9 @@ mod browser_loop {
         /// no gesture to ride and may be refused outright; the rejection is
         /// logged, not retried.
         fn sync_clipboard(&mut self, window: &Arc<Window>) {
-            // Taken every pass whether or not the tree wrote anything, which is
-            // what bounds the mark to a single drain — see
+            // Taken every pass whether or not the tree wrote anything, and the
+            // synchronous write itself asked for this pass — together that is
+            // what bounds the mark to a single drain. See
             // `ImeOverlay::take_synchronous_write`.
             let synchronous = self.ime.take_synchronous_write();
             if let Some(text) = super::clipboard_write_to_issue(
@@ -3433,8 +3439,9 @@ mod tests {
     fn the_dedicated_clipboard_keys_carry_their_editing_semantics() {
         // Rare in a browser — only a keyboard that has them sends them — but
         // they are editing keys like any other, and the desktop shell maps the
-        // same four. The platform chords never reach here at all: the DOM
-        // answers those on the overlay (`crate::ime::is_clipboard_chord`).
+        // same four. Which gestures survive the overlay's own exclusion is the
+        // verb's affair (`crate::ime::withheld_from_key_path`): a paste is
+        // answered by the DOM instead and never arrives.
         assert_eq!(map_named_key(WinitNamedKey::Copy), Some(NamedKey::Copy));
         assert_eq!(map_named_key(WinitNamedKey::Cut), Some(NamedKey::Cut));
         assert_eq!(map_named_key(WinitNamedKey::Paste), Some(NamedKey::Paste));
@@ -3553,6 +3560,39 @@ mod tests {
         // wrote something the tree never echoed (a plain `copy`).
         assert_eq!(clipboard_write_to_issue(None, Some("abc")), None);
         assert_eq!(clipboard_write_to_issue(None, None), None);
+    }
+
+    #[test]
+    fn a_synchronous_write_suppresses_its_own_echo_and_nothing_after_it() {
+        // One copy gesture, both halves: the DOM listener put the selection on
+        // the clipboard inside its callback, and the same keystroke reached the
+        // widget on the key path, which answered by writing the identical text
+        // into the tree's slot. Exactly one of the two may reach the host.
+        let action = crate::ime::clipboard_write_action(Some("abc"));
+        assert!(
+            action.request_frame,
+            "the write must ask for the drain that takes its mark: a copy \
+             queues no signal and paints nothing, so no other turn is owed, \
+             and a mark left standing is read as the next copy's own echo"
+        );
+        let mut mark = action.write.map(str::to_owned);
+
+        // That drain. The mark is taken whether or not the tree wrote anything,
+        // and here it did: the echo is suppressed.
+        assert_eq!(
+            clipboard_write_to_issue(Some("abc".to_string()), mark.take().as_deref()),
+            None
+        );
+
+        // A second copy of the same unchanged selection a moment later — a
+        // toolbar button, an app-driven copy, with no DOM event behind it. The
+        // mark died with the drain above, so this is the genuine write it looks
+        // like and must be issued.
+        assert_eq!(mark, None, "the mark lives for exactly one drain");
+        assert_eq!(
+            clipboard_write_to_issue(Some("abc".to_string()), mark.take().as_deref()),
+            Some("abc".to_string())
+        );
     }
 
     // --- a guard against a silent winit-web assumption ---
