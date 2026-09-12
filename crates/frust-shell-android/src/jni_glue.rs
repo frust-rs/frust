@@ -1710,14 +1710,20 @@ pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
 /// focus-routed, so without that compare a slow `ContentProvider`'s answer
 /// lands in whatever field holds focus whenever it finally arrives.
 ///
-/// A missing handle returns `0`, which no live generation ever equals
-/// (`RenderRoot` starts at `1` and `advance_focus_epoch` skips `0`), so a
-/// resolution outliving the native side can never compare equal and be
-/// delivered.
+/// A missing handle returns `0`, and the JVM half is what makes that sentinel
+/// unambiguous: it refuses to start a resolution whose *snapshot* is `0`, so
+/// every snapshot it goes on to hold is non-zero and a dead handle's `0` can
+/// never compare equal on arrival. That refusal is load-bearing rather than
+/// belt-and-braces, because the counter returned here is `focus_ime_gen`,
+/// which is built at `0` and advanced with a bare `wrapping_add` — `0` is a
+/// reachable live value. (`focus_epoch` is a different counter; only that one
+/// is built at `1` and stepped past `0` on wrap.)
 ///
-/// Deliberately does NOT `pump_reactive`: this is a generation the last frame
-/// already settled, and the Kotlin poll runs inside the same `doFrame` that
-/// produced it.
+/// Deliberately does NOT `pump_reactive`: nothing reactive writes this counter
+/// outside an event or paint pass, so a caller always reads a value the last
+/// frame already settled. The request-side read does run inside the `doFrame`
+/// that produced it; the arrival-side comparison runs later, off the main
+/// looper's queue, which is why it re-reads rather than trusting its snapshot.
 pub fn native_focus_generation(handle: jlong) -> jlong {
     guard("nativeFocusGeneration", 0, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).

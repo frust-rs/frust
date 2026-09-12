@@ -480,7 +480,9 @@ macro_rules! android_app {
         /// the session that asked for it. `EditCommand::Paste` is focus-routed,
         /// so a slow `ContentProvider`'s answer would otherwise land in
         /// whatever field holds focus when it arrives. A missing handle
-        /// returns `0`, which no live generation equals. Additive: older
+        /// returns `0`; the JVM half refuses to start a resolution whose
+        /// snapshot is `0`, and that is what makes the sentinel unambiguous
+        /// (see `jni_glue::native_focus_generation`). Additive: older
         /// generated Kotlin that never calls this is unaffected.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeFocusGeneration<'local>(

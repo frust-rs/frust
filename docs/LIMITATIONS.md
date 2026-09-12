@@ -315,18 +315,42 @@ those failing discards the paste silently. (2026-09-12)
 **Applies to**: Android only, and only a primary clip whose first item has a
 `Uri` and no direct text.
 
-**Why accepted**: the session check is what stops a slow provider's answer
-landing in a *different* field, since `EditCommand::Paste` is focus-routed and
-carries no identity of its own — a paste that does not land can be asked for
-again, one that lands in the wrong field cannot be taken back. The check is
-deliberately conservative: the generation moves on any real change of the
-focus flag or the published IME surface, so editing or moving the caret while
-the provider is still answering also discards the paste, not only switching
+**Why accepted**: the session check is what *usually* stops a slow provider's
+answer landing in a *different* field, since `EditCommand::Paste` is
+focus-routed and carries no identity of its own, and a paste that lands in the
+wrong field cannot be taken back. It is a proxy for that identity rather than
+the identity itself, and it is imperfect in three named ways.
+
+It is conservative in one direction: the generation moves on any real change
+of the focus flag or the published IME surface, so editing, moving the caret,
+*or the field merely being repositioned under the user* — a scroll, a reflow,
+the soft keyboard animating in — discards the paste, not only switching
 fields. Re-publishing an unchanged surface is not an edge, so an ordinary wait
-does not trip it. The two-second bound exists because `shutdownNow()` cannot
-interrupt a thread already blocked inside another process, so a deadline is
-the only thing that can stop a very late answer from arriving as a surprise
-paste.
+does not trip it.
+
+It is incomplete in the other direction, and this is the accepted risk: the
+generation is a surface-*change* counter, not a per-field identity. Focus can
+move between fields without moving it, because `set_focus_active(true)` is a
+no-op when some field was already focused, and the published `ImeState` carries
+no widget identity — only `{active, editing, caret, content_type}`. Two fields
+publishing structurally identical state (same caret rect, same empty editing
+state, same content type — overlapping fields mid-crossfade, say), or a
+focus-taker that publishes no surface at all, leave the counter still, and the
+misdelivery this guard exists to prevent becomes possible again. Two things
+keep the residual narrow: `content_type` is part of the compared value, so a
+clip asked for in a `Password` field can never land in a `Normal` one; and on a
+stock build pointer dispatch and paint complete inside one `nativeOnFrame`, so
+there is no moment at which a late answer can observe the gap. That second
+mitigation is defeated by the `FRUST_NO_RESAMPLE` kill switch.
+
+The two-second bound exists because `shutdownNow()` cannot interrupt a thread
+already blocked inside another process, so a deadline is the only thing that
+can stop a very late answer arriving as a surprise paste. Note what it does
+*not* buy: the resolver is a single thread, so asking again while a provider
+is still hung queues the retry behind that blocked read, and the retry is
+therefore already past its own deadline whenever it finally runs. While a
+provider hangs, "ask again" is not a recovery — no URI-backed paste succeeds
+until a background/foreground cycle tears the executor down.
 
 **Evidence**:
 `platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
@@ -336,9 +360,13 @@ paste.
 `AppTree::focus_ime_generation`.
 
 **Trigger for removal**: a per-request identity that distinguishes "this
-field, this request" from "this focus/IME state", which would let an edit
-during the wait keep the paste instead of discarding it, and would let a newer
-request supersede an older in-flight one.
+field, this request" from "this focus/IME state". That would close the
+misdelivery gap above rather than only narrowing it, let an edit during the
+wait keep the paste instead of discarding it, and let a newer request supersede
+an older in-flight one. The framework already computes a counter of the right
+shape — `focus_epoch`, advanced on every honoured focus claim whether or not
+any published level changed — but it is private and is not exposed through
+`AppTree`.
 
 **NOT DEVICE-VERIFIED.** The 2026-09-12 Pixel 5 run exercised the clipboard
 legs but not this path: reaching it needs a clip whose first item has a `Uri`

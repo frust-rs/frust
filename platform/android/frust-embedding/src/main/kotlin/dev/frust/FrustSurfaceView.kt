@@ -410,8 +410,11 @@ class FrustSurfaceView(
      * The framework's focus/IME session generation, used to bind an async
      * URI-backed clipboard resolution to the session that asked for it
      * ([readClipboardTextAsync]). A cheap `jlong` read, the same shape
-     * [nativeSystemUiState] above uses. `0` means no live native handle, and
-     * no real generation is ever `0`.
+     * [nativeSystemUiState] above uses. `0` means no live native handle — but
+     * a real generation can be `0` too, because the counter behind it starts
+     * there. [readClipboardTextAsync] is what separates the two: it refuses to
+     * start a resolution whose snapshot is `0`, so every snapshot it keeps is
+     * non-zero and a dead handle's `0` can never match one.
      */
     private external fun nativeFocusGeneration(handle: Long): Long
 
@@ -1417,6 +1420,12 @@ class FrustSurfaceView(
         // thread, while the asking press is still the current truth.
         val requestedInSession = if (handle != 0L) nativeFocusGeneration(handle) else 0L
         val deadlineUptimeMillis = SystemClock.uptimeMillis() + CLIPBOARD_RESOLUTION_TIMEOUT_MS
+        // Load-bearing, not a redundant handle check: `0` is both "no live
+        // native handle" and a reachable live generation, since the counter
+        // starts there. Refusing to start here is what guarantees every
+        // snapshot below is non-zero, which is in turn what lets the arrival
+        // comparison read a dead handle's `0` as "not the session that asked"
+        // instead of as a match.
         if (requestedInSession == 0L) {
             return
         }
