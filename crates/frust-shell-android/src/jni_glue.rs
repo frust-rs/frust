@@ -1699,6 +1699,35 @@ pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
     });
 }
 
+/// `nativeFocusGeneration`: return the focus/IME session generation for
+/// Kotlin's clipboard resolver to bind an async paste to the session that
+/// asked for it.
+///
+/// The same cheap per-frame-pollable `jlong` read `nativeSystemUiState` is,
+/// but per-handle rather than process-global. The JVM half snapshots this
+/// value when it hands a URI-backed clip to its background resolver and
+/// compares it again when the text comes back: `EditCommand::Paste` is
+/// focus-routed, so without that compare a slow `ContentProvider`'s answer
+/// lands in whatever field holds focus whenever it finally arrives.
+///
+/// A missing handle returns `0`, which no live generation ever equals
+/// (`RenderRoot` starts at `1` and `advance_focus_epoch` skips `0`), so a
+/// resolution outliving the native side can never compare equal and be
+/// delivered.
+///
+/// Deliberately does NOT `pump_reactive`: this is a generation the last frame
+/// already settled, and the Kotlin poll runs inside the same `doFrame` that
+/// produced it.
+pub fn native_focus_generation(handle: jlong) -> jlong {
+    guard("nativeFocusGeneration", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        app.focus_generation() as jlong
+    })
+}
+
 /// `nativeSystemUiState`: return the process-wide system-UI override slot's
 /// packed `(generation, mode)` state for Kotlin's `doFrame` to poll,
 /// mirroring the proven `nativeImeState`-in-`doFrame` per-frame-poll idiom.

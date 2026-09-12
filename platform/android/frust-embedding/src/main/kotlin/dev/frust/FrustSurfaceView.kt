@@ -10,6 +10,7 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
@@ -127,6 +128,21 @@ class FrustSurfaceView(
          * necessary exclusion, and AtomicBoolean's CAS would be redundant.
          */
         private var libraryLoaded = false
+
+        /**
+         * How long a URI-backed clipboard resolution's answer stays wanted,
+         * in milliseconds of `SystemClock.uptimeMillis` (which does not
+         * advance in deep sleep, so a device suspended mid-read does not
+         * burn the budget).
+         *
+         * `ClipData.Item.coerceToText` reaches into the CLIP OWNER's process,
+         * so how long it takes — or whether it returns at all — is that app's
+         * decision, not this one's. Two seconds is well past any healthy
+         * `ContentProvider` round-trip and well short of the user having
+         * moved on and forgotten they asked. An answer arriving later is
+         * dropped rather than pasted: see [readClipboardTextAsync].
+         */
+        private const val CLIPBOARD_RESOLUTION_TIMEOUT_MS = 2_000L
 
         /**
          * Load the app's Rust native library (the `.so` carrying the
@@ -389,6 +405,15 @@ class FrustSurfaceView(
     // (`frust_shell_common::system_ui::encoded_state()`'s doc comment has the
     // exact bit layout) for [pollSystemUiState] to decode.
     private external fun nativeSystemUiState(handle: Long): Long
+
+    /**
+     * The framework's focus/IME session generation, used to bind an async
+     * URI-backed clipboard resolution to the session that asked for it
+     * ([readClipboardTextAsync]). A cheap `jlong` read, the same shape
+     * [nativeSystemUiState] above uses. `0` means no live native handle, and
+     * no real generation is ever `0`.
+     */
+    private external fun nativeFocusGeneration(handle: Long): Long
 
     // Plugin platform initialization: deliver the
     // application Context to the native side so `frust-plugin`'s handles
@@ -1347,20 +1372,54 @@ class FrustSurfaceView(
      *
      * Runs `item.coerceToText(context)` on [clipboardWorker]'s single
      * background thread — never one thread per paste — then hops back to the
-     * UI thread via [mainHandler] to actually dispatch. On arrival the view is
-     * re-checked for still being somewhere a paste should land: `handle`
-     * must still be live and a field must still report [imeActive], and
-     * [clipboardResolutionEpoch] must not have moved since this resolution
-     * started (it moves exactly when [shutdownClipboardExecutor] runs, i.e.
-     * exactly when the view tore down). Any of those failing DROPS the paste
-     * silently rather than delivering it — a paste landing in a field the
-     * user has since left (or a view that no longer exists) is worse than one
-     * that never lands. When it does land, it calls the exact same
+     * UI thread via [mainHandler] to actually dispatch.
+     *
+     * On arrival the answer must still belong where it was asked for, and
+     * FOUR things are checked, because the framework routes
+     * `EditCommand::Paste` down whatever focus path is live at dispatch time
+     * and has no per-request identity of its own:
+     *
+     * * [clipboardResolutionEpoch] is unmoved — the view did not tear down
+     *   ([shutdownClipboardExecutor] is its only writer).
+     * * `handle` is still live.
+     * * The framework's focus/IME session generation ([nativeFocusGeneration])
+     *   is unmoved. This is the one that stops a resolved paste landing in a
+     *   DIFFERENT field: [imeActive] is a single view-wide flag that only
+     *   toggles on the active/inactive edge, so a move from one field to
+     *   another never clears it and cannot be used for this.
+     * * The text is non-empty.
+     *
+     * Any of those failing DROPS the paste silently: a paste landing in a
+     * field the user has since moved away from is worse than one that never
+     * lands, and a dropped one is recoverable by asking again.
+     *
+     * The generation check is deliberately CONSERVATIVE — it moves on any
+     * real change of the focus flag or the published IME surface, so an edit
+     * or a caret move while the provider is still answering also drops the
+     * paste, not only a move to another field. Re-publishing an identical
+     * surface is not an edge, so an ordinary wait does not trip it.
+     *
+     * The wait is also BOUNDED. `coerceToText` returns when the clip's owning
+     * app decides to answer — or never — so a deadline is stamped at request
+     * time and an answer arriving past it is dropped. `shutdownNow()` cannot
+     * interrupt a thread already blocked inside another process's
+     * `ContentProvider`, so the deadline and the epoch are what actually stop
+     * a late answer from being delivered.
+     *
+     * When it does land, it calls the exact same
      * `nativeEditCommand`/[pollImeAfterDispatch] pair the synchronous fast
      * path in [dispatchEditCommand] uses.
      */
     private fun readClipboardTextAsync(item: ClipData.Item) {
         val epoch = clipboardResolutionEpoch
+        // Snapshot the session this paste was asked for, and the point past
+        // which its answer is no longer wanted. Both are read here, on the UI
+        // thread, while the asking press is still the current truth.
+        val requestedInSession = if (handle != 0L) nativeFocusGeneration(handle) else 0L
+        val deadlineUptimeMillis = SystemClock.uptimeMillis() + CLIPBOARD_RESOLUTION_TIMEOUT_MS
+        if (requestedInSession == 0L) {
+            return
+        }
         try {
             clipboardWorker().execute {
                 val text = try {
@@ -1375,9 +1434,18 @@ class FrustSurfaceView(
                 mainHandler.post {
                     if (epoch != clipboardResolutionEpoch ||
                         handle == 0L ||
-                        !imeActive ||
                         text.isNullOrEmpty()
                     ) {
+                        return@post
+                    }
+                    if (SystemClock.uptimeMillis() > deadlineUptimeMillis) {
+                        Log.w(TAG, "clipboard read answered too late; dropping the paste")
+                        return@post
+                    }
+                    // The session must be the one that asked. `imeActive` cannot
+                    // answer this: it is view-wide and does not toggle when focus
+                    // moves from one field to another.
+                    if (nativeFocusGeneration(handle) != requestedInSession) {
                         return@post
                     }
                     nativeEditCommand(handle, EDIT_COMMAND_PASTE, text)

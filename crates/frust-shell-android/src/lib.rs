@@ -475,6 +475,22 @@ macro_rules! android_app {
             $crate::jni_glue::native_system_ui_state(handle)
         }
 
+        /// JNI `nativeFocusGeneration`: the focus/IME session generation, so
+        /// the Kotlin clipboard resolver can bind an async URI-backed paste to
+        /// the session that asked for it. `EditCommand::Paste` is focus-routed,
+        /// so a slow `ContentProvider`'s answer would otherwise land in
+        /// whatever field holds focus when it arrives. A missing handle
+        /// returns `0`, which no live generation equals. Additive: older
+        /// generated Kotlin that never calls this is unaffected.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeFocusGeneration<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jlong {
+            $crate::jni_glue::native_focus_generation(handle)
+        }
+
         /// JNI `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU
         /// surface before it is created. Takes no
         /// handle — a process-wide, pre-init-only opt-in the generated glue

@@ -144,6 +144,27 @@ impl AndroidAppHandle {
         self.app.ime_state()
     }
 
+    /// The focus/IME session generation, for the Kotlin side to bind a
+    /// clipboard resolution it started to the session that started it.
+    ///
+    /// `nativeFocusGeneration`'s whole payload. The JVM half snapshots this
+    /// when it hands a URI-backed clip to its background resolver and compares
+    /// it again when the text comes back: a paste is dispatched only if the
+    /// session has not moved, because `EditCommand::Paste` is focus-routed and
+    /// would otherwise land wherever focus happens to be when a slow
+    /// `ContentProvider` finally answers.
+    ///
+    /// Deliberately CONSERVATIVE. `AppTree::focus_ime_generation` moves on any
+    /// actual change of the focus flag or the published IME surface, so an edit
+    /// or a caret move during the wait drops the paste too, not just a move to
+    /// another field. That is the safe direction: a paste that does not land is
+    /// recoverable by pressing paste again, and a paste that lands in the wrong
+    /// field is not. Re-publishing an identical surface is not an edge, so an
+    /// ordinary wait — the common case — does not trip it.
+    pub(crate) fn focus_generation(&self) -> u64 {
+        self.app.focus_ime_generation()
+    }
+
     /// Forward a soft-keyboard editor action (`nativeImeAction`, e.g.
     /// `IME_ACTION_DONE`) as an [`NamedKey::Enter`] key press down the focus path.
     ///
