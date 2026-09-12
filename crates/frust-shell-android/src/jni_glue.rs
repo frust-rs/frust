@@ -1755,7 +1755,9 @@ pub fn native_focus_generation(handle: jlong) -> jlong {
 ///
 /// Deliberately does NOT `pump_reactive`, for the same reason as its
 /// neighbour: nothing reactive writes this counter outside an event or paint
-/// pass. The request-side read runs inside the `doFrame` that produced it; the
+/// pass. Every request-side read is on the main thread, where the counter is
+/// already settled: inside `doFrame` on the framework-driven route, and on the
+/// originating callback for a hardware chord or an edit-menu action. The
 /// arrival-side comparison runs later, off the main looper's queue, which is
 /// why it re-reads rather than trusting its snapshot.
 pub fn native_focus_epoch(handle: jlong) -> jlong {

@@ -328,11 +328,16 @@ state.
 The residue is what remains once misdelivery is closed: **a paste can still be
 dropped**, and silently.
 
-It is conservative in one narrow way. A press re-claims the focus session even
-when it lands in the field that already had it, so tapping back into the same
-field while the provider is still answering is read as a new session and
-discards the paste. That is the safe direction and costs at worst a paste the
-user can ask for again. Nothing else inside one session discards it: editing,
+It is conservative in one narrow way: any press that re-claims the field's
+focus session while the provider is still answering is read as a new session
+and discards the paste. Tapping back into the field that already had focus is
+one such press. So is a verb taken from the selection toolbar, which re-claims
+on the user's behalf so that a copy or a select-all leaves the field exactly as
+focused as it found it — that re-claim is indistinguishable from any other, so
+a *Copy* or *Select all* tapped during the wait drops the pending paste with
+nothing behind it. (Tapping *Paste* again merely replaces one pending answer
+with another.) That is the safe direction and costs at worst a paste the user
+can ask for again. Nothing else inside one session discards it: editing,
 moving the caret, and the field being repositioned — a reflow, the soft
 keyboard animating in, a programmatic scroll — all leave the session exactly
 where it was, so the paste still lands, in the field that asked for it and at
