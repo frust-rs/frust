@@ -285,10 +285,16 @@ front of the user for the ordinary case of an empty clipboard.
 and its `writeClipboardText` neighbour for the copy confirmation.
 
 **Trigger for removal**: none — this describes the platform, and is kept so a
-paste that silently does nothing is diagnosable rather than mysterious. It is
-read from the platform contract and from the shipped source: the Android
-clipboard device gate has not been run, so nothing here rests on an on-device
-observation.
+paste that silently does nothing is diagnosable rather than mysterious. The
+behaviours themselves are read from the platform contract and from the shipped
+source, not from an on-device observation of each one. A debug build of
+`examples/glyph-catalog` was run on a Pixel 5 (redfin) on 2026-09-12 and the
+operator reported the clipboard legs working; the APK was confirmed to carry
+this plan's code (`nativeFocusGeneration`, `readClipboardTextAsync` and
+`clipboardResolutionEpoch` all present in the shipped dex and arm64-v8a `.so`,
+against positive controls). That run is not enumerated leg-by-leg here, and in
+particular did not confirm the URI-backed path — see
+`android-uri-clipboard-paste-is-async-and-may-be-dropped`.
 
 ---
 
@@ -332,11 +338,20 @@ paste.
 **Trigger for removal**: a per-request identity that distinguishes "this
 field, this request" from "this focus/IME state", which would let an edit
 during the wait keep the paste instead of discarding it, and would let a newer
-request supersede an older in-flight one. Not device-verified: the Android
-clipboard gate has not been run, so the timing behaviour here is read from the
-source and the platform contract rather than observed.
+request supersede an older in-flight one.
 
-### `ios-native-edit-menu-device-status` — the iOS system edit-menu route is implemented and has never run on a device or simulator
+**NOT DEVICE-VERIFIED.** The 2026-09-12 Pixel 5 run exercised the clipboard
+legs but not this path: reaching it needs a clip whose first item has a `Uri`
+and no direct text — a photo, file or contact copied from another app, not
+text. Everything specific to this entry (the off-thread resolve, the
+focus-session guard, the two-second deadline) is therefore argued from the
+call graph and from the desktop shell's identical worker-thread precedent, and
+has never been watched happen. The JNI export the guard depends on WAS
+confirmed present in the shipped arm64-v8a library, so it will not fail with
+`UnsatisfiedLinkError`; that is the only part of this entry with hardware
+evidence behind it.
+
+### `ios-native-edit-menu-device-status` — the iOS system edit-menu route has run on an iPhone; the hardware-chord half of the paste exemption has not
 
 **Observed**: iOS *locks* `SelectionToolbarPolicy::Native` at `frust_init` —
 an app's later `set_selection_toolbar_policy` is refused rather than obeyed,
@@ -351,11 +366,25 @@ deprecated `UIMenuController` below it), and reads the pasteboard inside
 `paste(_:)` — the system-initiated read that is exempt from the iOS 14+
 "pasted from" banner and the iOS 16+ per-app permission alert, which is the
 entire reason the native route exists rather than the framework toolbar.
-**None of it has run on an iPhone or in the Simulator.** `cargo` cannot
-compile Swift, so no workspace gate reaches this code, and the iOS clipboard
-device gate has not been performed: nobody has watched the menu appear, a verb
-land in the field, or the permission exemption hold. Treat the route as
-implemented, not as verified. (2026-09-12)
+**Run on an iPhone SE (iOS 26.6.1) on 2026-09-12** against a debug build of
+`examples/glyph-catalog`, whose installed binary was confirmed to carry this
+code (the `presentMenu` wire field and the locked-policy diagnostic were both
+found in the shipped dylib, against positive controls). Observed: the system
+edit menu appears over a selection, the framework floats no toolbar of its
+own, the verbs act on the focused field — and **a paste from the system menu
+raised NO per-app permission alert**, which is the exemption this whole route
+exists to buy. That is the first hardware observation of it in this plan.
+
+**What that run did NOT cover, and it is the half this plan changed most:**
+no hardware keyboard was attached, so `Cmd+C`/`X`/`V`/`A` were never pressed.
+Hardware `Cmd+V` is the *other* exempt route, and until this plan a focused
+field published its verbs only while its own bar was open — so the chords were
+unanswerable on the ordinary tap-to-focus path. The fix (a focused field
+publishes its verbs as a level, whether or not a menu is up) is therefore
+verified by unit tests and by compilation, and NOT on a device. The
+`SHELLS_DEVELOPMENT.md` gate step for it deliberately says to run it before
+any leg that opens the menu, because a build with the old gating passes every
+menu-first leg. (2026-09-12)
 
 **Applies to**: iOS only — `FrustView.swift`'s edit-menu and
 `UIResponderStandardEditActions` surface, `FrustViewController.swift`'s
@@ -365,10 +394,10 @@ per-frame `frust_selection_toolbar_json` poll, and the Rust half in
 and has the same absence of a `cargo`-reachable gate.
 
 **Why accepted**: the Swift half of this shell has no gate short of a device
-or Simulator run, and that run is owed rather than skipped. Shipping the route
-unverified is the position every other `FrustEmbedding` surface is already in;
-what would not be acceptable is recording it as working, which is exactly why
-this entry exists.
+run — `cargo` cannot compile Swift, so no workspace gate reaches it. The menu
+and exemption legs are now observed; the hardware-chord leg remains owed
+rather than skipped, and is named here so it is not quietly assumed to have
+passed alongside the legs that did.
 
 **Evidence**:
 `platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustView.swift`'s
@@ -381,7 +410,11 @@ this entry exists.
 `crates/frust-shell-ios/src/ffi_support.rs`'s anchor/verbs JSON shape and
 edit-command wire codes.
 
-**Trigger for removal**: a device or Simulator run observing the menu
+**Trigger for removal**: a device run with a hardware keyboard attached,
+observing `Cmd+V` paste into a field that was tap-focused (never long-pressed)
+with no menu on screen, and raising no permission alert. The remaining legs
+are done; that one closes the entry. Previously this said: a device run
+observing the menu
 presented at the selection, each of the four verbs applied to the focused
 field, and a paste raising neither the "pasted from" banner nor the
 permission alert.
