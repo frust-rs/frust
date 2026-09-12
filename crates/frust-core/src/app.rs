@@ -848,9 +848,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// and dispatching
     /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`](crate::event::EditCommand::Paste)`(text))`
     /// — a *new* dispatch, because the read may be asynchronous and the pass that
-    /// asked is over. That answer is focus-routed, so it reaches no widget and is
-    /// harmlessly dropped if focus moved or was released in between; the shell
-    /// therefore never has to check who asked.
+    /// asked is over. That answer carries no identity of its own and is
+    /// focus-routed to whoever holds focus when it lands: a release in between
+    /// drops it harmlessly, but a focus *move* in between lands it in the new
+    /// field rather than the one that asked. A synchronous read has no such
+    /// window; an asynchronous one snapshots
+    /// [`focus_epoch`](RenderRoot::focus_epoch) at this drain and discards an
+    /// answer whose epoch no longer matches — not
+    /// [`focus_ime_generation`](RenderRoot::focus_ime_generation), which also
+    /// moves within a single session.
     ///
     /// **Destructive**, for [`take_clipboard_write`](RenderRoot::take_clipboard_write)'s
     /// reason. A pass may both write and request (a cut that immediately re-reads,

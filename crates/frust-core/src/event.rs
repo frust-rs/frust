@@ -1944,10 +1944,19 @@ impl<'a> EventCtx<'a> {
     ///
     /// The answer is a **new dispatch**, never a return value: the shell's read
     /// may be asynchronous (a permission prompt, a cross-process fetch), and by
-    /// the time it lands the pass that asked is long over. Focus routing makes
-    /// the late delivery safe — if focus moved or was released in between, the
-    /// synthesized [`EditCommand::Paste`] reaches no widget and is dropped, so a
-    /// shell may answer unconditionally without checking who asked.
+    /// the time it lands the pass that asked is long over. The synthesized
+    /// [`EditCommand::Paste`] carries text and no identity of its own, and focus
+    /// routing hands it to whoever holds focus *at delivery*: a **release** does
+    /// drop it — with nothing focused it reaches no widget — but a focus *move*
+    /// lands it in the new field, not in the one that asked.
+    ///
+    /// A synchronous read has no in-flight window and needs no guard. An
+    /// asynchronous one must bind its answer to the session that asked:
+    /// snapshot [`RenderRoot::focus_epoch`](crate::app::RenderRoot::focus_epoch)
+    /// (reached shell-side as `AppTree::focus_epoch`) when the request is
+    /// drained, and drop an answer whose epoch no longer matches — never
+    /// [`focus_ime_generation`](crate::app::RenderRoot::focus_ime_generation),
+    /// which an edit or a caret move inside one session also moves.
     ///
     /// A `Cut` may write and ask in the same pass; the two slots are independent.
     pub fn request_paste(&mut self) {
