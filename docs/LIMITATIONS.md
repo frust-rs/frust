@@ -292,11 +292,59 @@ observation.
 
 ---
 
+### `android-uri-clipboard-paste-is-async-and-may-be-dropped` — a paste from a URI-backed clip resolves off the UI thread and is discarded if the focus session moved or it took too long
+
+**Observed**: `ClipData.Item.coerceToText` performs a synchronous
+`ContentResolver` round-trip into the clip owner's process when the clip is
+URI-backed (a photo, file, or contact copied from another app), so the Android
+shell resolves that case on a background thread rather than blocking the frame
+loop on another app's `ContentProvider`. A clip that already carries text —
+the overwhelmingly common case, including everything frust itself writes — is
+still read and pasted synchronously in the same event pass. The asynchronous
+half is dispatched only if the framework's focus/IME session generation has
+not moved since the paste was asked for, the native handle is still live, the
+view has not torn down, and the answer arrived within two seconds. Any of
+those failing discards the paste silently. (2026-09-12)
+
+**Applies to**: Android only, and only a primary clip whose first item has a
+`Uri` and no direct text.
+
+**Why accepted**: the session check is what stops a slow provider's answer
+landing in a *different* field, since `EditCommand::Paste` is focus-routed and
+carries no identity of its own — a paste that does not land can be asked for
+again, one that lands in the wrong field cannot be taken back. The check is
+deliberately conservative: the generation moves on any real change of the
+focus flag or the published IME surface, so editing or moving the caret while
+the provider is still answering also discards the paste, not only switching
+fields. Re-publishing an unchanged surface is not an edge, so an ordinary wait
+does not trip it. The two-second bound exists because `shutdownNow()` cannot
+interrupt a thread already blocked inside another process, so a deadline is
+the only thing that can stop a very late answer from arriving as a surprise
+paste.
+
+**Evidence**:
+`platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
+`readClipboardText`/`readClipboardTextAsync` doc comments and
+`CLIPBOARD_RESOLUTION_TIMEOUT_MS`; the generation it compares crosses JNI as
+`nativeFocusGeneration` (`crates/frust-shell-android/src/jni_glue.rs`) from
+`AppTree::focus_ime_generation`.
+
+**Trigger for removal**: a per-request identity that distinguishes "this
+field, this request" from "this focus/IME state", which would let an edit
+during the wait keep the paste instead of discarding it, and would let a newer
+request supersede an older in-flight one. Not device-verified: the Android
+clipboard gate has not been run, so the timing behaviour here is read from the
+source and the platform contract rather than observed.
+
 ### `ios-native-edit-menu-device-status` — the iOS system edit-menu route is implemented and has never run on a device or simulator
 
-**Observed**: iOS selects `SelectionToolbarPolicy::Native` at `frust_init`, so
-a focused field floats no toolbar of its own and publishes only where its
-selection sits and which verbs apply. `FrustView` answers the four
+**Observed**: iOS *locks* `SelectionToolbarPolicy::Native` at `frust_init` —
+an app's later `set_selection_toolbar_policy` is refused rather than obeyed,
+because the paste exemption below depends on the native route being the only
+one — so a focused field floats no toolbar of its own and publishes where a
+menu would be anchored and which verbs apply. It publishes that whether or not
+it has a selection: the verbs are a level the responder chain reads whenever
+UIKit asks, including for a hardware `Cmd+V` with no menu on screen. `FrustView` answers the four
 `UIResponderStandardEditActions` from that published set, presents UIKit's own
 menu at the published anchor (`UIEditMenuInteraction` on iOS 16+, the
 deprecated `UIMenuController` below it), and reads the pasteboard inside
@@ -327,7 +375,7 @@ this entry exists.
 "Clipboard / system edit menu" section with its `canPerformAction` and
 `paste(_:)` overrides (the exemption is stated there in place);
 `crates/frust-shell-ios/src/ffi_glue.rs`'s
-`set_selection_toolbar_policy(SelectionToolbarPolicy::Native)` at init and its
+`lock_selection_toolbar_policy(SelectionToolbarPolicy::Native)` at init and its
 `selection_toolbar_json` body (exported as `frust_selection_toolbar_json` from
 `crates/frust-shell-ios/src/lib.rs`);
 `crates/frust-shell-ios/src/ffi_support.rs`'s anchor/verbs JSON shape and
