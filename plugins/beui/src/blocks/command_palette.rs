@@ -1135,9 +1135,7 @@ impl Widget for CommandPaletteWidget {
         // belong to the wrapped field outright — `Key` is handled above,
         // since the palette's own navigation keys intercept before falling
         // through to `handle_key`'s own field forward. Branch on the shared
-        // predicate rather than enumerating `Ime`/`EditCommand`: another
-        // focus-routed-adjacent variant (`InputEvent::Overlay`) is still to
-        // come, and an enumerated list would need to grow again.
+        // predicate rather than enumerating `Ime`/`EditCommand` separately.
         if event.is_focus_routed() {
             return route_event_single(&mut self.field, ctx, event);
         }

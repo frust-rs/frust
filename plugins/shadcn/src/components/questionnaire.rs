@@ -1776,9 +1776,7 @@ impl Widget for QuestionnaireWidget {
         // Ime composition and the clipboard verbs an `EditCommand` carries are
         // both focus-routed like `Key` (handled above) and belong to the
         // free-text field outright — branch on the shared predicate rather
-        // than enumerating `Ime`/`EditCommand`: another focus-routed-adjacent
-        // variant (`InputEvent::Overlay`) is still to come, and an
-        // enumerated list would need to grow again.
+        // than enumerating `Ime`/`EditCommand` separately.
         if event.is_focus_routed() {
             return self.route_to_input(ctx, event);
         }

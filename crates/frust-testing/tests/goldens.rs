@@ -809,8 +809,8 @@ fn text_input_selection_toolbar_long_press() {
 /// sensitive to a single-layer regression (which would need a `frust-widgets`-
 /// internal test with access to the private `toolbar`/`toolbar_view` fields). The
 /// glyph-run count delta remains the sensitive metric for this vantage: the
-/// native route remains the control case blocking a regression scenario where
-/// boundary.
+/// native route is the control case for detecting when both policy layers
+/// fail together and the toolbar appears.
 #[test]
 fn text_input_selection_toolbar_long_press_native_policy_floats_no_pod() {
     let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
