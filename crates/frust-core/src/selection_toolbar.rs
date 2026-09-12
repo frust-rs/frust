@@ -138,25 +138,86 @@ pub enum SelectionToolbarPolicy {
     Native,
 }
 
+/// The process-wide toolbar policy, plus whether a shell has locked it.
+///
+/// Value and lock share one `Mutex` rather than two separate slots, so a
+/// concurrent lock claim and set can never interleave into a state neither
+/// caller asked for.
+#[derive(Clone, Copy, Debug)]
+struct PolicyState {
+    value: SelectionToolbarPolicy,
+    /// Set once by [`lock_selection_toolbar_policy`]; while `true`,
+    /// [`set_selection_toolbar_policy`] is a refused no-op.
+    locked: bool,
+}
+
 /// The process-wide toolbar policy. A plain value rather than a generation-
 /// carrying slot like [`BUILDER`]: it is read directly at the point of decision
 /// (there is nothing to diff), and the default is the Framework route.
-static POLICY: Mutex<SelectionToolbarPolicy> = Mutex::new(SelectionToolbarPolicy::Framework);
+static POLICY: Mutex<PolicyState> = Mutex::new(PolicyState {
+    value: SelectionToolbarPolicy::Framework,
+    locked: false,
+});
 
 /// Choose who draws the selection toolbar, process-wide.
 ///
 /// Callable from any thread; the slot is a plain `Mutex`, and each reader
 /// observes it on its own thread when it next asks (see the module docs' thread
-/// contract). A shell sets [`SelectionToolbarPolicy::Native`] once at start-up on
-/// a platform whose system edit menu it intends to drive.
+/// contract). A shell whose platform REQUIRES a given route should call
+/// [`lock_selection_toolbar_policy`] instead — this setter is a refused no-op
+/// once a shell has done that, so an app that calls it after start-up cannot
+/// silently undo the platform's own requirement.
+///
+/// The refusal is silent to this function's own `()` return (unchanged, so no
+/// existing caller need change), but not silent to the process: a debug build
+/// logs it once, mirroring `TextInputWidget::sync_toolbar`'s wiring-gap
+/// diagnostic — a wrongly-timed app override is a wiring gap worth hearing
+/// about in development, not an error a release build can act on.
 pub fn set_selection_toolbar_policy(policy: SelectionToolbarPolicy) {
-    *POLICY.lock().unwrap_or_else(|e| e.into_inner()) = policy;
+    let mut state = POLICY.lock().unwrap_or_else(|e| e.into_inner());
+    if state.locked {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "frust-core: the selection-toolbar policy is locked to {:?} by the platform shell; \
+             ignoring an app's set_selection_toolbar_policy({policy:?}) call (see \
+             frust_core::lock_selection_toolbar_policy)",
+            state.value
+        );
+        return;
+    }
+    state.value = policy;
 }
 
 /// The process-wide toolbar policy, [`SelectionToolbarPolicy::Framework`] until
 /// something sets otherwise.
 pub fn selection_toolbar_policy() -> SelectionToolbarPolicy {
-    *POLICY.lock().unwrap_or_else(|e| e.into_inner())
+    POLICY.lock().unwrap_or_else(|e| e.into_inner()).value
+}
+
+/// Declare the policy a shell's platform REQUIRES, locking the slot so a
+/// later [`set_selection_toolbar_policy`] call cannot silently override it.
+///
+/// Reads like the other override/cooperative pair below
+/// ([`set_selection_toolbar_builder`]/[`install_selection_toolbar_builder_if_unset`]):
+/// unconditional for the first caller, the way `set_selection_toolbar_builder`
+/// is — but unlike that pair, only the FIRST claim ever wins here, since the
+/// whole point of a lock is that one declaration sticks against every later
+/// call, an app's included. Returns whether this call actually claimed the
+/// lock: `false` means the slot was already locked (most likely a repeated
+/// shell start-up), and the value is left exactly as the earlier claim left
+/// it.
+///
+/// A platform shell calls this once, at start-up, before any app code has had
+/// a chance to run — see `frust-shell-ios`'s `frust_init` for why iOS in
+/// particular cannot leave this choice to an app.
+pub fn lock_selection_toolbar_policy(policy: SelectionToolbarPolicy) -> bool {
+    let mut state = POLICY.lock().unwrap_or_else(|e| e.into_inner());
+    if state.locked {
+        return false;
+    }
+    state.value = policy;
+    state.locked = true;
+    true
 }
 
 /// Builds the view a framework-drawn selection toolbar floats.
@@ -288,6 +349,79 @@ mod tests {
         assert_eq!(selection_toolbar_policy(), SelectionToolbarPolicy::Native);
 
         // Leave the slot as the rest of the process expects to find it.
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+    }
+
+    /// Test-only escape hatch: release a lock claimed with
+    /// [`lock_selection_toolbar_policy`] so one test proving the lock's effect
+    /// does not trap every test after it that mutates the process-global
+    /// policy the ordinary way. Not `pub`, not `#[cfg(test)]`-exported beyond
+    /// this module: unlocking a shell's declared policy from app code would
+    /// defeat the whole point of the lock, so this stays a private detail of
+    /// this crate's own test suite rather than a casual public API.
+    fn unlock_selection_toolbar_policy_for_test() {
+        POLICY.lock().unwrap_or_else(|e| e.into_inner()).locked = false;
+    }
+
+    #[test]
+    fn set_policy_is_unaffected_when_nothing_has_locked_it() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // At rest, nothing has locked the slot — desktop, Android and web
+        // never call `lock_selection_toolbar_policy`, so this is their whole
+        // world: `set_selection_toolbar_policy` behaves exactly as it always
+        // has.
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+        assert_eq!(selection_toolbar_policy(), SelectionToolbarPolicy::Native);
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+        assert_eq!(
+            selection_toolbar_policy(),
+            SelectionToolbarPolicy::Framework
+        );
+    }
+
+    #[test]
+    fn locking_the_policy_sets_the_declared_value() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+
+        assert!(
+            lock_selection_toolbar_policy(SelectionToolbarPolicy::Native),
+            "the first claim always takes the lock"
+        );
+        assert_eq!(
+            selection_toolbar_policy(),
+            SelectionToolbarPolicy::Native,
+            "claiming the lock sets the value it declares"
+        );
+
+        unlock_selection_toolbar_policy_for_test();
+    }
+
+    #[test]
+    fn a_locked_policy_refuses_a_later_set_and_a_later_claim() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+        assert!(lock_selection_toolbar_policy(
+            SelectionToolbarPolicy::Native
+        ));
+
+        // An app's later call must not move a locked slot.
+        set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+        assert_eq!(
+            selection_toolbar_policy(),
+            SelectionToolbarPolicy::Native,
+            "a locked slot must not move for an app's later set_selection_toolbar_policy call"
+        );
+
+        // Nor may a second shell's claim silently displace the first.
+        assert!(
+            !lock_selection_toolbar_policy(SelectionToolbarPolicy::Framework),
+            "a second lock claim must not displace the first"
+        );
+        assert_eq!(selection_toolbar_policy(), SelectionToolbarPolicy::Native);
+
+        // Leave the slot as the rest of the process expects to find it.
+        unlock_selection_toolbar_policy_for_test();
         set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
     }
 
