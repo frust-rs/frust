@@ -75,9 +75,9 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   resolve against the active theme's `cosmetic_loop_rate` (see SHELLS_ARCHITECTURE.md).
 - `RenderRoot::event` routes input through the retained tree, tracking capture/focus without a
   separate registry. Events fall into three routing classes: hit-tested (pointer/scroll),
-  focus-routed (`Key`/`Ime`/`EditCommand`, delivered down the recorded focus path — a clipboard
-  verb is *about the selection*, which lives wherever focus is, so a paste answered after focus
-  moved reaches nobody and is harmlessly dropped), and **broadcast** — `InputEvent::Housekeeping`
+  focus-routed (`Key`/`Ime`/`EditCommand`, delivered down the recorded focus path to whatever
+  widget holds focus *at delivery* — a clipboard verb belongs here because it is *about the
+  selection*, which lives wherever focus is), and **broadcast** — `InputEvent::Housekeeping`
   and `InputEvent::Overlay`, non-input events every container forwards to every child
   unconditionally, ahead of its capture/focus/hit-test logic, and never consumes.
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
