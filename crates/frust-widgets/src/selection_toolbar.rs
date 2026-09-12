@@ -382,6 +382,12 @@ impl Widget for ToolbarButtonWidget {
 /// hosted under any app state at all. Sized to its content — the
 /// [`OverlaySlot`](crate::overlay::OverlaySlot) that floats it, via
 /// [`crate::overlay::place`], decides where that content sits.
+///
+/// [`request.present_menu`](SelectionToolbarRequest::present_menu) is ignored
+/// here, and that is not an oversight: a builder is called only for a bar the
+/// field already wants, so on this route the flag says nothing the call itself
+/// has not. It exists for the platform route, where "which verbs apply" is a
+/// level a host reads at any moment and "put a menu up" is an edge.
 pub fn selection_toolbar(request: &SelectionToolbarRequest) -> AnyView<()> {
     any(SelectionToolbarView {
         actions: request.actions,
@@ -513,6 +519,9 @@ mod tests {
         SelectionToolbarRequest {
             anchor: Rect::new(150.0, 100.0, 250.0, 120.0),
             actions,
+            // A builder only ever runs for a bar that is wanted; the flag is
+            // the platform route's, and this view ignores it.
+            present_menu: true,
         }
     }
 

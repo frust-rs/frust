@@ -174,21 +174,23 @@ open class FrustViewController: UIViewController {
     /// away from their platform-default `false`.
     private var lastSystemUiGeneration: UInt64 = 0
 
-    /// The selection-toolbar generation this controller last presented the
-    /// system edit menu for, or `nil` while no request stands.
+    /// The selection-toolbar generation this controller last acted on, or `nil`
+    /// while no field is focused.
     ///
     /// The whole present-once mechanism. `frust_selection_toolbar_json` reports
-    /// a generation that moves on every *actual* change of the focused field's
-    /// request (its clearing included), and a standing selection republishes
-    /// the same request — same generation — on every painted frame. So
-    /// [syncSelectionToolbar] presents only when this value moves, and a
-    /// selection the user leaves sitting there does not re-present the menu 120
-    /// times a second. Reset to `nil` the moment the request disappears, so the
-    /// *next* selection is diffed against "nothing presented" rather than
-    /// against a stale number. Optional rather than zero-seeded like
-    /// [lastSystemUiGeneration] one channel over, because `0` is a legitimate
-    /// generation here — the value a first request can carry — and so cannot
-    /// double as the "nothing yet" sentinel.
+    /// a generation that moves when the *menu-significant* part of the focused
+    /// field's request changes — whether a menu is wanted, and which verbs
+    /// apply, its clearing included — while the anchor and the verbs themselves
+    /// are republished on every painted frame. So [syncSelectionToolbar]
+    /// presents (or dismisses) only when this value moves: a selection the user
+    /// leaves sitting there does not re-present the menu 120 times a second, and
+    /// neither does one being dragged wider, whose anchor changes on every touch
+    /// sample. Reset to `nil` the moment the field blurs, so the *next* focus is
+    /// diffed against "nothing presented" rather than against a stale number.
+    /// Optional rather than zero-seeded like [lastSystemUiGeneration] one
+    /// channel over, because `0` is a legitimate generation here — the value a
+    /// first request can carry — and so cannot double as the "nothing yet"
+    /// sentinel.
     private var lastToolbarGeneration: UInt64?
 
     /// Decoded `frust::set_system_ui_mode` state. Both
@@ -972,18 +974,27 @@ open class FrustViewController: UIViewController {
     /// Poll the focused field's selection-toolbar request and keep UIKit's edit
     /// menu in step with it, once per `CADisplayLink` tick.
     ///
-    /// A **level**, not an edge: the request is republished by every paint the
-    /// selection survives, so this reads the same values on a steady selection
-    /// and acts only when [lastToolbarGeneration] moves (see that property for
-    /// why a generation diff rather than a value compare). A null return is the
-    /// framework saying no field has a selection worth a menu — a collapsed
-    /// selection, a typed character, or a blur — and puts the menu away.
+    /// Mostly a **level**, with one edge inside it. The request is republished
+    /// by every paint of a focused field — selection or not, menu or not — so
+    /// this reads the same values tick after tick and only *presents* or
+    /// *dismisses* when [lastToolbarGeneration] moves (see that property for why
+    /// a generation diff rather than a value compare). A null return is the
+    /// framework saying no field is focused at all — a blur, or a teardown — and
+    /// puts the menu away.
     ///
     /// The verb flags are pushed to the view on **every** poll, not just on a
     /// generation change, because `canPerformAction(_:withSender:)` is answered
     /// from them whenever UIKit asks — including for a hardware Cmd+C with no
-    /// menu on screen at all. The anchor likewise, so an already-visible menu's
+    /// menu on screen at all. That answer is only as good as its freshest push,
+    /// which is why the framework publishes the verbs for a focused field rather
+    /// than for a raised bar. The anchor likewise, so an already-visible menu's
     /// `targetRectFor` always reads the current rect.
+    ///
+    /// `presentMenu` carries what the generation is an edge *on*: the field
+    /// asking for a menu now. A generation change with it `true` presents, with
+    /// it `false` dismisses — a selection dragged wider moves the anchor on
+    /// every touch sample and must move neither, which is exactly why the
+    /// generation ignores the anchor.
     ///
     /// Geometry crosses in logical points (the space `touch.location(in:)` and
     /// the IME JSON's caret rect already use), absolute in the window — and
@@ -993,8 +1004,8 @@ open class FrustViewController: UIViewController {
 
         guard let raw = frust_selection_toolbar_json(handle) else {
             // No request: put away whatever stands and forget the generation.
-            // Guarded so the overwhelmingly common "no selection anywhere"
-            // tick costs one null FFI call and a nil compare.
+            // Guarded so the common "nothing focused anywhere" tick costs one
+            // null FFI call and a nil compare.
             guard lastToolbarGeneration != nil else { return }
             lastToolbarGeneration = nil
             forgeView.editActions = .none
@@ -1024,7 +1035,15 @@ open class FrustViewController: UIViewController {
         let generation = (json["generation"] as? NSNumber)?.uint64Value ?? 0
         guard generation != lastToolbarGeneration else { return }
         lastToolbarGeneration = generation
-        forgeView.presentSystemEditMenu()
+
+        // The edge, in both directions. A missing `presentMenu` reads as `false`
+        // — the same refusal the verb flags make — so a wire mismatch leaves the
+        // menu alone rather than raising one nobody asked for.
+        if (json["presentMenu"] as? Bool) ?? false {
+            forgeView.presentSystemEditMenu()
+        } else {
+            forgeView.dismissSystemEditMenu()
+        }
     }
 
     private func startDisplayLink() {

@@ -159,13 +159,21 @@ final class FrustView: UIView {
 
     /// The verbs the focused field currently allows, as of the controller's
     /// last poll. `canPerformAction(_:withSender:)` answers from this, which is
-    /// what UIKit builds its menu from.
+    /// what UIKit builds its menu from — and what it resolves a hardware
+    /// Cmd+C/X/V/A against, with no menu anywhere in sight.
+    ///
+    /// A **level**, refreshed for as long as a field holds focus and reset to
+    /// `.none` only when none does. It is deliberately not tied to a menu being
+    /// presented: see this file's `UIResponderStandardEditActions` section.
     var editActions: FrustEditActions = .none
 
     /// The selection's bounding rect in this view's coordinates (logical
-    /// points), or `nil` when no field has a selection worth a menu. The Rust
-    /// side publishes it in absolute window space and this view fills the
-    /// window, so it needs no conversion.
+    /// points), or `nil` when no field is focused. The Rust side publishes it in
+    /// absolute window space and this view fills the window, so it needs no
+    /// conversion.
+    ///
+    /// The caret's own rect while the selection is collapsed, which is where a
+    /// paste-only menu belongs.
     var editMenuAnchor: CGRect?
 
     /// Set by the view controller: bridges one edit verb into the
@@ -325,8 +333,18 @@ final class FrustView: UIView {
 // `UITextInput` conformance — they are not `UITextInput` members. Implementing
 // them is what puts Copy/Cut/Paste/Select All in UIKit's own edit menu (the
 // protocol's methods are optional, and UIKit hides the ones a responder does
-// not implement), and it is simultaneously what makes a hardware keyboard's
+// not implement), and it is half of what makes a hardware keyboard's
 // Cmd+C/X/V/A work: both routes resolve through this same responder chain.
+//
+// The other half is `editActions` being a LEVEL. UIKit asks
+// `canPerformAction(_:withSender:)` whenever it likes — for a hardware chord
+// there is no menu, no gesture and no presentation first — so the Rust side
+// publishes the focused field's verbs on every frame it holds focus, bar or no
+// bar, and the controller pushes them here on every poll. Answering out of a
+// value that only arrived while a menu was up would leave every hardware chord
+// refused: `canPerformAction` would say `false` and UIKit would route the key
+// elsewhere. Cmd+V is the one that costs the most — it is one of the two paste
+// routes iOS exempts from its per-app paste-permission alert.
 //
 // None of them touches the mirror in `FrustTextInput.swift`. Each hands the
 // verb to the focused Rust widget, which owns the selection and the text; the

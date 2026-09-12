@@ -420,31 +420,39 @@ pub(crate) struct ToolbarActions {
 /// `frust_selection_toolbar_json` returns:
 ///
 /// ```text
-/// {"generation":7,"x":12,"y":40,"w":86,"h":18,
+/// {"generation":7,"presentMenu":true,"x":12,"y":40,"w":86,"h":18,
 ///  "copy":true,"cut":true,"paste":true,"selectAll":false}
 /// ```
 ///
 /// `generation` is `AppTree::selection_toolbar_generation`'s counter, which
-/// moves on every *actual* change of the request; the Swift side caches the
-/// value it last presented for and re-presents only when it moves, which is
-/// what stops a standing selection — republished every frame it stands — from
-/// re-presenting the system menu on every vsync. The four geometry fields are
-/// logical points (see [`ToolbarAnchor`]), the four verb fields are the field's
-/// own enabled set (see [`ToolbarActions`]).
+/// moves when the *menu-significant* part of the request changes — `presentMenu`
+/// or the verbs, never the anchor alone; the Swift side caches the value it last
+/// acted on and presents or dismisses only when it moves, which is what stops a
+/// standing selection — republished every frame it stands — from re-presenting
+/// the system menu on every vsync.
 ///
-/// Total, unlike [`platform_view_commands_json`]: the "no field has a selection
-/// worth a menu" answer is the FFI's null return, not a shape this builder has
-/// to express, so a caller with a request always gets a string. JSON is
-/// hand-rolled (no `serde` in the shell, `docs/CODE_STANDARDS.md`) beside
-/// [`ime_state_json`].
+/// `presentMenu` is the request's one edge: `true` means the field is asking for
+/// the system menu now, `false` means it is only reporting where it is and what
+/// applies. The four geometry fields are logical points (see [`ToolbarAnchor`]),
+/// the four verb fields are the field's own enabled set (see [`ToolbarActions`])
+/// and are a level the responder chain answers `canPerformAction` from whether
+/// or not any menu is up.
+///
+/// Total, unlike [`platform_view_commands_json`]: the "no field is focused"
+/// answer is the FFI's null return, not a shape this builder has to express, so
+/// a caller with a request always gets a string. JSON is hand-rolled (no `serde`
+/// in the shell, `docs/CODE_STANDARDS.md`) beside [`ime_state_json`].
 pub(crate) fn selection_toolbar_json(
     generation: u64,
+    present_menu: bool,
     anchor: ToolbarAnchor,
     actions: ToolbarActions,
 ) -> String {
-    let mut out = String::with_capacity(128);
+    let mut out = String::with_capacity(148);
     out.push_str("{\"generation\":");
     let _ = write!(out, "{generation}");
+    out.push_str(",\"presentMenu\":");
+    push_bool(&mut out, present_menu);
     out.push_str(",\"x\":");
     push_finite_f32(&mut out, anchor.x);
     out.push_str(",\"y\":");
@@ -1038,6 +1046,7 @@ mod tests {
         // rather than probed with `contains`.
         let json = selection_toolbar_json(
             7,
+            true,
             anchor(),
             ToolbarActions {
                 copy: true,
@@ -1048,7 +1057,7 @@ mod tests {
         );
         assert_eq!(
             json,
-            r#"{"generation":7,"x":12,"y":40,"w":86,"h":18,"copy":true,"cut":true,"paste":true,"selectAll":false}"#
+            r#"{"generation":7,"presentMenu":true,"x":12,"y":40,"w":86,"h":18,"copy":true,"cut":true,"paste":true,"selectAll":false}"#
         );
     }
 
@@ -1059,7 +1068,7 @@ mod tests {
         let only = |pick: fn(&mut ToolbarActions)| {
             let mut actions = ToolbarActions::default();
             pick(&mut actions);
-            selection_toolbar_json(1, anchor(), actions)
+            selection_toolbar_json(1, true, anchor(), actions)
         };
         let copy = only(|a| a.copy = true);
         assert!(copy.contains(r#""copy":true"#));
@@ -1076,16 +1085,33 @@ mod tests {
     }
 
     #[test]
+    fn selection_toolbar_json_carries_the_present_flag_both_ways() {
+        // The request's one edge, and the one field a builder could hardcode
+        // and still pass the golden above: `true` asks the Swift side to put
+        // the system menu up, `false` says the field is only reporting where it
+        // is and which verbs apply. Hardcoding it would re-present the menu on
+        // every verb change of a field nobody long-pressed.
+        assert!(
+            selection_toolbar_json(1, true, anchor(), ToolbarActions::default())
+                .contains(r#""presentMenu":true"#)
+        );
+        assert!(
+            selection_toolbar_json(1, false, anchor(), ToolbarActions::default())
+                .contains(r#""presentMenu":false"#)
+        );
+    }
+
+    #[test]
     fn selection_toolbar_json_reports_the_generation_it_was_given() {
         // The generation is the whole present-once mechanism on the Swift side:
         // a builder that hard-coded or dropped it would re-present the system
         // menu on every vsync a selection stands.
         assert!(
-            selection_toolbar_json(0, anchor(), ToolbarActions::default())
+            selection_toolbar_json(0, true, anchor(), ToolbarActions::default())
                 .starts_with(r#"{"generation":0,"#)
         );
         assert!(
-            selection_toolbar_json(u64::MAX, anchor(), ToolbarActions::default())
+            selection_toolbar_json(u64::MAX, true, anchor(), ToolbarActions::default())
                 .starts_with(&format!(r#"{{"generation":{},"#, u64::MAX))
         );
     }
@@ -1097,6 +1123,7 @@ mod tests {
         // somewhere else entirely.
         let json = selection_toolbar_json(
             3,
+            true,
             ToolbarAnchor {
                 x: 1.0,
                 y: 2.0,
@@ -1116,6 +1143,7 @@ mod tests {
         // side the entire menu.
         let json = selection_toolbar_json(
             1,
+            true,
             ToolbarAnchor {
                 x: f32::NAN,
                 y: f32::INFINITY,

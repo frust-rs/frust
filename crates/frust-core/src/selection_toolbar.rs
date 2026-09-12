@@ -6,9 +6,10 @@
 //! A "copy / cut / paste / select all" bar over a selection is drawn by the
 //! *platform* on iOS (`UIEditMenuInteraction` — the system owns its look, its
 //! placement and its animation) and by the *framework* everywhere else. Both
-//! routes need the same facts — where the selection is, and which verbs apply —
-//! so a field publishes one [`SelectionToolbarRequest`] per paint and the two
-//! routes diverge downstream of it:
+//! routes need the same facts — where the selection is, which verbs apply, and
+//! whether a menu is wanted right now — so a focused field publishes one
+//! [`SelectionToolbarRequest`] per paint and the two routes diverge downstream
+//! of it:
 //!
 //! * [`SelectionToolbarPolicy::Native`]: the request surfaces on
 //!   [`RenderRoot::selection_toolbar`](crate::app::RenderRoot::selection_toolbar)
@@ -58,8 +59,9 @@ thread_local! {
     ///
     /// **Pass-scoped**, so a pass in which nobody published resolves to `None`
     /// rather than to whatever the previous pass left — which is what makes a
-    /// collapsed selection put the toolbar away with no widget having to retract
-    /// anything.
+    /// blurred field put the toolbar away with no widget having to retract
+    /// anything. A field that merely lost its selection keeps publishing: it is
+    /// still focused, and its verbs are still the answer the platform asks for.
     static PUBLISHED: Cell<Option<SelectionToolbarRequest>> = const { Cell::new(None) };
 
     /// Whether a selection-toolbar publish pass is open on this thread — owned
@@ -87,19 +89,40 @@ pub struct SelectionToolbarActions {
     pub select_all: bool,
 }
 
-/// One field's published "there is a selection here, and these verbs apply".
+/// One focused field's published "here is my selection, these verbs apply to
+/// it, and this is whether a menu is wanted over it right now".
 ///
-/// Published per paint pass; a pass without one means no field has a selection
-/// worth a toolbar.
+/// Published per paint pass by every **focused** field, with or without a
+/// selection; a pass without one means no field holds the focus. Two facts of
+/// different shapes travel together here: [`anchor`](Self::anchor) and
+/// [`actions`](Self::actions) are a **level** — the state of the field as it
+/// stands this frame, which a platform responder chain must be able to read at
+/// any moment — while [`present_menu`](Self::present_menu) is the **edge** that
+/// asks for a menu to go up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SelectionToolbarRequest {
     /// The selection's bounding rect in **absolute logical window space** — the
     /// same space an [`OverlayEntry::window_rect`](crate::overlay::OverlayEntry::window_rect)
     /// uses, so a framework toolbar can be placed against it directly and a
     /// native menu can be anchored to it after the shell's own scale conversion.
+    ///
+    /// Falls back to the caret rect while the selection is collapsed, which is
+    /// the right anchor for a paste-only menu.
     pub anchor: Rect,
-    /// Which verbs apply.
+    /// Which verbs apply. A **level**: computed from the field's own state, not
+    /// from whether any bar is up, so a hardware Cmd+C arriving with nothing on
+    /// screen still finds an answer here.
     pub actions: SelectionToolbarActions,
+    /// Whether the field wants a menu **presented now** — the one edge in an
+    /// otherwise level-shaped request.
+    ///
+    /// A field raises this when a gesture asks for the bar (a long press, a
+    /// secondary press) and drops it again when the bar is dismissed, while it
+    /// keeps republishing the same anchor and verbs either way. It is what
+    /// [`RenderRoot::selection_toolbar_generation`](crate::app::RenderRoot::selection_toolbar_generation)
+    /// moves on, together with `actions` — an anchor that merely follows a
+    /// growing selection must not ask a platform to re-present its menu.
+    pub present_menu: bool,
 }
 
 /// Who draws the selection toolbar.
@@ -243,6 +266,7 @@ mod tests {
                 paste: false,
                 select_all: true,
             },
+            present_menu: true,
         }
     }
 
