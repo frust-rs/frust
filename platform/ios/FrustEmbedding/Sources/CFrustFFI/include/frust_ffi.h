@@ -66,7 +66,67 @@ void  frust_destroy(void *handle);
 // "no editing state" sentinel. frust_string_free is a no-op on null.
 void  frust_ime_apply(void *handle, const char *text, int32_t sel_base, int32_t sel_ext, int32_t comp_base, int32_t comp_ext);
 char *frust_ime_state_json(void *handle);
+// Also frees the strings frust_take_clipboard_write,
+// frust_selection_toolbar_json and frust_platform_view_commands_json return —
+// one ownership contract for every heap-allocated string that crosses this
+// boundary. A no-op on null.
 void  frust_string_free(char *s);
+
+// Clipboard + the SYSTEM edit menu. iOS exempts a paste from its "pasted from"
+// banner (14+) and its per-app paste-permission alert (16+) ONLY when the paste
+// is system-initiated — a tap in UIKit's own edit menu, or a hardware Cmd+V
+// through the responder chain. So on this platform the framework does NOT draw
+// the selection toolbar: the Rust side declares the Native selection-toolbar
+// policy at frust_init, a focused field then publishes its request and floats
+// nothing, and FrustView/FrustViewController present UIKit's own menu at the
+// published anchor. The pasteboard and the menu are Swift-side throughout; the
+// Rust half never links UIKit.
+//
+// frust_edit_command delivers one verb from that menu (or from a hardware
+// Cmd+C/X/V/A UIKit resolved). `cmd` is a fixed numeric ABI shared with the
+// Rust glue — DO NOT renumber without changing both sides:
+//   0 = copy, 1 = cut, 2 = paste, 3 = select all.
+// An unrecognised code is dropped rather than guessed at (unlike
+// frust_dispatch_touch's phase, every verb here mutates or discloses the
+// document, so there is no safe default). `text` is the pasted UTF-8 payload
+// and is read for cmd == 2 ONLY; pass NULL for the other three. Copy and cut
+// carry nothing because the widget owns the selection and answers by filling
+// the slot frust_take_clipboard_write drains.
+void  frust_edit_command(void *handle, uint8_t cmd, const char *text);
+// frust_take_clipboard_write takes (and clears) the text a widget asked to put
+// on the pasteboard — the answer to a copy/cut. Returns a heap-allocated
+// string the CALLER MUST FREE with frust_string_free, or NULL when nothing was
+// copied. DESTRUCTIVE: the slot is an edge, so a caller that drains and drops
+// the result loses that write. FrustViewController drains it once per
+// CADisplayLink tick into UIPasteboard.general.string.
+char *frust_take_clipboard_write(void *handle);
+// frust_take_paste_request takes (and clears) whether a widget asked the shell
+// to read the pasteboard back to it. 1 = asked, 0 = not (plain uint8_t, the
+// same no-<stdbool.h> convention as frust_set_appearance's `dark`).
+// DESTRUCTIVE, like the drain above.
+//
+// This is the one paste route iOS does NOT exempt: answering it means reading
+// UIPasteboard.general.string from a display-link tick, which is not a
+// system-initiated action and so raises the notice/alert. Only a
+// FRAMEWORK-drawn selection toolbar's Paste button reaches it, and iOS never
+// draws the framework toolbar (see the Native policy above) — so in practice
+// it stays unused. Wired anyway so the shell implements the whole clipboard
+// channel rather than half of it.
+uint8_t frust_take_paste_request(void *handle);
+// frust_selection_toolbar_json reports where the system edit menu should be
+// anchored and which verbs it may offer, as a heap-allocated JSON string the
+// CALLER MUST FREE with frust_string_free — or NULL when no field has a
+// selection worth a menu (the "dismiss whatever stands" sentinel):
+//   {"generation":n,"x":f,"y":f,"w":f,"h":f,
+//    "copy":bool,"cut":bool,"paste":bool,"selectAll":bool}
+// x/y/w/h are LOGICAL POINTS, the same space as the caret rect the IME JSON
+// above reports and as frust_dispatch_touch's coordinates — no scale
+// conversion on either side. The rect is absolute in the window, and FrustView
+// fills the window, so it is already in the view's own coordinates.
+// `generation` moves on every actual change of the request (its clearing
+// included) and is how the caller presents the menu once per selection rather
+// than once per vsync.
+char *frust_selection_toolbar_json(void *handle);
 
 // Appearance: flip the app's theme brightness between
 // light and dark. `dark` is 0/1 (no existing bool-ish precedent to match in

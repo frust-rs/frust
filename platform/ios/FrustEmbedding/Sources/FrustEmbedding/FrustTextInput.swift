@@ -9,6 +9,17 @@ import UIKit
 // below is mechanical over the mirror; positions/ranges are UTF-16 code-unit
 // offsets, marked text maps directly onto the framework's composing region, and
 // geometry is approximated from the caret rect Rust publishes.
+//
+// The clipboard verbs are NOT here. Copy/Cut/Paste/Select All are
+// `UIResponderStandardEditActions`, not `UITextInput` members, and live on
+// `FrustView` itself (see `FrustView.swift`) — which is what routes UIKit's own
+// edit menu and a hardware keyboard's Cmd+C/X/V/A to them, and what keeps every
+// paste on the system-initiated path iOS exempts from its paste-permission
+// alert. They deliberately bypass the mirror below: each hands the verb to the
+// focused Rust widget, which owns the selection and the text, and the resulting
+// change arrives back here the way any other change no UIKit callback
+// originated does — through `reconcileMirror(to:)` on the controller's
+// per-frame poll.
 
 // MARK: - Position / range / selection-rect value types
 
