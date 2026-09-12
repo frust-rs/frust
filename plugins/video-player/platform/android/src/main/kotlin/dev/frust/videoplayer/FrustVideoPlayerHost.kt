@@ -752,7 +752,16 @@ object FrustVideoPlayerHost {
                     Log.w(TAG, "frust-video-player: unparseable url '$source'", e)
                     null
                 }
-                if (uri?.scheme == null) null else uri
+                // Defense in depth: the Rust side already refuses everything
+                // but http(s) before a source ever crosses into this class,
+                // but a URL is untrusted app data (a CMS response, a deep
+                // link, a scanned QR code), so this host answers the same way
+                // on its own rather than trusting that upstream refusal alone
+                // — `file://`, `content://`, `data:` and the like are exactly
+                // the schemes `MediaItem.fromUri` would otherwise resolve
+                // somewhere neither side chose.
+                val scheme = uri?.scheme
+                if (scheme == null || !isHttpOrHttps(scheme)) null else uri
             }
             else -> null
         }
@@ -773,6 +782,13 @@ object FrustVideoPlayerHost {
             false
         }
     }
+
+    /**
+     * Whether [scheme] is `http` or `https`, matched case-insensitively — the
+     * only schemes [resolveSource] accepts for [SOURCE_URL].
+     */
+    private fun isHttpOrHttps(scheme: String): Boolean =
+        scheme.equals("http", ignoreCase = true) || scheme.equals("https", ignoreCase = true)
 
     // --- State, position and the ticker ------------------------------------
 

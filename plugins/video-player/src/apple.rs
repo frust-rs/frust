@@ -136,7 +136,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -1314,6 +1314,20 @@ impl ResolvedSource {
     }
 }
 
+/// Schemes a [`VideoSource::Url`] may name — every other scheme is refused by
+/// [`resolve_source`] before `NSURL` ever sees the string. A media URL is the
+/// app data most likely to arrive from outside the trust boundary (a CMS
+/// response, a deep link, a scanned QR code), and `file://`, `content://`,
+/// `data:` and the like each reach somewhere neither this crate nor
+/// `AVPlayer` chose to expose.
+const URL_SCHEMES: [&str; 2] = ["http", "https"];
+
+/// The scheme naming `url`, ASCII-case-insensitively — the substring before
+/// its first `:` — or `None` when `url` has no `:` at all.
+fn url_scheme(url: &str) -> Option<&str> {
+    url.split_once(':').map(|(scheme, _)| scheme)
+}
+
 /// Resolve a [`VideoSource`] to something an `NSURL` can be built from, on the
 /// calling thread.
 ///
@@ -1322,7 +1336,11 @@ impl ResolvedSource {
 /// (matching the Android backend, which refuses both for the same reason — the
 /// platform resolves nothing, so a relative path would be read against whatever
 /// working directory the process happens to have), an asset the main bundle does
-/// not contain, or a URL Foundation will not parse.
+/// not contain or that a containment check ([`bundle_resource_path`]) would
+/// resolve outside it, a [`VideoSource::Url`] whose scheme is not in
+/// [`URL_SCHEMES`] (message names only the refused scheme, never the full
+/// URL — a refused URL is exactly the input least safe to repeat verbatim),
+/// or a URL Foundation will not parse.
 fn resolve_source(source: &VideoSource) -> Result<ResolvedSource, VideoError> {
     match source {
         VideoSource::File(path) => {
@@ -1350,6 +1368,22 @@ fn resolve_source(source: &VideoSource) -> Result<ResolvedSource, VideoError> {
             Ok(ResolvedSource::File(path))
         }
         VideoSource::Url(url) => {
+            match url_scheme(url) {
+                Some(scheme)
+                    if URL_SCHEMES
+                        .iter()
+                        .any(|allowed| scheme.eq_ignore_ascii_case(allowed)) => {}
+                Some(scheme) => {
+                    return Err(VideoError::UnsupportedSource(format!(
+                        "unsupported URL scheme `{scheme}`"
+                    )));
+                }
+                None => {
+                    return Err(VideoError::UnsupportedSource(
+                        "a URL source must have a scheme".to_owned(),
+                    ));
+                }
+            }
             // Parsed here so an unusable URL is a synchronous refusal; the
             // `NSURL` the item is actually built from is created on the main
             // thread by `construct` (a `Retained<NSURL>` is not `Send`).
@@ -1363,8 +1397,9 @@ fn resolve_source(source: &VideoSource) -> Result<ResolvedSource, VideoError> {
     }
 }
 
-/// `[[NSBundle mainBundle] resourcePath]` joined with `name`, if the file is
-/// actually there.
+/// `[[NSBundle mainBundle] resourcePath]` joined with `name`, if the result
+/// stays inside the bundle's resource directory and the file is actually
+/// there.
 ///
 /// `NSBundle` is reached through a runtime class lookup rather than the
 /// `objc2-foundation` binding on purpose: the binding sits behind that crate's
@@ -1374,9 +1409,10 @@ fn resolve_source(source: &VideoSource) -> Result<ResolvedSource, VideoError> {
 /// in a process with no Foundation loaded — where nothing else in this module
 /// would work either.
 ///
-/// Existence is checked with the standard library rather than
-/// `pathForResource:ofType:`, because a bundled asset is named by *path*
-/// (`clips/intro.mp4`), which that API's name/extension split does not model.
+/// Containment is checked by [`contained_resource_path`] before existence is
+/// checked with the standard library rather than `pathForResource:ofType:`,
+/// because a bundled asset is named by *path* (`clips/intro.mp4`), which that
+/// API's name/extension split does not model.
 fn bundle_resource_path(name: &str) -> Option<String> {
     let class = AnyClass::get(c"NSBundle")?;
     // SAFETY: `+[NSBundle mainBundle]` takes no arguments and returns the
@@ -1389,11 +1425,44 @@ fn bundle_resource_path(name: &str) -> Option<String> {
     let resources: Option<Retained<NSString>> = unsafe { msg_send![&*bundle, resourcePath] };
     let resources = resources?.to_string();
 
-    let path = Path::new(&resources).join(name);
+    let path = contained_resource_path(Path::new(&resources), name)?;
     if !path.is_file() {
         return None;
     }
     path.to_str().map(str::to_owned)
+}
+
+/// Whether `name`, joined onto `base`, stays inside `base` — an asset name is
+/// untrusted app data (the crate doc's threat model: a CMS response, a deep
+/// link, a QR code), so this refuses an absolute name and any `..` or other
+/// non-[`Component::Normal`] component before ever touching the filesystem,
+/// then canonicalizes the joined path and requires it to still start with
+/// `base`'s own canonical form — catching a symlink inside `base` that walks
+/// back out, not just a `..` spelled in `name`. `None` for a name that fails
+/// either check, or for a `base`/joined path that does not exist at all,
+/// since canonicalizing needs a real path.
+///
+/// Pure and filesystem-only (no Objective-C), so it is unit-testable on any
+/// host with a stubbed `base`.
+fn contained_resource_path(base: &Path, name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        return None;
+    }
+    if candidate
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    let canonical_base = base.canonicalize().ok()?;
+    let canonical_joined = base.join(candidate).canonicalize().ok()?;
+    if canonical_joined.starts_with(&canonical_base) {
+        Some(canonical_joined)
+    } else {
+        None
+    }
 }
 
 /// The `NSURL` an item is built from — a file URL for a path, a parsed one for a
@@ -1547,12 +1616,14 @@ mod tests {
     //! helpers are testable at all — everything else needs a live `AVPlayer`,
     //! which is the device gate's job.
 
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use objc2_av_foundation::{AVPlayerActionAtItemEnd, AVPlayerTimeControlStatus};
     use objc2_core_media::{CMTime, CMTimeFlags};
 
-    use crate::{PlaybackState, PlayerEvent};
+    use super::{contained_resource_path, resolve_source, url_scheme};
+    use crate::{PlaybackState, PlayerEvent, VideoError, VideoSource};
 
     /// A seek position becomes a millisecond-scaled `CMTime`.
     #[test]
@@ -1664,5 +1735,97 @@ mod tests {
     fn session_ids_are_positive() {
         let id = super::next_session_id().expect("the id space is not exhausted in a test");
         assert!(id > 0);
+    }
+
+    /// [`url_scheme`] splits on the first `:` and reports `None` for a
+    /// scheme-less string.
+    #[test]
+    fn url_scheme_splits_on_first_colon() {
+        assert_eq!(url_scheme("https://example.test"), Some("https"));
+        assert_eq!(url_scheme("HTTP://example.test"), Some("HTTP"));
+        assert_eq!(url_scheme("no-scheme-here"), None);
+        assert_eq!(url_scheme("data:text/plain,a:b"), Some("data"));
+    }
+
+    /// A scheme outside the `http`/`https` allowlist is refused, and the
+    /// message names only the scheme, never the full (potentially sensitive)
+    /// URL.
+    #[test]
+    fn resolve_source_refuses_a_disallowed_url_scheme() {
+        for url in ["file:///x", "content://x", "data:text/plain,x", "rtmp://x"] {
+            let refused = resolve_source(&VideoSource::Url(url.to_owned()));
+            match refused {
+                Err(VideoError::UnsupportedSource(message)) => {
+                    assert!(
+                        !message.contains(url),
+                        "message `{message}` echoed the refused URL `{url}`"
+                    );
+                }
+                Ok(_) => panic!("expected UnsupportedSource for `{url}`, got Ok"),
+                Err(other) => panic!("expected UnsupportedSource for `{url}`, got {other:?}"),
+            }
+        }
+    }
+
+    /// A URL string with no scheme at all is refused too.
+    #[test]
+    fn resolve_source_refuses_a_schemeless_url() {
+        let refused = resolve_source(&VideoSource::Url("example.test/a.mp4".to_owned()));
+        match refused {
+            Err(VideoError::UnsupportedSource(_)) => {}
+            Ok(_) => panic!("expected UnsupportedSource, got Ok"),
+            Err(other) => panic!("expected UnsupportedSource, got {other:?}"),
+        }
+    }
+
+    /// A throwaway directory tree under the OS temp dir, unique to `unique`,
+    /// for [`contained_resource_path`]'s tests to canonicalize against —
+    /// canonicalizing needs a `base` that actually exists.
+    fn stub_bundle_root(unique: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "frust-video-player-apple-test-{unique}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("clips")).expect("create stub bundle root");
+        std::fs::write(root.join("clips").join("intro.mp4"), b"stub").expect("write stub asset");
+        root
+    }
+
+    /// An absolute name is refused before the filesystem is ever touched.
+    #[test]
+    fn contained_resource_path_refuses_an_absolute_name() {
+        let base = stub_bundle_root("absolute");
+        assert_eq!(contained_resource_path(&base, "/etc/passwd"), None);
+    }
+
+    /// A leading `..` component is refused.
+    #[test]
+    fn contained_resource_path_refuses_a_parent_escape() {
+        let base = stub_bundle_root("escape");
+        assert_eq!(contained_resource_path(&base, "../escape"), None);
+    }
+
+    /// A name that dips below `base` and climbs back out further than it
+    /// went in is refused too, not just a bare leading `..`.
+    #[test]
+    fn contained_resource_path_refuses_a_nested_escape() {
+        let base = stub_bundle_root("nested-escape");
+        assert_eq!(contained_resource_path(&base, "a/../../b"), None);
+    }
+
+    /// A valid nested name resolves to the canonicalized file inside `base`.
+    #[test]
+    fn contained_resource_path_accepts_a_valid_nested_name() {
+        let base = stub_bundle_root("valid");
+        let resolved =
+            contained_resource_path(&base, "clips/intro.mp4").expect("nested name resolves");
+        assert_eq!(
+            resolved,
+            base.canonicalize()
+                .expect("stub base exists")
+                .join("clips")
+                .join("intro.mp4")
+        );
     }
 }

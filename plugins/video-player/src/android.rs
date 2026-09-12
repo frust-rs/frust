@@ -440,14 +440,32 @@ impl BackendSession for AndroidSession {
 
 // --- Pure helpers (no `jni` types: unit-tested below) -----------------------
 
+/// Schemes a [`VideoSource::Url`] may name — every other scheme is refused by
+/// [`source_args`] before the string ever reaches the host. A media URL is
+/// the app data most likely to arrive from outside the trust boundary (a CMS
+/// response, a deep link, a scanned QR code), and `file://`, `content://`,
+/// `data:` and the like each reach somewhere neither this crate nor the host
+/// chose to expose.
+const URL_SCHEMES: [&str; 2] = ["http", "https"];
+
+/// The scheme naming `url`, ASCII-case-insensitively — the substring before
+/// its first `:` — or `None` when `url` has no `:` at all.
+fn url_scheme(url: &str) -> Option<&str> {
+    url.split_once(':').map(|(scheme, _)| scheme)
+}
+
 /// Map a [`VideoSource`] to the `(sourceKind, source)` pair `openPlayer`
 /// takes (module doc's contract table).
 ///
 /// # Errors
 /// [`VideoError::UnsupportedSource`] for a relative [`VideoSource::File`]
 /// path — the host resolves nothing, so a relative path would be interpreted
-/// against whatever working directory the process happens to have — or one
-/// that is not valid UTF-8, which cannot cross into a Java `String` at all.
+/// against whatever working directory the process happens to have — one that
+/// is not valid UTF-8, which cannot cross into a Java `String` at all — or a
+/// [`VideoSource::Url`] whose scheme is not in [`URL_SCHEMES`] (including one
+/// with no scheme at all). The message names only the refused scheme, never
+/// the full URL, since a refused URL is exactly the input most likely to
+/// carry something worth not repeating into a log.
 fn source_args(source: &VideoSource) -> Result<(i32, &str), VideoError> {
     match source {
         VideoSource::File(path) => {
@@ -467,7 +485,21 @@ fn source_args(source: &VideoSource) -> Result<(i32, &str), VideoError> {
                 })
         }
         VideoSource::Asset(name) => Ok((SOURCE_KIND_ASSET, name)),
-        VideoSource::Url(url) => Ok((SOURCE_KIND_URL, url)),
+        VideoSource::Url(url) => match url_scheme(url) {
+            Some(scheme)
+                if URL_SCHEMES
+                    .iter()
+                    .any(|allowed| scheme.eq_ignore_ascii_case(allowed)) =>
+            {
+                Ok((SOURCE_KIND_URL, url.as_str()))
+            }
+            Some(scheme) => Err(VideoError::UnsupportedSource(format!(
+                "unsupported URL scheme `{scheme}`"
+            ))),
+            None => Err(VideoError::UnsupportedSource(
+                "a URL source must have a scheme".to_owned(),
+            )),
+        },
     }
 }
 
@@ -882,7 +914,7 @@ mod tests {
     use super::{
         COMMAND_OK, COMMAND_UNKNOWN_SESSION, DURATION_UNKNOWN, SOURCE_KIND_ASSET, SOURCE_KIND_FILE,
         SOURCE_KIND_URL, command_result, open_error, position_arg, position_event,
-        should_publish_state, source_args, video_size_event,
+        should_publish_state, source_args, url_scheme, video_size_event,
     };
     use crate::{PlaybackState, PlayerEvent, VideoError, VideoFit, VideoSource};
 
@@ -923,6 +955,65 @@ mod tests {
             source_args(&VideoSource::Asset("intro.mp4".to_owned())),
             Ok((SOURCE_KIND_ASSET, "intro.mp4"))
         );
+    }
+
+    /// `http`/`https` are the only accepted URL schemes, matched
+    /// ASCII-case-insensitively.
+    #[test]
+    fn source_args_accepts_only_http_and_https_urls() {
+        assert_eq!(
+            source_args(&VideoSource::Url("http://example.test/a.mp4".to_owned())),
+            Ok((SOURCE_KIND_URL, "http://example.test/a.mp4"))
+        );
+        assert_eq!(
+            source_args(&VideoSource::Url("HTTP://example.test/a.mp4".to_owned())),
+            Ok((SOURCE_KIND_URL, "HTTP://example.test/a.mp4"))
+        );
+        assert_eq!(
+            source_args(&VideoSource::Url("https://example.test/a.mp4".to_owned())),
+            Ok((SOURCE_KIND_URL, "https://example.test/a.mp4"))
+        );
+    }
+
+    /// A scheme outside the allowlist is refused, and the message names only
+    /// the scheme, never the full (potentially sensitive) URL.
+    #[test]
+    fn source_args_refuses_a_disallowed_url_scheme() {
+        for url in ["file:///x", "content://x", "data:text/plain,x", "rtmp://x"] {
+            let source = VideoSource::Url(url.to_owned());
+            let refused = source_args(&source);
+            match refused {
+                Err(VideoError::UnsupportedSource(message)) => {
+                    assert!(
+                        !message.contains(url),
+                        "message `{message}` echoed the refused URL `{url}`"
+                    );
+                }
+                other => panic!("expected UnsupportedSource for `{url}`, got {other:?}"),
+            }
+        }
+    }
+
+    /// A URL string with no scheme at all is refused too, not accepted or
+    /// mishandled.
+    #[test]
+    fn source_args_refuses_a_schemeless_url() {
+        let source = VideoSource::Url("example.test/a.mp4".to_owned());
+        let refused = source_args(&source);
+        assert!(
+            matches!(refused, Err(VideoError::UnsupportedSource(_))),
+            "expected UnsupportedSource, got {refused:?}"
+        );
+    }
+
+    /// [`url_scheme`] splits on the first `:` and reports `None` for a
+    /// scheme-less string.
+    #[test]
+    fn url_scheme_splits_on_first_colon() {
+        assert_eq!(url_scheme("https://example.test"), Some("https"));
+        assert_eq!(url_scheme("HTTP://example.test"), Some("HTTP"));
+        assert_eq!(url_scheme("no-scheme-here"), None);
+        assert_eq!(url_scheme("data:text/plain,a:b"), Some("data"));
     }
 
     /// `openPlayer`'s negative returns decode through the crate-wide host
