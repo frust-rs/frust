@@ -64,6 +64,29 @@
 //! flag is then derived from the link rather than latched beside it, so the two
 //! cannot drift apart.
 //!
+//! # Focus lifetime
+//!
+//! A pod's focus link has the same problem the capture link above had, one level
+//! up: a container clears a child's `focused` flag from its own
+//! blur-on-outside-tap sweep, and no container holds this pod, so no sweep ever
+//! reaches it. Nothing here fixes that by hand, and deliberately so — a fix that
+//! lived in this module would cover the surfaces `OverlaySlot` owns and leave
+//! every hand-written owner (and every direct `PaintCtx::register_overlay`
+//! caller) with the original defect.
+//!
+//! `frust-core` gives the link a lifetime instead, where every claim already
+//! passes: a recorded link carries the identity of the focus session it was
+//! recorded for, and the render root moves that identity on whenever a dispatch
+//! records a new claim or ends the session. A link whose stamp names an older
+//! session is retired by arithmetic, with no pass having to visit the branch it
+//! belongs to — and the root retires the flag itself the next time it holds the
+//! pod, during the paint that floats it
+//! ([`ChildPod::retire_stale_focus_link`](frust_core::ChildPod::retire_stale_focus_link)).
+//!
+//! What this module owes that mechanism is to ask the right question:
+//! [`OverlaySlot::pod_has_focus`] reports a link on the **live** session, not a
+//! flag that was once set, and every routing decision here reads it.
+//!
 //! # Not in v1
 //!
 //! * **The pod contributes no semantics.** A pod's nodes would attach under the
@@ -89,11 +112,11 @@ use std::rc::Rc;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, OutsideTap, OverlayBand, OverlayEntry, OverlayEventKind, OverlayInput, OverlayKey,
-    PaintCtx, PaintScene, PointerEvent, PointerPhase, SemanticsCtx, View, Widget, any,
+    PaintCtx, PaintScene, PointerEvent, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Rect, Size};
 
-use crate::authoring::{ErasedCallback, erase_callback, route_event_single};
+use crate::authoring::{ErasedCallback, erase_callback, releases_capture, route_event_single};
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -481,16 +504,27 @@ impl<PodState: 'static> OverlaySlot<PodState> {
         self.window_rect
     }
 
-    /// Whether the pod holds the recorded focus path.
+    /// Whether the pod holds a focus link on the **live** session — the read
+    /// every routing decision here makes.
+    ///
+    /// Not the raw recorded flag: a claim made from inside a floated surface
+    /// reaches no container's blur sweep, so a link this surface recorded
+    /// survives the session moving away from it (see the module docs' *Focus
+    /// lifetime*). Asking the raw flag would keep routing the keyboard into a
+    /// surface the user has left.
     pub fn pod_has_focus(&self) -> bool {
         self.pod
             .as_ref()
-            .is_some_and(|pod| pod.borrow().is_focused())
+            .is_some_and(|pod| pod.borrow().holds_live_focus())
     }
 
     /// Drop the pod's recorded focus link, so focus-routed events stop reaching
     /// it — the owner's half of "the surface asked for focus, and the owner
     /// declined on its behalf".
+    ///
+    /// An owner's *decision*, and the only reason this exists: a link the
+    /// session has merely moved away from needs no call, since its stamp retires
+    /// it on its own (see the module docs' *Focus lifetime*).
     pub fn withdraw_pod_focus(&mut self) {
         if let Some(pod) = &self.pod {
             pod.borrow_mut().set_focused(false);
@@ -836,18 +870,6 @@ impl<PodState: 'static> OverlaySlot<PodState> {
     }
 }
 
-/// Whether `event` is the phase that auto-releases a recorded capture
-/// (`Up`/`Cancel`) — the rule the authoring toolkit's
-/// [`route_event_single`](crate::authoring::route_event_single) applies to every
-/// captured child, restated here because [`OverlaySlot`] dispatches into its pod
-/// without going through it.
-fn releases_capture(event: &InputEvent) -> bool {
-    matches!(
-        event,
-        InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
-    )
-}
-
 // ---------------------------------------------------------------------------
 // The declarative portal
 // ---------------------------------------------------------------------------
@@ -1067,13 +1089,12 @@ impl<State: 'static> Widget for OverlayPortalWidget<State> {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let child_focused = self.child.is_focused();
-        // A focus-routed event belongs to the child whenever the child holds
-        // the link. Both links can be set at once — `preserve_focus` leaves the
-        // child's standing, and a child that takes focus back after the surface
-        // had it claims its own without anything clearing the surface's, since
-        // an overlay pod is not a sibling the root's blur rule can reach. The
-        // main tree wins in both cases: the surface's link is the older one.
+        let child_focused = self.child.holds_live_focus();
+        // A focus-routed event belongs to the child whenever the child holds the
+        // live link. Both links can be live at once only through
+        // `preserve_focus`, which deliberately re-records the child's against the
+        // same session it hands back; otherwise exactly one of them is, and this
+        // check simply prefers the main tree when both are.
         if !(event.is_focus_routed() && child_focused) {
             let pod_focused_before = self.slot.pod_has_focus();
             if let Some(result) = self.slot.event_ambient(ctx, event) {
@@ -1090,7 +1111,15 @@ impl<State: 'static> Widget for OverlayPortalWidget<State> {
                         // Hand the session back to the child: the surface's own
                         // claim is withdrawn, and re-asserting the request keeps
                         // every ancestor's recorded chain pointing here.
+                        //
+                        // The child's own link is re-recorded rather than left
+                        // alone. The surface's claim opened a new focus session,
+                        // and a link recorded against the session before it is
+                        // not a link on this one — so handing the session back
+                        // means saying so on the child's own record, not merely
+                        // not clearing it.
                         self.slot.withdraw_pod_focus();
+                        self.child.set_focused(true);
                         ctx.request_focus();
                     } else {
                         // The surface took the session, so the child's link
@@ -1120,8 +1149,8 @@ mod tests {
     use crate::test_support::RecordingScene;
     use crate::{Column, SizedBox, Stack, StackView, scroll_view};
     use frust_core::{
-        EditCommand, FrameTime, Key, KeyEvent, Modifiers, NamedKey, PointerButton, RenderRoot,
-        ScrollDelta,
+        EditCommand, FrameTime, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerPhase,
+        RenderRoot, ScrollDelta,
     };
     use peniko::Color;
 
@@ -1357,6 +1386,13 @@ mod tests {
         Plain,
         /// A small portal child partway down a scrollable column.
         Scrolled,
+        /// The portal beside a focus-taking field, both inside one `Column`, so
+        /// the container reconciling them is the ordinary
+        /// [`route_event`](crate::authoring::route_event) one and the field is a
+        /// SIBLING of the portal rather than its child — the arrangement in
+        /// which a recorded focus link the container never swept still decides
+        /// where a focus-routed event goes.
+        Sibling,
     }
 
     #[derive(Clone, Copy)]
@@ -1513,6 +1549,7 @@ mod tests {
             size: match cfg.shape {
                 Shape::Plain => None,
                 Shape::Scrolled => Some(Size::new(120.0, 40.0)),
+                Shape::Sibling => Some(Size::new(400.0, 50.0)),
             },
             reaction: Reaction::Focus,
             handles: true,
@@ -1547,6 +1584,18 @@ mod tests {
                 any(portal),
                 any(SizedBox(Some(400.0), Some(1000.0))),
             ])))]),
+            // The field first, the portal second: a focus-routed event walking
+            // the children in order meets the field's link before the portal's.
+            Shape::Sibling => Stack(vec![any(Column(vec![
+                any(Probe {
+                    tag: "field",
+                    size: Some(Size::new(400.0, 50.0)),
+                    reaction: Reaction::Focus,
+                    handles: true,
+                    log,
+                }),
+                any(portal),
+            ]))]),
         }
     }
 
@@ -1924,6 +1973,46 @@ mod tests {
             h.log(),
             vec!["child:key focus=true".to_string()],
             "the surface's older link must not outrank the main tree's live one"
+        );
+    }
+
+    /// A focus link the container never swept must stop deciding where a
+    /// focus-routed event goes.
+    ///
+    /// The field and the portal are siblings here, so the surface's claim
+    /// arrives as a broadcast the container forwards to both — no hit test, and
+    /// therefore no blur-on-outside-tap sweep to clear the field's link. Both
+    /// children then read as focus-link holders, and a container that answers
+    /// "which child holds focus" with the first one in child order delivers the
+    /// keyboard to the field the user has left.
+    #[test]
+    fn a_stale_sibling_link_does_not_outrank_the_surface_that_took_the_session() {
+        let mut h = Harness::new(Cfg {
+            shape: Shape::Sibling,
+            reaction: Reaction::Focus,
+            placement: OverlayPlacement::on(OverlaySide::Bottom)
+                .offset(0.0)
+                .align(OverlayAlign::Start)
+                .padding(0.0),
+            ..Cfg::default()
+        });
+        h.frame();
+
+        // The field takes the session.
+        h.down(200.0, 25.0);
+        h.clear_log();
+        h.key();
+        assert_eq!(h.log(), vec!["field:key focus=true".to_string()]);
+
+        // A press inside the surface, which claims focus for itself. The
+        // container sees only the broadcast, so it sweeps nothing.
+        h.down(40.0, 110.0);
+        h.clear_log();
+        h.key();
+        assert_eq!(
+            h.log(),
+            vec!["pod:key focus=true".to_string()],
+            "the keyboard follows the branch that actually holds the session"
         );
     }
 
