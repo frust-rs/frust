@@ -89,7 +89,43 @@ pub trait AppTree {
     /// other additive methods below: any constant default (`0` included) would
     /// report "nothing ever changed" and silently strand a focus transition,
     /// against the frame gate's default-to-run rule.
+    ///
+    /// **This is not the session's identity**, and the distinction is the whole
+    /// reason [`AppTree::focus_epoch`] sits beside it — read that one's doc
+    /// before using this counter to decide whether focus is still where it was.
     fn focus_ime_generation(&self) -> u64;
+
+    /// The live focus session's **identity**, advanced once per honoured focus
+    /// claim and once per session release (delegates to
+    /// [`RenderRoot::focus_epoch`]).
+    ///
+    /// Two adjacent generation counters invite exactly one mistake, so: the
+    /// neighbour above counts *changes to the published surface*, this one
+    /// counts *sessions*, and neither substitutes for the other.
+    ///
+    /// * **Focus moving from one field to another moves this one and can leave
+    ///   the neighbour completely still.** Claiming focus while some field is
+    ///   already focused writes `true` over `true`, and `ImeState` is
+    ///   `{active, editing, caret, content_type}` — it names no widget, so two
+    ///   fields can publish equal surfaces, and a field that takes focus and
+    ///   publishes nothing leaves the *previous* field's surface standing.
+    /// * **An edit, a caret move, or the field being repositioned under the
+    ///   user moves the neighbour and leaves this one still.** The session is
+    ///   the same session throughout.
+    ///
+    /// So a shell that must run a frame or re-sync the platform IME reads the
+    /// neighbour; a shell binding an answer it will receive *later* to the
+    /// session that asked for it — an off-thread clipboard read, say — reads
+    /// this one and compares it again on arrival.
+    ///
+    /// **Never `0`**, whatever a shell's own FFI layer may use `0` to mean: the
+    /// counter is built at `1` and steps past `0` on wrap.
+    ///
+    /// Not defaulted, for a sharper reason than its neighbour's: a constant
+    /// default would report "still the same session" *forever*, so every stale
+    /// answer would compare equal and be accepted. A wrong default here delivers
+    /// text into the wrong field rather than costing a frame.
+    fn focus_epoch(&self) -> u64;
 
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased.
@@ -407,6 +443,10 @@ where
         self.root.focus_ime_generation()
     }
 
+    fn focus_epoch(&self) -> u64 {
+        self.root.focus_epoch()
+    }
+
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {
         self.root.layout_with_text(logical, text_ctx);
     }
@@ -601,6 +641,9 @@ mod tests {
             unimplemented!()
         }
         fn focus_ime_generation(&self) -> u64 {
+            unimplemented!()
+        }
+        fn focus_epoch(&self) -> u64 {
             unimplemented!()
         }
         fn layout(&mut self, _logical: Size, _text_ctx: &mut dyn Any) {

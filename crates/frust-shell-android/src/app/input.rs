@@ -144,25 +144,41 @@ impl AndroidAppHandle {
         self.app.ime_state()
     }
 
-    /// The focus/IME session generation, for the Kotlin side to bind a
-    /// clipboard resolution it started to the session that started it.
+    /// The focus/IME session generation — `nativeFocusGeneration`'s whole
+    /// payload, a counter over *changes to the published focus/IME surface*.
     ///
-    /// `nativeFocusGeneration`'s whole payload. The JVM half snapshots this
-    /// when it hands a URI-backed clip to its background resolver and compares
-    /// it again when the text comes back: a paste is dispatched only if the
-    /// session has not moved, because `EditCommand::Paste` is focus-routed and
-    /// would otherwise land wherever focus happens to be when a slow
-    /// `ContentProvider` finally answers.
-    ///
-    /// Deliberately CONSERVATIVE. `AppTree::focus_ime_generation` moves on any
-    /// actual change of the focus flag or the published IME surface, so an edit
-    /// or a caret move during the wait drops the paste too, not just a move to
-    /// another field. That is the safe direction: a paste that does not land is
-    /// recoverable by pressing paste again, and a paste that lands in the wrong
-    /// field is not. Re-publishing an identical surface is not an edge, so an
-    /// ordinary wait — the common case — does not trip it.
+    /// Kept for Kotlin generated before [`Self::focus_epoch`] existed. It is
+    /// **not** the counter to bind an asynchronous answer to: it moves for an
+    /// edit or a caret move that never left the field, and it stands still for
+    /// a focus move between two fields that publish alike. The embedding's
+    /// clipboard resolver reads the session identity instead — see
+    /// [`Self::focus_epoch`], and `AppTree::focus_epoch` for the full contrast.
     pub(crate) fn focus_generation(&self) -> u64 {
         self.app.focus_ime_generation()
+    }
+
+    /// The live focus session's identity, for the Kotlin side to bind a
+    /// clipboard resolution it started to the session that started it.
+    ///
+    /// `nativeFocusEpoch`'s whole payload. The JVM half snapshots this when it
+    /// hands a URI-backed clip to its background resolver and compares it again
+    /// when the text comes back: a paste is dispatched only if the session is
+    /// still the one that asked, because `EditCommand::Paste` is focus-routed
+    /// and would otherwise land wherever focus happens to be when a slow
+    /// `ContentProvider` finally answers.
+    ///
+    /// `AppTree::focus_epoch` advances once per honoured focus claim and once
+    /// per session release, so it answers that question directly rather than by
+    /// proxy: a move to another field moves it whether or not the field taking
+    /// focus publishes anything, and an edit or a reposition *inside* one
+    /// session leaves it alone — which is what lets a paste the user is still
+    /// waiting for survive a keystroke.
+    ///
+    /// It never returns `0` for a live root (the counter is built at `1` and
+    /// steps past `0` on wrap), which is what leaves `0` free as the FFI
+    /// layer's dead-handle answer.
+    pub(crate) fn focus_epoch(&self) -> u64 {
+        self.app.focus_epoch()
     }
 
     /// Forward a soft-keyboard editor action (`nativeImeAction`, e.g.

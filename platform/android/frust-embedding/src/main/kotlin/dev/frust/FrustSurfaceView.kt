@@ -407,16 +407,23 @@ class FrustSurfaceView(
     private external fun nativeSystemUiState(handle: Long): Long
 
     /**
-     * The framework's focus/IME session generation, used to bind an async
-     * URI-backed clipboard resolution to the session that asked for it
+     * The identity of the framework's live focus session, used to bind an
+     * async URI-backed clipboard resolution to the session that asked for it
      * ([readClipboardTextAsync]). A cheap `jlong` read, the same shape
-     * [nativeSystemUiState] above uses. `0` means no live native handle — but
-     * a real generation can be `0` too, because the counter behind it starts
-     * there. [readClipboardTextAsync] is what separates the two: it refuses to
-     * start a resolution whose snapshot is `0`, so every snapshot it keeps is
-     * non-zero and a dead handle's `0` can never match one.
+     * [nativeSystemUiState] above uses.
+     *
+     * It advances once per focus claim the framework honours and once per
+     * session release, and on nothing else — so it moves when focus crosses to
+     * another field (whether or not that field publishes an IME surface of its
+     * own) and stands still while the user edits, moves the caret, or has the
+     * field moved under them inside one session.
+     *
+     * `0` means no live native handle, and nothing else: no live session ever
+     * reports `0`, because the counter behind it starts at `1` and steps past
+     * `0` if it ever wraps. It is unrelated to [clipboardResolutionEpoch],
+     * which is this view's own teardown counter.
      */
-    private external fun nativeFocusGeneration(handle: Long): Long
+    private external fun nativeFocusEpoch(handle: Long): Long
 
     // Plugin platform initialization: deliver the
     // application Context to the native side so `frust-plugin`'s handles
@@ -1380,27 +1387,34 @@ class FrustSurfaceView(
      * On arrival the answer must still belong where it was asked for, and
      * FOUR things are checked, because the framework routes
      * `EditCommand::Paste` down whatever focus path is live at dispatch time
-     * and has no per-request identity of its own:
+     * and the command itself carries no identity:
      *
      * * [clipboardResolutionEpoch] is unmoved — the view did not tear down
      *   ([shutdownClipboardExecutor] is its only writer).
      * * `handle` is still live.
-     * * The framework's focus/IME session generation ([nativeFocusGeneration])
-     *   is unmoved. This is the one that stops a resolved paste landing in a
-     *   DIFFERENT field: [imeActive] is a single view-wide flag that only
-     *   toggles on the active/inactive edge, so a move from one field to
-     *   another never clears it and cannot be used for this.
+     * * The framework's focus session is still the one that asked
+     *   ([nativeFocusEpoch]). This is the one that stops a resolved paste
+     *   landing in a DIFFERENT field: [imeActive] is a single view-wide flag
+     *   that only toggles on the active/inactive edge, so a move from one
+     *   field to another never clears it and cannot be used for this.
      * * The text is non-empty.
      *
      * Any of those failing DROPS the paste silently: a paste landing in a
      * field the user has since moved away from is worse than one that never
      * lands, and a dropped one is recoverable by asking again.
      *
-     * The generation check is deliberately CONSERVATIVE — it moves on any
-     * real change of the focus flag or the published IME surface, so an edit
-     * or a caret move while the provider is still answering also drops the
-     * paste, not only a move to another field. Re-publishing an identical
-     * surface is not an edge, so an ordinary wait does not trip it.
+     * The session check is an identity, not a proxy, and that decides what it
+     * does NOT drop. Editing, moving the caret, or having the field reflowed
+     * or resized under you while the provider is still answering all leave the
+     * session where it was, so the paste still lands — in the field that asked
+     * for it, at whatever the caret has since become, which is where a paste
+     * belongs. What moves the session is a focus claim the framework honoured
+     * or a session release: switching fields, dismissing the keyboard, tapping
+     * away — and a re-press inside the same field, which claims again and is
+     * therefore treated as a new session (conservative in the safe direction,
+     * costing at worst a paste the user can ask for again). A touch scroll is
+     * a press first, so it is judged as one: it re-claims if it started in a
+     * field and blurs if it started on nothing focusable.
      *
      * The wait is also BOUNDED. `coerceToText` returns when the clip's owning
      * app decides to answer — or never — so a deadline is stamped at request
@@ -1418,14 +1432,14 @@ class FrustSurfaceView(
         // Snapshot the session this paste was asked for, and the point past
         // which its answer is no longer wanted. Both are read here, on the UI
         // thread, while the asking press is still the current truth.
-        val requestedInSession = if (handle != 0L) nativeFocusGeneration(handle) else 0L
+        val requestedInSession = if (handle != 0L) nativeFocusEpoch(handle) else 0L
         val deadlineUptimeMillis = SystemClock.uptimeMillis() + CLIPBOARD_RESOLUTION_TIMEOUT_MS
-        // Load-bearing, not a redundant handle check: `0` is both "no live
-        // native handle" and a reachable live generation, since the counter
-        // starts there. Refusing to start here is what guarantees every
-        // snapshot below is non-zero, which is in turn what lets the arrival
-        // comparison read a dead handle's `0` as "not the session that asked"
-        // instead of as a match.
+        // `0` means one thing only — no live native handle — because no live
+        // session is ever numbered `0` (see [nativeFocusEpoch]). So this is an
+        // ordinary "nothing to paste into" bail rather than a sentinel repair,
+        // and the arrival comparison below reads a dead handle's `0` as "not
+        // the session that asked" on its own terms, with nothing here to
+        // arrange it.
         if (requestedInSession == 0L) {
             return
         }
@@ -1454,7 +1468,7 @@ class FrustSurfaceView(
                     // The session must be the one that asked. `imeActive` cannot
                     // answer this: it is view-wide and does not toggle when focus
                     // moves from one field to another.
-                    if (nativeFocusGeneration(handle) != requestedInSession) {
+                    if (nativeFocusEpoch(handle) != requestedInSession) {
                         return@post
                     }
                     nativeEditCommand(handle, EDIT_COMMAND_PASTE, text)

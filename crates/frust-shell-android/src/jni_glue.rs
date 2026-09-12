@@ -1699,31 +1699,28 @@ pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
     });
 }
 
-/// `nativeFocusGeneration`: return the focus/IME session generation for
-/// Kotlin's clipboard resolver to bind an async paste to the session that
-/// asked for it.
+/// `nativeFocusGeneration`: return the focus/IME session generation — a
+/// counter over *changes to the published focus/IME surface*.
 ///
 /// The same cheap per-frame-pollable `jlong` read `nativeSystemUiState` is,
-/// but per-handle rather than process-global. The JVM half snapshots this
-/// value when it hands a URI-backed clip to its background resolver and
-/// compares it again when the text comes back: `EditCommand::Paste` is
-/// focus-routed, so without that compare a slow `ContentProvider`'s answer
-/// lands in whatever field holds focus whenever it finally arrives.
+/// but per-handle rather than process-global.
 ///
-/// A missing handle returns `0`, and the JVM half is what makes that sentinel
-/// unambiguous: it refuses to start a resolution whose *snapshot* is `0`, so
-/// every snapshot it goes on to hold is non-zero and a dead handle's `0` can
-/// never compare equal on arrival. That refusal is load-bearing rather than
-/// belt-and-braces, because the counter returned here is `focus_ime_gen`,
-/// which is built at `0` and advanced with a bare `wrapping_add` — `0` is a
-/// reachable live value. (`focus_epoch` is a different counter; only that one
-/// is built at `1` and stepped past `0` on wrap.)
+/// Retained for Kotlin generated before [`native_focus_epoch`], which is what
+/// the embedding's clipboard resolver binds to now. This counter cannot
+/// answer "is this still the session that asked?": focus can move from one
+/// field to another without moving it at all (claiming focus while some field
+/// is already focused writes `true` over `true`, and the published `ImeState`
+/// names no widget), while an edit that never left the field does move it.
+///
+/// A missing handle returns `0`, which a caller must disambiguate itself: the
+/// counter returned here is built at `0` and advanced with a bare
+/// `wrapping_add`, so `0` is a reachable live value. That is a real difference
+/// from [`native_focus_epoch`], which never returns `0` for a live root — do
+/// not carry a sentinel argument from one of these two exports to the other.
 ///
 /// Deliberately does NOT `pump_reactive`: nothing reactive writes this counter
 /// outside an event or paint pass, so a caller always reads a value the last
-/// frame already settled. The request-side read does run inside the `doFrame`
-/// that produced it; the arrival-side comparison runs later, off the main
-/// looper's queue, which is why it re-reads rather than trusting its snapshot.
+/// frame already settled.
 pub fn native_focus_generation(handle: jlong) -> jlong {
     guard("nativeFocusGeneration", 0, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1731,6 +1728,43 @@ pub fn native_focus_generation(handle: jlong) -> jlong {
             return 0;
         };
         app.focus_generation() as jlong
+    })
+}
+
+/// `nativeFocusEpoch`: return the live focus session's identity, for Kotlin's
+/// clipboard resolver to bind an async paste to the session that asked for it.
+///
+/// `EditCommand::Paste` is focus-routed and carries no identity of its own, so
+/// without this compare a slow `ContentProvider`'s answer lands in whatever
+/// field holds focus whenever it finally arrives. The JVM half snapshots this
+/// value when it hands a URI-backed clip to its background resolver and
+/// compares it again when the text comes back, dispatching only on a match.
+///
+/// What it reports, exactly: `AppTree::focus_epoch` advances once per honoured
+/// focus claim and once per session release, and on nothing else. So a move to
+/// another field moves it whether or not that field publishes an IME surface,
+/// and an edit, a caret move, or the field being repositioned under the user
+/// leaves it alone. Its neighbour [`native_focus_generation`] gets both of
+/// those cases the other way round, which is why the two are separate exports
+/// rather than one renamed.
+///
+/// A missing handle returns `0`, and that sentinel is unambiguous *here* on
+/// its own: the underlying counter is built at `1` and steps past `0` on wrap,
+/// so no live root ever reports `0`. A caller needs no second check to read a
+/// dead handle's answer as "not the session that asked".
+///
+/// Deliberately does NOT `pump_reactive`, for the same reason as its
+/// neighbour: nothing reactive writes this counter outside an event or paint
+/// pass. The request-side read runs inside the `doFrame` that produced it; the
+/// arrival-side comparison runs later, off the main looper's queue, which is
+/// why it re-reads rather than trusting its snapshot.
+pub fn native_focus_epoch(handle: jlong) -> jlong {
+    guard("nativeFocusEpoch", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        app.focus_epoch() as jlong
     })
 }
 
