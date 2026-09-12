@@ -172,32 +172,47 @@ pub use frust_core::EditCommand;
 
 /// The selection-toolbar seam: the request a text field publishes when it
 /// has a selection ([`SelectionToolbarRequest`]/[`SelectionToolbarActions`]),
-/// and the two knobs that decide who draws it.
+/// and the knobs that decide who draws it.
 ///
 /// [`set_selection_toolbar_policy`] chooses
 /// [`SelectionToolbarPolicy::Framework`] (the default — a field floats its
 /// own pod through the overlay portal) or [`SelectionToolbarPolicy::Native`]
-/// (the platform's own edit menu, e.g. iOS's `UIEditMenuInteraction`) —
-/// see that type's own docs for the two-route split.
+/// (the platform's own edit menu, e.g. iOS's `UIEditMenuInteraction`) — see
+/// that type's own docs for the two-route split. This is **not** an
+/// unconditional free choice, though: a platform shell whose system owns the
+/// menu can LOCK it instead, with `frust_core::lock_selection_toolbar_policy`
+/// — once locked, [`set_selection_toolbar_policy`] is refused rather than
+/// obeyed, so an app cannot silently undo a platform requirement it doesn't
+/// know exists. iOS's shell locks [`SelectionToolbarPolicy::Native`] at
+/// start-up for exactly this reason: a framework-drawn toolbar's own Paste
+/// button would break the exemption that keeps iOS's per-app paste-permission
+/// prompt from firing on every paste.
+///
 /// [`set_selection_toolbar_builder`] installs the view a `Framework`-policy
 /// pod floats, **replacing** whatever the framework's own baseline (installed
 /// at bootstrap, before the first frame) or an earlier design system already
-/// installed. A
-/// design system's own installer should reach for
+/// installed. A design system's own installer should reach for
 /// `frust_core::install_selection_toolbar_builder_if_unset` instead — the
 /// cooperative, set-if-unset half of the same pair — so two catalogs linked
 /// into one binary never fight over the slot, and neither ever undoes an
 /// app's own explicit override.
 ///
 /// ```
-/// use frust::{SelectionToolbarPolicy, set_selection_toolbar_policy};
+/// use frust::{
+///     SelectionToolbarPolicy, lock_selection_toolbar_policy, set_selection_toolbar_policy,
+/// };
 ///
-/// // A shell that owns its own system edit menu selects the platform route.
-/// set_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+/// // A shell whose platform owns its own system edit menu locks the route,
+/// // so that requirement wins no matter what app code does afterward.
+/// let claimed = lock_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+/// assert!(claimed, "the first claim always takes the lock");
+///
+/// // An app's later override is refused rather than obeyed once locked.
+/// set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
 /// ```
 pub use frust_core::{
     SelectionToolbarActions, SelectionToolbarPolicy, SelectionToolbarRequest,
-    set_selection_toolbar_builder, set_selection_toolbar_policy,
+    lock_selection_toolbar_policy, set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 
 /// Platform-view embedding (platform-views feature): reserve

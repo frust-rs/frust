@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex, Once};
 use anyhow::{Context, Result, bail};
 
 use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
-use frust_core::selection_toolbar::{SelectionToolbarPolicy, set_selection_toolbar_policy};
+use frust_core::selection_toolbar::{SelectionToolbarPolicy, lock_selection_toolbar_policy};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
@@ -887,30 +887,19 @@ fn create_handle(
     // regardless of a signal write, so the waker is a no-op (mirrors Android).
     let rt = ReactiveRuntime::init(no_op_waker());
 
-    // Selection toolbar: iOS draws it itself. Declaring the `Native` policy
-    // process-wide makes a focused field publish its selection-toolbar request
-    // and float **no pod of its own**, so UIKit's own edit menu — presented by
-    // `FrustViewController`'s per-tick poll of `frust_selection_toolbar_json`
-    // — is the only menu on screen (see `frust_core::selection_toolbar`'s
-    // module docs for the two routes).
-    //
-    // Not cosmetic, and not an app-level choice: a paste is exempt from iOS's
-    // paste notice (the 14+ banner and the 16+ per-app permission alert) ONLY
+    // Selection toolbar: LOCK the policy to `Native` rather than merely
+    // setting it, so an app's own later call can never win here. This is the
+    // platform's requirement, not a preference: a paste is exempt from iOS's
+    // paste notice (the 14+ banner, the 16+ per-app permission alert) ONLY
     // when it is system-initiated — a tap in the system menu, or a hardware
-    // `Cmd+V` through UIKit's responder chain. A framework-drawn toolbar's
-    // Paste button would reach `EventCtx::request_paste`, which this shell can
-    // only answer by reading `UIPasteboard.general.string` off a display-link
-    // tick — squarely the alerting path (see `take_paste_request`). So the
-    // native route is the platform's requirement, not a preference.
-    //
-    // Set here rather than emitted by `ios_app!` for the reason the reactive
-    // runtime init above is: this is framework-side, both macro arms need it,
-    // and duplicating it per arm would let one drift. Idempotent (a plain
-    // last-writer-wins slot), so re-entering `frust_init` in the same process
-    // is benign. Set BEFORE `make_app`/the initial rebuild below, so the very
-    // first `sync_toolbar` a field runs already sees the native route and
-    // never mounts a pod it would have to tear down.
-    set_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+    // `Cmd+V` through UIKit's responder chain — and a framework-drawn
+    // toolbar's Paste button would read `UIPasteboard.general.string` off a
+    // display-link tick instead, squarely the alerting path. Set BEFORE
+    // `make_app`/the initial rebuild below, so the very first `sync_toolbar` a
+    // field runs already sees the native route and never mounts a pod it
+    // would have to tear down; idempotent, so re-entering `frust_init` in the
+    // same process is benign.
+    lock_selection_toolbar_policy(SelectionToolbarPolicy::Native);
 
     // Construct the app AND its handle under the root `Owner`. `make_app` runs
     // `Component::init` (via `new_boxed_app_with`'s state factory), and

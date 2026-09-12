@@ -80,8 +80,9 @@ pub use overlay::{
 };
 pub use selection_toolbar::{
     SelectionToolbarActions, SelectionToolbarBuilder, SelectionToolbarPolicy,
-    SelectionToolbarRequest, install_selection_toolbar_builder_if_unset, selection_toolbar_builder,
-    selection_toolbar_policy, set_selection_toolbar_builder, set_selection_toolbar_policy,
+    SelectionToolbarRequest, install_selection_toolbar_builder_if_unset,
+    lock_selection_toolbar_policy, selection_toolbar_builder, selection_toolbar_policy,
+    set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
 pub use tree::{InspectNode, WidgetPod, WidgetTree};
