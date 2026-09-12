@@ -31,6 +31,9 @@ import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -555,6 +558,37 @@ class FrustSurfaceView(
     private val clipboard: ClipboardManager
         get() = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
+    /**
+     * Main-thread handle used to hop a URI-backed clipboard resolution's
+     * answer back onto the UI thread — see [readClipboardTextAsync]. A
+     * dedicated field (rather than an inline `Handler(Looper.getMainLooper())`
+     * per call, the way [reduceMotionObserver] constructs its own) since this
+     * one is posted to repeatedly over the view's lifetime.
+     */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * The single background thread a URI-backed clipboard item's
+     * [ClipData.Item.coerceToText] round-trip runs on — never one thread per
+     * paste. Lazily created by [clipboardWorker] on first use and torn down by
+     * [shutdownClipboardExecutor] at every point a live handle stops being
+     * trustworthy ([surfaceDestroyed], [onPause], [onDestroy]), so no thread
+     * outlives this view. `null` until the first URI-backed paste is asked
+     * for; most apps that never copy a URI-backed clip never create it.
+     */
+    private var clipboardExecutor: ExecutorService? = null
+
+    /**
+     * Bumped by [shutdownClipboardExecutor] every time it runs. A resolution
+     * captures the epoch it started under ([readClipboardTextAsync]); if the
+     * epoch has moved by the time the answer reaches [mainHandler], the view
+     * tore down while the read was in flight and the answer is dropped
+     * instead of dispatched, even though [shutdownClipboardExecutor]'s
+     * `shutdownNow()` cannot guarantee the underlying `ContentProvider` call
+     * actually honours the interrupt.
+     */
+    private var clipboardResolutionEpoch = 0L
+
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
 
@@ -881,6 +915,10 @@ class FrustSurfaceView(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        // Stop (and forget) any in-flight URI-backed clipboard resolution
+        // before anything else here: the render surface going away is one of
+        // the points nothing should still land a late paste into.
+        shutdownClipboardExecutor()
         if (handle != 0L) {
             nativeOnSurfaceDestroyed(handle)
         }
@@ -992,10 +1030,13 @@ class FrustSurfaceView(
      *
      * A paste reads the clipboard here, on the JVM side that owns it, and is
      * simply not sent when the read yields nothing ([readClipboardText]
-     * documents when that happens). The press is still reported consumed by the
-     * callers in that case: the user asked a focused field to paste, and
-     * letting the chord fall through to the platform afterwards would be a
-     * second, unrelated interpretation of the same press.
+     * documents when that happens) — including the case where the clip is
+     * URI-backed and [readClipboardText] has instead handed the item to
+     * [readClipboardTextAsync], which dispatches on its own once (and if) the
+     * text arrives. The press is still reported consumed by the callers in
+     * that case: the user asked a focused field to paste, and letting the
+     * chord fall through to the platform afterwards would be a second,
+     * unrelated interpretation of the same press.
      *
      * The synchronous [pollImeAfterDispatch] is the same two-step shape
      * [FrustInputConnection.performEditorAction] uses: the verb changed the
@@ -1215,7 +1256,7 @@ class FrustSurfaceView(
 
     /**
      * Read the system clipboard's primary clip as plain text, or null when
-     * there is nothing usable to paste.
+     * there is nothing usable to paste **this pass**.
      *
      * Three platform behaviours this deliberately lives with:
      *
@@ -1236,9 +1277,32 @@ class FrustSurfaceView(
      *   restriction) is caught rather than propagated: the paste simply does
      *   not happen, and the frame loop survives.
      *
-     * `coerceToText` rather than `text`, so a copied URI or an intent-bearing
-     * clip still pastes as its human-readable text instead of silently
-     * refusing.
+     * A URI-backed clip (a photo, file, or contact copied from another app)
+     * still pastes as its human-readable text rather than silently refusing —
+     * but resolving that text is `ClipData.Item.coerceToText`'s synchronous
+     * `ContentResolver` round-trip into the CLIP OWNER's own process, which can
+     * block for as long as that app's `ContentProvider` takes to answer, or
+     * hang outright against a frozen/ANRed source app. Every caller of this
+     * method runs on the UI thread (the hardware `Ctrl+V` chord, the IME's own
+     * paste action, and the per-frame paste-request drain), so this method
+     * itself must never be the one to make that call:
+     *
+     * * When the item already carries a `CharSequence` — `item.text`, the
+     *   overwhelmingly common case, including every clip this view itself
+     *   writes ([writeClipboardText] always uses `ClipData.newPlainText`) —
+     *   it is returned directly, synchronously, in this same pass. A paste
+     *   that can answer now has to land now: [dispatchEditCommand]'s
+     *   synchronous [pollImeAfterDispatch] afterwards is what keeps the mirror
+     *   `Editable` in step, and that only runs for a same-pass answer.
+     * * When the item has no text and no `Uri` either (HTML-only, or an
+     *   `Intent`-only clip), `coerceToText` degrades to `Html.fromHtml` or
+     *   `Intent.toUri` — no `ContentResolver` call — so it stays synchronous
+     *   here too.
+     * * Only when the item has no text and does have a `Uri` is the
+     *   potentially-blocking half reached, and it is handed off to
+     *   [readClipboardTextAsync] to run off this thread instead. This method
+     *   returns null for that pass; [readClipboardTextAsync] dispatches the
+     *   paste itself once (and if) the text arrives — see its doc.
      */
     private fun readClipboardText(): String? {
         return try {
@@ -1249,7 +1313,23 @@ class FrustSurfaceView(
             if (clip == null || clip.itemCount == 0) {
                 return null
             }
-            clip.getItemAt(0)?.coerceToText(context)?.toString()
+            val item = clip.getItemAt(0) ?: return null
+            val text = item.text
+            if (text != null) {
+                return text.toString()
+            }
+            if (item.uri == null) {
+                // No direct text and nothing to resolve through a
+                // `ContentResolver`: whatever `coerceToText` produces (HTML,
+                // an `Intent`'s URI, or `""`) is cheap and synchronous.
+                return item.coerceToText(context)?.toString()
+            }
+            // URI-backed with no direct text: `coerceToText` may block on a
+            // `ContentResolver` round-trip into another app's process — never
+            // call it here. Hand the item to the background resolver and
+            // answer nothing for this pass.
+            readClipboardTextAsync(item)
+            null
         } catch (e: SecurityException) {
             Log.w(TAG, "clipboard read refused", e)
             null
@@ -1257,6 +1337,101 @@ class FrustSurfaceView(
             Log.w(TAG, "clipboard read failed", e)
             null
         }
+    }
+
+    /**
+     * Resolve a URI-backed clip item's text off the UI thread and dispatch
+     * the paste once (and if) it arrives — the half of [readClipboardText]
+     * that can block, moved off the thread every caller of this method runs
+     * on (see that doc comment for why).
+     *
+     * Runs `item.coerceToText(context)` on [clipboardWorker]'s single
+     * background thread — never one thread per paste — then hops back to the
+     * UI thread via [mainHandler] to actually dispatch. On arrival the view is
+     * re-checked for still being somewhere a paste should land: `handle`
+     * must still be live and a field must still report [imeActive], and
+     * [clipboardResolutionEpoch] must not have moved since this resolution
+     * started (it moves exactly when [shutdownClipboardExecutor] runs, i.e.
+     * exactly when the view tore down). Any of those failing DROPS the paste
+     * silently rather than delivering it — a paste landing in a field the
+     * user has since left (or a view that no longer exists) is worse than one
+     * that never lands. When it does land, it calls the exact same
+     * `nativeEditCommand`/[pollImeAfterDispatch] pair the synchronous fast
+     * path in [dispatchEditCommand] uses.
+     */
+    private fun readClipboardTextAsync(item: ClipData.Item) {
+        val epoch = clipboardResolutionEpoch
+        try {
+            clipboardWorker().execute {
+                val text = try {
+                    item.coerceToText(context)?.toString()
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "clipboard read refused", e)
+                    null
+                } catch (e: RuntimeException) {
+                    Log.w(TAG, "clipboard read failed", e)
+                    null
+                }
+                mainHandler.post {
+                    if (epoch != clipboardResolutionEpoch ||
+                        handle == 0L ||
+                        !imeActive ||
+                        text.isNullOrEmpty()
+                    ) {
+                        return@post
+                    }
+                    nativeEditCommand(handle, EDIT_COMMAND_PASTE, text)
+                    pollImeAfterDispatch()
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            // The executor was torn down between the epoch snapshot above and
+            // this submit (the view is tearing down right now) — the
+            // resolution simply does not happen.
+            Log.w(TAG, "clipboard read dropped: view is tearing down", e)
+        }
+    }
+
+    /**
+     * Lazily create (or reuse) the single background thread [readClipboardTextAsync]
+     * runs on. Never spawned per paste: the same executor answers every
+     * URI-backed paste for as long as the view stays resumed, and
+     * [shutdownClipboardExecutor] tears it down (and this getter re-creates
+     * it on the next ask) at every point a live handle stops being
+     * trustworthy.
+     */
+    private fun clipboardWorker(): ExecutorService {
+        var executor = clipboardExecutor
+        if (executor == null || executor.isShutdown) {
+            executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "frust-clipboard").apply { isDaemon = true }
+            }
+            clipboardExecutor = executor
+        }
+        return executor
+    }
+
+    /**
+     * Stop the background clipboard-coercion thread (if one was ever created)
+     * and bump [clipboardResolutionEpoch] so a resolution that finished on
+     * that thread just as the view tore down is dropped on arrival instead of
+     * dispatching into a view nobody should still be pasting into. Idempotent
+     * — safe to call from every teardown path ([surfaceDestroyed], [onPause],
+     * [onDestroy]) whether or not a resolution was ever started.
+     *
+     * `shutdownNow()` rather than `shutdown()`: the one task this executor can
+     * be running is blocked inside another app's `ContentProvider` query
+     * ([readClipboardTextAsync]), which a graceful `shutdown()` would wait
+     * out — exactly the UI-thread stall this whole split exists to avoid,
+     * only now on a thread nothing is joining. `shutdownNow()` interrupts it
+     * and returns immediately; the epoch bump is what actually stops a late
+     * answer from being delivered even on a provider call that does not
+     * honour the interrupt.
+     */
+    private fun shutdownClipboardExecutor() {
+        clipboardResolutionEpoch++
+        clipboardExecutor?.shutdownNow()
+        clipboardExecutor = null
     }
 
     /**
@@ -1435,6 +1610,10 @@ class FrustSurfaceView(
         // Hold no resolver registration while backgrounded; [onResume] re-arms
         // it and re-reads the value that may have changed in between.
         unregisterReduceMotionObserver()
+        // Same reasoning: hold no clipboard-coercion thread while backgrounded.
+        // A fresh one is created lazily ([clipboardWorker]) the next time a
+        // URI-backed paste is actually asked for after [onResume].
+        shutdownClipboardExecutor()
         if (handle != 0L) {
             nativeOnPause(handle)
         }
@@ -1446,6 +1625,9 @@ class FrustSurfaceView(
         // ContentObserver outliving its view would keep calling into a dead
         // handle.
         unregisterReduceMotionObserver()
+        // Same belt-and-suspenders reasoning: no clipboard-coercion thread may
+        // outlive this view.
+        shutdownClipboardExecutor()
         if (handle != 0L) {
             nativeOnDestroy(handle)
             handle = 0
