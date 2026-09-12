@@ -76,10 +76,10 @@ brightness hook) and their own native bindings — never on each other, never on
 `frust-shell-common`, and nothing in the shared core depends on them. The core is compiled for
 every desktop host; the native half is chosen above it.
 
-**`frust-shell-web` depends only on `frust-shell-common`**, never on `frust-shell-desktop`, for
-exactly the entangled-dependency reasons in the Overview above. Its `winit` edge rides the
-identical workspace pin the desktop tier uses — a second `winit` identity between the two shell
-tiers would be a resolution hazard, not a convenience.
+**`frust-shell-web` depends only on `frust-shell-common`**, never on `frust-shell-desktop`, for the
+Overview's reasons. Its `winit` edge rides the identical workspace pin the desktop tier uses — a
+second `winit` identity between the two shell tiers would be a resolution hazard, not a
+convenience.
 
 ### Target gating
 
@@ -97,7 +97,7 @@ only its own host's native bindings: `crates/frust/Cargo.toml`'s `[target.'cfg(n
 | other desktop hosts (BSDs) | shared desktop core + the whole-set no-op extensions — window, input, theme and accessibility all work; only native identity/menu integration is absent |
 | Android | `frust-shell-android` only; the desktop core is excluded (winit's `android-activity` edge does not build there and the app is JNI-driven) |
 | iOS | `frust-shell-ios` only; the desktop core is excluded, keeping winit and `accesskit_winit` out of an iOS build entirely. The `app!` macro still emits a `__frust_main` **stub** on iOS, because the generated `main.rs` binary target Xcode builds calls it — it logs and exits non-zero rather than looking like an app that started and vanished |
-| Web (`wasm32-unknown-unknown`) | `frust-shell-web` only; the desktop core is excluded (its `accesskit_winit` adapter, `pollster::block_on` bring-up, render thread and `frust-paths` cache I/O do not build for this target — see `crates/frust-shell-web/Cargo.toml`'s own header). `frust::web_app!` mirrors `android_app!`/`ios_app!`: an unconditional, self-gating invocation whose generated `#[wasm_bindgen(start)]` shim expands to nothing off `wasm32`, and `app!` emits it under the identical gate |
+| Web (`wasm32-unknown-unknown`) | `frust-shell-web` only; the desktop core is excluded (see the Overview, and `crates/frust-shell-web/Cargo.toml`'s own header). `frust::web_app!` mirrors `android_app!`/`ios_app!`: an unconditional, self-gating invocation whose generated `#[wasm_bindgen(start)]` shim expands to nothing off `wasm32`, and `app!` emits it under the identical gate |
 
 ### Sanctioned-unsafe zones
 
@@ -228,11 +228,11 @@ The desktop shell persists a pipeline cache through `frust-paths`, so second-and
 skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 that is any
 Vulkan adapter (Linux, and Windows when the selected backend is Vulkan; verified in wgpu-hal
 30.0.1's unconditional Vulkan feature set), never Metal or DX12 — so macOS never writes a cache.
-Loading is unconditional file I/O at startup on every desktop OS, and reads through to a legacy
-macOS cache base when the current-location file is absent, migrating nothing — that read-through is inert by construction (the legacy base is `Some`
-only on macOS, where a save never fires, so no legacy blob can exist); it survives purely as
-compatibility for the `frust-paths` macOS-arm change. The whole path is best-effort — startup never
-fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
+Loading is unconditional file I/O at startup on every desktop OS and reads through to a legacy
+macOS cache base when the current-location file is absent, migrating nothing — inert by
+construction, since the legacy base is `Some` only on macOS, where a save never fires. The whole
+path is best-effort: startup never fails on cache I/O. See
+[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
 
 ### Mobile frame path
 
@@ -270,12 +270,11 @@ GPU work and the font wait, the two longest serial stretches of iOS cold start, 
 instead of back to back. The two threads share one startup-span recorder (`SharedStartupSpans`)
 behind a `StartupRecorder` that is `Owned` for the inline (`FRUST_NO_RENDER_THREAD`) executor and
 `Shared` for the split one; every `Shared` method locks only for the body of its own record/take
-call, never across `render_scene`'s blocking GPU tail (drawable acquire plus submit) — a `render_loop`
-that once held the lock across that whole call was a latent UIKit-watchdog hazard. Once the startup
-line is taken and emitted on the first present, the render thread drops to a lock-free `Owned`
-handle for every later frame. Because the two threads race to record onto the same shared line, the
-spans they contribute do not print in a fixed left-to-right causal order — a reader determines actual
-ordering from each span's own recorded delta, not from its position in the line.
+call, never across the blocking GPU tail (drawable acquire plus submit), which would be a UIKit
+watchdog hazard. Once the startup line is taken and emitted on the first present, the render thread
+drops to a lock-free `Owned` handle for every later frame. Because the two threads race to record
+onto one shared line, the spans do not print in causal order — read each span's own delta, not its
+position.
 
 Frame pacing itself is unchanged: the surface's desired maximum frame latency stays at its constant
 (two frames in flight, `crates/frust-gpu/src/surface.rs`), and pre-acquiring a drawable ahead of the
@@ -285,10 +284,9 @@ dial: `ios-pace`, one `frust-perf ios-pace` line per rendered frame decomposing 
 submit/loop time plus `p2p_us` — submit-to-submit cadence between frames whose GPU work was actually
 submitted for presentation. A frame that presented nothing reports `p2p_us=NA` and leaves the
 cadence base untouched; under armed present-sync the UI thread commits the drawable later than the
-render thread's own submit, so the render thread never observes that later commit. This diagnostic
-is also what showed an earlier "frames over 20 ms are missing a vsync" reading to be a measurement
-artefact: `FramePasses::total` sums the UI thread's and the render thread's concurrently-running
-spans, so it is a cost, not an interval, and present-to-present on the iPhone SE is a locked 60 Hz.
+render thread's own submit, so the render thread never observes that later commit. `FramePasses::total`
+is not an interval to read a dropped vsync out of: it sums the UI and render threads'
+concurrently-running spans, so it is a cost.
 
 ### Web frame path
 
@@ -366,6 +364,53 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its
   semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
   and Cursor section for the request/resolve contract.
+- **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
+  `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
+  `InputEvent::EditCommand`, dispatched back (see
+  [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Each tier answers them with its own host clipboard.
+  **Desktop** drains both beside `sync_ime`/`sync_cursor`, because either slot can fill as a side
+  effect of any event, and hands each to a lazily spawned worker thread owning the process's single
+  `arboard::Clipboard` for the run's lifetime: on X11 and Wayland a copy is served *live* by the
+  process that claimed the selection, so an instance created per call takes the copy with it when it
+  drops, and a read blocks for as long as that owner takes to answer (24 s, measured, against a
+  stopped one) — which is why the read may not run on the event loop, and why both operations
+  serialise on one thread rather than sharing an instance behind a lock. A finished read comes back
+  as a user event and becomes exactly one top-level paste dispatch; shutdown waits, briefly, for the
+  worker to drop the instance so a clipboard manager can adopt the copy.
+  **Web** cannot go through winit here either, because a browser hands clipboard access to the
+  focused editable and nobody else: the hidden IME overlay below carries the `copy`/`cut`/`paste`
+  listeners (plus `beforecopy`/`beforecut`, which claim the verbs for a collapsed selection), a
+  `paste` reading `clipboardData` directly and a `copy`/`cut` writing with `setData` inside the
+  callback, where neither a secure context nor a permission is needed. A paste keystroke is withheld
+  from the canvas re-dispatch, since the DOM event carries text no key event could; a copy or cut
+  keeps the key path — an engine may raise no event at all for this overlay, and a bridge waiting for
+  one would drop the gesture — and marks a handoff, so the widget's own answer is what the callback
+  writes and one gesture stays one write. A write no callback is coming for (an app- or
+  toolbar-driven copy) and a toolbar paste take `navigator.clipboard`, which is undefined outside a
+  secure context: an `http://` page loses those outright, warning once, while the keyboard's paste
+  is unaffected.
+  **Android** owns the clipboard on the JVM side (`ClipboardManager` has no Rust-reachable binding),
+  so the channel is a JNI trio: the Kotlin view drains `nativeTakeClipboardWrite` and
+  `nativeTakePasteRequest` once per frame, from the same tick as its other per-frame polls, and
+  pushes verbs back in through `nativeEditCommand` from two host routes — the IME's own affordances
+  through
+  `FrustInputConnection.performContextMenuAction` (a soft keyboard never sends chords) and hardware
+  `Ctrl+C`/`X`/`V`/`A` decoded in `onKeyDown`. Both are gated on a focused editable, since an edit
+  command is focus-routed and consuming the press for nobody would take it from the host activity
+  for nothing. Two system behaviours are lived with rather than engineered around: `getPrimaryClip`
+  yields nothing unless the app holds input focus (Android 10+), indistinguishable here from an
+  empty clipboard on purpose; and reading another app's clip raises the system "pasted from" toast
+  (Android 12+), which is why the cheap `hasPrimaryClip` gate runs first and only a real,
+  user-initiated paste ever crosses that line.
+  **iOS** takes the `Native` toolbar policy at start-up, so a field floats no pod and UIKit's own
+  edit menu is the only menu on screen — presented at the published anchor through
+  `UIEditMenuInteraction` (iOS 16+, `UIMenuController` on 15) and answered from the published verb
+  set, with the framework's view as the app's single responder for both the menu and a hardware
+  `Cmd+C`/`X`/`V`/`A` arriving over `UIResponderStandardEditActions`. Native is the platform's
+  requirement rather than a preference: `UIPasteboard.general.string` is exempt from iOS's paste
+  notice and per-app permission alert only when the read is system-initiated, which `paste(_:)` is
+  and a framework-drawn Paste button — answerable only by reading the pasteboard off a display-link
+  tick — is not. Both mobile tiers' clipboard paths are device-unverified.
 - **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (its `web_sys` backend
   implements none of the IME setters — upstream issue 4424 is open with no timeline), so
   `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under
@@ -375,26 +420,25 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   `autocomplete="new-password"`, a suggestion-refusing field adds `inputmode="text"`, and a hint
   that moves tears the element down and rebuilds it rather than mutating it, since a browser only
   reads `type` when it classifies an element it has not seen before — checked from a dispatched
-  event and from the frame loop alike, so a focus move a signal drove (no input event behind it)
-  is answered on the next frame: the replacement inherits the DOM focus the old element held, and
-  an element that had lost focus is closed instead, a frame never taking focus for the user; the
-  frame loop's reposition pass clears the element's value on every pass no composition owns. Composition tracking is an
-  explicit `ComposeSession` (Idle/Open/PendingEmptyEnd): in `Open`, a `compositionend` carrying data
-  commits directly, but an *empty* one does not retract the preedit on the spot — several browsers
-  end a composition that way and deliver its text on the `input` immediately behind it — so it moves
-  to `PendingEmptyEnd`, which holds the preedit for the rest of that one signal-drain pass and lets
-  the next `insert*` `input` resolve it as the commit, while anything else resolves it as one clear.
-  winit's own `keydown`/`keyup` listeners stay attached to the canvas element rather than
-  `document`, so the overlay re-dispatches each plain keystroke it receives onto the canvas as a
-  copy — except a `keydown` the browser reports as `Unidentified` (what a mobile soft keyboard sends
-  for most of its keys), which is never re-dispatched; its edit is instead taken from the `input`
-  signal behind it (an `insert*` carrying data becomes its characters) and delivered once as a key
-  event, by a mark that lives no longer than the signal drain that queued it and is ended by any
-  keystroke the key path does deliver. A soft keyboard's Backspace is the known gap: the element is
-  emptied every frame, so the deletion has nothing to consume and raises no `input`. Removing the element mid-composition ends the
-  latch's session and retracts the preedit, the same as a blur. Not yet wired: the mobile
-  visual-viewport jump when a soft keyboard opens, and multiple simultaneous editables. The bridge
-  is compile- and unit-tested but device-unverified — this build host has no browser rig — see
+  event and from the frame loop alike, so a focus move a signal drove (no input event behind it) is
+  answered on the next frame: the replacement inherits the DOM focus the old element held, an
+  element that had lost focus is closed instead (a frame never takes focus for the user), and the
+  element's value is cleared on every pass no composition owns. Composition tracking is an explicit
+  three-state session, because an *empty* `compositionend` is not reliably a cancel: several
+  browsers end a composition that way and deliver its text on the `input` behind it, so the preedit
+  is held one signal longer and resolved as that commit when one arrives, as a clear otherwise.
+  winit's own `keydown`/`keyup` listeners stay on the canvas rather than `document`, so the overlay
+  re-dispatches each plain keystroke onto the canvas as a copy — except a `keydown` the browser
+  reports as `Unidentified` (what a mobile soft keyboard sends for most of its keys), whose edit is
+  taken from the `input` signal behind it and delivered once as a key event instead. A soft
+  keyboard's Backspace is the known gap: the element is emptied every frame, so the deletion has
+  nothing to consume and raises no `input`. Removing the element mid-composition ends the session
+  and retracts the preedit, the same as a blur. The same element is the page's
+  clipboard surface, since a browser hands clipboard access to the focused editable alone: its
+  `copy`/`cut`/`paste` listeners and the verb-shaped exclusion that keeps a clipboard keystroke from
+  reaching a widget twice are the Clipboard bullet above. Not yet wired: the mobile visual-viewport
+  jump when a soft keyboard opens, and multiple simultaneous editables. The bridge is compile- and
+  unit-tested but device-unverified — this build host has no browser rig — see
   [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
 - **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
   adapter — a canvas app needs its semantics mirrored into real DOM/ARIA elements) and the in-app
@@ -423,7 +467,7 @@ signal-driven repaint in the browser; see its own README for the milestone evide
 
 | Type | Purpose |
 |------|---------|
-| `AppTree` / `new_boxed_app` / `new_boxed_app_with` | Type-erased app driver each shell's FFI/event-loop layer owns and calls into for every lifecycle callback |
+| `AppTree` / `new_boxed_app` / `new_boxed_app_with` | Type-erased app driver each shell's FFI/event-loop layer owns and calls into for every lifecycle callback. Beside the lifecycle passes it carries the host-signal drains a shell polls: `take_clipboard_write()`/`take_paste_request()` (destructive, one-shot) and `selection_toolbar()`/`selection_toolbar_generation()` (a level plus a counter to diff), each delegating to the matching `RenderRoot` accessor |
 | `FrameGate` / `FrameInputs` / `FrameDecision` | Shared run/skip decision the continuous-loop mobile shells consult every tick |
 | `RenderCommand` / `Ack` / `AckWaiter` / `SceneFrame` | UI-thread↔render-thread lifecycle and scene-handoff vocabulary underlying each shell's default split frame path |
 | `PlatformViewState` / `ViewCommand` | Generation-stamped native-sibling create/update/dispose backlog each mobile shell exposes to its embedding module |
@@ -440,12 +484,11 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 
 - **macOS** — runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu
   and accelerator, Hide/Show All, and close-then-Dock-click reopen.
-- **Windows** — runtime-verified on hardware (2026-08-19, Windows 11): titlebar/taskbar icon,
-  AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and
-  quit. The pass caught two real defects, both fixed: muda's predefined quit dead-ends under
-  winit's pump (the quit role is now an owned item the handler maps to `WM_CLOSE`), and an
-  accelerator only enters the `HACCEL` if its submenu is attached before the item is appended
-  (build order is load-bearing) — both documented at their `menu.rs` sites.
+- **Windows** — runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity,
+  titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules the
+  pass established are load-bearing and documented at their `menu.rs` sites: muda's predefined quit
+  dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is
+  attached before the item is appended.
 - **Linux** — proven by cross-target compilation only, plus every native call site read against
   its vendored source. Owed: a non-headless `app_id`/icon pass. See
   [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and
