@@ -35,6 +35,32 @@
 //! and a second [`RenderSpec::scale`](crate::render::RenderSpec::scale) would
 //! apply it twice ([`physical_case`] is the one place that mapping is made).
 //!
+//! # Warm frames, and why one paint is not always enough
+//!
+//! A single paint cannot show a *staged* animation at anything but its start.
+//! `AnimationController::advance` (`crates/frust-core/src/anim.rs`) derives its
+//! delta from the previous `advance`, so the first call after a motion starts
+//! only seeds the clock and contributes a zero delta no matter what
+//! [`FrameSpec::time`] says; a presence driver latching its `started` instant
+//! on its first paint (`plugins/beui/src/motion/presence.rs`) behaves the same
+//! way. A one-paint recorder therefore records every staged ramp at progress
+//! 0 — the widget is invisible, or unsettled, in a frame that was supposed to
+//! show it had arrived.
+//!
+//! [`FrameSpec::warm_frames`] is the answer: `n` extra rebuild/layout/paint
+//! passes that run BEFORE the captured one and are thrown away, so the
+//! captured paint is the second-or-later `advance` and sees a real delta. The
+//! warm passes paint into [`frust_core::DiscardScene`], which drops every
+//! command, so nothing they draw can reach the captured [`Scene`]. They must
+//! also run at a DIFFERENT timestamp than the capture, or the delta is zero
+//! again and the warm pass achieves exactly nothing — see
+//! [`FrameSpec::warm_time`] for the schedule that guarantees it, and its
+//! corollary: warming a frame whose [`FrameSpec::time`] is
+//! [`FrameTime::ZERO`] is a no-op, because there is no interval to spend.
+//!
+//! The default is zero warm frames, i.e. the single paint this module has
+//! always done, so no existing caller moves a pixel by adopting the field.
+//!
 //! # Determinism
 //!
 //! `docs/TESTING.md`'s Deterministic Inputs binds every input that can move a
@@ -43,6 +69,12 @@
 //! - **Time.** [`FrameSpec::time`] is an explicit [`FrameTime`], never a
 //!   clock. Animating widgets difference it against their own stored time, so
 //!   a fixed timestamp is a fixed frame.
+//! - **Warm frames.** [`FrameSpec::warm_frames`] does not weaken that: the
+//!   warm schedule is integer nanosecond arithmetic over `time`/`warm_frames`
+//!   ([`FrameSpec::warm_time`]) and the passes are driven by a counted loop,
+//!   never by a wall clock or a "keep going until settled" predicate. A fixed
+//!   count at fixed timestamps is still a pure function of the spec, so two
+//!   runs of the same case paint the identical sequence.
 //! - **Fonts.** [`test_text_context`] registers ONLY the bundled
 //!   [`crate::fonts`] faces, and [`pin_type_scale`] rewrites every slot of a
 //!   theme's type scale onto the bundled family so a design-system widget
@@ -62,7 +94,8 @@
 use std::any::Any;
 
 use frust_core::{
-    FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot, View,
+    DiscardScene, FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase,
+    RenderRoot, View,
 };
 use frust_scene::{Command, Scene, SceneBuilder};
 use frust_text::{FontFamily, TextContext, TextStyle};
@@ -106,17 +139,34 @@ pub struct FrameSpec {
     /// The frame's timestamp. Explicit, never a clock: an animating widget
     /// differences it against its own stored time.
     pub time: FrameTime,
+    /// How many DISCARDED paint passes precede the captured one, so a widget
+    /// that stages an animation records past progress 0 (see the module
+    /// docs' Warm frames section).
+    ///
+    /// `0` — the default everywhere — is the single paint this module has
+    /// always done, so a spec that ignores this field records exactly the
+    /// frame it always did. `1` is the count a staged ramp needs: one pass at
+    /// [`FrameTime::ZERO`] to seed the animation's clock, then the captured
+    /// pass at [`FrameSpec::time`], which is the first `advance` to see a
+    /// non-zero delta.
+    ///
+    /// Counts above 1 exist for a motion that *integrates* per frame (a
+    /// spring) rather than sampling a curve, where one big delta and several
+    /// small ones are not the same answer; [`FrameSpec::warm_time`] spaces
+    /// them evenly.
+    pub warm_frames: u8,
 }
 
 impl FrameSpec {
     /// The phone frame every corpus case uses: [`PHONE_LOGICAL`] at
-    /// [`PHONE_SCALE`], at [`FrameTime::ZERO`].
+    /// [`PHONE_SCALE`], at [`FrameTime::ZERO`], with no warm frames.
     #[must_use]
     pub const fn phone() -> Self {
         Self {
             size: PHONE_LOGICAL,
             scale: PHONE_SCALE,
             time: FrameTime::ZERO,
+            warm_frames: 0,
         }
     }
 
@@ -126,6 +176,44 @@ impl FrameSpec {
     pub const fn at(mut self, time: FrameTime) -> Self {
         self.time = time;
         self
+    }
+
+    /// The same frame preceded by `frames` discarded warm paints — how a case
+    /// whose widget stages an animation records past progress 0.
+    ///
+    /// Pair it with [`FrameSpec::at`]: warming toward [`FrameTime::ZERO`]
+    /// spends no interval and changes nothing.
+    #[must_use]
+    pub const fn warmed(mut self, frames: u8) -> Self {
+        self.warm_frames = frames;
+        self
+    }
+
+    /// The timestamp warm pass `index` paints at.
+    ///
+    /// The passes step evenly from [`FrameTime::ZERO`] up to — but never
+    /// reaching — [`FrameSpec::time`], which belongs to the captured pass
+    /// alone. One warm frame is therefore a single pass at zero; two are zero
+    /// and the midpoint. That the last warm pass stops short of `time` is the
+    /// whole point: a warm pass at the capture's own timestamp would leave the
+    /// captured `advance` with a zero delta, which is exactly the bug warming
+    /// exists to fix.
+    ///
+    /// Integer nanosecond arithmetic throughout, so the schedule is a pure
+    /// function of `time` and `warm_frames` and cannot drift between runs. The
+    /// multiply saturates rather than wrapping, which only a `time` past ~834
+    /// days of nanoseconds could reach.
+    ///
+    /// An `index` at or beyond [`FrameSpec::warm_frames`] — including any
+    /// index at all when the count is `0` — answers [`FrameTime::ZERO`]
+    /// instead of reading past the schedule.
+    #[must_use]
+    pub const fn warm_time(&self, index: u8) -> FrameTime {
+        if index >= self.warm_frames {
+            return FrameTime::ZERO;
+        }
+        let count = self.warm_frames as u64;
+        FrameTime::from_nanos(self.time.as_nanos().saturating_mul(index as u64) / count)
     }
 
     /// Physical output width in pixels: logical width times scale.
@@ -241,7 +329,22 @@ pub fn pin_type_scale(mut theme: Theme, family: &FontFamily) -> Theme {
     theme
 }
 
-/// One frame of `root`, captured into `scene`.
+/// Rebuilds and lays `root` out at `size` — the two passes that precede every
+/// paint, warm or captured, in the shell's own order.
+fn build_and_layout<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    size: Size,
+) {
+    root.rebuild(logic, state);
+    let tcx_any: &mut dyn Any = tcx;
+    root.layout_with_text(size, tcx_any);
+}
+
+/// One frame of `root`, captured into `scene`, preceded by
+/// [`FrameSpec::warm_frames`] discarded ones.
 ///
 /// The port of `examples/huddle`'s `tests/support/mod.rs::frame` onto a real
 /// [`SceneBuilder`] — see the module docs for the sequence and why the scale
@@ -249,6 +352,15 @@ pub fn pin_type_scale(mut theme: Theme, family: &FontFamily) -> Theme {
 /// [`PaintOutcome`](frust_core::PaintOutcome) is deliberately dropped: a
 /// golden is one frame, and "this tree would like another frame" is a
 /// scheduling signal, not a pixel.
+///
+/// A warm pass is the SAME sequence — rebuild, layout-with-text, paint — at
+/// its own [`FrameSpec::warm_time`], differing only in where it paints: a
+/// [`DiscardScene`], which drops every command, so `scene` receives the
+/// captured frame and nothing else. Running the full sequence rather than a
+/// bare re-paint is deliberate; a shell rebuilds and re-lays-out every frame,
+/// and a widget that stages its motion during rebuild would not see it
+/// otherwise. `warm_frames == 0` skips the loop entirely, leaving the exact
+/// single-paint behaviour every existing caller records under.
 pub fn frame<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -257,9 +369,12 @@ pub fn frame<S: 'static, V: View<S>>(
     spec: &FrameSpec,
     scene: &mut Scene,
 ) {
-    root.rebuild(logic, state);
-    let tcx_any: &mut dyn Any = tcx;
-    root.layout_with_text(spec.size, tcx_any);
+    for index in 0..spec.warm_frames {
+        build_and_layout(root, logic, state, tcx, spec.size);
+        let mut discard = DiscardScene;
+        let _outcome = root.paint(&mut discard as &mut dyn PaintScene, spec.warm_time(index));
+    }
+    build_and_layout(root, logic, state, tcx, spec.size);
     let mut builder = SceneBuilder::new(scene);
     builder.push_transform(Affine::scale(spec.scale));
     let _outcome = root.paint(&mut builder as &mut dyn PaintScene, spec.time);
@@ -275,6 +390,11 @@ pub fn frame<S: 'static, V: View<S>>(
 /// the type-erased path widgets recover through `Theme::from_layout_ctx` /
 /// `Theme::from_paint_ctx` — no reactive runtime and no ambient owner are
 /// involved, so a case stays a pure function of its inputs.
+///
+/// One [`RenderRoot`] serves the whole of [`frame`], warm passes included —
+/// which is what makes warming work at all: the animation state a warm pass
+/// seeds lives on the retained widget tree, so a fresh root per pass would
+/// throw away the very thing being warmed.
 pub fn record_view<V: View<()>>(
     scene: &mut Scene,
     spec: &FrameSpec,
@@ -616,8 +736,153 @@ mod tests {
         assert_eq!(spec.size, Size::new(412.0, 892.0));
         assert_eq!(spec.scale, 2.0);
         assert_eq!(spec.time, FrameTime::ZERO);
+        assert_eq!(
+            spec.warm_frames, 0,
+            "the default must stay the single paint every existing caller records under"
+        );
         assert_eq!(spec.physical_width(), 824);
         assert_eq!(spec.physical_height(), 1784);
+    }
+
+    /// 400ms in nanoseconds — the capture timestamp the warm-schedule tests
+    /// step toward.
+    const T400: FrameTime = FrameTime::from_nanos(400_000_000);
+
+    #[test]
+    fn a_spec_with_no_warm_frames_schedules_no_warm_pass() {
+        let spec = FrameSpec::phone().at(T400);
+        assert_eq!(spec.warm_frames, 0);
+        // Nothing iterates, so nothing can read the schedule; asking anyway
+        // must answer ZERO rather than divide by the zero count.
+        assert_eq!(spec.warm_time(0), FrameTime::ZERO);
+        assert_eq!(spec.warm_time(7), FrameTime::ZERO);
+    }
+
+    #[test]
+    fn one_warm_frame_paints_at_zero_and_leaves_the_capture_its_own_timestamp() {
+        let spec = FrameSpec::phone().at(T400).warmed(1);
+        assert_eq!(spec.warm_time(0), FrameTime::ZERO);
+        assert_ne!(
+            spec.warm_time(0),
+            spec.time,
+            "a warm pass sharing the capture's timestamp would leave the \
+             captured advance with a zero delta — the exact bug warming fixes"
+        );
+    }
+
+    #[test]
+    fn warm_times_step_evenly_up_to_but_never_reaching_the_capture() {
+        let spec = FrameSpec::phone().at(T400).warmed(4);
+        let times: Vec<u64> = (0..spec.warm_frames)
+            .map(|i| spec.warm_time(i).as_nanos())
+            .collect();
+        assert_eq!(times, vec![0, 100_000_000, 200_000_000, 300_000_000]);
+        assert!(
+            times.iter().all(|&t| t < spec.time.as_nanos()),
+            "every warm pass stays strictly before the captured one: {times:?}"
+        );
+        // Past the end of the schedule, not a wrapped or extrapolated time.
+        assert_eq!(spec.warm_time(4), FrameTime::ZERO);
+    }
+
+    #[test]
+    fn a_warm_schedule_over_a_zero_time_frame_is_a_documented_no_op() {
+        let spec = FrameSpec::phone().warmed(3);
+        for index in 0..spec.warm_frames {
+            assert_eq!(
+                spec.warm_time(index),
+                spec.time,
+                "there is no interval to spend before ZERO, so every pass \
+                 lands on the capture's own timestamp and advances nothing"
+            );
+        }
+    }
+
+    /// A button in its `loading` state carries a repeating 900ms linear
+    /// spinner (`frust_widgets`' `SPINNER_PERIOD_MS`) whose arc angle is the
+    /// controller's value — a genuinely STAGED animation, unlike the implicit
+    /// wrappers that seed themselves already settled. It is therefore the
+    /// honest subject for the claim this module makes: without a warm pass the
+    /// capture is the animation's first `advance`, which contributes a zero
+    /// delta no matter how late the timestamp.
+    fn a_staged_animation_frame(spec: &FrameSpec) -> String {
+        let (mut tcx, family) = test_text_context();
+        let theme = pin_type_scale(Theme::neutral(), &family);
+        let mut scene = Scene::new();
+        record_view(&mut scene, spec, theme, &mut tcx, || {
+            frust_widgets::button(SAMPLE_TEXT, |_: &mut ()| {}).loading(true)
+        });
+        scene_fingerprint(&scene)
+    }
+
+    #[test]
+    fn without_a_warm_frame_a_staged_animation_records_at_progress_zero() {
+        // A quarter of the spinner's period: far enough in that a running
+        // animation is unmistakably elsewhere.
+        let quarter_turn = FrameTime::from_nanos(225_000_000);
+        assert_eq!(
+            a_staged_animation_frame(&FrameSpec::phone().at(quarter_turn)),
+            a_staged_animation_frame(&FrameSpec::phone()),
+            "this is the bug, pinned: with one paint, a late timestamp records \
+             the identical frame as t=0, because the first advance only seeds \
+             the clock"
+        );
+    }
+
+    #[test]
+    fn a_warm_frame_lets_a_staged_animation_record_past_progress_zero() {
+        let quarter_turn = FrameTime::from_nanos(225_000_000);
+        let cold = a_staged_animation_frame(&FrameSpec::phone().at(quarter_turn));
+        let warmed = a_staged_animation_frame(&FrameSpec::phone().at(quarter_turn).warmed(1));
+        assert_ne!(
+            cold, warmed,
+            "one discarded warm paint at ZERO must leave the captured paint a \
+             real delta to advance through"
+        );
+    }
+
+    #[test]
+    fn the_warm_passes_paint_into_the_discard_scene_and_not_the_capture() {
+        // Same case, same capture timestamp, one warm pass versus four. The
+        // captured scene must carry ONE frame's worth of commands either way:
+        // if a warm pass leaked into the builder, the command count would
+        // grow with the warm count.
+        let (mut tcx, family) = test_text_context();
+        let theme = pin_type_scale(Theme::neutral(), &family);
+        let build = || frust_widgets::test_support::leaf(100.0, 50.0);
+
+        let mut one = Scene::new();
+        record_view(
+            &mut one,
+            &FrameSpec::phone().at(T400).warmed(1),
+            theme.clone(),
+            &mut tcx,
+            build,
+        );
+        let mut four = Scene::new();
+        record_view(
+            &mut four,
+            &FrameSpec::phone().at(T400).warmed(4),
+            theme,
+            &mut tcx,
+            build,
+        );
+        assert_eq!(one.commands().len(), four.commands().len());
+        assert_eq!(scene_fingerprint(&one), scene_fingerprint(&four));
+    }
+
+    #[test]
+    fn a_warmed_capture_is_reproducible() {
+        // The determinism claim the snapshot tree's `--check` rests on, at the
+        // scale of one case: a fixed warm count at fixed timestamps is a pure
+        // function of the spec.
+        let spec = FrameSpec::phone()
+            .at(FrameTime::from_nanos(225_000_000))
+            .warmed(3);
+        assert_eq!(
+            a_staged_animation_frame(&spec),
+            a_staged_animation_frame(&spec)
+        );
     }
 
     #[test]
@@ -755,6 +1020,7 @@ mod tests {
             size: PHONE_LOGICAL,
             scale: 1.0,
             time: FrameTime::ZERO,
+            warm_frames: 0,
         };
         record_view(&mut unscaled, &spec1, theme.clone(), &mut tcx, build);
 

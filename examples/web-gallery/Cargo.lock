@@ -4180,7 +4180,10 @@ name = "web-gallery"
 version = "0.1.0"
 dependencies = [
  "frust",
+ "frust-beui",
  "frust-gallery",
+ "frust-glyph",
+ "frust-shadcn",
  "frust-shell-web",
  "js-sys",
  "wasm-bindgen",

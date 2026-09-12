@@ -22,12 +22,30 @@
 //!   previous pass's — so a single build always paints the plain steady-state
 //!   child, with no crossfade/slide bracket at all.
 //!
-//! Capturing an actual mid-transition frame needs **two** builds (an initial
-//! one, then a rebuild with a different target/key, advanced to a chosen
-//! `time_ms`) — outside what today's `Case`/recorder contract can express.
-//! That would need a `warm_frames: u8`-shaped field on [`Case`] the recorder
-//! rebuilds through before capturing the final frame; this module does not add
-//! one, since `case.rs` is outside this module's remit.
+//! Capturing an actual mid-transition frame needs **two builds with different
+//! inputs** (an initial one, then a rebuild whose target/key has changed,
+//! advanced to a chosen `time_ms`) — and that is still outside what the
+//! `Case`/recorder contract can express, for a reason the recorder cannot
+//! reach.
+//!
+//! The recorder *does* now paint warm passes before the captured one
+//! ([`Case::warm_frames`], derived from a non-zero [`Case::time_ms`] rather
+//! than declared as a field — no `warm_frames` field exists on [`Case`], and
+//! one was deliberately not added; `crates/frust-testing/src/frame.rs`'s
+//! `FrameSpec::warm_frames` is the recorder-side half). A warm pass is a full
+//! rebuild -> layout -> paint, so it is a second *build* as well as a second
+//! *advance*. What it is not is a build with different inputs: [`Case::build`]
+//! is a pure `fn() -> `[`frust_core::AnyView`]`<()>`, so every pass returns the
+//! same target and the same key, and the retarget/key-change these three
+//! wrappers stage on is never staged. Warming therefore buys them exactly
+//! nothing, and all three keep [`Case::DEFAULT_TIME_MS`] — measured, not
+//! assumed: each was recorded at `time_ms: 400` with the warm pass active and
+//! produced a **byte-identical** PNG in both variants.
+//!
+//! (The two cases the warm pass does move both live in
+//! [`crate::beui`] — a modal whose lanes are `Presence`-staged, and a balance
+//! on a per-grapheme cascade. Both are staged by *elapsed time* on a single
+//! build, which is the shape warming addresses.)
 //!
 //! `physics` is its own case: `apps/website/widgets/base/animation/physics.mdx`
 //! documents `ScrollPhysics` — explicitly "Nothing on this page is a widget"

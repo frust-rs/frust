@@ -10,10 +10,10 @@
 //! (`material/button`, `material/text-field`, ...), per the crate docs' slug
 //! rule.
 //!
-//! # Pure `View`, one frame — what that excludes
+//! # Pure `View`, one captured frame — what that excludes
 //!
-//! [`Case::build`] is a plain `fn() -> `[`AnyView`]`<()>` recorded through a
-//! single build/layout/paint pass (`crates/frust-testing/src/frame.rs`'s
+//! [`Case::build`] is a plain `fn() -> `[`AnyView`]`<()>` recorded through one
+//! captured build/layout/paint pass (`crates/frust-testing/src/frame.rs`'s
 //! `frame`), so every callback here is an empty closure over `()` and every
 //! knob is a literal. Two consequences shape this module:
 //!
@@ -23,14 +23,19 @@
 //!   [`frust_widgets::nav::navigator`] host. A case therefore builds the
 //!   pushed view itself — `calendar_date_picker(..)`, `time_dial(..)`,
 //!   `navigation_drawer_content(..)` — never the pushing helper.
-//! - **No entrance ramp.** A widget that ramps in from `progress == 0` on its
-//!   first paint is captured before its ramp moves, i.e. invisible, for
-//!   **any** [`Case::time_ms`]. See the module docs' "entrance-ramp limit"
-//!   section below for the three cases this reaches and how each answers it.
+//! - **An entrance ramp needs a warm pass.** A widget that ramps in from
+//!   `progress == 0` on its first paint is captured before its ramp moves —
+//!   invisible, not merely early — unless the case pins a non-zero
+//!   [`Case::time_ms`], which is also how it asks the recorder for the
+//!   discarded warm paint that lets that timestamp mean anything
+//!   ([`Case::warm_frames`]). That reaches a ramp composited in paint; it does
+//!   not reach one driven in *layout*. See the "entrance-ramp limit" section
+//!   below for the three cases this module has to answer and which answer each
+//!   one takes.
 //!
-//! Two pages therefore name a component whose *dialog* form is a modal this
-//! recorder cannot show, and take that component's own non-modal surface
-//! instead: `material/time-picker` records `time_dial` (what
+//! Two pages therefore record a component's own non-modal surface rather than
+//! the dialog form its page's `show_*` helper pushes onto a navigator:
+//! `material/time-picker` records `time_dial` (what
 //! `time_picker`/`show_time_picker` put inside the dialog) and
 //! `material/date-picker` records `calendar_date_picker` (likewise, versus
 //! `date_picker_dialog`).
@@ -71,49 +76,81 @@ use kurbo::Size;
 use crate::base::{framed, framed_in};
 use crate::case::{Case, Design};
 
-// # The entrance-ramp limit, and how cases work around it
+// # The entrance-ramp limit, and how cases answer it
 //
 // `frust_material`'s modal host (`OverlayModalWidget`), its bottom sheet
 // (`BottomSheetWidget`) and its snackbar host (`SnackbarHostWidget`) all seed
-// `progress = 0.0` at build and only leave zero once a *second* paint carries
-// a non-zero frame delta: `frust_core`'s `AnimationController` holds
-// `last_time: None` until its first `advance`, so that first call contributes
-// a zero delta whatever [`Case::time_ms`] says. The recorder paints exactly
-// one frame, so anything ramping in is captured *before* its ramp moves —
-// invisible, not merely early. Three cases reach this limit, each answered per
-// what the public API allows:
+// `progress = 0.0` at build and only leave zero once a *later* paint carries a
+// non-zero frame delta: `frust_core`'s `AnimationController` holds
+// `last_time: None` until its first `advance`, so that first call only seeds
+// the clock, whatever [`Case::time_ms`] says. A case that pins a non-zero
+// `time_ms` therefore also buys the discarded warm paint that supplies that
+// first `advance` ([`Case::warm_frames`]), leaving the captured pass to see the
+// whole of `time_ms` as one delta — and a `Duration` ramp handed a delta at or
+// past its own duration lands on exactly `1.0`, not a hair short. A case that
+// pins nothing still records its ramp at zero. Three cases here reach this, and
+// the single warm pass the registry derives answers only one:
 //
 // - **[`dialog_case`]** mounts the genuine `overlay_modal` host with the exact
 //   chrome config `frust_material::dialog` composes
-//   (`OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH)`), with the one
-//   field the one-frame recording needs changed — [`OverlayEntrance::None`],
-//   "the panel is at rest on its first frame". `dialog()` itself takes no
-//   entrance argument, so its panel body (a private view type) is laid out here
-//   from the same Material primitives its page documents.
-// - **[`sheet_case`]** mounts the genuine `overlay_modal` host with the M3
-//   sheet chrome preset (`OverlayModalConfig::edge(OverlaySide::Bottom).handle(true)`)
-//   because `BottomSheetView` **exposes no settled-entrance seam** — its own
+//   (`OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH)`) — entrance
+//   included, since [`OverlayEntrance::FadeScale`] is composited in *paint*,
+//   which one warm pass is enough for. The case pins `time_ms: 400` instead of
+//   pinning the entrance off, so the live catalog page animates and the poster
+//   still records settled (verified byte-identical to the pinned one). This
+//   module registers no [`crate::interactive`] twin for `material/dialog`, so
+//   `Case::build` IS what a live host renders
+//   (`find_interactive(slug).unwrap_or(case.build)`) — measured in headless
+//   Chrome, the panel fades and scales across ~13 frames of the page load.
+// - **[`sheet_case`]** keeps [`OverlayEntrance::None`], because the warm pass
+//   cannot stand in for the pin here. [`OverlayEntrance::Slide`] — what
+//   `OverlayModalConfig::edge` defaults to — moves the panel in *layout*, and
+//   `OverlayModalWidget::layout` reads the `progress` the *previous* paint left
+//   behind. With one warm pass the captured pass therefore lays the panel out
+//   at progress 0, off its own edge, and then paints it there at the full
+//   opacity its now-settled ramp asks for: a poster that is scrim and nothing
+//   else (measured, both variants). Two warm passes fix it exactly — but the
+//   count alone is not the condition, and a follow-up scoped off the count
+//   alone would fail. `FrameSpec::warm_time` spaces the warm schedule across
+//   `time_ms` rather than stepping it by the ramp's duration, so the LAST warm
+//   pass lands at `time_ms` × (count − 1) / count, and it is that pass, not the
+//   capture, that has to reach the entrance's own duration for the capture's
+//   LAYOUT to read a settled `progress`. Measured at count 2 against the 500 ms
+//   `Slide`: `time_ms: 800` moves all six of those PNGs, while `1_000` and
+//   `1_200` leave them byte-identical. Two passes therefore want `time_ms` ≥
+//   2 × duration — a `warm_frames: 2` bolted onto a 400 ms `time_ms` would fail
+//   for that reason rather than disproving the fix. So this waits on a per-case
+//   warm count, the follow-up [`Case::warm_frames`] already names, arriving
+//   with a `time_ms` to match. This one is paid
+//   for live as well, unlike shadcn's edge cases: there is no
+//   [`crate::interactive`] twin for `material/sheet` either, so a browser
+//   renders this pinned constructor and the sheet is simply open on arrival
+//   (measured: one painted frame, then no further frames at all).
+//   Independently of the entrance, this case mounts the overlay-modal host with
+//   the M3 sheet chrome preset
+//   (`OverlayModalConfig::edge(OverlaySide::Bottom).handle(true)`) because
+//   `BottomSheetView` **exposes no settled-entrance seam** at all — its own
 //   `build()` call seeds the widget at `progress = 0.0` and only advances it
-//   via spring on the second paint onward. Instead of the genuine
-//   `bottom_sheet(..)` widget, which renders invisible on frame 1, we
-//   **approximate** its at-rest chrome via the overlay modal's bottom-edge
-//   preset, matching three duplicated magic numbers: **28dp corner radius**
-//   (`shape.extra_large`), **32×4dp drag handle** (visual indicator), and
-//   **48dp handle touch target**. The risk is that if `BottomSheetWidget`
-//   drifts (a corner radius bump, a different handle size, changes to the
-//   scrim or panel background) the approximation becomes stale without
-//   automatic discovery. This limitation is documented alongside other known
-//   gaps.
-// - **[`snackbar_case`]** has no such seam: `snackbar_host` exposes no
-//   entrance knob and its bar is drawn by the host widget itself, so the case
-//   mounts the real host with a real pending [`snackbar`] message — the
-//   documented mount contract — and records the frame before the bar slides
-//   up. Its preview therefore shows the host's app content only.
+//   via spring on a later paint. So rather than the genuine `bottom_sheet(..)`
+//   widget we **approximate** its at-rest chrome, matching three duplicated
+//   magic numbers: **28dp corner radius** (`shape.extra_large`), **32×4dp drag
+//   handle** (visual indicator), and **48dp handle touch target**. The risk is
+//   that if `BottomSheetWidget` drifts (a corner radius bump, a different
+//   handle size, changes to the scrim or panel background) the approximation
+//   becomes stale without automatic discovery. This limitation is documented
+//   alongside other known gaps.
+// - **[`snackbar_case`]** pins no `time_ms`, so it takes no warm pass and
+//   records the frame before the bar slides up: its preview shows the host's
+//   app content only. `snackbar_host` exposes no entrance knob and its bar is
+//   drawn by the host widget itself, so the case mounts the real host with a
+//   real pending [`snackbar`] message — the documented mount contract. One warm
+//   pass *does* settle the bar (measured), so opting in is one line here plus
+//   one in `case.rs`'s allowlist; it moves a published poster, which is a
+//   decision of its own rather than a rider on the entrance work.
 //
-// This is the same single-build limit `crate::base::animation` documents for
-// `pattern-switcher`. Lifting it properly needs a warm-frame field on
-// [`Case`] the recorder rebuilds through before capturing, which `case.rs`
-// is outside this module's remit to add.
+// [`crate::base::animation`] documents the other half of the same seam: three
+// cases warming buys nothing for, because what they stage on is a rebuild with
+// *different inputs*, and every `Case::build` pass returns the same tree.
 
 /// A single full-width bar, or one short row of components, with room to
 /// breathe around it.
@@ -307,10 +344,15 @@ fn date_picker_case() -> AnyView<()> {
     )
 }
 
-/// The M3 dialog on its `overlay_modal` host, pinned at rest. The genuine
-/// `dialog()` widget is invisible on the recorder's single frame (entrance ramp
-/// limit — see the module docs), so this case lays out the panel body here
-/// directly rather than handing it to `frust_material::dialog`.
+/// The M3 dialog on its `overlay_modal` host, entrance included: the panel
+/// fades and scales in exactly as `frust_material::dialog` composes it, and
+/// `time_ms: 400` is what lands the poster on the settled frame — see the
+/// module docs' entrance-ramp section.
+///
+/// The panel *body* is still laid out here from the page's own Material
+/// primitives rather than handed to the `dialog()` builder. The entrance used
+/// to force that and no longer does; swapping in the builder is a composition
+/// change with its own poster consequences, so it stays a separate question.
 fn dialog_case() -> AnyView<()> {
     framed_in(
         TALL,
@@ -332,7 +374,7 @@ fn dialog_case() -> AnyView<()> {
                     ])),
                 ]),
             ),
-            OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH).entrance(OverlayEntrance::None),
+            OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
         ),
     )
 }
@@ -559,14 +601,19 @@ fn selection_controls_case() -> AnyView<()> {
     )
 }
 
-/// The M3 bottom-sheet at-rest chrome, approximated via `overlay_modal` host.
-/// The genuine `bottom_sheet(..)` widget is invisible on the recorder's single
-/// frame (it seeds at `progress = 0.0` and only advances via spring on frame 2+),
+/// The M3 bottom-sheet at-rest chrome, approximated via the `overlay_modal`
+/// host. The genuine `bottom_sheet(..)` widget seeds at `progress = 0.0`, only
+/// advances via spring on a later paint, and exposes no settled-entrance seam,
 /// so this case uses [`OverlayModalConfig::edge(OverlaySide::Bottom)`] preset
 /// chrome instead. This duplicates three material magic numbers: 28dp corner
 /// radius, 32×4dp drag handle, and 48dp handle touch target. If
 /// `BottomSheetWidget` drifts, this approximation becomes stale — the drift
 /// risk is documented as a known limitation.
+///
+/// The entrance stays pinned to [`OverlayEntrance::None`]. Unlike
+/// [`dialog_case`], a warm pass cannot stand in for the pin: the edge preset's
+/// `Slide` is driven in layout, one pass behind the paint that advances it —
+/// see the module docs' entrance-ramp section for the measured result.
 fn sheet_case() -> AnyView<()> {
     framed_in(
         TALL,
@@ -624,9 +671,10 @@ fn slider_case() -> AnyView<()> {
 
 /// The snackbar host with a message already requested — the page's own mount
 /// contract (`snackbar_host(&state.toasts, app_view)` at the root, a
-/// `controller.show(..)` from an action). The bar itself is still off-screen
-/// on this frame, because the entrance ramp (documented above) has not
-/// advanced past zero yet.
+/// `controller.show(..)` from an action). The bar itself is still off-screen on
+/// this frame: the case pins no [`Case::time_ms`], so the recorder takes no
+/// warm pass for it and the entrance ramp never advances past zero (see the
+/// module docs' entrance-ramp section).
 fn snackbar_case() -> AnyView<()> {
     let toasts: SnackbarController<()> = SnackbarController::new();
     toasts.show(snackbar("Message archived").action("Undo", |_: &mut ()| {}));
@@ -786,7 +834,7 @@ pub const CASES: &[Case] = &[
         title: "Material Dialog",
         size: TALL,
         scale: Case::DEFAULT_SCALE,
-        time_ms: Case::DEFAULT_TIME_MS,
+        time_ms: 400,
         design: Design::Material,
         build: dialog_case,
     },

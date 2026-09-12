@@ -700,7 +700,15 @@ impl Widget for TooltipLayerWidget {
             }
         }
         if self.arrow == TooltipArrow::Tip {
-            draw_arrow(scene, panel, self.anchor_used - origin.to_vec2(), fill);
+            // Both rects in window space: `panel` is this layer's placed rect
+            // lifted out of its own space by `origin` just above, and the latch
+            // stores the trigger's rect in window space already. Lowering the
+            // anchor into the layer's space here instead would compare the two
+            // in different spaces and put the tip `origin` away from the edge
+            // facing the trigger (the identity only at a layer sitting at the
+            // window origin, which is what the documented full-area `Stack`
+            // mount happens to be).
+            draw_arrow(scene, panel, self.anchor_used, fill);
         }
         self.content.paint_child(ctx, scene);
         if ramping {
@@ -746,9 +754,40 @@ impl Widget for TooltipLayerWidget {
     visit_children!(content);
 }
 
+/// Keep `v` inside `[lo, hi]` by at least `reach`, the inset a tip of
+/// half-diagonal `reach` needs to sit wholly within that span.
+///
+/// **Total for a span narrower than the tip**, which [`f64::clamp`] is not: at
+/// `hi - lo <= 2 * reach` the two bounds cross (`lo + reach > hi - reach`) and
+/// `clamp` panics on `min > max` rather than answering. No position keeps the
+/// tip inside a span that short, so the midpoint — as far inside as it can be —
+/// is the answer. See [`draw_arrow`] for how short a panel gets.
+fn inset_within(v: f64, lo: f64, hi: f64, reach: f64) -> f64 {
+    if hi - lo <= 2.0 * reach {
+        (lo + hi) / 2.0
+    } else {
+        v.clamp(lo + reach, hi - reach)
+    }
+}
+
 /// Paint the tooltip's `size-2.5 rotate-45` tip on the panel edge facing the
 /// anchor.
+///
+/// `panel` and `anchor` are both **window space** — the space the scene is
+/// recorded in and the space the latch stores its trigger rect in. Passing one
+/// of them in the layer's own local space instead puts the tip the layer's
+/// origin away from the edge it belongs on.
+///
+/// Defined for a panel of any extent, including none: a viewport too small to
+/// give the panel a size collapses it (`crate::overlay`'s `finite_or_zero`
+/// coerces an unbounded constraint to zero, and a host can lay a frame out at a
+/// viewport it has not measured yet), and a tip is geometry hung off a panel
+/// edge — with no panel there is no edge, and a shorter one takes the tip as
+/// far inside as it goes.
 fn draw_arrow(scene: &mut dyn PaintScene, panel: Rect, anchor: Rect, color: Color) {
+    if panel.is_zero_area() {
+        return;
+    }
     // A square rotated 45° is a diamond whose half-diagonal is `edge / √2`.
     let reach = ARROW_EDGE * std::f64::consts::FRAC_1_SQRT_2;
     let (center, horizontal) = if panel.y1 <= anchor.y0 {
@@ -763,9 +802,9 @@ fn draw_arrow(scene: &mut dyn PaintScene, panel: Rect, anchor: Rect, color: Colo
     // Keep the tip inside the panel's own span, so a clamped panel does not grow
     // a tip hanging off its corner.
     let center = if horizontal {
-        Point::new(center.x, center.y.clamp(panel.y0 + reach, panel.y1 - reach))
+        Point::new(center.x, inset_within(center.y, panel.y0, panel.y1, reach))
     } else {
-        Point::new(center.x.clamp(panel.x0 + reach, panel.x1 - reach), center.y)
+        Point::new(inset_within(center.x, panel.x0, panel.x1, reach), center.y)
     };
     let mut path = BezPath::new();
     path.move_to(Point::new(-reach, 0.0));
@@ -1222,6 +1261,116 @@ mod tests {
         let bounded = w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
         assert_eq!(bounded, WINDOW);
         assert_eq!(w.panel_rect().y1, trigger.y0, "flush above its trigger");
+    }
+
+    #[test]
+    fn a_viewport_too_small_to_size_the_panel_leaves_the_tip_off_instead_of_panicking() {
+        // A host may lay a frame out before it knows its own viewport — winit's
+        // web backend reports `inner_size()` as 0x0 until its `ResizeObserver`
+        // first fires, and the browser shell lays out at exactly that (see
+        // `frust-shell-web`'s surface reconciliation, which guards the
+        // swapchain against a zero dimension but not the layout pass). The
+        // panel collapses with the area, and a tip whose half-diagonal exceeds
+        // the panel it hangs off used to take `f64::clamp` past `min > max` and
+        // panic out through the event loop.
+        let hover = TooltipHover::new();
+        hover.set_open(true);
+        let mut root: RenderRoot<AppState, frust::StackView<AppState>> = RenderRoot::new();
+        root.set_theme(Box::new(light()));
+        let mut state = AppState::default();
+        let mut tcx = TextContext::new();
+        let latch = hover.clone();
+        let mut logic = move |_s: &mut AppState| {
+            frust::Stack(vec![
+                any(tooltip_trigger(
+                    &latch,
+                    SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                )),
+                any(tooltip(&latch, "Add to library")),
+            ])
+        };
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(Size::ZERO, &mut tcx as &mut dyn Any);
+        let mut rec = Recorder::default();
+        root.paint(&mut rec, ft_ms(0.0));
+        assert!(
+            rec.rects.is_empty(),
+            "no tip painted for a panel with no extent to hang it off"
+        );
+
+        // The same tree at a real viewport still grows one.
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        let mut rec = Recorder::default();
+        root.paint(&mut rec, ft_ms(16.0));
+        assert_eq!(rec.rects.len(), 1, "the tip is back once the panel has one");
+    }
+
+    #[test]
+    fn the_tip_centres_on_a_panel_shorter_than_the_tip_itself() {
+        // Between "no panel at all" and "a panel the tip fits inside" sits a
+        // panel too short to hold it: nowhere inside is far enough from both
+        // edges, so the tip takes the midpoint rather than a crossed clamp.
+        let reach = ARROW_EDGE * std::f64::consts::FRAC_1_SQRT_2;
+        // Narrower than the tip's own diagonal, with the trigger below it: the
+        // tip goes on the bottom edge and is pinned along `x`, the short axis.
+        let panel = Rect::new(100.0, 200.0, 108.0, 228.0);
+        let anchor = Rect::new(150.0, 300.0, 230.0, 336.0);
+        assert!(panel.width() < 2.0 * reach, "the case this test is about");
+        let mut rec = Recorder::default();
+        draw_arrow(&mut rec, panel, anchor, Color::BLACK);
+        let (center, size, _) = rec.rects[0];
+        assert_eq!(
+            center,
+            Point::new(panel.center().x, panel.y1),
+            "centred across the short axis, still on the edge facing the anchor"
+        );
+        assert_eq!(size.width, 2.0 * reach, "a whole tip, not a shrunken one");
+    }
+
+    #[test]
+    fn the_tip_is_placed_against_the_trigger_from_a_layer_off_the_window_origin() {
+        // The layer's placed rect is lifted into window space for painting, so
+        // the anchor it is measured against has to be window space too. Inset
+        // the mount and the two spaces stop coinciding.
+        const INSET: f64 = 50.0;
+        let hover = TooltipHover::new();
+        hover.set_open(true);
+        let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
+        root.set_theme(Box::new(light()));
+        let mut state = AppState::default();
+        let mut tcx = TextContext::new();
+        let latch = hover.clone();
+        let mut logic = move |_s: &mut AppState| {
+            any(frust::Padding(
+                frust::EdgeInsets::all(INSET),
+                frust::Stack(vec![
+                    any(tooltip_trigger(
+                        &latch,
+                        SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                    )),
+                    any(tooltip(&latch, "Add to library")),
+                ]),
+            ))
+        };
+        // Two frames: the trigger publishes its rect on the first paint, and the
+        // layer places against it on the layout that paint asks for.
+        for frame in 0..2 {
+            root.rebuild(&mut logic, &mut state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft_ms(f64::from(frame) * 16.0));
+        }
+        let mut rec = Recorder::default();
+        root.paint(&mut rec, ft_ms(32.0));
+
+        let trigger = Rect::from_origin_size(Point::new(INSET, INSET), TRIGGER);
+        assert_eq!(hover.anchor(), trigger, "the trigger's window-space rect");
+        let (center, _, _) = rec.rects[0];
+        assert_eq!(
+            center.x,
+            trigger.center().x,
+            "under the trigger, not the layer's own origin away from it"
+        );
+        assert_eq!(center.y, trigger.y1, "on the panel edge facing the trigger");
     }
 
     #[test]
