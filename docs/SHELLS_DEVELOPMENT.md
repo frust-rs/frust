@@ -71,6 +71,11 @@ permission alert only while it is system-initiated).
   intercepted only while an editable holds focus).
 - **Android — empty clipboard:** with nothing on the clipboard, Paste inserts nothing and clears no
   selection.
+- **Android — a URI-backed clip:** copy a *photo or file* in another app (not text), focus a field
+  and paste. It resolves off the UI thread, so watch for two things: the app must not freeze while
+  the source app answers, and the text must land in the field you asked from. Then repeat and switch
+  to a different field while it is still resolving — the paste must be discarded, not delivered to
+  the field you moved to.
 - **iOS — the system menu:** long-press or double-tap a word; UIKit's own edit menu appears at the
   selection and the framework floats no toolbar of its own. The menu offers Copy/Cut/Paste/Select
   All and nothing else, and offers only the verbs the field allows.
@@ -79,8 +84,13 @@ permission alert only while it is system-initiated).
   either one appearing means the pasteboard was read outside the system-initiated path.
 - **iOS — Paste is offered only when there is something to paste:** with no string on the
   pasteboard, the item is absent from the menu.
-- **iOS — hardware chords:** `Cmd`+`C`/`X`/`V`/`A` reach the focused field through the responder
-  chain, matching the menu's own verbs.
+- **iOS — hardware chords, with NO menu on screen:** tap a field to focus it, do not long-press,
+  and press `Cmd`+`V` on a hardware keyboard. It must paste. Then `Cmd`+`A`, `Cmd`+`C`, `Cmd`+`X`.
+  Run this leg *before* any leg that opens the menu: the verbs are published as a level by a focused
+  field, and a bug that gated them on a menu being open passes every menu-first test and fails only
+  this one. `Cmd`+`V` is also one of just two paste routes iOS exempts from its per-app permission
+  alert, so this leg doubles as the check that no alert appears.
+- **iOS — hardware chords with the menu up:** the same four chords match the menu's own verbs.
 - **iOS — the menu goes away:** collapsing the selection, blurring the field, or any gesture that
   withdraws the field's request (a scroll, a text change) puts it away; it never stands over a
   field that no longer has a selection.
