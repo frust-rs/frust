@@ -797,7 +797,8 @@ pub struct PaintCtx<'a> {
     paced_interval: Option<Duration>,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
-    /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
+    /// from its pod's recorded link *on the live session*
+    /// ([`ChildPod::holds_live_focus`]'s composition, spelled out inline) by
     /// [`ChildPod::paint_child`], and from [`crate::app::RenderRoot`]'s
     /// `focus_active` at the root. The paint-pass mirror of
     /// [`EventCtx::has_focus`]: an editable gates its focus chrome (accent
@@ -822,6 +823,16 @@ pub struct PaintCtx<'a> {
     /// counts as hovered only while it equals this; see the [`crate::event`] module
     /// docs for the epoch mechanism.
     hover_epoch: u64,
+    /// The live focus epoch — the identity of the focus session the root
+    /// currently holds, threaded from [`crate::app::RenderRoot::paint`] and
+    /// copied into each child by [`ChildPod::paint_child`] (global, like the
+    /// clock and the hover epoch).
+    ///
+    /// A pod's recorded focus stamp ([`ChildPod::focus_epoch`]) counts as a link
+    /// on the live session only while it equals this, which is what strands the
+    /// link of a branch the session has left — including one no container can
+    /// reach to clear. See [`set_live_focus_session`].
+    focus_epoch: u64,
     /// The shell-provided time for this frame, threaded from
     /// [`crate::app::RenderRoot::paint`] and seeded into each child by
     /// [`ChildPod::paint_child`]. Defaults to [`FrameTime::ZERO`] (the "no time
@@ -922,6 +933,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: false,
             hovered: false,
             hover_epoch: 0,
+            focus_epoch: 0,
             frame_time: FrameTime::ZERO,
             theme: None,
             window_insets: WindowInsets::default(),
@@ -1083,9 +1095,9 @@ impl<'a> PaintCtx<'a> {
     }
 
     /// Seed whether the widget being painted holds focus. Called by
-    /// [`ChildPod::paint_child`] (from the pod's recorded focus flag) and by
-    /// [`crate::app::RenderRoot::paint`] (from `focus_active`) — the paint mirror
-    /// of [`EventCtx::set_has_focus`].
+    /// [`ChildPod::paint_child`] (from the pod's recorded link, its session stamp
+    /// and the chain above it) and by [`crate::app::RenderRoot::paint`] (from
+    /// `focus_active`) — the paint mirror of [`EventCtx::set_has_focus`].
     pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
     }
@@ -1131,6 +1143,20 @@ impl<'a> PaintCtx<'a> {
     /// The live hover epoch a pod's recorded stamp is compared against.
     pub(crate) fn hover_epoch(&self) -> u64 {
         self.hover_epoch
+    }
+
+    /// Seed the live focus epoch. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root (and for each floated pod)
+    /// and threaded unchanged into every child by [`ChildPod::paint_child`],
+    /// mirroring how the hover epoch flows.
+    pub(crate) fn set_focus_epoch(&mut self, epoch: u64) {
+        self.focus_epoch = epoch;
+    }
+
+    /// The live focus epoch: a pod whose recorded stamp equals this holds a link
+    /// on the session the root currently has.
+    pub(crate) fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
     }
 
     /// The shell-provided time for this frame (monotonic, arbitrary origin).
@@ -1564,6 +1590,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: self.has_focus,
             hovered: self.hovered,
             hover_epoch: self.hover_epoch,
+            focus_epoch: self.focus_epoch,
             frame_time: self.frame_time,
             theme: self.theme,
             window_insets: self.window_insets,
@@ -2080,7 +2107,35 @@ pub struct ChildPod {
     /// keyboard/IME events straight to it with no hit test (focus is the
     /// second recorded path, a mirror of `active`). Maintained by
     /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
+    ///
+    /// **A set flag on its own says nothing about the live session.** It records
+    /// that a claim once passed through this pod, and the only routes that clear
+    /// it are a container's own blur sweep and a reconciler severing the link —
+    /// neither of which can reach a pod held off-tree (a floated overlay
+    /// surface). `focus_epoch` below is what makes the record falsifiable; read
+    /// [`ChildPod::holds_live_focus`], not this flag, to decide anything.
     focused: bool,
+    /// The focus epoch this pod's recorded link belongs to — stamped by
+    /// [`ChildPod::set_focused`]`(true)` from the session standing on this
+    /// thread ([`set_live_focus_session`]) and never cleared.
+    ///
+    /// The focus analog of `hover_epoch` below, and for the same reason: a
+    /// session that moves has no way to visit the branch it left. The root
+    /// advances its epoch around every dispatch that could record a new chain,
+    /// so a claim recorded in that dispatch carries the new value and every link
+    /// recorded by an older claim is stranded by arithmetic — including one
+    /// belonging to a pod no container owns. `0` until a claim first passes
+    /// through.
+    focus_epoch: u64,
+    /// The identity of the [`RenderRoot`](crate::app::RenderRoot) whose session
+    /// `focus_epoch` names, recorded with it and never cleared either. `0` until
+    /// a claim first passes through.
+    ///
+    /// Exactly `hover_root`'s job below: epoch counters are per-root and collide
+    /// by construction, so the identity is what keeps one root's pod from
+    /// reading as a holder of another root's identically-numbered session — and
+    /// what keeps a dying pod from ending a session it was never part of.
+    focus_root: u64,
     /// The hover epoch this pod's recorded hover link belongs to — stamped by
     /// [`ChildPod::event_child`] when a [`EventCtx::claim_hover`] bubbles through
     /// it, and never explicitly cleared. `0` until a claim first passes through —
@@ -2139,6 +2194,68 @@ thread_local! {
     /// shape: the widget tree is single-threaded, and an inspect walk runs
     /// behind `&self` with no allocator in scope to thread down.
     static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
+
+    /// The focus session standing on this thread right now, as `(root identity,
+    /// live epoch, claim epoch)` — published by [`crate::app::RenderRoot`] and
+    /// compared against by every [`ChildPod`] that records, reads or drops a
+    /// focus link.
+    ///
+    /// The two epochs are the same value except during a dispatch, where the
+    /// root opens a *candidate* session the claim recorded in that dispatch is
+    /// stamped with (see [`focus_claim_stamp`]) while reads still answer against
+    /// the session standing when the dispatch began. That is hover's
+    /// `hover_epoch`/`hover_claim_epoch` split, in a channel rather than on the
+    /// context — and the reason both are visible at once is that a claim
+    /// recorded on the way back up must be observable to the container that is
+    /// still unwinding: a blur sweep deciding which child *kept* focus, and a
+    /// portal noticing that its surface just took the session, both ask after
+    /// the claim they are reacting to.
+    ///
+    /// `(0, 0, 0)` until a root publishes, which is also what a dispatch driven
+    /// without any root at all (a widget unit test) sees: a pod claiming focus
+    /// there stamps `0` too, so its link reads live and routing behaves exactly
+    /// as it did before this channel existed. A real root's identity starts at
+    /// `1` and its epoch at `1`, so it can never publish that triple.
+    static LIVE_FOCUS_SESSION: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Publish the focus session standing on this thread: `live` is the session a
+/// recorded link must name to count, `claim` the one a link recorded *now* takes
+/// (equal to `live` outside a dispatch).
+///
+/// # Why a thread-local, and not the running context
+///
+/// The hover epoch rides [`EventCtx`]/[`PaintCtx`] because every reader of it is
+/// inside a pass the root itself seeded. A focus link has two readers that are
+/// not: a container deciding where a focus-routed event goes runs its own
+/// dispatch (a component boundary and an overlay slot both substitute a context
+/// of their own on the way down, so a value threaded from the root does not
+/// survive the trip), and a pod's destructor runs with no context at all. The
+/// triple is therefore published where both can reach it, exactly as the hover
+/// link's own `(root, epoch)` pair already is for the destructor's sake
+/// (`crate::event::set_live_hover_link`).
+///
+/// It mirrors **one** root: a second [`crate::app::RenderRoot`] driving passes on
+/// the same thread republishes before each of its own passes, which is why the
+/// identity rides along — a pod of the other root can then never match by an
+/// epoch integer the two happen to share.
+pub(crate) fn set_live_focus_session(root: u64, live: u64, claim: u64) {
+    LIVE_FOCUS_SESSION.with(|slot| slot.set((root, live, claim)));
+}
+
+/// The `(root identity, epoch)` a link recorded right now is stamped with — the
+/// candidate session while a dispatch is open, the live one otherwise.
+fn focus_claim_stamp() -> (u64, u64) {
+    let (root, _live, claim) = LIVE_FOCUS_SESSION.with(|slot| slot.get());
+    (root, claim)
+}
+
+/// Whether `(root, epoch)` names the session standing on this thread — either
+/// the live one, or the candidate a dispatch currently open is recording claims
+/// against.
+fn names_live_focus_session(root: u64, epoch: u64) -> bool {
+    let (live_root, live, claim) = LIVE_FOCUS_SESSION.with(|slot| slot.get());
+    root == live_root && (epoch == live || epoch == claim)
 }
 
 impl Drop for ChildPod {
@@ -2169,6 +2286,23 @@ impl Drop for ChildPod {
         if crate::event::live_hover_link_is(self.hover_root, self.hover_epoch) {
             crate::event::mark_hover_orphaned(self.hover_root);
         }
+        // The focus half of the same report. The reconcilers raise this mark for
+        // every pod they sever themselves (`teardown_child` and friends), which
+        // covers the whole main tree; a pod floated by the overlay portal is
+        // reached by none of them — its owner holds it behind an `Rc` and can
+        // drop it with no view to tear it down through — so the pod reports its
+        // own severance here, with nothing for an owner to remember to call.
+        //
+        // Gated on the stamp exactly as the hover half is, and additionally on a
+        // non-zero epoch: a pod that never held a link carries `(0, 0)`, which is
+        // precisely what a dispatch driven without a root publishes, and a
+        // rootless test dropping pods owes no release.
+        if self.focused
+            && self.focus_epoch != 0
+            && names_live_focus_session(self.focus_root, self.focus_epoch)
+        {
+            crate::event::mark_focus_orphaned();
+        }
     }
 }
 
@@ -2192,6 +2326,8 @@ impl ChildPod {
             size: Size::ZERO,
             active: false,
             focused: false,
+            focus_epoch: 0,
+            focus_root: 0,
             hover_epoch: 0,
             hover_root: 0,
             semantics_id: Cell::new(None),
@@ -2301,18 +2437,88 @@ impl ChildPod {
         self.active = active;
     }
 
-    /// Whether this child currently holds the recorded focus path — keyboard/IME
-    /// events route straight to it (the focus mirror of [`ChildPod::is_active`]).
+    /// Whether this child has a recorded focus path at all — **not** whether
+    /// that record belongs to the session the root currently holds.
+    ///
+    /// The raw flag, kept for the things that legitimately want it: a paint-time
+    /// culling exemption, a blur sweep clearing whatever it finds, a container
+    /// asking "did I ever record a link here". Deciding *where a focus-routed
+    /// event goes*, or whether a widget may speak for the focus session, needs
+    /// [`ChildPod::holds_live_focus`] instead — a link this flag reports can be
+    /// one a moved session left behind, and there is no pass that visits an
+    /// abandoned branch to clear it.
     pub fn is_focused(&self) -> bool {
         self.focused
     }
 
-    /// Set (or clear) the recorded focus path. Containers clear it on
-    /// blur-on-outside-tap and set it when a child requests focus; the flag is
-    /// maintained automatically by [`ChildPod::event_child`] on a
-    /// `focus_requested`/`focus_released` bubble.
+    /// Record (or drop) this child's focus path **against the live session**.
+    ///
+    /// Setting it stamps the session standing on this thread
+    /// (`set_live_focus_session`) beside the flag, so the link says which session
+    /// it belongs to rather than merely that one existed; clearing it leaves the
+    /// stamp alone, which costs nothing because the flag gates every read.
+    /// Containers clear it on blur-on-outside-tap and set it when a child
+    /// requests focus; the flag is maintained automatically by
+    /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+        if focused {
+            let (root, epoch) = focus_claim_stamp();
+            self.focus_root = root;
+            self.focus_epoch = epoch;
+        }
+    }
+
+    /// The focus epoch this pod's recorded link was stamped with — the focus
+    /// counterpart of [`ChildPod::hover_epoch`], and just as much an identity
+    /// rather than an ordering or a boolean.
+    ///
+    /// Diagnostic only, for the same reason the hover stamp's accessor is: a
+    /// stamp is never cleared, only stranded by the next session, so a non-zero
+    /// value means "a claim passed through here once", never "focused". Ask
+    /// [`ChildPod::holds_live_focus`], which is the comparison this exists for.
+    pub fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
+    }
+
+    /// Whether this child holds a focus link **on the session the root currently
+    /// has** — the read every routing and provenance decision wants.
+    ///
+    /// `true` only while the flag is set *and* the stamp names the live session
+    /// (`set_live_focus_session`). Two branches can both carry a set flag — an
+    /// overlay pod's claim reaches no container's blur sweep, so the branch it
+    /// superseded keeps its own record — and this is what tells them apart
+    /// without either branch having to be visited.
+    ///
+    /// A dispatch driven with no root at all reads `(0, 0)` on both sides, so a
+    /// pod that claimed focus during such a dispatch answers `true`: with no
+    /// session to be stale relative to, the flag is all there is.
+    pub fn holds_live_focus(&self) -> bool {
+        self.focused && names_live_focus_session(self.focus_root, self.focus_epoch)
+    }
+
+    /// Drop a recorded focus link that the live session has already stranded,
+    /// reporting whether one was dropped.
+    ///
+    /// The retirement seam a [`RenderRoot`](crate::app::RenderRoot) needs and
+    /// cannot otherwise have. A pod floated by the overlay portal lives off the
+    /// tree, behind its owner's `Rc`, and the root borrows it for exactly the
+    /// length of the paint pass that floats it — so the one moment the root can
+    /// act on such a link is that pass, and the one thing it can honestly say
+    /// about it is what the stamp already decides. Calling this keeps the raw
+    /// flag and the stamp telling the same story, which is what the consumers of
+    /// [`ChildPod::is_focused`] that cannot consult an epoch depend on.
+    ///
+    /// Deliberately *not* a bare `set_focused(false)` at the call site: the
+    /// condition is the whole contract, and a pod whose link is live must never
+    /// be retired by a pass that merely walked past it.
+    pub fn retire_stale_focus_link(&mut self) -> bool {
+        if self.focused && !self.holds_live_focus() {
+            self.focused = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// The hover epoch this pod's recorded hover link belongs to — the hover
@@ -2391,17 +2597,29 @@ impl ChildPod {
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
         child_ctx.set_translucent(ctx.is_translucent());
-        // Thread the pod's recorded focus path into paint (the mirror of how
-        // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
-        // observes a container-routed blur that never reached its `event()`.
-        // COMPOSED with the ancestor's paint focus: paint descends into every
-        // child unconditionally (no focus-routing gate like the event pass), and
-        // a container-routed blur only clears the focused pod at the
-        // nearest-common-ancestor link — flags deeper in the blurred subtree
-        // legitimately go stale. ANDing with `ctx.has_focus()` makes any cleared
-        // link force `has_focus == false` for the whole subtree below it,
-        // matching the effective gating focus-path routing gives events.
-        child_ctx.set_has_focus(self.focused && ctx.has_focus());
+        // Thread the live focus epoch down unchanged (global, like the clock),
+        // and seed this child's focus from its own recorded link against it —
+        // the mirror of how `event_child` seeds the child `EventCtx`, so a
+        // focus-dependent widget observes a blur that never reached its
+        // `event()`. Three conjuncts, each load-bearing:
+        //
+        // * `self.focused` — a link was recorded here at all;
+        // * the stamp — that link belongs to the session the root has *now*, not
+        //   to one it has since left. Paint descends into every branch
+        //   unconditionally and a branch the session left is reached by no pass
+        //   that could clear its flag, so without this a field the user has
+        //   walked away from goes on painting a caret and republishing the
+        //   surface it described while it still had the session;
+        // * `ctx.has_focus()` — the ancestor chain, since a blur clears the link
+        //   at the nearest common ancestor only and flags deeper in the blurred
+        //   subtree legitimately go stale.
+        //
+        // Exactly the composition the hover seed below uses, for exactly the
+        // same reason.
+        child_ctx.set_focus_epoch(ctx.focus_epoch());
+        child_ctx.set_has_focus(
+            self.focused && self.focus_epoch == ctx.focus_epoch() && ctx.has_focus(),
+        );
         // Thread the live hover epoch down unchanged (global, like the clock), and
         // seed this child's hover link from its own recorded stamp against it —
         // ANDed with the ancestor's hover, exactly like `focused` above. Both halves
@@ -2573,11 +2791,17 @@ impl ChildPod {
         // `focus_requested` bubble records this child as the focused one; a
         // `focus_released` bubble drops it. A request wins over a release in the
         // rare case both fire in one dispatch (a re-focus supersedes a blur).
+        //
+        // The record goes through `set_focused`, which stamps the session the
+        // claim belongs to beside the flag: the whole chain from the claimant up
+        // to the root is on one bubble and therefore takes one stamp, which is
+        // what lets a container later ask which of two flagged children is on the
+        // live chain.
         if focus_rel {
-            self.focused = false;
+            self.set_focused(false);
         }
         if focus_req {
-            self.focused = true;
+            self.set_focused(true);
         }
         ctx.absorb_child(redraw, captured, hover_claimed, focus_req, focus_rel, ime);
         result
@@ -2596,6 +2820,135 @@ impl ChildPod {
             && point.x < self.origin.x + self.size.width
             && point.y >= self.origin.y
             && point.y < self.origin.y + self.size.height
+    }
+}
+
+#[cfg(test)]
+mod focus_link_tests {
+    use super::*;
+
+    /// A guard restoring the focus channel this thread started with, so a test
+    /// that publishes a session of its own cannot leak it into a neighbour.
+    struct Session(u64, u64, u64);
+
+    impl Session {
+        fn enter(root: u64, live: u64, claim: u64) -> Self {
+            let previous = LIVE_FOCUS_SESSION.with(|slot| slot.get());
+            set_live_focus_session(root, live, claim);
+            Session(previous.0, previous.1, previous.2)
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            set_live_focus_session(self.0, self.1, self.2);
+        }
+    }
+
+    /// A do-nothing leaf: these tests exercise the pod's own bookkeeping, so
+    /// the widget inside it never runs.
+    struct Inert;
+
+    impl Widget for Inert {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    fn pod() -> ChildPod {
+        ChildPod::new(Box::new(Inert))
+    }
+
+    #[test]
+    fn a_recorded_link_counts_only_while_its_stamp_names_the_live_session() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        pod.set_focused(true);
+        assert!(pod.holds_live_focus(), "recorded against the live session");
+        assert_eq!(pod.focus_epoch(), 3);
+
+        // The session moves on. Nothing visits this pod; its flag is untouched.
+        set_live_focus_session(7, 4, 4);
+        assert!(
+            pod.is_focused(),
+            "the raw record survives, as it always did"
+        );
+        assert!(
+            !pod.holds_live_focus(),
+            "but it no longer names the session the root has"
+        );
+    }
+
+    #[test]
+    fn a_link_of_another_root_never_counts_however_the_epochs_line_up() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        pod.set_focused(true);
+
+        // A second root on the same thread, with the identical epoch integer —
+        // which two roots hold as a rule, not as a fluke.
+        set_live_focus_session(8, 3, 3);
+        assert!(!pod.holds_live_focus());
+    }
+
+    #[test]
+    fn a_claim_recorded_during_a_dispatch_counts_before_the_dispatch_commits_it() {
+        // The root opened a candidate session: reads still answer against the
+        // live one, and a link recorded now takes the candidate.
+        let _session = Session::enter(7, 3, 4);
+        let mut claimed = pod();
+        claimed.set_focused(true);
+        assert_eq!(claimed.focus_epoch(), 4, "stamped with the candidate");
+        assert!(
+            claimed.holds_live_focus(),
+            "and observable to the container still unwinding around the claim"
+        );
+
+        let mut standing = pod();
+        standing.focused = true;
+        standing.focus_root = 7;
+        standing.focus_epoch = 3;
+        assert!(
+            standing.holds_live_focus(),
+            "while a link recorded before this dispatch still reads live"
+        );
+
+        // The dispatch commits the claim: the older link is stranded.
+        set_live_focus_session(7, 4, 4);
+        assert!(claimed.holds_live_focus());
+        assert!(!standing.holds_live_focus());
+    }
+
+    #[test]
+    fn retiring_a_link_drops_only_one_the_live_session_has_already_stranded() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        pod.set_focused(true);
+        assert!(
+            !pod.retire_stale_focus_link(),
+            "a live link is never retired by a pass that merely walked past it"
+        );
+        assert!(pod.is_focused());
+
+        set_live_focus_session(7, 4, 4);
+        assert!(pod.retire_stale_focus_link(), "a stranded link is dropped");
+        assert!(
+            !pod.is_focused(),
+            "so the raw flag and the stamp tell one story"
+        );
+        assert!(
+            !pod.retire_stale_focus_link(),
+            "and retiring is idempotent — there is nothing left to drop"
+        );
+    }
+
+    #[test]
+    fn a_pod_that_never_held_a_link_reports_nothing_to_retire() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        assert!(!pod.holds_live_focus());
+        assert!(!pod.retire_stale_focus_link());
     }
 }
 

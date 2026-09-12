@@ -876,8 +876,15 @@ pub use crate::visit_children;
 pub use frust_core::ChildPod;
 
 /// Whether `event` is the phase that auto-releases a recorded capture
-/// (`Up`/`Cancel`) — shared by [`route_event`]/[`route_event_single`].
-fn releases_capture(event: &InputEvent) -> bool {
+/// (`Up`/`Cancel`) — shared by [`route_event`]/[`route_event_single`] and by
+/// [`OverlaySlot`](crate::overlay::OverlaySlot), which dispatches into its pod
+/// without going through either and owes the pod's `active` link the same
+/// lifetime every other container gives a captured child.
+///
+/// `frust-core`'s `component::route_child` keeps a copy of its own: that crate
+/// sits *below* this one, so it cannot name this function. It is the one
+/// remaining duplicate of this predicate in the workspace.
+pub(crate) fn releases_capture(event: &InputEvent) -> bool {
     matches!(
         event,
         InputEvent::Pointer(p)
@@ -928,9 +935,17 @@ fn is_pointer_down(event: &InputEvent) -> bool {
 /// [`InputEvent::Housekeeping`].
 ///
 /// **Focus-routed events** ([`InputEvent::Key`]/[`InputEvent::Ime`]) bypass hit
-/// testing entirely: they go straight to the child holding the recorded focus
-/// path ([`ChildPod::is_focused`]), or are ignored if none does. This is the
-/// focus mirror of the capture fast-path.
+/// testing entirely: they go straight to the child holding a focus link **on the
+/// live session** ([`ChildPod::holds_live_focus`]), or are ignored if none does.
+/// This is the focus mirror of the capture fast-path.
+///
+/// The liveness half is not a refinement, it is the question. Two children can
+/// carry a recorded link at the same time — the blur sweep below runs on a
+/// hit-tested `Down`, and a claim made from a broadcast (an overlay surface's
+/// own press, which reaches no container's hit test) never triggers it — so a
+/// container that answered "which child is focused?" with the first flagged one
+/// delivered the keyboard by child order rather than by who holds the session.
+/// A stamp comparison answers it by who actually claimed it last.
 ///
 /// For **pointer/scroll**: a captured gesture goes straight to the recorded
 /// active child (capture auto-releases on `Up`/`Cancel`). Otherwise the children
@@ -948,13 +963,13 @@ fn is_pointer_down(event: &InputEvent) -> bool {
 /// merely "corrected later". Nothing reads a `focused` flag on its own: every
 /// consumer composes it with the chain above it, so a cleared link forces the
 /// whole subtree below to read as unfocused. Focus-routed events stop at the
-/// cleared link (this function finds no focused child to forward to); paint ANDs
-/// the same way (`ChildPod::paint_child`'s `self.focused && ctx.has_focus()`); and
-/// the rebuild pass ANDs the same way too ([`BuildCtx::has_focus`]), so tearing a
-/// stale branch down marks no orphan and cannot release the session of the field
-/// that really is focused ([`mark_orphan_if_live`]). The flags themselves are
-/// still cleaned up the next time focus enters that subtree (a focus request
-/// re-records the whole chain).
+/// cleared link (this function finds no live-linked child to forward to); paint
+/// ANDs the same way (`ChildPod::paint_child` composes the link, its stamp and
+/// the chain); and the rebuild pass ANDs the same way too
+/// ([`BuildCtx::has_focus`]), so tearing a stale branch down marks no orphan and
+/// cannot release the session of the field that really is focused
+/// ([`mark_orphan_if_live`]). The flags themselves are still cleaned up the next
+/// time focus enters that subtree (a focus request re-records the whole chain).
 pub fn route_event(
     children: &mut [ChildPod],
     ctx: &mut EventCtx<'_>,
@@ -969,7 +984,7 @@ pub fn route_event(
         return EventResult::Ignored;
     }
     if event.is_focus_routed() {
-        if let Some(pod) = children.iter_mut().find(|p| p.is_focused()) {
+        if let Some(pod) = children.iter_mut().find(|p| p.holds_live_focus()) {
             return pod.event_child(ctx, event);
         }
         return EventResult::Ignored;
@@ -987,7 +1002,7 @@ pub fn route_event(
         if children[i].contains(position)
             && children[i].event_child(ctx, event) == EventResult::Handled
         {
-            if children[i].is_focused() {
+            if children[i].holds_live_focus() {
                 kept_focus = Some(i);
             }
             handled = EventResult::Handled;
@@ -1027,8 +1042,10 @@ pub fn route_event_single(
         return EventResult::Ignored;
     }
     if event.is_focus_routed() {
-        // Focus-routed events go to the child only if it holds the focus path.
-        if pod.is_focused() {
+        // Focus-routed events go to the child only if its recorded link belongs
+        // to the live session — see [`route_event`] for why the liveness half is
+        // load-bearing rather than cosmetic.
+        if pod.holds_live_focus() {
             return pod.event_child(ctx, event);
         }
         return EventResult::Ignored;
