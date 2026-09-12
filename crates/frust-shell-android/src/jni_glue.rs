@@ -53,7 +53,7 @@ use jni::refs::Global;
 use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
-use frust_core::event::{EditingState, ImeContentType, ImeState};
+use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
@@ -69,8 +69,9 @@ use crate::app::{
     AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
 };
 use crate::ffi_support::{
-    ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
-    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
+    EditCommandWire, ImeJsonState, PlatformViewCommandJson, build_ime_state_json,
+    build_platform_view_commands_json, edit_command_from_code, load_pipeline_cache,
+    normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 
@@ -1485,6 +1486,155 @@ pub fn native_ime_action(handle: jlong, action: jint) {
     });
 }
 
+// ---------------------------------------------------------------------
+// The clipboard route: two one-shot drains Kotlin polls once per frame, and one
+// inbound command dispatch.
+//
+// All three are hand-written exports like `nativeInitPlatform` above rather
+// than `android_app!`-generated ones: each takes only the opaque handle and
+// names no app type, so nothing about them varies per app and the macro has
+// nothing to bind. The clipboard itself lives entirely on the JVM side
+// (`ClipboardManager` is a system service with no Rust-reachable counterpart),
+// so this seam carries text across the boundary instead of owning any.
+// ---------------------------------------------------------------------
+
+/// `nativeTakeClipboardWrite`: drain the text a focused editable asked to put
+/// on the host clipboard and return it as a `java.lang.String`, or `null` when
+/// nothing was copied.
+///
+/// **Destructive** — the slot is a one-shot edge (see
+/// [`AndroidAppHandle::take_clipboard_write`]), so a drained value Kotlin drops
+/// is lost. Kotlin calls this once per frame from `doFrame`, right after the
+/// post-dispatch IME poll, and hands any non-null result to
+/// `ClipboardManager.setPrimaryClip`.
+///
+/// A missing handle returns `null` too: "no native side" and "the channel was
+/// empty" are the same answer to Kotlin — there is nothing to write either way.
+///
+/// The drained text is never logged here. It is the user's selection, and a
+/// copied secret is exactly as sensitive as the pasted one [`EditCommand`]'s
+/// own redacting `Debug` exists for.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeTakeClipboardWrite<'local>(
+    env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jstring {
+    native_take_clipboard_write(env, handle)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeTakeClipboardWrite`], split
+/// out so the export stays a thin `extern "system"` shim (the
+/// [`native_init_platform`] shape).
+fn native_take_clipboard_write(mut env: EnvUnowned, handle: jlong) -> jstring {
+    guard("nativeTakeClipboardWrite", std::ptr::null_mut(), || {
+        pump_reactive_runtime();
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(text) = app.take_clipboard_write() else {
+            return std::ptr::null_mut();
+        };
+        env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &text)?.into()))
+            .resolve::<LogErrorAndDefault>()
+            .into_raw()
+    })
+}
+
+/// `nativeTakePasteRequest`: drain whether a focused editable asked this shell
+/// to read the host clipboard back to it.
+///
+/// **Destructive** for [`Java_dev_frust_FrustSurfaceView_nativeTakeClipboardWrite`]'s
+/// reason, and drained in the same per-frame place. On `true` Kotlin reads
+/// `ClipboardManager` and dispatches the answer back through
+/// [`Java_dev_frust_FrustSurfaceView_nativeEditCommand`] as a paste carrying the
+/// text — a *new* dispatch, not a return value, because the read is the JVM's to
+/// perform and may legitimately yield nothing (Android 10+ hands no clip at all
+/// to an app that does not have input focus). A missing handle answers `false`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeTakePasteRequest<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    native_take_paste_request(handle)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeTakePasteRequest`].
+fn native_take_paste_request(handle: jlong) -> jboolean {
+    guard("nativeTakePasteRequest", false, || {
+        pump_reactive_runtime();
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        match unsafe { handle_mut(handle) } {
+            Some(app) => app.take_paste_request(),
+            None => false,
+        }
+    })
+}
+
+/// `nativeEditCommand`: dispatch one decoded clipboard/selection verb to the
+/// focused editable — a hardware `Ctrl` chord, an IME context-menu action, or
+/// the answer to a paste request.
+///
+/// `cmd` is a fixed numeric ABI shared with the Kotlin side — DO NOT renumber
+/// without changing both sides (the rule the touch ABI carries):
+///   0 = copy
+///   1 = cut
+///   2 = paste — `text` carries the clipboard content
+///   3 = select all
+///
+/// [`edit_command_from_code`] owns the decode and is host-tested; an
+/// unrecognised code is logged and dropped rather than defaulted to a verb,
+/// because every verb here edits a document.
+///
+/// `text` is read only for a paste and may be `null` for every other verb; an
+/// unreadable/`null` string falls back to empty, which a focused field treats as
+/// nothing to insert. It is never logged — see [`EditCommand`]'s own redacting
+/// `Debug`.
+///
+/// Same thread contract as `nativeImeApply`: called on the JVM's UI thread —
+/// from the Choreographer callback, an `InputConnection` callback, or
+/// `onKeyDown` — never from the render thread. A missing handle is a no-op.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeEditCommand<'local>(
+    env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    cmd: jint,
+    text: JString<'local>,
+) {
+    native_edit_command(env, handle, cmd, text)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeEditCommand`].
+fn native_edit_command(mut env: EnvUnowned, handle: jlong, cmd: jint, text: JString) {
+    guard("nativeEditCommand", (), || {
+        pump_reactive_runtime();
+        let Some(wire) = edit_command_from_code(cmd) else {
+            log::warn!("frust-shell-android: nativeEditCommand dropped unknown command code {cmd}");
+            return;
+        };
+        // Read the Java string before touching the handle (that releases the
+        // `env` borrow), exactly as `native_ime_apply` does — and only for the
+        // one verb that carries text, so a copy/cut/select-all pays no string
+        // conversion at all.
+        let command = match wire {
+            EditCommandWire::Copy => EditCommand::Copy,
+            EditCommandWire::Cut => EditCommand::Cut,
+            EditCommandWire::SelectAll => EditCommand::SelectAll,
+            EditCommandWire::Paste => EditCommand::Paste(
+                env.with_env(|env| text.try_to_string(env))
+                    .resolve::<LogErrorAndDefault>(),
+            ),
+        };
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.edit_command(command);
+        }
+    });
+}
+
 /// `nativeSetAppearance`: flip the app's theme brightness (config/uiMode
 /// change), re-publishing it through both delivery paths (mirrors the
 /// desktop shell's `apply_theme`). `dark` is a JNI `jboolean` (this `jni` crate's
@@ -1547,6 +1697,41 @@ pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
             app.set_reduce_motion(reduce);
         }
     });
+}
+
+/// `nativeFocusGeneration`: return the focus/IME session generation for
+/// Kotlin's clipboard resolver to bind an async paste to the session that
+/// asked for it.
+///
+/// The same cheap per-frame-pollable `jlong` read `nativeSystemUiState` is,
+/// but per-handle rather than process-global. The JVM half snapshots this
+/// value when it hands a URI-backed clip to its background resolver and
+/// compares it again when the text comes back: `EditCommand::Paste` is
+/// focus-routed, so without that compare a slow `ContentProvider`'s answer
+/// lands in whatever field holds focus whenever it finally arrives.
+///
+/// A missing handle returns `0`, and the JVM half is what makes that sentinel
+/// unambiguous: it refuses to start a resolution whose *snapshot* is `0`, so
+/// every snapshot it goes on to hold is non-zero and a dead handle's `0` can
+/// never compare equal on arrival. That refusal is load-bearing rather than
+/// belt-and-braces, because the counter returned here is `focus_ime_gen`,
+/// which is built at `0` and advanced with a bare `wrapping_add` — `0` is a
+/// reachable live value. (`focus_epoch` is a different counter; only that one
+/// is built at `1` and stepped past `0` on wrap.)
+///
+/// Deliberately does NOT `pump_reactive`: nothing reactive writes this counter
+/// outside an event or paint pass, so a caller always reads a value the last
+/// frame already settled. The request-side read does run inside the `doFrame`
+/// that produced it; the arrival-side comparison runs later, off the main
+/// looper's queue, which is why it re-reads rather than trusting its snapshot.
+pub fn native_focus_generation(handle: jlong) -> jlong {
+    guard("nativeFocusGeneration", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        app.focus_generation() as jlong
+    })
 }
 
 /// `nativeSystemUiState`: return the process-wide system-UI override slot's

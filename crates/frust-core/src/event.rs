@@ -71,8 +71,11 @@
 use std::any::Any;
 use std::cell::Cell;
 use std::fmt;
+use std::thread::LocalKey;
 
 use kurbo::{Point, Rect, Size, Vec2};
+
+use crate::overlay::OverlayKey;
 
 /// Which physical (or synthetic) button a pointer event carries.
 ///
@@ -205,6 +208,26 @@ pub enum NamedKey {
     Escape,
     /// Tab — focus traversal or literal tab (widget's choice).
     Tab,
+    /// The dedicated hardware **Copy** key (winit's `NamedKey::Copy`), present on
+    /// full-size and multimedia keyboards. Semantically identical to the
+    /// platform copy chord, but it arrives as a key rather than as a modifier
+    /// combination, so a shell maps it straight onto
+    /// [`EditCommand::Copy`] instead of asking a widget to decode a chord.
+    Copy,
+    /// The dedicated hardware **Cut** key (winit's `NamedKey::Cut`) — the
+    /// [`Copy`](NamedKey::Copy) note applies verbatim, mapping onto
+    /// [`EditCommand::Cut`].
+    Cut,
+    /// The dedicated hardware **Paste** key (winit's `NamedKey::Paste`) — the
+    /// [`Copy`](NamedKey::Copy) note applies verbatim. A shell answers it the way
+    /// it answers any paste: by reading the host clipboard and dispatching
+    /// [`EditCommand::Paste`] with the text.
+    Paste,
+    /// **Insert** — carried for the legacy clipboard chords rather than for an
+    /// overtype mode: `Shift+Insert` is paste and `Ctrl+Insert` is copy on
+    /// Windows, Linux, and most X11 terminals, which is the only reason this key
+    /// is enumerated here (nothing in this workspace toggles overtype).
+    Insert,
 }
 
 /// A logical key press: either a semantic [`NamedKey`] or a run of typed text.
@@ -245,6 +268,76 @@ pub struct KeyEvent {
     pub modifiers: Modifiers,
     /// Whether this is an auto-repeat (key held down), not a fresh press.
     pub repeat: bool,
+}
+
+/// A semantic clipboard / selection command delivered to the focused editable.
+///
+/// The **decoded** form of a platform gesture, not the gesture itself: a shell
+/// resolves `Cmd+C` / `Ctrl+C` / [`NamedKey::Copy`] / `Ctrl+Insert` / an Android
+/// `ACTION_PROCESS_TEXT` / an iOS edit-menu tap into one of these variants and
+/// dispatches it as [`InputEvent::EditCommand`], so no widget has to know which
+/// chord means copy on which OS. Every widget sees the same four verbs.
+///
+/// # Why paste carries its text and copy does not
+///
+/// The clipboard itself lives in the shell (only the shell has a host clipboard
+/// to talk to), and the two directions are deliberately asymmetric:
+///
+/// * [`Copy`](EditCommand::Copy) / [`Cut`](EditCommand::Cut) carry nothing —
+///   the widget owns the selection, so it answers by writing its own text into
+///   the pass's clipboard slot ([`EventCtx::write_clipboard`]), which the shell
+///   drains and hands to the host.
+/// * [`Paste`](EditCommand::Paste) carries the text — the *shell* owns the
+///   host clipboard, so by the time the command reaches the tree the read has
+///   already happened. A widget that wants a paste it did not receive asks for
+///   one ([`EventCtx::request_paste`]) and the shell answers with this variant.
+///
+/// # Refusal is the widget's call
+///
+/// Nothing here is a permission: a read-only or secret field is free to ignore
+/// a [`Copy`](EditCommand::Copy)/[`Cut`](EditCommand::Cut) it does not want to
+/// honour, and a widget with no selection simply reports
+/// [`EventResult::Ignored`]. The vocabulary states what was *asked for*.
+///
+/// Exhaustive on purpose (no `#[non_exhaustive]`): these four verbs are the
+/// whole clipboard contract, and a widget matching on them should be told by
+/// the compiler if that ever stops being true.
+#[derive(Clone, PartialEq, Eq)]
+pub enum EditCommand {
+    /// Copy the current selection to the host clipboard, leaving the document
+    /// unchanged. A widget answers by calling [`EventCtx::write_clipboard`].
+    Copy,
+    /// Copy the current selection and delete it. A widget answers by calling
+    /// [`EventCtx::write_clipboard`] *and* mutating its own text — the shell
+    /// sees one clipboard write either way (see that method's last-writer rule).
+    Cut,
+    /// Replace the current selection with this text (insert it at the caret when
+    /// there is no selection). Already read from the host clipboard by the shell.
+    Paste(String),
+    /// Select the widget's entire content — the selection half of this
+    /// vocabulary, carried here because it arrives through the same platform
+    /// chords and edit menus as the other three.
+    SelectAll,
+}
+
+impl fmt::Debug for EditCommand {
+    /// Hand-written so pasted text never reaches a log.
+    ///
+    /// [`ImeState`]'s reason, one step earlier in the pipeline (see its `Debug`):
+    /// a paste payload is arbitrary host-clipboard content — a password manager's
+    /// fill, a copied token, a recovery phrase — and unlike an IME surface there
+    /// is no content-type hint to key the decision off, because the *clipboard*
+    /// has no owner to state one. So the payload is unconditionally replaced by
+    /// `<redacted>` (no length, which would itself leak), and the variant name
+    /// still prints so a trace stays readable.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EditCommand::Copy => f.write_str("Copy"),
+            EditCommand::Cut => f.write_str("Cut"),
+            EditCommand::Paste(_) => f.debug_tuple("Paste").field(&"<redacted>").finish(),
+            EditCommand::SelectAll => f.write_str("SelectAll"),
+        }
+    }
 }
 
 /// The full editing state of a text field, the one struct every IME bridge syncs.
@@ -318,14 +411,61 @@ pub enum ImeEvent {
     Disabled,
 }
 
+/// What an [`InputEvent::Overlay`] carries into a floated surface.
+///
+/// The key names the surface's owner (see [`OverlayKey`]); the kind is the input
+/// itself, always in **absolute window space** rather than in anyone's local
+/// space — see [`OverlayEventKind`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlayEvent {
+    /// The owner whose registered surface the root hit. Every other widget in
+    /// the tree sees this broadcast and must ignore it.
+    pub key: OverlayKey,
+    /// What happened.
+    pub kind: OverlayEventKind,
+}
+
+/// The input an [`OverlayEvent`] delivers.
+///
+/// # Window space, not local space
+///
+/// Every position here is absolute logical window space, deliberately: the
+/// broadcast reaches the owner by travelling the *main* tree, so the translation
+/// chain it passes through on the way (`ChildPod::event_child` subtracting each
+/// container's origin) describes the owner's position, not the floated pod's.
+/// Translating the payload would therefore corrupt it. The owner instead
+/// subtracts its own registered
+/// [`window_rect`](crate::overlay::OverlayEntry::window_rect) origin before
+/// forwarding into the pod, which is the only offset that means anything — which
+/// is also why [`InputEvent::translated`] returns an overlay event unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverlayEventKind {
+    /// A pointer event inside the surface's rect, positioned in window space.
+    Pointer(PointerEvent),
+    /// A scroll inside the surface's rect, positioned in window space.
+    Scroll {
+        /// Where the scroll occurred, in absolute window space.
+        position: Point,
+        /// How much to scroll.
+        delta: ScrollDelta,
+    },
+    /// A primary press landed outside **every** registered surface — the
+    /// light-dismiss notification, delivered only to entries registered
+    /// [`OutsideTap::Notify`](crate::overlay::OutsideTap::Notify). It carries no
+    /// position: where the press landed is the main tree's business, and an
+    /// owner that wants it can register `consume: false` and watch the press
+    /// arrive there normally.
+    OutsideDown,
+}
+
 /// An input event delivered to the widget tree.
 ///
-/// Pointer gestures and scroll are **hit-tested** (routed by position); keyboard
-/// and IME events are **focus-routed** — delivered straight down the recorded
-/// focus chain with no hit test and no meaningful position (see
+/// Pointer gestures and scroll are **hit-tested** (routed by position); keyboard,
+/// IME, and edit-command events are **focus-routed** — delivered straight down
+/// the recorded focus chain with no hit test and no meaningful position (see
 /// [`crate::widget::ChildPod`]'s focus bookkeeping and `frust-widgets`'
-/// `route_event`). [`InputEvent::Housekeeping`] is neither: it is a **broadcast**
-/// that reaches every child unconditionally.
+/// `route_event`). [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`] are
+/// neither: they are **broadcasts** that reach every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A pointer (mouse/touch/pen) gesture event.
@@ -341,6 +481,17 @@ pub enum InputEvent {
     Key(KeyEvent),
     /// An IME event, routed down the focus path (no hit test).
     Ime(ImeEvent),
+    /// A decoded clipboard / selection command, routed down the focus path (no
+    /// hit test) exactly like [`Key`](InputEvent::Key) and [`Ime`](InputEvent::Ime).
+    ///
+    /// Focus-routed rather than hit-tested because a clipboard verb is *about
+    /// the selection*, and the selection lives wherever focus is — a `Cmd+V`
+    /// carries no pointer position, and an edit-menu tap's position is the
+    /// menu's, not the field's. Focus routing is also what makes a paste with
+    /// nothing focused a harmless no-op: the event reaches no widget and is
+    /// dropped, so a shell may answer a stale paste request unconditionally
+    /// (see [`EventCtx::request_paste`]).
+    EditCommand(EditCommand),
     /// **Not user input**: a state-bearing housekeeping pass, broadcast to the
     /// whole tree so a widget that queued a callback needing `&mut State` during
     /// a state-free `BuildCtx` pass can run it.
@@ -376,21 +527,62 @@ pub enum InputEvent {
     /// codebase ([`crate::widget::TickClass`]), and this variant has nothing to
     /// do with the frame gate.
     Housekeeping,
+    /// **Not user input either**: one floated overlay surface's own input,
+    /// broadcast to the whole tree so it reaches the owner that registered the
+    /// surface, wherever in the tree that owner sits.
+    ///
+    /// # Why a broadcast
+    ///
+    /// The owner of a floated surface is an ordinary widget somewhere in the
+    /// tree, and the pointer that hit its surface is nowhere near its own bounds
+    /// — that is the entire point of floating. Hit-testing the event would
+    /// therefore deliver it to whatever the main tree has under the pointer, and
+    /// focus-routing it would deliver it to a text field that has nothing to do
+    /// with the surface. Broadcasting is the only route that reaches the owner
+    /// without knowing where it is, so this is the **second** broadcast variant
+    /// (see [`InputEvent::is_broadcast`]), and every routing helper's existing
+    /// broadcast-first branch already forwards it correctly with no change.
+    ///
+    /// # Routing contract
+    ///
+    /// **Only the owner whose [`OverlayKey`] matches acts on it; every other
+    /// widget ignores it.** A container forwards it to every child
+    /// unconditionally — no hit test, no capture fast path, no focus gate — and
+    /// reports [`EventResult::Ignored`] regardless, exactly like
+    /// [`Housekeeping`](InputEvent::Housekeeping). A widget that is not an
+    /// overlay owner, or whose key differs, must fall through: the key
+    /// comparison is the whole addressing mechanism.
+    ///
+    /// At the root it is inert in the ways a broadcast must be — it advances no
+    /// hover epoch and never blurs — but, unlike `Housekeeping`, it *is* a real
+    /// user gesture underneath, so a focus request or a pointer capture bubbled
+    /// from inside the surface is honoured (see
+    /// [`crate::app::RenderRoot::event`]).
+    Overlay(OverlayEvent),
 }
 
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
-    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]) and the
-    /// [`Housekeeping`](InputEvent::Housekeeping) broadcast have no spatial
-    /// position — they are delivered down the focus chain, or to every child, not
-    /// hit-tested — so this reports [`Point::ZERO`] for them; callers must never
-    /// hit-test on it (routing helpers early-return both classes).
+    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
+    /// [`InputEvent::EditCommand`]) and the two broadcasts
+    /// ([`Housekeeping`](InputEvent::Housekeeping) and
+    /// [`Overlay`](InputEvent::Overlay)) have no spatial position — they are
+    /// delivered down the focus chain, or to every child, not hit-tested — so
+    /// this reports [`Point::ZERO`] for them; callers must never hit-test on it
+    /// (routing helpers early-return both classes). An overlay event's *payload*
+    /// does carry a position, but in window space rather than in the receiver's
+    /// local space, which is precisely why it is not reported here (see
+    /// [`OverlayEventKind`]).
     pub fn position(&self) -> Point {
         match self {
             InputEvent::Pointer(p) => p.position,
             InputEvent::Scroll { position, .. } => *position,
-            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::Housekeeping => Point::ZERO,
+            InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_)
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => Point::ZERO,
         }
     }
 
@@ -399,9 +591,15 @@ impl InputEvent {
     /// Containers use this (with `offset = -child_origin`) to translate an event
     /// from their own coordinate space into a child's local space before
     /// forwarding it — see [`crate::widget::ChildPod::event_child`]. Focus-routed
-    /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]) and the
+    /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
+    /// [`InputEvent::EditCommand`]) and the
     /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
-    /// they are returned unchanged (cloned).
+    /// they are returned unchanged (cloned). An
+    /// [`Overlay`](InputEvent::Overlay) event is returned unchanged for the
+    /// opposite reason — its payload carries a **window-space** position that the
+    /// container chain between the root and the owner must not shift, since that
+    /// chain describes where the *owner* sits and not where the floated surface
+    /// does (see [`OverlayEventKind`]).
     pub fn translated(&self, offset: Vec2) -> InputEvent {
         match self {
             InputEvent::Pointer(p) => InputEvent::Pointer(PointerEvent {
@@ -412,7 +610,11 @@ impl InputEvent {
                 position: *position + offset,
                 delta: *delta,
             },
-            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::Housekeeping => self.clone(),
+            InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_)
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => self.clone(),
         }
     }
 
@@ -423,20 +625,26 @@ impl InputEvent {
     /// reaches every child, focused or not; see
     /// [`is_broadcast`](InputEvent::is_broadcast).
     pub fn is_focus_routed(&self) -> bool {
-        matches!(self, InputEvent::Key(_) | InputEvent::Ime(_))
+        matches!(
+            self,
+            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_)
+        )
     }
 
     /// Whether this event is a broadcast: forwarded to **every** child
     /// unconditionally, with no hit test, no capture fast-path, and no focus
-    /// routing — today exactly [`InputEvent::Housekeeping`].
+    /// routing — [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`].
     ///
     /// Every routing helper branches on this **first**, before its capture,
     /// focus, and hit-test branches (`frust-widgets`'
     /// `route_event`/`route_event_single`, and this crate's own
     /// [`crate::component`] mirror), so a broadcast can never be swallowed by a
-    /// captured child or a `contains()` miss.
+    /// captured child or a `contains()` miss. That existing branch is exactly
+    /// what carries an overlay event to its owner with no router change: the two
+    /// variants differ in what they *mean* (a deferred callback flush vs one
+    /// floated surface's own input), not in how they travel.
     pub fn is_broadcast(&self) -> bool {
-        matches!(self, InputEvent::Housekeeping)
+        matches!(self, InputEvent::Housekeeping | InputEvent::Overlay(_))
     }
 }
 
@@ -708,9 +916,9 @@ pub(crate) fn live_hover_link_is(root: u64, epoch: u64) -> bool {
 }
 
 thread_local! {
-    /// The cursor a widget asked for during the event pass currently running on
+    /// The cursor a widget asked for during the request pass currently running on
     /// this thread — written by [`EventCtx::set_cursor`], bracketed by the
-    /// [`CursorPass`] guard [`crate::app::RenderRoot::event`] holds for the
+    /// [`RequestPass`] guard [`crate::app::RenderRoot::event`] holds for the
     /// length of its dispatch.
     ///
     /// A side channel for a *routing* reason rather than the missing-handle
@@ -728,7 +936,7 @@ thread_local! {
     /// next pass's clear rather than leaking into it. Last write wins, which is
     /// what makes the innermost widget the routed path reaches the one that
     /// decides. A *nested* pass is scoped the same way and hands the slot back
-    /// (see [`CursorPass`]).
+    /// (see [`RequestPass`]).
     ///
     /// Thread-local rather than a process-global for the same UI-thread-affinity
     /// reason as its two neighbours: the tree that requests a cursor and the
@@ -736,28 +944,223 @@ thread_local! {
     /// let a hover on one thread reshape another window's pointer.
     static CURSOR_REQUEST: Cell<Option<CursorIcon>> = const { Cell::new(None) };
 
-    /// Whether a cursor pass is open on this thread — `false` at rest, `true` for
-    /// the length of one, however many are nested. Owned by [`CursorPass`], which
-    /// is the only thing that reads or writes it: [`CursorPass::enter`] captures
+    /// The text a widget asked the shell to put on the host clipboard during the
+    /// request pass currently running on this thread — written by
+    /// [`EventCtx::write_clipboard`], bracketed by the same [`RequestPass`] guard,
+    /// and resolved by [`crate::app::RenderRoot::event`] into the value a shell
+    /// drains through
+    /// [`RenderRoot::take_clipboard_write`](crate::app::RenderRoot::take_clipboard_write).
+    ///
+    /// **A slot rather than a bubbled field, for [`CURSOR_REQUEST`]'s routing
+    /// reason verbatim** (above): the root wants one value — whichever widget on
+    /// the routed path spoke last — and no container between the copying widget
+    /// and the root reads it or acts on it, so recording it per pod would widen
+    /// every container's fold ([`EventCtx::absorb_child`], and with it
+    /// [`crate::widget::ChildPod::event_child`] and every hand-written router in
+    /// `frust-widgets`) to carry a payload no container uses. `ImeState` is
+    /// bubbled precisely because containers *do* re-publish it; a clipboard write
+    /// is a one-way message to the shell.
+    ///
+    /// **Pass-scoped and last-writer-wins**, exactly like the cursor: a write
+    /// made outside any pass (a reconciler's synthesized `Cancel`) is dropped
+    /// rather than leaked into the next pass, and a `Cut` that writes from an
+    /// inner widget after its container wrote something else sends the inner
+    /// widget's text.
+    ///
+    /// Thread-local for its neighbours' UI-thread-affinity reason: the tree that
+    /// copies and the `RenderRoot` whose shell owns the host clipboard live on
+    /// one thread.
+    static CLIPBOARD_WRITE: Cell<Option<String>> = const { Cell::new(None) };
+
+    /// Whether a widget asked the shell to hand it the host clipboard's contents
+    /// during the request pass currently running on this thread — raised by
+    /// [`EventCtx::request_paste`], bracketed by the same [`RequestPass`] guard,
+    /// and resolved by [`crate::app::RenderRoot::event`] into the flag a shell
+    /// drains through
+    /// [`RenderRoot::take_paste_request`](crate::app::RenderRoot::take_paste_request).
+    ///
+    /// **Data-free and idempotent**, like [`PENDING_RESULT_FLUSH`]: only the
+    /// *fact* that a paste was asked for rides here, because the answer is the
+    /// shell's to compose (it reads the host clipboard and dispatches
+    /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`]`)`). Two widgets
+    /// asking in one pass owe exactly one read — there is one host clipboard and
+    /// one focused widget to deliver it to, so "who asked" adds nothing.
+    ///
+    /// Pass-scoped and thread-local for [`CLIPBOARD_WRITE`]'s reasons.
+    static PASTE_REQUEST: Cell<bool> = const { Cell::new(false) };
+
+    /// Edit commands one widget dispatched to another during the request pass
+    /// currently running on this thread — pushed by
+    /// [`EventCtx::dispatch_edit_command`] and drained, in order, by
+    /// [`EventCtx::take_edit_commands`].
+    ///
+    /// **A widget-to-widget channel, not a shell-facing one**, which is what
+    /// makes it different from its three neighbours above: the cursor, the
+    /// clipboard write and the paste request all resolve *at the root* into
+    /// something a shell reads, whereas this queue is drained by another widget
+    /// in the same pass and the root never looks at it. It rides here anyway
+    /// because the two widgets cannot reach each other any other way — a
+    /// selection toolbar floated through [`crate::overlay`] is a pod the *text
+    /// input* owns but does not contain, so the toolbar's "Copy" tap has no
+    /// container path down which to hand the verb back.
+    ///
+    /// **A FIFO, not a last-writer-wins slot**: a toolbar may answer one tap with
+    /// several verbs (a "cut" that is a copy then a delete), and order is
+    /// meaning.
+    ///
+    /// Pass-scoped like its neighbours, and for a sharper reason: an undrained
+    /// command must never re-fire in a later pass — a stale `Cut` applied to
+    /// whatever is selected two gestures later would silently destroy text. A
+    /// pass that ends with the queue non-empty therefore clears it (and says so
+    /// in a debug build — see [`RequestPass::take`]) rather than carrying it.
+    ///
+    /// Thread-local for its neighbours' UI-thread-affinity reason.
+    static EDIT_COMMAND_QUEUE: Cell<Vec<EditCommand>> = const { Cell::new(Vec::new()) };
+
+    /// Whether a request pass is open on this thread — `false` at rest, `true` for
+    /// the length of one, however many are nested. Owned by [`RequestPass`], which
+    /// is the only thing that reads or writes it: [`RequestPass::enter`] captures
     /// the previous value into the guard and `Drop` puts exactly that value back,
     /// so an unwind through a nested pass restores the enclosing pass's state
     /// rather than leaving a counter to unwind correctly on its own.
     ///
-    /// The one question it answers is whether [`CursorPass::enter`] found an
-    /// *enclosing* pass's in-progress request in the slot (restore it on exit) or
-    /// a stray request made outside any pass (drop it), which the slot's own
-    /// contents cannot distinguish.
-    static CURSOR_PASS_OPEN: Cell<bool> = const { Cell::new(false) };
+    /// The one question it answers is whether [`RequestPass::enter`] found an
+    /// *enclosing* pass's in-progress requests in the slots (restore them on exit)
+    /// or stray requests made outside any pass (drop them), which the slots' own
+    /// contents cannot distinguish. One flag covers all three slots because one
+    /// guard brackets all three: they open and close together, per dispatch.
+    static REQUEST_PASS_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The open/close bracket around one cursor pass, and the guard that makes the
-/// pass-scoped slot above survive re-entrancy.
+/// One pass-scoped request slot's save/restore half — the mechanism [`RequestPass`]
+/// owns three of.
+///
+/// Generic over the slot's payload rather than written out per channel: the
+/// cursor, the clipboard write, and the paste flag differ only in what they
+/// carry, and three hand-copied guards would be three places for the
+/// stash-and-restore invariant to drift. `T::default()` is each slot's "nobody
+/// asked" state (`None`, `None`, `false`), which is exactly what makes absence
+/// the answer rather than a missing answer.
+pub(crate) struct PassSlot<T: Default + 'static> {
+    /// The thread-local this half brackets. A `&'static` handle so one generic
+    /// body serves every channel — [`LocalKey::with`] needs the `'static`
+    /// reference anyway.
+    slot: &'static LocalKey<Cell<T>>,
+    /// What the slot is restored to when this pass ends: the enclosing pass's
+    /// in-progress request when nested, `T::default()` at the outermost level.
+    restore: T,
+}
+
+impl<T: Default + 'static> PassSlot<T> {
+    /// Open this slot for a pass, starting it from "nobody has asked for
+    /// anything" and stashing whatever an enclosing pass had collected.
+    ///
+    /// `nested` is the shared [`REQUEST_PASS_OPEN`] answer: only an enclosing
+    /// pass is owed its value back, since a value found in the slot with no pass
+    /// open is a stray (see [`CURSOR_REQUEST`]).
+    pub(crate) fn enter(slot: &'static LocalKey<Cell<T>>, nested: bool) -> Self {
+        let stashed = slot.with(|cell| cell.take());
+        Self {
+            slot,
+            restore: if nested { stashed } else { T::default() },
+        }
+    }
+
+    /// Take what *this* pass recorded in this slot, leaving it empty.
+    pub(crate) fn take(&self) -> T {
+        self.slot.with(|cell| cell.take())
+    }
+}
+
+impl<T: Default + 'static> Drop for PassSlot<T> {
+    fn drop(&mut self) {
+        let restore = std::mem::take(&mut self.restore);
+        self.slot.with(|cell| cell.set(restore));
+    }
+}
+
+/// A pass-scoped slot **carrying its own open flag** — [`PassSlot`] made
+/// self-contained, for a channel bracketed by a *different* pass than the event
+/// dispatch.
+///
+/// [`RequestPass`] brackets three channels that open and close together, so one
+/// [`REQUEST_PASS_OPEN`] flag serves all three. A channel scoped to the **paint**
+/// pass instead (the overlay registry and the selection-toolbar publish slot —
+/// see [`crate::overlay`] and [`crate::selection_toolbar`]) cannot share that
+/// flag: a paint pass runs with no event pass open, and an event pass with no
+/// paint pass open, so borrowing the other's flag would answer "is an enclosing
+/// pass of MY kind open?" with another kind's state and either restore a stray
+/// or drop an enclosing pass's work. One flag per bracket is what keeps the
+/// question well-posed.
+///
+/// Everything else is [`PassSlot`]'s, verbatim: enter stashes, [`take`](Self::take)
+/// drains what this pass alone recorded, and `Drop` puts the enclosing pass's
+/// stash back (or leaves the slot clear at the outermost level, so a value
+/// written with no pass open is dropped rather than leaked into the next one).
+///
+/// Unlike [`RequestPass::take`] this drains behind `&self` rather than consuming
+/// the guard: a paint pass resolves its channels *and then* keeps painting
+/// (`RenderRoot::paint` drains the registry, then paints what it drained), so the
+/// bracket has to outlive its own drain.
+pub(crate) struct PassBracket<T: Default + 'static> {
+    /// The value half, which owns the stash/restore invariant.
+    slot: PassSlot<T>,
+    /// This bracket's own "a pass is open" flag.
+    open: &'static LocalKey<Cell<bool>>,
+    /// Whether a pass of this kind was already open when this one entered — put
+    /// back verbatim by `Drop`.
+    was_open: bool,
+}
+
+impl<T: Default + 'static> PassBracket<T> {
+    /// Open a pass over `slot`, tracked by `open`, starting from
+    /// `T::default()` ("nobody has recorded anything").
+    pub(crate) fn enter(
+        slot: &'static LocalKey<Cell<T>>,
+        open: &'static LocalKey<Cell<bool>>,
+    ) -> Self {
+        let was_open = open.with(|flag| flag.replace(true));
+        Self {
+            slot: PassSlot::enter(slot, was_open),
+            open,
+            was_open,
+        }
+    }
+
+    /// Take what *this* pass recorded, leaving the slot empty.
+    pub(crate) fn take(&self) -> T {
+        self.slot.take()
+    }
+}
+
+impl<T: Default + 'static> Drop for PassBracket<T> {
+    fn drop(&mut self) {
+        // The inner `PassSlot` restores the value as it drops, right after this.
+        self.open.with(|flag| flag.set(self.was_open));
+    }
+}
+
+/// Everything one request pass resolved: the three shell-facing values a
+/// dispatch can produce, drained together by [`RequestPass::take`].
+pub(crate) struct PassRequests {
+    /// The cursor the pass's last [`EventCtx::set_cursor`] asked for; `None` when
+    /// no widget asked, which resolves to [`CursorIcon::Default`].
+    pub(crate) cursor: Option<CursorIcon>,
+    /// The text the pass's last [`EventCtx::write_clipboard`] asked the shell to
+    /// put on the host clipboard; `None` when no widget copied.
+    pub(crate) clipboard_write: Option<String>,
+    /// Whether any widget in the pass called [`EventCtx::request_paste`].
+    pub(crate) paste_request: bool,
+}
+
+/// The open/close bracket around one request pass, and the guard that makes the
+/// pass-scoped slots above survive re-entrancy.
 ///
 /// # Why a guard rather than a bare clear/take pair
 ///
-/// The slot is *pass-scoped*: cleared before a dispatch, drained after it, so a
+/// Each slot is *pass-scoped*: cleared before a dispatch, drained after it, so a
 /// request never outlives the pass that made it. Spelled as a bare
-/// [`clear_cursor_request`] + [`take_cursor_request`] pair that contract holds
+/// `clear_cursor_request` + `take_cursor_request` pair that contract holds
 /// only while passes never nest — a nested dispatch's clear would erase a request
 /// the enclosing pass had already collected, and its drain would take one the
 /// enclosing pass was still owed. Nothing in this workspace nests a pass today
@@ -766,64 +1169,102 @@ thread_local! {
 /// rather than calling into a live dispatch), but the failure is silent and the
 /// cost of ruling it out is one stack slot.
 ///
+/// # One guard, three channels
+///
+/// The cursor, the clipboard write and the paste request are all "one value the
+/// root resolves at the end of the dispatch", so they share a bracket and a
+/// single [`REQUEST_PASS_OPEN`] flag rather than three copies of this reasoning;
+/// the per-slot half is [`PassSlot`], instantiated once per channel. What differs
+/// is only what the root *does* with each value — see
+/// [`RenderRoot::event`](crate::app::RenderRoot::event), where the cursor commits
+/// on pointer-move passes alone while the two clipboard values commit on every
+/// pass.
+///
 /// # What nesting resolves to
 ///
 /// Save-and-restore, so **every** pass — nested or not — resolves exactly the
-/// requests made inside it, and an inner pass returns the slot to the enclosing
+/// requests made inside it, and an inner pass returns the slots to the enclosing
 /// pass untouched:
 ///
-/// * [`CursorPass::enter`] stashes whatever the enclosing pass had collected and
+/// * [`RequestPass::enter`] stashes whatever the enclosing pass had collected and
 ///   starts the inner pass from empty (the same "absence *is* the answer" state a
 ///   top-level pass starts from).
-/// * [`CursorPass::take`] drains what this pass alone recorded, and **consumes
+/// * [`RequestPass::take`] drains what this pass alone recorded, and **consumes
 ///   the guard**: a pass resolves exactly once, and the drain is what closes it.
 /// * `Drop` puts the enclosing pass's stash back — or, at the outermost level,
-///   leaves the slot clear, exactly as the bare pair did, so a request made
+///   leaves the slots clear, exactly as the bare pair did, so a request made
 ///   outside any pass (a reconciler's synthesized `Cancel`) is still dropped
 ///   rather than leaked into the next one.
-pub(crate) struct CursorPass {
-    /// What the slot is restored to when this pass ends: the enclosing pass's
-    /// in-progress request when nested, `None` at the outermost level.
-    restore: Option<CursorIcon>,
+pub(crate) struct RequestPass {
+    /// The cursor half of the bracket.
+    cursor: PassSlot<Option<CursorIcon>>,
+    /// The clipboard-write half.
+    clipboard_write: PassSlot<Option<String>>,
+    /// The paste-request half.
+    paste_request: PassSlot<bool>,
+    /// The widget-to-widget edit-command queue. Bracketed here rather than
+    /// resolved into [`PassRequests`]: the root must never see it (its consumer
+    /// is another widget in the same pass), so this half exists only to bound the
+    /// queue's lifetime to the pass — see [`EDIT_COMMAND_QUEUE`].
+    edit_commands: PassSlot<Vec<EditCommand>>,
     /// Whether a pass was already open when this one entered — put back verbatim
     /// by `Drop`, so an inner pass leaves the enclosing one open and the
     /// outermost leaves the thread at rest.
     was_open: bool,
 }
 
-impl CursorPass {
-    /// Open a cursor pass, starting it from "nobody has asked for anything".
+impl RequestPass {
+    /// Open a request pass, starting every slot from "nobody has asked for
+    /// anything".
     pub(crate) fn enter() -> Self {
-        let was_open = CURSOR_PASS_OPEN.with(|open| open.replace(true));
-        let stashed = CURSOR_REQUEST.with(|slot| slot.replace(None));
+        let was_open = REQUEST_PASS_OPEN.with(|open| open.replace(true));
         Self {
-            // Only an enclosing pass is owed its request back; a value found in
-            // the slot with no pass open is a stray (see `CURSOR_REQUEST`).
-            restore: if was_open { stashed } else { None },
+            cursor: PassSlot::enter(&CURSOR_REQUEST, was_open),
+            clipboard_write: PassSlot::enter(&CLIPBOARD_WRITE, was_open),
+            paste_request: PassSlot::enter(&PASTE_REQUEST, was_open),
+            edit_commands: PassSlot::enter(&EDIT_COMMAND_QUEUE, was_open),
             was_open,
         }
     }
 
-    /// Take what *this* pass recorded — the value the root resolves into its
-    /// shell-facing cursor. `None` when no widget asked, which resolves to
-    /// [`CursorIcon::Default`].
+    /// Take what *this* pass recorded — the values the root resolves into its
+    /// shell-facing cursor, clipboard write and paste request.
     ///
     /// Consumes the guard, so the pass ends here: a second drain of the same pass
-    /// is unrepresentable rather than a silent `None` (the slot is drained
-    /// destructively, so a repeat call would report "nobody asked" for a pass that
-    /// had already resolved).
-    pub(crate) fn take(self) -> Option<CursorIcon> {
-        take_cursor_request()
+    /// is unrepresentable rather than a silent set of empties (the slots are
+    /// drained destructively, so a repeat call would report "nobody asked" for a
+    /// pass that had already resolved).
+    pub(crate) fn take(self) -> PassRequests {
+        // The edit-command queue is drained here but NOT reported: anything left
+        // in it is a command whose intended consumer never called
+        // `EventCtx::take_edit_commands` — a wiring bug in the dispatching
+        // widget, not something the root can act on. Dropping it is the safe
+        // resolution (a command that survived into a later pass would apply to
+        // whatever is selected *then*), and a debug build says so rather than
+        // swallowing it silently.
+        let leaked = self.edit_commands.take();
+        #[cfg(debug_assertions)]
+        if !leaked.is_empty() {
+            eprintln!(
+                "frust-core: {} edit command(s) dispatched but never taken in this \
+                 pass ({leaked:?}); clearing — the dispatching widget's consumer \
+                 must call EventCtx::take_edit_commands in the same pass",
+                leaked.len()
+            );
+        }
+        drop(leaked);
+        PassRequests {
+            cursor: self.cursor.take(),
+            clipboard_write: self.clipboard_write.take(),
+            paste_request: self.paste_request.take(),
+        }
     }
 }
 
-impl Drop for CursorPass {
+impl Drop for RequestPass {
     fn drop(&mut self) {
-        CURSOR_PASS_OPEN.with(|open| open.set(self.was_open));
-        match self.restore.take() {
-            Some(icon) => CURSOR_REQUEST.with(|slot| slot.set(Some(icon))),
-            None => clear_cursor_request(),
-        }
+        // Each `PassSlot` restores its own slot as it drops, right after this.
+        REQUEST_PASS_OPEN.with(|open| open.set(self.was_open));
     }
 }
 
@@ -835,16 +1276,20 @@ impl Drop for CursorPass {
 /// model stateless: a widget that stops asking stops being obeyed, with nothing
 /// to release.
 ///
-/// A root brackets its pass with [`CursorPass`] instead of calling this directly;
-/// it is the outermost end of that bracket.
+/// **Test-only.** Production code brackets a pass with [`RequestPass`], which
+/// owns both ends; this is the bare clear a test that drives a widget *with no
+/// root above it* needs to start from a known slot (`component.rs`'s
+/// component-boundary cursor test is the one caller).
+#[cfg(test)]
 pub(crate) fn clear_cursor_request() {
     CURSOR_REQUEST.with(|slot| slot.set(None));
 }
 
 /// Take (and clear) the cursor requested during this pass, `None` when no widget
-/// asked. Reached through [`CursorPass::take`] from
-/// [`crate::app::RenderRoot::event`], which resolves it into the root's
-/// shell-facing cursor.
+/// asked — the drain half of the test-only pair (see
+/// [`clear_cursor_request`]); a root reaches the same value through
+/// [`RequestPass::take`].
+#[cfg(test)]
 pub(crate) fn take_cursor_request() -> Option<CursorIcon> {
     CURSOR_REQUEST.with(|slot| slot.take())
 }
@@ -1426,6 +1871,130 @@ impl<'a> EventCtx<'a> {
         CURSOR_REQUEST.with(|slot| slot.set(Some(icon)));
     }
 
+    /// Ask the shell to put `text` on the host clipboard.
+    ///
+    /// The answer to an [`InputEvent::EditCommand`]`(`[`EditCommand::Copy`]`)` or
+    /// [`EditCommand::Cut`]: the widget owns the selection, so it is the only
+    /// thing that can say what "copy" means, and the shell owns the host
+    /// clipboard, so it is the only thing that can perform the write. A widget
+    /// with nothing selected simply does not call this, and nothing is written.
+    ///
+    /// ```ignore
+    /// InputEvent::EditCommand(EditCommand::Cut) => {
+    ///     if let Some(sel) = self.selected_text() {
+    ///         ctx.write_clipboard(sel);
+    ///         self.delete_selection();
+    ///         ctx.request_redraw();
+    ///     }
+    ///     EventResult::Handled
+    /// }
+    /// ```
+    ///
+    /// # Pass-scoped, last writer wins
+    ///
+    /// The request rides the same kind of per-pass slot as
+    /// [`set_cursor`](EventCtx::set_cursor) (`CLIPBOARD_WRITE`, bracketed by the
+    /// same [`RequestPass`] guard), so exactly one write is resolved per dispatch
+    /// and the pass's last caller is it — which, since a container routes to its
+    /// child from the middle of its own handler, normally makes the innermost
+    /// widget the route reaches the one that speaks. Nothing accumulates between
+    /// passes and there is nothing to clear: a widget that stops copying stops
+    /// writing.
+    ///
+    /// The root resolves the slot at the end of **every** pass (not just a
+    /// clipboard one — a copy can be answered from a key chord a widget decoded
+    /// itself), and a shell drains it with
+    /// [`RenderRoot::take_clipboard_write`](crate::app::RenderRoot::take_clipboard_write)
+    /// immediately after the dispatch, beside
+    /// [`cursor()`](crate::app::RenderRoot::cursor) and
+    /// [`ime_state()`](crate::app::RenderRoot::ime_state).
+    ///
+    /// # It does not request a redraw
+    ///
+    /// [`set_cursor`](EventCtx::set_cursor)'s reason: copying paints nothing. A
+    /// `Cut` that mutates the document asks for its own redraw, for the mutation.
+    ///
+    /// Takes `&mut self` like every other request on this context even though the
+    /// pass's slot is not a field of it: asking is something a widget does
+    /// *through its context*, and keeping the signature honest about that leaves
+    /// the storage free to move.
+    pub fn write_clipboard(&mut self, text: String) {
+        CLIPBOARD_WRITE.with(|slot| slot.set(Some(text)));
+    }
+
+    /// Ask the shell to read the host clipboard and deliver it back as an
+    /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`]`)`.
+    ///
+    /// The inverse of [`write_clipboard`](EventCtx::write_clipboard), and the
+    /// reason a paste arrives with its text already attached: only the shell can
+    /// touch the host clipboard, so a widget that wants a paste it was not given
+    /// — an in-widget context-menu item, a chord the widget decoded itself —
+    /// raises this flag and receives the text on a *later* dispatch rather than
+    /// inline.
+    ///
+    /// # Idempotent, pass-scoped, and answered out of band
+    ///
+    /// Data-free: two widgets asking in one pass owe exactly one clipboard read,
+    /// because there is one host clipboard and one focused widget to deliver it
+    /// to. The flag rides a per-pass slot bracketed by the same [`RequestPass`]
+    /// guard as the cursor, so an ask made outside any dispatch is dropped rather
+    /// than leaking into the next pass; the root resolves it at the end of every
+    /// pass and a shell drains it with
+    /// [`RenderRoot::take_paste_request`](crate::app::RenderRoot::take_paste_request).
+    ///
+    /// The answer is a **new dispatch**, never a return value: the shell's read
+    /// may be asynchronous (a permission prompt, a cross-process fetch), and by
+    /// the time it lands the pass that asked is long over. Focus routing makes
+    /// the late delivery safe — if focus moved or was released in between, the
+    /// synthesized [`EditCommand::Paste`] reaches no widget and is dropped, so a
+    /// shell may answer unconditionally without checking who asked.
+    ///
+    /// A `Cut` may write and ask in the same pass; the two slots are independent.
+    pub fn request_paste(&mut self) {
+        PASTE_REQUEST.with(|slot| slot.set(true));
+    }
+
+    /// Hand an [`EditCommand`] to whichever widget drains the queue later in
+    /// **this** pass — the widget-to-widget half of the clipboard story.
+    ///
+    /// # Why this is not just an `InputEvent::EditCommand`
+    ///
+    /// A selection toolbar and the text input it acts on are two different
+    /// widgets, and the toolbar is a pod its owner floats rather than contains
+    /// (see [`crate::overlay`]), so there is no container path from the toolbar's
+    /// "Copy" tap back down to the field. Re-entering
+    /// [`crate::app::RenderRoot::event`] with a focus-routed
+    /// [`InputEvent::EditCommand`] would be the other option, and is worse: a
+    /// dispatch may not re-enter the root (see that method's reentrancy
+    /// contract), and the toolbar's tap is *already* being routed as an overlay
+    /// broadcast when it decides. So the verb rides a pass-scoped FIFO the owner
+    /// drains the instant its forward returns, and applies to the field itself —
+    /// synchronously, inside the same dispatch.
+    ///
+    /// Order is preserved: commands drain in the order they were dispatched.
+    ///
+    /// A command nobody takes before the pass ends is **dropped** (with a
+    /// debug-build diagnostic) rather than carried into the next pass, where it
+    /// would apply to whatever happened to be selected by then.
+    pub fn dispatch_edit_command(&mut self, cmd: EditCommand) {
+        EDIT_COMMAND_QUEUE.with(|slot| {
+            let mut queue = slot.take();
+            queue.push(cmd);
+            slot.set(queue);
+        });
+    }
+
+    /// Drain everything [`EventCtx::dispatch_edit_command`] queued so far in this
+    /// pass, in dispatch order, leaving the queue empty.
+    ///
+    /// An overlay owner calls this immediately after forwarding an event into its
+    /// floated pod, and applies what comes back to itself. Draining the queue
+    /// (rather than peeking) is what keeps a verb from being applied twice when
+    /// two owners forward in the same pass.
+    pub fn take_edit_commands(&mut self) -> Vec<EditCommand> {
+        EDIT_COMMAND_QUEUE.with(|slot| slot.take())
+    }
+
     /// Publish this widget's IME surface (editing state + caret) for the shell.
     ///
     /// The value bubbles up the focus chain to [`crate::app::RenderRoot`], where
@@ -1997,14 +2566,14 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_cursor_pass_resolves_its_own_and_hands_the_slot_back() {
+    fn a_nested_request_pass_resolves_its_own_and_hands_the_slot_back() {
         // The reentrancy guard on the pass-scoped slot. `RenderRoot::event`
         // forbids re-entering itself, so this shape is not reachable today —
         // which is the point: the failure it would produce (an inner dispatch
         // silently eating the request the outer pass had already collected, or
         // draining one the outer pass was still owed) is invisible, so the
         // bracket enforces the scoping rather than the convention doing it.
-        let outer = CursorPass::enter();
+        let outer = RequestPass::enter();
         let mut count = 0u32;
         {
             let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
@@ -2013,17 +2582,17 @@ mod tests {
         // A nested pass starts from absence, like any other — and draining it
         // ends it, handing the enclosing pass's request straight back.
         assert_eq!(
-            CursorPass::enter().take(),
+            RequestPass::enter().take().cursor,
             None,
             "a nested pass starts from absence, like any other"
         );
         {
-            let inner = CursorPass::enter();
+            let inner = RequestPass::enter();
             let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
             ctx.set_cursor(CursorIcon::Text);
             drop(ctx);
             assert_eq!(
-                inner.take(),
+                inner.take().cursor,
                 Some(CursorIcon::Text),
                 "and resolves exactly what was asked inside it"
             );
@@ -2032,7 +2601,7 @@ mod tests {
         // cleared rather than restored, and a `set_cursor` made outside any pass
         // (a reconciler's synthesized `Cancel`) still cannot leak into the next.
         assert_eq!(
-            outer.take(),
+            outer.take().cursor,
             Some(CursorIcon::Grab),
             "the enclosing pass's request survived the nested one"
         );
@@ -2040,9 +2609,9 @@ mod tests {
             let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
             ctx.set_cursor(CursorIcon::NotAllowed);
         }
-        let next = CursorPass::enter();
+        let next = RequestPass::enter();
         assert_eq!(
-            next.take(),
+            next.take().cursor,
             None,
             "a request made between passes belongs to no pass"
         );
@@ -2053,5 +2622,281 @@ mod tests {
         // `Default::default()` is what an absent request resolves to at the root,
         // so the derive must land on the arrow and not on some named shape.
         assert_eq!(CursorIcon::default(), CursorIcon::Default);
+    }
+
+    #[test]
+    fn a_nested_request_pass_hands_the_clipboard_slots_back_too() {
+        // The cursor's reentrancy proof above, for the two channels sharing its
+        // bracket: one flag guards all three slots, so a nested pass must return
+        // an enclosing pass's *undrained copy* and *unanswered paste request*
+        // exactly as it returns its cursor.
+        let outer = RequestPass::enter();
+        let mut count = 0u32;
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.write_clipboard("outer".to_string());
+            ctx.request_paste();
+        }
+        {
+            let inner = RequestPass::enter();
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.write_clipboard("inner".to_string());
+            drop(ctx);
+            let resolved = inner.take();
+            assert_eq!(
+                resolved.clipboard_write.as_deref(),
+                Some("inner"),
+                "a nested pass resolves exactly what was written inside it"
+            );
+            assert!(
+                !resolved.paste_request,
+                "and starts from absence rather than inheriting the enclosing ask"
+            );
+        }
+        let resolved = outer.take();
+        assert_eq!(
+            resolved.clipboard_write.as_deref(),
+            Some("outer"),
+            "the enclosing pass's write survived the nested one"
+        );
+        assert!(resolved.paste_request, "and so did its paste request");
+
+        // Outside any pass now: a stray write belongs to nobody.
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.write_clipboard("stray".to_string());
+            ctx.request_paste();
+        }
+        let next = RequestPass::enter().take();
+        assert_eq!(next.clipboard_write, None);
+        assert!(!next.paste_request);
+    }
+
+    #[test]
+    fn the_last_clipboard_write_of_a_pass_wins() {
+        let pass = RequestPass::enter();
+        let mut count = 0u32;
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.write_clipboard("container".to_string());
+            ctx.write_clipboard("leaf".to_string());
+        }
+        assert_eq!(
+            pass.take().clipboard_write.as_deref(),
+            Some("leaf"),
+            "one write is resolved per pass, and the last caller is it"
+        );
+    }
+
+    #[test]
+    fn a_paste_request_is_idempotent_within_a_pass() {
+        let pass = RequestPass::enter();
+        let mut count = 0u32;
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.request_paste();
+            ctx.request_paste();
+        }
+        // Data-free: two asks owe one clipboard read, and the flag cannot
+        // represent anything else.
+        assert!(pass.take().paste_request);
+    }
+
+    #[test]
+    fn an_edit_command_is_focus_routed_with_zero_position() {
+        let copy = InputEvent::EditCommand(EditCommand::Copy);
+        assert!(copy.is_focus_routed(), "a clipboard verb follows the focus");
+        assert!(!copy.is_broadcast(), "and is not a broadcast");
+        assert_eq!(copy.position(), Point::ZERO);
+        assert_eq!(
+            copy.translated(Vec2::new(10.0, 20.0)),
+            copy,
+            "a positionless event is returned unchanged by a container's translate"
+        );
+    }
+
+    /// An overlay event standing in for one routed into a floated surface.
+    fn overlay(kind: OverlayEventKind) -> InputEvent {
+        InputEvent::Overlay(OverlayEvent {
+            key: OverlayKey::next(),
+            kind,
+        })
+    }
+
+    #[test]
+    fn overlay_is_a_broadcast_and_housekeeping_is_the_only_other_one() {
+        let routed = overlay(OverlayEventKind::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(120.0, 80.0),
+            button: PointerButton::Primary,
+        }));
+        assert!(
+            routed.is_broadcast(),
+            "an overlay event reaches its owner by broadcast, wherever the owner sits"
+        );
+        assert!(
+            !routed.is_focus_routed(),
+            "and not down the focus chain — the surface's owner need not be focused"
+        );
+        assert!(InputEvent::Housekeeping.is_broadcast());
+
+        // ...and nothing else is. Spelled as an exhaustive walk rather than three
+        // spot checks, so a variant added later has to state its own answer here.
+        for event in [
+            InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::ZERO,
+                button: PointerButton::Primary,
+            }),
+            InputEvent::Scroll {
+                position: Point::ZERO,
+                delta: ScrollDelta::Lines(0.0, 1.0),
+            },
+            InputEvent::Key(KeyEvent {
+                key: Key::Named(NamedKey::Enter),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }),
+            InputEvent::Ime(ImeEvent::Enabled),
+            InputEvent::EditCommand(EditCommand::Copy),
+        ] {
+            assert!(
+                !event.is_broadcast(),
+                "only Housekeeping and Overlay broadcast, but {event:?} claims to"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlay_event_carries_no_local_position_and_is_never_translated() {
+        let routed = overlay(OverlayEventKind::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(120.0, 80.0),
+            button: PointerButton::Primary,
+        }));
+        assert_eq!(
+            routed.position(),
+            Point::ZERO,
+            "a broadcast is never hit-tested, so it reports no position to hit-test on"
+        );
+        // The payload's own position is WINDOW space, and the container chain the
+        // broadcast travels describes where the *owner* sits — not where the
+        // floated surface does — so translating it would corrupt it.
+        assert_eq!(
+            routed.translated(Vec2::new(-10.0, -20.0)),
+            routed,
+            "the container chain must not shift a window-space payload"
+        );
+        let scrolled = overlay(OverlayEventKind::Scroll {
+            position: Point::new(120.0, 80.0),
+            delta: ScrollDelta::Pixels(0.0, 12.0),
+        });
+        assert_eq!(scrolled.translated(Vec2::new(5.0, 5.0)), scrolled);
+        let outside = overlay(OverlayEventKind::OutsideDown);
+        assert_eq!(outside.position(), Point::ZERO);
+        assert_eq!(outside.translated(Vec2::new(5.0, 5.0)), outside);
+    }
+
+    #[test]
+    fn edit_commands_drain_in_dispatch_order_within_one_pass() {
+        let pass = RequestPass::enter();
+        let mut count = 0u32;
+        let taken = {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            // The toolbar's "cut" answered as two verbs: order is meaning.
+            ctx.dispatch_edit_command(EditCommand::Copy);
+            ctx.dispatch_edit_command(EditCommand::SelectAll);
+            ctx.dispatch_edit_command(EditCommand::Cut);
+            ctx.take_edit_commands()
+        };
+        assert_eq!(
+            taken,
+            vec![EditCommand::Copy, EditCommand::SelectAll, EditCommand::Cut],
+            "a FIFO, not a last-writer-wins slot"
+        );
+
+        // The drain empties the queue, so a second owner forwarding in the same
+        // pass cannot re-apply the first owner's verbs.
+        let mut second = 0u32;
+        let mut ctx = EventCtx::new(&mut second, Point::ZERO, Size::ZERO);
+        assert!(ctx.take_edit_commands().is_empty());
+        drop(ctx);
+        drop(pass.take());
+    }
+
+    #[test]
+    fn a_leaked_edit_command_is_cleared_with_the_pass_and_never_reaches_the_next() {
+        {
+            let pass = RequestPass::enter();
+            let mut count = 0u32;
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            // Dispatched, and nobody drains it: a wiring bug in the dispatching
+            // widget. The pass resolving is what reports (debug builds) and clears
+            // it — a `Cut` surviving into a later pass would apply to whatever is
+            // selected by then, which is how text gets destroyed silently.
+            ctx.dispatch_edit_command(EditCommand::Cut);
+            drop(ctx);
+            drop(pass.take());
+        }
+
+        let next = RequestPass::enter();
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        assert!(
+            ctx.take_edit_commands().is_empty(),
+            "a leaked command must not survive into the next pass"
+        );
+        drop(ctx);
+        drop(next.take());
+    }
+
+    #[test]
+    fn a_nested_pass_hands_the_enclosing_passs_edit_commands_back() {
+        let outer = RequestPass::enter();
+        let mut count = 0u32;
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.dispatch_edit_command(EditCommand::Copy);
+        }
+        {
+            // A nested dispatch (the overlay pre-pass re-entering `RenderRoot::event`
+            // is the shipped case) starts from an empty queue and must not eat the
+            // enclosing pass's undrained command.
+            let inner = RequestPass::enter();
+            let mut inner_state = 0u32;
+            let mut ctx = EventCtx::new(&mut inner_state, Point::ZERO, Size::ZERO);
+            assert!(ctx.take_edit_commands().is_empty());
+            ctx.dispatch_edit_command(EditCommand::SelectAll);
+            assert_eq!(ctx.take_edit_commands(), vec![EditCommand::SelectAll]);
+            drop(ctx);
+            drop(inner.take());
+        }
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        assert_eq!(
+            ctx.take_edit_commands(),
+            vec![EditCommand::Copy],
+            "the enclosing pass's queue is handed back intact"
+        );
+        drop(ctx);
+        drop(outer.take());
+    }
+
+    #[test]
+    fn debug_redacts_a_pasted_payload() {
+        // The clipboard has no content-type hint to key a decision off (see the
+        // `Debug` impl), so the payload is redacted unconditionally.
+        let rendered = format!("{:?}", EditCommand::Paste("hunter2".to_string()));
+        assert!(
+            !rendered.contains("hunter2"),
+            "paste payload leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            rendered.contains("Paste"),
+            "the verb still prints: {rendered}"
+        );
+        // No length either — that leaks too.
+        assert!(!rendered.contains('7'));
+        assert_eq!(format!("{:?}", EditCommand::SelectAll), "SelectAll");
     }
 }

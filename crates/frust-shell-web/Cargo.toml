@@ -141,6 +141,18 @@ web-sys = { workspace = true, features = [
     "InputEvent",
     "KeyboardEvent",
     "KeyboardEventInit",
+    # The clipboard route, both halves. `ClipboardEvent` is what the overlay's
+    # `paste`/`copy`/`cut` listeners narrow their `Event` to, and `DataTransfer`
+    # is the payload hanging off it — `getData("text/plain")` for a paste,
+    # `setData` for the synchronous write a `copy`/`cut` callback must complete
+    # before it returns (Safari honours a clipboard write from nowhere else).
+    "ClipboardEvent",
+    "DataTransfer",
+    # The asynchronous half, for the two slots the tree fills with no DOM event
+    # behind them (a toolbar tap, an app-driven copy): `Navigator` is the
+    # `window.navigator` getter and `Clipboard` its `writeText`/`readText`.
+    "Clipboard",
+    "Navigator",
 ] }
 # stderr is a silent no-op in a browser: `console_log` routes the `log` facade
 # to `console.*` and `console_error_panic_hook` routes panics to

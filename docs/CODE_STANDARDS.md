@@ -287,8 +287,7 @@ against every drive core outside a small CLI-entry allowlist.
 
 ## Interaction Semantics
 
-Conventions for `Widget::event` implementations, followed by every interactive
-widget in `frust-widgets`:
+Conventions for `Widget::event` implementations in every interactive `frust-widgets` widget:
 
 - **Fire on up-inside, not down.** A press captures the pointer on `Down` and tracks a
   `pressed` visual on `Move`, but the callback fires only on `Up` and only if the release
@@ -303,13 +302,14 @@ widget in `frust-widgets`:
   ```
 
 - **Only `PointerButton::Primary` starts a press/capture/activation.** A secondary (or other
-  non-primary) press is a context gesture, not an activation — the sanctioned consumer is a
-  context-menu trigger, never the widget's own `on_press`/`on_toggle`/`on_change`. A barrier or
-  light-dismiss layer may still consume any button to close, but must not enter press state from a
-  non-primary one, while focus/IME session re-claims stay button-agnostic. Every widget tree
-  carries its own crate-private predicate for the rule — `frust_widgets::authoring::presses`,
-  `frust_shadcn::hit::presses`, and `press::presses` in each catalog crate — no cross-crate
-  dependency.
+  non-primary) press is a context gesture, not an activation — the sanctioned consumers are a
+  context-menu trigger and the baseline text input's selection toolbar (a secondary press on an
+  interactive `TextInput` claims focus, moves no caret, and toggles that toolbar), never the
+  widget's own `on_press`/`on_toggle`/`on_change`. A barrier or light-dismiss layer may still
+  consume any button to close, but must not enter press state from a non-primary one, while
+  focus/IME session re-claims stay button-agnostic. Every widget tree carries its own crate-private
+  predicate for the rule — `frust_widgets::authoring::presses`, `frust_shadcn::hit::presses`, and
+  `press::presses` in each catalog crate — no cross-crate dependency.
 
 - **Controlled components never self-mutate.** `Checkbox`/`Slider` report the *requested*
   value through `on_toggle`/`on_change` and leave `checked`/`value` untouched until the next
@@ -319,32 +319,31 @@ widget in `frust-widgets`:
   value win next frame.
 
 - **A container checks `InputEvent::is_broadcast()` before anything else.** A broadcast
-  (`InputEvent::Housekeeping`) is not user input: every routing helper forwards it to *every*
-  child unconditionally, ahead of the capture/focus/hit-test branches below, and always reports
-  `Ignored` regardless of what children returned — a broadcast is never consumed and never
-  short-circuited by a captured or focused child (`docs/CORE_ARCHITECTURE.md`'s event-routing data
-  flow).
+  (`InputEvent::Housekeeping`, `InputEvent::Overlay`) is not user input: every routing helper
+  forwards it to *every* child unconditionally, ahead of the capture/focus/hit-test branches below,
+  and always reports `Ignored` whatever children returned — it is never consumed and never
+  short-circuited by a captured or focused child, and only the owner whose `OverlayKey` an `Overlay`
+  quotes acts on it (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow).
 
-- **Focus routes by recorded path, like capture; `Key`/`Ime` events never hit-test.** A
-  container simply forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
-  (re)claim focus on the child it hits blurs the chain. **A structural container rebuild
-  clears capture and focus only where identity is actually lost** —
-  stable-prefix/key-matched, not a blanket clear. A reconciler that tears down (or type-swaps) a
-  focused pod cannot reach `RenderRoot` itself (no handle inside a `BuildCtx` pass), so it marks the
-  pod orphaned instead, but only *on the live focus chain* — gate the mark on
-  `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone, since a
-  hand-rolled container's own teardown/type-swap path can hit a stale flag under an
+- **Focus routes by recorded path, like capture; `Key`/`Ime`/`EditCommand` events never hit-test.**
+  A container simply forwards them to its focused child; a `Down` that doesn't (re)claim focus on
+  the child it hits blurs the chain. **A structural container rebuild clears capture and focus only
+  where identity is actually lost** — stable-prefix/key-matched, not a blanket clear. A reconciler
+  that tears down (or type-swaps) a focused pod cannot reach `RenderRoot` itself (no handle inside a
+  `BuildCtx` pass), so it marks the pod orphaned instead, but only *on the live focus chain* — gate
+  the mark on `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone,
+  since a hand-rolled container's own teardown/type-swap path can hit a stale flag under an
   already-blurred ancestor; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same
   rebuild that raised the mark, not merely "eventually" on a later event pass
-  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container
-  that publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
+  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container that
+  publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
   `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
-  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is
-  the page being **covered**. Two severing paths are known to be **uncovered** and are
-  registered rather than fixed: a type swap through a doubly-erased pod, which no reconciler
-  can observe (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item
-  lists, which never clear or mark a truncated item's own focus link
-  (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
+  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is the
+  page being **covered**. Two severing paths are known to be **uncovered** and are registered rather
+  than fixed: a type swap through a doubly-erased pod, which no reconciler can observe
+  (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item lists, which never
+  clear or mark a truncated item's own focus link (`focus-navbar-item-truncation-unmarked`). See
+  `docs/LIMITATIONS.md`.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set

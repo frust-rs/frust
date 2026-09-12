@@ -42,6 +42,44 @@ anyhow = { workspace = true }
 # is already pulled in via `frust-shell-common`).
 log = { workspace = true }
 
+# Desktop clipboard route (macOS, Linux, Windows) — `arboard`, the same sync
+# clipboard crate `plugins/clipboard`'s desktop backend uses, but held here as
+# ONE process-lifetime instance owned by the `frust-clipboard` WORKER THREAD
+# rather than constructed per call the way that backend does (see
+# `src/app_handler.rs`'s `ClipboardWorker` doc; the instance moved off the UI
+# thread when a paste stopped blocking the event loop, superseding the plan's
+# decision D11 — it is emphatically NOT `ShellHandler`-owned any more, whatever
+# an older comment may say): on X11/Wayland the clipboard's content is served
+# live by
+# whichever process last claimed the selection, so a per-call instance would
+# drop that ownership — and so the content this process just copied — the
+# moment `set_text` returned, on any desktop with no clipboard manager
+# running. `default-features = false` drops arboard's default `image-data`
+# feature (image get/set, pulling in `image`/`objc2-core-graphics`/
+# `windows-sys` Gdi bindings this shell never uses) — see root `Cargo.toml`'s
+# Version-Pin Policy comment for the pin rationale. `wayland-data-control`
+# (native Wayland selection support via `wl-clipboard-rs`) is deliberately
+# NOT enabled, matching `plugins/clipboard`'s own choice — a Wayland session
+# without XWayland compatibility may be unable to reach the clipboard at all,
+# a documented, deliberately-deferred gap, not this shell's to close.
+# Tripwire: `cargo check -p frust-shell-desktop`.
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+# COEXISTENCE CONSTRAINT with `plugins/clipboard` (recorded 2026-09-11).
+# This shell now holds its `arboard::Clipboard` open on a background
+# thread for the process lifetime, while `plugins/clipboard`'s desktop backend
+# constructs a fresh one per call on whatever thread the app calls from. Those
+# two instances can therefore be live on DIFFERENT threads at the same instant,
+# which `plugins/clipboard/src/desktop.rs` records as having been observed to
+# crash (`arboard`'s macOS `NSPasteboard` backend is not documented safe for
+# concurrent access from independent `Clipboard` instances). Before the worker
+# thread existed both paths ran on the UI thread and were serialised by
+# construction, so this is a NEW constraint, not a pre-existing one. An app that
+# uses a clipboard-capable widget (`TextInput`, the OTP widgets) together with
+# `frust-clipboard`'s own API on desktop is therefore in unsupported territory
+# until one of the two routes gives way. Not yet closed — deliberately recorded
+# rather than silently carried.
+arboard = { workspace = true }
+
 # DEV-ONLY: the shipped crate reaches the reactive substrate exclusively through
 # `frust-reactive` (see docs/ARCHITECTURE.md's Layer Dependencies) — this entry
 # is a dev-dependency ONLY and never enters a consumer's dependency graph. It

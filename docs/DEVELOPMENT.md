@@ -10,7 +10,7 @@ gates, template work, and the version-pin rows each unit owns live in its spoke:
 | CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
 | RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `wgpu`, `image`, `vello_common`/`glifo` pins |
 | SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests; `muda`, `windows-sys` pins |
-| PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` pins |
+| PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` (shared with the desktop shell) pins |
 | CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
 | TUI | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` pins |
 
@@ -382,12 +382,12 @@ tests above) compiles Kotlin; compiling Swift needs an Xcode build (macOS only).
 
 ### Per-unit device gates
 
-The **deep-link** and **safe-area / keyboard / back** manual tests
-([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)), the **shared-preferences**, **secure-storage**,
-**camera**, and **IAP** manual tests ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)), and
-**template development** ([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) live in their unit spokes.
-Every one is a person-driven device/emulator check with no automated counterpart — none of them
-ride the gate chain above.
+The **deep-link**, **safe-area / keyboard / back**, **clipboard**, desktop and browser manual
+tests ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)), the **shared-preferences**,
+**secure-storage**, **camera**, and **IAP** manual tests
+([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)), and **template development**
+([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) live in their unit spokes — each a person-driven check
+against an installed app or a real browser, none riding the gate chain above.
 
 ## Benchmarks
 
@@ -445,7 +445,7 @@ owns them:
 |------|-------|
 | `wgpu`, `image`, `vello_common`/`glifo` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
-| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
+| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` (one pin, two consumers — `frust-clipboard` and `frust-shell-desktop`'s clipboard route — so its row carries two tripwires, `cargo check -p frust-clipboard` **and** `cargo check -p frust-shell-desktop`), `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above); web shell tier: `wasm-bindgen` (=0.2.128 exact — must equal the host `wasm-bindgen-cli`), `wasm-bindgen-futures`, `js-sys`/`web-sys`, `web-time`, `console_log`, `console_error_panic_hook`, `wasm-bindgen-test` (=0.3.78 exact — crate-local, bumps in lockstep with `wasm-bindgen`) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
 | `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |

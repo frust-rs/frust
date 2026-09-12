@@ -10,35 +10,39 @@
 //!
 //! A hover card is the tooltip's mechanics wearing the popover's clothes, and
 //! that is exactly how it is built: the hover latch, the frame-clock delays and
-//! the input-transparent top layer are [`crate::tooltip`]'s (read that module for
-//! why a hover-opened overlay cannot be an [`crate::overlay::anchored`] host and
-//! why `on_open_change` is a best-effort notification), and the panel is
+//! the `OverlaySlot`-registered panel are [`crate::tooltip`]'s (read that module
+//! for why a hover-opened overlay cannot be an [`crate::overlay::anchored`] host
+//! and why `on_open_change` is a best-effort notification), and the panel is
 //! [`crate::popover`]'s shared chrome at `w-64`.
 //!
-//! Two things differ from the tooltip: the open delay is paired with a **close
-//! delay** ([`HOVER_CARD_CLOSE_DELAY_MS`], Radix's own default), which is what
-//! lets the pointer travel from the trigger onto the panel without the card
-//! vanishing under it; and the panel carries no arrow tip.
+//! Three things differ from the tooltip: the open delay is paired with a
+//! **close delay** ([`HOVER_CARD_CLOSE_DELAY_MS`], Radix's own default), which
+//! is what lets the pointer travel from the trigger onto the panel without the
+//! card vanishing under it; the panel carries no arrow tip; and the panel is
+//! registered [`frust::OverlayInput::Interactive`] rather than `Transparent`
+//! — its content (a link, a button) can genuinely be pressed, which the
+//! catalog's hover-driven panels could not do before this port.
 //!
-//! The panel keeps the card open while the pointer is over it — the layer records
-//! that in the shared latch, and the trigger treats it as hover of its own.
+//! The panel keeps the card open while the pointer is over it — the registered
+//! pod records that in the shared latch, and the trigger treats it as hover of
+//! its own.
 //!
-//! Because the layer is mounted permanently, the card gets its
-//! `data-[state=closed]:fade-out-0` exit for free — see [`crate::tooltip`]'s
-//! exit-ramp section, which owns the whole ramp for both components.
+//! Because the owner keeps registering the panel through its own exit grace
+//! window, the card gets its `data-[state=closed]:fade-out-0` exit for free —
+//! see [`crate::tooltip`]'s exit-ramp section, which owns the whole ramp for
+//! both components.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::authoring::{BuildCtx, ChangeFlags, View};
+use frust::authoring::{BuildCtx, ChangeFlags, OverlayAlign, OverlaySide, View};
 
 use crate::components::popover::{POPOVER_PADDING, PanelHandle, PanelStyle, panel};
 use crate::components::tooltip::{
     HOVER_CARD_CLOSE_DELAY_MS, TooltipHover, TooltipLayerView, TooltipLayerWidget,
     TooltipTriggerView, tooltip_layer, tooltip_trigger,
 };
-use crate::overlay::{OverlayAlign, OverlaySide};
 use crate::style;
 
 /// `w-64` — the hover card's panel width, in logical px.
@@ -75,10 +79,12 @@ pub fn hover_card_trigger<State: 'static, V: View<State>>(
     tooltip_trigger(hover, child).close_delay(Duration::from_millis(HOVER_CARD_CLOSE_DELAY_MS))
 }
 
-/// Build a hover-card layer showing `content` while `hover` is open.
+/// Build a hover-card panel showing `content` while `hover` is open.
 ///
-/// Mount it as the top child of a full-area [`frust::Stack`], permanently: it
-/// paints nothing while closed and never consumes input.
+/// Mount it unconditionally, as a child of the same full-area layered host
+/// as before (e.g. [`frust::Stack`]) — it registers nothing with the root
+/// while closed, and its content is interactive once open (see the module
+/// docs).
 pub fn hover_card<State: 'static, V: View<State>>(
     hover: &TooltipHover,
     content: V,
@@ -115,22 +121,22 @@ impl<State: 'static> HoverCardView<State> {
 }
 
 impl<State: 'static> View<State> for HoverCardView<State> {
-    type Element = TooltipLayerWidget;
+    type Element = TooltipLayerWidget<State>;
 
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> TooltipLayerWidget {
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> TooltipLayerWidget<State> {
         View::build(&self.inner, ctx)
     }
 
     fn rebuild(
         &self,
         prev: &Self,
-        element: &mut TooltipLayerWidget,
+        element: &mut TooltipLayerWidget<State>,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         View::rebuild(&self.inner, &prev.inner, element, ctx)
     }
 
-    fn teardown(&self, element: &mut TooltipLayerWidget, ctx: &mut BuildCtx<'_>) {
+    fn teardown(&self, element: &mut TooltipLayerWidget<State>, ctx: &mut BuildCtx<'_>) {
         View::teardown(&self.inner, element, ctx);
     }
 }
@@ -138,17 +144,23 @@ impl<State: 'static> View<State> for HoverCardView<State> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::popover::POPOVER_PADDING;
     use crate::components::popover::tests::{Recorder, WINDOW, ft_ms, light, pointer};
     use crate::components::tooltip::TOOLTIP_DELAY_MS;
     use frust::SizedBox;
     use frust::authoring::text::TextContext;
-    use frust::authoring::{InputEvent, Point, PointerPhase, Size, any};
+    use frust::authoring::{
+        BoxConstraints, EventCtx, EventResult, InputEvent, LayoutCtx, OverlayPlacement, PaintCtx,
+        PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size, Widget, any, place,
+        visit_children,
+    };
     use frust_core::RenderRoot;
     use std::any::Any;
 
     #[derive(Default)]
     struct AppState {
         opens: Vec<bool>,
+        link_pressed: bool,
     }
 
     const TRIGGER: Size = Size::new(80.0, 36.0);
@@ -301,6 +313,120 @@ mod tests {
                 .iter()
                 .any(|(_, _, _, sd, _)| *sd == style::SHADOW_MD.std_dev),
             "shadow-md"
+        );
+    }
+
+    /// A probe filling whatever area it is given, recording whether it was
+    /// pressed — the content a hover card floats.
+    struct LinkProbe;
+    struct LinkProbeWidget;
+
+    impl View<AppState> for LinkProbe {
+        type Element = LinkProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> LinkProbeWidget {
+            LinkProbeWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut LinkProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+        fn teardown(&self, _element: &mut LinkProbeWidget, _ctx: &mut BuildCtx<'_>) {}
+    }
+
+    impl Widget for LinkProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            // A fixed size, not `bc.max()`: the card's own panel hands its
+            // content a loose box with an *infinite* max height (the same
+            // shrink-wrap every popover-chrome panel in this catalog uses), so
+            // filling `bc.max()` here would make the card infinitely tall.
+            bc.constrain(Size::new(80.0, 24.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.state_mut::<AppState>().link_pressed = true;
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, _ctx: &mut SemanticsCtx) {}
+        visit_children!();
+    }
+
+    /// The capability this port adds: a hover card's own content is now
+    /// genuinely interactive (`OverlayInput::Interactive`), where the old
+    /// layer's `event()` always returned `Ignored` unconditionally and never
+    /// routed to its content at all — this could not have fired before the
+    /// port, by construction of the old code (see the module docs).
+    #[test]
+    fn a_press_inside_the_open_cards_own_content_reaches_it() {
+        let hover = TooltipHover::new();
+        let mut state = AppState::default();
+        let mut root: RenderRoot<AppState, frust::StackView<AppState>> = RenderRoot::new();
+        root.set_theme(Box::new(light()));
+        let mut tcx = TextContext::new();
+
+        let mut run = |root: &mut RenderRoot<AppState, frust::StackView<AppState>>,
+                       state: &mut AppState,
+                       ms: f64| {
+            let hover = hover.clone();
+            let mut logic = move |_s: &mut AppState| {
+                frust::Stack(vec![
+                    any(hover_card_trigger(
+                        &hover,
+                        SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                    )),
+                    any(hover_card(&hover, LinkProbe)),
+                ])
+            };
+            root.rebuild(&mut logic, state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft_ms(ms));
+        };
+
+        run(&mut root, &mut state, 0.0);
+        root.event(&mut state, &pointer(PointerPhase::Move, 10.0, 10.0));
+        run(&mut root, &mut state, 0.0);
+        run(&mut root, &mut state, TOOLTIP_DELAY_MS as f64);
+        assert!(hover.is_open());
+
+        // The card's own content sits inset by `POPOVER_PADDING` inside the
+        // placed panel — landing on the panel's own rect is not enough (that
+        // padding border is chrome, not `LinkProbe`), so this computes where
+        // the content itself sits, the same way `PanelWidget::layout` does.
+        let content_size = Size::new(80.0, 24.0);
+        let panel = place(
+            hover.anchor(),
+            Size::new(
+                HOVER_CARD_WIDTH,
+                content_size.height + 2.0 * POPOVER_PADDING,
+            ),
+            Rect::from_origin_size(Point::ORIGIN, WINDOW),
+            OverlayPlacement::default(),
+        );
+        let inside_content = Point::new(
+            panel.x0 + POPOVER_PADDING + content_size.width / 2.0,
+            panel.y0 + POPOVER_PADDING + content_size.height / 2.0,
+        );
+        // A press landing inside a registered overlay is routed to it as
+        // `InputEvent::Overlay`, which the main tree's own dispatch treats as
+        // a broadcast — "never consumed, whatever the pod returned"
+        // (`OverlaySlot::route`'s own doc) — so the top-level `EventOutcome`
+        // never reflects a pod's result by design; `state.link_pressed` is
+        // the reliable proof that the press actually reached the content.
+        root.event(
+            &mut state,
+            &pointer(PointerPhase::Down, inside_content.x, inside_content.y),
+        );
+        assert!(
+            state.link_pressed,
+            "the press reaches the card's own content"
         );
     }
 }

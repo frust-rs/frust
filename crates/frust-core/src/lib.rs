@@ -29,6 +29,12 @@
 //!   `StatefulWidget` analog: a subtree with retained local state, a
 //!   per-component reactive `Owner`, and a state boundary the outer view tree
 //!   never sees.
+//! * [`overlay`] — the overlay portal: an owner-hosted, root-painted,
+//!   root-routed pod a widget floats above the whole app (menus, popovers,
+//!   tooltips, selection toolbars).
+//! * [`selection_toolbar`] — what a text field publishes when it has a
+//!   selection, plus the process-global policy/builder slots that decide who
+//!   draws the toolbar.
 
 pub mod anim;
 pub mod app;
@@ -37,6 +43,8 @@ pub mod event;
 pub mod input;
 pub mod insets;
 pub mod layout;
+pub mod overlay;
+pub mod selection_toolbar;
 pub mod semantics;
 pub mod tree;
 pub mod view;
@@ -55,10 +63,11 @@ pub use anim::{
 pub use app::{Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
-    CursorIcon, EditingState, EventCtx, EventOutcome, EventResult, ImeContentType, ImeEvent,
-    ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
-    PointerPhase, ScrollDelta, has_pending_result_flush, mark_focus_orphaned,
-    mark_pending_result_flush, take_focus_orphaned, take_pending_result_flush,
+    CursorIcon, EditCommand, EditingState, EventCtx, EventOutcome, EventResult, ImeContentType,
+    ImeEvent, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, OverlayEvent,
+    OverlayEventKind, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    has_pending_result_flush, mark_focus_orphaned, mark_pending_result_flush, take_focus_orphaned,
+    take_pending_result_flush,
 };
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
@@ -66,6 +75,15 @@ pub use input::{
 };
 pub use insets::{EdgeInsets as WindowEdgeInsets, WindowInsets};
 pub use layout::BoxConstraints;
+pub use overlay::{
+    OutsideTap, OverlayBand, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPod,
+};
+pub use selection_toolbar::{
+    SelectionToolbarActions, SelectionToolbarBuilder, SelectionToolbarPolicy,
+    SelectionToolbarRequest, install_selection_toolbar_builder_if_unset,
+    lock_selection_toolbar_policy, selection_toolbar_builder, selection_toolbar_policy,
+    set_selection_toolbar_builder, set_selection_toolbar_policy,
+};
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
 pub use tree::{InspectNode, WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};

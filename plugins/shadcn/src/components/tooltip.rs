@@ -1,5 +1,5 @@
 //! `tooltip`: the hover-opened label that floats beside its trigger — and the
-//! **shared hover latch + top layer** the hover card is built on too.
+//! **shared hover latch** the hover card is built on too.
 //!
 //! Source: `apps/v4/registry/new-york-v4/ui/tooltip.tsx` (shadcn/ui v4, rev
 //! `d4fc45b1fbabfccb7a6a4333d8004cf19481caa9`, retrieved 2026-08-17) — a Radix
@@ -8,65 +8,111 @@
 //! with `animate-in fade-in-0 zoom-in-95`, plus a `size-2.5 rotate-45
 //! bg-foreground` arrow tip.
 //!
-//! # Why this component is a latch and a layer, not an anchored host
+//! # Riding the framework portal
 //!
-//! Every other anchored component in the catalog is opened by a *click*, so the
-//! app can own the open flag: a press is an event, an event carries `&mut State`,
-//! and the app remounts the overlay on the next frame. A hover-opened overlay
-//! cannot work that way, for two reasons:
+//! Every other anchored component in this catalog floats its panel through
+//! [`crate::overlay::anchored`], which consumes every press outside its
+//! content by design (its light dismiss) — mounted permanently under a hover
+//! trigger it would eat the button press underneath. That mismatch used to
+//! force this component to hand-roll its own full-area, permanently-mounted,
+//! never-consumes-anything top layer, placed with its own copy of the
+//! placement math.
 //!
-//! 1. **The delay has no event to fire on.** The open moment is "700ms after the
-//!    pointer came to rest", and a resting pointer sends nothing. The only
-//!    per-frame pass a widget gets is `paint`, which carries a clock
-//!    ([`PaintCtx::frame_time`](frust::authoring::PaintCtx::frame_time)) but no
-//!    application state, and the framework exposes no way for a plugin-tier
-//!    widget to queue a state-bearing callback onto the next frame. So the open
-//!    decision has to live in a widget, not in app state.
-//! 2. **A tooltip must not swallow the click it is floating over.**
-//!    [`crate::overlay::anchored`] consumes every press outside its content, by
-//!    design (that is its light dismiss). Mounted permanently under a hover
-//!    trigger it would eat the button press underneath.
+//! It no longer has to: the panel is registered through
+//! [`frust::authoring::OverlaySlot`] — the same mechanism
+//! [`frust::authoring::overlay_portal`] itself is built from, and the one the
+//! framework's own docs name for exactly this shape ("a design system's
+//! popover, menu, tooltip and context menu place a surface through `place`
+//! and host it through `OverlaySlot`"). The root now paints the panel *after*
+//! the whole main tree (so it can never be painted under a later sibling) and
+//! hit-tests it *before* the main tree, per its declared
+//! [`frust::OverlayBand`]/[`frust::OverlayInput`] — a tooltip declares
+//! [`frust::OverlayBand::Tooltip`] + [`frust::OverlayInput::Transparent`], so
+//! the root's pre-pass skips it outright and every press reaches the main
+//! tree exactly as if the tooltip did not exist. A hover card's panel is
+//! genuinely interactive instead ([`frust::OverlayBand::Floating`] +
+//! [`frust::OverlayInput::Interactive`]), which the old hand-rolled layer
+//! never allowed — its content (a link, a button) can now actually be
+//! pressed.
 //!
-//! So the pair here is: [`TooltipHover`], a shared, non-reactive latch holding
-//! "is it open" plus the trigger's rect (the same `Rc<Cell<_>>` shape
-//! [`OverlayAnchor`] uses, and read the same way — during the layout/paint of the
-//! very frame that wrote it); [`tooltip_trigger`], which latches hover, runs the
-//! delays off the frame clock, and writes the latch; and [`tooltip`], a full-area
-//! **input-transparent** top layer that shows the panel while the latch is set
-//! and consumes nothing at all.
+//! [`overlay_portal`](frust::authoring::overlay_portal)'s own declarative
+//! wrapper anchors only to its own child's bounds, which does not fit here:
+//! the trigger and the panel stay two independently-mounted views (so an app
+//! keeps mounting `tooltip_trigger` and `tooltip` exactly as before), and the
+//! panel's own [`OverlaySlot`](frust::authoring::OverlaySlot) anchors itself
+//! to the trigger's captured rect via
+//! [`OverlayAnchor::Rect`](frust::authoring::OverlayAnchor::Rect) — the shared
+//! latch below is what carries that rect from one to the other.
+//!
+//! # Why this component is still a latch, not an anchored host
+//!
+//! A hover-opened overlay still cannot be driven the way a press-opened one
+//! is, for the same two reasons as before:
+//!
+//! 1. **The delay has no event to fire on.** The open moment is "700ms after
+//!    the pointer came to rest", and a resting pointer sends nothing. The
+//!    only per-frame pass a widget gets is `paint`, which carries a clock
+//!    ([`PaintCtx::frame_time`](frust::authoring::PaintCtx::frame_time)) but
+//!    no application state, and the framework exposes no way for a
+//!    plugin-tier widget to queue a state-bearing callback onto the next
+//!    frame. So the open decision has to live in a widget, not in app state.
+//! 2. **The trigger and the panel are two separately-mounted views.** An
+//!    [`OverlaySlot`](frust::authoring::OverlaySlot) anchors to a rect *an
+//!    app states explicitly* (`OverlayAnchor::Rect`), not to some other
+//!    widget's bounds automatically — so the trigger's own window-space rect
+//!    still has to travel from the widget that captures it to the widget
+//!    that floats a surface against it.
+//!
+//! So the pair here is unchanged in shape: [`TooltipHover`], a shared,
+//! non-reactive latch holding "is it open", the trigger's rect and whether
+//! the pointer is over the panel (the same `Rc<Cell<_>>` shape
+//! [`OverlayAnchor`](crate::overlay::OverlayAnchor) uses, and read the same
+//! way — during the layout/paint of the very frame that wrote it);
+//! [`tooltip_trigger`], which latches hover, runs the delays off the frame
+//! clock, and writes the latch; and [`tooltip`], which now owns an
+//! [`OverlaySlot`](frust::authoring::OverlaySlot) instead of a hand-rolled
+//! layer.
 //!
 //! `on_open_change` is still reported, so an app can mirror the state — but
-//! **best-effort and one pass late**: the widget can only call it from an event
-//! pass, and the open it is reporting happened during a paint. It is a
+//! **best-effort and one pass late**: the widget can only call it from an
+//! event pass, and the open it is reporting happened during a paint. It is a
 //! notification, not the mechanism. Passing [`TooltipTriggerView::open`] a
-//! `Some(_)` takes the whole decision over instead (Radix's controlled `open`).
+//! `Some(_)` takes the whole decision over instead (Radix's controlled
+//! `open`).
 //!
 //! # Delays
 //!
 //! [`TOOLTIP_DELAY_MS`] (700ms) is Radix's own `delayDuration` default;
 //! shadcn's `TooltipProvider` overrides it to `0`, which
-//! [`TooltipTriggerView::delay`] is one call away from. Closing is immediate for
-//! a tooltip and delayed for a hover card ([`HOVER_CARD_CLOSE_DELAY_MS`]).
+//! [`TooltipTriggerView::delay`] is one call away from. Closing is immediate
+//! for a tooltip and delayed for a hover card ([`HOVER_CARD_CLOSE_DELAY_MS`]).
 //! Neither delay is motion: `Theme.motion.reduce_motion` collapses the
 //! fade/zoom entrance and leaves both timings alone.
 //!
-//! Radix's `skipDelayDuration` (a second tooltip inside the same provider opens
-//! instantly) has no equivalent here: each trigger owns its own latch, and there
-//! is no provider to share a skip window through.
+//! Radix's `skipDelayDuration` (a second tooltip inside the same provider
+//! opens instantly) has no equivalent here: each trigger owns its own latch,
+//! and there is no provider to share a skip window through.
 //!
 //! # The exit ramp
 //!
-//! `data-[state=closed]:fade-out-0` is a plain fade with no zoom riding along,
-//! and it costs this component nothing to run: the layer is **already mounted
-//! permanently**, so the frames the ramp needs are there whether the latch is
-//! set or not. A close starts the fade, the layer paints the whole way down, and
-//! it stops painting entirely once the presence settles at zero. A hover
-//! returning mid-fade picks the entrance up from wherever the presence had got
-//! to, and `reduce_motion` collapses both directions to a jump.
+//! `data-[state=closed]:fade-out-0` is a plain fade with no zoom riding
+//! along. Its cost changed shape with the port: the *owner* widget
+//! ([`TooltipLayerWidget`]) is what an app keeps mounted permanently — still,
+//! as before, as a child of a full-area layered host such as
+//! [`frust::Stack`], and no longer required to be its *topmost* one, since
+//! paint order now comes from the declared [`frust::OverlayBand`] rather than
+//! tree position — and it keeps *registering* the surface with the root for
+//! as long as the fade needs, even after the latch has already dropped. The
+//! fade/zoom itself runs inside the registered pod
+//! ([`RampedPanelWidget`]) — the only widget that actually runs during the
+//! root's separate overlay paint pass, which is why the ramp state lives
+//! there and not on the owner: an owner's own `push_layer` would already
+//! have been popped by the time the root gets around to painting a
+//! registered pod directly.
 //!
-//! A closing panel consumes nothing, exactly as an open one does not — the layer
-//! is input-transparent by contract — and its `over_panel` grip is dropped with
-//! the latch, so a fading panel cannot hold its own card open.
+//! A closing panel consumes nothing, exactly as an open one does not — a
+//! tooltip is input-transparent by contract — and its `over_panel` grip is
+//! dropped with the latch, so a fading panel cannot hold its own card open.
 //!
 //! # Touch
 //!
@@ -78,15 +124,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, SemanticsCtx, Size, ThemeTextColor, View, Widget, any, build_child,
-    erase_callback_arg, rebuild_child, route_event_single, teardown_child, visit_children,
+    Affine, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, OutsideTap, OverlayAlign,
+    OverlayAnchor, OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, OverlaySlot, PaintCtx,
+    PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size, ThemeTextColor, View, Widget, any,
+    build_child, erase_callback_arg, rebuild_child, route_event_single, teardown_child,
+    visit_children,
 };
 use frust::{AnimationController, Curve, FrameTime, Theme, text};
 
 use crate::hit::inside;
-use crate::overlay::{OverlayAlign, OverlayPlacement, OverlaySide, finite_or_zero, place};
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -102,7 +149,9 @@ const TOOLTIP_PAD_X: f64 = 12.0;
 const TOOLTIP_PAD_Y: f64 = 6.0;
 /// `size-2.5` — the arrow tip's edge before its 45° rotation.
 const ARROW_EDGE: f64 = 10.0;
-/// `duration-200`, shared with every other overlay's entrance.
+/// `duration-200`, shared with every other overlay's entrance — and the exit
+/// grace window [`TooltipLayerWidget`] keeps registering the panel for after
+/// the latch drops, so the fade always gets the frames it needs.
 const ENTRANCE_MS: u64 = 200;
 /// `zoom-in-95` — the scale the entrance starts from.
 const ZOOM_FROM: f64 = 0.95;
@@ -119,7 +168,7 @@ const UNBOUNDED_WIDTH: f64 = 320.0;
 ///
 /// **Not reactive**, exactly like [`OverlayAnchor`](crate::overlay::OverlayAnchor):
 /// writing it wakes no frame. The trigger writes it during a paint that already
-/// asked for the next frame, and the layer reads it during the layout and paint
+/// asked for the next frame, and the panel reads it during the layout and paint
 /// of that frame.
 #[derive(Clone, Debug, Default)]
 pub struct TooltipHover(Rc<Cell<HoverLatch>>);
@@ -347,7 +396,7 @@ impl Widget for TooltipTriggerWidget {
         // `PaintCtx::is_hovered` is authoritative — it is what drops the flag on
         // the frame the pointer moves onto something else, which no event can
         // tell this widget about — and `PaintCtx::origin` is absolute window
-        // space, which is what the layer's placement needs.
+        // space, which is what the panel's placement needs.
         self.hovered = ctx.is_hovered();
         self.hover
             .set_anchor(Rect::from_origin_size(ctx.origin(), ctx.size()));
@@ -442,7 +491,7 @@ impl Widget for TooltipTriggerWidget {
     visit_children!(child);
 }
 
-/// The chrome a [`TooltipLayerView`] paints around its content.
+/// The chrome a [`RampedPanelWidget`] paints around its content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TooltipArrow {
     /// The tooltip's `size-2.5 rotate-45 bg-foreground` tip.
@@ -451,49 +500,74 @@ pub(crate) enum TooltipArrow {
     None,
 }
 
-/// Build a tooltip layer showing `label` while `hover` is open.
+/// Build a tooltip panel showing `label` while `hover` is open.
 ///
-/// Mount it as the top child of a full-area [`frust::Stack`], **permanently** —
-/// it paints nothing while closed and consumes no input ever, so it costs a
-/// layout of its content and nothing else. That stack must itself be bounded:
-/// inside a scroll view the layer has no vertical area to place a panel in
-/// (`crate::overlay`'s `finite_or_zero`, the scroll-view trap).
+/// Mount it *unconditionally*, as a child of the same full-area layered host
+/// as before (e.g. [`frust::Stack`]) — it registers nothing with the root
+/// while closed, so it costs a layout of its content and nothing else. Unlike
+/// the layer this replaced, it no longer has to be that host's *topmost*
+/// child: the root's own [`frust::OverlayBand`] ordering puts it above
+/// everything regardless of where among the host's children it sits.
 pub fn tooltip<State: 'static>(
     hover: &TooltipHover,
     label: impl Into<String>,
 ) -> TooltipLayerView<State> {
+    let content: AnyView<State> = any(TooltipPanel {
+        label: label.into(),
+    });
     TooltipLayerView {
-        content: any(TooltipPanel {
-            label: label.into(),
+        content: any(RampedPanelView {
+            content,
+            hover: hover.clone(),
+            arrow: TooltipArrow::Tip,
         }),
         hover: hover.clone(),
         // `sideOffset={0}` — the tooltip sits flush against its trigger, with the
         // arrow tip bridging the gap.
         placement: OverlayPlacement::on(OverlaySide::Top).offset(0.0),
-        arrow: TooltipArrow::Tip,
+        band: OverlayBand::Tooltip,
+        input: OverlayInput::Transparent,
+        outside_tap: OutsideTap::Ignore,
     }
 }
 
-/// Build a layer showing `content` while `hover` is open — the hover card's half
+/// Build a panel showing `content` while `hover` is open — the hover card's half
 /// of the shared machinery. See [`tooltip`].
+///
+/// Unlike a tooltip, `content` is genuinely interactive: it is registered
+/// [`frust::OverlayInput::Interactive`], so a link or button inside it can
+/// actually be pressed.
 pub(crate) fn tooltip_layer<State: 'static, V: View<State>>(
     hover: &TooltipHover,
     content: V,
 ) -> TooltipLayerView<State> {
+    let content: AnyView<State> = any(content);
     TooltipLayerView {
-        content: any(content),
+        content: any(RampedPanelView {
+            content,
+            hover: hover.clone(),
+            arrow: TooltipArrow::None,
+        }),
         hover: hover.clone(),
         placement: OverlayPlacement::default(),
-        arrow: TooltipArrow::None,
+        band: OverlayBand::Floating,
+        input: OverlayInput::Interactive,
+        // Notified but not consumed: a hover card closes on hover-out, never on
+        // a tap outside it (see the module docs on why it stays a latch).
+        outside_tap: OutsideTap::Notify { consume: false },
     }
 }
 
-/// A declarative hover-overlay layer. See [`tooltip`].
+/// A declarative hover-overlay panel. See [`tooltip`].
 pub struct TooltipLayerView<State: 'static> {
+    /// Wraps a [`RampedPanelView`] — already erased here so [`tooltip`] and
+    /// [`tooltip_layer`] share one shape regardless of what they float.
     content: AnyView<State>,
     hover: TooltipHover,
     placement: OverlayPlacement,
-    arrow: TooltipArrow,
+    band: OverlayBand,
+    input: OverlayInput,
+    outside_tap: OutsideTap,
 }
 
 impl<State: 'static> TooltipLayerView<State> {
@@ -516,19 +590,184 @@ impl<State: 'static> TooltipLayerView<State> {
     }
 }
 
-/// The retained widget for a [`TooltipLayerView`].
-pub struct TooltipLayerWidget {
+/// The retained widget for a [`TooltipLayerView`]: owns an
+/// [`OverlaySlot`], anchored to the trigger's rect captured in `hover`, and
+/// decides only *whether* to keep registering it — the ramp itself runs in
+/// the registered pod ([`RampedPanelWidget`]), which is the only widget that
+/// runs during the root's own overlay paint pass.
+pub struct TooltipLayerWidget<State: 'static> {
+    hover: TooltipHover,
+    slot: OverlaySlot<State>,
+    /// Whether the latch was open as of the last paint.
+    was_open: bool,
+    /// When the latch last dropped, if a fade might still be running.
+    closing_since: Option<FrameTime>,
+}
+
+impl<State: 'static> TooltipLayerView<State> {
+    /// Push the view's routing configuration onto the slot — the half of
+    /// `build`/`rebuild` that is identical in both.
+    fn configure(&self, slot: &mut OverlaySlot<State>) {
+        slot.set_band(self.band);
+        slot.set_input(self.input);
+        slot.set_outside_tap(self.outside_tap);
+        slot.set_placement(self.placement);
+    }
+}
+
+impl<State: 'static> View<State> for TooltipLayerView<State> {
+    type Element = TooltipLayerWidget<State>;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> TooltipLayerWidget<State> {
+        let mut slot = OverlaySlot::new();
+        self.configure(&mut slot);
+        slot.rebuild(None, Some(&self.content), ctx);
+        TooltipLayerWidget {
+            hover: self.hover.clone(),
+            slot,
+            was_open: false,
+            closing_since: None,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut TooltipLayerWidget<State>,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        self.configure(&mut element.slot);
+        element.hover = self.hover.clone();
+        element
+            .slot
+            .rebuild(Some(&prev.content), Some(&self.content), ctx)
+            | ChangeFlags::PAINT
+    }
+
+    fn teardown(&self, element: &mut TooltipLayerWidget<State>, ctx: &mut BuildCtx<'_>) {
+        element.slot.rebuild(Some(&self.content), None, ctx);
+    }
+}
+
+impl<State: 'static> Widget for TooltipLayerWidget<State> {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // The floated pod is sized against the window (`OverlaySlot::layout`),
+        // not against `bc` — it escapes this widget's box entirely, and unlike
+        // the layer this replaced, that no longer depends on `bc` being bounded
+        // (the old scroll-view trap this component used to hit): the pod is
+        // never coerced from an unbounded `bc.max()`, because it never reads
+        // `bc.max()` at all.
+        self.slot.layout(ctx);
+        // Filling the available box, not `Size::ZERO`: an ordinary,
+        // uncaptured, non-broadcast pointer move only ever reaches a widget
+        // whose own bounds contain it (`route_event`'s hit test), and this
+        // owner's own `event` needs exactly that to learn "the pointer moved
+        // off the panel" (the registry has no companion event for it — see
+        // `event` below). Coerced to zero on an unbounded axis rather than
+        // reporting an infinite size upward.
+        let max = bc.max();
+        bc.constrain(Size::new(
+            if max.width.is_finite() {
+                max.width
+            } else {
+                0.0
+            },
+            if max.height.is_finite() {
+                max.height
+            } else {
+                0.0
+            },
+        ))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+        // Whether to keep registering the surface at all — the fade the
+        // registered pod runs needs frames *after* the latch has already
+        // dropped, matching the old layer's "still fading" edge case, so this
+        // mirrors the same `ENTRANCE_MS` duration the pod ramps over rather
+        // than trusting the latch alone.
+        let now = ctx.frame_time();
+        let open = self.hover.is_open();
+        if open {
+            self.was_open = true;
+            self.closing_since = None;
+        } else if self.was_open {
+            self.was_open = false;
+            self.closing_since = Some(now);
+        }
+        let reduce_motion = Theme::from_paint_ctx(ctx).is_some_and(|t| t.motion.reduce_motion);
+        let grace = if reduce_motion {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(ENTRANCE_MS)
+        };
+        let showing =
+            open || matches!(self.closing_since, Some(since) if now.saturating_sub(since) < grace);
+        if !showing {
+            return;
+        }
+        // Window space → this widget's own local space: the same translation
+        // `place`'s every other caller in this workspace makes, now handed to
+        // the slot instead of computed by hand.
+        let local = self.hover.anchor() - ctx.origin().to_vec2();
+        self.slot.set_anchor(OverlayAnchor::Rect(local));
+        self.slot.paint(ctx, Size::ZERO);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let Some(result) = self.slot.event_ambient(ctx, event) {
+            // Drained, not acted on: a hover card closes on hover-out (the
+            // trigger's own close delay), never on a tap outside it.
+            self.slot.take_outside_down();
+            return result;
+        }
+        // Reaching here means the root's overlay pre-pass did *not* claim this
+        // event for our own registered rect (no `InputEvent::Overlay` for our
+        // key, no active capture, no focus routed to the pod) — the only way
+        // this owner, a regular main-tree widget, sees a pointer move at all
+        // while the panel is interactive. The registry has no "you left"
+        // companion event for `OverlayInput::Interactive`, so an *ordinary*
+        // move landing here is itself the signal that the pointer is not over
+        // the panel — the panel's own pod ([`RampedPanelWidget`]) is what sets
+        // the flag back to `true` from inside the routed overlay event.
+        if let InputEvent::Pointer(p) = event
+            && p.phase == PointerPhase::Move
+            && self.hover.over_panel()
+        {
+            self.hover.set_over_panel(false);
+            ctx.request_redraw();
+        }
+        EventResult::Ignored
+    }
+
+    fn semantics(&self, _ctx: &mut SemanticsCtx) {
+        // An overlay pod contributes no accessibility nodes in v1 (see
+        // `frust_widgets::overlay`'s "Not in v1" list) — nothing to attach.
+    }
+
+    visit_children!();
+}
+
+/// The pod actually registered with the root's overlay mechanism: `content`
+/// wrapped in the shared latch's own fade/zoom ramp, plus (for a tooltip) its
+/// arrow tip.
+///
+/// This is the *only* widget that runs during the root's separate overlay
+/// paint pass, which is why the ramp state lives here rather than on
+/// [`TooltipLayerWidget`]: the root paints a registered pod directly, so an
+/// owner's own `push_layer`/`push_transform` would already have been popped
+/// by the time the pod's own paint runs.
+struct RampedPanelView<State: 'static> {
+    content: AnyView<State>,
+    hover: TooltipHover,
+    arrow: TooltipArrow,
+}
+
+/// The retained widget for a [`RampedPanelView`].
+struct RampedPanelWidget {
     content: ChildPod,
     hover: TooltipHover,
-    placement: OverlayPlacement,
     arrow: TooltipArrow,
-    /// The placed panel rect, in this layer's own space.
-    rect: Rect,
-    /// The anchor the last layout placed against, and this layer's own absolute
-    /// origin — the same self-correcting pair
-    /// [`crate::overlay::anchored`](crate::overlay::AnchoredOverlayWidget) keeps.
-    anchor_used: Rect,
-    host_origin: Point,
     /// Whether the panel was showing on the last paint (an edge starts a ramp,
     /// in whichever direction the edge went).
     was_open: bool,
@@ -537,17 +776,7 @@ pub struct TooltipLayerWidget {
     presence: f64,
 }
 
-impl TooltipLayerWidget {
-    /// The placed panel rect, in the layer's own coordinate space.
-    pub fn panel_rect(&self) -> Rect {
-        self.rect
-    }
-
-    /// How present the panel is — `0.0` gone, `1.0` settled.
-    pub fn progress(&self) -> f64 {
-        self.presence
-    }
-
+impl RampedPanelWidget {
     /// Take this paint's ramp decision, returning the presence to paint at.
     ///
     /// The entrance is `fade-in-0 zoom-in-95`; the exit is
@@ -570,7 +799,8 @@ impl TooltipLayerWidget {
         }
         if reduce_motion {
             // `reduce_motion` collapses either direction to a jump. The open and
-            // close delays above are timing, not motion, and are untouched.
+            // close delays are timing, not motion, and are untouched (they live
+            // on the trigger).
             if self.anim.is_animating() {
                 self.anim.stop();
             }
@@ -591,18 +821,14 @@ impl TooltipLayerWidget {
     }
 }
 
-impl<State: 'static> View<State> for TooltipLayerView<State> {
-    type Element = TooltipLayerWidget;
+impl<State: 'static> View<State> for RampedPanelView<State> {
+    type Element = RampedPanelWidget;
 
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> TooltipLayerWidget {
-        TooltipLayerWidget {
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> RampedPanelWidget {
+        RampedPanelWidget {
             content: build_child(&self.content, ctx),
             hover: self.hover.clone(),
-            placement: self.placement,
             arrow: self.arrow,
-            rect: Rect::ZERO,
-            anchor_used: Rect::ZERO,
-            host_origin: Point::ORIGIN,
             was_open: false,
             anim: AnimationController::new(Duration::from_millis(ENTRANCE_MS))
                 .with_curve(Curve::EaseOut),
@@ -613,69 +839,37 @@ impl<State: 'static> View<State> for TooltipLayerView<State> {
     fn rebuild(
         &self,
         prev: &Self,
-        element: &mut TooltipLayerWidget,
+        element: &mut RampedPanelWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        let mut flags = rebuild_child(&prev.content, &self.content, &mut element.content, ctx);
-        if element.placement != self.placement {
-            element.placement = self.placement;
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
+        let flags = rebuild_child(&prev.content, &self.content, &mut element.content, ctx);
         element.hover = self.hover.clone();
         element.arrow = self.arrow;
         flags
     }
 
-    fn teardown(&self, element: &mut TooltipLayerWidget, ctx: &mut BuildCtx<'_>) {
+    fn teardown(&self, element: &mut RampedPanelWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.content, &mut element.content, ctx);
     }
 }
 
-impl Widget for TooltipLayerWidget {
+impl Widget for RampedPanelWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let area = Size::new(
-            finite_or_zero(bc.max().width),
-            finite_or_zero(bc.max().height),
-        );
-        let content = self.content.layout_child(ctx, &BoxConstraints::loose(area));
-        self.anchor_used = self.hover.anchor();
-        // Window space → this layer's own space (the identity in the supported
-        // mount, the top child of a full-area `Stack`).
-        let anchor_local = self.anchor_used - self.host_origin.to_vec2();
-        self.rect = place(
-            anchor_local,
-            content,
-            Rect::from_origin_size(Point::ORIGIN, area),
-            self.placement,
-        );
-        self.content.set_origin(self.rect.origin());
-        bc.constrain(area)
+        let content = self.content.layout_child(ctx, bc);
+        self.content.set_origin(Point::ORIGIN);
+        bc.constrain(content)
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // The same self-correction the anchored host runs: this is the only pass
-        // that knows the layer's absolute origin, and the latch can move under a
-        // layout that already ran.
-        if ctx.origin() != self.host_origin || self.hover.anchor() != self.anchor_used {
-            self.host_origin = ctx.origin();
-            ctx.request_layout();
-        }
         let open = self.hover.is_open();
-        // Settled closed: paint nothing. The layer stays mounted, costing a
-        // layout of its content and this check. `was_open` is part of the test
-        // because a latch that closes on the frame after it opened leaves the
-        // presence at zero with the edge still owed — skipping the ramp there
-        // would strand `was_open` set and the next open would never start.
+        // Settled closed: paint nothing. `was_open` is part of the test because
+        // a latch that closes on the frame after it opened leaves the presence
+        // at zero with the edge still owed — skipping the ramp there would
+        // strand `was_open` set and the next open would never start.
         if !open && !self.was_open && self.presence <= 0.0 {
             return;
         }
-        let (reduce_motion, fill) = {
-            let theme = Theme::from_paint_ctx(ctx);
-            (
-                theme.is_some_and(|t| t.motion.reduce_motion),
-                crate::overlay::foreground(theme),
-            )
-        };
+        let reduce_motion = Theme::from_paint_ctx(ctx).is_some_and(|t| t.motion.reduce_motion);
         let presence = self.ramp(ctx, open, reduce_motion);
         if !open && presence <= 0.0 {
             // The fade-out has just settled.
@@ -683,7 +877,8 @@ impl Widget for TooltipLayerWidget {
         }
 
         let origin = ctx.origin();
-        let panel = self.rect + origin.to_vec2();
+        let size = ctx.size();
+        let panel = Rect::from_origin_size(origin, size);
         let ramping = presence < 1.0;
         if ramping {
             scene.push_layer(panel.origin(), panel.size(), presence as f32);
@@ -700,15 +895,15 @@ impl Widget for TooltipLayerWidget {
             }
         }
         if self.arrow == TooltipArrow::Tip {
-            // Both rects in window space: `panel` is this layer's placed rect
-            // lifted out of its own space by `origin` just above, and the latch
-            // stores the trigger's rect in window space already. Lowering the
-            // anchor into the layer's space here instead would compare the two
-            // in different spaces and put the tip `origin` away from the edge
-            // facing the trigger (the identity only at a layer sitting at the
-            // window origin, which is what the documented full-area `Stack`
-            // mount happens to be).
-            draw_arrow(scene, panel, self.anchor_used, fill);
+            // Both rects in window space: `panel` is this layer's placed rect,
+            // built from `ctx.origin()` above, and the latch stores the
+            // trigger's rect in window space already. Lowering the anchor into
+            // the layer's own space instead would compare the two in different
+            // spaces and put the tip `origin` away from the edge facing its
+            // trigger — an identity only for a layer sitting at the window
+            // origin, which a floated overlay is not.
+            let fill = crate::overlay::foreground(Theme::from_paint_ctx(ctx));
+            draw_arrow(scene, panel, self.hover.anchor(), fill);
         }
         self.content.paint_child(ctx, scene);
         if ramping {
@@ -720,29 +915,22 @@ impl Widget for TooltipLayerWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Input-transparent by contract: the layer observes moves to keep the
-        // latch's "pointer is over the panel" flag current and **consumes
-        // nothing**, so the trigger underneath keeps seeing its own hover and a
-        // press anywhere reaches whatever is below.
+        // Keep the latch's "pointer is over the panel" flag current — a
+        // tooltip is `OverlayInput::Transparent`, so the root never routes an
+        // overlay event here at all and this never runs for one; a hover
+        // card's panel is `OverlayInput::Interactive`, so its own content
+        // (a link, a button) is routed to below, exactly like any other
+        // container.
         if let InputEvent::Pointer(p) = event
             && p.phase == PointerPhase::Move
         {
-            let over = self.hover.is_open() && self.rect.contains(p.position);
+            let over = inside(p.position, ctx.size());
             if over != self.hover.over_panel() {
                 self.hover.set_over_panel(over);
                 ctx.request_redraw();
             }
-            if over {
-                // Claimed so nothing under the panel lights up while the pointer
-                // is over it; the trigger stays "active" through the latch's own
-                // `over_panel` flag rather than through the hover link.
-                ctx.claim_hover();
-            }
         }
-        // The content is never routed to: a hover overlay has no interactive
-        // parts in v1, and routing would make it possible for the panel to
-        // swallow a press meant for the page.
-        EventResult::Ignored
+        route_event_single(&mut self.content, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -806,7 +994,7 @@ fn draw_arrow(scene: &mut dyn PaintScene, panel: Rect, anchor: Rect, color: Colo
     } else {
         Point::new(inset_within(center.x, panel.x0, panel.x1, reach), center.y)
     };
-    let mut path = BezPath::new();
+    let mut path = frust::authoring::BezPath::new();
     path.move_to(Point::new(-reach, 0.0));
     path.line_to(Point::new(0.0, -reach));
     path.line_to(Point::new(reach, 0.0));
@@ -923,12 +1111,56 @@ mod tests {
     #[derive(Default)]
     struct AppState {
         opens: Vec<bool>,
+        button_pressed: bool,
     }
 
     const TRIGGER: Size = Size::new(80.0, 36.0);
 
-    /// The mount an app uses: the trigger in the page, the layer as the top child
-    /// of a full-area [`frust::Stack`], permanently.
+    /// A page widget filling whatever area it is given, recording whether it
+    /// was pressed — the proof consumer for "a press on the button beneath an
+    /// open tooltip actually reaches the button", not merely "nobody handled
+    /// it".
+    struct PageButton;
+
+    struct PageButtonWidget;
+
+    impl View<AppState> for PageButton {
+        type Element = PageButtonWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PageButtonWidget {
+            PageButtonWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PageButtonWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+        fn teardown(&self, _element: &mut PageButtonWidget, _ctx: &mut BuildCtx<'_>) {}
+    }
+
+    impl Widget for PageButtonWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.state_mut::<AppState>().button_pressed = true;
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, _ctx: &mut SemanticsCtx) {}
+        visit_children!();
+    }
+
+    /// The mount an app uses: the trigger in the page, the panel mounted
+    /// unconditionally alongside it — the panel no longer needs to be a
+    /// particular child of anything (see the module docs).
     struct Harness {
         root: RenderRoot<AppState, frust::StackView<AppState>>,
         state: AppState,
@@ -1030,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn the_layer_paints_nothing_while_closed_and_a_panel_with_a_tip_while_open() {
+    fn the_panel_paints_nothing_while_closed_and_a_panel_with_a_tip_while_open() {
         let mut h = Harness::new();
         let closed = h.paint_at(0.0);
         assert!(closed.rrects.is_empty(), "no panel while closed");
@@ -1205,14 +1437,14 @@ mod tests {
     }
 
     #[test]
-    fn the_layer_consumes_nothing_so_the_page_under_it_keeps_its_input() {
+    fn the_panel_consumes_nothing_so_the_page_under_it_keeps_its_input() {
         let mut h = Harness::new();
         h.event(pointer(PointerPhase::Move, 10.0, 10.0));
         h.frame(0.0);
         h.frame(TOOLTIP_DELAY_MS as f64);
         assert!(h.hover.is_open());
         let panel = {
-            let rect = place(
+            let rect = frust::authoring::place(
                 h.hover.anchor(),
                 Size::new(100.0, 28.0),
                 Rect::from_origin_size(Point::ORIGIN, WINDOW),
@@ -1229,38 +1461,75 @@ mod tests {
         );
     }
 
+    /// The proof this port owes: a press on a real widget beneath an open
+    /// tooltip must reach that widget, not just "nobody swallowed it". A page
+    /// button fills the whole window, directly under wherever the tooltip
+    /// panel lands.
+    ///
+    /// Negative control performed by hand: temporarily changing `tooltip`'s
+    /// registration from `OverlayInput::Transparent` to
+    /// `OverlayInput::Interactive` makes this test fail (`outcome.handled` is
+    /// `false` and `state.button_pressed` stays `false`, because the root's
+    /// overlay pre-pass then routes the press to the tooltip's own pod
+    /// instead of letting it fall through) — see the completion summary for
+    /// the exact run.
     #[test]
-    fn an_unbounded_height_collapses_the_layer_and_clamps_the_panel_to_its_top() {
-        // The documented mount is a full-area `Stack`, which is bounded; a
-        // layer put inside a scroll view is not, and this is what that costs —
-        // pinned, not fixed here: the coercion cannot invent an extent nobody
-        // offered, so the fix belongs at the mount site.
+    fn a_press_on_a_button_beneath_an_open_tooltip_reaches_the_button() {
         let hover = TooltipHover::new();
-        let trigger = Rect::from_origin_size(Point::new(40.0, 300.0), TRIGGER);
-        hover.set_anchor(trigger);
-        let view: TooltipLayerView<AppState> = tooltip(&hover, "Add to library");
-        let mut counter = 0u64;
-        let mut w = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = AppState::default();
+        let mut root: RenderRoot<AppState, frust::StackView<AppState>> = RenderRoot::new();
+        root.set_theme(Box::new(light()));
         let mut tcx = TextContext::new();
-        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
-        // The constraints `frust::scroll_view` hands its child: the viewport
-        // width, an infinite max height.
-        let scrolled = BoxConstraints::new(
-            Size::new(WINDOW.width, 0.0),
-            Size::new(WINDOW.width, f64::INFINITY),
-        );
-        let size = w.layout(&mut lctx, &scrolled);
-        assert_eq!(size.height, 0.0, "no vertical area to fill");
-        assert_eq!(
-            w.panel_rect().y0,
-            0.0,
-            "clamped to the top of a zero-height area, nowhere near its trigger"
-        );
 
-        // The same layer under the contract's own constraints places normally.
-        let bounded = w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
-        assert_eq!(bounded, WINDOW);
-        assert_eq!(w.panel_rect().y1, trigger.y0, "flush above its trigger");
+        fn logic(hover: &TooltipHover) -> impl FnMut(&mut AppState) -> frust::StackView<AppState> {
+            let hover = hover.clone();
+            move |_s: &mut AppState| {
+                frust::Stack(vec![
+                    any(PageButton),
+                    any(tooltip_trigger(
+                        &hover,
+                        SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                    )),
+                    any(tooltip(&hover, "Add to library")),
+                ])
+            }
+        }
+
+        let mut run = |root: &mut RenderRoot<AppState, frust::StackView<AppState>>,
+                       state: &mut AppState,
+                       ms: f64| {
+            let mut l = logic(&hover);
+            root.rebuild(&mut l, state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft_ms(ms));
+        };
+
+        run(&mut root, &mut state, 0.0);
+        root.event(&mut state, &pointer(PointerPhase::Move, 10.0, 10.0));
+        run(&mut root, &mut state, 0.0);
+        run(&mut root, &mut state, TOOLTIP_DELAY_MS as f64);
+
+        assert!(hover.is_open(), "the tooltip is open");
+
+        let panel_center = frust::authoring::place(
+            hover.anchor(),
+            Size::new(100.0, 28.0),
+            Rect::from_origin_size(Point::ORIGIN, WINDOW),
+            OverlayPlacement::on(OverlaySide::Top).offset(0.0),
+        )
+        .center();
+        let outcome = root.event(
+            &mut state,
+            &pointer(PointerPhase::Down, panel_center.x, panel_center.y),
+        );
+        assert!(
+            outcome.handled,
+            "the press reaches the page button under the open tooltip"
+        );
+        assert!(
+            state.button_pressed,
+            "and the button beneath actually fired, not just 'nobody swallowed it'"
+        );
     }
 
     #[test]
@@ -1370,7 +1639,11 @@ mod tests {
             trigger.center().x,
             "under the trigger, not the layer's own origin away from it"
         );
-        assert_eq!(center.y, trigger.y1, "on the panel edge facing the trigger");
+        // Flush ABOVE the trigger, so the edge facing it is the panel's own
+        // `y1` sitting on `trigger.y0`. The panel escapes its padded ancestor
+        // onto the window-level overlay, so unlike a mount confined to that
+        // ancestor it still has room above the trigger and does not flip below.
+        assert_eq!(center.y, trigger.y0, "on the panel edge facing the trigger");
     }
 
     #[test]

@@ -147,6 +147,54 @@ pub(crate) fn normalize_ime_indices(
     )
 }
 
+/// A semantic clipboard / selection verb crossing the `nativeEditCommand` JNI
+/// boundary, decoupled from `frust_core::event::EditCommand` so this module
+/// stays host-testable (the core crate is Android-gated — see the crate's
+/// `Cargo.toml`). [`crate::jni_glue`] maps this onto the core command at the
+/// one Android-only call site, exactly as [`TouchPhase`] and [`Appearance`]
+/// are mapped.
+///
+/// Carries no payload on purpose: only a paste has one, and it crosses as its
+/// own `jstring` argument beside the code rather than being modelled here — so
+/// this stays a `Copy` discriminant and the pasted text never needs a second
+/// owner on the way through the mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditCommandWire {
+    /// Copy the selection to the host clipboard (wire code `0`).
+    Copy,
+    /// Copy the selection and delete it (wire code `1`).
+    Cut,
+    /// Replace the selection with the text accompanying the command (wire code `2`).
+    Paste,
+    /// Select the focused field's whole content (wire code `3`).
+    SelectAll,
+}
+
+/// Map the command code the Kotlin `FrustSurfaceView.nativeEditCommand` sends
+/// into an [`EditCommandWire`].
+///
+/// The numeric ABI is fixed and shared with the Kotlin side — DO NOT renumber
+/// without changing both sides:
+///   `0` = copy, `1` = cut, `2` = paste (text in the accompanying `jstring`),
+///   `3` = select all.
+///
+/// An unrecognised code answers `None` — *ignored*, never defaulted. That is
+/// the deliberate opposite of [`touch_phase_from_action`]'s cancel fallback: a
+/// stray touch code is safest resolved to "release the gesture", but every verb
+/// in this vocabulary edits a document (a paste replaces the selection, a cut
+/// deletes it), so picking one for a code this side could not decode would
+/// mutate the user's text on an undecodable value.
+#[inline]
+pub(crate) fn edit_command_from_code(cmd: i32) -> Option<EditCommandWire> {
+    match cmd {
+        0 => Some(EditCommandWire::Copy),
+        1 => Some(EditCommandWire::Cut),
+        2 => Some(EditCommandWire::Paste),
+        3 => Some(EditCommandWire::SelectAll),
+        _ => None,
+    }
+}
+
 /// A plain, `jni`/`frust-core`-free view of the IME surface, ready to be
 /// serialised into the `nativeImeState` JSON the Kotlin side parses.
 ///
@@ -688,6 +736,25 @@ mod tests {
             !should_consume_back_press(false),
             "handles_back=false -> return JNI_FALSE (activity finishes)"
         );
+    }
+
+    #[test]
+    fn edit_command_codes_map_to_verbs() {
+        assert_eq!(edit_command_from_code(0), Some(EditCommandWire::Copy));
+        assert_eq!(edit_command_from_code(1), Some(EditCommandWire::Cut));
+        assert_eq!(edit_command_from_code(2), Some(EditCommandWire::Paste));
+        assert_eq!(edit_command_from_code(3), Some(EditCommandWire::SelectAll));
+    }
+
+    #[test]
+    fn an_unknown_edit_command_code_is_ignored_not_defaulted() {
+        // A code this side cannot decode must reach no widget: every verb in
+        // this vocabulary edits a document, so a fallback verb would mutate the
+        // user's text on a value that was never understood.
+        assert_eq!(edit_command_from_code(4), None);
+        assert_eq!(edit_command_from_code(-1), None);
+        assert_eq!(edit_command_from_code(i32::MAX), None);
+        assert_eq!(edit_command_from_code(i32::MIN), None);
     }
 
     #[test]

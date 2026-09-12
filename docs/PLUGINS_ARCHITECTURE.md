@@ -171,18 +171,27 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   `DesignLanguage`-keyed special case (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s
   theme ladder). Cupertino's `baseline()` attaches no font extension.
 - **`frust-shadcn` and `frust-material` each carry a cross-component `overlay` seam** — the only
-  place either catalog reaches through a full-area top-layer widget pattern standing in for the DOM
-  portal shadcn/ui itself relies on. `frust-material`'s is a Phase-3 sibling port of `frust-shadcn`'s
+  place either catalog reaches through a full-area top-layer widget pattern standing in for the
+  DOM portal shadcn/ui itself relies on. `frust-material`'s is a sibling port of `frust-shadcn`'s
   (ported, never depended on — the charter above forbids one design-system plugin depending on
-  another), not a shared module. Both give an `anchored` host (trigger-relative placement in window
-  space, light-dismiss, no scrim — popover, tooltip, hover-card, the menu/dropdown/select/combobox
-  family) and a `modal` host (scrim + centered/edge-pinned panel — dialog, alert-dialog, sheet,
-  side/drawer sheet, full-screen search, picker). Every other component in either catalog paints
-  inside its own box; only these reach through the seam. **One divergence**: `frust-shadcn`'s modal
-  host pops via the simpler `NavigatorController::push_transparent_for_result`, with no staged
-  back-press route, while `frust-material`'s sits on a `BackPolicy::DismissAnimated` +
-  `PushOptions::dismiss_signal` tier — an Android back press stages the *same* reverse-ramp exit
-  every other dismiss gesture takes, a back-dismiss tier `frust-shadcn`'s modal host lacks.
+  another), not a shared module. Both give an `anchored` host (trigger-relative placement in
+  window space, light-dismiss, no scrim — popover, the menu/dropdown/select/combobox family, and
+  material's tooltip/rich tooltip) and a `modal` host (scrim + centered/edge-pinned panel —
+  dialog, alert-dialog, sheet, side/drawer sheet, full-screen search, picker). Every other
+  component in either catalog paints inside its own box; only these reach through the seam —
+  except `frust-shadcn`'s `tooltip` and `hover_card`, which register their panel with the
+  **framework** overlay portal instead (`frust::authoring::OverlaySlot`, the seam
+  `frust::overlay_portal` is itself built from), so the render root paints it above the whole main
+  tree and hit-tests it ahead of that tree: a tooltip in the `Tooltip` band as
+  `OverlayInput::Transparent`, so every press falls through as though it were not there; a hover
+  card in `Floating` as `Interactive`, so its content is genuinely pressable. Both still latch
+  their open state in a widget and time their delays off the paint clock, a hover having no event
+  to open on, and the catalogs' own `anchored` hosts are candidates for becoming thin wrappers
+  over that same slot. **One divergence**: `frust-shadcn`'s modal host pops via the simpler
+  `NavigatorController::push_transparent_for_result`, with no staged back-press route, while
+  `frust-material`'s sits on a `BackPolicy::DismissAnimated` + `PushOptions::dismiss_signal` tier
+  — an Android back press stages the *same* reverse-ramp exit every other dismiss gesture takes, a
+  back-dismiss tier `frust-shadcn`'s modal host lacks.
 - **Both plugins' overlay hosts animate their exit, not just their entrance.** Each `modal` host
   stages every dismiss (scrim tap, Escape, close button, drag, and — material only — back) as a
   reverse ramp and fires the app's dismissal only once it settles — material's staged pop is

@@ -1770,9 +1770,17 @@ impl Widget for QuestionnaireWidget {
             }
             return EventResult::Ignored;
         }
+        if let InputEvent::Key(key) = event {
+            return self.handle_key(ctx, event, key);
+        }
+        // Ime composition and the clipboard verbs an `EditCommand` carries are
+        // both focus-routed like `Key` (handled above) and belong to the
+        // free-text field outright — branch on the shared predicate rather
+        // than enumerating `Ime`/`EditCommand` separately.
+        if event.is_focus_routed() {
+            return self.route_to_input(ctx, event);
+        }
         match event {
-            InputEvent::Key(key) => self.handle_key(ctx, event, key),
-            InputEvent::Ime(_) => self.route_to_input(ctx, event),
             InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p),
             _ => EventResult::Ignored,
         }
@@ -1885,7 +1893,8 @@ mod tests {
     use frust::FrameTime;
     use frust::authoring::text::TextContext;
     use frust::authoring::{
-        BezPath, EventOutcome, Modifiers, PointerButton, SemanticsUpdate, scene::GlyphRun,
+        BezPath, EditCommand, EventOutcome, Modifiers, PointerButton, SemanticsUpdate,
+        scene::GlyphRun,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -2586,6 +2595,96 @@ mod tests {
             EventResult::Ignored
         );
         assert_eq!(state.answered.len(), 1);
+    }
+
+    /// `EditCommand::Paste` is focus-routed exactly like `Key`/`Ime`: a
+    /// clipboard paste dispatched at the widget while the free-text field
+    /// holds focus must reach it, closing the gap where a `Ctrl+V` chord's
+    /// `ctx.request_paste()` succeeds but the shell's separate top-level
+    /// `EditCommand::Paste(text)` dispatch it triggers is then swallowed here.
+    #[test]
+    fn a_paste_edit_command_reaches_the_focused_free_text_field() {
+        let (mut widget, size) = ready(1, Vec::new());
+        let mut state = Flow::default();
+        let rect = widget.input_rect.expect("the second item has an input");
+        // Tap the free-text field so it holds the recorded focus path.
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Down, rect.center().x, rect.center().y),
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Up, rect.center().x, rect.center().y),
+        );
+        assert!(
+            widget.input_focused(),
+            "the tap focused the free-text field"
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &InputEvent::EditCommand(EditCommand::Paste("hello".to_string())),
+        );
+        assert_eq!(
+            state.answered.last().map(|e| e.answer.text.as_str()),
+            Some("hello"),
+            "the pasted text must reach the focused free-text field"
+        );
+    }
+
+    /// Guard against over-forwarding: Enter confirms from anywhere — including
+    /// from inside the free-text field (module docs) — so `handle_key` must
+    /// keep intercepting it before `is_focus_routed()`'s wider catch-all ever
+    /// gets a look, even while the field holds focus.
+    #[test]
+    fn enter_confirms_and_is_not_forwarded_while_the_field_is_focused() {
+        // The item must already validate (it is not required, but an
+        // unanswered item still fails `is_valid`), so Enter reaches
+        // `confirm`'s navigate branch rather than its validation-latch one —
+        // either way proves Enter never reaches the field, but this keeps the
+        // assertion about *where the event went*, not about validity.
+        let (mut widget, size) = ready(
+            1,
+            vec![QuestionnaireAnswer::default(), answered(&["progress"])],
+        );
+        let mut state = Flow::default();
+        let rect = widget.input_rect.expect("the second item has an input");
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Down, rect.center().x, rect.center().y),
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Up, rect.center().x, rect.center().y),
+        );
+        assert!(
+            widget.input_focused(),
+            "the tap focused the free-text field"
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &key(Key::Named(NamedKey::Enter)),
+        );
+        assert_eq!(
+            state.navigated,
+            vec![2],
+            "Enter confirmed the item and advanced, rather than reaching the field"
+        );
+        assert!(
+            state.answered.is_empty(),
+            "Enter must not be routed to the free-text field as text"
+        );
     }
 
     // ---- Rebuild ----------------------------------------------------------

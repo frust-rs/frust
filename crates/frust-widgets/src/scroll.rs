@@ -1166,14 +1166,18 @@ impl ScrollWidget {
             // A broadcast is not user input: it bypasses the whole gesture
             // machinery, reaches the child whether or not it is focused or
             // captured, and is never consumed (`crate::authoring::route_event`'s
-            // contract, applied to this widget's hand-rolled routing).
-            InputEvent::Housekeeping => {
+            // contract, applied to this widget's hand-rolled routing). A floated
+            // surface's own input travels the same way — it has to reach an
+            // overlay owner anywhere below this viewport, and a scroll gesture
+            // must never swallow it.
+            InputEvent::Housekeeping | InputEvent::Overlay(_) => {
                 self.child.event_child(ctx, event);
                 EventResult::Ignored
             }
-            // Focus-routed events (Key/Ime) bypass the scroll gesture machinery
-            // and go straight to the child if it holds the recorded focus path.
-            InputEvent::Key(_) | InputEvent::Ime(_) => {
+            // Focus-routed events (Key/Ime, and the clipboard verbs an
+            // `EditCommand` carries) bypass the scroll gesture machinery and go
+            // straight to the child if it holds the recorded focus path.
+            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
                 if self.child.is_focused() {
                     self.child.event_child(ctx, event)
                 } else {
@@ -1740,6 +1744,78 @@ mod tests {
         let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, 100.0));
         w.event_at(&mut ctx, e, t);
         ctx.needs_redraw()
+    }
+
+    #[test]
+    fn an_overlay_broadcast_reaches_the_child_and_is_never_consumed() {
+        use frust_core::{OverlayEvent, OverlayEventKind, OverlayKey};
+
+        /// What a floated surface's owner below this viewport would see.
+        #[derive(Default)]
+        struct Seen {
+            overlays: u32,
+            pointers: u32,
+        }
+        struct Owner;
+        struct OwnerW;
+        impl View<Seen> for Owner {
+            type Element = OwnerW;
+            fn build(&self, _c: &mut BuildCtx<'_>) -> OwnerW {
+                OwnerW
+            }
+            fn rebuild(&self, _p: &Self, _e: &mut OwnerW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+                ChangeFlags::NONE
+            }
+        }
+        impl Widget for OwnerW {
+            fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(200.0, 1000.0))
+            }
+            fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+            fn event(&mut self, ctx: &mut EventCtx, e: &InputEvent) -> EventResult {
+                match e {
+                    InputEvent::Overlay(_) => {
+                        ctx.state_mut::<Seen>().overlays += 1;
+                        // Even a `Handled` must not be reported upward: a
+                        // broadcast is never consumed.
+                        EventResult::Handled
+                    }
+                    InputEvent::Pointer(_) => {
+                        ctx.state_mut::<Seen>().pointers += 1;
+                        EventResult::Handled
+                    }
+                    _ => EventResult::Ignored,
+                }
+            }
+        }
+
+        let view: ScrollView<Seen> = scroll_view(Owner);
+        let mut counter = 0u64;
+        let mut w = View::<Seen>::build(&view, &mut BuildCtx::new(&mut counter));
+        w.viewport = Size::new(200.0, 100.0);
+        let mut state = Seen::default();
+        let broadcast = InputEvent::Overlay(OverlayEvent {
+            key: OverlayKey::next(),
+            kind: OverlayEventKind::OutsideDown,
+        });
+        let result = {
+            let sa: &mut dyn Any = &mut state;
+            let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, 100.0));
+            w.event_at(&mut ctx, &broadcast, 0.0)
+        };
+        assert_eq!(
+            state.overlays, 1,
+            "a floated surface's own input reaches its owner through the viewport"
+        );
+        assert_eq!(
+            result,
+            EventResult::Ignored,
+            "and is never consumed, whatever the child returned"
+        );
+        assert_eq!(state.pointers, 0, "it is not a pointer event");
+        // The gesture machinery is untouched by it: no capture was opened and
+        // no drag armed.
+        assert!(!w.down_active && !w.scrolling);
     }
 
     #[test]
@@ -3793,5 +3869,48 @@ mod tests {
             "a rebuild whose view carries no .physics(...) leaves the widget's physics untouched"
         );
         assert!(!w.scrolling);
+    }
+
+    /// A focused editable inside the viewport must see a clipboard verb: an
+    /// `EditCommand` is focus-routed, so it takes the same bypass `Key`/`Ime`
+    /// take rather than the gesture machinery (and never a hit test).
+    #[test]
+    fn an_edit_command_reaches_the_focused_child() {
+        use crate::text_input;
+        use frust_core::{EditCommand, RenderRoot};
+
+        struct Field {
+            value: String,
+        }
+        fn logic(state: &mut Field) -> ScrollView<Field> {
+            scroll_view(text_input(
+                state.value.clone(),
+                |s: &mut Field, v: String| {
+                    s.value = v;
+                },
+            ))
+        }
+
+        let mut state = Field {
+            value: "hello".to_string(),
+        };
+        let mut root: RenderRoot<Field, ScrollView<Field>> = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 100.0));
+
+        // Tap the field through the viewport so it holds the recorded focus path.
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 10.0));
+        assert!(root.is_focus_active(), "the tap focused the child field");
+
+        root.event(&mut state, &InputEvent::EditCommand(EditCommand::SelectAll));
+        root.event(&mut state, &InputEvent::EditCommand(EditCommand::Copy));
+
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("hello"),
+            "the copy was answered by the child, through this router"
+        );
+        assert_eq!(state.value, "hello", "a copy edits nothing");
     }
 }

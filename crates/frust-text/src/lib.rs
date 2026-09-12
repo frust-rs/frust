@@ -19,7 +19,8 @@ mod style;
 
 pub use context::{FontError, RegisteredFamily, TextContext, register_generic_fallback};
 pub use editor::{
-    EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, utf16_to_byte,
+    EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, sanitize_paste,
+    utf16_to_byte,
 };
 pub use layout::TextLayout;
 pub use shape_cache::ShapeCacheStats;

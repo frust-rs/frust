@@ -311,6 +311,189 @@ pub(crate) fn json_escape_into(s: &str, out: &mut String) {
     }
 }
 
+/// One clipboard/selection verb the host's edit menu (or a hardware-keyboard
+/// chord routed through UIKit's responder chain) asked for, decoupled from
+/// `frust_core::event::EditCommand` so this module stays host-testable (the
+/// core crate is iOS-gated — see the crate's `Cargo.toml`, the same reasoning
+/// [`TouchPhase`]/[`Appearance`] above follow).
+///
+/// Carries no payload: only a paste has one, and the wire passes that text as
+/// `frust_edit_command`'s separate C-string argument rather than widening this
+/// enum — which keeps the mapping a pure `u8` decision this module can test
+/// without a string allocation. [`crate::ffi_glue::edit_command`] pairs the two
+/// back together into the core `EditCommand` at the one iOS-only call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditCommandKind {
+    /// Copy the selection to the host pasteboard.
+    Copy,
+    /// Copy the selection to the host pasteboard and delete it.
+    Cut,
+    /// Replace the selection with the text the host read for us.
+    Paste,
+    /// Select the focused field's whole content.
+    SelectAll,
+}
+
+/// `frust_edit_command`'s wire code for [`EditCommandKind::Copy`].
+///
+/// **DO NOT renumber.** These four constants are a fixed numeric ABI shared
+/// with the Swift `FrustView` edit actions (`copy(_:)`/`cut(_:)`/`paste(_:)`/
+/// `selectAll(_:)`), exactly like the touch-phase codes
+/// [`touch_phase_from_code`] decodes: the Swift side compiles the literal into
+/// the app binary, so changing a value here silently re-points a shipped
+/// caller's verb at a different one.
+pub(crate) const EDIT_COMMAND_COPY: u8 = 0;
+/// `frust_edit_command`'s wire code for [`EditCommandKind::Cut`] — see
+/// [`EDIT_COMMAND_COPY`] for the do-not-renumber rule.
+pub(crate) const EDIT_COMMAND_CUT: u8 = 1;
+/// `frust_edit_command`'s wire code for [`EditCommandKind::Paste`] — see
+/// [`EDIT_COMMAND_COPY`] for the do-not-renumber rule.
+pub(crate) const EDIT_COMMAND_PASTE: u8 = 2;
+/// `frust_edit_command`'s wire code for [`EditCommandKind::SelectAll`] — see
+/// [`EDIT_COMMAND_COPY`] for the do-not-renumber rule.
+pub(crate) const EDIT_COMMAND_SELECT_ALL: u8 = 3;
+
+/// Map `frust_edit_command`'s `cmd` code onto an [`EditCommandKind`], or `None`
+/// for a code this ABI does not define.
+///
+/// **Unrecognised codes are dropped, not defaulted** — the one place this
+/// module deliberately parts company with [`touch_phase_from_code`], which
+/// folds an unknown code into `Cancelled`. A touch phase has a safe default
+/// (cancelling releases capture, which is strictly the *less* destructive
+/// reading); a clipboard verb has none. Every variant above either mutates the
+/// document or discloses its contents, so a corrupt code guessed as `Cut` would
+/// delete a selection and one guessed as `Paste` would overwrite it. Refusing
+/// is the only answer that cannot damage the user's text.
+#[inline]
+pub(crate) fn edit_command_from_code(cmd: u8) -> Option<EditCommandKind> {
+    match cmd {
+        EDIT_COMMAND_COPY => Some(EditCommandKind::Copy),
+        EDIT_COMMAND_CUT => Some(EditCommandKind::Cut),
+        EDIT_COMMAND_PASTE => Some(EditCommandKind::Paste),
+        EDIT_COMMAND_SELECT_ALL => Some(EditCommandKind::SelectAll),
+        _ => None,
+    }
+}
+
+/// The selection's bounding rect in **logical** points, the anchor the Swift
+/// side presents the system edit menu against.
+///
+/// Decoupled from `kurbo::Rect` for [`CaretRect`]'s reason (`kurbo` is an
+/// iOS-gated dependency of this crate) and carried in the same unit as that
+/// caret rect — logical px equal view points on iOS — so the Swift side
+/// consumes both with no scale conversion. The core publishes the anchor in
+/// **absolute** logical window space, and `FrustView` fills the window, so the
+/// rect is already in the view's own coordinates when it arrives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ToolbarAnchor {
+    /// Left edge (logical points).
+    pub x: f32,
+    /// Top edge (logical points).
+    pub y: f32,
+    /// Width (logical points).
+    pub w: f32,
+    /// Height (logical points).
+    pub h: f32,
+}
+
+/// Which clipboard verbs the focused field says apply to its current selection,
+/// decoupled from `frust_core::selection_toolbar::SelectionToolbarActions` for
+/// [`ToolbarAnchor`]'s reason.
+///
+/// The **field's** call, not the menu's: an obscured field refuses copy and cut,
+/// a read-only one refuses cut and paste. The Swift side answers
+/// `canPerformAction(_:with:)` from these, which is what makes UIKit's own menu
+/// offer exactly the verbs the framework would have offered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ToolbarActions {
+    /// Copy the selection.
+    pub copy: bool,
+    /// Cut the selection.
+    pub cut: bool,
+    /// Replace the selection with the pasteboard's contents.
+    pub paste: bool,
+    /// Select the field's whole content.
+    pub select_all: bool,
+}
+
+/// Serialize the focused field's selection-toolbar request into the JSON
+/// `frust_selection_toolbar_json` returns:
+///
+/// ```text
+/// {"generation":7,"presentMenu":true,"x":12,"y":40,"w":86,"h":18,
+///  "copy":true,"cut":true,"paste":true,"selectAll":false}
+/// ```
+///
+/// `generation` is `AppTree::selection_toolbar_generation`'s counter, which
+/// moves when the *menu-significant* part of the request changes — `presentMenu`
+/// or the verbs, never the anchor alone; the Swift side caches the value it last
+/// acted on and presents or dismisses only when it moves, which is what stops a
+/// standing selection — republished every frame it stands — from re-presenting
+/// the system menu on every vsync.
+///
+/// `presentMenu` is the request's one edge: `true` means the field is asking for
+/// the system menu now, `false` means it is only reporting where it is and what
+/// applies. The four geometry fields are logical points (see [`ToolbarAnchor`]),
+/// the four verb fields are the field's own enabled set (see [`ToolbarActions`])
+/// and are a level the responder chain answers `canPerformAction` from whether
+/// or not any menu is up.
+///
+/// Total, unlike [`platform_view_commands_json`]: the "no field is focused"
+/// answer is the FFI's null return, not a shape this builder has to express, so
+/// a caller with a request always gets a string. JSON is hand-rolled (no `serde`
+/// in the shell, `docs/CODE_STANDARDS.md`) beside [`ime_state_json`].
+pub(crate) fn selection_toolbar_json(
+    generation: u64,
+    present_menu: bool,
+    anchor: ToolbarAnchor,
+    actions: ToolbarActions,
+) -> String {
+    let mut out = String::with_capacity(148);
+    out.push_str("{\"generation\":");
+    let _ = write!(out, "{generation}");
+    out.push_str(",\"presentMenu\":");
+    push_bool(&mut out, present_menu);
+    out.push_str(",\"x\":");
+    push_finite_f32(&mut out, anchor.x);
+    out.push_str(",\"y\":");
+    push_finite_f32(&mut out, anchor.y);
+    out.push_str(",\"w\":");
+    push_finite_f32(&mut out, anchor.w);
+    out.push_str(",\"h\":");
+    push_finite_f32(&mut out, anchor.h);
+    out.push_str(",\"copy\":");
+    push_bool(&mut out, actions.copy);
+    out.push_str(",\"cut\":");
+    push_bool(&mut out, actions.cut);
+    out.push_str(",\"paste\":");
+    push_bool(&mut out, actions.paste);
+    out.push_str(",\"selectAll\":");
+    push_bool(&mut out, actions.select_all);
+    out.push('}');
+    out
+}
+
+/// Append `v` as a JSON number, substituting a finite `0` for a non-finite one.
+///
+/// The `f32` twin of [`push_finite`], and it degrades the same way for the same
+/// reason: the anchor is a *required* field (unlike [`ime_state_json`]'s
+/// optional caret, which nulls), so a `NaN`/`±inf` component must not emit an
+/// unparseable token and cost the Swift side the whole menu. A menu anchored at
+/// the view's origin is a visible glitch; a batch that fails to parse is a
+/// silently missing system menu with nothing to see.
+fn push_finite_f32(out: &mut String, v: f32) {
+    if v.is_finite() {
+        let _ = write!(out, "{v}");
+    } else {
+        out.push('0');
+    }
+}
+
+/// Append `v` as a JSON boolean literal.
+fn push_bool(out: &mut String, v: bool) {
+    out.push_str(if v { "true" } else { "false" });
+}
+
 /// A logical-or-physical rect, decoupled from `kurbo::Rect` so this module
 /// stays host-testable (`kurbo` is an iOS-gated dependency in this crate —
 /// see the crate's `Cargo.toml`, mirroring [`CaretRect`] above). The caller
@@ -809,6 +992,169 @@ mod tests {
     fn ime_json_encodes_content_type_no_suggestions() {
         let json = ime_state_json(true, "ABC-123", 7, 7, -1, -1, None, "noSuggestions");
         assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    // --- Edit-command wire ABI --------------
+
+    #[test]
+    fn edit_command_codes_map_to_their_verbs() {
+        // The fixed ABI the Swift `FrustView` edit actions compile against.
+        // Pinned by literal, not by the named constants alone: a test written
+        // against the constants would pass just as happily if every value were
+        // renumbered together, which is precisely the shipped-caller breakage
+        // the do-not-renumber rule exists to stop.
+        assert_eq!(edit_command_from_code(0), Some(EditCommandKind::Copy));
+        assert_eq!(edit_command_from_code(1), Some(EditCommandKind::Cut));
+        assert_eq!(edit_command_from_code(2), Some(EditCommandKind::Paste));
+        assert_eq!(edit_command_from_code(3), Some(EditCommandKind::SelectAll));
+    }
+
+    #[test]
+    fn edit_command_constants_agree_with_the_wire_codes() {
+        assert_eq!(EDIT_COMMAND_COPY, 0);
+        assert_eq!(EDIT_COMMAND_CUT, 1);
+        assert_eq!(EDIT_COMMAND_PASTE, 2);
+        assert_eq!(EDIT_COMMAND_SELECT_ALL, 3);
+    }
+
+    #[test]
+    fn unknown_edit_command_codes_are_refused_not_defaulted() {
+        // Deliberately unlike `touch_phase_from_code`'s fallback: every verb in
+        // this vocabulary either mutates the document or discloses it, so a
+        // corrupt code must reach no widget at all rather than be guessed into
+        // a destructive one.
+        assert_eq!(edit_command_from_code(4), None);
+        assert_eq!(edit_command_from_code(u8::MAX), None);
+    }
+
+    // --- Selection-toolbar JSON --------------
+
+    fn anchor() -> ToolbarAnchor {
+        ToolbarAnchor {
+            x: 12.0,
+            y: 40.0,
+            w: 86.0,
+            h: 18.0,
+        }
+    }
+
+    #[test]
+    fn selection_toolbar_json_golden() {
+        // Field names are the contract the Swift poll reads by key — a rename
+        // (or a `select_all`-style spelling for `selectAll`) silently turns
+        // every verb into "absent", so the whole object is pinned verbatim
+        // rather than probed with `contains`.
+        let json = selection_toolbar_json(
+            7,
+            true,
+            anchor(),
+            ToolbarActions {
+                copy: true,
+                cut: true,
+                paste: true,
+                select_all: false,
+            },
+        );
+        assert_eq!(
+            json,
+            r#"{"generation":7,"presentMenu":true,"x":12,"y":40,"w":86,"h":18,"copy":true,"cut":true,"paste":true,"selectAll":false}"#
+        );
+    }
+
+    #[test]
+    fn selection_toolbar_json_carries_each_verb_independently() {
+        // One verb true at a time, so a builder that wrote the same flag into
+        // four slots (or paired two of them up) cannot pass.
+        let only = |pick: fn(&mut ToolbarActions)| {
+            let mut actions = ToolbarActions::default();
+            pick(&mut actions);
+            selection_toolbar_json(1, true, anchor(), actions)
+        };
+        let copy = only(|a| a.copy = true);
+        assert!(copy.contains(r#""copy":true"#));
+        assert!(copy.contains(r#""cut":false,"paste":false,"selectAll":false"#));
+
+        let cut = only(|a| a.cut = true);
+        assert!(cut.contains(r#""copy":false,"cut":true,"paste":false,"selectAll":false"#));
+
+        let paste = only(|a| a.paste = true);
+        assert!(paste.contains(r#""copy":false,"cut":false,"paste":true,"selectAll":false"#));
+
+        let select_all = only(|a| a.select_all = true);
+        assert!(select_all.contains(r#""copy":false,"cut":false,"paste":false,"selectAll":true"#));
+    }
+
+    #[test]
+    fn selection_toolbar_json_carries_the_present_flag_both_ways() {
+        // The request's one edge, and the one field a builder could hardcode
+        // and still pass the golden above: `true` asks the Swift side to put
+        // the system menu up, `false` says the field is only reporting where it
+        // is and which verbs apply. Hardcoding it would re-present the menu on
+        // every verb change of a field nobody long-pressed.
+        assert!(
+            selection_toolbar_json(1, true, anchor(), ToolbarActions::default())
+                .contains(r#""presentMenu":true"#)
+        );
+        assert!(
+            selection_toolbar_json(1, false, anchor(), ToolbarActions::default())
+                .contains(r#""presentMenu":false"#)
+        );
+    }
+
+    #[test]
+    fn selection_toolbar_json_reports_the_generation_it_was_given() {
+        // The generation is the whole present-once mechanism on the Swift side:
+        // a builder that hard-coded or dropped it would re-present the system
+        // menu on every vsync a selection stands.
+        assert!(
+            selection_toolbar_json(0, true, anchor(), ToolbarActions::default())
+                .starts_with(r#"{"generation":0,"#)
+        );
+        assert!(
+            selection_toolbar_json(u64::MAX, true, anchor(), ToolbarActions::default())
+                .starts_with(&format!(r#"{{"generation":{},"#, u64::MAX))
+        );
+    }
+
+    #[test]
+    fn selection_toolbar_json_keeps_the_anchor_components_in_order() {
+        // x/y/w/h are four same-typed numbers in a row — the one shape where a
+        // transposed pair produces perfectly valid JSON and a menu anchored
+        // somewhere else entirely.
+        let json = selection_toolbar_json(
+            3,
+            true,
+            ToolbarAnchor {
+                x: 1.0,
+                y: 2.0,
+                w: 3.0,
+                h: 4.0,
+            },
+            ToolbarActions::default(),
+        );
+        assert!(json.contains(r#""x":1,"y":2,"w":3,"h":4"#));
+    }
+
+    #[test]
+    fn selection_toolbar_json_sanitizes_a_non_finite_anchor() {
+        // A required field, so it degrades to a finite `0` (the
+        // `push_rect_json` rule) rather than to `null` (the optional caret's):
+        // `NaN`/`inf` are not JSON, and an unparseable object costs the Swift
+        // side the entire menu.
+        let json = selection_toolbar_json(
+            1,
+            true,
+            ToolbarAnchor {
+                x: f32::NAN,
+                y: f32::INFINITY,
+                w: f32::NEG_INFINITY,
+                h: 18.0,
+            },
+            ToolbarActions::default(),
+        );
+        assert!(json.contains(r#""x":0,"y":0,"w":0,"h":18"#));
+        assert!(!json.contains("NaN"));
+        assert!(!json.contains("inf"));
     }
 
     // --- Platform-view commands JSON --------------

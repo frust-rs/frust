@@ -42,6 +42,7 @@ mod image;
 mod list_view;
 pub mod motion;
 pub mod nav;
+mod overlay;
 mod padding;
 pub mod physics;
 mod platform_view;
@@ -49,6 +50,7 @@ mod radio;
 mod safe_area;
 mod scaffold;
 mod scroll;
+mod selection_toolbar;
 mod sized;
 mod slider;
 mod stack;
@@ -85,6 +87,10 @@ pub use nav::router::{
     Router, shell_route,
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec, TransitionState};
+pub use overlay::{
+    DEFAULT_OFFSET, DEFAULT_PADDING, OverlayAlign, OverlayAnchor, OverlayPlacement,
+    OverlayPortalView, OverlayPortalWidget, OverlaySide, OverlaySlot, overlay_portal, place,
+};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use physics::effect::OverscrollEffect;
 pub use physics::parity::{
@@ -102,6 +108,7 @@ pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scaffold::{ScaffoldView, ScaffoldWidget, scaffold};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
+pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use stack::{Stack, StackView, StackWidget};

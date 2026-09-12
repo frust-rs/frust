@@ -1,12 +1,19 @@
 //! Overlays: the modal family (dialog, alert-dialog, sheet, drawer, command
 //! dialog), each mounted the primary documented way — pushed as a
 //! transparent navigator page through `overlay::show_*` from a trigger
-//! button's `on_press`, never built from the render path itself. A
-//! `show_*` call's `build` closure is captured once, at push time; every
-//! frozen literal it carries stays identical across the pushed page's
-//! rebuilds, which is what lets a live-edited control inside it (the
-//! command dialog's search field) keep its own typed text rather than being
-//! fought back to the push-time snapshot on every pass.
+//! button's `on_press`, never built from the render path itself. A `show_*`
+//! call's `build` closure is an `impl Fn() -> AnyView<AppState>` the
+//! navigator re-invokes on every rebuild while the page stays pushed, **not**
+//! a value captured once at push time. Every trigger here except the command
+//! palette hands that closure fully static content (labels, descriptions,
+//! controller clones for its own pop callbacks), so re-invoking it is a
+//! no-op in practice — a fresh, identical `AnyView` each pass. The command
+//! dialog's search field is the one live-edited control: because the closure
+//! never receives `&AppState` to read from directly, its builder instead
+//! reads the current text from a shared cell owned by `State::command_query`
+//! on every invocation (see `current_command_query`) — a `String` closed
+//! over above the closure would freeze at whatever it held when the button
+//! was pressed, fighting every keystroke back to that snapshot.
 //!
 //! Every dismissal here **animates out**: the modal host stages the exit,
 //! reversing whatever entrance it played (a fade-zoom for the centered panels,
@@ -17,6 +24,9 @@
 //! The navigator is this page's outermost view and the trigger list scrolls
 //! inside its root page: a pushed modal page inherits the navigator's own
 //! constraints, so those have to be the page slot's bounded ones.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use frust::{
     AnyView, Column, EdgeInsets, NavigatorController, Padding, PopResult, SizedBox, View, any,
@@ -36,6 +46,15 @@ use crate::AppState;
 pub struct State {
     pub controller: NavigatorController<AppState>,
     pub last_result: String,
+    /// The command palette's search text, held behind a shared cell (not a
+    /// plain `String`) because the pushed dialog page's builder — an
+    /// `impl Fn() -> AnyView<AppState>` the navigator re-invokes on every
+    /// rebuild — never receives `&State` itself. Owning the cell here, in
+    /// `State`, is what lets it survive: a cell created fresh inside `page`
+    /// (which itself re-runs every rebuild) would reset to empty on the very
+    /// next pass. Cleared when an item is selected and when the dialog is
+    /// dismissed, so the next open starts blank.
+    pub command_query: Rc<RefCell<String>>,
 }
 
 impl Default for State {
@@ -43,8 +62,26 @@ impl Default for State {
         Self {
             controller: NavigatorController::new(),
             last_result: "(nothing dismissed yet)".to_string(),
+            command_query: Rc::new(RefCell::new(String::new())),
         }
     }
+}
+
+/// The command palette's live-read seam: the search text a freshly invoked
+/// dialog builder should show, taken from the shared handle rather than a
+/// value captured once when the button that opened it was pressed. Called
+/// from inside the builder body on every invocation (never above it), so a
+/// character typed since the last invocation — written back into the same
+/// handle by `command`'s `on_query_change` — is visible on the very next one.
+fn current_command_query(handle: &Rc<RefCell<String>>) -> String {
+    handle.borrow().clone()
+}
+
+/// Empty the shared command-query handle. Both the item-select and the
+/// dialog-dismiss paths call this, so re-opening the palette always starts
+/// from a blank field rather than whatever was last typed.
+fn clear_command_query(handle: &Rc<RefCell<String>>) {
+    handle.borrow_mut().clear();
 }
 
 fn gap() -> AnyView<AppState> {
@@ -144,6 +181,7 @@ fn drawer_trigger(
 pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let controller = state.controller.clone();
     let last_result = state.last_result.clone();
+    let command_query = state.command_query.clone();
 
     let root_controller = controller.clone();
     navigator(&controller, move || {
@@ -153,6 +191,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         let scroll_sheet_ctrl = root_controller.clone();
         let bare_sheet_ctrl = root_controller.clone();
         let snap_ctrl = root_controller.clone();
+        let command_query = command_query.clone();
 
         // The scroll slot is *inside* the navigator's root page, never around
         // the navigator: a pushed modal page is laid out under the navigator's
@@ -234,10 +273,19 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                 })),
                 any(button("Open Command Palette", move |_: &mut AppState| {
                     let select_ctrl = command_ctrl.clone();
+                    let read_handle = command_query.clone();
                     show_command_dialog(
                         &command_ctrl,
                         move || {
                             let select_ctrl = select_ctrl.clone();
+                            // The live read (see `current_command_query`'s own
+                            // doc): the navigator re-invokes this whole
+                            // closure on every rebuild while the palette is
+                            // pushed, so re-reading the handle here (rather
+                            // than closing over a `String` computed once,
+                            // above this closure) is what keeps typed text
+                            // from being fought back to empty every frame.
+                            let query = current_command_query(&read_handle);
                             command_dialog(command(
                                 vec![
                                     command_item("Calendar").group("Suggestions"),
@@ -250,16 +298,33 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                         .shortcut("\u{2318}B")
                                         .disabled(true),
                                 ],
-                                "",
-                                |_: &mut AppState, _query: String| {},
+                                query,
+                                |s: &mut AppState, text: String| {
+                                    // Written through `&mut AppState` (the
+                                    // handle lives at `s.overlays.command_query`,
+                                    // not a detached clone), so the edit lands
+                                    // on the same cell the next builder
+                                    // invocation reads — see `State::command_query`'s
+                                    // own doc for why the cell has to live there.
+                                    *s.overlays.command_query.borrow_mut() = text;
+                                },
                                 move |s: &mut AppState, index: usize| {
                                     s.overlays.last_result =
                                         format!("command: selected index {index}");
+                                    clear_command_query(&s.overlays.command_query);
                                     select_ctrl.pop();
                                 },
                             ))
                         },
-                        record("command_dialog"),
+                        |s: &mut AppState, result: PopResult| {
+                            // Covers the scrim/Escape/close-X dismissal path —
+                            // `on_select` above already clears for a
+                            // selection, and this same callback also runs
+                            // when a selection's own `pop()` resolves, so the
+                            // second clear there is a harmless no-op repeat.
+                            clear_command_query(&s.overlays.command_query);
+                            record("command_dialog")(s, result);
+                        },
                     );
                 })),
             ]),
@@ -394,4 +459,62 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             any(SizedBox(None, Some(24.0))),
         ])))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `CommandView`'s own `query` field is private to `frust_shadcn`, so these
+    // assert on the shared handle directly rather than on a built view — the
+    // same handle `current_command_query`/`clear_command_query` operate on in
+    // `page`, exercised here without needing a live window or event loop.
+
+    #[test]
+    fn the_read_after_a_write_sees_the_new_value_not_a_frozen_one() {
+        // Two clones of one handle, mirroring the shape in `page`: one held by
+        // the button's captured `read_handle`, one reachable through
+        // `AppState` (`on_query_change`'s `s.overlays.command_query`).
+        let owned_by_state = Rc::new(RefCell::new(String::new()));
+        let read_handle = owned_by_state.clone();
+
+        assert_eq!(current_command_query(&read_handle), "");
+
+        // The write `on_query_change` performs, through the *other* clone —
+        // a captured `String` snapshot could never observe this from the
+        // first clone; a shared cell does.
+        *owned_by_state.borrow_mut() = "sea".to_string();
+        assert_eq!(
+            current_command_query(&read_handle),
+            "sea",
+            "a live read through one clone must see a write made through another"
+        );
+
+        *owned_by_state.borrow_mut() = "search".to_string();
+        assert_eq!(
+            current_command_query(&read_handle),
+            "search",
+            "a second write must be visible to a second read, not just the first"
+        );
+    }
+
+    #[test]
+    fn clearing_the_handle_empties_the_next_read() {
+        let handle = Rc::new(RefCell::new("query text".to_string()));
+        assert_eq!(current_command_query(&handle), "query text");
+
+        clear_command_query(&handle);
+        assert_eq!(
+            current_command_query(&handle),
+            "",
+            "both the select and the dismiss paths clear through this helper, \
+             so re-opening the palette must read empty"
+        );
+    }
+
+    #[test]
+    fn state_default_starts_with_an_empty_shared_query() {
+        let state = State::default();
+        assert_eq!(current_command_query(&state.command_query), "");
+    }
 }

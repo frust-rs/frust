@@ -105,14 +105,114 @@ pub use frust_widgets::{
     IconButtonView, IconData, IconSource, IconView, IconWidget, Image, ImageError, ImageFit,
     ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
-    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
-    PushOptions, Radio, RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView,
-    ScaffoldView, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SpringDescription, Stack, StackView, TextInput,
-    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
-    VisibilityCallback, button, checkbox, colored_box, container, divider, flexible, hero, icon,
-    icon_button, inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider,
-    text, text_input,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView,
+    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox, SizedBoxView,
+    Slider, SliderView, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
+    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, button, checkbox,
+    colored_box, container, divider, flexible, hero, icon, icon_button, inflexible, keyed,
+    list_view, overlay_portal, radio, safe_area, scaffold, scroll_view, slider, text, text_input,
+};
+
+/// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:
+/// which z-band a floated surface sits in, whether the pointer reaches it, and
+/// what a press landing outside it delivers.
+///
+/// [`overlay_portal`] floats a surface above the whole app, anchored to its
+/// child's bounds and painted after the entire main tree — so it escapes both
+/// the child's paint order and every ancestor's clip, and follows the child
+/// across scroll and relayout with nothing subscribed. The surface is mounted
+/// while [`OverlayPortalView::overlay`] is `Some`; a widget that hosts a
+/// surface of its own instead reaches for `authoring::OverlaySlot`.
+///
+/// Lifted flat for [`EditCommand`]'s reason: an app or design system naming a
+/// band, an input class or a light-dismiss policy is configuring a portal, not
+/// authoring a widget.
+///
+/// ```
+/// use frust::{
+///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, any, overlay_portal, text,
+/// };
+///
+/// struct App {
+///     hovering: bool,
+/// }
+///
+/// // A tooltip: above its trigger, in the topmost band, and transparent to the
+/// // pointer so hovering the trigger is never interrupted by its own tip.
+/// fn trigger(state: &mut App) -> impl View<App> + use<> {
+///     overlay_portal(text("Save"))
+///         .overlay(state.hovering.then(|| any(text("Save the document"))))
+///         .placement(OverlayPlacement::on(OverlaySide::Top))
+///         .band(OverlayBand::Tooltip)
+///         .input(OverlayInput::Transparent)
+/// }
+/// # let _ = trigger;
+/// ```
+pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
+
+/// The clipboard/selection command vocabulary, flat-re-exported from
+/// `frust-core::event` (and also available through
+/// [`authoring::EditCommand`]).
+///
+/// [`InputEvent::EditCommand`](authoring::InputEvent) delivers one of
+/// [`EditCommand::Copy`], [`EditCommand::Cut`], [`EditCommand::Paste`] or
+/// [`EditCommand::SelectAll`] down the focus chain, already decoded by the shell
+/// from the platform's own gesture — `Cmd+C` on macOS, `Ctrl+C` or `Ctrl+Insert`
+/// elsewhere, a hardware clipboard key, an Android `ACTION_PROCESS_TEXT`, an iOS
+/// edit-menu tap — so app and design-system code never decodes a chord itself.
+///
+/// Lifted flat rather than left inside [`authoring`] for [`CursorIcon`]'s reason:
+/// a design system's own context menu or toolbar builder names these verbs in
+/// its public API without being a widget author. `Paste` carries its text
+/// because the shell has already read the host clipboard; its [`Debug`] redacts
+/// that text, since a paste payload can be a password or a token.
+pub use frust_core::EditCommand;
+
+/// The selection-toolbar seam: the request a text field publishes when it
+/// has a selection ([`SelectionToolbarRequest`]/[`SelectionToolbarActions`]),
+/// and the knobs that decide who draws it.
+///
+/// [`set_selection_toolbar_policy`] chooses
+/// [`SelectionToolbarPolicy::Framework`] (the default — a field floats its
+/// own pod through the overlay portal) or [`SelectionToolbarPolicy::Native`]
+/// (the platform's own edit menu, e.g. iOS's `UIEditMenuInteraction`) — see
+/// that type's own docs for the two-route split. This is **not** an
+/// unconditional free choice, though: a platform shell whose system owns the
+/// menu can LOCK it instead, with `frust_core::lock_selection_toolbar_policy`
+/// — once locked, [`set_selection_toolbar_policy`] is refused rather than
+/// obeyed, so an app cannot silently undo a platform requirement it doesn't
+/// know exists. iOS's shell locks [`SelectionToolbarPolicy::Native`] at
+/// start-up for exactly this reason: a framework-drawn toolbar's own Paste
+/// button would break the exemption that keeps iOS's per-app paste-permission
+/// prompt from firing on every paste.
+///
+/// [`set_selection_toolbar_builder`] installs the view a `Framework`-policy
+/// pod floats, **replacing** whatever the framework's own baseline (installed
+/// at bootstrap, before the first frame) or an earlier design system already
+/// installed. A design system's own installer should reach for
+/// `frust_core::install_selection_toolbar_builder_if_unset` instead — the
+/// cooperative, set-if-unset half of the same pair — so two catalogs linked
+/// into one binary never fight over the slot, and neither ever undoes an
+/// app's own explicit override.
+///
+/// ```
+/// use frust::{
+///     SelectionToolbarPolicy, lock_selection_toolbar_policy, set_selection_toolbar_policy,
+/// };
+///
+/// // A shell whose platform owns its own system edit menu locks the route,
+/// // so that requirement wins no matter what app code does afterward.
+/// let claimed = lock_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+/// assert!(claimed, "the first claim always takes the lock");
+///
+/// // An app's later override is refused rather than obeyed once locked.
+/// set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+/// ```
+pub use frust_core::{
+    SelectionToolbarActions, SelectionToolbarPolicy, SelectionToolbarRequest,
+    lock_selection_toolbar_policy, set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
@@ -412,6 +512,19 @@ pub mod authoring {
         PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget,
         WidgetId, any,
     };
+
+    /// The clipboard/selection vocabulary an editable widget matches on —
+    /// [`InputEvent::EditCommand`] carries one of these four verbs, already
+    /// decoded from whatever chord, hardware key or edit-menu tap produced it.
+    /// A widget answers copy/cut through
+    /// [`EventCtx::write_clipboard`](frust_core::EventCtx::write_clipboard) and
+    /// asks for a paste through
+    /// [`EventCtx::request_paste`](frust_core::EventCtx::request_paste); the shell
+    /// owns the host clipboard at both ends. Also re-exported flat as
+    /// [`frust::EditCommand`](crate::EditCommand), for the same reason
+    /// [`CursorIcon`] is: a design system's public API can name a verb without
+    /// authoring a widget.
+    pub use frust_core::EditCommand;
 
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
     /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a
@@ -1373,6 +1486,37 @@ pub fn __web_init_state<State: 'static>(state_init: impl FnOnce() -> State) -> S
     rt.with_owner(state_init)
 }
 
+/// Install the baseline framework-drawn selection-toolbar view
+/// ([`frust_widgets::selection_toolbar`]) as the process's default
+/// [`SelectionToolbarBuilder`](frust_core::SelectionToolbarBuilder), **set-if-
+/// unset** (`frust_core::install_selection_toolbar_builder_if_unset`) — so a
+/// design system that already installed its own keeps it, whether that
+/// install happened earlier in `main` (before `frust::app!`/`frust::run`
+/// ran at all) or inside an `app!` `setup = { .. }` block.
+///
+/// Called once, on the UI thread, at the same point on every platform this
+/// crate starts an app from — after any `setup = { .. }` block and
+/// immediately before the root [`Component::init`] (Android/iOS/wasm32, from
+/// inside [`app!`]'s `@emit_mobile` closures) or before the desktop shell is
+/// constructed ([`run_desktop_configured`], which every desktop entry point —
+/// [`App::run`], [`run`], [`run_with_setup`], [`run_desktop_config`],
+/// [`run_with_setup_and_config`] and `app!`'s desktop arm — funnels through).
+/// Running it *after* setup, not before, is deliberate: a design system's own
+/// cooperative install (also `install_selection_toolbar_builder_if_unset`,
+/// called from inside a `setup = { .. }` block) must get first claim on the
+/// empty slot, or this baseline would win the race and leave the design
+/// system's own catalog toolbar never installed.
+///
+/// `#[doc(hidden)]`, not part of the public API: reached only through
+/// `$crate::` from [`app!`]'s macro expansion and this crate's own desktop
+/// entry points, exactly like [`__web_bootstrap`]/[`__web_init_state`].
+#[doc(hidden)]
+pub fn __install_default_selection_toolbar() {
+    frust_core::install_selection_toolbar_builder_if_unset(std::sync::Arc::new(|req, _win| {
+        frust_widgets::selection_toolbar(req)
+    }));
+}
+
 /// The browser counterpart of [`android_app!`]/[`ios_app!`]: binds a
 /// [`Component`]'s state and app-logic to the browser shell's wasm-bindgen
 /// entry point. Takes the identical two-argument (state type + app-logic
@@ -1586,6 +1730,17 @@ impl<State: 'static, Logic> App<State, Logic> {
 /// constructor takes `&DesktopConfig` and clones out the fields it acts on
 /// (`app_id`, `window_icon`, `menu_spec`, the close policy), while the core
 /// itself takes ownership to title the window.
+///
+/// This is the single desktop choke point every desktop entry funnels
+/// through — [`App::run`] directly, and [`run`]/[`run_with_setup`]/
+/// [`run_desktop_config`]/[`run_with_setup_and_config`]/`app!`'s desktop arm
+/// indirectly, via `App::new(..).desktop(config).run()` — which is why
+/// [`__install_default_selection_toolbar`] sits here rather than duplicated
+/// across each of those: whatever path an app took to get here, any `setup`
+/// it ran (and any explicit override that ran even earlier, in `main`) has
+/// already had its chance to claim the selection-toolbar builder slot before
+/// this call, and this is the one point strictly before the shell — and
+/// therefore the first frame — starts.
 #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 fn run_desktop_configured<State, Logic, V>(
     state: State,
@@ -1597,6 +1752,7 @@ where
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
 {
+    __install_default_selection_toolbar();
     let extensions = desktop_extensions(&config);
     frust_shell_desktop::run_desktop_with(state, logic, config, extensions)
 }
@@ -1918,6 +2074,7 @@ macro_rules! app {
             <$root as $crate::Component>::State,
             || {
                 $($setup)?
+                $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
             },
             {
@@ -1932,6 +2089,7 @@ macro_rules! app {
             <$root as $crate::Component>::State,
             || {
                 $($setup)?
+                $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
             },
             {
@@ -1954,6 +2112,7 @@ macro_rules! app {
             <$root as $crate::Component>::State,
             || {
                 $($setup)?
+                $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
             },
             {
@@ -2617,6 +2776,88 @@ mod push_with_options_dismiss_animated {
             1,
             "back fired the dismiss signal exactly once, for the modal's own \
              widget to stage its exit animation on"
+        );
+    }
+}
+
+/// [`__install_default_selection_toolbar`]'s two contracts: it installs the
+/// framework baseline when the slot is empty, and a prior explicit
+/// [`set_selection_toolbar_builder`] always survives it.
+///
+/// `frust-core` keeps its builder slot private and offers no way to reset it
+/// (unlike its own in-crate tests, which reach the static directly) — this is
+/// the only test in this crate's suite that touches the process-global slot,
+/// so its very first touch below really is that slot's virgin state in this
+/// process; every assertion after that is made deterministic by an explicit
+/// `set_selection_toolbar_builder`/[`Arc::ptr_eq`] check instead of relying on
+/// ambient state again.
+#[cfg(test)]
+mod selection_toolbar_bootstrap {
+    use std::any::Any;
+    use std::sync::Arc;
+
+    use frust_core::{BuildCtx, SelectionToolbarBuilder};
+    use kurbo::{Rect, Size};
+
+    use crate::{
+        __install_default_selection_toolbar, SelectionToolbarActions, SelectionToolbarRequest,
+        View, any, set_selection_toolbar_builder, text,
+    };
+
+    fn sample_request() -> SelectionToolbarRequest {
+        SelectionToolbarRequest {
+            anchor: Rect::new(0.0, 0.0, 10.0, 10.0),
+            actions: SelectionToolbarActions {
+                copy: true,
+                ..Default::default()
+            },
+            present_menu: true,
+        }
+    }
+
+    #[test]
+    fn installs_the_baseline_when_unset_and_yields_to_a_prior_explicit_install() {
+        // The slot's virgin state (see the module doc comment above): nothing
+        // has claimed it yet in this process, so the bootstrap call must take
+        // it.
+        __install_default_selection_toolbar();
+        let installed = frust_core::selection_toolbar_builder()
+            .expect("the bootstrap install must take the empty slot");
+
+        // Prove it really is the framework baseline — the widget it builds is
+        // `frust_widgets::selection_toolbar`'s own type, not merely
+        // "something" — by comparing the boxed elements' concrete `TypeId`s,
+        // the same type-swap-detection technique
+        // `frust_widgets::authoring::rebuild_child_tracked` uses internally.
+        let sample = sample_request();
+        let probe_view = installed(&sample, Size::new(400.0, 600.0));
+        let mut probe_id = 0u64;
+        let probe_widget = View::<()>::build(&probe_view, &mut BuildCtx::new(&mut probe_id));
+
+        let baseline_view = frust_widgets::selection_toolbar(&sample);
+        let mut baseline_id = 0u64;
+        let baseline_widget =
+            View::<()>::build(&baseline_view, &mut BuildCtx::new(&mut baseline_id));
+
+        let probe_any: &dyn Any = &*probe_widget;
+        let baseline_any: &dyn Any = &*baseline_widget;
+        assert_eq!(
+            probe_any.type_id(),
+            baseline_any.type_id(),
+            "the installed default must build selection_toolbar's own widget"
+        );
+
+        // Now the other half: an explicit `set_selection_toolbar_builder`
+        // always outranks the bootstrap's own set-if-unset call, whatever the
+        // slot already held going in (the framework's own baseline, just
+        // installed above, included).
+        let marker: SelectionToolbarBuilder = Arc::new(|_req, _win| any(text("prior-marker")));
+        set_selection_toolbar_builder(Arc::clone(&marker));
+        __install_default_selection_toolbar();
+        let after = frust_core::selection_toolbar_builder().expect("a builder is installed");
+        assert!(
+            Arc::ptr_eq(&after, &marker),
+            "a prior explicit set_selection_toolbar_builder must survive the bootstrap install"
         );
     }
 }

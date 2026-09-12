@@ -49,8 +49,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::event::{
-    CursorIcon, EventOutcome, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
-    PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    CursorIcon, EditCommand, EventOutcome, ImeEvent, InputEvent, Key, KeyEvent, Modifiers,
+    NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
@@ -162,6 +162,16 @@ pub fn mouse_button_should_dispatch(
 /// `None` for a named key this shell carries no editing semantics for (function
 /// keys, media keys, browser keys) — those are dropped rather than misreported
 /// as text.
+///
+/// The four clipboard keys are carried like every other editing key, and the
+/// browser is where they are rarest: a page sees the dedicated `Copy`/`Cut`/
+/// `Paste` keys only from a keyboard that has them, and `Insert` only from the
+/// legacy `Ctrl`/`Shift`+`Insert` chords a widget decodes itself. While a text
+/// field is focused, which of them reach here at all is decided by the verb
+/// they mean ([`crate::ime::clipboard_verb`]): a copy or a cut arrives as an
+/// ordinary key event, because the DOM may raise no clipboard event for it,
+/// while every paste gesture is withheld and answered as a DOM `paste` on the
+/// IME overlay instead.
 pub fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
     Some(match key {
         WinitNamedKey::Enter => NamedKey::Enter,
@@ -175,6 +185,10 @@ pub fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::End => NamedKey::End,
         WinitNamedKey::Escape => NamedKey::Escape,
         WinitNamedKey::Tab => NamedKey::Tab,
+        WinitNamedKey::Copy => NamedKey::Copy,
+        WinitNamedKey::Cut => NamedKey::Cut,
+        WinitNamedKey::Paste => NamedKey::Paste,
+        WinitNamedKey::Insert => NamedKey::Insert,
         _ => return None,
     })
 }
@@ -440,6 +454,15 @@ impl ComposeLatch {
             // Carries no edit: it marks the signal behind it. Consumed by
             // [`InputState::dom_edit`], which owns that mark.
             DomEditEvent::KeyDropped => None,
+            // A clipboard signal is not composition, and it never resolves one
+            // on its own: a preedit it displaces has already been retracted by
+            // the explicit `Cancel` the drain feeds ahead of it
+            // ([`crate::ime::displaced_composition_signal`]), so by the time it
+            // reaches this mapping there is nothing left to settle. It becomes
+            // an [`InputEvent::EditCommand`] in [`InputState::dom_edit`]
+            // instead, for [`carried_key_event`]'s reason: what it produces is
+            // not an [`ImeEvent`] at all.
+            DomEditEvent::Paste(_) | DomEditEvent::EditCommand(_) => None,
         }
     }
 
@@ -687,6 +710,17 @@ impl InputState {
     /// `None` where the signal must not reach the tree — see
     /// [`ComposeLatch::observe_dom`] for the dedupe rules.
     ///
+    /// # The two signals that become an edit command
+    ///
+    /// A [`Paste`](crate::ime::DomEditEvent::Paste) and an
+    /// [`EditCommand`](crate::ime::DomEditEvent::EditCommand) carry a decoded
+    /// clipboard verb rather than composition, so they leave as
+    /// [`InputEvent::EditCommand`] — focus-routed onto the identical path the
+    /// desktop shell's own clipboard drain dispatches, so a widget cannot tell
+    /// which host read the clipboard. A composition they interrupt is retracted
+    /// by the `Cancel` the drain feeds ahead of them
+    /// ([`crate::ime::displaced_composition_signal`]), not here.
+    ///
     /// # The one signal that becomes a key event
     ///
     /// A [`DomEditEvent::KeyDropped`](crate::ime::DomEditEvent::KeyDropped)
@@ -706,6 +740,13 @@ impl InputState {
         }
         let carrying = std::mem::take(&mut self.key_dropped);
         let in_session = self.compose.has_open_session();
+        if let Some(command) = dom_edit_command(event) {
+            // The carry mark was taken above and is simply dropped: a clipboard
+            // verb is not the keystroke an unnamed key was waiting to be
+            // carried by, and every signal consumes the mark whether or not it
+            // uses it.
+            return Some(InputEvent::EditCommand(command));
+        }
         if let Some(ime) = self.compose.observe_dom(event) {
             return Some(InputEvent::Ime(ime));
         }
@@ -794,6 +835,100 @@ pub fn carried_key_event(
         // carries no flag for one.
         repeat: false,
     })
+}
+
+// --- clipboard -----------------------------------------------------------
+
+/// The framework verb one overlay signal means, or `None` for a signal that
+/// carries no clipboard edit at all.
+///
+/// The two arms differ only in who decoded the gesture. A `paste` is read as
+/// text and named by this shell; a `cut` was already resolved to its verb by the
+/// listener that answered it, because the clipboard half of a cut has to happen
+/// inside the DOM callback and the delete half cannot.
+fn dom_edit_command(event: &crate::ime::DomEditEvent) -> Option<EditCommand> {
+    match event {
+        crate::ime::DomEditEvent::Paste(text) => Some(EditCommand::Paste(text.clone())),
+        crate::ime::DomEditEvent::EditCommand(command) => Some(command.clone()),
+        _ => None,
+    }
+}
+
+/// Where the text the tree just put in its one-shot clipboard slot is owed.
+///
+/// The browser's two write routes are not equivalent — one needs a secure
+/// context and the other does not — so which one a given text takes is a
+/// decision rather than a detail: [`clipboard_write_route`]'s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardWrite {
+    /// Nothing to write: the slot was empty, or holds the echo of a write a
+    /// DOM callback already made.
+    Nothing,
+    /// Hand it to the overlay's `copy`/`cut` callback
+    /// ([`crate::ime::ClipboardHandoff`]), still to run in this very browser
+    /// task, which writes it with `clipboardData.setData` — inside the
+    /// gesture, needing neither a secure context nor a permission.
+    HandOff(String),
+    /// Issue it as `navigator.clipboard.writeText`: the route for a write no
+    /// DOM callback is coming for.
+    Async(String),
+}
+
+/// Where the shell must send the tree's pending clipboard write, given the text
+/// a `copy`/`cut` listener already wrote synchronously during this same drain
+/// and whether a copy/cut keystroke is still in flight.
+///
+/// # The echo
+///
+/// Identical text is not written twice. A `cut` the DOM resolved on its own (a
+/// browser edit menu, a touch callout) writes the clipboard from inside its
+/// callback and then asks the widget to delete the selection; the widget
+/// answers by writing that same text into the tree's slot, which is the value
+/// this function is handed. Re-issuing it would ask a browser to write text
+/// that is already on the clipboard, from outside the gesture that authorised
+/// it — refused on some browsers, pointless on all of them.
+///
+/// Text that merely *looks* like a duplicate is still a real write: the
+/// comparison is against one drain's own synchronous write, which the caller
+/// takes and discards every pass and which the write itself asks for a drain
+/// to take, so a second copy of the same selection a moment later is issued
+/// normally instead of being read as the first one's echo.
+///
+/// # The two routes
+///
+/// `gesture` is the mark a copy/cut keystroke left on its way to the canvas
+/// ([`crate::ime::hands_write_to_dom_event`]). It says the text in the slot is
+/// that keystroke's own answer and that a `copy`/`cut` event may still be
+/// raised for it *in this same browser task*, so the write is handed over
+/// rather than issued: the synchronous route needs no secure context, which is
+/// the whole of what puts a cut on the clipboard of an `http://` page, and
+/// handing the text over rather than issuing it as well is what keeps one
+/// gesture to one write.
+///
+/// Everything else — an app-driven copy behind a toolbar button, a widget
+/// answering a command no keystroke carried — takes the asynchronous route
+/// straight away, and deliberately: no DOM event is coming for it, and parking
+/// it for one would issue it a frame later, outside the user gesture a browser
+/// wants such a write to ride. A handoff parked in vain is issued by the very
+/// next drain (`ImeOverlay::take_unclaimed_clipboard_write`) — the frame the
+/// handoff itself asks for, or the gesture's own `keyup`, whichever comes
+/// first.
+pub fn clipboard_write_route(
+    pending: Option<String>,
+    synchronous: Option<&str>,
+    gesture: bool,
+) -> ClipboardWrite {
+    let Some(pending) = pending else {
+        return ClipboardWrite::Nothing;
+    };
+    if synchronous == Some(pending.as_str()) {
+        return ClipboardWrite::Nothing;
+    }
+    if gesture {
+        ClipboardWrite::HandOff(pending)
+    } else {
+        ClipboardWrite::Async(pending)
+    }
 }
 
 // --- the reactive-owner event wrap ---------------------------------------
@@ -1116,6 +1251,7 @@ mod browser_loop {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use frust_core::event::{CursorIcon, InputEvent, PointerPhase};
     use frust_core::view::View;
@@ -1139,7 +1275,7 @@ mod browser_loop {
     use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
     use winit::window::{Window, WindowId};
 
-    use crate::ime::{DomEditEvent, ImeOverlay};
+    use crate::ime::{DomEditEvent, ImeOverlay, PasteSink};
     use crate::input::TouchTracker;
     use crate::pacing::{
         ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, next_paced_wake, overshoot, paced_wake_action,
@@ -1289,6 +1425,117 @@ mod browser_loop {
         }
     }
 
+    /// Whether the missing async Clipboard API has already been reported — the
+    /// once-per-page guard [`report_gap_once`](super::report_gap_once) applies
+    /// to the other absent host signals, at `warn` rather than `debug` because
+    /// this one loses a user action rather than a capability nobody asked for.
+    static CLIPBOARD_API_REPORTED: AtomicBool = AtomicBool::new(false);
+
+    /// The page's async clipboard, or `None` when the browser withholds it.
+    ///
+    /// `navigator.clipboard` is **undefined outside a secure context** (an
+    /// `http://` page that is not `localhost`), and web-sys types that getter as
+    /// an infallible `Clipboard`, so calling a method on the value it hands back
+    /// there would throw out of Rust rather than fail. The check is the whole
+    /// reason this is a function: it is the one place a browser can refuse this
+    /// seam outright, and it refuses it for the whole page rather than per call.
+    ///
+    /// # What an insecure page still does, and what it does not
+    ///
+    /// A **paste** is unaffected: the `paste` event carries its own text and
+    /// needs neither this API nor a permission, so the keyboard's paste keeps
+    /// working. A **copy or cut** rides the DOM `copy`/`cut` event *where the
+    /// browser raises one* — which is not everywhere, and is why nothing may
+    /// assume it. Blink and WebKit raise it for this overlay only because the
+    /// page claims the verb by cancelling `beforecopy`/`beforecut`; an engine
+    /// defining neither (Gecko) sees an element whose selection is collapsed
+    /// and may run no clipboard command at all, leaving the gesture to the
+    /// [`ClipboardWrite::Async`](super::ClipboardWrite::Async) fallback that
+    /// this function has just refused.
+    ///
+    /// So an insecure page loses an app-driven copy and a toolbar paste
+    /// outright, and loses a keyboard copy or cut on any engine that raises no
+    /// event for it. The cut is the one where that costs text rather than a
+    /// gesture, because the widget's own delete has already happened by then;
+    /// the shell has no way to put it back from here.
+    fn navigator_clipboard() -> Option<web_sys::Clipboard> {
+        let clipboard = web_sys::window()?.navigator().clipboard();
+        if AsRef::<wasm_bindgen::JsValue>::as_ref(&clipboard).is_undefined() {
+            if !CLIPBOARD_API_REPORTED.swap(true, Ordering::Relaxed) {
+                log::warn!(
+                    "frust-shell-web: navigator.clipboard is unavailable (the async Clipboard \
+                     API needs a secure context — https, or localhost); an app-driven copy and \
+                     a toolbar paste will silently no-op for the rest of this run. A keyboard \
+                     paste is unaffected (the paste event carries its own text), and a keyboard \
+                     copy or cut still reaches the clipboard through the DOM copy/cut event on \
+                     every engine that raises one — but where none is raised, this was the last \
+                     route, and a cut has already deleted what it could not write."
+                );
+            }
+            return None;
+        }
+        Some(clipboard)
+    }
+
+    /// Hand `text` to the host clipboard, ignoring the answer.
+    ///
+    /// The route for a write no DOM `copy`/`cut` callback will make — an
+    /// app-driven copy, or a keystroke's write on an engine that raised no
+    /// event for it ([`super::clipboard_write_route`]).
+    ///
+    /// Spawned rather than awaited: the promise resolves in a later task and
+    /// this is a frame path that must not block, and there is nothing useful to
+    /// do with a refusal beyond reporting it — the copy is already gone from the
+    /// tree's one-shot slot, and re-issuing it later would write the clipboard
+    /// from outside the gesture that authorised it.
+    fn write_clipboard_text(text: String) {
+        let Some(clipboard) = navigator_clipboard() else {
+            return;
+        };
+        let promise = clipboard.write_text(&text);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(err) = wasm_bindgen_futures::JsFuture::from(promise).await {
+                log::warn!(
+                    "frust-shell-web: the browser refused a clipboard write ({err:?}); \
+                     the copy is lost"
+                );
+            }
+        });
+    }
+
+    /// Ask the host clipboard for text and queue the answer as a paste.
+    ///
+    /// The tree already asked for this (`RenderRoot::take_paste_request`), so
+    /// the read is on the user's behalf — but unlike the `paste` event's own
+    /// synchronous read it is permission-gated: Chrome on Android prompts, iOS
+    /// Safari shows its Paste callout, and Firefox refuses a read it cannot tie
+    /// to a gesture. A refusal is one dropped paste, logged and not retried.
+    fn read_clipboard_text(sink: PasteSink) {
+        let Some(clipboard) = navigator_clipboard() else {
+            return;
+        };
+        let promise = clipboard.read_text();
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(value) => match value.as_string() {
+                    // Queued rather than dispatched: this resolves in its own
+                    // task, with no event loop turn around it, so it re-enters
+                    // the shell through the one path every DOM signal takes.
+                    Some(text) => sink.deliver(text),
+                    None => log::warn!(
+                        "frust-shell-web: the clipboard read resolved to something that is not \
+                         text; the paste is dropped"
+                    ),
+                },
+                Err(err) => log::warn!(
+                    "frust-shell-web: the browser refused a clipboard read ({err:?}); the paste \
+                     is dropped (the permission prompt may have been dismissed, or the browser \
+                     may allow no programmatic read at all)"
+                ),
+            }
+        });
+    }
+
     /// The browser shell's winit `ApplicationHandler` — the retained tree, the
     /// reactive plumbing, the shell-owned appearance state, and the wake
     /// bookkeeping the frame loop runs on.
@@ -1415,6 +1662,9 @@ mod browser_loop {
             // the tree keeps painting its preedit.
             needs_redraw |= self.end_torn_down_session(synced.detached);
 
+            // Either half of this pass — the drained signals or the event
+            // itself — can have left a copy or a paste request behind.
+            self.sync_clipboard(window);
             super::sync_cursor(window, &mut self.cursor_icon, self.root.cursor());
             if needs_redraw {
                 window.request_redraw();
@@ -1428,9 +1678,26 @@ mod browser_loop {
                 .needs_redraw
         }
 
-        /// Feed one composition signal — queued or synthesized — through the
-        /// latch and deliver whatever it maps to.
+        /// Feed one DOM signal — queued or synthesized — through the latch and
+        /// deliver whatever it maps to, preceded by the composition it displaces
+        /// when it is a clipboard edit arriving on top of a live session (see
+        /// [`crate::ime::displaced_composition_signal`]). Two signals at most,
+        /// and only ever in that order: the preedit is retracted before the
+        /// paste lands, never after.
         fn feed_ime(&mut self, signal: &DomEditEvent) -> bool {
+            let mut needs_redraw = false;
+            if let Some(displaced) =
+                crate::ime::displaced_composition_signal(signal, self.input.has_open_session())
+            {
+                needs_redraw |= self.feed_one(&displaced);
+            }
+            needs_redraw |= self.feed_one(signal);
+            needs_redraw
+        }
+
+        /// Map one signal through the latch and deliver it, if it maps to
+        /// anything at all.
+        fn feed_one(&mut self, signal: &DomEditEvent) -> bool {
             let Some(event) = self.input.dom_edit(signal) else {
                 return false;
             };
@@ -1470,6 +1737,71 @@ mod browser_loop {
             needs_redraw
         }
 
+        /// Drain the tree's one-shot clipboard write / paste-request slots and
+        /// act on the browser's clipboard — after every dispatch and after every
+        /// frame's signal drain, beside the IME sync and for its reason: either
+        /// slot can fill as a side effect of any event, not only a keyboard one
+        /// (a widget's own chord decode, a toolbar tap, an app-driven copy).
+        ///
+        /// The browser twin of `frust-shell-desktop`'s `sync_clipboard`, and
+        /// asynchronous where that one is not: `writeText`/`readText` answer
+        /// with promises, so neither result is available to this pass. A write
+        /// that takes that route is spawned and a rejection logged; the read
+        /// resolves into a queued [`DomEditEvent::Paste`] and the redraw that
+        /// drains it, rather than into a re-entrant dispatch — which is also
+        /// why the recursion bound the desktop twin has to argue for is not
+        /// needed here: nothing in this method dispatches anything.
+        ///
+        /// # Which route a write takes
+        ///
+        /// Not every write takes that route, and a cut must not: a copy or cut
+        /// keystroke is still mid-flight when this runs on the dispatch path
+        /// (winit's web backend delivers the re-dispatched keystroke
+        /// synchronously, so the browser has not run the keydown's default
+        /// action yet), and the DOM `copy`/`cut` event it is about to raise can
+        /// write the clipboard with no secure context at all. So such a write
+        /// is handed to the overlay for that callback to make
+        /// ([`super::clipboard_write_route`], [`crate::ime::ClipboardHandoff`])
+        /// and only falls back to `writeText` on the next drain, if no callback
+        /// claimed it.
+        ///
+        /// Every other write goes straight out. On the dispatch path this runs
+        /// inside winit's own DOM listener, so a write a pointer gesture caused
+        /// is issued *within* that gesture, which is what Safari and Firefox
+        /// require of one. A write the frame loop finds instead (an app-driven
+        /// copy with no input event behind it) has no gesture to ride and may
+        /// be refused outright; the rejection is logged, not retried.
+        fn sync_clipboard(&mut self, window: &Arc<Window>) {
+            // A write handed to the overlay on an earlier pass that no
+            // `copy`/`cut` callback came for: the gesture that could have
+            // written it synchronously is over, so it falls back to the
+            // asynchronous route here. Ahead of this pass's own handoff, which
+            // is what keeps the slot from being overwritten while occupied.
+            if let Some(unclaimed) = self.ime.take_unclaimed_clipboard_write() {
+                write_clipboard_text(unclaimed);
+            }
+            // Both taken every pass whether or not the tree wrote anything, and
+            // each was asked for by the thing that left it — together that is
+            // what bounds them to a single drain. See
+            // `ImeOverlay::take_synchronous_write` and `ClipboardHandoff`.
+            let synchronous = self.ime.take_synchronous_write();
+            let gesture = self.ime.take_clipboard_gesture();
+            match super::clipboard_write_route(
+                self.root.take_clipboard_write(),
+                synchronous.as_deref(),
+                gesture,
+            ) {
+                super::ClipboardWrite::Nothing => {}
+                super::ClipboardWrite::HandOff(text) => {
+                    self.ime.hand_off_clipboard_write(window, text)
+                }
+                super::ClipboardWrite::Async(text) => write_clipboard_text(text),
+            }
+            if self.root.take_paste_request() {
+                read_clipboard_text(self.ime.paste_sink(window));
+            }
+        }
+
         /// The whole `rebuild → layout → paint → encode → present` turn, run
         /// inside the `requestAnimationFrame` callback winit services
         /// `RedrawRequested` from.
@@ -1482,6 +1814,9 @@ mod browser_loop {
             // listener queues the signal and asks for this frame, and here is
             // where it reaches the tree, before the rebuild that renders it.
             self.drain_ime();
+            // Answer whatever that drain — or a signal-driven copy no input
+            // event caused — asked the host clipboard for.
+            self.sync_clipboard(window);
             // A field the app blurred itself — a rebuild dropping it, a signal
             // moving focus — publishes no input event, so the frame loop is the
             // only place that session's overlay can be taken down. Closing and
@@ -2015,15 +2350,16 @@ mod tests {
     use crate::ime::DomEditEvent;
 
     use super::{
-        ComposeLatch, ElementState, Ime, InputState, MouseScrollDelta, WinitCursorIcon, WinitKey,
-        WinitNamedKey, WinitTheme, base_theme, brightness_from_winit, carried_key_event,
-        cursor_change_to_apply, follow_platform_brightness, map_key_event, map_modifiers,
-        map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
-        physical_to_logical, reverted_theme, theme_after_override_poll, winit_cursor_for,
+        ClipboardWrite, ComposeLatch, ElementState, Ime, InputState, MouseScrollDelta,
+        WinitCursorIcon, WinitKey, WinitNamedKey, WinitTheme, base_theme, brightness_from_winit,
+        carried_key_event, clipboard_write_route, cursor_change_to_apply,
+        follow_platform_brightness, map_key_event, map_modifiers, map_mouse_button, map_named_key,
+        map_scroll_delta, mouse_button_should_dispatch, physical_to_logical, reverted_theme,
+        theme_after_override_poll, winit_cursor_for,
     };
     use frust_core::event::{
-        CursorIcon, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
-        PointerPhase, ScrollDelta,
+        CursorIcon, EditCommand, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
+        PointerButton, PointerPhase, ScrollDelta,
     };
     use frust_theme::{Brightness, Theme};
     use kurbo::Point;
@@ -3190,6 +3526,209 @@ mod tests {
         assert_eq!(
             cursor_change_to_apply(CursorIcon::Pointer, CursorIcon::Pointer),
             None
+        );
+    }
+
+    // --- the clipboard route ---
+
+    #[test]
+    fn the_dedicated_clipboard_keys_carry_their_editing_semantics() {
+        // Rare in a browser — only a keyboard that has them sends them — but
+        // they are editing keys like any other, and the desktop shell maps the
+        // same four. Which gestures survive the overlay's own exclusion is the
+        // verb's affair (`crate::ime::withheld_from_key_path`): a paste is
+        // answered by the DOM instead and never arrives.
+        assert_eq!(map_named_key(WinitNamedKey::Copy), Some(NamedKey::Copy));
+        assert_eq!(map_named_key(WinitNamedKey::Cut), Some(NamedKey::Cut));
+        assert_eq!(map_named_key(WinitNamedKey::Paste), Some(NamedKey::Paste));
+        assert_eq!(map_named_key(WinitNamedKey::Insert), Some(NamedKey::Insert));
+    }
+
+    #[test]
+    fn a_pasted_clipboard_signal_reaches_the_tree_as_an_edit_command() {
+        // The ordinary case: nothing composing, the browser handed the text to
+        // the `paste` listener, and it leaves as the same command the desktop
+        // shell dispatches after its own clipboard read.
+        let mut input = InputState::new();
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Paste("hi".to_string())),
+            Some(InputEvent::EditCommand(EditCommand::Paste(
+                "hi".to_string()
+            )))
+        );
+        // An empty clipboard is still a paste: whether nothing is worth
+        // inserting is the receiving widget's sanitiser's call, not the shell's.
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Paste(String::new())),
+            Some(InputEvent::EditCommand(EditCommand::Paste(String::new())))
+        );
+    }
+
+    #[test]
+    fn a_paste_on_top_of_a_composition_retracts_the_preedit_first() {
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::CompositionStart);
+        input.dom_edit(&DomEditEvent::CompositionUpdate {
+            data: "に".to_string(),
+        });
+        assert!(input.is_composing());
+
+        // What the drain does with a clipboard signal while a session is live:
+        // the displaced composition is fed first, retracting the marked text,
+        // and only then does the paste land — never inside a marked region a
+        // later commit could replace.
+        let paste = DomEditEvent::Paste("hi".to_string());
+        let displaced = crate::ime::displaced_composition_signal(&paste, input.has_open_session())
+            .expect("a live session owes a retraction");
+        assert_eq!(
+            input.dom_edit(&displaced),
+            Some(InputEvent::Ime(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            }))
+        );
+        assert_eq!(
+            input.dom_edit(&paste),
+            Some(InputEvent::EditCommand(EditCommand::Paste(
+                "hi".to_string()
+            )))
+        );
+        assert!(!input.is_composing());
+        assert!(!input.has_open_session());
+    }
+
+    #[test]
+    fn a_cut_the_dom_already_wrote_asks_the_widget_to_delete_what_it_took() {
+        // The listener put the selection on the clipboard inside its own
+        // callback (the only window Safari allows); this is the other half.
+        let mut input = InputState::new();
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::EditCommand(EditCommand::Cut)),
+            Some(InputEvent::EditCommand(EditCommand::Cut))
+        );
+    }
+
+    #[test]
+    fn a_clipboard_signal_consumes_a_carry_mark_without_answering_it() {
+        // The mark belongs to a keystroke the key path could not name; a paste
+        // is not that keystroke's edit, so it takes the mark and drops it
+        // rather than letting it reach the signal behind it.
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Paste("hi".to_string())),
+            Some(InputEvent::EditCommand(EditCommand::Paste(
+                "hi".to_string()
+            )))
+        );
+        assert_eq!(
+            input.dom_edit(&DomEditEvent::Input {
+                input_type: "insertText".to_string(),
+                data: Some("a".to_string()),
+                is_composing: false,
+            }),
+            None,
+            "the mark died with the paste that took it"
+        );
+    }
+
+    #[test]
+    fn a_cuts_own_clipboard_write_is_not_issued_a_second_time() {
+        // The `cut` listener wrote "abc" synchronously for a gesture no
+        // keystroke carried (an edit menu's cut), and the widget answered the
+        // `Cut` it queued by writing the identical text into the tree's slot.
+        // One write reached the clipboard and the second is skipped.
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), Some("abc"), false),
+            ClipboardWrite::Nothing
+        );
+        // A copy the tree made on its own (a toolbar button, an app-driven
+        // copy) has no synchronous write behind it and no keystroke waiting to
+        // write it, so it is issued now — inside the gesture that caused it.
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), None, false),
+            ClipboardWrite::Async("abc".to_string())
+        );
+        // Different text is a different copy, whatever the listener did.
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), Some("xyz"), false),
+            ClipboardWrite::Async("abc".to_string())
+        );
+        // Nothing pending is nothing to write — including when the listener
+        // wrote something the tree never echoed (a plain `copy`).
+        assert_eq!(
+            clipboard_write_route(None, Some("abc"), false),
+            ClipboardWrite::Nothing
+        );
+        assert_eq!(
+            clipboard_write_route(None, None, false),
+            ClipboardWrite::Nothing
+        );
+    }
+
+    #[test]
+    fn a_keystrokes_own_write_is_handed_to_the_dom_rather_than_issued() {
+        // The cut this pins: the keydown listener marked the gesture, the
+        // re-dispatched keystroke reached the widget, and the widget wrote the
+        // cut text into the tree's slot and deleted the selection — all before
+        // the browser has run the keydown's default action. The text is owed to
+        // the `cut` event still to come, which can write it with no secure
+        // context, not to `writeText`, which on an insecure page is not there
+        // at all.
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), None, true),
+            ClipboardWrite::HandOff("abc".to_string())
+        );
+        // Same gesture, nothing written by the widget (a caret, a refused
+        // field): there is nothing to hand over and nothing to issue.
+        assert_eq!(
+            clipboard_write_route(None, None, true),
+            ClipboardWrite::Nothing
+        );
+        // An app-driven copy is not parked for an event nobody will raise: it
+        // goes out now, while the pointer gesture that caused it still counts.
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), None, false),
+            ClipboardWrite::Async("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn a_synchronous_write_suppresses_its_own_echo_and_nothing_after_it() {
+        // The two halves of a cut the DOM resolved by itself: the listener put
+        // the selection on the clipboard inside its callback and queued the
+        // `Cut` that asks the widget to delete it, and the widget answered by
+        // writing the identical text into the tree's slot. Exactly one of the
+        // two may reach the host.
+        let selection = "abc";
+        let action = crate::ime::clipboard_write_action(None, Some(selection));
+        assert!(
+            action.delete_owed,
+            "nothing had deleted this text when the callback wrote it"
+        );
+        assert!(
+            action.request_frame,
+            "the write must ask for the drain that takes its mark: a copy \
+             queues no signal and paints nothing, so no other turn is owed, \
+             and a mark left standing is read as the next copy's own echo"
+        );
+        let mut mark = action.write.map(str::to_owned);
+
+        // That drain. The mark is taken whether or not the tree wrote anything,
+        // and here it did: the echo is suppressed.
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), mark.take().as_deref(), false),
+            ClipboardWrite::Nothing
+        );
+
+        // A second copy of the same unchanged selection a moment later — a
+        // toolbar button, an app-driven copy, with no DOM event behind it. The
+        // mark died with the drain above, so this is the genuine write it looks
+        // like and must be issued.
+        assert_eq!(mark, None, "the mark lives for exactly one drain");
+        assert_eq!(
+            clipboard_write_route(Some("abc".to_string()), mark.take().as_deref(), false),
+            ClipboardWrite::Async("abc".to_string())
         );
     }
 
