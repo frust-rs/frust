@@ -19,6 +19,8 @@ relative path dependency.
 
 - `?case=<slug>` (e.g. `?case=button`, `?case=material/button`) renders
   exactly that case, full-screen, with a small "‹ Index" header.
+- `?case=<slug>&embed=1` renders the same case with that header (and all
+  other chrome) stripped away — see "Embedding" below.
 - No `?case=` (or an unknown slug) falls back to the **index page**: a
   live-filtered, keyboard-searchable, scrollable list of every case in the
   registry, plus a ticking counter line that proves a `frust::RwSignal`
@@ -29,10 +31,61 @@ Query parameters, all read in `src/main.rs` / `index.html`:
 | Param | Values | Effect |
 |---|---|---|
 | `?case=<slug>` | any registry slug | render that one case |
+| `?theme=<variant>` | `light`/`dark` | force that appearance end-to-end (`frust::set_app_theme`), overriding the host's own reported light/dark appearance; any other value (including absent) leaves the shell following the host, unchanged from before this parameter existed |
+| `?embed=1` | exact string `1` | strip this app's own chrome down to exactly the hosted case — no "‹ Index" header, no debug title, no outer `scroll_view`/padding — and make it inescapable from inside the frame (for a slug the registry carries; an unknown slug still falls back to the chromed index, see "Embedding"); any other value (including absent) leaves the existing chromed `?case=` page unchanged. **This is the exact spelling and semantics the website's `WidgetPreview` component's iframe `src` must use** (`?case=<slug>&embed=1`) — see "Embedding" below |
 | `?log=<level>` | `off`/`error`/`warn`/`info`/`debug`/`trace` | raise the console log ceiling above the facade's `Warn` default |
 | `?arm=webgl` | present/absent | force the WebGL2 backend arm (see "The WebGL2 arm" below) |
 
+See "Embedding" below for the `?theme=`/`?embed=1` overrides' rationale and
+the iframe height-report contract this task adds.
+
 ## Build
+
+### Primary recipe: `frust build web --release`
+
+From this directory, once `frust` itself is built from this checkout (an
+installed `frust` predating the web-shell plan's CLI work has no `web`
+subcommand at all — check `frust build web --help` before assuming an
+already-installed binary is new enough):
+
+```sh
+frust build web --release
+```
+
+This is `crates/frust-drive::web_build::build` (`BuildTarget::Web` in
+`crates/frust-cli/src/commands/build.rs`), and it always builds in release
+mode regardless of the flag (every `frust build` target does — matching
+`macos`/`windows`/`linux`/`apk`/`appbundle`/`ios`/`ipa`); `--release` is
+written above because it is the invocation the CLI documents for every
+target, not because it changes anything here. In order: `cargo build
+--target wasm32-unknown-unknown --release`, `wasm-bindgen --target web`
+straight into `<out-dir>/pkg/` (`build/web/pkg/` by default), then
+`wasm-opt` — release always runs it, using the exact named-proposal list
+`WASM_OPT_FEATURES` in `crates/frust-drive/src/web_build/mod.rs` carries
+(see "wasm-opt feature flags" below; kept in lockstep with the manual
+recipe's own flags), then stages a host page over the result.
+
+**This crate has no `web/` host-page directory of its own** (`[web]
+host-dir`'s default), only an `index.html` at its project root — the exact
+shape `frust-drive::web_build::bundle::resolve_embedder`'s own test names
+this crate by: *"No app host page at all (`examples/web-gallery`'s shape: an
+`index.html` at the project root, not under `web/`) falls back to the
+framework embedder."* So `frust build web` **always** stages
+`platform/web/index.html` + `platform/web/frust_web.js` verbatim, named
+`pkg/app.js`/`pkg/app_bg.wasm` (`BINDGEN_OUT_NAME`) — never this directory's
+own `index.html`, whatever it says. That framework page already implements
+the height-report contract (see "Embedding" below), so this is the recipe
+the binary-size table below and the browser verification were measured
+against — it needed no change from this task at all, which is this task's
+own justification for leaving `Cargo.toml`/the CLI's embedder choice alone
+and only touching this crate's own `index.html` for the *second*, independent
+embedding route (below).
+
+Output lands in `build/web/` (`pkg/app.js`, `pkg/app_bg.wasm`, the staged
+`index.html`/`frust_web.js`) — see "Serve" below for why it is
+**not** committed.
+
+### Manual recipe (no `frust` build required)
 
 From this directory:
 
@@ -47,9 +100,18 @@ wasm-opt -O \
   -o pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
 ```
 
+This produces the exact `pkg/web_gallery.js`/`pkg/web_gallery_bg.wasm` this
+directory's own `index.html` imports by that fixed `--out-name`. Unlike the
+primary recipe, this one **does** serve this directory's own `index.html` —
+see "Serve" below for the one requirement that recipe adds (serving from the
+repository root, not this directory, so `index.html`'s
+`../../platform/web/frust_web.js` import resolves).
+
 Host tool versions the sizes below were measured with: `wasm-bindgen-cli`
 0.2.128 (must equal the crate's own `=0.2.128` pin — see `Cargo.toml`),
 `wasm-opt` 132, `cargo` 1.98.1 (the repo's pinned toolchain).
+
+### `wasm-opt` feature flags
 
 `wasm-opt` must be told which proposals to accept — bare `-O` refuses to
 parse this `rustc`/`wasm-opt` combination's output, the finding
@@ -75,31 +137,87 @@ enable with --experimental-wasm-compact-imports
 cp pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
 ```
 
-### Binary size (this build, `[profile.release]` from this crate's own
-`Cargo.toml` — `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`,
-`panic = "abort"`, copied from the root profile since a standalone workspace
-never sees it):
+### Binary size — the number that decides whether live previews ship
+default-on or opt-in
+
+Measured against the **primary recipe** (`frust build web --release`,
+`build/web/pkg/app_bg.wasm`) — the artifact this task's browser verification
+actually loaded (see "Embedding" below) — not the manual recipe, though the
+two drive the identical underlying pipeline: same crate, same
+`[profile.release]`, the identical `cargo build`/`wasm-bindgen`/`wasm-opt`
+invocation (compare "Primary recipe" above against "Manual recipe" below —
+`crates/frust-drive/src/web_build/mod.rs`'s `WASM_OPT_FEATURES` list is the
+same seven flags the manual recipe passes by hand); only the file
+name/host page differ. That does not make their *output* byte-identical,
+and it should not be read as such — see the "snapshot, not a constant" note
+below the table, which records two builds of this identical pipeline, from
+unchanged source, producing different byte counts at every stage.
+`[profile.release]` is this crate's own (`lto = "fat"`, `codegen-units = 1`,
+`strip = "symbols"`, `panic = "abort"`, copied from the root profile since a
+standalone workspace never sees it):
 
 | Stage | Size |
 |---|---|
-| `wasm-bindgen` output (`web_gallery_bg.wasm`, unoptimized) | 11,535,811 B ≈ 11.00 MiB |
-| after `wasm-opt -O` with the feature list above | 10,730,424 B ≈ 10.23 MiB |
-| gzip `-9` of the `wasm-opt`'d file | 4,465,581 B ≈ 4.26 MiB |
+| `wasm-bindgen` output (unoptimized) | 11,524,399 B ≈ 10.99 MiB |
+| after `wasm-opt -O` with the feature list above | 10,724,099 B ≈ 10.23 MiB |
+| gzip `-9` of the `wasm-opt`'d file | 4,466,947 B ≈ 4.26 MiB |
 
-Measured 2026-09-08 on `dev` after the web shell's IME bridge and CLI web
-build landed; the earlier rows this table carried (9.34 / 8.72 / 3.69 MiB)
-predate both.
+**These three numbers are a snapshot, not a constant — re-measure before
+citing one anywhere else.** All three rows above are from one build's own
+log — the deployed artifact, measured 2026-09-09 against
+`feature/widget-previews-p3` — never mixed across builds; `wasm-opt` shrank
+that build's own unoptimized module from 11,524,399 B to the 10,724,099 B
+row above it. Same recipe as always: `frust build web --release` (see
+"Primary recipe" above) followed by `gzip -9 -c build/web/pkg/app_bg.wasm |
+wc -c`. This table's immediately-prior row (11,523,553 / 10,723,170 /
+4,466,842 B, measured 2026-09-08 on `task/p3-r1-embed-mode`, this same base,
+no source change since) differs from today's row at every stage — 846 B
+larger unoptimized, 929 B larger optimized, 105 B larger gzipped. That is
+the observation: two builds of unchanged source through the identical
+pipeline did not produce byte-identical output. This document does not know
+why — nothing here diagnoses a cause, and none should be assumed — only
+that it happened, which is reason enough that a second document
+(`docs/TESTING.md`) copying one of these numbers goes stale the moment
+either file rebuilds, independent of any app-code change; that is
+why `docs/TESTING.md` no longer quotes a byte count at all (see its own
+`examples/web-gallery` entry). The prior-prior measurement (11,523,550 /
+10,723,407 / 4,466,224 B, the base commit review-round-1 started from — the
+exact pair a previous draft of this document, and `docs/TESTING.md`,
+both went on quoting as if still current) and the rows before that
+(11,535,811 / 10,730,424 / 4,465,581 B before `?theme=`; 9.34 / 8.72 / 3.69
+MiB predating the web shell's IME bridge and CLI web build landing) remain
+useful history for the same reason — read as history, never as today's
+number.
 
-One binary contains the whole 35-case registry (see "A discrepancy with the
-card's '107 cases'" below) plus the JS glue (`web_gallery.js`, 162,382 B,
-uncompressed) is separate and tiny by comparison. For scale,
+**Every row above predates the design-system font registration** that
+`src/main.rs` now performs, and that registration is not free: it grows the
+module by ~1.22 MB uncompressed and ~0.53 MiB gzipped, measured before and
+after on the manual recipe in one sitting. The "Text on `wasm32`" section
+below carries that before/after pair and explains why the bytes were not
+already linked in; read it together with this table rather than assuming
+either number still describes the other's build.
+
+**Verdict for the live-preview default:** unchanged by this task — a ~10.2
+MiB (~4.3 MiB gzipped) module is still too large to load eagerly per
+preview instance; g3-02's lazy-iframe-with-PNG-poster design (load only on
+demand, one shared module cached across every embedded case on a page) is
+the right shape, not a default-on embed. This binary carries the *whole*
+107-case registry — Base plus all five design systems (see "Registry size"
+below) — per-design-system splitting, so a single Material-only preview page
+does not pay for Cupertino/Glyph/Shadcn/beUI too, remains the lever actually
+worth pulling before "opt-in" becomes "affordable by default"; that split is
+future work, not something this task's `write_files` can do (it would mean
+restructuring `frust-gallery`'s own case registry, `examples/gallery`).
+
+One binary contains the whole 107-case registry plus the JS glue
+(`app.js`/`web_gallery.js`, 162,358–162,382 B depending on `--out-name`,
+uncompressed) — separate and tiny by comparison. For scale,
 `examples/web-spike`'s own five-crate render-engine probe (no widgets, no
 `frust-gallery`, no design-system plugins) measured 5.44 MiB / 1.93 MiB
 gzipped at `wasm-opt`; the delta here is the widget set, the reactive
 runtime's full surface, and the five design-system plugins' own font/token
-data pulled in transitively through `frust-gallery`'s dependency on all five
-(even though, at this base commit, `cases()` only actually walks the `Base`
-module — see below).
+data, which `cases()` now pulls in directly, not merely transitively — see
+"Registry size" below.
 
 ## Serve
 
@@ -109,19 +227,181 @@ to `application/wasm` since 3.9 — the same fact `examples/web-spike/serve.sh`
 documents). A `serve.sh` matching that spike's own script was **not** added
 — it is outside this task's `write_files` (`Cargo.toml`, `README.md`,
 `index.html`, `src/main.rs`); the conductor can add one from this recipe if
-wanted:
+wanted.
+
+**Primary recipe's artifact** (`build/web/`, self-contained — `frust_web.js`
+is staged *into* it, so nothing outside it is ever read):
 
 ```sh
-python3 -m http.server 8931 --bind 127.0.0.1
-# open http://127.0.0.1:8931/index.html
+python3 -m http.server 8931 --bind 127.0.0.1 --directory build/web
+# open http://127.0.0.1:8931/index.html?case=button
 ```
 
-`pkg/` and `target/` are generated and **must not be committed** — this
-standalone workspace needs its own `.gitignore` for that, which is also
-outside `write_files`; the conductor adds it (see the task card's own "if the
-standalone workspace needs its own .gitignore ... report it" instruction).
+**Manual recipe's `index.html`** — this directory's own page now imports
+`../../platform/web/frust_web.js` directly rather than carrying a copy (see
+"Embedding" below for why), so the server root must be the **repository
+root**, not this directory, or that relative import 404s:
 
-## Rig used for the milestone evidence below
+```sh
+python3 -m http.server 8931 --bind 127.0.0.1 --directory ../..
+# open http://127.0.0.1:8931/examples/web-gallery/index.html?case=button
+```
+
+`--directory` needs Python 3.7+; both invocations were verified against the
+`python3` this task's own host carries.
+
+`pkg/` and `target/` are generated and **must not be committed** — this
+standalone workspace's own `.gitignore` already covers both (`efe979c5`).
+`build/`, which the `frust build web` recipe writes, is covered the same way
+(`066e9c30`) — the `.gitignore` line was added separately because
+`.gitignore` was outside this task's own `write_files`.
+
+## Embedding (this task, g3-01)
+
+This task's objective: make the gallery embeddable — `?case=`/`?theme=`
+routing (done; `?case=` already existed from w1-06, `?theme=` is new here)
+plus reporting the embedded page's own rendered height to a parent frame, so
+a preview host (g3-02's lazy iframe) can size itself without guessing.
+
+**The height contract is the framework's, not this crate's own code.**
+`platform/web/frust_web.js`'s `mount()` (read-only evidence for this task —
+outside `write_files`) posts `{type: "frust:height", height}` to
+`window.parent` via `postMessage`, on canvas-ready, after the wasm module's
+own `init()` resolves, and on every `window resize` event — see that file's
+`postHeightToParent`/`mount` doc comments for the exact mechanism (a plain
+`document.documentElement.scrollHeight` read, `"*"` as the target origin
+since a preview host is not assumed same-origin). Two independent routes
+put this crate's own page on that contract, both inside this task's
+`write_files`, and both are now live:
+
+1. **`frust build web --release` stages the framework's own
+   `platform/web/index.html` verbatim**, because this crate has no `web/`
+   host-page directory of its own (see "Primary recipe" above) — no code
+   change needed at all; the framework page already calls `mount()`.
+2. **This directory's own `index.html` now imports `mount` from
+   `../../platform/web/frust_web.js` directly**, replacing its former
+   hand-rolled canvas-binding/resize script (the "Milestone 6" fix below) —
+   the general version of the identical technique, plus the height-report
+   calls that script never made. Chosen over copying `frust_web.js` into
+   this directory (the shape `templates/app/web.tmpl/` uses for a *real*
+   scaffolded app's own `<host-dir>`) because a copy is a second identity to
+   keep in sync by hand the moment the framework's contract changes, and
+   this task's `write_files` has no `web/` subdirectory to put one in
+   anyway — a plain relative import is `mount()`'s own read-only evidence,
+   never duplicated.
+
+Both were verified end-to-end this task (see "Browser verification" below)
+to actually post the message with the correct payload; the "Binary size"
+table above records route 1's own measurement, since that is what `frust
+build web --release`'s own recipe produces and what a real embedding is
+expected to load.
+
+**`?theme=light`/`?theme=dark`** (`src/main.rs`'s
+`resolve_theme_override_from_query`) is the other half: an embedding host's
+explicit request to pin one appearance end-to-end
+(`frust::set_app_theme(frust_gallery::theme(design, variant))`), overriding
+whatever the host/browser itself reports — orthogonal to and layered above
+the existing per-design-system-case seeding (`set_default_theme`), which
+still runs unchanged when `?theme=` is absent. Host-follow with no query
+parameter needs no app code at all, exactly as before this task.
+
+**`?embed=1`** (`src/main.rs`'s `resolve_embed_from_query`, task p3-r1-01,
+review round 1) is a third piece, added after this section's other two: the
+website's `WidgetPreview` component builds its iframe `src` as
+`?case=<slug>&embed=1`, not bare `?case=<slug>`, so a reader inside the
+preview iframe sees exactly `component(CaseHost(case.build))` — no "‹ Index"
+header, no debug title, no outer `scroll_view`/padding
+(`src/main.rs`'s `embedded_case_view`, the chrome-free sibling of
+`case_view`). Without it, the chromed `?case=` page's own header
+(~55–60px) plus its 12px/16px padding squeezed the widget into whatever
+remained inside a box the website sizes from the poster PNG
+`frust-testing`'s CPU oracle renders **bare**, at `Case::DEFAULT_SIZE`
+(`examples/gallery/src/case.rs`, 360×240 for five of the six live slugs,
+400×180 for `material/tabs`) — a composition mismatch between the poster
+and the live frame it cross-fades into. Worse, the chromed page's "‹ Index"
+tap set `AppState::case` back to `None`, replacing the documented widget
+with the full gallery index (recoverable only by tapping the slug's row
+again — `src/main.rs`'s `index_view` sets `case` back to `Some`). `?embed=1`
+closes both: `embedded_case_view` never renders a `nav_row`/`GestureDetector`
+at all, so no tap inside an embedded frame can reach `index_view`. One
+caveat the parameter cannot cover: `?embed=1` with a slug the registry does
+not carry resolves to `None`, and `src/main.rs`'s view match then renders
+the chromed `index_view` — so a stale or renamed slug shows the full index
+inside the frame. The tap-out is closed; a bad slug is not. Any value other than the literal string `"1"`
+(including the parameter's absence) leaves the existing chromed `?case=`
+page unchanged — additive, not a replacement, the identical discipline
+`?theme=` already established. **This exact spelling (`embed`, exact value
+`"1"`) is the contract the website's `WidgetPreview` component (a separate
+repository, a parallel card) must match** — see the query-parameter table
+above.
+
+## Browser verification (this task, g3-01)
+
+This Mac carries no automated WebDriver rig (the prior milestone evidence
+below was gathered from a Linux Docker container this task's host does not
+have) — but it does have `/Applications/Google Chrome.app` installed, and
+Playwright's `chromium.launch({channel: "chrome"})` drives an **already
+installed** Chrome over CDP directly, no `chromedriver`/Selenium download
+needed. Verified this way, headed (not headless — this Mac's headless Chrome
+GPU behaviour was not characterized, and headed matches the milestone
+evidence below's own precedent), against `frust build web --release`'s own
+`build/web/` output served locally and embedded in a plain cross-origin
+`<iframe>` (a second local static server on a different port — the real
+preview-embedding shape, not same-origin):
+
+- **Chrome, WebGPU (`?case=button`):** loads; a canvas is created and
+  correctly reparented under `#frust-host`
+  (`canvasParentId === "frust-host"`); the parent frame receives **two**
+  `{"type":"frust:height","height":700}` messages (canvas-ready, then
+  post-`init()`) matching the iframe's own CSS box height exactly; the
+  button case's shapes and (on this Chrome/macOS combination) its text both
+  render.
+- **Chrome, forced WebGL2 (`?case=button&arm=webgl`):** loads through the
+  GL arm (`ANGLE (Apple, ANGLE Metal Renderer: Apple M4, ...)` in the
+  adapter name, Naga-generated GLSL in the console under `?log=debug`,
+  matching the WebGL2-arm mechanism described below); canvas adoption and
+  the height-message pair both behave identically to the WebGPU arm.
+- **`?theme=dark` / `?theme=light` (`?case=button`):** both load and post
+  height correctly; screenshots confirm a genuinely different rendered
+  background (near-black vs. near-white) for the two, with no OS/browser
+  dark-mode emulation touched — the override is real, not host-follow
+  coincidentally agreeing.
+- **The manual recipe's own `index.html`** (served from the repository root
+  per "Serve" above): posts the identical two height messages, confirming
+  route 2 above works as well as route 1.
+
+**One observation from this task, now explained (not a Mac/Linux platform
+quirk):** on this Chrome/macOS/M4 combination, case-label text rendered
+legibly on **both** the WebGPU and forced-WebGL2 arms — screenshots show
+"Save"/"Cancel"/"Delete"/"Locked" clearly, which did not match the "Text on
+`wasm32`" section below's original "every label renders as a blank/solid box"
+finding from the prior task's Linux rig. A review-round-1 fix (this pass)
+traced this to `docs/LIMITATIONS.md`'s `web-generic-family-partial-fallback`
+entry: `crates/frust-shell-web`'s `install_default_fonts` registers a
+bundled Inter Variable face as the `SystemUi`/`SansSerif` generic-family
+fallback unconditionally, before the shell builds its own `TextContext` —
+in the codebase this whole crate builds against today, that mapping is
+already live for every case's default-styled text. So the legible text
+above is that framework-level fix actually working, not an unexplained
+platform/GPU difference; this passage no longer needs the Linux rig re-run
+it originally called for. See the "Text on `wasm32`" section below for the
+corrected, current state (the `Monospace`/`Serif`/`Emoji` *generics* remain
+unmapped; the named families in front of the `Monospace` tail — Glyph's two
+faces and the shadcn/beUI mono slots — are registered by this binary itself
+now, and their cases do render text, measured there case by case).
+Note this rig exercised only `Base` cases, which is exactly why the
+14 blank `glyph/*` cases went unobserved at the time — see that section's
+own browser evidence, which reproduces the defect first and then measures
+the fix.
+
+**Not run, and not claimable from this Mac:** Safari 26. There is no Safari
+automation available in this environment (Playwright's `webkit` channel is
+a bundled WebKit build, not shipping Safari, and was not substituted for
+it here since that would misrepresent the leg as covered). The conductor
+should bill a real Safari 26 pass to Ed or a macOS device gate, the same way
+the card's own acceptance names it.
+
+## Rig used for the milestone evidence below (prior task, w1-06)
 
 `docker exec frust-linux-native ...` — Chrome 151.0.7922.108 at
 `/usr/bin/google-chrome`, `chromedriver` 151.0.7922.108 at
@@ -148,9 +428,8 @@ recipe above to reproduce.
 
 ### 1. Mouse click / hover (index navigation)
 
-Clicking a row in the index list's `nav_row` (see "A font defect and how
-this app works around it" below for why rows are hand-rolled instead of
-`frust::button`) navigated to that case's `?case=` page; clicking "‹ Index"
+Clicking a row in the index list's `nav_row` (see "Text on `wasm32`" below
+for why rows are hand-rolled instead of `frust::button`) navigated to that case's `?case=` page; clicking "‹ Index"
 on a case page navigated back. Verified round-trip on both the WebGPU and
 the forced-WebGL2 arm.
 
@@ -182,10 +461,12 @@ scope can investigate further.
 ### 4. Keyboard text entry
 
 Typing `flex` into the index page's filter `text_input` (WebDriver key
-actions, one `keyDown`/`keyUp` pair per character) live-filtered the
-35-case list down to the single `flex — Row and Column` row, confirmed by
-screenshot. The typed value round-tripped through the widget's controlled
-`on_change`/`value` contract exactly as `TextInputView`'s own doc describes.
+actions, one `keyDown`/`keyUp` pair per character) live-filtered the case
+list — 35 entries at the time of this evidence (before the design-system
+batches landed; 107 today, see "Registry size" below) — down to the single
+`flex — Row and Column` row, confirmed by screenshot. The typed value
+round-tripped through the widget's controlled `on_change`/`value` contract
+exactly as `TextInputView`'s own doc describes.
 
 ### 5. Dark/light theme follow — **live flip**
 
@@ -233,6 +514,13 @@ new width. This is genuinely useful, in-scope evidence for the milestone —
 but the underlying gap (an *unstyled* page's canvas never resizes at all)
 is a `frust-shell-web` fact this app's `write_files` cannot fix at the
 source; see "Recommended follow-up" below.
+
+**Update (g3-01):** this page's own `MutationObserver` script described
+above has since been removed — `platform/web/frust_web.js`'s `mount()` now
+implements the identical fix, generalized from a fixed `100vw`/`100vh`
+target to an arbitrary host element's own box (see "Embedding" above). The
+finding and its root-cause diagnosis above remain accurate history; only
+where the fix lives has moved.
 
 ### 7. Device-pixel-ratio change
 
@@ -313,88 +601,218 @@ the "container/colored_box" case's blue rounded rect render pixel-correct;
 every label on both pages is a solid-white box the same shape and size the
 text would have occupied.
 
-## A font defect and how this app works around it
+## Text on `wasm32`: `SystemUi`/`SansSerif` and the bundled design-system faces render; the `Monospace`/`Serif`/`Emoji` generics still do not
 
-**Discovered during this task, not by it:** every text-bearing Frust widget
-defaults to `frust_text::FontFamily::SystemUi` (`TextStyle::default()`)
-unless a caller sets `.family(...)` explicitly, and — as of this base commit
-— **no case in the whole `frust-gallery` registry does**
-(`grep -rn '\.family(' examples/gallery/src` is empty). On desktop that
-resolves through fontique's real system-font backend; on
+**The generic-slot half was discovered by a prior task and fixed at the
+framework level:** every text-bearing Frust widget defaults to
+`frust_text::FontFamily::SystemUi` (`TextStyle::default()`) unless a caller
+sets `.family(...)` explicitly, and no case in the whole `frust-gallery`
+registry does (`grep -rn '\.family(' examples/gallery/src` is empty). On
+desktop that resolves through fontique's real system-font backend; on
 `wasm32-unknown-unknown`, `fontique` 0.11.1 ships a backend its own source
 literally comments as a "Dummy system font backend for targets like
 wasm32-unknown-unknown" (`fontique-0.11.1/src/backend/mod.rs`), whose
-generic-family map is empty. So `SystemUi` — and `Theme::neutral()`'s own
-type scale, which carries a generic `NamedWithGeneric([], SansSerif)` stack
-rather than a named face — resolves **zero glyphs** on this target, and nothing
-an app registers through `frust::register_app_fonts` changes that: verified
-empirically here (registering a bundled Inter Variable face and re-rendering
-with no other change left every `SystemUi`-styled label exactly as blank —
-see the two "index" screenshots taken before/after that one-line change).
+generic-family map is empty by default. `crates/frust-shell-web`'s
+`install_default_fonts` now registers a bundled Inter Variable face as the
+`SystemUi`/`SansSerif` generic-family fallback
+(`frust_text::register_generic_fallback`) unconditionally, before the shell
+builds its own `TextContext` — no per-app opt-in, and this app does not opt
+in to anything for it. `Monospace`, `Serif` and `Emoji` remain **unmapped**
+by design (a proportional face substituted for `Monospace` would silently
+regress `TextInput`/code-display layout, and the bundled face set has
+neither a serif nor an emoji face) — see `docs/LIMITATIONS.md`'s
+`web-generic-family-partial-fallback` entry for the authoritative record.
 
-This app works around it for its **own** authored chrome only:
+### What this binary now registers itself
 
-- `src/main.rs`'s `label()` helper wraps `frust::text` with an explicit
-  `.family(FontFamily::named("Inter Variable"))` (the bundled face's real
-  name-table entry — not `"Inter"`; same fact `plugins/shadcn`'s
-  `tokens::theme::INTER_FAMILY` documents, not depended on directly since it
-  is not re-exported past that crate's `tokens` module).
-- `frust_widgets::button`'s internal label has no family-override builder at
-  all, so a `button()` call would still render an invisible (though still
-  clickable) label under the same defect. This app therefore never calls
-  `button()` — `nav_row()` in `src/main.rs` hand-rolls the same affordance
-  out of `GestureDetector` + `container` + `label()`, entirely within this
-  crate's own write scope.
-- The bundled face itself
-  (`plugins/shadcn/fonts/inter/InterVariable.ttf`, `include_bytes!`'d — a
-  *read* of an existing repo asset, not a new write-scope file) is
-  registered once via `frust::register_app_fonts` in `AppState::new`,
-  before the shell constructs (matching the timing contract
-  `frust::register_app_fonts`'s own doc and `frust_shadcn::install`'s
-  identical pattern both spell out).
+A design system's text does not go through a bare generic slot: it goes
+through `FontFamily::stack_with_generic([<named family>], <generic>)`, whose
+named half resolves only against faces somebody registered. Nothing
+registers them here by inheritance — the registry builds its design-system
+cases directly rather than through each plugin's `install()`
+(`examples/gallery/src/glyph.rs` explains why), and `install()` is the only
+seam that registers them. So every stack whose generic tail is `Monospace`
+fell through to nothing and rendered **zero glyphs**, under CPU posters that
+look perfectly correct because the poster host has the real faces.
 
-It **cannot** work around this for a hosted `Case`'s own internal text (the
-overwhelming majority of the registry's actual content) — that is
-`crates/frust-text`, `crates/frust-widgets`, and `examples/gallery`, all
-outside this task's `write_files`. A case's shapes, images, layout and theme
-colours all render correctly; its labels do not, on **either** backend arm
-(this is a `frust-text`/`fontique` defect, orthogonal to the WebGL2-specific
-glyph-atlas defect above — it reproduces identically on the WebGPU arm too).
+`src/main.rs`'s `register_design_system_fonts` closes that: it hands the
+bundled Glyph, shadcn and beUI faces to `frust::register_app_fonts` in
+`AppState::new`, before `run_app` constructs the shell (the timing contract
+`register_app_fonts`' own doc states). It deliberately does **not** call any
+plugin's `install()`, which would also `set_default_theme` and fight this
+app's own per-case seeding. Per design system, checked against each
+plugin's own font module and manifest rather than assumed from Glyph's
+shape:
 
-**Recommended follow-up (for the conductor to file, mirroring the w0-07 →
-its-own-landing-card precedent):** either give `frust-text`'s `TextContext`
-a way to populate fontique's generic-family map from an app-registered face
-on `wasm32` (so `SystemUi`/`Theme::neutral()`'s generic stack resolves
-without every widget author having to name a family explicitly), or give
-`frust-gallery`'s case-building helpers (`base::framed`/`framed_in`, or
-`Case` itself) a way to carry/request a fallback family so a browser host can
-thread one through without editing every one of the 35 (eventually 107)
-case modules by hand.
+| Design | Mono/named exposure | Bundling | Registered here |
+|---|---|---|---|
+| Glyph | **Both** type faces are `stack_with_generic([Space Mono \| IBM Plex Mono], Monospace)` (`plugins/glyph/src/tokens/scales.rs`) — all 14 `glyph/*` cases | 7 faces, unconditional `include_bytes!`, no feature gate; `font_data` re-exported at the crate root | **Yes** |
+| shadcn | `mono_family()` = `[JetBrains Mono] + Monospace` (`tokens/theme.rs`), used by `kbd`/`questionnaire` shortcut badges; body text tails `SansSerif` and always rendered | 2 faces, unconditional; `font_data` at crate root | **Yes** |
+| beUI | `mono_family()` = `[Geist Mono] + Monospace` (`tokens/theme.rs`), used by `code-block`, loaders, `number`, agents blocks; body tails `SansSerif` | 2 faces, unconditional; `font_data` at crate root | **Yes** |
+| Material | **No `Monospace` slot at all** — its one stack is `[Roboto Flex] + SansSerif`, which the shell already maps. Roboto Mono is bundled but no type token selects it | 2 faces, unconditional — but `mod tokens;` is **private** and the crate root does not re-export `font_data`, so there is no public accessor | No — not exposed to this defect, and could not be registered if it were |
+| Cupertino | **Does** declare one — `FontFamily::stack(["SF Pro Display" \| "SF Pro Text", "SF Pro"])` on every type role (`plugins/cupertino/src/tokens.rs`'s `sf_family_for_size`, applied by `apply_type`, wired through `type_scale` into `baseline`). A named stack with **no** generic tail, so it resolves through parley's own fallback once those names miss rather than through a mapped generic slot; its cases render | **None at all** — no `fonts/` directory, no `include_bytes!`, no `font_data` | No — nothing exists to register |
 
-## A discrepancy with the card's "107 cases"
+**Correction, since the wrong version of the Cupertino row shipped first.**
+Earlier drafts of this file, `src/main.rs` and `Cargo.toml` all said
+Cupertino "declares no font family anywhere". That was false, and it came
+from grepping for `stack_with_generic`/`GenericSlot::` and reading the empty
+result as "no family" — Cupertino uses plain `FontFamily::stack(...)`, which
+that pattern cannot see. The conclusion (nothing to register) survives, but
+only for the reason in the table above: it bundles no font files. A `grep`
+that returns nothing is evidence about the pattern, not about the code.
 
-This task's dispatch text states `frust_gallery::cases()` returns "107 cases
-incl. five design systems". At this task's actual `base_sha`,
-`frust_gallery::cases()` returns **35** — every one tagged
-`Design::Base` — because `examples/gallery/src/lib.rs`'s own `cases()`
-still only calls `base::cases()`; its doc comment says so explicitly
-("Currently the whole `Base` page set... later phases add each design
-system's own case modules and concatenate them here"). This app's own
-`?case=`/index-page code reads the registry *dynamically* (`frust_gallery::cases().len()`
-is what the index page's own "N cases in the registry" line reports, and it
-correctly says 35, not a hard-coded 107), so no change is needed here when
-the design-system case batches land — this app will pick them up
-automatically, including the per-case `set_default_theme` override in
-`AppState::new` for a `Design != Base` case, written and compiling today but
-not yet exercised by any case in the registry.
+**This does not map a generic.** Registering a named face and mapping a
+generic slot are different things, and only the first happens here: text
+that resolves to a bare `Monospace`, `Serif` or `Emoji` generic with no
+named face in front of it still renders nothing on this target. The
+`docs/LIMITATIONS.md` entry stands unchanged, and its stated trigger for
+removal ("a bundled monospace/serif/emoji policy, or a page-side
+font-loading seam that lets an app supply those faces without paying for
+them in every binary") is still the open item.
+
+### Browser evidence: measured text, not a canvas that appeared
+
+The reason this defect survived a full phase and three review rounds is that
+the browser checks ran `Base` cases only, and the readiness probe asserts a
+canvas *appeared* — which it does whether or not a single glyph resolves.
+The measurement below therefore asserts on rendered text: real Chrome
+(Playwright, `channel: "chrome"`, headed, DPR 1, `colorScheme: light`) loads
+`?case=<slug>&embed=1&theme=light` from the manual recipe's own artifact,
+screenshots the shell's canvas, and computes **horizontal-edge density**
+(fraction of pixels whose luminance differs from the next pixel's by more
+than 24/255 — text is overwhelmingly the source of such edges) for the live
+capture and for the case's committed CPU poster in the website's
+`static/preview/`.
+
+**Edge density is a fraction of the whole canvas, so it only means anything
+with the capture viewport stated.** Each case was captured at its own
+manifest size, one browser context per case, DPR 1 — the sizes in the table
+below. A larger viewport spreads the same case over more empty pixels and
+drives every figure down together (measuring these cases at 900x700 returns
+roughly a seventh of these numbers), so compare the before/after pair and
+the ratio, never an absolute against a differently-sized run.
+
+Live and poster are not expected to reach parity either: the embed view
+anchors a case top-left while the poster centres it in the frame, so the
+`Base` control's own live/poster edge ratio (0.386) is the ceiling this
+comparison can reach, and it is the bar the design-system cases are read
+against.
+
+| Case | Viewport (CSS px, DPR 1) | Live edges before | Live edges after | Poster edges | Live/poster before → after |
+|---|---|---|---|---|---|
+| `glyph/term-block` | 360x240 | 0.0011 | 0.0139 | 0.0343 | 0.033 → **0.405** |
+| `glyph/list` | 360x420 | 0.0019 | 0.0107 | 0.0300 | 0.062 → **0.358** |
+| `beui/code-block` | 420x280 | 0.0010 | 0.0067 | 0.0183 | 0.054 → **0.366** |
+| `shadcn/questionnaire` | 420x320 | 0.0097 | 0.0099 | 0.0278 | 0.350 → **0.356** |
+| `button` (`Base` control) | 360x240 | 0.0078 | 0.0078 | 0.0203 | 0.385 → **0.386** |
+
+Read alongside the captures themselves: before, `glyph/term-block` drew the
+terminal chrome and its three window dots over an empty collapsed body,
+against a poster showing four lines of shell transcript — after, all four
+lines are there. `beui/code-block` went from a header strip (`TYPESCRIPT`,
+`Ready` — both sans) above an empty code area to line numbers plus three
+syntax-coloured lines. `shadcn/questionnaire` moves barely at all in
+aggregate, correctly: only its three shortcut badges are mono, and they went
+from empty rings to `A`/`B`/`C`. The `Base` control does not move at all,
+which is the point of including it.
+
+### It is not free: +1.22 MB uncompressed, +0.53 MiB gzipped
+
+The bytes are bundled unconditionally by all three plugins, but they were
+**not** all in the artifact beforehand — only the faces something reachable
+still referenced. Each plugin's `native_typefaces` binding names one or two
+specific faces (Glyph: Space Mono Regular + IBM Plex Mono Regular; shadcn:
+Inter; beUI: Geist), and the linker dropped the rest as unreachable.
+Measured on the manual recipe (`cargo build --release --target
+wasm32-unknown-unknown` → `wasm-bindgen` → `wasm-opt`, `wasm-bindgen-cli`
+0.2.128 / `wasm-opt` 132 / `cargo` 1.98.1), same host, same base commit,
+back to back:
+
+| Stage | Before | After | Delta |
+|---|---|---|---|
+| `wasm-bindgen` output | 11,535,394 B | 12,760,170 B | +1,224,776 B (+10.6%) |
+| after `wasm-opt -O` | 10,730,018 B | 11,951,777 B | +1,221,759 B (+11.4%) |
+| gzip `-9` (what a reader downloads) | 4,467,316 B | 5,027,473 B | +560,157 B (+12.5%) |
+
+That delta is exactly the previously-dropped faces: the three plugins bundle
+2,543,516 B of TTFs, of which 1,321,172 B were already linked through
+`native_typefaces`, leaving 1,222,344 B unreachable — within 585 B of the
+measured `wasm-opt`-stage growth. So the honest version of "the bytes are
+already linked in" is: *a fifth of them were.* Registering the rest costs
+about half a megabyte on the wire, which is a real input to the
+live-preview download budget the site advertises, not a rounding error. The
+lever if that proves too expensive is registering fewer faces (each family's
+Regular only, accepting synthesized weights) rather than fewer families —
+dropping a family reopens the blank-text defect for its whole page set.
+These numbers are a snapshot of one host and one pair of builds; re-measure
+before citing them elsewhere, exactly as the "Binary size" table above says
+of its own.
+
+### The app's own label face
+
+`src/main.rs`'s `LABEL_FONT_BYTES` still `include_bytes!`es
+`plugins/shadcn/fonts/inter/InterVariable.ttf` and registers it by name for
+this app's own chrome (`label()`/`nav_row()` name `"Inter Variable"`
+explicitly — the variable release's real name-table entry, not `"Inter"`).
+It is now redundant twice over: the shell's generic fallback covers it, and
+`register_design_system_fonts` registers shadcn's own copy of the identical
+file. It is kept so this app's chrome does not depend on a plugin's bundle.
+
+**Retiring it saves approximately nothing, and an earlier draft of this
+section was wrong to advertise a "~0.88 MB" win.** There is no duplicate to
+reclaim: identical `include_bytes!` constants merge, so the two sites —
+`LABEL_FONT_BYTES` here and `plugins/shadcn`'s own `INTER_VARIABLE` — are
+one copy in the artifact. Measured, not assumed: three 4096-byte probes
+taken at 1/4, 1/2 and 3/4 through `InterVariable.ttf` each match **exactly
+once** in the shipped module, the same result the single-site
+`SpaceMono-Regular` control gives, while `RobotoMono.ttf` (bundled by
+Material, never registered) matches **zero** times — the control that shows
+the probe can tell present from absent. The same merging argument retires
+the claim, previously in `Cargo.toml`, that `include_bytes!`ing the plugins'
+TTFs here instead of depending on the plugins would have cost ~2.5 MB extra:
+it would have cost the same ~1.22 MB, and the real reasons to prefer the
+dependency rows are drift and provenance, not size. Retiring
+`LABEL_FONT_BYTES` remains worth doing for clarity; budget no bytes for it.
+
+## Registry size: 107 cases, not 35
+
+An earlier draft of this document asserted the registry held only 35 cases,
+all `Design::Base` — accurate at an earlier base commit, when
+`examples/gallery/src/lib.rs`'s `cases()` still only called `base::cases()`
+and its own doc comment said so explicitly. That assertion was not corrected
+when the design-system case batches landed; it was instead carried forward
+into text a later pass of this same document rewrote (the "Binary size"
+section above), while `src/main.rs`'s own doc comment, added in that same
+pass, correctly said 107 — one draft of this file contradicting itself.
+
+As of this task's own base commit, `lib.rs`'s `cases()` (`lib.rs:80-89`)
+concatenates `base::cases()` with every design-system module's own `CASES`
+slice (`DESIGN_PARTS` at `lib.rs:67-73`: material, cupertino, glyph, shadcn,
+beui, in that order) into one cached, `'static` slice. Counted directly
+against that function: **107 cases total** — 35 `Base`, 23 `Material`, 15
+`Shadcn`, 14 `Glyph`, 13 `Beui`, 7 `Cupertino` — every slug unique
+(`examples/gallery/tests/registry.rs`'s `slugs_are_unique`). This app's own
+`?case=`/index-page code has always read the registry *dynamically*
+(`frust_gallery::cases().len()` is what the index page's own "N cases in the
+registry" line reports, `src/main.rs:451`), so no app-code change was needed
+here when the batches landed — only this document was wrong.
+
+The per-case `set_default_theme` override in `AppState::new` for a
+`Design != Base` case (see "Embedding" above) is likewise **not** dormant,
+contrary to what an earlier draft of this section claimed: it runs for every
+one of the 72 non-`Base` cases now in the registry, including two of the six
+slugs the website's own catalog currently embeds (`material/tabs`,
+`beui/button`) — a `?case=material/tabs` request exercises this branch on
+every load.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `Cargo.toml` | Standalone workspace manifest: the `frust` facade + `frust-gallery` path deps, the `wasm32`-gated `wasm-bindgen`/`web-sys`/`js-sys`/`wasm-bindgen-futures`/`frust-shell-web` rows, and this crate's own `[profile.release]`. |
-| `src/main.rs` | The app. `fn main() {}` (required for a `[[bin]]` target; the real entry is `wasm_bindgen(start)`) plus a `wasm32`-only `mod app`: `AppState`, the font-registration/case-resolution/log-level startup sequence, `label`/`nav_row` (the font-defect workaround), `CaseHost` (the `Component` state-boundary bridge into a `()`-state `Case`), `case_view`/`index_view`, and the `frust::web_app!` invocation. |
-| `index.html` | Host page. No `<canvas>` of its own (the shell creates one) — carries the `?arm=webgl` WebGPU-removal script, the canvas-resize `MutationObserver`, and the load-failure `<pre id="log">` mirror. |
+| `src/main.rs` | The app. `fn main() {}` (required for a `[[bin]]` target; the real entry is `wasm_bindgen(start)`) plus a `wasm32`-only `mod app`: `AppState`, the font-registration/case-theme-embed-resolution/log-level startup sequence (`resolve_case_from_query`, `resolve_theme_override_from_query`, `resolve_embed_from_query`), `label`/`nav_row` (the font-defect workaround, now largely redundant — see "Text on `wasm32`" below), `CaseHost` (the `Component` state-boundary bridge into a `()`-state `Case`), `case_view`/`embedded_case_view`/`index_view`, and the `frust::web_app!` invocation. |
+| `index.html` | Host page for the manual recipe. No `<canvas>` of its own (the shell creates one) — carries the `?arm=webgl` WebGPU-removal script and the load-failure `<pre id="log">` mirror; canvas-host binding, resize/DPR sync, and the iframe height-report contract are now `platform/web/frust_web.js`'s `mount()` (imported directly, see "Embedding" above), not a page-local script. Not read at all by `frust build web --release`, which stages the framework's own page instead (see "Primary recipe" above). |
 | `README.md` | This file. |
-| `pkg/` | `wasm-bindgen`/`wasm-opt` output. Generated; **not committed** (see "Serve" above). |
-| `target/` | Cargo build output. Generated; **not committed**. |
+| `pkg/` | `wasm-bindgen`/`wasm-opt` output (manual recipe). Generated; **not committed** (`.gitignore`-covered — see "Serve" above). |
+| `target/` | Cargo build output. Generated; **not committed** (`.gitignore`-covered). |
+| `build/` | `frust build web --release`'s own output directory (primary recipe). Generated; **not committed**, and `.gitignore`-covered alongside `pkg/` and `target/`. |

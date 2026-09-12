@@ -73,11 +73,16 @@ The repository already contains substantial non-pixel coverage:
   text cases, incl. `examples/material3-demo`'s standalone page goldens).
 - `examples/gallery` (package `frust-gallery`): a hand-authored widget/page case registry, a
   dev-only root workspace member shared by the website's static snapshot generator and the
-  future browser gallery. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
+  browser gallery below. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
   CPU oracle to a light/dark PNG plus `manifest.json` per case — a documentation-asset
   generator, not a golden class (no committed baseline, no promotion); its `--check` mode
   re-renders and byte-compares, proving same-host determinism only. Run via
   `scripts/widget-snapshots.sh`.
+- `examples/web-gallery`: the frust.dev website's live-preview app, rendering the same
+  `examples/gallery` case registry in-browser via `frust build web --release`. It carries
+  no automated coverage and is gated manually in a browser — see its README's "Browser
+  verification" section for the procedure, and its "Binary size" section for the artifact
+  measurement (deliberately not restated here, since it moves with every build).
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.

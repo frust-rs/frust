@@ -565,6 +565,9 @@ fn record_text_input_selection_toolbar_long_press(scene: &mut Scene) {
         size: TOOLBAR_WINDOW,
         scale: 1.0,
         time: ft_ms(ms),
+        // This case warms itself explicitly below, so it takes the single
+        // captured paint rather than asking the recorder to stage one.
+        warm_frames: 0,
     };
 
     // Warm-up: lay out/paint once before the press lands on real geometry.
@@ -636,6 +639,7 @@ fn text_input_selection_toolbar_long_press_case() -> CorpusCase {
                 size: TOOLBAR_WINDOW,
                 scale: 1.0,
                 time: FrameTime::ZERO,
+                warm_frames: 0,
             },
             Tolerance::new(),
         ),

@@ -47,10 +47,8 @@ an unhandled rejection.
 `WebAssembly.instantiateStreaming` with an `arrayBuffer` fallback for a
 server that answers a `.wasm` request with the wrong `Content-Type`
 (`wasm-bindgen`'s own `__wbg_load`); `mount()` awaits it rather than
-re-implementing that fallback a second time, matching
-`examples/web-gallery/index.html`'s identical `init().catch(...)` precedent
-for reporting a failure that happens before Rust's own panic hook is
-installed.
+re-implementing that fallback a second time, so a failure that happens
+before Rust's own panic hook is installed is still reported.
 
 ## Canvas host / resize / DPR contract
 
