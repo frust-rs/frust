@@ -402,11 +402,15 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   empty clipboard on purpose; and reading another app's clip raises the system "pasted from" toast
   (Android 12+), which is why the cheap `hasPrimaryClip` gate runs first and only a real,
   user-initiated paste ever crosses that line.
-  **iOS** takes the `Native` toolbar policy at start-up, so a field floats no pod and UIKit's own
+  **iOS** *locks* the `Native` toolbar policy at start-up — an app's later
+  `set_selection_toolbar_policy` is refused, not obeyed, because the exemption below depends on the
+  native route being the only one — so a field floats no pod and UIKit's own
   edit menu is the only menu on screen — presented at the published anchor through
   `UIEditMenuInteraction` (iOS 16+, `UIMenuController` on 15) and answered from the published verb
   set, with the framework's view as the app's single responder for both the menu and a hardware
-  `Cmd+C`/`X`/`V`/`A` arriving over `UIResponderStandardEditActions`. Native is the platform's
+  `Cmd+C`/`X`/`V`/`A` arriving over `UIResponderStandardEditActions`. A focused field publishes those
+  verbs whether or not any menu is up, because the responder chain is asked for them with nothing on
+  screen — a hardware chord on a plainly tapped-into field is answered from the same published set. Native is the platform's
   requirement rather than a preference: `UIPasteboard.general.string` is exempt from iOS's paste
   notice and per-app permission alert only when the read is system-initiated, which `paste(_:)` is
   and a framework-drawn Paste button — answerable only by reading the pasteboard off a display-link
