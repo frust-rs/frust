@@ -249,6 +249,145 @@ Security` section for the crate-level writeup.
 
 ---
 
+### `android-clipboard-read-focus-gate-and-toast` — an Android paste needs window focus, and a cross-app read raises a system toast
+
+**Observed**: the Android shell drains the framework's paste request each
+frame and reads the primary clip through `ClipboardManager`, inheriting two
+platform behaviours it does not try to hide. (1) **The focus gate (Android
+10+)**: `getPrimaryClip` returns nothing unless the app currently has input
+focus, so a paste attempted while the window is unfocused yields nothing and
+is deliberately indistinguishable here from an empty clipboard — no error
+reaches the tree or the user. (2) **The read toast (Android 12+)**: the
+system shows an "<app> pasted from <app>" toast the first time the app reads
+another app's clip. The emptiness check runs before the real read precisely
+because `hasPrimaryClip` raises no toast, so only a read a user actually
+asked for ever crosses that line. A `SecurityException` from a device policy
+or profile restriction is caught and logged: the paste does not happen and
+the frame loop survives. The write side has its own platform note — Android
+13+ shows the system's own "copied" confirmation, which nothing here
+suppresses or duplicates. (2026-09-12)
+
+**Applies to**: Android only, every field the framework's `EditCommand::Paste`
+route reaches — the framework selection toolbar's Paste, a hardware `Ctrl+V`,
+and `performContextMenuAction`. iOS is unaffected (its reads go through the
+system edit menu, `ios-native-edit-menu-device-status`); desktop and web have
+their own gates.
+
+**Why accepted**: both are platform contracts rather than frust behaviour, and
+neither has a route around it that keeps the read honest — focus is a
+precondition the OS enforces, and the toast is the OS telling the user what
+the app just did. Reporting a null read as an error would put a failure in
+front of the user for the ordinary case of an empty clipboard.
+
+**Evidence**:
+`platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
+`readClipboardText` doc comment, which names all three behaviours in place,
+and its `writeClipboardText` neighbour for the copy confirmation.
+
+**Trigger for removal**: none — this describes the platform, and is kept so a
+paste that silently does nothing is diagnosable rather than mysterious. It is
+read from the platform contract and from the shipped source: the Android
+clipboard device gate has not been run, so nothing here rests on an on-device
+observation.
+
+---
+
+### `android-uri-clipboard-paste-is-async-and-may-be-dropped` — a paste from a URI-backed clip resolves off the UI thread and is discarded if the focus session moved or it took too long
+
+**Observed**: `ClipData.Item.coerceToText` performs a synchronous
+`ContentResolver` round-trip into the clip owner's process when the clip is
+URI-backed (a photo, file, or contact copied from another app), so the Android
+shell resolves that case on a background thread rather than blocking the frame
+loop on another app's `ContentProvider`. A clip that already carries text —
+the overwhelmingly common case, including everything frust itself writes — is
+still read and pasted synchronously in the same event pass. The asynchronous
+half is dispatched only if the framework's focus/IME session generation has
+not moved since the paste was asked for, the native handle is still live, the
+view has not torn down, and the answer arrived within two seconds. Any of
+those failing discards the paste silently. (2026-09-12)
+
+**Applies to**: Android only, and only a primary clip whose first item has a
+`Uri` and no direct text.
+
+**Why accepted**: the session check is what stops a slow provider's answer
+landing in a *different* field, since `EditCommand::Paste` is focus-routed and
+carries no identity of its own — a paste that does not land can be asked for
+again, one that lands in the wrong field cannot be taken back. The check is
+deliberately conservative: the generation moves on any real change of the
+focus flag or the published IME surface, so editing or moving the caret while
+the provider is still answering also discards the paste, not only switching
+fields. Re-publishing an unchanged surface is not an edge, so an ordinary wait
+does not trip it. The two-second bound exists because `shutdownNow()` cannot
+interrupt a thread already blocked inside another process, so a deadline is
+the only thing that can stop a very late answer from arriving as a surprise
+paste.
+
+**Evidence**:
+`platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
+`readClipboardText`/`readClipboardTextAsync` doc comments and
+`CLIPBOARD_RESOLUTION_TIMEOUT_MS`; the generation it compares crosses JNI as
+`nativeFocusGeneration` (`crates/frust-shell-android/src/jni_glue.rs`) from
+`AppTree::focus_ime_generation`.
+
+**Trigger for removal**: a per-request identity that distinguishes "this
+field, this request" from "this focus/IME state", which would let an edit
+during the wait keep the paste instead of discarding it, and would let a newer
+request supersede an older in-flight one. Not device-verified: the Android
+clipboard gate has not been run, so the timing behaviour here is read from the
+source and the platform contract rather than observed.
+
+### `ios-native-edit-menu-device-status` — the iOS system edit-menu route is implemented and has never run on a device or simulator
+
+**Observed**: iOS *locks* `SelectionToolbarPolicy::Native` at `frust_init` —
+an app's later `set_selection_toolbar_policy` is refused rather than obeyed,
+because the paste exemption below depends on the native route being the only
+one — so a focused field floats no toolbar of its own and publishes where a
+menu would be anchored and which verbs apply. It publishes that whether or not
+it has a selection: the verbs are a level the responder chain reads whenever
+UIKit asks, including for a hardware `Cmd+V` with no menu on screen. `FrustView` answers the four
+`UIResponderStandardEditActions` from that published set, presents UIKit's own
+menu at the published anchor (`UIEditMenuInteraction` on iOS 16+, the
+deprecated `UIMenuController` below it), and reads the pasteboard inside
+`paste(_:)` — the system-initiated read that is exempt from the iOS 14+
+"pasted from" banner and the iOS 16+ per-app permission alert, which is the
+entire reason the native route exists rather than the framework toolbar.
+**None of it has run on an iPhone or in the Simulator.** `cargo` cannot
+compile Swift, so no workspace gate reaches this code, and the iOS clipboard
+device gate has not been performed: nobody has watched the menu appear, a verb
+land in the field, or the permission exemption hold. Treat the route as
+implemented, not as verified. (2026-09-12)
+
+**Applies to**: iOS only — `FrustView.swift`'s edit-menu and
+`UIResponderStandardEditActions` surface, `FrustViewController.swift`'s
+per-frame `frust_selection_toolbar_json` poll, and the Rust half in
+`crates/frust-shell-ios`. It shares its unverifiability with
+`ime-ios-content-type-unverified`, whose IME surface lives in the same view
+and has the same absence of a `cargo`-reachable gate.
+
+**Why accepted**: the Swift half of this shell has no gate short of a device
+or Simulator run, and that run is owed rather than skipped. Shipping the route
+unverified is the position every other `FrustEmbedding` surface is already in;
+what would not be acceptable is recording it as working, which is exactly why
+this entry exists.
+
+**Evidence**:
+`platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustView.swift`'s
+"Clipboard / system edit menu" section with its `canPerformAction` and
+`paste(_:)` overrides (the exemption is stated there in place);
+`crates/frust-shell-ios/src/ffi_glue.rs`'s
+`lock_selection_toolbar_policy(SelectionToolbarPolicy::Native)` at init and its
+`selection_toolbar_json` body (exported as `frust_selection_toolbar_json` from
+`crates/frust-shell-ios/src/lib.rs`);
+`crates/frust-shell-ios/src/ffi_support.rs`'s anchor/verbs JSON shape and
+edit-command wire codes.
+
+**Trigger for removal**: a device or Simulator run observing the menu
+presented at the selection, each of the four verbs applied to the focused
+field, and a paste raising neither the "pasted from" banner nor the
+permission alert.
+
+---
+
 ### `pbxproj-id-budget` — Xcode object-id minting is capped at 255 ids per prefix
 
 **Observed**: the scheme frust mints new Xcode project object ids under
@@ -2353,6 +2492,220 @@ a widget that is torn down … leaves the last shape in place until the next `Mo
 
 ---
 
+### `overlay-portal-v1-scope` — six named narrowings in the framework overlay portal
+
+**Observed**: `frust::overlay_portal` and `frust::authoring::OverlaySlot` float a pod above the
+whole app — owner-hosted, root-painted after the main tree, root-routed ahead of it — and the v1
+seam declines six things, each named in its own source:
+
+1. **No focus trap.** Focus inside a pod behaves exactly like focus anywhere else; nothing confines
+   traversal to the pod or restores it on dismiss.
+2. **No declined-key forwarding.** Key, IME and edit-command events stay focus-routed and are never
+   re-offered to an overlay owner that did not take focus, so a pod cannot hand a key it declined
+   to a sibling panel that would have taken it.
+3. **The catalogs' own hosts are not on it.** All six `overlay::anchored`/`overlay::modal` hosts
+   across `frust_shadcn`, `frust_material` and `frust_beui` still place and paint their surfaces
+   in-tree; `frust_shadcn::tooltip`/`hover_card` are the only catalog components riding the portal.
+4. **A pod is invisible to inspection and to assistive technology.** It is not reached by
+   `Widget::visit_children` unless its owner chooses to visit it, so `RenderRoot::inspect` — the
+   devtools widget tree — sees the owner and not the floated surface; and the portal publishes no
+   semantics for it, because a pod's nodes would attach under the owner's node at the owner's
+   position rather than at the floated rect. An assistive-technology user reaches a floated surface
+   through the owner's own node (see `selection-verbs-advertised-not-invocable` for the state of
+   the text field's half of that).
+5. **Every overlay pointer event walks the whole tree.** A hit on a registered rect dispatches
+   `InputEvent::Overlay` as a broadcast, and a broadcast is forwarded to every child
+   unconditionally — no hit test, no capture fast path, no focus gate — so one press inside a
+   floated surface costs a full tree walk.
+6. **An owner torn down by a structural rebuild cannot animate out.** The registry is per paint
+   pass, so a surface lives exactly as long as its owner keeps registering it, and an exit ramp is
+   "keep registering while it runs" — which an owner the rebuild has unmounted cannot do. This is
+   the portal-side statement of the same framework gap
+   `shadcn-anchored-exit-needs-kept-mounted` records from the catalog side.
+
+Two smaller consequences of the same per-pass registry: **no nesting** (a registration made from
+inside a floated pod's own paint is dropped, so a menu opening a submenu registers both surfaces
+from the one owner) and **no hover inside a pod** (the root marks a hover pass on a hit-tested
+event only, and an overlay event is a broadcast).
+
+**Applies to**: every caller of `frust::overlay_portal` or `frust::authoring::OverlaySlot` — today
+the baseline `TextInput`'s selection toolbar and `frust_shadcn::tooltip`/`hover_card`. Item (3)
+applies to the three catalogs' own hosts, which is where most floated surfaces still live.
+
+**Why accepted**: each is a seam the first callers do not need, and each is cheaper to add once a
+second caller states its shape than to guess at now. (3) in particular is migration work with no
+behaviour riding on it — the catalog hosts work, and moving them is a port rather than a fix.
+(5) is a real cost rather than a correctness gap: the walk happens per overlay pointer event, not
+per frame, and the broadcast is the only route that reaches an owner without knowing where it sits.
+
+**Evidence**: `crates/frust-core/src/overlay.rs`'s "Not in v1" section (focus trap, declined keys,
+inspection, nesting) and its per-pass registry contract; `crates/frust-widgets/src/overlay.rs`'s
+own "Not in v1" section (semantics, hover, IME); `crates/frust-core/src/event.rs`'s
+`InputEvent::Overlay` routing contract (the broadcast); `plugins/shadcn/src/components/tooltip.rs`
+module docs ("Riding the framework portal") against the six unported
+`plugins/{shadcn,material,beui}/src/overlay/{anchored,modal}.rs` hosts.
+
+**Trigger for removal**: per item — a focus-trap seam, a declined-key route, the catalog hosts
+ported onto `OverlaySlot`, an overlay-aware semantics and inspection path, and a keyed dispatch
+that reaches an owner without a full walk.
+
+---
+
+### `selection-toolbar-no-handles-magnifier-v1` — the framework selection route ships the bar alone: no drag handles, no magnifier
+
+**Observed**: under `SelectionToolbarPolicy::Framework` a field's selection affordance is the
+floated toolbar and nothing else. There are no draggable handles at the selection's ends, so the
+only pointer route that adjusts a selection is a drag still belonging to the press that made it
+(by word after a long-press, by cluster otherwise) — once the finger is up, a selection can be
+re-made but not adjusted, since the next primary `Down` puts the bar away and starts over. A
+hardware keyboard's Shift+arrows still extend one. And there is no magnifier loupe over the caret or the grab point,
+so on a touch device the finger covers exactly what it is positioning. Neither surface exists
+anywhere in the widget tier: this is absence, not degradation.
+
+**Applies to**: every platform on the framework route — Android, desktop and web. iOS is
+unaffected: it selects `SelectionToolbarPolicy::Native` and gets UIKit's own handles and loupe
+(see `ios-native-edit-menu-device-status` for that route's own status).
+
+**Why accepted**: handles and a loupe are each a rendered, hit-tested, platform-flavoured surface
+in their own right, and the bar is what makes the clipboard verbs reachable at all — the distance
+between "no way to copy" and "copy works, adjusting a selection does not" is the one worth closing
+first. A design system that wants them is not blocked: the builder seam replaces the whole floated
+view.
+
+**Evidence**: `crates/frust-widgets/src/selection_toolbar.rs` (the entire baseline view — a pill of
+verb buttons and nothing else); `crates/frust-widgets/src/textinput.rs`'s "Selection gestures and
+the toolbar" section, which enumerates the four gestures that reach a selection, none of them a
+handle drag.
+
+**Trigger for removal**: a handle and loupe surface in the widget tier, which needs a second
+floated-surface owner per field and a magnifier able to sample the painted scene.
+
+---
+
+### `selection-toolbar-labels-english-v1` — the baseline toolbar's four labels are English, always
+
+**Observed**: the framework-drawn toolbar reads its labels from one fixed table — "Cut", "Copy",
+"Paste", "Select all" — and never localises them. A Japanese or Arabic app on the framework route
+gets English verbs, in English order: the pill lays its items out left to right with no RTL
+mirroring. The same four strings are what the field publishes as the labels of its accesskit
+custom actions, so a screen reader reads them out in English too.
+
+**Applies to**: every platform on the framework route (Android, desktop, web) whose app or design
+system has not installed a toolbar builder of its own. iOS is unaffected — UIKit localises its own
+edit menu.
+
+**Why accepted**: localisation is deferred to the builder seam by design rather than missing — a
+design system or an app installs a translated view through
+`frust_core::set_selection_toolbar_builder`, and replacing this baseline that way is the documented
+path. Baking a string table into `frust-widgets` would put a translation surface in the one crate
+with no locale to resolve it against: `frust-i18n` is a plugin, and the widget tier does not depend
+on it.
+
+**Evidence**: `crates/frust-widgets/src/selection_toolbar.rs`'s "Labels" section and its `LABELS`
+table ("This baseline never localises its own four labels");
+`crates/frust-widgets/src/textinput.rs`'s custom-action labels beside `A11Y_CUT_ID`.
+
+**Trigger for removal**: a locale seam the widget tier can read, or a localised builder shipped by
+each design system — which closes it for that catalog's apps only, not for the baseline.
+
+---
+
+### `selection-toolbar-mouse-hold-opens` — a held mouse press opens the selection toolbar, because nothing says it is a mouse
+
+**Observed**: `PointerEvent` carries a phase, a position and a button, and no pointer *kind* — the
+framework cannot tell a finger from a mouse or a pen anywhere in the tree. The text field's
+long-press therefore arms on any primary `Down`, so holding a mouse button still inside a field for
+the long-press threshold selects the word under it and raises the toolbar, which no desktop
+platform does. The desktop gesture actually meant to open it (a secondary press) works as well:
+this is an extra route, not a missing one.
+
+**Applies to**: desktop and any mouse-driven host on the framework route. The same blindness makes
+every other press-and-hold in the tree fire for a mouse; the text field is where it is most
+visible, because it is the gesture that opens a menu.
+
+**Why accepted**: adding a kind to `PointerEvent` changes the one type every widget's event handler
+destructures, and each shell would have to source it (winit distinguishes touch from mouse, the
+browser has `pointerType`, both mobile shells synthesize their own) — a change worth making
+deliberately rather than as a side effect of one field's gesture. The wrong behaviour here costs a
+selection the user can dismiss, never an edit.
+
+**Evidence**: `crates/frust-core/src/event.rs`'s `PointerEvent` (three fields, no kind);
+`crates/frust-widgets/src/textinput.rs`'s "Selection gestures and the toolbar" section (the
+long-press arms on a primary `Down`, with no kind consulted).
+
+**Trigger for removal**: a pointer-kind axis on `PointerEvent`, sourced by every shell, after which
+the long-press gates on touch.
+
+---
+
+### `text-input-read-only-not-copyable` — a read-only field cannot be selected from or copied
+
+**Observed**: `TextInputView::read_only(true)` makes a field non-interactive through the same focus
+gate `enabled(false)` uses — it never takes focus — and a field that never holds focus never
+receives a selection gesture, an `EditCommand` or a toolbar. So a read-only field's text cannot be
+selected, copied, or read out verb-by-verb by an assistive client, even though it is live,
+undimmed and visually ordinary. Material 3 and Apple's HIG both keep a read-only field focusable
+and copyable; this widget deliberately does not, and says so in place.
+
+**Applies to**: every `frust::TextInputView` with `read_only(true)` on every platform, and every
+design-system field wrapping one (`frust_material::text_field` and the shadcn/beUI equivalents
+inherit it). A `enabled(false)` field is not covered: it is meant to be inert.
+
+**Why accepted**: read-only reuses the focus gate rather than growing a parallel one, which is what
+keeps "interactive?" and "dimmed?" independent and makes a field turned read-only while focused
+release exactly like one turned disabled. A copyable read-only field needs a third state —
+focusable and selectable, but refusing every mutation — threaded through that same gate and through
+every handler that reads it, which is a design rather than a flag.
+
+**Evidence**: `crates/frust-widgets/src/textinput.rs`'s "Read-only mode" section and
+`TextInputWidget::interactive` (`enabled && !read_only`), plus that module's clipboard-verb section
+("a read-only field cannot be copied from — Material 3 and the HIG would keep it focusable, and
+this widget deliberately does not").
+
+**Trigger for removal**: a focusable-but-immutable mode on the field, gating mutation instead of
+focus.
+
+---
+
+### `selection-verbs-advertised-not-invocable` — the field publishes Copy/Cut/Paste/Select all to a screen reader, and none of them can be invoked
+
+**Observed**: the floated toolbar is a pointer affordance and the portal publishes no semantics for
+the pod it floats, so the baseline `TextInput` publishes the four clipboard verbs on its **own**
+accessibility node instead, as accesskit custom actions — accesskit models none of the four
+natively, so each is a stable id plus a label the client reads out. Only enabled verbs are offered
+and the offer never depends on the bar being up, so the advertisement itself is correct. **It
+cannot be acted on.** A platform adapter reports an invoked custom action as an
+`accesskit::ActionRequest` carrying `Action::CustomAction` plus the id in its `data`; the
+shell-to-core seam `AppTree::perform_accessibility_action` forwards only `(node_id, action)` and
+drops `data`, and `RenderRoot::perform_accessibility_action` models `Click` and `Focus` and nothing
+else. A screen-reader user therefore sees four verbs on the field and gets silence from all four —
+in one respect a worse failure than never advertising them, since the field's own rule is that an
+action offered and then refused is worse than one never offered, and this is that case one layer
+down. It is recorded here rather than left silent for exactly that reason. (2026-09-12)
+
+**Applies to**: every platform with an accessibility adapter — the desktop shells and both mobile
+bridges alike, since the seam that drops `data` is the shared one. The field's own half is
+complete: every verb already has a route into its command handler the moment one arrives as an
+`InputEvent::EditCommand`, which is precisely what a shell dispatches for a platform edit menu.
+
+**Why accepted**: closing it is not a widget change. `RenderRoot::perform_accessibility_action`,
+`AppTree::perform_accessibility_action` and the `Widget` trait have to widen together — the seam
+must carry the action's data, the root must route a custom action to the node that published it,
+and a widget needs a hook to receive one — which is a framework-wide seam change rather than
+something a text field can do from inside itself.
+
+**Evidence**: `crates/frust-widgets/src/textinput.rs`'s "The clipboard verbs and assistive
+technology" section ("What is still missing is the dispatch, and it does not live here") and its
+`A11Y_CUT_ID` neighbours' `set_custom_actions` publication;
+`crates/frust-shell-common/src/app_tree.rs`'s `AppTree::perform_accessibility_action` signature;
+`crates/frust-core/src/app.rs`'s `RenderRoot::perform_accessibility_action` (a `Click` arm, a
+`Focus` arm, nothing else).
+
+**Trigger for removal**: the three widened together, proven by a custom action invoked from a real
+screen reader landing as an `EditCommand` in the focused field.
+
+---
+
 ### `shadcn-hover-overlays-touch-inert` — tooltip and hover-card never open on a touch device
 
 **Observed**: `frust-shadcn`'s `tooltip`/`hover_card` open only through the shared hover latch
@@ -2445,9 +2798,10 @@ reporting it, and a host that must know passes the flag itself (`TodoListView::o
 paint-clock-driven delay (`frust_shadcn::tooltip`/`hover_card`) or a rebuild-driven state flip
 (`frust_beui::todo_list`, `frust_beui::agent_activity`) alike.
 
-**Why accepted**: the workaround (a shared, non-reactive latch plus an input-transparent top layer
-for shadcn; an owned, host-driven flag for beUI's two lists) fully covers each current caller's
-needs; widening the public seam is framework-level work with no caller it blocks today.
+**Why accepted**: the workaround (a shared, non-reactive latch plus, for shadcn, a pod floated
+through the framework overlay portal in its input-transparent tooltip band; an owned, host-driven
+flag for beUI's two lists) fully covers each current caller's needs; widening the public seam is
+framework-level work with no caller it blocks today.
 
 **Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("the framework exposes no way
 for a plugin-tier widget to queue a state-bearing callback onto the next frame");
@@ -2573,31 +2927,29 @@ conditionally-mounted view alive past the rebuild that unmounts it").
 
 ---
 
-### `shadcn-otp-table-button-api-gaps` — three named API-surface gaps in `input_otp`, `table`, and `button`
+### `shadcn-otp-table-button-api-gaps` — two named API-surface gaps in `table` and `button`
 
-**Observed**: three deliberate v1 narrowings, each named in the component's own source:
+**Observed**: two deliberate v1 narrowings, each named in the component's own source:
 
-1. **`input_otp` has no paste.** Upstream's real `<input>` gets the platform's paste for free; frust
-   delivers no clipboard event a widget can read, so a multi-character paste into an OTP field is
-   not supported — only typed entry.
-2. **`table`'s header/footer are label strings, not views.** `TableView::header`/`footer` take
+1. **`table`'s header/footer are label strings, not views.** `TableView::header`/`footer` take
    `Vec<String>`, since upstream's head/footer cells are markup this port never generalized to
    arbitrary content. A tri-state "select all" checkbox or a sortable-header control therefore
    cannot live in the header row itself — the demo's data-table page fakes one by prepending a
    normal body-styled row instead, at the cost of the header's own chrome and semantics.
-3. **`button` has no icon-view slot.** `ButtonSize::Icon`/`IconSm`/`IconLg` size a button to a fixed
+2. **`button` has no icon-view slot.** `ButtonSize::Icon`/`IconSm`/`IconLg` size a button to a fixed
    square, but the label is a plain `String` with nowhere to put an icon view — an icon-only button
    (e.g. a row's `⋮` menu trigger) has to fake it with a literal glyph character.
 
-**Applies to**: `frust_shadcn::input_otp`, `table`, and `button` respectively.
+**Applies to**: `frust_shadcn::table` and `button` respectively. `input_otp` is not among them —
+it accepts `EditCommand::Paste` and decodes the paste chord itself, so a multi-character paste
+fills its slots.
 
 **Why accepted**: each is a named v1 narrowing recorded at the point it was found rather than a
-regression; a real fix (a clipboard paste event, view-typed table header/footer cells, an icon-view
-button slot) is plugin/framework follow-up work with no caller forcing it in yet.
+regression; a real fix (view-typed table header/footer cells, an icon-view button slot) is
+plugin/framework follow-up work with no caller forcing it in yet.
 
-**Evidence**: `plugins/shadcn/src/components/input_otp.rs` module docs ("No paste"); the `table`
-module doc's header/footer type (`Vec<String>`); `plugins/shadcn/src/components/button.rs`'s
-`ButtonView::label: String` field; `workflow/plans/features/shadcn-round-2/tasks/11-demo-expansion.md` completion summary (items 2 and 4).
+**Evidence**: `plugins/shadcn/src/components/table.rs`'s header/footer type (`Vec<String>`);
+`plugins/shadcn/src/components/button.rs`'s `ButtonView::label: String` field.
 
 ---
 
@@ -2965,22 +3317,6 @@ boundary (`beui-3d-degradations` above), not an independent gap.
 
 ---
 
-### `beui-otp-no-paste` — `otp_input` accepts only typed entry, no clipboard paste
-
-**Observed**: `blocks::otp_input` delivers no clipboard event a widget can read, so a multi-character
-paste into the code field is not supported — the same platform gap `shadcn-otp-table-button-api-gaps`
-already documents for `frust_shadcn::input_otp`.
-
-**Applies to**: `frust_beui::blocks::otp_input`.
-
-**Why accepted**: inherited platform gap, not a beUI-specific one — see
-`shadcn-otp-table-button-api-gaps` for the accepted reasoning, which applies unchanged here.
-
-**Evidence**: `plugins/beui/src/blocks/otp_input.rs` module docs (no paste path); see
-`shadcn-otp-table-button-api-gaps` above for the shared platform cause.
-
----
-
 ### `beui-substituted-springs` — an upstream ad hoc spring resolves to the nearest catalog spring
 
 **Observed**: several upstream components author a one-off, per-component spring
@@ -3028,9 +3364,15 @@ on this host.
 **Why accepted**: (1) is the same bounded-constraints/no-scroll-view mounting contract
 `frust_shadcn`'s and `frust_material`'s `overlay::anchored` hosts already carry (`overlay/mod.rs`'s
 "scroll-view trap" in all three catalogs) — the remedy is at the mount site, not the host, and the
-gallery demonstrates the correct workaround rather than avoiding the case. (2) is a deliberate
-scope line: an input-transparent mode is new host surface with no second caller yet to justify it,
-and consuming the press is the documented, tested behavior in the meantime.
+gallery demonstrates the correct workaround rather than avoiding the case. (2) no longer needs a
+new host mode to close: the framework's own overlay portal (`frust::overlay_portal` /
+`authoring::OverlaySlot`) already declares input class per surface, and a pod registered in the
+`OverlayBand::Tooltip` band as `OverlayInput::Transparent` is skipped by the root's hit-test
+pre-pass entirely, so every press reaches the main tree as if the label were not there —
+`frust_shadcn::tooltip`/`hover_card` ride exactly that and swallow nothing. Moving beUI's tooltip
+onto it is a port of a working host rather than a fix, and is follow-up work; consuming the press
+is the documented, tested behavior until then (see `overlay-portal-v1-scope`, which records that
+none of the three catalogs' own `anchored`/`modal` hosts is on the portal yet).
 
 **Evidence**: `plugins/beui/src/overlay/mod.rs` ("The scroll-view trap");
 `plugins/beui/src/agents/citations.rs` module docs (the `overlay::anchored` mounting sequence);
@@ -3959,9 +4301,9 @@ ported, reachability limited" section; `plugins/material/src/dropdown/mod.rs` mo
 
 ---
 
-### `material-descoped-flutter-isms` — three Flutter-framework mechanisms the port doesn't attempt
+### `material-descoped-flutter-isms` — two Flutter-framework mechanisms the port doesn't attempt
 
-**Observed**: three Flutter-framework-level mechanisms the M3E reference leans on have no
+**Observed**: two Flutter-framework-level mechanisms the M3E reference leans on have no
 counterpart in this workspace; each affected component's own module doc records the descope in
 place rather than silently dropping the behavior.
 
@@ -3973,29 +4315,19 @@ place rather than silently dropping the behavior.
 - **Native platform menu style** (`split_button`): upstream's third menu style
   (`M3ESplitButtonMenuStyle.native`, Flutter's own `showMenu` platform route) is descoped — this
   framework hosts no platform menu to route to. Only the popup and bottom-sheet styles ship.
-- **Text-selection toolbar** (`text_field`): the M3E text field paints decoration around the
-  framework's own `frust::TextInputView` and defers every editing concern, selection included, to
-  it; the baseline editable has no context-menu/selection-toolbar contract to pair with a selection
-  at all — a secondary press "moves nothing rather than silently relocating a caret the user cannot
-  see a menu for," because "frust has no context-menu contract to pair that with yet."
-  `frust_material` inherits this baseline-scope gap rather than adding its own toolbar.
 
 **Applies to**: `frust_material::dropdown`/`dropdown_menus` (no validator/autovalidateMode, no
 restored field state); `split_button` (no native platform menu style — an app on a platform whose
-OS ships one sees the popup or bottom-sheet style instead); every `frust_material::text_field` (no
-copy/cut/paste/select-all toolbar on a text selection, on any platform).
+OS ships one sees the popup or bottom-sheet style instead).
 
-**Why accepted**: a deliberate v1 scope line drawn at plan time (PLAN.md Scope decision 6,
-`workflow/plans/features/material-3-expressive/PLAN.md:126-128`), not a bug — closing any of the
-three needs framework-level work (a `Form`/`FormField` primitive plus restoration plumbing, a
-platform-menu host, or a context-menu/selection-toolbar contract on the baseline text input), none
-of which has a caller beyond this port yet to justify building ahead of need.
+**Why accepted**: a deliberate v1 scope line recorded in each component's own source, not a bug —
+closing either needs framework-level work (a `Form`/`FormField` primitive plus restoration
+plumbing, or a platform-menu host), neither of which has a caller beyond this port yet to justify
+building ahead of need.
 
 **Evidence**: `plugins/material/src/dropdown/mod.rs` module doc's "Descoped: form-field validation
 and restoration" section; `plugins/material/src/split_button.rs`'s header comment ("upstream's
-third menu style … is descoped"); `crates/frust-widgets/src/textinput.rs:1616-1622` (no
-context-menu contract, quoted verbatim above); `plugins/material/src/text_field.rs` module doc's
-"Wrapping the baseline, not forking it" section.
+third menu style … is descoped").
 
 ---
 
@@ -4998,7 +5330,10 @@ devtools transport, each its own future change.
 "Cases deliberately not handled"; [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s
 Web IME bridge): the hidden-`<input>` overlay bridge (real browser
 composition — CJK marked text, dead keys, mobile autocorrect — turned into
-`ImeEvent::Compose`/`Commit`) is implemented and unit-tested, but: (1) it is
+`ImeEvent::Compose`/`Commit`, and now the DOM `copy`/`cut`/`paste`
+listeners too, since a browser hands clipboard access to the focused
+editable element and to nobody else) is implemented and unit-tested,
+but: (1) it is
 **device-unverified** — the build host that landed it has no browser rig, so
 no real CJK/IME input has ever been driven through a live browser session,
 and two rules the IME bridge review added on 2026-09-08 rest entirely on that
@@ -5042,7 +5377,16 @@ and the unnamed-keystroke rule only. A hint that moves under a focused field
 is answered from the frame loop as well as from a dispatched event: the
 replacement inherits the DOM focus the old element held, and on a mobile
 browser that `focus()` runs outside a gesture, so the soft keyboard may close
-until the next tap. (2026-09-08)
+until the next tap. (6) **one cut can destroy text it wrote nowhere**: a
+keyboard cut deletes in the canvas re-dispatch and writes in the DOM `cut`
+callback behind it, and the handoff between the two is what makes that
+reliable — but an engine that raises no `cut` for the overlay's permanently
+collapsed selection (one defining no `beforecut` for the page to claim the
+verb with) *and* withholds `navigator.clipboard` (a page that is not a secure
+context) leaves no route at all, after the widget has already deleted.
+Holding the delete until a write is confirmed is the only answer left, and
+the confirmation is asynchronous, so it would have to be pushed back across
+the shell/widget seam this bridge does not cross. (2026-09-12)
 
 **Accepted because**: the composition/commit/cancel contract itself is real
 and tested (unlike the no-op it replaces), and each residual is independently
@@ -5051,10 +5395,16 @@ soft keyboard — a hardware Backspace, and every deletion inside a
 composition, still work. `ImeContentType` is no longer among them — the
 overlay is built from the focused field's hint, so a secret field gets a real
 `type="password"` element and a suggestion-refusing one gets
-`inputmode="text"`.
+`inputmode="text"`. (6) needs three conditions at once (no `beforecut`, no
+secure context, a cut rather than a copy), and a page serving an app over
+plain `http` has already lost the async clipboard for every other purpose.
 
-**Trigger for removal**: a browser device gate exercising CJK composition
-end-to-end (closes 1). It must include, as manual checks: Safari — compose CJK
+**Trigger for removal**: a browser gate exercising CJK composition
+end-to-end (closes 1). Coverage so far, stated exactly: the browser gate has
+run on Safari only and only partially — the IME legs were not among what it
+exercised — the Chrome and Firefox legs are unconfirmed, and Firefox is not
+installed on the development machine. A full gate must include, as manual
+checks: Safari — compose CJK
 text and let predictive text commit it (the commit window); Android Chrome —
 type on the soft keyboard with no hardware keyboard attached (the
 unnamed-keystroke rule: each letter exactly once), then press its Backspace
@@ -5066,7 +5416,10 @@ available on it (gap 5). Then: the overlay reading `visualViewport` offsets
 (closes 2); a conformance test pinning winit's canvas-attachment choice, or an
 upstream `WindowEvent::Ime` implementation removing the need for the bridge
 entirely (closes 3); the sentinel design landed with that Android evidence
-(closes 4).
+(closes 4); and, for (6), either a delete deferred until its write is
+confirmed or a Firefox leg showing the engine does raise a usable `cut` for
+the overlay after all — which needs a Firefox install this machine does not
+have.
 
 ### `web-touch-single-contact` — the web shell tracks only one touch contact at a time
 
@@ -5221,7 +5574,15 @@ browser's own clipboard surface (the async Clipboard API,
 gated behind a user gesture and, for reads, a permission prompt — a
 materially different contract from every other platform's synchronous
 plugin call, which this crate has not yet been reshaped to accommodate.
-(2026-09-08)
+
+**The framework's own text fields are not affected.** Copy, cut and paste
+inside a `frust::TextInputView` on the browser tier do not go through
+this plugin at all: they ride the web shell's DOM route on the same
+hidden `<input>` overlay [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s
+Web IME bridge describes — a `paste` event carries its own text, and
+`copy`/`cut` write through `clipboardData.setData` inside the gesture,
+with `navigator.clipboard` only as the fallback. What this entry
+describes is the *plugin* API an app calls directly. (2026-09-12)
 
 **Accepted because**: a typed `NotAvailable` refusal is the same shape the
 crate already uses for any unsupported platform (see `set_text`'s "Total-cover
@@ -5230,4 +5591,38 @@ crash or silent no-op results.
 
 **Trigger for removal**: a `wasm32` backend built on the async Clipboard API,
 which will also need `ClipboardError`'s synchronous return type reshaped to
-carry the API's own asynchrony and permission-prompt outcomes.
+carry the API's own asynchrony and permission-prompt outcomes. Note what it
+would *not* close: the shell's DOM route already serves the framework's own
+fields, so this is about an app calling `frust_clipboard` directly, and any
+such backend inherits the gates `web-toolbar-paste-permission-gated`
+records.
+
+---
+
+### `web-toolbar-paste-permission-gated` — a toolbar paste on the web is permission-gated and may silently drop
+
+**Observed** (evidence: `crates/frust-shell-web/src/app_handler.rs`'s
+`read_clipboard_text` and `navigator_clipboard`): a paste the *tree* asks
+for — the selection toolbar's Paste item, or any `EventCtx::request_paste`
+— cannot ride the DOM `paste` event, which only a keystroke raises. The
+shell answers it with `navigator.clipboard.readText()` instead, and that
+call is permission-gated where the keyboard's own paste is not: Chrome on
+Android prompts, iOS Safari shows its Paste callout, and Firefox refuses a
+read it cannot tie to a gesture. A refusal is one dropped paste, logged and
+never retried. On a page that is not a secure context (`http://` other than
+`localhost`) `navigator.clipboard` is undefined outright, so a toolbar
+paste and an app-driven copy no-op for the whole run — a keyboard paste is
+unaffected there, since the `paste` event carries its own text.
+(2026-09-12)
+
+**Accepted because**: the async Clipboard API is the only route to a read no
+DOM event will deliver, and its permission model is the browser's rather
+than ours. The failure is a dropped paste with a console warning, never a
+partial or wrong insertion, and the keyboard route the same field offers is
+not gated at all.
+
+**Trigger for removal**: nothing in frust closes it — the gate belongs to
+the browser. What is owed is observation of how each engine actually
+behaves: the browser gate so far has run on Safari only and only partially,
+the Chrome and Firefox legs are unconfirmed, and Firefox is not installed on
+the development machine.
