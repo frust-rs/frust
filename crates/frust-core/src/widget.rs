@@ -1495,7 +1495,8 @@ impl<'a> PaintCtx<'a> {
         crate::overlay::register(entry);
     }
 
-    /// Publish "there is a selection here, and these verbs apply" for this frame.
+    /// Publish "this field is focused, these verbs apply, and here is where a
+    /// menu would go" for this frame.
     ///
     /// Resolved by [`crate::app::RenderRoot::paint`] into
     /// [`RenderRoot::selection_toolbar`](crate::app::RenderRoot::selection_toolbar)
@@ -1508,10 +1509,17 @@ impl<'a> PaintCtx<'a> {
     /// publishes this too: it costs one pointer-sized write, and it keeps a single
     /// code path rather than one per route.
     ///
+    /// **A focused field publishes whether or not it has a selection, and whether
+    /// or not any bar is up.** The verbs are a level a platform responder chain
+    /// must be able to read at any moment — a hardware Cmd+C/X/V/A is asked for
+    /// with no menu on screen — so gating the publish on a bar being open is what
+    /// used to leave those shortcuts unanswerable. Whether a menu should be
+    /// *presented* rides in the request's own flag instead.
+    ///
     /// Pass-scoped and last-writer-wins, like every other paint-time request: a
-    /// pass in which nothing publishes resolves to "no selection", which is what
-    /// puts the toolbar away when a selection collapses without any widget having
-    /// to retract anything.
+    /// pass in which nothing publishes resolves to "no field is focused", which is
+    /// what puts the toolbar away on a blur without any widget having to retract
+    /// anything.
     pub fn publish_selection_toolbar(
         &mut self,
         request: crate::selection_toolbar::SelectionToolbarRequest,

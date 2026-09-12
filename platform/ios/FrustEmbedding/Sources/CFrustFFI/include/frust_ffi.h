@@ -113,19 +113,35 @@ char *frust_take_clipboard_write(void *handle);
 // it stays unused. Wired anyway so the shell implements the whole clipboard
 // channel rather than half of it.
 uint8_t frust_take_paste_request(void *handle);
-// frust_selection_toolbar_json reports where the system edit menu should be
-// anchored and which verbs it may offer, as a heap-allocated JSON string the
-// CALLER MUST FREE with frust_string_free — or NULL when no field has a
-// selection worth a menu (the "dismiss whatever stands" sentinel):
-//   {"generation":n,"x":f,"y":f,"w":f,"h":f,
+// frust_selection_toolbar_json reports the focused field's clipboard verbs,
+// where a system edit menu should be anchored, and whether one should be
+// presented right now — as a heap-allocated JSON string the CALLER MUST FREE
+// with frust_string_free, or NULL when NO FIELD IS FOCUSED (the "dismiss
+// whatever stands and forget the generation" sentinel):
+//   {"generation":n,"presentMenu":bool,"x":f,"y":f,"w":f,"h":f,
 //    "copy":bool,"cut":bool,"paste":bool,"selectAll":bool}
 // x/y/w/h are LOGICAL POINTS, the same space as the caret rect the IME JSON
 // above reports and as frust_dispatch_touch's coordinates — no scale
 // conversion on either side. The rect is absolute in the window, and FrustView
 // fills the window, so it is already in the view's own coordinates.
-// `generation` moves on every actual change of the request (its clearing
-// included) and is how the caller presents the menu once per selection rather
-// than once per vsync.
+//
+// A FOCUSED FIELD ANSWERS EVERY TICK, selection or not. The verbs are a LEVEL,
+// not an edge: read them on every poll and keep the responder's answer to
+// canPerformAction: up to date from them, because a hardware Cmd+C/X/V/A is
+// asked for with no menu on screen at all. With no selection the anchor is the
+// caret rect, which is the right place for a paste-only menu.
+//
+// `presentMenu` is the EDGE half: true means the field wants a menu presented
+// now (the user long-pressed or tapped inside a selection), false means it
+// does not. Present when the generation moves and presentMenu is true; dismiss
+// when the generation moves and it is false.
+//
+// `generation` moves only when presentMenu or the verb set actually changes —
+// NOT when the anchor alone moves. That exclusion is deliberate: the anchor is
+// recomputed every painted frame and tracks a dragging selection, so moving
+// the generation with it would ask the host to re-present its menu on every
+// touch sample. Re-read the anchor as a level for the menu's target rect; do
+// not treat it as a reason to present.
 char *frust_selection_toolbar_json(void *handle);
 
 // Appearance: flip the app's theme brightness between

@@ -177,15 +177,28 @@ pub trait AppTree {
     /// `frust_core::selection_toolbar::selection_toolbar_policy()`, not on the
     /// presence of a request.
     ///
+    /// **`Some` means a field is FOCUSED, not that it has a selection.** The verbs
+    /// are a level a platform responder chain reads at any moment, so they are
+    /// published on every paint of a focused field; `None` means no field is
+    /// focused. Whether a menu should be *presented* is the request's own flag,
+    /// not the presence of the request.
+    ///
     /// **Defaulted to `None`** like the getters below, so an [`AppTree`] impl
     /// that predates this channel still compiles and reads an empty one.
     fn selection_toolbar(&self) -> Option<SelectionToolbarRequest> {
         None
     }
 
-    /// A monotonically-increasing generation bumped on every **actual** change of
-    /// [`AppTree::selection_toolbar`], its clearing included (delegates to
-    /// [`RenderRoot::selection_toolbar_generation`]).
+    /// A monotonically-increasing generation bumped when the **menu-significant**
+    /// part of [`AppTree::selection_toolbar`] actually changes — the present flag
+    /// and the verb set, its clearing included — and NOT when the anchor alone
+    /// moves (delegates to [`RenderRoot::selection_toolbar_generation`]).
+    ///
+    /// The anchor exclusion is deliberate: the anchor is recomputed every painted
+    /// frame and follows a dragging selection, so moving the generation with it
+    /// would ask the host to re-present its menu on every touch sample. Re-read
+    /// the anchor as a level for the menu's target rect; do not treat it as a
+    /// reason to present.
     ///
     /// The [`AppTree::focus_ime_generation`] contract one channel over: a shell
     /// caches the last value it acted on and re-presents the host menu only when
