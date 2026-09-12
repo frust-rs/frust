@@ -206,7 +206,11 @@
 //! publishes the request ([`PaintCtx::publish_selection_toolbar`]) for the
 //! shell to hand to the platform's own edit menu — but it publishes that
 //! request under **both** policies, so the two routes diverge downstream of one
-//! code path. A verb the pod dispatches
+//! code path. The publish happens on **every** paint of a focused field, bar or
+//! no bar: the verbs are a level a platform responder chain reads whenever it
+//! likes (a hardware Cmd+C never raises a bar first), and
+//! [`SelectionToolbarRequest::present_menu`] is the single edge inside it that
+//! says a menu is wanted now. A verb the pod dispatches
 //! ([`EventCtx::dispatch_edit_command`]) is drained in the same pass by
 //! [`EventCtx::take_edit_commands`] and applied through the same
 //! [`handle_command`](TextInputWidget::handle_command) a keyboard chord takes,
@@ -231,7 +235,9 @@
 //!   [`toolbar_actions`](TextInputWidget::toolbar_actions) alone — the same
 //!   predicates the bar is built from — and not from `toolbar_open`. Gating
 //!   them on the bar would mean the verbs existed only for a user who had
-//!   already performed the pointer gesture that raises it.
+//!   already performed the pointer gesture that raises it. The platform
+//!   edit-menu route obeys the same rule, for the same reason and by the same
+//!   means (see `paint`'s publish).
 //! * **Only enabled verbs are offered.** An obscured field publishes no
 //!   copy/cut, a non-interactive one no cut/paste, and a fully-selected or
 //!   empty field no select-all, exactly as the bar refuses them. An action
@@ -1595,6 +1601,10 @@ impl TextInputWidget {
                 &SelectionToolbarRequest {
                     anchor: self.toolbar_anchor,
                     actions,
+                    // Always true here: a builder is called only for a bar that
+                    // is wanted, so the flag the platform route reads as an edge
+                    // carries no information on this side of the seam.
+                    present_menu: true,
                 },
                 self.window_size,
             )),
@@ -2455,20 +2465,37 @@ impl Widget for TextInputWidget {
             // later) against a rect that is already current.
             let local_anchor = self.selection_anchor(size.height);
             self.toolbar_anchor = local_anchor + origin.to_vec2();
-            if self.toolbar_open {
-                // Published under **both** policies — it costs one pointer-sized
-                // write and keeps one code path where the platform edit-menu
-                // route needs the same facts (see `frust_core::selection_toolbar`).
-                ctx.publish_selection_toolbar(SelectionToolbarRequest {
-                    anchor: self.toolbar_anchor,
-                    actions: self.toolbar_actions(),
-                });
-                if selection_toolbar_policy() == SelectionToolbarPolicy::Framework {
-                    // The slot takes the anchor in the field's own local space
-                    // and lifts it into window space with the paint origin.
-                    self.toolbar.set_anchor(OverlayAnchor::Rect(local_anchor));
-                    self.toolbar.paint(ctx, size);
-                }
+            // Published on every paint of a focused field, bar or no bar, and
+            // under **both** policies: it costs one pointer-sized write and
+            // keeps one code path where the platform edit-menu route needs the
+            // same facts (see `frust_core::selection_toolbar`).
+            //
+            // Publishing only while the bar stood is what used to make the
+            // platform route disagree with the accessibility one: the module
+            // docs' rule that the verbs "never depend on the bar being up"
+            // holds for both now. A host responder chain answers "may I offer
+            // Paste?" from `actions` whenever it asks — a hardware Cmd+V
+            // arrives with nothing on screen, and on iOS it is one of the two
+            // paste routes the system exempts from its own permission alert —
+            // so gating the answer on a pointer gesture the user never made
+            // left every hardware shortcut dead.
+            //
+            // With no selection the anchor is the caret rect
+            // (`selection_anchor`), which is the right place to hang a
+            // paste-only menu; `present_menu` carries the bar's own open/closed
+            // state as the one edge in the request, so the level below it may
+            // change every frame without asking anyone to present anything.
+            ctx.publish_selection_toolbar(SelectionToolbarRequest {
+                anchor: self.toolbar_anchor,
+                actions: self.toolbar_actions(),
+                present_menu: self.toolbar_open,
+            });
+            if self.toolbar_open && selection_toolbar_policy() == SelectionToolbarPolicy::Framework
+            {
+                // The slot takes the anchor in the field's own local space
+                // and lifts it into window space with the paint origin.
+                self.toolbar.set_anchor(OverlayAnchor::Rect(local_anchor));
+                self.toolbar.paint(ctx, size);
             }
         }
     }
@@ -7253,6 +7280,66 @@ mod tests {
             },
             "the secret is not this widget's to hand out, but writing into it is \
              ordinary — and everything is already selected"
+        );
+    }
+
+    #[test]
+    fn a_focused_field_publishes_its_verbs_with_no_bar_up() {
+        // The fact a platform responder chain answers "may I offer Paste?"
+        // from. It asks whenever it likes — a hardware Cmd+V arrives with
+        // nothing on screen and never raises a bar first — so a publish gated
+        // on the bar left every hardware clipboard shortcut unanswerable.
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        // An ordinary tap to focus: no long press, no context press, no bar.
+        tap(&mut root, &mut state, 20.0, 10.0);
+        let scene = toolbar_frame(&mut root, &mut logic, &mut state, 100.0);
+        assert!(widget(&root).focused, "the tap focused the field");
+        assert!(!widget(&root).toolbar_open, "and raised no bar");
+        assert!(scene.probe().is_none(), "so nothing floated either");
+        assert_eq!(selection(&root), None, "a plain tap selects nothing");
+
+        let published = root
+            .selection_toolbar()
+            .expect("a focused field publishes whether or not a bar is up");
+        assert_eq!(
+            published.actions,
+            widget(&root).toolbar_actions(),
+            "the published verbs are the field's own, computed from its state \
+             rather than from the bar — the rule the accesskit route already kept"
+        );
+        assert!(
+            published.actions.paste,
+            "a bare caret in an interactive field is exactly what paste is for"
+        );
+        assert!(
+            !published.present_menu,
+            "…while nothing asked for a menu, so nothing asks a shell to present one"
+        );
+        assert_eq!(
+            published.anchor,
+            widget(&root).toolbar_anchor,
+            "anchored on the caret rect with the selection collapsed"
+        );
+
+        // And the bar going up is the same request with the one flag raised.
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 20.0, 10.0),
+        );
+        toolbar_frame(&mut root, &mut logic, &mut state, 200.0);
+        assert!(
+            root.selection_toolbar()
+                .expect("still focused, still publishing")
+                .present_menu
         );
     }
 

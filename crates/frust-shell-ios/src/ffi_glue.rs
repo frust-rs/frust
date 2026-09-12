@@ -1509,13 +1509,23 @@ pub fn take_paste_request(handle: *mut c_void) -> u8 {
 
 /// `frust_selection_toolbar_json`: the focused field's selection-toolbar
 /// request as a heap-allocated, caller-freed JSON C string — where the system
-/// edit menu should be anchored and which verbs it may offer.
+/// edit menu should be anchored, which verbs it may offer, and whether the
+/// field is asking for it to be presented right now.
 ///
-/// Returns null when no field has a selection worth a menu (the Swift side
-/// treats that as "dismiss"), otherwise a fresh `CString` the caller **must**
+/// Returns null when **no field is focused** (the Swift side treats that as
+/// "dismiss and forget"), otherwise a fresh `CString` the caller **must**
 /// release via [`string_free`]/`frust_string_free` — the identical ownership
 /// contract to [`ime_state_json`]/[`platform_view_commands_json`]. Shape and
 /// field names: [`crate::ffi_support::selection_toolbar_json`].
+///
+/// A focused field therefore answers with a string on every tick, selection or
+/// not, and that is the point: `canPerformAction(_:with:)` is asked whenever
+/// UIKit likes — a hardware Cmd+V arrives with no menu on screen — and it can
+/// only answer from the verbs this call last carried across. The cost is one
+/// small JSON per display tick for as long as a text field holds focus, which
+/// buys back the hardware shortcuts and, with them, the paste route iOS exempts
+/// from its own per-app permission alert. `presentMenu` is what distinguishes
+/// "these verbs apply" from "put a menu up".
 ///
 /// The anchor crosses in **logical points**, the same space as the caret rect
 /// the IME JSON already reports (and the space `touch.location(in:)` arrives
@@ -1534,11 +1544,12 @@ pub fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
             return std::ptr::null_mut();
         };
         let Some(request) = app.selection_toolbar() else {
-            // No selection worth a menu — the "dismiss whatever stands" sentinel.
+            // No focused field at all — the "dismiss whatever stands" sentinel.
             return std::ptr::null_mut();
         };
         let json = crate::ffi_support::selection_toolbar_json(
             app.selection_toolbar_generation(),
+            request.present_menu,
             ToolbarAnchor {
                 x: request.anchor.x0 as f32,
                 y: request.anchor.y0 as f32,

@@ -31,7 +31,9 @@ use crate::overlay::{
     OutsideTap, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPaintPass,
     sort_into_paint_order,
 };
-use crate::selection_toolbar::{SelectionToolbarPass, SelectionToolbarRequest};
+use crate::selection_toolbar::{
+    SelectionToolbarActions, SelectionToolbarPass, SelectionToolbarRequest,
+};
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
@@ -1840,37 +1842,62 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Resolve this paint pass's selection-toolbar publish into the shell-facing
-    /// slot, moving [`RenderRoot::selection_toolbar_generation`] only on an actual
-    /// change.
+    /// slot, moving [`RenderRoot::selection_toolbar_generation`] only on a
+    /// **menu edge**.
     ///
-    /// Three rules, all visible here: the same request re-published keeps its
-    /// generation (the common case — a standing selection publishes every frame),
-    /// a different one bumps it, and a pass in which **nothing** published clears
-    /// it (which is how a collapsed selection puts the menu away with no widget
-    /// having to retract anything).
+    /// The request carries two shapes of fact, and they are resolved differently
+    /// (see [`SelectionToolbarRequest`]):
+    ///
+    /// * The whole request is stored as a **level**, newest wins. A shell reads
+    ///   [`SelectionToolbarRequest::anchor`] on every tick it has a menu on
+    ///   screen, so the stored anchor has to be the current one, not the one the
+    ///   generation last moved for.
+    /// * The generation moves on the **menu-significant** part alone:
+    ///   [`SelectionToolbarRequest::present_menu`] and
+    ///   [`SelectionToolbarRequest::actions`], with an absent request reading as
+    ///   "no menu, no verbs" so appearing and disappearing are edges on the same
+    ///   comparison. An anchor that merely moved is deliberately **not** an edge:
+    ///   a focused field recomputes its anchor every painted frame, and a
+    ///   selection dragged wider moves it on every touch sample — bumping there
+    ///   would ask the platform to re-present its menu per sample.
     ///
     /// The publish is refused outright while no focus session is active, mirroring
     /// `paint`'s refusal to let a paint-time publish resurrect a cleared IME
-    /// surface: a selection belongs to the focused field, so a request arriving
-    /// after the blur describes a selection that no longer exists.
+    /// surface: the request describes the focused field, so one arriving after the
+    /// blur describes a field that no longer holds anything.
     fn resolve_selection_toolbar(&mut self, published: Option<SelectionToolbarRequest>) {
         let next = if self.focus_active { published } else { None };
-        if self.selection_toolbar != next {
-            self.selection_toolbar = next;
+        // "Nothing published" is the same statement as "no menu wanted, no verbs
+        // enabled" — which is what lets one comparison cover a change between two
+        // requests, a first appearance, and a clearing alike.
+        let menu_edge = |request: &Option<SelectionToolbarRequest>| {
+            request.map_or((false, SelectionToolbarActions::default()), |request| {
+                (request.present_menu, request.actions)
+            })
+        };
+        if menu_edge(&self.selection_toolbar) != menu_edge(&next) {
             self.selection_toolbar_gen = self.selection_toolbar_gen.wrapping_add(1);
         }
+        self.selection_toolbar = next;
     }
 
     /// The selection-toolbar request the focused field published during the most
-    /// recent [`RenderRoot::paint`], or `None` when no field has a selection worth
-    /// a toolbar.
+    /// recent [`RenderRoot::paint`], or `None` when no field is focused at all.
     ///
     /// The shell half of the platform edit-menu route
     /// ([`SelectionToolbarPolicy::Native`](crate::selection_toolbar::SelectionToolbarPolicy::Native)):
-    /// a shell reads it beside [`RenderRoot::ime_state`] and presents the host's
-    /// own menu at [`SelectionToolbarRequest::anchor`]. A **level**, not an edge —
-    /// re-read it as often as you like; pair it with
-    /// [`RenderRoot::selection_toolbar_generation`] to notice changes cheaply.
+    /// a shell reads it beside [`RenderRoot::ime_state`], answers "may I offer
+    /// this verb?" from [`SelectionToolbarRequest::actions`] whenever the platform
+    /// asks, and presents the host's own menu at
+    /// [`SelectionToolbarRequest::anchor`] when
+    /// [`SelectionToolbarRequest::present_menu`] says so. A **level**, not an edge
+    /// — re-read it as often as you like; pair it with
+    /// [`RenderRoot::selection_toolbar_generation`] to notice the changes worth
+    /// presenting or dismissing for.
+    ///
+    /// Present for a focused field with no selection at all, which is not a
+    /// wasted answer: paste applies to a bare caret, and a platform asking
+    /// whether it may offer one needs a reply before any bar exists.
     ///
     /// A field under the framework policy publishes this too (it floats its own
     /// toolbar through [`crate::overlay`] as well), so a shell that drives the
@@ -1879,14 +1906,22 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.selection_toolbar
     }
 
-    /// A monotonically-increasing generation bumped on every **actual** change of
-    /// [`RenderRoot::selection_toolbar`] — including its clearing, so a shell sees
-    /// the menu going away as an edge too.
+    /// A monotonically-increasing generation bumped on every change to the
+    /// **menu-significant** part of [`RenderRoot::selection_toolbar`] — its
+    /// [`present_menu`](SelectionToolbarRequest::present_menu) flag and its
+    /// [`actions`](SelectionToolbarRequest::actions) — including the clearing that
+    /// a blur produces, so a shell sees the menu going away as an edge too.
+    ///
+    /// A moved [`anchor`](SelectionToolbarRequest::anchor) is **not** an edge: it
+    /// is republished (and recomputed) every painted frame, so a shell re-reads it
+    /// from [`RenderRoot::selection_toolbar`] rather than waiting for this to move
+    /// — bumping on it would re-present a menu on every touch sample of a drag
+    /// that widens a selection.
     ///
     /// The `focus_ime_generation` contract one channel over: a shell caches the
-    /// last value it acted on and re-presents only when it moves, which is what
-    /// keeps a standing selection — republished every single frame — from asking
-    /// the platform to re-present its menu on every vsync.
+    /// last value it acted on and acts only when it moves, which is what keeps a
+    /// standing selection — republished every single frame — from asking the
+    /// platform to re-present its menu on every vsync.
     pub fn selection_toolbar_generation(&self) -> u64 {
         self.selection_toolbar_gen
     }
@@ -8253,6 +8288,8 @@ mod tests {
     // Selection toolbar: publish, generation, clear.
     // ---------------------------------------------------------------------
 
+    /// A request with the menu up, anchored at `x` — the shape a field
+    /// publishes while its bar stands.
     fn toolbar_request(x: f64) -> crate::selection_toolbar::SelectionToolbarRequest {
         crate::selection_toolbar::SelectionToolbarRequest {
             anchor: Rect::new(x, 100.0, x + 50.0, 120.0),
@@ -8262,11 +8299,22 @@ mod tests {
                 paste: false,
                 select_all: true,
             },
+            present_menu: true,
+        }
+    }
+
+    /// The same request with no menu wanted — what a focused field publishes
+    /// with nothing on screen, so the platform can still answer "may I offer
+    /// Copy?" for a hardware shortcut.
+    fn toolbar_level(x: f64) -> crate::selection_toolbar::SelectionToolbarRequest {
+        crate::selection_toolbar::SelectionToolbarRequest {
+            present_menu: false,
+            ..toolbar_request(x)
         }
     }
 
     #[test]
-    fn a_selection_toolbar_publish_resolves_and_only_a_change_moves_the_generation() {
+    fn a_selection_toolbar_publish_resolves_and_only_a_menu_edge_moves_the_generation() {
         let mut h = OverlayHarness::new(vec![]);
         // A toolbar describes the FOCUSED field's selection, so open a session
         // first — a publish with nothing focused describes nothing.
@@ -8286,14 +8334,29 @@ mod tests {
         assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(10.0)));
         assert_eq!(h.root.selection_toolbar_generation(), first_gen);
 
-        // A moved selection is a change.
+        // A moved anchor is stored — a shell re-reads it to place a menu it
+        // already has on screen — but it is NOT a menu edge. This assertion used
+        // to read `first_gen + 1`: the anchor is recomputed every painted frame
+        // and a drag that widens a selection moves it on every touch sample, so
+        // bumping here asked the platform to re-present its menu per sample.
         h.state.publish = Some(toolbar_request(60.0));
         h.frame();
         assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(60.0)));
+        assert_eq!(
+            h.root.selection_toolbar_generation(),
+            first_gen,
+            "an anchor following the selection is not a reason to re-present"
+        );
+
+        // A verb changing IS: the menu's own contents just changed.
+        let mut fewer_verbs = toolbar_request(60.0);
+        fewer_verbs.actions.select_all = false;
+        h.state.publish = Some(fewer_verbs);
+        h.frame();
         assert_eq!(h.root.selection_toolbar_generation(), first_gen + 1);
 
-        // The selection collapses: the field simply stops publishing, and the
-        // menu goes away with nothing retracted.
+        // The field blurs: it stops publishing, and the menu goes away with
+        // nothing retracted.
         h.state.publish = None;
         h.frame();
         assert_eq!(h.root.selection_toolbar(), None);
@@ -8306,6 +8369,61 @@ mod tests {
         // ...and staying away is not.
         h.frame();
         assert_eq!(h.root.selection_toolbar_generation(), first_gen + 2);
+    }
+
+    #[test]
+    fn only_the_menu_flag_going_up_asks_a_shell_to_present() {
+        let mut h = OverlayHarness::new(vec![]);
+        h.down(30.0, 120.0);
+        assert!(h.root.is_focus_active());
+
+        // A focused field with no bar up publishes all the same: the verbs are
+        // the answer a platform responder chain needs for a hardware shortcut
+        // that arrives with nothing on screen.
+        h.state.publish = Some(toolbar_level(10.0));
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), Some(toolbar_level(10.0)));
+        let level_gen = h.root.selection_toolbar_generation();
+
+        // Republishing the same level is not an edge, however many frames it
+        // stands for.
+        h.frame();
+        h.frame();
+        assert_eq!(h.root.selection_toolbar_generation(), level_gen);
+
+        // The gesture fires and the field asks for a menu: THAT is the edge.
+        h.state.publish = Some(toolbar_request(10.0));
+        h.frame();
+        assert_eq!(
+            h.root.selection_toolbar_generation(),
+            level_gen + 1,
+            "the flag going false to true is what presents the menu"
+        );
+
+        // And dropping it again is the dismiss edge, with the field still
+        // focused and still publishing its verbs.
+        h.state.publish = Some(toolbar_level(10.0));
+        h.frame();
+        assert!(h.root.selection_toolbar().is_some());
+        assert_eq!(h.root.selection_toolbar_generation(), level_gen + 2);
+    }
+
+    #[test]
+    fn a_pass_that_publishes_nothing_still_moves_the_generation() {
+        // `RenderRoot::paint` resolves a pass nobody published in to `None`,
+        // which reads as "no menu, no verbs" and must differ from whatever
+        // stood — otherwise a shell holding a presented menu never learns to
+        // put it away.
+        let mut h = OverlayHarness::new(vec![]);
+        h.down(30.0, 120.0);
+        h.state.publish = Some(toolbar_request(10.0));
+        h.frame();
+        let standing = h.root.selection_toolbar_generation();
+
+        h.state.publish = None;
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), None);
+        assert_eq!(h.root.selection_toolbar_generation(), standing + 1);
     }
 
     #[test]

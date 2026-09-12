@@ -2796,6 +2796,7 @@ mod selection_toolbar_bootstrap {
                 copy: true,
                 ..Default::default()
             },
+            present_menu: true,
         }
     }
 
