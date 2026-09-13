@@ -307,41 +307,44 @@ shell resolves that case on a background thread rather than blocking the frame
 loop on another app's `ContentProvider`. A clip that already carries text —
 the overwhelmingly common case, including everything frust itself writes — is
 still read and pasted synchronously in the same event pass. The asynchronous
-half is dispatched only if the framework's focus/IME session generation has
-not moved since the paste was asked for, the native handle is still live, the
-view has not torn down, and the answer arrived within two seconds. Any of
-those failing discards the paste silently. (2026-09-12)
+half is dispatched only if the framework's focus session is still the one that
+asked for it, the native handle is still live, the view has not torn down, and
+the answer arrived within two seconds. Any of those failing discards the paste
+silently. (2026-09-13)
 
 **Applies to**: Android only, and only a primary clip whose first item has a
 `Uri` and no direct text.
 
-**Why accepted**: the session check is what *usually* stops a slow provider's
-answer landing in a *different* field, since `EditCommand::Paste` is
-focus-routed and carries no identity of its own, and a paste that lands in the
-wrong field cannot be taken back. It is a proxy for that identity rather than
-the identity itself, and it is imperfect in three named ways.
+**Why accepted**: `EditCommand::Paste` is focus-routed and carries no identity
+of its own, so a late answer has to be checked against something, and a paste
+landing in the wrong field cannot be taken back. What it is checked against is
+the framework's focus *session identity* (`RenderRoot::focus_epoch`, advanced
+once per honoured focus claim and once per session release), so the check is
+an identity rather than a proxy for one: focus cannot move from one field to
+another without moving it, whether or not the field taking focus publishes an
+IME surface, and whether or not two fields publish structurally identical
+state.
 
-It is conservative in one direction: the generation moves on any real change
-of the focus flag or the published IME surface, so editing, moving the caret,
-*or the field merely being repositioned under the user* — a scroll, a reflow,
-the soft keyboard animating in — discards the paste, not only switching
-fields. Re-publishing an unchanged surface is not an edge, so an ordinary wait
-does not trip it.
+The residue is what remains once misdelivery is closed: **a paste can still be
+dropped**, and silently.
 
-It is incomplete in the other direction, and this is the accepted risk: the
-generation is a surface-*change* counter, not a per-field identity. Focus can
-move between fields without moving it, because `set_focus_active(true)` is a
-no-op when some field was already focused, and the published `ImeState` carries
-no widget identity — only `{active, editing, caret, content_type}`. Two fields
-publishing structurally identical state (same caret rect, same empty editing
-state, same content type — overlapping fields mid-crossfade, say), or a
-focus-taker that publishes no surface at all, leave the counter still, and the
-misdelivery this guard exists to prevent becomes possible again. Two things
-keep the residual narrow: `content_type` is part of the compared value, so a
-clip asked for in a `Password` field can never land in a `Normal` one; and on a
-stock build pointer dispatch and paint complete inside one `nativeOnFrame`, so
-there is no moment at which a late answer can observe the gap. That second
-mitigation is defeated by the `FRUST_NO_RESAMPLE` kill switch.
+It is conservative in one narrow way: any press that re-claims the field's
+focus session while the provider is still answering is read as a new session
+and discards the paste. Tapping back into the field that already had focus is
+one such press. So is a verb taken from the selection toolbar, which re-claims
+on the user's behalf so that a copy or a select-all leaves the field exactly as
+focused as it found it — that re-claim is indistinguishable from any other, so
+a *Copy* or *Select all* tapped during the wait drops the pending paste with
+nothing behind it. (Tapping *Paste* again merely replaces one pending answer
+with another.) That is the safe direction and costs at worst a paste the user
+can ask for again. Nothing else inside one session discards it: editing,
+moving the caret, and the field being repositioned — a reflow, the soft
+keyboard animating in, a programmatic scroll — all leave the session exactly
+where it was, so the paste still lands, in the field that asked for it and at
+whatever the caret has since become. A *touch* scroll is a press first, so it
+is the press that decides there too: one landing in the field re-claims, one
+landing on nothing focusable blurs, and the movement itself decides nothing
+either way.
 
 The two-second bound exists because `shutdownNow()` cannot interrupt a thread
 already blocked inside another process, so a deadline is the only thing that
@@ -350,23 +353,29 @@ can stop a very late answer arriving as a surprise paste. Note what it does
 is still hung queues the retry behind that blocked read, and the retry is
 therefore already past its own deadline whenever it finally runs. While a
 provider hangs, "ask again" is not a recovery — no URI-backed paste succeeds
-until a background/foreground cycle tears the executor down.
+until a background/foreground cycle tears the executor down. There is also no
+supersede: a second request does not cancel an older in-flight one, they simply
+queue.
 
 **Evidence**:
 `platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
 `readClipboardText`/`readClipboardTextAsync` doc comments and
-`CLIPBOARD_RESOLUTION_TIMEOUT_MS`; the generation it compares crosses JNI as
-`nativeFocusGeneration` (`crates/frust-shell-android/src/jni_glue.rs`) from
-`AppTree::focus_ime_generation`.
+`CLIPBOARD_RESOLUTION_TIMEOUT_MS`; the identity it compares crosses JNI as
+`nativeFocusEpoch` (`crates/frust-shell-android/src/jni_glue.rs`) from
+`AppTree::focus_epoch`. What that counter does where the older surface-change
+counter beside it stands still is pinned by `crates/frust-core/src/app.rs`'s
+`focus_epoch_moves_when_focus_crosses_two_fields_publishing_alike`,
+`focus_epoch_moves_when_the_field_taking_focus_publishes_nothing`, and
+`focus_epoch_ignores_an_edit_inside_one_session`, each of which asserts what
+*both* counters did at the same moment.
 
-**Trigger for removal**: a per-request identity that distinguishes "this
-field, this request" from "this focus/IME state". That would close the
-misdelivery gap above rather than only narrowing it, let an edit during the
-wait keep the paste instead of discarding it, and let a newer request supersede
-an older in-flight one. The framework already computes a counter of the right
-shape — `focus_epoch`, advanced on every honoured focus claim whether or not
-any published level changed — but it is private and is not exposed through
-`AppTree`.
+**Trigger for removal**: a resolver that cannot starve. The remaining drops are
+the deadline and the single-thread queue behind it, so removing this entry
+needs a resolution path where a hung provider cannot hold up the next request
+— a per-request cancel, or a bounded pool — plus a device run that actually
+watches a URI-backed paste land. The misdelivery half of this entry's earlier
+trigger is done: the per-session identity it asked for is exposed through
+`AppTree` and is what the guard compares.
 
 **NOT DEVICE-VERIFIED.** The 2026-09-12 Pixel 5 run exercised the clipboard
 legs but not this path: reaching it needs a clip whose first item has a `Uri`
@@ -374,10 +383,11 @@ and no direct text — a photo, file or contact copied from another app, not
 text. Everything specific to this entry (the off-thread resolve, the
 focus-session guard, the two-second deadline) is therefore argued from the
 call graph and from the desktop shell's identical worker-thread precedent, and
-has never been watched happen. The JNI export the guard depends on WAS
-confirmed present in the shipped arm64-v8a library, so it will not fail with
-`UnsatisfiedLinkError`; that is the only part of this entry with hardware
-evidence behind it.
+has never been watched happen. That run predates `nativeFocusEpoch`, so it
+carries no evidence about the export the guard now depends on either: this
+entry currently has **no** hardware evidence behind any part of it, and a
+device run should confirm the export resolves before reading anything else
+from the behaviour.
 
 ### `ios-native-edit-menu-device-status` — the iOS system edit-menu route has run on an iPhone; the hardware-chord half of the paste exemption has not
 

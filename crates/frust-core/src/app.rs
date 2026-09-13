@@ -848,9 +848,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// and dispatching
     /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`](crate::event::EditCommand::Paste)`(text))`
     /// — a *new* dispatch, because the read may be asynchronous and the pass that
-    /// asked is over. That answer is focus-routed, so it reaches no widget and is
-    /// harmlessly dropped if focus moved or was released in between; the shell
-    /// therefore never has to check who asked.
+    /// asked is over. That answer carries no identity of its own and is
+    /// focus-routed to whoever holds focus when it lands: a release in between
+    /// drops it harmlessly, but a focus *move* in between lands it in the new
+    /// field rather than the one that asked. A synchronous read has no such
+    /// window; an asynchronous one snapshots
+    /// [`focus_epoch`](RenderRoot::focus_epoch) at this drain and discards an
+    /// answer whose epoch no longer matches — not
+    /// [`focus_ime_generation`](RenderRoot::focus_ime_generation), which also
+    /// moves within a single session.
     ///
     /// **Destructive**, for [`take_clipboard_write`](RenderRoot::take_clipboard_write)'s
     /// reason. A pass may both write and request (a cut that immediately re-reads,
@@ -907,8 +913,51 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// surface (which the paint pass does on every frame a field stays focused)
     /// or re-blurring an already-blurred root is not an edge. Wrapping is
     /// deliberate and harmless — a comparison, never an ordering.
+    ///
+    /// # Not the session's identity
+    ///
+    /// This counts *changes to the published surface*, not *sessions*, and the
+    /// two come apart in both directions — see
+    /// [`focus_epoch`](RenderRoot::focus_epoch), which is what to reach for when
+    /// the question is "is this still the same focus session?". Answering that
+    /// one from this counter is wrong whenever focus moves between two fields
+    /// without the published value changing.
     pub fn focus_ime_generation(&self) -> u64 {
         self.focus_ime_gen
+    }
+
+    /// The live focus session's **identity** — advanced once per honoured focus
+    /// claim and once per session release, and by nothing else.
+    ///
+    /// The neighbour of [`focus_ime_generation`](RenderRoot::focus_ime_generation)
+    /// and easy to mistake for it, so: that one counts *changes to the published
+    /// surface* (the focus flag, or the [`ImeState`] value), this one counts
+    /// *sessions*. They come apart in both directions, which is why both exist:
+    ///
+    /// * Focus moving from one field to another moves this one and can leave
+    ///   that one completely still. Claiming focus while some field already
+    ///   holds it writes `true` over `true`, and the surface the new field
+    ///   publishes may compare equal to the old field's ([`ImeState`] is
+    ///   `{active, editing, caret, content_type}` and names no widget) — or may
+    ///   not be published at all, since a widget is free to take focus and
+    ///   publish nothing, which leaves the previous field's surface standing.
+    /// * An edit landing, a caret moving, or the field being repositioned under
+    ///   the user moves that one and leaves this one still: the session is the
+    ///   same session throughout.
+    ///
+    /// So a caller binding an asynchronous answer to the session that asked for
+    /// it wants this one; a caller asking "must I run a frame, or re-sync the
+    /// platform IME?" wants that one.
+    ///
+    /// **Never `0`.** The counter is built at `1` and steps *past* `0` on wrap,
+    /// because `0` is a never-claimed [`ChildPod`](crate::widget::ChildPod)'s
+    /// stamp and a root publishing it would hand every unclaimed pod in the tree
+    /// a live link. A caller is therefore free to use `0` as its own "no root /
+    /// no answer" sentinel with no risk of colliding with a live value. Wrapping
+    /// is otherwise deliberate and harmless: the value is compared for equality,
+    /// never ordered.
+    pub fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
     }
 
     /// Set the root's focus flag, bumping [`RenderRoot::focus_ime_generation`]
@@ -4512,6 +4561,304 @@ mod tests {
             root.focus_ime_generation(),
             released,
             "releasing an already-released focus must not move the generation"
+        );
+    }
+
+    // --- The focus session's IDENTITY, beside the edge generation ------------
+    //
+    // `focus_epoch` answers a question `focus_ime_generation` cannot: "is this
+    // still the session that asked?". A caller that binds a slow, asynchronous
+    // answer to the field that asked for it needs an identity, and a counter
+    // over the published surface's *value* is not one — two fields publish
+    // equal surfaces, and a field is free to take focus and publish nothing at
+    // all.
+    //
+    // Each test below asserts what BOTH counters did at the same moment. The
+    // `focus_ime_generation` assertions are the point rather than decoration:
+    // they are what states, in a form the compiler checks, that the edge
+    // generation stands still exactly where the identity moves.
+
+    /// The text both fields publish from a press, so neither can be told from
+    /// the other by the published value alone.
+    const SHARED_FIELD_TEXT: &str = "shared";
+
+    /// One field of the two-field fixture.
+    ///
+    /// Takes the focus session on any press inside itself; publishes an IME
+    /// surface on that press only when built to; and treats an `Ime` event as an
+    /// edit — the text changes and the surface is republished, but nothing
+    /// re-claims a session the field already holds.
+    ///
+    /// `publishes: false` is not a contrivance: the baseline text input claims
+    /// focus and republishes nothing for a press that lands inside text it
+    /// already had selected (such a press moves no caret and collapses no
+    /// selection), and any app-authored focusable that publishes no IME surface
+    /// of its own behaves the same way.
+    ///
+    /// A press publishes the *shared* surface, so the two fields are
+    /// indistinguishable to anything reading the published value — that is the
+    /// case under test. An edit publishes the field's own `name` instead, which
+    /// is how a test proves which field a focus-routed event actually reached.
+    struct SessionField {
+        name: &'static str,
+        publishes: bool,
+    }
+
+    impl SessionField {
+        /// The surface a field publishes. Deliberately carries nothing that
+        /// tells one field from another: `ImeState` is
+        /// `{active, editing, caret, content_type}` and names no widget, so two
+        /// fields holding the same text and caret publish equal values — which
+        /// is the ordinary shape of two empty fields, or two overlapping ones
+        /// mid-transition.
+        fn surface(text: &str) -> ImeState {
+            ImeState {
+                active: true,
+                editing: EditingState {
+                    text: text.to_string(),
+                    selection_base: 0,
+                    selection_extent: 0,
+                    composing_base: -1,
+                    composing_extent: -1,
+                },
+                caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                content_type: Default::default(),
+            }
+        }
+    }
+
+    impl crate::widget::Widget for SessionField {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    if self.publishes {
+                        ctx.publish_ime_state(Self::surface(SHARED_FIELD_TEXT));
+                    }
+                    EventResult::Handled
+                }
+                InputEvent::Ime(_) => {
+                    ctx.publish_ime_state(Self::surface(self.name));
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// The fixture's root: two stacked fields, with a pointer event hit-tested
+    /// to the one under it and a focus-routed event forwarded down the recorded
+    /// focus path without a hit test — the routing every real container does.
+    struct TwoFields {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for TwoFields {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::new(0.0, 0.0));
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 50.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.top.paint_child(ctx, scene);
+            self.bottom.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if matches!(event, InputEvent::Pointer(_)) {
+                let pos = event.position();
+                if self.top.contains(pos) {
+                    return self.top.event_child(ctx, event);
+                }
+                if self.bottom.contains(pos) {
+                    return self.bottom.event_child(ctx, event);
+                }
+                return EventResult::Ignored;
+            }
+            if self.top.holds_live_focus() {
+                return self.top.event_child(ctx, event);
+            }
+            if self.bottom.holds_live_focus() {
+                return self.bottom.event_child(ctx, event);
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            self.top.semantics_child(ctx);
+            self.bottom.semantics_child(ctx);
+        }
+    }
+
+    struct TwoFieldsView {
+        bottom_publishes: bool,
+    }
+
+    impl View<ClickState> for TwoFieldsView {
+        type Element = TwoFields;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TwoFields {
+            TwoFields {
+                top: crate::widget::ChildPod::new(Box::new(SessionField {
+                    name: "top",
+                    publishes: true,
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(SessionField {
+                    name: "bottom",
+                    publishes: self.bottom_publishes,
+                })),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut TwoFields,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// An edit pushed down the focus path by the platform IME: it claims no
+    /// focus, so only the field already holding the session sees it — which is
+    /// what makes the surface it republishes name that field.
+    fn edit_event() -> InputEvent {
+        InputEvent::Ime(crate::event::ImeEvent::ApplyEditingState(
+            SessionField::surface(SHARED_FIELD_TEXT).editing,
+        ))
+    }
+
+    /// Mount the two-field fixture and press the top field, returning the root
+    /// with a live session on it.
+    fn two_fields_focused(
+        bottom_publishes: bool,
+    ) -> (RenderRoot<ClickState, TwoFieldsView>, ClickState) {
+        let mut root: RenderRoot<ClickState, TwoFieldsView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut |_| TwoFieldsView { bottom_publishes }, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active(), "the top field opened a session");
+        (root, state)
+    }
+
+    #[test]
+    fn focus_epoch_moves_when_focus_crosses_two_fields_publishing_alike() {
+        let (mut root, mut state) = two_fields_focused(true);
+        let first_session = root.focus_epoch();
+        let steady_edge = root.focus_ime_generation();
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface(SHARED_FIELD_TEXT))
+        );
+
+        // Press the bottom field. Focus really does move — and nothing
+        // observable about the published surface moves with it: claiming while
+        // some field is already focused writes `true` over `true`, and the
+        // surface the second field publishes compares equal to the first's.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.focus_ime_generation(),
+            steady_edge,
+            "the edge generation is blind to this move, which is why a caller \
+             asking 'is this the same session?' must not be built on it"
+        );
+        assert_ne!(
+            root.focus_epoch(),
+            first_session,
+            "the session identity must move when focus crosses to another field"
+        );
+
+        // Not merely "some counter moved": the focus PATH is the bottom
+        // field's now, which a focus-routed event proves by reaching it.
+        root.event(&mut state, &edit_event());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface("bottom")),
+            "the second field is the one holding the session"
+        );
+    }
+
+    #[test]
+    fn focus_epoch_moves_when_the_field_taking_focus_publishes_nothing() {
+        let (mut root, mut state) = two_fields_focused(false);
+        let first_session = root.focus_epoch();
+        let steady_edge = root.focus_ime_generation();
+
+        // Press the bottom field, which takes the session and publishes no
+        // surface of its own. A publish-nothing dispatch leaves the standing
+        // surface standing, so what the shell still sees describes the field
+        // the user just left — for as long as this session lasts, not merely
+        // until the next frame.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface(SHARED_FIELD_TEXT)),
+            "the field that lost focus is still the one the surface describes"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            steady_edge,
+            "no published value moved, so the edge generation cannot have"
+        );
+        assert_ne!(
+            root.focus_epoch(),
+            first_session,
+            "an honoured claim moves the session identity whether or not the \
+             claimant publishes anything"
+        );
+
+        // And again, the move is a real one: the focus path now ends at the
+        // field that published nothing.
+        root.event(&mut state, &edit_event());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface("bottom")),
+            "the second field is the one holding the session"
+        );
+    }
+
+    #[test]
+    fn focus_epoch_ignores_an_edit_inside_one_session() {
+        // The converse direction, and the reason the two counters are kept
+        // apart rather than merged: a caller holding an identity can let a
+        // harmless edit ride, where a caller comparing the published value has
+        // to treat every keystroke as a reason to give up.
+        let (mut root, mut state) = two_fields_focused(true);
+        let session = root.focus_epoch();
+        let before_edit = root.focus_ime_generation();
+
+        root.event(&mut state, &edit_event());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface("top")),
+            "the focused field applied the edit and republished"
+        );
+        assert_ne!(
+            root.focus_ime_generation(),
+            before_edit,
+            "a changed surface IS an edge"
+        );
+        assert_eq!(
+            root.focus_epoch(),
+            session,
+            "an edit does not end or restart the session it lands in"
+        );
+
+        // A release ends the identity too, so a stale one can never come back
+        // round to matching by standing still.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 90.0));
+        assert!(!root.is_focus_active());
+        assert_ne!(
+            root.focus_epoch(),
+            session,
+            "a release retires the session's identity"
         );
     }
 

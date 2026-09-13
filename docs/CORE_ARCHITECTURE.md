@@ -75,9 +75,9 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   resolve against the active theme's `cosmetic_loop_rate` (see SHELLS_ARCHITECTURE.md).
 - `RenderRoot::event` routes input through the retained tree, tracking capture/focus without a
   separate registry. Events fall into three routing classes: hit-tested (pointer/scroll),
-  focus-routed (`Key`/`Ime`/`EditCommand`, delivered down the recorded focus path — a clipboard
-  verb is *about the selection*, which lives wherever focus is, so a paste answered after focus
-  moved reaches nobody and is harmlessly dropped), and **broadcast** — `InputEvent::Housekeeping`
+  focus-routed (`Key`/`Ime`/`EditCommand`, delivered down the recorded focus path to whatever
+  widget holds focus *at delivery* — a clipboard verb belongs here because it is *about the
+  selection*, which lives wherever focus is), and **broadcast** — `InputEvent::Housekeeping`
   and `InputEvent::Overlay`, non-input events every container forwards to every child
   unconditionally, ahead of its capture/focus/hit-test logic, and never consumes.
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
@@ -232,18 +232,25 @@ collected. A shell reads the resolved cursor via `RenderRoot::cursor()` — see
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the desktop-only apply path.
 
 The clipboard write and the paste request are the cursor's siblings in that same guard — one bracket
-over every pass-scoped request channel, opened and closed per dispatch. `EventCtx::write_clipboard` answers a `Copy`/`Cut` by putting
-the text in a last-writer-wins slot; `EventCtx::request_paste` raises a data-free flag, since two
-widgets asking in one pass still owe exactly one host read. Both resolve at the root and a shell
-drains them after every dispatch (`RenderRoot::take_clipboard_write`/`take_paste_request`) —
-**destructive**, where `cursor()` is a standing level, so a caller that drains and drops loses the
-edge. A paste is answered with a *new* focus-routed `EditCommand::Paste(text)` dispatch rather than
-a return value: the host read may be asynchronous, and focus routing makes a late answer to a moved
-session a no-op, so a shell never has to check who asked. A third channel is a FIFO rather than a
-slot — `EventCtx::dispatch_edit_command`/`take_edit_commands`, pass-scoped, order-preserving, and
-dropped rather than carried if nobody drains it (a stale `Cut` applied two gestures later would
-destroy text). It exists because a floated toolbar and the field it acts on have no container path
-between them (see Overlay Portal).
+over every pass-scoped request channel, opened and closed per dispatch. `EventCtx::write_clipboard`
+answers a `Copy`/`Cut` by putting the text in a last-writer-wins slot; `EventCtx::request_paste`
+raises a data-free flag, since two widgets asking in one pass still owe exactly one host read. Both
+resolve at the root and a shell drains them after every dispatch
+(`RenderRoot::take_clipboard_write`/`take_paste_request`) — **destructive**, where `cursor()` is a
+standing level, so a caller that drains and drops loses the edge. A paste is answered with a *new*
+focus-routed `EditCommand::Paste(text)` dispatch rather than a return value: the host read may be
+asynchronous, and the pass that asked is over by the time it lands. That dispatch carries no identity
+of its own — focus routing hands it to whatever field holds focus *at delivery*, which is the field
+that asked only if focus never moved in between. A synchronous read has no in-flight window and needs
+no guard; an asynchronous one binds its answer to the session that asked, snapshotting the session
+identity above (`RenderRoot::focus_epoch`, reached from a shell as `AppTree::focus_epoch`) at the
+request and dropping an answer whose epoch no longer matches — never `focus_ime_generation`, which an
+edit or a caret move inside one session also moves. See
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for which tier reads which way. A third channel is a
+FIFO rather than a slot — `EventCtx::dispatch_edit_command`/`take_edit_commands`, pass-scoped,
+order-preserving, and dropped rather than carried if nobody drains it (a stale `Cut` applied two
+gestures later would destroy text). It exists because a floated toolbar and the field it acts on have
+no container path between them (see Overlay Portal).
 
 ## Overlay Portal
 
