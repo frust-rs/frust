@@ -217,6 +217,12 @@ pub(crate) fn edit_command_from_code(cmd: i32) -> Option<EditCommandWire> {
 /// crate's `Cargo.toml`, so this host-testable type cannot name the enum
 /// directly). This is the same wire shape the iOS bridge's `ime_state_json`
 /// emits under `"contentType"`.
+///
+/// `suppress_soft_keyboard` mirrors [`frust_core::event::ImeState::suppress_soft_keyboard`]
+/// unchanged (a plain `bool`, no wire-string translation needed) into the
+/// `"suppressSoftKeyboard"` JSON field [`build_ime_state_json`] emits — the
+/// hint `FrustSurfaceView`'s `pollImeAfterDispatch` reads to keep a read-only
+/// field's `InputConnection` alive without raising the on-screen keyboard.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ImeJsonState {
     pub active: bool,
@@ -227,11 +233,13 @@ pub(crate) struct ImeJsonState {
     pub comp_ext: i32,
     pub caret: Option<(f32, f32, f32, f32)>,
     pub content_type: &'static str,
+    pub suppress_soft_keyboard: bool,
 }
 
 impl Default for ImeJsonState {
     /// The "no focused editable" surface: inactive, empty, no selection/composing,
-    /// `"normal"` content type (no hint).
+    /// `"normal"` content type (no hint), keyboard not suppressed (nothing to
+    /// suppress with no field focused).
     fn default() -> Self {
         Self {
             active: false,
@@ -242,6 +250,7 @@ impl Default for ImeJsonState {
             comp_ext: -1,
             caret: None,
             content_type: "normal",
+            suppress_soft_keyboard: false,
         }
     }
 }
@@ -285,9 +294,11 @@ fn json_number(v: f32) -> String {
 /// Serialise an [`ImeJsonState`] into the exact JSON wire form the Kotlin
 /// `FrustSurfaceView` parses from `nativeImeState`.
 ///
-/// Shape (indices UTF-16, caret logical px; absent caret ⇒ `null` components):
+/// Shape (indices UTF-16, caret logical px; absent caret ⇒ `null` components;
+/// `suppressSoftKeyboard` a real JSON boolean, not a string):
 /// `{"active":bool,"text":"...","selBase":n,"selExt":n,"compBase":n,`
-/// `"compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"..."}`.
+/// `"compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"...",`
+/// `"suppressSoftKeyboard":bool}`.
 pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
     let (caret_x, caret_y, caret_w, caret_h) = match state.caret {
         Some((x, y, w, h)) => (
@@ -304,7 +315,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
         ),
     };
     format!(
-        "{{\"active\":{},\"text\":\"{}\",\"selBase\":{},\"selExt\":{},\"compBase\":{},\"compExt\":{},\"caretX\":{},\"caretY\":{},\"caretW\":{},\"caretH\":{},\"contentType\":\"{}\"}}",
+        "{{\"active\":{},\"text\":\"{}\",\"selBase\":{},\"selExt\":{},\"compBase\":{},\"compExt\":{},\"caretX\":{},\"caretY\":{},\"caretW\":{},\"caretH\":{},\"contentType\":\"{}\",\"suppressSoftKeyboard\":{}}}",
         state.active,
         json_escape(&state.text),
         state.sel_base,
@@ -316,6 +327,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
         caret_w,
         caret_h,
         json_escape(state.content_type),
+        state.suppress_soft_keyboard,
     )
 }
 
@@ -810,10 +822,11 @@ mod tests {
             comp_ext: -1,
             caret: Some((1.5, 2.0, 0.0, 10.0)),
             content_type: "normal",
+            suppress_soft_keyboard: false,
         };
         assert_eq!(
             build_ime_state_json(&state),
-            "{\"active\":true,\"text\":\"hi\",\"selBase\":2,\"selExt\":2,\"compBase\":-1,\"compExt\":-1,\"caretX\":1.5,\"caretY\":2,\"caretW\":0,\"caretH\":10,\"contentType\":\"normal\"}"
+            "{\"active\":true,\"text\":\"hi\",\"selBase\":2,\"selExt\":2,\"compBase\":-1,\"compExt\":-1,\"caretX\":1.5,\"caretY\":2,\"caretW\":0,\"caretH\":10,\"contentType\":\"normal\",\"suppressSoftKeyboard\":false}"
         );
     }
 
@@ -828,10 +841,11 @@ mod tests {
             comp_ext: -1,
             caret: None,
             content_type: "normal",
+            suppress_soft_keyboard: false,
         };
         assert_eq!(
             build_ime_state_json(&state),
-            "{\"active\":false,\"text\":\"a\\\"b\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\"}"
+            "{\"active\":false,\"text\":\"a\\\"b\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\",\"suppressSoftKeyboard\":false}"
         );
     }
 
@@ -839,8 +853,28 @@ mod tests {
     fn build_ime_state_json_default_is_inactive_empty() {
         assert_eq!(
             build_ime_state_json(&ImeJsonState::default()),
-            "{\"active\":false,\"text\":\"\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\"}"
+            "{\"active\":false,\"text\":\"\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\",\"suppressSoftKeyboard\":false}"
         );
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_suppress_soft_keyboard_true() {
+        // The flag rides as a real JSON boolean (not a quoted string) so
+        // `JSONObject.optBoolean` on the Kotlin side parses it directly.
+        let state = ImeJsonState {
+            suppress_soft_keyboard: true,
+            ..ImeJsonState::default()
+        };
+        assert!(build_ime_state_json(&state).contains("\"suppressSoftKeyboard\":true"));
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_suppress_soft_keyboard_false() {
+        let state = ImeJsonState {
+            suppress_soft_keyboard: false,
+            ..ImeJsonState::default()
+        };
+        assert!(build_ime_state_json(&state).contains("\"suppressSoftKeyboard\":false"));
     }
 
     #[test]

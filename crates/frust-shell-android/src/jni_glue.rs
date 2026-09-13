@@ -2177,6 +2177,9 @@ fn content_type_wire(content_type: ImeContentType) -> &'static str {
 /// [`ImeState::content_type`] maps through [`content_type_wire`] onto the
 /// explicitly-encoded wire string — never a `Debug` rendering, which is exactly
 /// what [`ImeState`]'s own hand-written `Debug` impl redacts for a secret field.
+/// [`ImeState::suppress_soft_keyboard`] rides straight through unchanged —
+/// `FrustSurfaceView`'s `pollImeAfterDispatch` is what turns it into "keep the
+/// `InputConnection`, skip `showSoftInput`" behaviour.
 fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
     let Some(state) = state else {
         return ImeJsonState::default();
@@ -2199,6 +2202,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
         comp_ext: state.editing.composing_extent,
         caret,
         content_type: content_type_wire(state.content_type),
+        suppress_soft_keyboard: state.suppress_soft_keyboard,
     }
 }
 
@@ -2284,6 +2288,27 @@ mod ime_content_type_wire {
         // but it's still the wrong default — "normal" is what "no field" is).
         let json = build_ime_state_json(&ime_state_to_json(None));
         assert!(json.contains(r#""contentType":"normal""#));
+        // Nothing focused means nothing to suppress; the hint must not default on.
+        assert!(json.contains(r#""suppressSoftKeyboard":false"#));
+    }
+
+    #[test]
+    fn published_suppressed_state_carries_the_flag_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "read-only".to_string(),
+                selection_base: 9,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Normal,
+            suppress_soft_keyboard: true,
+        };
+        let json = build_ime_state_json(&ime_state_to_json(Some(state)));
+        assert!(json.contains(r#""suppressSoftKeyboard":true"#));
     }
 
     #[test]
