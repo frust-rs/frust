@@ -2089,6 +2089,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::Password,
+            suppress_soft_keyboard: false,
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"password""#));
@@ -2112,6 +2113,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::NoSuggestions,
+            suppress_soft_keyboard: false,
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"noSuggestions""#));
@@ -2130,6 +2132,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::Terminal,
+            suppress_soft_keyboard: false,
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"terminal""#));

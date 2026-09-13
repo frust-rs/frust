@@ -320,9 +320,14 @@
 //! focus on a press, places its caret, drag-selects, long-presses to a toolbar
 //! offering copy and select-all, and answers the copy/select-all chords in full,
 //! while it refuses typed characters, IME composition and commits, and the
-//! editing and caret-motion keys, and answers cut and paste with nothing. Its
-//! caret is drawn but does **not** blink: a blink advertises an insertion point,
-//! and this field takes no insertion.
+//! editing and caret-motion keys. Cut and paste it answers with nothing — and a
+//! paste chord it answers *without* asking the shell to read the host clipboard
+//! at all: the ask itself reaches the host, and on iOS it is one of the gestures
+//! that can raise the system's paste prompt, which a field that would discard
+//! the answer has no business provoking. Escape still ends the session, a field
+//! that can hold one needing a keyboard way out of it. Its caret is drawn but
+//! does **not** blink: a blink advertises an insertion point, and this field
+//! takes no insertion.
 //!
 //! **The keyboard.** A focused read-only field publishes
 //! `ImeState { active: true, suppress_soft_keyboard: true, .. }`. Active,
