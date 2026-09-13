@@ -2588,14 +2588,32 @@ seam declines six things, each named in its own source:
    to a sibling panel that would have taken it.
 3. **The catalogs' own hosts are not on it.** All six `overlay::anchored`/`overlay::modal` hosts
    across `frust_shadcn`, `frust_material` and `frust_beui` still place and paint their surfaces
-   in-tree; `frust_shadcn::tooltip`/`hover_card` are the only catalog components riding the portal.
+   in-tree; `frust_shadcn::tooltip`/`hover_card`, `frust_beui::tooltip`, and
+   `frust_material::tooltip`/`rich_tooltip` are the catalogs' only components riding the portal so
+   far.
 4. **A pod is invisible to inspection and to assistive technology.** It is not reached by
    `Widget::visit_children` unless its owner chooses to visit it, so `RenderRoot::inspect` — the
    devtools widget tree — sees the owner and not the floated surface; and the portal publishes no
    semantics for it, because a pod's nodes would attach under the owner's node at the owner's
    position rather than at the floated rect. An assistive-technology user reaches a floated surface
    through the owner's own node (see `selection-verbs-advertised-not-invocable` for the state of
-   the text field's half of that).
+   the text field's half of that). **For `frust_material::tooltip`/`rich_tooltip` this is a
+   regression, not only a scope note.** Before either panel rode the portal, both mounted through
+   the in-tree `crate::overlay::anchored` host and were reached by the ordinary widget-tree
+   semantics walk, so a screen reader learned the plain panel's label and the rich panel's action
+   buttons (its title and supporting text were never wired to semantics, ported or not — only the
+   action row was). Floated through the portal instead, neither owner (`TooltipWidget`,
+   `RichTooltipWidget`) declares its panel a semantics child, so a screen reader reaches none of
+   that today; the regression holds for both panels regardless of input class — the plain panel
+   registers `OverlayInput::Transparent` (skipped by hit-testing outright, the same class
+   `frust_beui::tooltip` rides), while the rich panel registers `OverlayInput::Interactive` with a
+   non-consuming outside-tap so its action row keeps routing and a tap elsewhere still dismisses it
+   — neither classification changes whether the portal walks a pod's semantics, which it does not,
+   for any registered pod, in v1. The panels' own `semantics` methods are otherwise untouched by
+   the port and still push those same nodes — dead code today that resumes for free the moment this
+   restriction lifts, the same shape `frust_beui::tooltip` deliberately restores after an interim
+   revision of its own port had dropped the push entirely; `frust_material`'s was simply carried
+   over unchanged and was never touched by the migration.
 5. **Every overlay pointer event walks the whole tree.** A hit on a registered rect dispatches
    `InputEvent::Overlay` as a broadcast, and a broadcast is forwarded to every child
    unconditionally — no hit test, no capture fast path, no focus gate — so one press inside a
@@ -2612,8 +2630,9 @@ from the one owner) and **no hover inside a pod** (the root marks a hover pass o
 event only, and an overlay event is a broadcast).
 
 **Applies to**: every caller of `frust::overlay_portal` or `frust::authoring::OverlaySlot` — today
-the baseline `TextInput`'s selection toolbar and `frust_shadcn::tooltip`/`hover_card`. Item (3)
-applies to the three catalogs' own hosts, which is where most floated surfaces still live.
+the baseline `TextInput`'s selection toolbar, `frust_shadcn::tooltip`/`hover_card`,
+`frust_beui::tooltip`, and `frust_material::tooltip`/`rich_tooltip`. Item (3) applies to the three
+catalogs' own hosts, which is where most floated surfaces still live.
 
 **Why accepted**: each is a seam the first callers do not need, and each is cheaper to add once a
 second caller states its shape than to guess at now. (3) in particular is migration work with no
@@ -2624,9 +2643,12 @@ per frame, and the broadcast is the only route that reaches an owner without kno
 **Evidence**: `crates/frust-core/src/overlay.rs`'s "Not in v1" section (focus trap, declined keys,
 inspection, nesting) and its per-pass registry contract; `crates/frust-widgets/src/overlay.rs`'s
 own "Not in v1" section (semantics, hover, IME); `crates/frust-core/src/event.rs`'s
-`InputEvent::Overlay` routing contract (the broadcast); `plugins/shadcn/src/components/tooltip.rs`
-module docs ("Riding the framework portal") against the six unported
-`plugins/{shadcn,material,beui}/src/overlay/{anchored,modal}.rs` hosts.
+`InputEvent::Overlay` routing contract (the broadcast); `plugins/shadcn/src/components/tooltip.rs`,
+`plugins/beui/src/components/tooltip.rs`, and `plugins/material/src/tooltip.rs` module docs (all
+titled "Riding the framework portal") against the six unported
+`plugins/{shadcn,material,beui}/src/overlay/{anchored,modal}.rs` hosts;
+`plugins/material/src/tooltip.rs`'s `TooltipWidget`/`RichTooltipWidget` `semantics` methods and
+their pre-port use of `crate::overlay::anchored` (for item (4)'s regression above).
 
 **Trigger for removal**: per item — a focus-trap seam, a declined-key route, the catalog hosts
 ported onto `OverlaySlot`, an overlay-aware semantics and inspection path, and a keyed dispatch
@@ -2992,11 +3014,12 @@ port of either) hits it too.
 
 **Applies to**: every component built on any of the three catalogs' `overlay::anchored` host —
 shadcn's popover, tooltip, hover-card, dropdown/context menu, select, combobox; material's menu
-(incl. submenu), dropdown, tooltip, and the search view's docked panel; beUI's tooltip, popover,
-context menu, citations' preview, and the dropdown panels of select/combobox/multi_select. Each
-catalog's `modal` host is unaffected, since its exit is staged through the navigator's own
-pop-result/back-press machinery (shadcn, material) or through `StagedPop`'s own depth-guarded
-close (beUI) instead of a mount flag.
+(incl. submenu), dropdown, and the search view's docked panel; beUI's popover, context menu,
+citations' preview, and the dropdown panels of select/combobox/multi_select. Neither material's nor
+beUI's tooltip is built on this host any longer — both now float through the framework overlay
+portal instead (see `overlay-portal-v1-scope`). Each catalog's `modal` host is unaffected, since its
+exit is staged through the navigator's own pop-result/back-press machinery (shadcn, material) or
+through `StagedPop`'s own depth-guarded close (beUI) instead of a mount flag.
 
 **Why accepted**: this is the framework-level trade the pattern makes explicit, not an oversight — a
 kept-mounted host costs one layout of its content per frame while closed and nothing else, which all
@@ -3423,45 +3446,33 @@ substituted").
 
 ---
 
-### `beui-overlay-seam` — the anchored host needs bounded constraints, and has no input-transparent mode
+### `beui-overlay-seam` — the anchored host needs bounded constraints
 
-**Observed**: two named gaps in `overlay::anchored`, beUI's non-modal trigger-relative host (see
+**Observed**: `overlay::anchored`, beUI's non-modal trigger-relative host (see
 PLUGINS_ARCHITECTURE.md's Design-System Plugins for the seam itself, and
 `shadcn-anchored-exit-needs-kept-mounted` for its kept-mounted exit ramp, which beUI's anchored host
-shares): (1) the host fills whatever area it is given and expects bounded constraints, so it cannot
-sit inside a `frust::scroll_view` (whose child gets an unbounded max on the scroll axis) — the
-`beui-demo` gallery hits this directly: `citations`' hover preview is documented to mount through
-`overlay::anchored`, but the gallery's page slot is itself a scroll view, so the demo instead reads
-the hover through `on_hover_change` and paints the same preview panel inline, in a page-owned slot
-the caption names as the workaround. (2) the host has no input-transparent mode: `tooltip`'s
-hover-only label is hosted on `overlay::anchored`, and the host consumes every `Down` outside its
-content as a light-dismiss — so the first press after a label has appeared is swallowed rather than
-reaching whatever it landed on, once per hover session (the trigger is suppressed until the pointer
-leaves it and re-arms).
+shares), fills whatever area it is given and expects bounded constraints, so it cannot sit inside a
+`frust::scroll_view` (whose child gets an unbounded max on the scroll axis) — the `beui-demo` gallery
+hits this directly: `citations`' hover preview is documented to mount through `overlay::anchored`,
+but the gallery's page slot is itself a scroll view, so the demo instead reads the hover through
+`on_hover_change` and paints the same preview panel inline, in a page-owned slot the caption names
+as the workaround.
 
-**Applies to**: every component mounted through `overlay::anchored` for constraint (1) — popover,
-tooltip, context menu, the dropdown panels of select/combobox/multi_select, citations' preview;
-`tooltip` alone for the swallowed-press gap (2), since it is the catalog's only hover-only trigger
-on this host.
+**Applies to**: every component still mounted through `overlay::anchored` — popover, context menu,
+the dropdown panels of select/combobox/multi_select, citations' preview. `tooltip` no longer mounts
+through this host at all: it rides the framework overlay portal instead (see
+`overlay-portal-v1-scope`), so it carries no gap from this entry.
 
-**Why accepted**: (1) is the same bounded-constraints/no-scroll-view mounting contract
-`frust_shadcn`'s and `frust_material`'s `overlay::anchored` hosts already carry (`overlay/mod.rs`'s
-"scroll-view trap" in all three catalogs) — the remedy is at the mount site, not the host, and the
-gallery demonstrates the correct workaround rather than avoiding the case. (2) no longer needs a
-new host mode to close: the framework's own overlay portal (`frust::overlay_portal` /
-`authoring::OverlaySlot`) already declares input class per surface, and a pod registered in the
-`OverlayBand::Tooltip` band as `OverlayInput::Transparent` is skipped by the root's hit-test
-pre-pass entirely, so every press reaches the main tree as if the label were not there —
-`frust_shadcn::tooltip`/`hover_card` ride exactly that and swallow nothing. Moving beUI's tooltip
-onto it is a port of a working host rather than a fix, and is follow-up work; consuming the press
-is the documented, tested behavior until then (see `overlay-portal-v1-scope`, which records that
-none of the three catalogs' own `anchored`/`modal` hosts is on the portal yet).
+**Why accepted**: the same bounded-constraints/no-scroll-view mounting contract `frust_shadcn`'s and
+`frust_material`'s `overlay::anchored` hosts already carry (`overlay/mod.rs`'s "scroll-view trap" in
+all three catalogs) — the remedy is at the mount site, not the host, and the gallery demonstrates the
+correct workaround rather than avoiding the case.
 
 **Evidence**: `plugins/beui/src/overlay/mod.rs` ("The scroll-view trap");
 `plugins/beui/src/agents/citations.rs` module docs (the `overlay::anchored` mounting sequence);
 `examples/beui-demo/src/pages/agents/panels.rs`'s `citation_panel` (the inline workaround and its
-caption); `plugins/beui/src/components/tooltip.rs` module docs ("A press while the label is up",
-"One swallowed press per hover session").
+caption); `plugins/beui/src/components/tooltip.rs` module docs ("Riding the framework portal" — the
+section documenting `tooltip`'s move off this host onto the framework overlay portal instead).
 
 ---
 
