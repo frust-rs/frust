@@ -203,6 +203,11 @@
 //!   check runs from the frame loop as well as from a dispatched event, since
 //!   a focus move a signal drove reaches the tree with no event behind it
 //!   ([`stale_overlay_action`]).
+//! * **A focused read-only field.** [`ImeState::suppress_soft_keyboard`] asks
+//!   for the surface without the keyboard it would otherwise raise, so the
+//!   element carries `inputmode="none"` instead of any other `inputmode`
+//!   ([`overlay_attributes`]) — still focusable, still carrying its
+//!   `copy`/`cut` listeners, but no mobile browser summons a keyboard for it.
 //! * **A composition cancelled with Escape.** Browsers disagree about whether
 //!   `compositionend` fires (and with what data) for a cancel, so Escape is
 //!   read from the keystroke itself while composing
@@ -720,6 +725,17 @@ pub fn displaced_composition_signal(
 /// rule the iOS and Android bridges apply to their wire strings, reached here by
 /// having no fallback arm to get wrong.
 ///
+/// # Why the suppression hint is its own parameter, not a read off `ImeState`
+///
+/// The function already takes exactly the one fact it needs off the focused
+/// field's published surface rather than the whole [`ImeState`] — its editing
+/// text, selection and caret have nothing to say about the element's
+/// attributes. [`ImeState::suppress_soft_keyboard`] is the same shape of fact
+/// as `content_type`, so it joins it as a second plain parameter instead of
+/// widening the signature to the struct; the one call site
+/// (`ImeOverlay::build`) already destructures both off the same `Option<&
+/// ImeState>` before calling in.
+///
 /// # What each attribute is for
 ///
 /// `type="password"` is the one that matters: it is what makes the browser
@@ -735,7 +751,19 @@ pub fn displaced_composition_signal(
 /// see, and a suggestion strip would read text the app never showed it.
 /// `tabindex="-1"` keeps the overlay out of the page's own tab order; it is
 /// focused programmatically or not at all.
-pub fn overlay_attributes(content_type: ImeContentType) -> Vec<(&'static str, &'static str)> {
+///
+/// `inputmode="none"` is applied last, and instead of any other `inputmode`,
+/// when `suppress_soft_keyboard` is set: it is the platform contract for "this
+/// element is focusable and receives events but must not summon the virtual
+/// keyboard", which is exactly what a focused read-only field needs — the
+/// element still carries every listener below, so the DOM `copy`/`cut` route
+/// still serves it, but a mobile browser raises no keyboard for it. It must
+/// win over `content_type`'s own `inputmode="text"` rather than merge with it,
+/// since an element may carry only one `inputmode` value.
+pub fn overlay_attributes(
+    content_type: ImeContentType,
+    suppress_soft_keyboard: bool,
+) -> Vec<(&'static str, &'static str)> {
     let secret = content_type.is_secret();
     let mut attributes = vec![
         ("id", OVERLAY_ID),
@@ -746,7 +774,9 @@ pub fn overlay_attributes(content_type: ImeContentType) -> Vec<(&'static str, &'
         ("spellcheck", "false"),
         ("tabindex", "-1"),
     ];
-    if content_type.suppresses_suggestions() {
+    if suppress_soft_keyboard {
+        attributes.push(("inputmode", "none"));
+    } else if content_type.suppresses_suggestions() {
         attributes.push(("inputmode", "text"));
     }
     attributes
@@ -1444,11 +1474,11 @@ mod browser {
         /// Create the element, style it, install its listeners and append it to
         /// the document body.
         ///
-        /// The attributes come from the focused field's own content-type hint
-        /// ([`overlay_attributes`]) rather than from a constant, which is why
-        /// the published surface is threaded in here: `type="password"` is only
-        /// read by a browser when it classifies the element, so it has to be
-        /// set on creation.
+        /// The attributes come from the focused field's own content-type and
+        /// soft-keyboard-suppression hints ([`overlay_attributes`]) rather than
+        /// from a constant, which is why the published surface is threaded in
+        /// here: `type="password"` and `inputmode` are only read by a browser
+        /// when it classifies the element, so both have to be set on creation.
         ///
         /// Every step is fallible in a DOM that may not have a body yet; a
         /// failure logs and leaves `element` unset rather than panicking a
@@ -1473,7 +1503,8 @@ mod browser {
             };
 
             let content_type = published_content_type(ime);
-            for (name, value) in overlay_attributes(content_type) {
+            let suppress_soft_keyboard = ime.is_some_and(|state| state.suppress_soft_keyboard);
+            for (name, value) in overlay_attributes(content_type, suppress_soft_keyboard) {
                 let _ = element.set_attribute(name, value);
             }
             let style = element.style();
@@ -2050,8 +2081,12 @@ mod tests {
         }
     }
 
-    fn attribute(content_type: ImeContentType, name: &str) -> Option<&'static str> {
-        overlay_attributes(content_type)
+    fn attribute(
+        content_type: ImeContentType,
+        suppress_soft_keyboard: bool,
+        name: &str,
+    ) -> Option<&'static str> {
+        overlay_attributes(content_type, suppress_soft_keyboard)
             .into_iter()
             .find(|(key, _)| *key == name)
             .map(|(_, value)| value)
@@ -2242,26 +2277,29 @@ mod tests {
     #[test]
     fn an_obscured_fields_overlay_is_secret_typed_and_a_plain_fields_is_not() {
         assert_eq!(
-            attribute(ImeContentType::Password, "type"),
+            attribute(ImeContentType::Password, false, "type"),
             Some("password")
         );
         assert_eq!(
-            attribute(ImeContentType::Password, "autocomplete"),
+            attribute(ImeContentType::Password, false, "autocomplete"),
             Some("new-password"),
             "a secret field must refuse autofill, which a plain `off` does not"
         );
         assert_eq!(
-            attribute(ImeContentType::Password, "inputmode"),
+            attribute(ImeContentType::Password, false, "inputmode"),
             Some("text")
         );
 
-        assert_eq!(attribute(ImeContentType::Normal, "type"), Some("text"));
         assert_eq!(
-            attribute(ImeContentType::Normal, "autocomplete"),
+            attribute(ImeContentType::Normal, false, "type"),
+            Some("text")
+        );
+        assert_eq!(
+            attribute(ImeContentType::Normal, false, "autocomplete"),
             Some("off")
         );
         assert_eq!(
-            attribute(ImeContentType::Normal, "inputmode"),
+            attribute(ImeContentType::Normal, false, "inputmode"),
             None,
             "an ordinary field leaves the keyboard choice to the browser"
         );
@@ -2269,16 +2307,19 @@ mod tests {
         // Non-secret but suggestion-refusing: a plain-text element, pinned to
         // the plain-text keyboard.
         assert_eq!(
-            attribute(ImeContentType::NoSuggestions, "type"),
+            attribute(ImeContentType::NoSuggestions, false, "type"),
             Some("text")
         );
         assert_eq!(
-            attribute(ImeContentType::NoSuggestions, "inputmode"),
+            attribute(ImeContentType::NoSuggestions, false, "inputmode"),
             Some("text")
         );
-        assert_eq!(attribute(ImeContentType::Terminal, "type"), Some("text"));
         assert_eq!(
-            attribute(ImeContentType::Terminal, "inputmode"),
+            attribute(ImeContentType::Terminal, false, "type"),
+            Some("text")
+        );
+        assert_eq!(
+            attribute(ImeContentType::Terminal, false, "inputmode"),
             Some("text")
         );
 
@@ -2290,10 +2331,35 @@ mod tests {
             ImeContentType::NoSuggestions,
             ImeContentType::Terminal,
         ] {
-            assert_eq!(attribute(hint, "spellcheck"), Some("false"));
-            assert_eq!(attribute(hint, "autocorrect"), Some("off"));
-            assert_eq!(attribute(hint, "autocapitalize"), Some("off"));
-            assert_eq!(attribute(hint, "tabindex"), Some("-1"));
+            assert_eq!(attribute(hint, false, "spellcheck"), Some("false"));
+            assert_eq!(attribute(hint, false, "autocorrect"), Some("off"));
+            assert_eq!(attribute(hint, false, "autocapitalize"), Some("off"));
+            assert_eq!(attribute(hint, false, "tabindex"), Some("-1"));
+        }
+    }
+
+    #[test]
+    fn a_suppressed_keyboard_wins_inputmode_over_every_content_type() {
+        // `inputmode="none"` must win over a content type's own
+        // `inputmode="text"` (Password/NoSuggestions/Terminal) and over
+        // Normal's lack of one — exactly one `inputmode` entry either way.
+        for hint in [
+            ImeContentType::Normal,
+            ImeContentType::Password,
+            ImeContentType::NoSuggestions,
+            ImeContentType::Terminal,
+        ] {
+            let attributes = overlay_attributes(hint, true);
+            let inputmodes: Vec<_> = attributes
+                .iter()
+                .filter(|(key, _)| *key == "inputmode")
+                .collect();
+            assert_eq!(
+                inputmodes,
+                vec![&("inputmode", "none")],
+                "a suppressed field must carry exactly one `inputmode`, and it \
+                 must be `none`, for {hint:?}"
+            );
         }
     }
 
