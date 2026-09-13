@@ -128,6 +128,48 @@ final class FrustView: UIView {
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .default
     var autocapitalizationType: UITextAutocapitalizationType = .sentences
 
+    /// Whether the focused field wants the input surface *without* an
+    /// on-screen keyboard — the `"suppressSoftKeyboard"` flag
+    /// `frust_ime_state_json` publishes from
+    /// `frust_core::event::ImeState::suppress_soft_keyboard`.
+    ///
+    /// A field whose text cannot be changed is still focusable and still
+    /// copyable, and on iOS the first responder is exactly what carries
+    /// `copy:`/`cut:`/`paste:`/`selectAll:` and the system edit menu (the
+    /// `UIResponderStandardEditActions` section at the bottom of this file).
+    /// So such a field must *stay* first responder; what it must not do is
+    /// raise a keyboard for text it cannot accept. `inputView` below is what
+    /// separates the two — this is a keyboard suppression, never a focus
+    /// refusal, and `canBecomeFirstResponder` stays `true` regardless.
+    ///
+    /// `FrustViewController.syncImeFocus` assigns this from the parsed state
+    /// **before** `becomeFirstResponder()`, for the same reason the
+    /// content-type traits above are assigned there: UIKit reads the
+    /// responder's input view when it stands the keyboard up, not
+    /// continuously afterward.
+    var suppressSoftKeyboard = false
+
+    /// The empty stand-in `inputView` hands UIKit while suppressed. Built
+    /// once and reused, so a re-query never yields a different view for the
+    /// same state; zero-sized by default, which is all this needs to be.
+    private lazy var suppressedInputView = UIView()
+
+    /// The custom keyboard-replacement view UIKit stands up for this
+    /// responder, or `nil` to use the system keyboard.
+    ///
+    /// A non-nil empty view is the documented UIKit contract for "first
+    /// responder, no system keyboard" — the only way to keep the responder,
+    /// and with it the edit actions and the system edit menu, while nothing
+    /// rises from the bottom of the screen. Unsuppressed this returns `nil`
+    /// and the system keyboard behaves exactly as it always has.
+    ///
+    /// UIKit re-reads this only across a first-responder transition, which is
+    /// why `FrustViewController.syncImeFocus` cycles the responder when the
+    /// flag *changes* — and, just as deliberately, only then.
+    override var inputView: UIView? {
+        return suppressSoftKeyboard ? suppressedInputView : nil
+    }
+
     /// A custom editor view must opt in to becoming first responder for the
     /// keyboard to appear.
     override var canBecomeFirstResponder: Bool { true }

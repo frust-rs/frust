@@ -1613,7 +1613,11 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
 /// mandate matching on for this reason: an unrecognized variant becomes the
 /// *strictest* wire string its own predicates justify, never the loosest.
 /// Mirrors `frust_shell_android::jni_glue::content_type_wire` byte-for-byte
-/// (same four wire strings, same fail-closed rule).
+/// (same four wire strings, same fail-closed rule). The neighbouring
+/// `"suppressSoftKeyboard"` flag — [`ImeState::suppress_soft_keyboard`],
+/// serialized last by [`crate::ffi_support::ime_state_json`] — is spelled
+/// identically on the Android side and sits in the same slot there, so that
+/// mirror covers the whole object rather than this field alone.
 fn content_type_wire(content_type: ImeContentType) -> &'static str {
     match content_type {
         ImeContentType::Normal => "normal",
@@ -1636,6 +1640,10 @@ fn content_type_wire(content_type: ImeContentType) -> &'static str {
 /// bridge JSON, mapping the logical-pixel caret rect into the flat
 /// caretX/Y/W/H the Swift side expects and [`ImeContentType`] into the
 /// `"contentType"` wire string (see [`content_type_wire`]).
+///
+/// [`ImeState::suppress_soft_keyboard`] rides across as
+/// `"suppressSoftKeyboard"`; the absent-state sentinel publishes `false`,
+/// since an inactive surface has no keyboard to suppress.
 fn ime_state_to_json(state: Option<ImeState>) -> String {
     match state {
         Some(s) => {
@@ -1654,6 +1662,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
                 s.editing.composing_extent,
                 caret,
                 content_type_wire(s.content_type),
+                s.suppress_soft_keyboard,
             )
         }
         // No focused field / no published surface: the inactive sentinel.
@@ -1666,6 +1675,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
             -1,
             None,
             content_type_wire(ImeContentType::Normal),
+            false,
         ),
     }
 }
@@ -2117,6 +2127,38 @@ mod ime_content_type_wire {
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    #[test]
+    fn published_suppression_hint_carries_it_through_to_json() {
+        // A focused read-only field stays active on purpose — that is what
+        // keeps the Swift first responder, and with it `copy:` and the system
+        // edit menu, alive — and asks only for the keyboard to stay down.
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "read-only".to_string(),
+                selection_base: 0,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Normal,
+            suppress_soft_keyboard: true,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""suppressSoftKeyboard":true"#));
+        // The hint is orthogonal to the classification: a suppressed field is
+        // still whatever content type it published.
+        assert!(json.contains(r#""contentType":"normal""#));
+    }
+
+    #[test]
+    fn absent_state_suppresses_nothing() {
+        // No focused field: there is no keyboard up to suppress, and the flag
+        // must not read as `true` by accident of the sentinel's construction.
+        assert!(ime_state_to_json(None).contains(r#""suppressSoftKeyboard":false"#));
     }
 
     #[test]
