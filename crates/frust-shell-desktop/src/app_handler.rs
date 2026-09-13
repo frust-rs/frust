@@ -389,9 +389,13 @@ enum ClipboardFailure {
     /// the clipboard is empty"* — is not trustworthy: `arboard` returns it both
     /// for a genuinely empty clipboard and for a selection owner that never
     /// answered, which is the X11 case this worker exists for. There its
-    /// `get_text` reaches this error only after exhausting six candidate target
-    /// atoms at 4 s apiece. The two causes are indistinguishable from here, so
-    /// the warning says so rather than repeating the host's claim.
+    /// `get_text` reaches this error only after exhausting six candidate
+    /// target atoms, each with its own 4 s window — a worst-case total, not
+    /// six independent recovery chances, since a late answer is rescued only
+    /// when it lands inside the window currently being tried (see
+    /// [`ClipboardWorker`]'s `# Why a thread at all` for the measured
+    /// evidence). The two causes are indistinguishable from here, so the
+    /// warning says so rather than repeating the host's claim.
     Unanswered,
     /// The read failed some other way.
     ReadFailed,
@@ -716,10 +720,20 @@ fn spawn_clipboard_worker(
 /// Reading the host clipboard blocks for as long as the *other* process owning
 /// the selection takes to answer, and on X11 that is unbounded in practice:
 /// measured at 24 005 ms against a stopped selection owner, because `arboard`'s
-/// X11 backend retries its `ConvertSelection` round trip once per candidate
-/// target atom, each with its own 4 s bound. Run on the winit event-loop thread
-/// — as this shell did until this change — that is 24 s with no frames, no
-/// input, no resize and no close: a window indistinguishable from a hung app.
+/// X11 backend tries its `ConvertSelection` round trip once per candidate
+/// target atom, each with its own 4 s bound, before giving up on that atom and
+/// moving to the next. That 24 s is a worst-case TOTAL across all six atoms,
+/// not six independent chances at recovery: once an atom's 4 s window has
+/// lapsed, an owner answering late does not rescue the read — recovery needs
+/// the owner to answer within the window currently being tried. Measured on
+/// the same rig: an owner SIGSTOPped then resumed at +4.9 s (after the first
+/// atom's window had already lapsed at 4 s) never recovered — every remaining
+/// atom timed out and the full 24 004 ms warning fired even though the owner
+/// was serving normally from +4.9 s on; an owner resumed at +2.9 s (inside the
+/// first atom's own window) answered within ~5 ms of the resume. Run on the
+/// winit event-loop thread — as this shell did until this change — that
+/// worst case is 24 s with no frames, no input, no resize and no close: a
+/// window indistinguishable from a hung app.
 /// `frust-core` was designed for the answer to arrive late (see
 /// `EventCtx::request_paste`: *"The answer is a new dispatch, never a return
 /// value"*), so only the shell had to move.
@@ -1371,6 +1385,13 @@ fn map_modifiers(state: ModifiersState) -> Modifiers {
 /// necessarily what plain typing should insert), so the fallback stays
 /// scoped to the documented ctrl/meta case rather than replacing the `text`
 /// path outright.
+///
+/// Measured on Linux/X11 (2026-09-13, KDE on Xorg, winit at this workspace's
+/// pin): `text` IS populated under Ctrl for the whole chord set tried —
+/// Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A — so this arm never fires on that backend.
+/// It is retained for the macOS Cmd case it was written for, which this
+/// observation does not disprove, and for the backends (including Wayland)
+/// this one rig's session never exercised.
 fn map_key_event(
     logical_key: &WinitKey,
     text: Option<&str>,
