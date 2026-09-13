@@ -3,19 +3,20 @@
 //! `frust_material::tooltip`'s trigger and panel are two sibling views over
 //! one shared [`TooltipHover`] handle (see that module's own docs), not one
 //! nested widget the way `M3ETooltip(child: ...)` reads in the reference. The
-//! trigger stays inline with the preview card; the panel — an anchored
-//! overlay, positioned in window space off the trigger's captured rect —
-//! mounts at this page's own outer `Stack`, the same placement
-//! [`crate::widgets::playground`]'s [`play_enum_menu_field`]/
+//! trigger stays inline with the preview card; the panel — floated through
+//! the framework's overlay portal, anchored in window space to the trigger's
+//! captured rect — mounts at this page's own outer `Stack`, the same
+//! placement [`crate::widgets::playground`]'s [`play_enum_menu_field`]/
 //! [`play_enum_menu_panel`] pair documents, so it never gets clipped by
 //! [`playground_body`]'s own `scroll_view`.
 //!
 //! [`play_enum_menu_field`]: crate::widgets::playground::play_enum_menu_field
 //! [`play_enum_menu_panel`]: crate::widgets::playground::play_enum_menu_panel
 //!
-//! Mount-on-open, no exit fade, and hover with zero added delay are all
-//! upstream-faithful per that module's own docs — this page drives no knob
-//! for any of the three, since none is exposed as a prop upstream either.
+//! Permanent mounting with paint-gated portal registration, no exit fade, and
+//! hover with zero added delay are all upstream-faithful per that module's
+//! own docs — this page drives no knob for any of the three, since none is
+//! exposed as a prop upstream either.
 
 use frust::{AnyView, Component, Stack, any, component, icon};
 use frust_material::{
@@ -80,9 +81,10 @@ fn preview_trigger(state: &Knobs) -> AnyView<Knobs> {
     play_preview_card(label, tooltip_trigger(&state.hover, button))
 }
 
-/// The anchored panel itself — mounted unconditionally beside the trigger
-/// (see the module docs); its own mount-on-open swap is what makes it
-/// invisible while `hover` reads closed.
+/// The portal panel itself — mounted unconditionally beside the trigger (see
+/// the module docs); its own portal registration, gated on a live
+/// [`TooltipHover::is_open`] read during paint, is what makes it invisible
+/// while `hover` reads closed.
 fn panel(state: &Knobs) -> AnyView<Knobs> {
     if state.rich {
         any(rich_tooltip(&state.hover, state.rich_message.clone())
@@ -94,7 +96,7 @@ fn panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The playground body for the current knob state: [`playground_body`]'s
-/// scrollable content, plus the anchored panel at the outer `Stack` — see
+/// scrollable content, plus the portal panel at the outer `Stack` — see
 /// the module docs.
 fn body(state: &mut Knobs) -> AnyView<Knobs> {
     let preview = preview_trigger(state);
