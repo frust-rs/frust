@@ -102,10 +102,10 @@ permission alert only while it is system-initiated).
 ## Per-OS desktop shell gate (macOS + Windows + Linux)
 
 A hardware gate for the native integration the shared winit core cannot cover, run against an app
-configured with an app name, reverse-DNS id, window icon and menu spec. macOS and Windows are
-closed (Windows 2026-08-19, via `examples/shadcn-demo` built natively with MSVC); Linux is still
-owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` for exactly which
-checks remain). Per host:
+configured with an app name, reverse-DNS id, window icon and menu spec. macOS, Windows, and
+Linux/X11 are closed (Windows 2026-08-19, `examples/shadcn-demo` on MSVC; Linux 2026-09-13 on
+X11); Wayland remains owed (see [LIMITATIONS.md](LIMITATIONS.md)
+`desktop-shells-runtime-unverified`). Per host:
 
 - **macOS:** menu bar shows the app-named application menu; ⌘Q and the menu Quit both exit;
   Hide/Show All work; closing with `quit_on_last_window_closed = false` hides the window and a
@@ -113,8 +113,8 @@ checks remain). Per host:
 - **Windows:** titlebar and taskbar icons; taskbar grouping under the configured AppUserModelID;
   titlebar brightness follows an app-forced theme flip; the native menu bar and each declared
   accelerator activate their item.
-- **Linux:** the window pairs with its `.desktop` entry (Wayland `app_id` / X11 `WM_CLASS`) and
-  the X11 window icon shows; run non-headless, on both session types where available.
+- **Linux:** `WM_CLASS` matches the app id and the `.desktop` pairing via `StartupWMClass`, plus
+  the X11 window icon — done on X11; the Wayland `app_id` pairing is still owed.
 
 ## Browser manual gate (web)
 
