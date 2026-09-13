@@ -1797,9 +1797,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// and B gets the single paste it asked for.
     ///
     /// Note what does *not* save the standing record: "every value here is a
-    /// session that asked" stays true throughout that sequence. It is simply
-    /// not enough, because it says nothing about how many answers one ask may
-    /// absorb. Consuming the record is what bounds that at one.
+    /// session in which a paste was requested" stays true throughout that
+    /// sequence. It is simply not enough, because it says nothing about how
+    /// many answers one ask may absorb. Consuming the record is what bounds
+    /// that at one.
     ///
     /// So the lost paste above is paid for knowingly. A paste that did not
     /// happen inserts nothing and costs a keystroke; a duplicate inserts text
