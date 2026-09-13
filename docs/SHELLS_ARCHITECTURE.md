@@ -306,7 +306,7 @@ page's `requestAdapter()`, which can spuriously answer `null` once on a machine 
 good adapter (a GPU-process warm-up race). There is no pipeline-cache I/O: `frust-paths` writes
 files and a page has no filesystem, so the renderer runs on its empty initial cache every launch.
 
-The tier's Phase-1 gate vehicle is the standalone [examples/web-gallery](../examples/web-gallery)
+The tier's gate vehicle is the standalone [examples/web-gallery](../examples/web-gallery)
 workspace — an ordinary `frust::web_app!` app exercising input, theme-follow, resize/DPR and a
 signal-driven repaint in the browser; see its own README for the milestone evidence.
 
@@ -366,55 +366,66 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   and Cursor section for the request/resolve contract.
 - **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
   `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
-  `InputEvent::EditCommand`, dispatched back (see
-  [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Each tier answers them with its own host clipboard.
-  **Desktop** drains both beside `sync_ime`/`sync_cursor`, because either slot can fill as a side
+  `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
+  those slots and the rule an asynchronous read inherits: the answer is a later focus-routed
+  dispatch carrying no identity, so it is bound to the session (`focus_epoch`) recorded when the
+  paste request is drained and dropped when that session has gone. Which tier reads which way is
+  this tier's half: desktop and Android asynchronously, iOS synchronously.
+  **Desktop** drains both slots beside `sync_ime`/`sync_cursor`, because either can fill as a side
   effect of any event, and hands each to a lazily spawned worker thread owning the process's single
   `arboard::Clipboard` for the run's lifetime: on X11 and Wayland a copy is served *live* by the
   process that claimed the selection, so an instance created per call takes the copy with it when it
   drops, and a read blocks for as long as that owner takes to answer (24 s, measured, against a
   stopped one) — which is why the read may not run on the event loop, and why both operations
   serialise on one thread rather than sharing an instance behind a lock. A finished read comes back
-  as a user event and becomes exactly one top-level paste dispatch; shutdown waits, briefly, for the
+  through the event-loop proxy as a fresh top-level dispatch on a later turn, never nested in the
+  pass that asked. A request raised while a read is outstanding folds into that read rather than
+  queueing a second such wait, and re-points its answer at the most recent asker — the only asker an
+  answer can still reach. That gate re-opens as the worker *posts* an answer, not as the UI thread
+  consumes it, so a further read can start inside that window; the record is taken on arrival, so a
+  surplus answer finds nothing addressed to it and is dropped, the deliberate cost being that two
+  presses close enough to race it yield one paste rather than two. Shutdown waits, briefly, for the
   worker to drop the instance so a clipboard manager can adopt the copy.
   **Web** cannot go through winit here either, because a browser hands clipboard access to the
   focused editable and nobody else: the hidden IME overlay below carries the `copy`/`cut`/`paste`
-  listeners (plus `beforecopy`/`beforecut`, which claim the verbs for a collapsed selection), a
-  `paste` reading `clipboardData` directly and a `copy`/`cut` writing with `setData` inside the
-  callback, where neither a secure context nor a permission is needed. A paste keystroke is withheld
-  from the canvas re-dispatch, since the DOM event carries text no key event could; a copy or cut
-  keeps the key path — an engine may raise no event at all for this overlay, and a bridge waiting for
-  one would drop the gesture — and marks a handoff, so the widget's own answer is what the callback
-  writes and one gesture stays one write. A write no callback is coming for (an app- or
-  toolbar-driven copy) and a toolbar paste take `navigator.clipboard`, which is undefined outside a
-  secure context: an `http://` page loses those outright, warning once, while the keyboard's paste
-  is unaffected.
+  listeners (plus `beforecopy`/`beforecut`, which claim the verbs for a collapsed selection),
+  reading `clipboardData` directly on a paste and writing with `setData` on a copy or cut, inside
+  the callback, where neither a secure context nor a permission is needed. A paste keystroke is
+  withheld from the canvas re-dispatch, since the DOM event carries text no key event could; a copy
+  or cut keeps the key path — an engine may raise no event at all for this overlay, and a bridge
+  waiting for one would drop the gesture — and marks a handoff, so the widget's own answer is what
+  the callback writes and one gesture stays one write. A write no callback is coming for (an app- or
+  toolbar-driven copy) and a toolbar paste take `navigator.clipboard`, undefined outside a secure
+  context: an `http://` page loses those outright, warning once, while the keyboard's paste is
+  unaffected.
   **Android** owns the clipboard on the JVM side (`ClipboardManager` has no Rust-reachable binding),
   so the channel is a JNI trio: the Kotlin view drains `nativeTakeClipboardWrite` and
-  `nativeTakePasteRequest` once per frame, from the same tick as its other per-frame polls, and
-  pushes verbs back in through `nativeEditCommand` from two host routes — the IME's own affordances
-  through
+  `nativeTakePasteRequest` once per frame, and pushes verbs back in through `nativeEditCommand` from
+  two host routes — the IME's own affordances through
   `FrustInputConnection.performContextMenuAction` (a soft keyboard never sends chords) and hardware
   `Ctrl+C`/`X`/`V`/`A` decoded in `onKeyDown`. Both are gated on a focused editable, since an edit
   command is focus-routed and consuming the press for nobody would take it from the host activity
-  for nothing. Two system behaviours are lived with rather than engineered around: `getPrimaryClip`
-  yields nothing unless the app holds input focus (Android 10+), indistinguishable here from an
-  empty clipboard on purpose; and reading another app's clip raises the system "pasted from" toast
-  (Android 12+), which is why the cheap `hasPrimaryClip` gate runs first and only a real,
-  user-initiated paste ever crosses that line.
+  for nothing. A clip whose text must be coerced resolves off the view's thread under the same
+  session guard as desktop, bounded additionally by a 2 s deadline stamped at request time, since
+  nothing can interrupt a thread already parked inside another app's `ContentProvider`. Two system
+  behaviours are lived with rather than engineered around: `getPrimaryClip` yields nothing unless
+  the app holds input focus (Android 10+), indistinguishable here from an empty clipboard on
+  purpose; and reading another app's clip raises the system "pasted from" toast (Android 12+), which
+  is why the cheap `hasPrimaryClip` gate runs first and only a real, user-initiated paste ever
+  crosses that line.
   **iOS** *locks* the `Native` toolbar policy at start-up — an app's later
   `set_selection_toolbar_policy` is refused, not obeyed, because the exemption below depends on the
-  native route being the only one — so a field floats no pod and UIKit's own
-  edit menu is the only menu on screen — presented at the published anchor through
-  `UIEditMenuInteraction` (iOS 16+, `UIMenuController` on 15) and answered from the published verb
-  set, with the framework's view as the app's single responder for both the menu and a hardware
-  `Cmd+C`/`X`/`V`/`A` arriving over `UIResponderStandardEditActions`. A focused field publishes those
-  verbs whether or not any menu is up, because the responder chain is asked for them with nothing on
-  screen — a hardware chord on a plainly tapped-into field is answered from the same published set. Native is the platform's
+  native route being the only one — so a field floats no pod and UIKit's own edit menu is the only
+  menu on screen, presented at the published anchor through `UIEditMenuInteraction` (iOS 16+,
+  `UIMenuController` on 15) and answered from the published verb set, with the framework's view as
+  the app's single responder for both the menu and a hardware `Cmd+C`/`X`/`V`/`A` arriving over
+  `UIResponderStandardEditActions`. A focused field publishes those verbs whether or not any menu is
+  up, because the responder chain is asked for them with nothing on screen. Native is the platform's
   requirement rather than a preference: `UIPasteboard.general.string` is exempt from iOS's paste
   notice and per-app permission alert only when the read is system-initiated, which `paste(_:)` is
   and a framework-drawn Paste button — answerable only by reading the pasteboard off a display-link
-  tick — is not. Both mobile tiers' clipboard paths are device-unverified.
+  tick — is not. That read runs synchronously on the main thread inside `paste(_:)`, so this tier
+  has no in-flight window to guard at all. Both mobile tiers' clipboard paths are device-unverified.
 - **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (its `web_sys` backend
   implements none of the IME setters — upstream issue 4424 is open with no timeline), so
   `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under
@@ -437,11 +448,10 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   taken from the `input` signal behind it and delivered once as a key event instead. A soft
   keyboard's Backspace is the known gap: the element is emptied every frame, so the deletion has
   nothing to consume and raises no `input`. Removing the element mid-composition ends the session
-  and retracts the preedit, the same as a blur. The same element is the page's
-  clipboard surface, since a browser hands clipboard access to the focused editable alone: its
-  `copy`/`cut`/`paste` listeners and the verb-shaped exclusion that keeps a clipboard keystroke from
-  reaching a widget twice are the Clipboard bullet above. Not yet wired: the mobile visual-viewport
-  jump when a soft keyboard opens, and multiple simultaneous editables. The bridge is compile- and
+  and retracts the preedit, the same as a blur. The same element is the page's clipboard surface —
+  its verb listeners and the exclusion keeping a clipboard keystroke from reaching a widget twice
+  are the Clipboard bullet above. Not yet wired: the mobile visual-viewport jump when a soft
+  keyboard opens, and multiple simultaneous editables. The bridge is compile- and
   unit-tested but device-unverified — this build host has no browser rig — see
   [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
 - **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
