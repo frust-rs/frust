@@ -334,8 +334,23 @@
 //! because every shell's clipboard route hangs off the platform surface (the web
 //! overlay `<input>`'s DOM `copy` listener, Android's `InputConnection`, iOS's
 //! first responder) and dies with it; suppressed, because there is nothing here
-//! to type into. Each shell honours the hint by keeping the surface and leaving
-//! the on-screen keyboard down.
+//! to type into.
+//!
+//! The hint is an **obligation on the shell**, and it is the shell's half that
+//! makes the pair mean anything: a shell that raises an on-screen keyboard must
+//! read `suppress_soft_keyboard` and, when it is set, keep the platform input
+//! surface it would build for `active` while leaving that keyboard down. A shell
+//! with no on-screen keyboard of its own (desktop/winit) has nothing to do for
+//! it.
+//!
+//! **No shell reads it yet.** `active` alone still drives the platform keyboard
+//! on both mobile shells, and neither `ime_state_to_json` puts this field on the
+//! wire at all, so it cannot reach Kotlin or Swift even in principle. Until each
+//! shell is taught the hint, tapping a read-only field on Android or iOS raises
+//! the soft keyboard — where before this field took no focus, it raised nothing.
+//! That is a known, tracked gap in the shells, not a contract this module is
+//! quietly failing to keep: everything above the seam publishes the hint
+//! correctly, and a test pins it.
 //!
 //! `enabled(false)` remains the stronger claim, unchanged: it refuses focus
 //! outright, so none of the above reaches a disabled field, and a field disabled
@@ -2560,7 +2575,7 @@ impl Widget for TextInputWidget {
                     chrome.caret,
                 );
             }
-        } else if !self.editable() && ctx.has_focus() {
+        } else if !self.focusable() && ctx.has_focus() {
             // Disabled while still holding the pod's focus path: publish an
             // *inactive* IME surface so the shell dismisses the keyboard on the
             // very next frame rather than waiting for the event-pass release
@@ -5774,6 +5789,40 @@ mod tests {
         assert_eq!(widget(&root).editor.text(), "abc");
         assert_eq!(state.changes, 0);
         assert_eq!(state.submits, 0, "Enter submits nothing either");
+    }
+
+    #[test]
+    fn escape_ends_a_read_only_session_without_touching_the_text() {
+        // A field that can hold a session needs a keyboard way out of it, so
+        // Escape stays answered where the editing keys do not. It ends the
+        // session and takes the toolbar with it, and mutates nothing on the way.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 20.0, 10.0),
+        );
+        assert!(root.is_focus_active(), "the context press opened a session");
+        assert!(widget(&root).toolbar_open, "…with the bar up");
+
+        let outcome = root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+
+        assert!(
+            outcome.handled,
+            "Escape is answered, not left for an ancestor"
+        );
+        assert!(!root.is_focus_active(), "the session is over");
+        assert!(!widget(&root).focused);
+        assert!(
+            !widget(&root).toolbar_open,
+            "the toolbar goes with the session it belonged to"
+        );
+        assert_eq!(widget(&root).editor.text(), "abc", "and nothing was edited");
+        assert_eq!(state.changes, 0);
     }
 
     #[test]
