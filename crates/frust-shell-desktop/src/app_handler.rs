@@ -747,9 +747,12 @@ struct ClipboardWorker {
     /// `arboard::Clipboard` — see [`spawn_clipboard_worker`] and
     /// [`CLIPBOARD_SHUTDOWN_WAIT`].
     stopped: Receiver<()>,
-    /// Whether a read is queued or its answer still in flight — the coalescing
-    /// gate. While a read is hung, every further paste request is dropped
-    /// instead of queued behind it, so a user pressing Ctrl+V six more times at
+    /// Whether a read is queued or running — the coalescing gate. Held from the
+    /// request until the worker's read arm ends, which is once the answer has
+    /// been posted rather than once the UI thread has taken it.
+    ///
+    /// While a read is hung, no further read is started behind it, so a user
+    /// pressing Ctrl+V six more times at
     /// a frozen selection owner does not buy six more 24 s reads, nor six late
     /// pastes landing minutes later in whatever holds focus by then. Two
     /// presses far enough apart to be two keystrokes are never coalesced: a
@@ -760,13 +763,45 @@ struct ClipboardWorker {
 /// The dispatch a clipboard answer becomes: exactly one top-level
 /// [`EditCommand::Paste`] carrying the text the worker read.
 ///
-/// Focus routing is what makes the late delivery safe, with no shell-side
-/// record of who asked: if focus moved or was released while the read was
-/// outstanding, the synthesized command reaches no widget and is dropped
-/// (`EventCtx::request_paste`'s own contract), so the shell answers
-/// unconditionally.
+/// Says nothing about *whether* the answer should be dispatched at all — that
+/// is [`paste_answer_dispatch`]'s question, and it is a separate one, because
+/// focus routing alone hands a late answer to whichever field holds focus when
+/// it lands rather than to the one that asked.
 fn paste_input_event(text: PasteText) -> InputEvent {
     InputEvent::EditCommand(EditCommand::Paste(text.into_string()))
+}
+
+/// The dispatch a clipboard answer becomes, or `None` when the answer no longer
+/// belongs to the focus session that asked for it.
+///
+/// `asked_in` is the session recorded when the read was requested
+/// ([`ShellHandler::paste_session`]); `live` is
+/// [`RenderRoot::focus_epoch`] read again at the moment the answer arrives.
+///
+/// The comparison is the whole of the guard, and it is needed because focus
+/// routing covers only half the hazard. A session that was *released* while the
+/// read was outstanding does drop the answer on its own — with nothing focused
+/// the synthesized command reaches no widget (`EventCtx::request_paste`'s own
+/// contract). A focus *move*, though, leaves a field standing to receive it,
+/// and that field never asked for a paste; the clip the user meant for one
+/// field is silently typed into another. That is what this refuses.
+///
+/// [`RenderRoot::focus_epoch`] is the right counter for the question and
+/// `focus_ime_generation` is not: this one advances once per honoured focus
+/// claim and once per session release and on nothing else, so it moves when
+/// focus crosses two fields publishing identical surfaces, and stands still
+/// through an edit or a caret move inside the one session. Both accessors
+/// document the contrast.
+///
+/// `None` for `asked_in` means nothing on record addresses this answer, so it
+/// is not this shell's to deliver: either nothing asked, or an earlier answer
+/// already took the record — which is how a second read that raced the
+/// coalescing gate open loses its own answer. See
+/// [`ShellHandler::paste_session`] for why that is the accepted cost.
+///
+/// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
+fn paste_answer_dispatch(asked_in: Option<u64>, live: u64, text: PasteText) -> Option<InputEvent> {
+    (asked_in == Some(live)).then(move || paste_input_event(text))
 }
 
 /// Run `app_logic` over `state` in a desktop preview window until it is closed.
@@ -931,6 +966,8 @@ where
         // field's doc.
         clipboard: None,
         clipboard_unreachable_logged: false,
+        // Nothing has asked for a paste yet — see the field's doc.
+        paste_session: None,
     };
 
     // Construction-time font drain: apply any fonts registered via
@@ -1695,6 +1732,83 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// reachable clipboard mechanism, a selection owner that never answers) are
     /// warned once per kind on the worker itself — see [`ClipboardWarnings`].
     clipboard_unreachable_logged: bool,
+    /// The focus session ([`RenderRoot::focus_epoch`]) recorded by the most
+    /// recent paste request — `None` before anything has asked, and again as
+    /// soon as an answer takes it. Nothing else clears it, so a value outlasts
+    /// a read that answered nothing; the next request overwrites it, and no
+    /// answer can reach this slot without one.
+    ///
+    /// An `EditCommand::Paste` is focus-routed and carries text but no identity
+    /// of its own, so an answer that arrives after focus has moved lands in
+    /// whichever field holds focus by then: a field that never asked for it.
+    /// The host read is asynchronous and its wait belongs to another process —
+    /// 24 seconds, measured, against an unresponsive X11 selection owner (see
+    /// [`ClipboardWorker`]) — and a Tab press inside a window that wide is an
+    /// ordinary thing for a user to do. So the asking session is recorded here
+    /// when the request is drained and compared against the live one when the
+    /// answer arrives; see [`ShellHandler::request_clipboard_read`] and
+    /// [`paste_answer_dispatch`].
+    ///
+    /// # One slot, however many reads are out
+    ///
+    /// More than one read genuinely can be outstanding, so this slot does not
+    /// describe what is in flight and does not try to. The coalescing gate
+    /// ([`ClipboardWorker::read_in_flight`]) re-opens as the worker's read arm
+    /// ends — after the answer has been posted through the proxy, but before
+    /// the UI thread has consumed it — so a paste request raised inside that
+    /// window finds the gate open and starts a second read instead of folding
+    /// into the first.
+    ///
+    /// One slot is still enough, because an answer is decided against this
+    /// value alone and there are only three outcomes. It names the live
+    /// session: deliver, into a session in which a paste was requested, since
+    /// nothing but a request ever writes here. It names one since gone: drop.
+    /// It is empty, an earlier answer having taken it: drop. None of the three
+    /// asks which read an answer came from, so threading an identity through
+    /// [`ClipboardRequest`] and [`ShellUserEvent`] would buy a pairing the
+    /// decision never consults.
+    ///
+    /// # A surplus answer is dropped
+    ///
+    /// The record is taken, not copied, so one recorded request is answered
+    /// once. A second read that does get past the gate therefore finds the slot
+    /// empty when its answer lands: two presses close enough together to race
+    /// it, inside one *unchanged* session, now produce one paste where this
+    /// shell previously produced two. That is a real lost paste, and the
+    /// tolerable direction of one — a paste that did not happen is a keystroke
+    /// away, and a paste that landed in the wrong field is not.
+    ///
+    /// # Why the record is not simply left standing
+    ///
+    /// Letting it survive its answer is the obvious-looking repair for that
+    /// lost paste, and it is wrong. Two fields and one race:
+    ///
+    /// 1. Field A holds the session. It asks, the record becomes A's, a read
+    ///    starts.
+    /// 2. The worker reads, posts its answer, and the gate re-opens. The UI
+    ///    thread has not drained that answer yet.
+    /// 3. Focus moves to field B, which asks **once**. The record is
+    ///    overwritten to B's, and the gate being open, a *second* read starts.
+    /// 4. Both answers now meet a record naming B and a live session of B, so
+    ///    both match.
+    ///
+    /// Left standing, the record hands B the clip twice for the one press it
+    /// made. Taken, the second answer finds nothing on record and is dropped,
+    /// and B gets the single paste it asked for.
+    ///
+    /// Note what does *not* save the standing record: "every value here is a
+    /// session in which a paste was requested" stays true throughout that
+    /// sequence. It is simply not enough, because it says nothing about how
+    /// many answers one ask may absorb. Consuming the record is what bounds
+    /// that at one.
+    ///
+    /// So the lost paste above is paid for knowingly. A paste that did not
+    /// happen inserts nothing and costs a keystroke; a duplicate inserts text
+    /// the user never asked for, and has to be noticed before it can be undone.
+    /// A text field wants the stronger of those two guarantees.
+    ///
+    /// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
+    paste_session: Option<u64>,
 }
 
 impl<State, Logic, V, E> ShellHandler<State, Logic, V, E>
@@ -1833,15 +1947,36 @@ where
         }
     }
 
-    /// Ask the worker for a paste, unless one is already outstanding.
+    /// Ask the worker for a paste, unless one is already outstanding, and
+    /// record the focus session that is doing the asking.
     ///
     /// The coalescing gate ([`ClipboardWorker::read_in_flight`]) is the
     /// difference between a hung selection owner costing one dropped paste and
     /// costing a queue of them: the swap publishes "a read is outstanding"
     /// before the request is sent, and the worker clears it once the answer —
     /// or the decision not to send one — is behind it.
+    ///
+    /// # The recorded session is the most recent asker, not the first
+    ///
+    /// Because a request can be coalesced into a read someone else started, the
+    /// asker and the reader need not be the same session, and the recorded
+    /// value has to belong to one of them deliberately. It is overwritten on
+    /// every request, so the single answer serves whoever asked last.
+    ///
+    /// That is the only choice that can deliver anything at all in the case
+    /// where the two differ. An answer can no longer reach the earlier
+    /// session once focus has left it; keeping the earlier
+    /// session on record would therefore throw the answer away *and* leave the
+    /// field now focused — which explicitly asked for a paste — with nothing.
+    /// Overwriting cannot misdeliver either: every value written here is a
+    /// session in which a paste was requested, and [`paste_answer_dispatch`]
+    /// still requires it to
+    /// be the live one when the answer lands.
     fn request_clipboard_read(&mut self) {
         self.ensure_clipboard_worker();
+        // Written before the coalescing branch: a request folded into a read
+        // already under way is still a request, and still names who to answer.
+        self.paste_session = Some(self.root.focus_epoch());
         let outstanding = self
             .clipboard
             .as_ref()
@@ -2171,12 +2306,22 @@ where
             // The clipboard worker answered a paste request (see
             // `ClipboardWorker`): dispatch it as a fresh, top-level edit
             // command, on this loop turn rather than nested inside the pass
-            // that asked. No window means the answer outlived the window it
-            // was asked for, so it is dropped — the same answer
-            // `DevtoolsUi::dispatch` gives an injection racing startup.
+            // that asked. Two things withhold it. No window means the answer
+            // outlived the window it was asked for — the same answer
+            // `DevtoolsUi::dispatch` gives an injection racing startup. A focus
+            // session that has moved since the request means the answer belongs
+            // to nobody who asked for it, and dispatching it would type the
+            // clip into a field that did not (see `paste_answer_dispatch`). The
+            // record is taken either way, so one request is answered once — and
+            // a surplus answer, from a second read that raced the coalescing
+            // gate open, finds the slot empty and is dropped.
             ShellUserEvent::ClipboardPaste(text) => {
-                if let Some(window) = self.window.clone() {
-                    self.dispatch(&window, paste_input_event(text));
+                let asked_in = self.paste_session.take();
+                if let Some(window) = self.window.clone()
+                    && let Some(event) =
+                        paste_answer_dispatch(asked_in, self.root.focus_epoch(), text)
+                {
+                    self.dispatch(&window, event);
                 }
             }
             // The render thread lost its surface (split path): re-create it here
@@ -2749,8 +2894,9 @@ mod tests {
         clipboard_warning, cursor_change_to_apply, default_theme, finish,
         follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers,
         map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
-        parse_window_maximized, parse_window_size, paste_input_event, physical_to_logical,
-        resolved_window_knob, theme_after_override_poll, window_attributes, winit_cursor_for,
+        parse_window_maximized, parse_window_size, paste_answer_dispatch, paste_input_event,
+        physical_to_logical, resolved_window_knob, theme_after_override_poll, window_attributes,
+        winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
@@ -3024,6 +3170,270 @@ mod tests {
 
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    // --- binding a late paste answer to the focus session that asked ---
+    //
+    // The host read is asynchronous and its wait belongs to another process, so
+    // the answer arrives on a later loop turn — by which time focus may have
+    // moved. `EditCommand::Paste` carries text and no identity, so focus
+    // routing alone would hand it to whatever field holds focus at delivery.
+    //
+    // These two drive a real `RenderRoot`, and move the focus session the way
+    // the user does — a press the field answers with a focus claim of its own —
+    // rather than by writing a counter, so they keep their meaning if the
+    // session mechanism is reimplemented. They are a matched pair on purpose: a
+    // guard that dropped every answer would pass the second one alone.
+    //
+    // What they do NOT reach is the wiring on either side of
+    // `paste_answer_dispatch`: that `ShellHandler::request_clipboard_read`
+    // records `RenderRoot::focus_epoch` and not `focus_ime_generation`, and that
+    // `user_event`'s `ClipboardPaste` arm takes the record rather than copying
+    // it and compares it against a freshly read `focus_epoch`. Both sites live
+    // on a handler owning an `EventLoopProxy`, which cannot exist without an
+    // event loop, so no unit test can construct one — the same wall
+    // `clipboard_loop` meets, and the reason it takes its collaborators
+    // generically. Those two sites are pinned by prose,
+    // not by a test: swapping the counter at the request site would leave both
+    // tests below green.
+
+    /// A focusable stand-in for a text field: takes the focus session on a
+    /// press inside itself, and records every paste it is handed.
+    struct PasteField {
+        /// The texts this field received, in order — the proof of where a paste
+        /// actually landed.
+        pasted: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for PasteField {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::EditCommand(EditCommand::Paste(text)) => {
+                    self.pasted.borrow_mut().push(text.clone());
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// Two stacked fields: a press hit-tests, a paste follows the focus chain.
+    struct PasteFields {
+        first: frust_core::widget::ChildPod,
+        second: frust_core::widget::ChildPod,
+    }
+
+    impl Widget for PasteFields {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.first.layout_child(ctx, bc);
+            self.first.set_origin(Point::ZERO);
+            self.second.layout_child(ctx, bc);
+            self.second.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_focus_routed() {
+                for pod in [&mut self.first, &mut self.second] {
+                    if pod.is_focused() {
+                        return pod.event_child(ctx, event);
+                    }
+                }
+                return EventResult::Ignored;
+            }
+            let position = event.position();
+            let blurs = matches!(
+                event,
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down
+            );
+            let mut result = EventResult::Ignored;
+            let mut hit = false;
+            for pod in [&mut self.first, &mut self.second] {
+                if !hit && pod.contains(position) {
+                    hit = true;
+                    result = pod.event_child(ctx, event);
+                } else if blurs {
+                    // A press landing elsewhere blurs the chain, exactly as
+                    // `frust-widgets`' routers do.
+                    pod.set_focused(false);
+                }
+            }
+            result
+        }
+    }
+
+    /// The fixture's view. It carries the two record handles so each test can
+    /// read what its field received without reaching into the built tree.
+    #[derive(Clone)]
+    struct PasteFieldsView {
+        first: Rc<RefCell<Vec<String>>>,
+        second: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl View<()> for PasteFieldsView {
+        type Element = PasteFields;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PasteFields {
+            PasteFields {
+                first: frust_core::widget::ChildPod::new(Box::new(PasteField {
+                    pasted: self.first.clone(),
+                })),
+                second: frust_core::widget::ChildPod::new(Box::new(PasteField {
+                    pasted: self.second.clone(),
+                })),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PasteFields,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// Which of the fixture's two fields.
+    #[derive(Clone, Copy)]
+    enum PasteTarget {
+        First,
+        Second,
+    }
+
+    /// A laid-out `RenderRoot` over the two fields, plus their paste records.
+    struct PasteHarness {
+        root: RenderRoot<(), PasteFieldsView>,
+        state: (),
+        first: Rc<RefCell<Vec<String>>>,
+        second: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl PasteHarness {
+        fn new() -> Self {
+            let mut root: RenderRoot<(), PasteFieldsView> = RenderRoot::new();
+            let mut state = ();
+            let view = PasteFieldsView {
+                first: Rc::new(RefCell::new(Vec::new())),
+                second: Rc::new(RefCell::new(Vec::new())),
+            };
+            let (first, second) = (view.first.clone(), view.second.clone());
+            root.rebuild(&mut move |_: &mut ()| view.clone(), &mut state);
+            root.layout(Size::new(100.0, 60.0));
+            PasteHarness {
+                root,
+                state,
+                first,
+                second,
+            }
+        }
+
+        /// Press a field the way a user does — inside its bounds — which is
+        /// what makes it claim the focus session.
+        fn press(&mut self, target: PasteTarget) {
+            let y = match target {
+                PasteTarget::First => 15.0,
+                PasteTarget::Second => 45.0,
+            };
+            let press = InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(50.0, y),
+                button: PointerButton::Primary,
+            });
+            self.root.event(&mut self.state, &press);
+        }
+
+        fn dispatch(&mut self, event: &InputEvent) {
+            self.root.event(&mut self.state, event);
+        }
+
+        /// What each field has been handed so far.
+        fn pasted(&self) -> (Vec<String>, Vec<String>) {
+            (self.first.borrow().clone(), self.second.borrow().clone())
+        }
+    }
+
+    #[test]
+    fn a_paste_answer_still_lands_when_the_focus_session_never_moved() {
+        // The control, and the half that keeps the other half honest: the
+        // ordinary paste, where the answer comes back into the same session
+        // that asked and must be delivered in full.
+        let mut harness = PasteHarness::new();
+        harness.press(PasteTarget::First);
+        // What `request_clipboard_read` records at the moment the tree asks.
+        let asked_in = Some(harness.root.focus_epoch());
+
+        // …and what `user_event` decides when the worker answers.
+        let dispatch = paste_answer_dispatch(
+            asked_in,
+            harness.root.focus_epoch(),
+            PasteText("copied text".to_string()),
+        )
+        .expect("an answer arriving in the session that asked must still dispatch");
+        harness.dispatch(&dispatch);
+
+        let (first, second) = harness.pasted();
+        assert_eq!(
+            first,
+            vec!["copied text".to_string()],
+            "exactly one paste, with the text the worker read, into the field that asked"
+        );
+        assert!(second.is_empty(), "{second:?}");
+    }
+
+    #[test]
+    fn a_paste_answer_is_withheld_once_the_focus_session_has_moved_on() {
+        let mut harness = PasteHarness::new();
+        harness.press(PasteTarget::First);
+        let asked_in = Some(harness.root.focus_epoch());
+
+        // The user moves on while the read is still outstanding. Nothing about
+        // the request is replayed — only the tree's focus session moves, and it
+        // moves through an honoured claim, the way it does in a running app.
+        harness.press(PasteTarget::Second);
+        assert_ne!(
+            Some(harness.root.focus_epoch()),
+            asked_in,
+            "fixture precondition: an honoured focus claim moves the session"
+        );
+
+        assert!(
+            paste_answer_dispatch(
+                asked_in,
+                harness.root.focus_epoch(),
+                PasteText("copied text".to_string()),
+            )
+            .is_none(),
+            "an answer whose session is gone must not become a dispatch"
+        );
+        let (first, second) = harness.pasted();
+        assert!(
+            first.is_empty() && second.is_empty(),
+            "nothing may be pasted at all: {first:?} {second:?}"
+        );
+
+        // What makes the assertion above mean something: the very same answer,
+        // dispatched with no session check, does land — in the field the user
+        // moved to, which never asked for it. The tree would not have dropped
+        // this paste on its own, so the withholding above is the guard's doing
+        // and nothing else's.
+        harness.dispatch(&paste_input_event(PasteText("copied text".to_string())));
+        let (first, second) = harness.pasted();
+        assert!(
+            first.is_empty(),
+            "the field that asked cannot be reached once focus has left it: {first:?}"
+        );
+        assert_eq!(
+            second,
+            vec!["copied text".to_string()],
+            "unguarded, the clip is typed into the field that never asked"
+        );
     }
 
     // --- brightness_from_winit ---
