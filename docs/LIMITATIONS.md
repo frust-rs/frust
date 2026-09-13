@@ -2044,7 +2044,7 @@ dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md)
 
 ---
 
-### `desktop-shells-runtime-unverified` — the Linux desktop shell is compile-gated only, never launched
+### `desktop-shells-runtime-unverified` — the Linux desktop shell's Wayland session is unverified
 
 **Observed**: Phase A's `frust-shell-macos`/`-windows`/`-linux` (menu bar, lifecycle, window
 icon/identity) were built and integrated from a headless Linux host — proven only via cross-target
@@ -2059,28 +2059,28 @@ functional bugs found. **Windows** is no longer in this gap either: the Windows 
 titlebar+taskbar icon, the `AppUserModelID` taskbar identity, the dark titlebar following the app
 theme, native menu-bar activation delivery, a declared accelerator firing its item (proven by
 injected-keystroke probe against the live window), and quit — and caught two real defects, both
-fixed and re-verified in the same round: the quit role dead-ended in muda's `PostQuitMessage`
-(now an owned item the handler maps to `WM_CLOSE`), and submenu accelerators never entered the
-`HACCEL` because items were appended before the submenu was attached (build order is
-load-bearing; both contracts are documented at their `frust-shell-windows/src/menu.rs` sites).
-Still owed: **Linux** — Wayland `app_id`/X11 `WM_CLASS` pairing and the window icon (a
-non-headless Linux session; rides Phase B's `.desktop` milestone).
+fixed and re-verified in the same round: the quit role dead-ended in muda's `PostQuitMessage` (now
+an owned item the handler maps to `WM_CLOSE`), and submenu accelerators never entered the `HACCEL`
+because items were appended before the submenu was attached (build order is load-bearing; both
+contracts are documented at their `frust-shell-windows/src/menu.rs` sites). **Linux X11** closed on
+2026-09-13 (KDE on Xorg, NVIDIA T400): `WM_CLASS` matched the app id, the `.desktop` entry paired
+via `StartupWMClass` (KDE task manager), `_NET_WM_ICON` rendered in the titlebar and taskbar, and
+titlebar-close exited 0. Only a **Wayland** session (the `app_id` half) remains open.
 
-**Applies to**: any app built with a Phase A desktop shell on Linux, until the matching device
-pass runs.
+**Applies to**: a Phase A desktop shell app under Wayland, until the `app_id` pairing is verified.
 
-**Why accepted**: PLAN.md's Edge Cases documented this verification asymmetry before the phase
-started (only Linux hardware was on hand); the cross-target compile gates are the strongest proof
-achievable without the device, and every native API call site was additionally read against its
-vendored source (muda 0.19.3, winit 0.30.13, windows-sys 0.61.2, objc2/objc2-app-kit 0.3.x) rather
-than guessed.
+**Why accepted**: the closed macOS, Windows, and Linux X11 gates cover the native shell call sites
+this crate owns, each read against vendored source (muda 0.19.3, winit 0.30.13, windows-sys 0.61.2,
+objc2/objc2-app-kit 0.3.x) rather than guessed; only a Wayland session — a distinct winit backend
+for the `app_id` identity path — has not yet run.
 
 **Evidence**: desktop-shells Phase A tasks 02/03/04/05/06 completion summaries (Risks/Limitations
 sections); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Build State (Wave 3
 integration-verify cross-target matrix); macOS runtime verification —
-`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` (gate table
-G4, G5, G9, G12, G15); Windows runtime verification — the 2026-08-19 gate, landed with the
-menu-quit and accelerator-registration fixes that narrowed this entry.
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` (gate table G4,
+G5, G9, G12, G15); Windows runtime verification — the 2026-08-19 gate, landed with the menu-quit
+and accelerator-registration fixes that narrowed this entry; Linux X11 verification — the
+2026-09-13 gate (KDE on Xorg, NVIDIA T400).
 
 ---
 
