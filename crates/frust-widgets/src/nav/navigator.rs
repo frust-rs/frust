@@ -2135,6 +2135,7 @@ fn cleared_ime_state() -> ImeState {
         },
         caret: None,
         content_type: Default::default(),
+        suppress_soft_keyboard: false,
     }
 }
 

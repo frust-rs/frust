@@ -792,6 +792,7 @@ mod tests {
                 },
                 caret: None,
                 content_type: Default::default(),
+                suppress_soft_keyboard: false,
             });
         }
     }

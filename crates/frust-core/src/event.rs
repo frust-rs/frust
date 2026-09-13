@@ -1451,6 +1451,23 @@ pub struct ImeState {
     /// platform IME. Defaults to [`ImeContentType::Normal`] — a field that says
     /// nothing behaves exactly as it did before this hint existed.
     pub content_type: ImeContentType,
+    /// Whether the field wants the platform input surface **without** an
+    /// on-screen keyboard.
+    ///
+    /// A field whose text cannot be changed is still focusable and copyable
+    /// (Material 3 and Apple's HIG both keep it so), and copying is exactly
+    /// what needs the surface: the web overlay `<input>`'s DOM `copy`
+    /// listener, Android's `InputConnection` and iOS's first responder are
+    /// each the route a clipboard verb travels, and all three exist only while
+    /// [`active`](Self::active) holds. What such a field does not need is
+    /// somewhere to type — so this asks the shell to keep the surface wired and
+    /// suppress the soft keyboard it would otherwise raise.
+    ///
+    /// Defaults to `false` — a field that says nothing behaves exactly as it
+    /// did before this hint existed. It says nothing about an inactive surface
+    /// (there is no keyboard up to suppress), and a shell with no on-screen
+    /// keyboard of its own has nothing to do for it.
+    pub suppress_soft_keyboard: bool,
 }
 
 impl Default for ImeState {
@@ -1462,6 +1479,7 @@ impl Default for ImeState {
             editing: EditingState::default(),
             caret: None,
             content_type: ImeContentType::Normal,
+            suppress_soft_keyboard: false,
         }
     }
 }
@@ -1495,6 +1513,7 @@ impl fmt::Debug for ImeState {
         }
         s.field("caret", &self.caret)
             .field("content_type", &self.content_type)
+            .field("suppress_soft_keyboard", &self.suppress_soft_keyboard)
             .finish()
     }
 }
@@ -2281,6 +2300,7 @@ mod tests {
             },
             caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
             content_type: ImeContentType::Normal,
+            suppress_soft_keyboard: false,
         };
         {
             let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false, false, false);
@@ -2399,6 +2419,7 @@ mod tests {
             },
             caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
             content_type: ImeContentType::Password,
+            suppress_soft_keyboard: false,
         };
         ctx.publish_ime_state(published.clone());
         let taken = ctx.take_ime_state().expect("published state");
@@ -2428,6 +2449,29 @@ mod tests {
         assert_eq!(ctx.take_ime_state(), Some(published));
     }
 
+    /// The keyboard-suppression hint is carried, not interpreted: core passes
+    /// it through untouched, and it prints plainly (it is a routing hint, not a
+    /// secret) so a trace shows why no keyboard came up.
+    #[test]
+    fn suppress_soft_keyboard_defaults_off_round_trips_and_prints_plainly() {
+        assert!(
+            !ImeState::default().suppress_soft_keyboard,
+            "a publisher that says nothing must behave as it did before the hint existed"
+        );
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        let published = ImeState {
+            active: true,
+            suppress_soft_keyboard: true,
+            ..ImeState::default()
+        };
+        ctx.publish_ime_state(published.clone());
+        let taken = ctx.take_ime_state().expect("published state");
+        assert_eq!(taken, published);
+        assert!(taken.suppress_soft_keyboard);
+        assert!(format!("{taken:?}").contains("suppress_soft_keyboard: true"));
+    }
+
     #[test]
     fn debug_redacts_a_secret_field_but_not_a_normal_one() {
         let secret = ImeState {
@@ -2438,6 +2482,7 @@ mod tests {
             },
             caret: None,
             content_type: ImeContentType::Password,
+            suppress_soft_keyboard: false,
         };
         let rendered = format!("{secret:?}");
         assert!(

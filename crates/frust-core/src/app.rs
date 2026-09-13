@@ -4047,6 +4047,7 @@ mod tests {
                         },
                         caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
                         content_type: Default::default(),
+                        suppress_soft_keyboard: false,
                     });
                     return EventResult::Handled;
                 }
@@ -4143,6 +4144,7 @@ mod tests {
             },
             caret: None,
             content_type: Default::default(),
+            suppress_soft_keyboard: false,
         }
     }
 
@@ -4360,6 +4362,7 @@ mod tests {
                 },
                 caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
                 content_type: Default::default(),
+                suppress_soft_keyboard: false,
             }
         }
     }
@@ -4623,6 +4626,7 @@ mod tests {
                 },
                 caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
                 content_type: Default::default(),
+                suppress_soft_keyboard: false,
             }
         }
     }

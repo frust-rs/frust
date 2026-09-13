@@ -96,10 +96,10 @@
 //! to nothing ([`frust_text::sanitize_paste`], which denies newlines in a
 //! single-line field and normalises CRLF in a multi-line one) inserts nothing.
 //! Each is still *handled*: the verb was understood and answered with "nothing".
-//! A disabled or read-only field never sees a command at all, because it never
-//! holds focus (which is also why a read-only field cannot be copied from —
-//! Material 3 and the HIG would keep it focusable, and this widget deliberately
-//! does not).
+//! A disabled field never sees a command at all, because it never holds focus.
+//! A **read-only** field does see them: it is focusable precisely so its content
+//! can be selected and copied, so it answers copy and select-all in full and
+//! answers cut and paste with nothing (see "Read-only mode").
 //!
 //! # Selection gestures and the toolbar
 //!
@@ -305,18 +305,58 @@
 //! # Read-only mode
 //!
 //! [`TextInputView::read_only(true)`](TextInputView::read_only) makes the field
-//! non-interactive **without** dimming it — the presentation `enabled(false)`
-//! cannot express, since disabled conflates two orthogonal questions
-//! (interactive? / dimmed?) a static-but-live-styled mock must keep apart (a
-//! splash screen's frozen preview must not pop to full alpha when it goes live).
+//! uneditable **without** dimming it — the presentation `enabled(false)` cannot
+//! express, since disabled conflates two orthogonal questions (editable? /
+//! dimmed?) a static-but-live-styled mock must keep apart (a splash screen's
+//! frozen preview must not pop to full alpha when it goes live).
 //!
-//! Non-interactivity reuses that same focus gate rather than a parallel path:
-//! [`TextInputWidget::interactive`] is `enabled && !read_only`, and every gate
-//! (the top of [`Widget::event`], the focused-while-painting check, the
-//! disabled-while-focused IME-dismiss branch) reads it, so a field turned
-//! read-only while focused releases focus and dismisses the platform IME exactly
-//! like one turned disabled. **Dimming stays keyed to `enabled` alone**, never
-//! `interactive`: both resolution points ([`Chrome::resolve`] and
+//! **A read-only field is focusable and copyable** — Material 3's and Apple's
+//! HIG's convention, and the plain reading of a value on screen: text a user can
+//! read is text they can select and copy. Two hooks say so where there used to
+//! be one: [`TextInputWidget::focusable`] is `enabled` (the top of
+//! [`Widget::event`], the focused-while-painting check) and
+//! [`TextInputWidget::editable`] is `enabled && !read_only` (every path that
+//! changes the text, plus the keyboard hint below). So a read-only field takes
+//! focus on a press, places its caret, drag-selects, long-presses to a toolbar
+//! offering copy and select-all, and answers the copy/select-all chords in full,
+//! while it refuses typed characters, IME composition and commits, and the
+//! editing and caret-motion keys. Cut and paste it answers with nothing — and a
+//! paste chord it answers *without* asking the shell to read the host clipboard
+//! at all: the ask itself reaches the host, and on iOS it is one of the gestures
+//! that can raise the system's paste prompt, which a field that would discard
+//! the answer has no business provoking. Escape still ends the session, a field
+//! that can hold one needing a keyboard way out of it. Its caret is drawn but
+//! does **not** blink: a blink advertises an insertion point, and this field
+//! takes no insertion.
+//!
+//! **The keyboard.** A focused read-only field publishes
+//! `ImeState { active: true, suppress_soft_keyboard: true, .. }`. Active,
+//! because every shell's clipboard route hangs off the platform surface (the web
+//! overlay `<input>`'s DOM `copy` listener, Android's `InputConnection`, iOS's
+//! first responder) and dies with it; suppressed, because there is nothing here
+//! to type into.
+//!
+//! The hint is an **obligation on the shell**, and it is the shell's half that
+//! makes the pair mean anything: a shell that raises an on-screen keyboard must
+//! read `suppress_soft_keyboard` and, when it is set, keep the platform input
+//! surface it would build for `active` while leaving that keyboard down. A shell
+//! with no on-screen keyboard of its own (desktop/winit) has nothing to do for
+//! it.
+//!
+//! **No shell reads it yet.** `active` alone still drives the platform keyboard
+//! on both mobile shells, and neither `ime_state_to_json` puts this field on the
+//! wire at all, so it cannot reach Kotlin or Swift even in principle. Until each
+//! shell is taught the hint, tapping a read-only field on Android or iOS raises
+//! the soft keyboard — where before this field took no focus, it raised nothing.
+//! That is a known, tracked gap in the shells, not a contract this module is
+//! quietly failing to keep: everything above the seam publishes the hint
+//! correctly, and a test pins it.
+//!
+//! `enabled(false)` remains the stronger claim, unchanged: it refuses focus
+//! outright, so none of the above reaches a disabled field, and a field disabled
+//! while focused still releases focus and deactivates the IME. **Dimming stays
+//! keyed to `enabled` alone**, never to either hook: both resolution points
+//! ([`Chrome::resolve`] and
 //! [`effective_style`](TextInputWidget::effective_style)) branch on `enabled`.
 //!
 //! **Semantics.** Read-only is a real accessibility distinction from disabled —
@@ -328,7 +368,9 @@
 //! Read-only is orthogonal to [`obscured`](TextInputView::obscured) — never
 //! touching masking, the mirror or the published `ImeContentType` hint, so a
 //! read-only obscured field still reports `Role::PasswordInput` with a masked
-//! a11y value, it just never focuses — and to the *Chrome* geometry setters.
+//! a11y value — and to the *Chrome* geometry setters. The two refusals compose
+//! rather than cancel: an obscured field hands out neither its secret nor its
+//! bullet mirror, so a read-only obscured one is focusable and copies nothing.
 //!
 //! # Obscured (password) mode
 //!
@@ -599,7 +641,7 @@ pub struct TextInputView<State: 'static> {
     /// and IME editing unreachable) and dims the chrome — see
     /// [`TextInputView::enabled`].
     enabled: bool,
-    /// Whether the field refuses focus/editing without dimming — see
+    /// Whether the field refuses *editing* (never focus) without dimming — see
     /// [`TextInputView::read_only`]. Independent of `enabled`: dimming stays
     /// keyed to `enabled` alone (see the [module docs](self)' "Read-only mode"
     /// section).
@@ -726,27 +768,29 @@ impl<State: 'static> TextInputView<State> {
     /// paints no caret and dims its text, placeholder and outline (see the
     /// [module docs](self)). A field disabled while focused drops its focus.
     ///
-    /// This is **disabled**, not *read-only*: Material 3 and Apple's HIG both
-    /// keep a read-only field focusable and copyable, which this option
-    /// deliberately does not do.
+    /// This is **disabled**, not *read-only*: a read-only field stays focusable
+    /// and copyable (Material 3's and Apple's HIG's convention — see
+    /// [`read_only`](Self::read_only)), where this option refuses focus
+    /// outright.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
     }
 
-    /// Set whether the field is read-only (default `false`): non-interactive
-    /// like a disabled field (no focus, no caret, no editing — see
-    /// [`enabled`](Self::enabled)) but painted at **full alpha**, not dimmed.
+    /// Set whether the field is read-only (default `false`): its text cannot be
+    /// changed, but it is still focusable and copyable, and it paints at **full
+    /// alpha** rather than dimmed.
     ///
-    /// This is the presentation `enabled(false)` cannot express: an
-    /// undimmed-but-inert field, e.g. a static mock that should look identical
-    /// before and after a live handoff. Reuses
-    /// `enabled(false)`'s one suppression hook (the focus gate) rather than a
-    /// parallel path — a field made read-only while focused releases focus and
-    /// dismisses the platform IME exactly like disabling it would. See the
-    /// [module docs](self)' "Read-only mode" section for the semantics
-    /// distinction from disabled and the interaction with `obscured`/the
-    /// chrome geometry setters.
+    /// This is the presentation `enabled(false)` cannot express: an undimmed
+    /// field that takes no edits, e.g. a static mock that should look identical
+    /// before and after a live handoff. Unlike
+    /// [`enabled(false)`](Self::enabled) it suppresses only editing — a press
+    /// focuses it, a drag selects, copy and select-all work, and cut and paste
+    /// are answered with nothing. A focused read-only field asks the shell for
+    /// the platform input surface (its clipboard route) with the on-screen
+    /// keyboard suppressed. See the [module docs](self)' "Read-only mode"
+    /// section for the full contract, the semantics distinction from disabled,
+    /// and the interaction with `obscured`/the chrome geometry setters.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
@@ -954,25 +998,27 @@ pub struct TextInputWidget {
     /// Defaults to true single-line / false multi-line; Shift+Enter inverts it
     /// (multi-line only — a single-line field always submits).
     submit_on_enter: bool,
-    /// Whether the field accepts input (see [`TextInputView::enabled`]). Feeds
-    /// [`interactive`](Self::interactive) (the gate for the whole `event()`
-    /// pass) and, alone, both theme-resolution points' dimming — see
+    /// Whether the field accepts input (see [`TextInputView::enabled`]). It
+    /// alone is [`focusable`](Self::focusable) (the gate for the whole `event()`
+    /// pass) and it alone drives both theme-resolution points' dimming — see
     /// [`Chrome::resolve`]/[`effective_style`](Self::effective_style).
     enabled: bool,
     /// Whether the field is read-only (see [`TextInputView::read_only`]).
-    /// Feeds [`interactive`](Self::interactive) alongside `enabled`, but never
-    /// dimming — the whole point of the flag (see the [module docs](self)'
-    /// "Read-only mode" section).
+    /// Withholds [`editable`](Self::editable) alongside `enabled` — but never
+    /// focus, and never dimming, which is the whole point of the flag (see the
+    /// [module docs](self)' "Read-only mode" section).
     read_only: bool,
     /// Whether the rendered glyphs are masked (see [`TextInputView::obscured`]).
     /// Kept alongside `mask_editor` (which it decides) so `rebuild` can compare
     /// it and `semantics` can pick its role without inspecting the mirror.
     obscured: bool,
-    /// Set by a `rebuild` that disabled or read-onlied a field holding focus:
-    /// the focus path lives on the widget's *pod*, which `rebuild` cannot reach
-    /// (`BuildCtx` carries no focus seam), so the release is deferred to the
-    /// first `event()` that arrives — meanwhile `paint` already refuses to
-    /// behave as focused (no caret, no blink frame, an inactive IME surface).
+    /// Set by a `rebuild` that disabled a field holding focus: the focus path
+    /// lives on the widget's *pod*, which `rebuild` cannot reach (`BuildCtx`
+    /// carries no focus seam), so the release is deferred to the first `event()`
+    /// that arrives — meanwhile `paint` already refuses to behave as focused (no
+    /// caret, no blink frame, an inactive IME surface). Read-only does not set
+    /// it: that field keeps its session (see the [module docs](self)' "Read-only
+    /// mode" section).
     release_focus_pending: bool,
     /// The widget's event-pass view of its focus: set on a `Down` inside,
     /// cleared on Escape / a blur `Down` this widget observes. NOT authoritative
@@ -1106,17 +1152,66 @@ fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
+/// Which named keys a focusable-but-not-editable field still answers.
+///
+/// The clipboard verbs, and Escape — the keyboard's way out of a session such a
+/// field can now hold. Everything else either changes the text or moves the
+/// caret through `apply_edit`, and stays refused exactly as it was while a
+/// read-only field refused focus outright. Cut and paste are answered *here* and
+/// refused further down (`handle_command`, `request_paste_if_editable`), so the
+/// verb is understood and answered with nothing rather than ignored.
+///
+/// Matched exhaustively (no `_` arm) on purpose: a named key added to
+/// [`NamedKey`] is a compile error here until it is classified.
+fn answered_while_read_only(named: NamedKey, modifiers: frust_core::Modifiers) -> bool {
+    match named {
+        NamedKey::Copy | NamedKey::Cut | NamedKey::Paste | NamedKey::Insert | NamedKey::Escape => {
+            true
+        }
+        // Shift+Delete is the legacy cut chord; a plain (or otherwise chorded)
+        // Delete is a forward delete, which is an edit.
+        NamedKey::Delete => modifiers.shift && !modifiers.ctrl && !modifiers.meta,
+        NamedKey::Enter
+        | NamedKey::Backspace
+        | NamedKey::ArrowLeft
+        | NamedKey::ArrowRight
+        | NamedKey::ArrowUp
+        | NamedKey::ArrowDown
+        | NamedKey::Home
+        | NamedKey::End
+        | NamedKey::Tab => false,
+    }
+}
+
 impl TextInputWidget {
-    /// Whether the field can take focus and be edited — `false` if disabled
-    /// *or* read-only. The single hook both flags suppress interactivity
-    /// through: [`Widget::event`]'s top gate, `paint`'s `focused` computation,
-    /// and the disabled/read-only-while-focused IME-dismiss branch all key off
-    /// this rather than `enabled` alone, so `read_only` gets the exact same
-    /// suppression `enabled(false)` already had with no parallel path. Dimming
-    /// deliberately does **not** use this — see [`Chrome::resolve`] and
+    /// Whether the field can take focus — `enabled` alone, so a **read-only**
+    /// field passes.
+    ///
+    /// [`Widget::event`]'s top gate and `paint`'s `focused` computation read
+    /// this: a read-only field is focusable so its content can be selected and
+    /// copied (what Material 3 and Apple's HIG both keep), and the clipboard
+    /// verbs reach it the way every focus-routed event does — along the focus
+    /// path it is now allowed to hold. What read-only withholds is
+    /// [`editable`](Self::editable), not this.
+    ///
+    /// Dimming deliberately uses neither hook — see [`Chrome::resolve`] and
     /// [`effective_style`](Self::effective_style), which key off `enabled`
     /// alone (the [module docs](self)' "Read-only mode" section).
-    fn interactive(&self) -> bool {
+    fn focusable(&self) -> bool {
+        self.enabled
+    }
+
+    /// Whether the field's text may actually change — `false` if disabled *or*
+    /// read-only.
+    ///
+    /// Every mutating path keys off this rather than off focus: typing, IME
+    /// composition and commits, the editing and caret-motion named keys, and
+    /// the `Cut`/`Paste` halves of [`handle_command`](Self::handle_command)
+    /// (answered, with nothing, rather than left for someone else). So does
+    /// [`ImeState::suppress_soft_keyboard`], which is how a focused read-only
+    /// field keeps the platform surface its copy route needs without the
+    /// on-screen keyboard it has no use for.
+    fn editable(&self) -> bool {
         self.enabled && !self.read_only
     }
 
@@ -1385,6 +1480,12 @@ impl TextInputWidget {
             } else {
                 ImeContentType::Normal
             },
+            // A read-only field publishes an *active* surface like any other —
+            // the shells' clipboard routes (the web overlay's DOM `copy`
+            // listener, Android's `InputConnection`, iOS's first responder) all
+            // hang off it — and asks only that the on-screen keyboard stay down,
+            // having nothing to type into.
+            suppress_soft_keyboard: !self.editable(),
         }
     }
 
@@ -1525,8 +1626,10 @@ impl TextInputWidget {
     /// [`SelectionToolbarActions`]): an obscured field hands out neither the
     /// real buffer nor its bullet mirror, so copy and cut are refused there
     /// exactly as [`clipboard_selection`](Self::clipboard_selection) refuses
-    /// them; cut and paste additionally need an interactive field; and
-    /// select-all is pointless with no text or with all of it already selected.
+    /// them; cut and paste additionally need an [`editable`](Self::editable)
+    /// field, which is what leaves a read-only one offering copy and select-all
+    /// alone; and select-all is pointless with no text or with all of it
+    /// already selected.
     fn toolbar_actions(&self) -> SelectionToolbarActions {
         let text = self.editor.text();
         let selected = self.editor.selected_text();
@@ -1536,8 +1639,8 @@ impl TextInputWidget {
         let all_selected = selected.is_some_and(|s| s.len() == text.len());
         SelectionToolbarActions {
             copy: has_selection && !self.obscured,
-            cut: has_selection && !self.obscured && self.interactive(),
-            paste: self.interactive(),
+            cut: has_selection && !self.obscured && self.editable(),
+            paste: self.editable(),
             select_all: !text.is_empty() && !all_selected,
         }
     }
@@ -1588,9 +1691,13 @@ impl TextInputWidget {
     fn sync_toolbar(&mut self, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
         // Under the Native policy the platform draws it, so the field floats
         // nothing and only keeps publishing the request from `paint`.
+        // Wanted by any *focusable* field, read-only included: on a touch
+        // device the bar is the only copy affordance there is, and
+        // `toolbar_actions` is what withholds the verbs a read-only field must
+        // not offer.
         let wanted = (self.toolbar_open
             && self.focused
-            && self.interactive()
+            && self.focusable()
             && selection_toolbar_policy() == SelectionToolbarPolicy::Framework)
             .then(|| self.toolbar_actions());
         if wanted == self.toolbar_view_actions {
@@ -1657,10 +1764,7 @@ impl TextInputWidget {
                         return self.handle_command(ctx, &EditCommand::Cut);
                     }
                     if s.eq_ignore_ascii_case("v") {
-                        // Only the shell can read the host clipboard, so a paste
-                        // is *asked for* here and arrives on a later pass as
-                        // `EditCommand::Paste` (`EventCtx::request_paste`).
-                        ctx.request_paste();
+                        self.request_paste_if_editable(ctx);
                         return EventResult::Handled;
                     }
                     if s.eq_ignore_ascii_case("a") {
@@ -1672,10 +1776,19 @@ impl TextInputWidget {
                     // inserting a stray letter.
                     return EventResult::Handled;
                 }
+                if !self.editable() {
+                    // Focusable but not editable: a read-only field takes no
+                    // text from the keyboard, and refuses it unconsumed exactly
+                    // as it did when it refused focus outright.
+                    return EventResult::Ignored;
+                }
                 self.apply_edit(ctx, EditOp::Insert(s.clone()));
                 EventResult::Handled
             }
             Key::Named(named) => {
+                if !self.editable() && !answered_while_read_only(*named, modifiers) {
+                    return EventResult::Ignored;
+                }
                 let select = modifiers.shift;
                 match named {
                     NamedKey::Backspace => self.apply_edit(ctx, EditOp::Backdelete),
@@ -1746,7 +1859,7 @@ impl TextInputWidget {
                     // exactly the verbs the chords above do.
                     NamedKey::Copy => return self.handle_command(ctx, &EditCommand::Copy),
                     NamedKey::Cut => return self.handle_command(ctx, &EditCommand::Cut),
-                    NamedKey::Paste => ctx.request_paste(),
+                    NamedKey::Paste => self.request_paste_if_editable(ctx),
                     NamedKey::Insert => {
                         // The legacy Insert chords: Shift+Insert pastes,
                         // Ctrl+Insert copies (shift wins when both are held).
@@ -1754,7 +1867,7 @@ impl TextInputWidget {
                         // does not implement, so it is left unconsumed rather
                         // than silently swallowed.
                         if modifiers.shift {
-                            ctx.request_paste();
+                            self.request_paste_if_editable(ctx);
                         } else if modifiers.ctrl {
                             return self.handle_command(ctx, &EditCommand::Copy);
                         } else {
@@ -1764,6 +1877,21 @@ impl TextInputWidget {
                 }
                 EventResult::Handled
             }
+        }
+    }
+
+    /// Ask the shell to read the host clipboard, but only for a field that
+    /// could act on the answer.
+    ///
+    /// Only the shell can read it, so a paste is *asked for* here and arrives
+    /// on a later pass as [`EditCommand::Paste`] (`EventCtx::request_paste`).
+    /// The asking is not free — it reaches the host clipboard, and on iOS it is
+    /// one of the gestures that can raise the system's paste prompt — so a
+    /// read-only field, whose `EditCommand::Paste` would change nothing anyway,
+    /// consumes its paste chord and asks for nothing.
+    fn request_paste_if_editable(&self, ctx: &mut EventCtx) {
+        if self.editable() {
+            ctx.request_paste();
         }
     }
 
@@ -1801,6 +1929,10 @@ impl TextInputWidget {
     /// understood and answered with "nothing", which is not the same as leaving
     /// it for someone else.
     ///
+    /// * **Read-only** — cut and paste change nothing and write nothing, since
+    ///   both would rewrite a buffer the field does not hand out for rewriting;
+    ///   copy and select-all run exactly as on an editable field, which is the
+    ///   whole point of keeping a read-only field focusable.
     /// * **Obscured** — copy and cut write nothing and change nothing
     ///   ([`clipboard_selection`](Self::clipboard_selection)). Paste is
     ///   unaffected: writing *into* a password field is ordinary.
@@ -1810,14 +1942,11 @@ impl TextInputWidget {
     /// * **Empty after sanitising** — a paste of nothing but newlines into a
     ///   single-line field inserts nothing rather than applying an empty edit.
     fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &EditCommand) -> EventResult {
-        // A non-interactive field holds no focus path for this command to route
-        // along ([`Widget::event`]'s top gate releases it), so a cut needs no
-        // editable check of its own — this pins that invariant rather than
-        // re-testing it.
-        debug_assert!(
-            self.interactive(),
-            "an EditCommand reached a disabled or read-only field"
-        );
+        // A disabled field holds no focus path for this command to route along
+        // ([`Widget::event`]'s top gate releases it) — this pins that invariant
+        // rather than re-testing it. A read-only field *does* hold one, which is
+        // why the mutating arms below carry their own `editable` check.
+        debug_assert!(self.focusable(), "an EditCommand reached a disabled field");
         let before = self.editor.text().to_string();
         match cmd {
             EditCommand::Copy => {
@@ -1826,7 +1955,13 @@ impl TextInputWidget {
                 }
             }
             EditCommand::Cut => {
-                if let Some(text) = self.clipboard_selection() {
+                // Understood and answered with nothing on a read-only field:
+                // neither half of a cut (the clipboard write *or* the delete)
+                // may happen, since handing out the text while failing to
+                // remove it would be a copy wearing a cut's name.
+                if self.editable()
+                    && let Some(text) = self.clipboard_selection()
+                {
                     ctx.write_clipboard(text);
                     // `Backdelete` over a non-collapsed selection removes the
                     // selection itself, so the write and the delete describe the
@@ -1839,7 +1974,7 @@ impl TextInputWidget {
                 // one normalises CRLF/CR — `frust_text::sanitize_paste` owns both
                 // rules, and `max_visible_lines` is what says which field this is.
                 let text = sanitize_paste(text, self.max_visible_lines.is_none());
-                if !text.is_empty() {
+                if self.editable() && !text.is_empty() {
                     // `Insert` replaces the selection, exactly like typing does.
                     self.editor
                         .apply(EditOp::Insert(text.into_owned()), &mut self.text_ctx);
@@ -2085,22 +2220,15 @@ impl<State: 'static> View<State> for TextInputView<State> {
         }
         // Read-only reconcile: unlike `enabled`, PAINT only — `read_only`
         // never dims (see the module docs' "Read-only mode" section), so no
-        // glyph color is baked differently at layout time. A field made
-        // read-only *while focused* releases focus the same way a field
-        // disabled while focused does (see `interactive`).
+        // glyph color is baked differently at layout time. And unlike a field
+        // disabled while focused, a field made read-only while focused keeps
+        // its session: it is still `focusable`, and that session is what its
+        // content is selected and copied through. Nothing is unwound here —
+        // the next paint publishes a keyboard-suppressed surface (so the soft
+        // keyboard goes away) and `sync_toolbar` below recomputes the verbs,
+        // both from the flag this line just moved across.
         if prev.read_only != self.read_only {
             element.read_only = self.read_only;
-            if self.read_only {
-                element.release_focus_pending = element.focused;
-                element.focused = false;
-                element.captured = false;
-                // A field that stops being interactive mid-press keeps no
-                // gesture in flight either: the hold timer is capture-gated, so
-                // it could not fire anyway, and leaving it armed would hand the
-                // next press a stale epoch.
-                element.clear_gesture();
-                element.toolbar_open = false;
-            }
             flags |= ChangeFlags::PAINT;
         }
         // Obscured reconcile: the masked mirror is what gets *measured*, and a
@@ -2159,8 +2287,9 @@ impl<State: 'static> View<State> for TextInputView<State> {
             flags |= ChangeFlags::PAINT;
         }
         // Last: the toolbar's want is computed from the state everything above
-        // may have just changed (a field turned read-only or disabled wants no
-        // toolbar, and a controlled reconcile changes which verbs apply).
+        // may have just changed (a field turned disabled wants no toolbar, one
+        // turned read-only wants a shorter set of verbs, and a controlled
+        // reconcile changes which verbs apply).
         flags |= element.sync_toolbar(ctx);
         flags
     }
@@ -2319,11 +2448,12 @@ impl Widget for TextInputWidget {
         // caret-blink continuation frame, and IME republish below all key off
         // `focused`, so they stop together and the field stops resurrecting the
         // IME surface the blur cleared.
-        // A disabled or read-only field never *behaves* as focused, even if
-        // the pod's focus path is still recorded (a `rebuild` that flipped
-        // either flag on a focused field cannot reach it — see
-        // `release_focus_pending`).
-        let focused = ctx.has_focus() && self.interactive();
+        // A disabled field never *behaves* as focused, even if the pod's focus
+        // path is still recorded (a `rebuild` that disabled a focused field
+        // cannot reach it — see `release_focus_pending`). Read-only is
+        // deliberately not part of this test: such a field holds a real
+        // session, it just holds one with no keyboard over it.
+        let focused = ctx.has_focus() && self.focusable();
         if self.focused && !focused {
             self.focused = false;
             // The toolbar belongs to the session that was just blurred out from
@@ -2421,7 +2551,13 @@ impl Widget for TextInputWidget {
         // decorative loop, so it is the one exception among the paced loops
         // that freezes lit rather than dark.
         if focused {
-            if !reduce_motion {
+            // A read-only field's caret is drawn steady. The blink advertises an
+            // insertion point, and a field that accepts no insertion has none to
+            // advertise — the caret is there to mark where a selection starts,
+            // so it stays lit and the field asks for no continuation frames at
+            // all (`reduce_motion` freezes it lit for the same reason).
+            let blinks = self.editable() && !reduce_motion;
+            if blinks {
                 ctx.request_frame_paced_at(Duration::from_millis(BLINK_MS as u64));
             }
             // Republish the IME surface every painted frame while focused, so a
@@ -2430,7 +2566,7 @@ impl Widget for TextInputWidget {
             // otherwise leave stale — the mobile IME mirror relies on this to
             // observe the clear (see `PaintCtx::publish_ime_state`).
             ctx.publish_ime_state(self.current_ime_state(origin, size));
-            let caret_visible = reduce_motion || self.caret_visible_at(now);
+            let caret_visible = !blinks || self.caret_visible_at(now);
             if caret_visible && let Some(c) = self.display().cursor_rect(self.caret_width) {
                 let off = text_origin.to_vec2();
                 scene.fill_rect(
@@ -2439,12 +2575,15 @@ impl Widget for TextInputWidget {
                     chrome.caret,
                 );
             }
-        } else if !self.interactive() && ctx.has_focus() {
-            // Disabled or read-only while still holding the pod's focus path:
-            // publish an *inactive* IME surface so the shell dismisses the
-            // keyboard on the very next frame rather than waiting for the
-            // event-pass release (`release_focus_pending`). No caret, and no
-            // frame request — a non-interactive field is at rest.
+        } else if !self.focusable() && ctx.has_focus() {
+            // Disabled while still holding the pod's focus path: publish an
+            // *inactive* IME surface so the shell dismisses the keyboard on the
+            // very next frame rather than waiting for the event-pass release
+            // (`release_focus_pending`). No caret, and no frame request — a
+            // disabled field is at rest. A read-only field never reaches this
+            // arm (it is focusable, so the branch above claims it) and must
+            // not: it keeps an *active* surface with the keyboard suppressed,
+            // which is what leaves the shell's clipboard route wired.
             let mut ime = self.current_ime_state(origin, size);
             ime.active = false;
             ime.caret = None;
@@ -2501,12 +2640,13 @@ impl Widget for TextInputWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // The focus gate IS the disabled/read-only gate: refusing focus here
-        // is what makes `Key`/`Ime` (focus-routed, never hit-tested)
-        // unreachable, so `handle_key`/`handle_ime` need no disabled/read-only
-        // guards of their own. A non-interactive field also consumes nothing
-        // — it is inert, not a shield.
-        if !self.interactive() {
+        // The focus gate IS the disabled gate: refusing focus here is what
+        // makes `Key`/`Ime` (focus-routed, never hit-tested) unreachable, and a
+        // disabled field consumes nothing on the way — it is inert, not a
+        // shield. A read-only field passes this gate and reaches everything
+        // below, so each mutating path carries its own `editable` guard
+        // instead (`handle_key`, the `Ime` arm, `handle_command`'s cut/paste).
+        if !self.focusable() {
             if ctx.has_focus() || self.release_focus_pending {
                 ctx.release_focus();
                 self.release_focus_pending = false;
@@ -2759,6 +2899,13 @@ impl Widget for TextInputWidget {
                 if !ctx.has_focus() {
                     return EventResult::Ignored;
                 }
+                // A read-only field publishes an *active* surface — that is what
+                // keeps the shells' clipboard routes wired — but takes no text
+                // from it. A composition or commit that arrives anyway is
+                // refused exactly as it was when the field held no session.
+                if !self.editable() {
+                    return EventResult::Ignored;
+                }
                 self.focused = true;
                 self.last_tap = None;
                 self.handle_ime(ctx, e)
@@ -2843,12 +2990,14 @@ impl Widget for TextInputWidget {
         // stable). Only the enabled ones are published — an action offered and
         // then refused is worse than one never offered.
         //
-        // Gated on `interactive()` as a whole, the way mounting the bar is: a
-        // disabled or read-only field never holds the focus a verb routes
-        // along, and `toolbar_actions()` alone would still offer `copy` over a
-        // selection one happened to be showing. Focus itself is deliberately
-        // *not* required — a client explores the tree before it acts, and a
-        // field that advertised nothing until focused would not be discovered.
+        // Gated on `focusable()` as a whole, the way mounting the bar is: a
+        // disabled field never holds the focus a verb routes along, and
+        // `toolbar_actions()` alone would still offer `copy` over a selection it
+        // happened to be showing. A read-only field passes — it is copyable, and
+        // `toolbar_actions()` has already withheld the cut and paste it must not
+        // offer. Focus itself is deliberately *not* required — a client explores
+        // the tree before it acts, and a field that advertised nothing until
+        // focused would not be discovered.
         let verbs = self.toolbar_actions();
         let offered: Vec<CustomAction> = [
             (A11Y_CUT_ID, "Cut", verbs.cut),
@@ -2857,7 +3006,7 @@ impl Widget for TextInputWidget {
             (A11Y_SELECT_ALL_ID, "Select all", verbs.select_all),
         ]
         .into_iter()
-        .filter(|(_, _, enabled)| *enabled && self.interactive())
+        .filter(|(_, _, enabled)| *enabled && self.focusable())
         .map(|(id, description, _)| CustomAction {
             id,
             description: description.into(),
@@ -5433,49 +5582,289 @@ mod tests {
 
     // --- read_only(true) ---
 
+    /// A read-only field over `value`, ready for events.
+    fn read_only_root(
+        state: &mut AppState,
+        logic: &mut impl FnMut(&mut AppState) -> TextInputView<AppState>,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        options_root(logic, state)
+    }
+
+    /// Drag-select the whole buffer of an already-built field, the way a user
+    /// produces a selection — [`focused_with_selection`] without the typing a
+    /// read-only field would refuse.
+    fn drag_select_all(
+        state: &mut AppState,
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+    ) {
+        root.event(state, &pointer(PointerPhase::Down, 0.0, 10.0));
+        root.event(state, &pointer(PointerPhase::Move, 290.0, 10.0));
+        root.event(state, &pointer(PointerPhase::Up, 290.0, 10.0));
+    }
+
     #[test]
-    fn read_only_refuses_focus_and_stays_inert() {
-        // Same inertness contract as disabled (reused suppression hook, not a
-        // parallel one): no focus, no caret, no edits reach the field.
-        let mut state = AppState::default();
+    fn read_only_takes_focus_on_a_press_and_paints_focused() {
+        // A read-only field is focusable so its content can be selected and
+        // copied; what it withholds is editing, not the session.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
         let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(
+            outcome.handled,
+            "the press is consumed, like any focus claim"
+        );
+        assert!(root.is_focus_active(), "a press focuses a read-only field");
+        assert!(widget(&root).focused);
+        assert!(widget(&root).captured, "and captures, so a drag can select");
+
+        let rec = paint_chrome(&mut root);
+        assert_eq!(
+            rec.rrects[0], ACCENT,
+            "a focused read-only field paints the focused accent border"
+        );
+        assert_eq!(rec.rects, vec![CARET], "and draws its caret");
+    }
+
+    #[test]
+    fn a_read_only_caret_is_drawn_steady_and_asks_for_no_blink_frames() {
+        // The blink advertises an insertion point; a field that takes no
+        // insertion has none to advertise, so the caret marks where a selection
+        // would start and the field otherwise sits at rest.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+
+        for ms in [0.0, BLINK_MS + 10.0, 2.0 * BLINK_MS + 10.0] {
+            let mut rec = CaretRecorder {
+                caret_color: Some(CARET),
+                caret_fills: 0,
+            };
+            let outcome = root.paint(&mut rec, ft_ms(ms));
+            assert_eq!(rec.caret_fills, 1, "the caret stays lit at t={ms}ms");
+            assert!(
+                !outcome.needs_frame,
+                "no continuation frame is asked for at t={ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn a_focused_read_only_field_publishes_an_active_keyboard_suppressed_surface() {
+        // Active so each shell's clipboard route (which hangs off the platform
+        // surface) stays wired; suppressed so no on-screen keyboard comes up.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let ime = root.ime_state().expect("a focused read-only field has one");
+        assert!(ime.active, "the surface is live, not released");
+        assert!(ime.suppress_soft_keyboard);
+        assert_eq!(ime.editing.text, "abc");
+
+        // An editable field says nothing, exactly as it did before the hint.
+        let mut state = AppState::default();
+        let mut editable_logic = options_logic(true, false, false);
+        let mut root = options_root(&mut editable_logic, &mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let ime = root.ime_state().expect("a focused editable field has one");
+        assert!(ime.active);
+        assert!(
+            !ime.suppress_soft_keyboard,
+            "an editable field wants its keyboard"
+        );
+    }
+
+    #[test]
+    fn read_only_copies_a_drag_selection_and_selects_all_from_the_chords() {
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        drag_select_all(&mut state, &mut root);
+        assert_eq!(
+            selection(&root).as_deref(),
+            Some("abc"),
+            "a drag selects on a read-only field"
+        );
+
+        root.event(&mut state, &chord("c", meta()));
+        assert_eq!(
+            root.take_clipboard_write().as_deref(),
+            Some("abc"),
+            "copy is the verb read-only exists to allow"
+        );
+        assert_eq!(state.changes, 0, "a copy is not an edit");
+
+        // Select-all reaches the same buffer from a fresh session, where a
+        // press placed a caret and selected nothing.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(selection(&root), None, "sanity: nothing selected yet");
+
+        root.event(&mut state, &chord("a", meta()));
+        assert_eq!(selection(&root).as_deref(), Some("abc"));
+        assert_eq!(state.changes, 0);
+    }
+
+    #[test]
+    fn read_only_answers_cut_and_paste_with_nothing() {
+        // Consumed, not ignored: the verb was understood. What it may not do is
+        // change the buffer, write half a cut to the clipboard, or report an
+        // edit that never happened.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        drag_select_all(&mut state, &mut root);
+
+        let outcome = root.event(&mut state, &chord("x", meta()));
+        assert!(outcome.handled, "the cut chord is consumed");
+        assert_eq!(
+            root.take_clipboard_write(),
+            None,
+            "a refused cut writes nothing — half a cut is not a copy"
+        );
+
+        let outcome = root.event(&mut state, &edit(EditCommand::Paste("zz".to_string())));
+        assert!(outcome.handled, "the paste command is consumed");
+
+        assert_eq!(
+            widget(&root).editor.text(),
+            "abc",
+            "the buffer is untouched"
+        );
+        assert_eq!(state.changes, 0, "and no on_change fires for either");
+        assert_eq!(state.value, "abc");
+    }
+
+    #[test]
+    fn read_only_still_refuses_typing_and_ime_commits() {
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active(), "refused while genuinely focused");
+
+        for event in [
+            ch("x"),
+            InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+            named(NamedKey::Backspace, Modifiers::default()),
+            named(NamedKey::Delete, Modifiers::default()),
+            named(NamedKey::Enter, Modifiers::default()),
+        ] {
+            let outcome = root.event(&mut state, &event);
+            assert!(
+                !outcome.handled,
+                "an edit is refused unconsumed, as it was when the field \
+                 refused focus outright: {event:?}"
+            );
+        }
+        assert_eq!(widget(&root).editor.text(), "abc");
+        assert_eq!(state.changes, 0);
+        assert_eq!(state.submits, 0, "Enter submits nothing either");
+    }
+
+    #[test]
+    fn escape_ends_a_read_only_session_without_touching_the_text() {
+        // A field that can hold a session needs a keyboard way out of it, so
+        // Escape stays answered where the editing keys do not. It ends the
+        // session and takes the toolbar with it, and mutates nothing on the way.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = read_only_root(&mut state, &mut logic);
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 20.0, 10.0),
+        );
+        assert!(root.is_focus_active(), "the context press opened a session");
+        assert!(widget(&root).toolbar_open, "…with the bar up");
+
+        let outcome = root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+
+        assert!(
+            outcome.handled,
+            "Escape is answered, not left for an ancestor"
+        );
+        assert!(!root.is_focus_active(), "the session is over");
+        assert!(!widget(&root).focused);
+        assert!(
+            !widget(&root).toolbar_open,
+            "the toolbar goes with the session it belonged to"
+        );
+        assert_eq!(widget(&root).editor.text(), "abc", "and nothing was edited");
+        assert_eq!(state.changes, 0);
+    }
+
+    #[test]
+    fn disabled_still_refuses_focus_where_read_only_no_longer_does() {
+        // `enabled(false)` is the stronger claim and is unchanged by the
+        // read-only split: no focus, no caret, no surface, nothing consumed.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(false, false, false);
         let mut root = options_root(&mut logic, &mut state);
 
         let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
-        assert!(!outcome.handled, "a read-only field consumes nothing");
-        assert!(
-            !root.is_focus_active(),
-            "a tap must not focus a read-only field"
-        );
-        assert!(!widget(&root).focused);
-        assert!(!widget(&root).captured, "no drag capture either");
-        assert!(root.ime_state().is_none(), "no IME surface is published");
-
-        root.event(&mut state, &ch("x"));
-        root.event(
-            &mut state,
-            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
-        );
-        assert_eq!(widget(&root).editor.text(), "");
-        assert_eq!(state.changes, 0);
+        assert!(!outcome.handled, "a disabled field consumes nothing");
+        assert!(!root.is_focus_active(), "and takes no focus");
+        assert!(root.ime_state().is_none(), "so it publishes no surface");
 
         let mut rec = CaretRecorder {
             caret_color: Some(CARET),
             caret_fills: 0,
         };
         let outcome = root.paint(&mut rec, FrameTime::ZERO);
-        assert_eq!(rec.caret_fills, 0, "a read-only field paints no caret");
-        assert!(!outcome.needs_frame, "a read-only field never blinks");
+        assert_eq!(rec.caret_fills, 0, "a disabled field paints no caret");
+        assert!(!outcome.needs_frame);
     }
 
     #[test]
-    fn making_a_focused_field_read_only_releases_focus_and_deactivates_ime() {
-        let mut state = AppState::default();
+    fn making_a_focused_field_read_only_keeps_the_session_and_drops_the_keyboard() {
+        // Unlike a field disabled while focused, this one keeps its session:
+        // the text is still on screen and still worth selecting. What goes is
+        // the on-screen keyboard, asked for on the very next published surface.
+        let mut state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
         let mut live_logic = options_logic(true, false, false);
         let mut root = options_root(&mut live_logic, &mut state);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         assert!(root.is_focus_active());
-        assert!(root.ime_state().expect("focused").active);
+        let ime = root.ime_state().expect("focused");
+        assert!(ime.active && !ime.suppress_soft_keyboard);
 
         // Flip the flag on a rebuild while the field holds focus.
         let mut read_only_logic = options_logic(true, false, true);
@@ -5486,35 +5875,29 @@ mod tests {
         );
         root.layout(Size::new(300.0, 200.0));
         assert!(
-            !widget(&root).focused,
-            "the widget stops considering itself focused immediately"
+            widget(&root).focused,
+            "the widget keeps considering itself focused"
         );
 
-        // Leg 1 — the next paint already refuses to act focused and hands the
-        // shell an inactive IME surface (dismissing the keyboard), which the root
-        // reads as a session release: surface dropped, focus mirror cleared (see
-        // the disabled twin above).
-        let mut sink = NullScene;
-        let outcome = root.paint(&mut sink, FrameTime::ZERO);
-        assert!(!outcome.needs_frame, "a read-only field paints at rest");
-        assert!(
-            root.ime_state().is_none(),
-            "the published inactive surface releases the session"
-        );
-        assert!(
-            !root.is_focus_active(),
-            "the root's focus mirror goes with it"
-        );
+        // Leg 1 — the next paint keeps the session and re-publishes it with the
+        // keyboard suppressed; the caret is still drawn, now steady.
+        let mut rec = CaretRecorder {
+            caret_color: Some(CARET),
+            caret_fills: 0,
+        };
+        root.paint(&mut rec, FrameTime::ZERO);
+        assert_eq!(rec.caret_fills, 1, "the caret survives the flip");
+        let ime = root.ime_state().expect("the session survives the flip");
+        assert!(ime.active, "the surface stays live for the clipboard route");
+        assert!(ime.suppress_soft_keyboard, "but the keyboard is asked down");
+        assert!(root.is_focus_active(), "the root's focus mirror stays");
 
-        // Leg 2 — the first event that reaches the field releases the pod-level
-        // focus path, and edits nothing on the way.
+        // Leg 2 — and the keyboard events it can no longer act on are refused
+        // without disturbing any of that.
         root.event(&mut state, &ch("x"));
-        assert!(
-            !root.is_focus_active(),
-            "the stranded focus path is released"
-        );
-        assert!(root.ime_state().is_none());
-        assert_eq!(widget(&root).editor.text(), "");
+        assert!(root.is_focus_active(), "a refused key does not blur");
+        assert_eq!(widget(&root).editor.text(), "abc");
+        assert_eq!(state.changes, 0);
     }
 
     #[test]
@@ -5717,18 +6100,20 @@ mod tests {
             "an obscured field hands out neither the buffer nor its bullets"
         );
 
-        // Read-only: copy is fine over a selection, cut and paste are not.
+        // Read-only: copy is fine over a selection, cut and paste are not —
+        // the field is focusable and copyable, so the accessible route carries
+        // exactly the verbs it will actually answer.
         let mut state = AppState {
             value: "abc".to_string(),
             ..Default::default()
         };
         let mut logic = options_logic(true, false, true);
-        let root = options_root(&mut logic, &mut state);
-        let (supports, offered) = a11y_verbs(&root);
-        assert!(
-            !supports && offered.is_empty(),
-            "a non-interactive field holds no focus a verb could route along, \
-             so it advertises none: {offered:?}"
+        let mut root = options_root(&mut logic, &mut state);
+        drag_select_all(&mut state, &mut root);
+        assert_eq!(
+            a11y_verbs(&root).1,
+            vec![(A11Y_COPY_ID, "Copy".to_string())],
+            "a read-only field offers copy over its selection, never cut or paste"
         );
 
         // Disabled: same reasoning, and the stronger claim.
@@ -5784,10 +6169,11 @@ mod tests {
     }
 
     #[test]
-    fn read_only_obscured_field_stays_password_role_and_never_focuses() {
+    fn read_only_obscured_field_stays_password_role_and_copies_nothing() {
         // Orthogonality: `read_only` never touches masking or the IME
-        // content-type hint, it just keeps the field from ever actually
-        // focusing (so there is no active surface to publish a hint on).
+        // content-type hint. The two refusals compose rather than cancel — the
+        // field focuses like any read-only one, and hands out neither the
+        // secret nor its bullets.
         let mut state = AppState {
             value: "hunter2".to_string(),
             ..AppState::default()
@@ -5804,10 +6190,34 @@ mod tests {
         assert_eq!(node.value(), Some("\u{2022}".repeat(7).as_str()));
         assert!(node.is_read_only());
 
-        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
-        assert!(!outcome.handled);
-        assert!(!root.is_focus_active());
-        assert!(root.ime_state().is_none());
+        drag_select_all(&mut state, &mut root);
+        assert!(
+            root.is_focus_active(),
+            "it focuses like any read-only field"
+        );
+        assert!(
+            selection(&root).is_some(),
+            "sanity: the refusal below is only meaningful over a real selection"
+        );
+
+        let ime = root.ime_state().expect("focused");
+        assert_eq!(
+            ime.content_type,
+            ImeContentType::Password,
+            "the content-type hint is read-only's business to leave alone"
+        );
+        assert!(ime.suppress_soft_keyboard);
+
+        root.event(&mut state, &chord("c", meta()));
+        assert_eq!(
+            root.take_clipboard_write(),
+            None,
+            "an obscured field copies nothing, read-only or not"
+        );
+        assert!(
+            a11y_verbs(&root).1.is_empty(),
+            "and advertises no verb it would refuse"
+        );
     }
 
     // --- obscured(true) ---
