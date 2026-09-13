@@ -129,8 +129,8 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             "input_otp \u{2014} click a slot to focus the group, then type: digits \
              fill forward, Backspace clears back, the arrows/Home/End move the \
              active slot, and the active empty slot blinks a caret (static under \
-             reduced motion). There is no paste path \u{2014} frust surfaces no \
-             clipboard event to a widget.",
+             reduced motion). Pasting a code into the focused group fills the \
+             slots from the active one forward.",
         )),
         any(SizedBox(None, Some(8.0))),
         any(Row(vec![
