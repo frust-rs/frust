@@ -875,7 +875,9 @@ impl TooltipView {
         // including over the panel itself — reaches the main tree untouched.
         slot.set_input(OverlayInput::Transparent);
         // A plain tooltip dismisses on hover-exit or on its own timer, never on
-        // a tap; a transparent surface is told about an outside press anyway.
+        // a tap. A transparent surface is never told about an outside press in
+        // the first place — the root's pre-pass skips it for that too — so this
+        // records the intent rather than being what enforces it.
         slot.set_outside_tap(OutsideTap::Ignore);
         slot.set_placement(portal_placement(self.placement));
     }
@@ -2185,11 +2187,12 @@ mod tests {
     /// The whole point of the port, for the plain panel: a press that lands on
     /// the panel reaches the page *underneath* it.
     ///
-    /// Negative control performed by hand while writing this: changing
-    /// `TooltipView::configure`'s `OverlayInput::Transparent` to `Interactive`
-    /// makes this fail — `state.pressed` stays `0`, because the root's overlay
-    /// pre-pass then routes the press into the panel's own pod instead of
-    /// letting it through. See the completion summary for the run.
+    /// Negative control performed by hand while writing this: with
+    /// `TooltipView::configure`'s `OverlayInput::Transparent` changed to
+    /// `Interactive`, this test fails on the `state.pressed` assertion, which
+    /// stays `0` — the root's overlay pre-pass routes the press into the
+    /// panel's own pod instead of letting it through. So the assertion below is
+    /// pinned to the registration, not merely satisfied by it.
     #[test]
     fn a_press_on_an_open_plain_tooltip_reaches_the_page_beneath_it() {
         let mut h = PortalHarness::new(false);
