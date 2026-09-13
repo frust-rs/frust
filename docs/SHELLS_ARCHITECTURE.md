@@ -407,7 +407,11 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   command is focus-routed and consuming the press for nobody would take it from the host activity
   for nothing. A clip whose text must be coerced resolves off the view's thread under the same
   session guard as desktop, bounded additionally by a 2 s deadline stamped at request time, since
-  nothing can interrupt a thread already parked inside another app's `ContentProvider`. Two system
+  nothing can interrupt a thread already parked inside another app's `ContentProvider`. One
+  resolution is outstanding at a time here too: a request raised while one runs folds into it,
+  re-pointed at the most recent asker with its deadline re-stamped from that press, rather than
+  starting a second. That record is held until the UI thread *takes* the answer rather than
+  released as it is posted, so no second resolution can start inside that window at all. Two system
   behaviours are lived with rather than engineered around: `getPrimaryClip` yields nothing unless
   the app holds input focus (Android 10+), indistinguishable here from an empty clipboard on
   purpose; and reading another app's clip raises the system "pasted from" toast (Android 12+), which

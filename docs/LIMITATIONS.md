@@ -337,25 +337,35 @@ focused as it found it — that re-claim is indistinguishable from any other, so
 a *Copy* or *Select all* tapped during the wait drops the pending paste with
 nothing behind it. (Tapping *Paste* again merely replaces one pending answer
 with another.) That is the safe direction and costs at worst a paste the user
-can ask for again. Nothing else inside one session discards it: editing,
-moving the caret, and the field being repositioned — a reflow, the soft
-keyboard animating in, a programmatic scroll — all leave the session exactly
-where it was, so the paste still lands, in the field that asked for it and at
-whatever the caret has since become. A *touch* scroll is a press first, so it
-is the press that decides there too: one landing in the field re-claims, one
-landing on nothing focusable blurs, and the movement itself decides nothing
-either way.
+can ask for again, on the terms below — which are weaker while a provider is
+hanging. Nothing else inside one session discards it: editing, moving the
+caret, and the field being repositioned — a reflow, the soft keyboard
+animating in, a programmatic scroll — all leave the session exactly where it
+was, so the paste still lands, in the field that asked for it and at whatever
+the caret has since become. A *touch* scroll is a press first, so it is the
+press that decides there too: one landing in the field re-claims, one landing
+on nothing focusable blurs, and the movement itself decides nothing either
+way.
 
 The two-second bound exists because `shutdownNow()` cannot interrupt a thread
 already blocked inside another process, so a deadline is the only thing that
-can stop a very late answer arriving as a surprise paste. Note what it does
-*not* buy: the resolver is a single thread, so asking again while a provider
-is still hung queues the retry behind that blocked read, and the retry is
-therefore already past its own deadline whenever it finally runs. While a
-provider hangs, "ask again" is not a recovery — no URI-backed paste succeeds
-until a background/foreground cycle tears the executor down. There is also no
-supersede: a second request does not cancel an older in-flight one, they simply
-queue.
+can stop a very late answer arriving as a surprise paste. What asking again
+buys depends on where the paste was lost. A paste dropped by the arrival
+checks — wrong session, past deadline, empty text — is one whose resolution
+came back, and the record is released before those checks run, so the resolver
+is free and the next press submits a read of its own. While a provider is
+still hanging, the next press is neither queued behind that read nor already
+past its own deadline when it runs: one resolution is outstanding at a time,
+so the press re-points the read already out at itself, replacing the session
+that answer is addressed to and re-stamping the deadline from its own press,
+and lands if the provider returns inside those fresh two seconds. What it does
+not get is a read of its own — the single resolver thread stays parked in the
+call that hung it, unreachable until that provider returns or a teardown
+(`onPause`, `surfaceDestroyed`, `onDestroy`) discards the executor.
+
+Re-pointing costs staleness: a folded press is answered with the item the
+outstanding read captured, so a clip replaced during the wait pastes the one
+that was on the clipboard when the first press asked.
 
 **Evidence**:
 `platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
@@ -369,13 +379,15 @@ counter beside it stands still is pinned by `crates/frust-core/src/app.rs`'s
 `focus_epoch_ignores_an_edit_inside_one_session`, each of which asserts what
 *both* counters did at the same moment.
 
-**Trigger for removal**: a resolver that cannot starve. The remaining drops are
-the deadline and the single-thread queue behind it, so removing this entry
-needs a resolution path where a hung provider cannot hold up the next request
-— a per-request cancel, or a bounded pool — plus a device run that actually
-watches a URI-backed paste land. The misdelivery half of this entry's earlier
-trigger is done: the per-session identity it asked for is exposed through
-`AppTree` and is what the guard compares.
+**Trigger for removal**: a resolver that cannot starve — half met. A retry
+cannot be starved behind a read that will not drain, but the one resolver
+thread can still be parked by a hung provider until it returns or a teardown
+discards the executor, so removing this entry needs a resolution path that can
+reclaim or replace that thread — a per-request cancel, or a bounded pool —
+plus a device run that actually watches a URI-backed paste land. The
+misdelivery half of this entry's earlier trigger is done: the per-session
+identity it asked for is exposed through `AppTree` and is what the guard
+compares.
 
 **NOT DEVICE-VERIFIED.** The 2026-09-12 Pixel 5 run exercised the clipboard
 legs but not this path: reaching it needs a clip whose first item has a `Uri`
