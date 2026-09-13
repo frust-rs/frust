@@ -2523,14 +2523,20 @@ impl Widget for TextInputWidget {
             }
         } else {
             let off = text_origin.to_vec2();
-            // Selection highlights sit behind the glyphs. Both come from the
-            // displayed layout — the masked mirror while obscured.
-            for r in self.display().selection_rects() {
-                scene.fill_rect(
-                    Point::new(r.x0 + off.x, r.y0 + off.y),
-                    Size::new(r.width(), r.height()),
-                    chrome.selection,
-                );
+            // Selection highlights sit behind the glyphs, gated on `focused`
+            // the same way the caret below is — a blurred field keeps its
+            // selection model untouched (so a later refocus restores the
+            // highlight unchanged) but must stop painting it, just like the
+            // caret goes dark on blur. Both come from the displayed layout —
+            // the masked mirror while obscured.
+            if focused {
+                for r in self.display().selection_rects() {
+                    scene.fill_rect(
+                        Point::new(r.x0 + off.x, r.y0 + off.y),
+                        Size::new(r.width(), r.height()),
+                        chrome.selection,
+                    );
+                }
             }
             for run in self.display().to_scene_runs(text_origin) {
                 scene.draw_glyph_run(run);
@@ -3331,6 +3337,52 @@ mod tests {
         assert!(!root.is_focus_active(), "outside tap blurs the field");
         assert!(root.ime_state().is_none());
         assert!(!widget(&root).focused);
+    }
+
+    #[test]
+    fn blurred_selection_stops_painting_its_highlight_but_survives_for_refocus() {
+        // Regression test: the caret already goes dark on blur, but the
+        // selection highlight fill was not gated the same way, so a field
+        // that lost focus while holding a non-empty selection kept painting
+        // it. Asserting on `selection_rects()` alone would only prove the
+        // selection *model* still holds a range — it says nothing about
+        // whether `paint` actually stopped filling it, which is exactly the
+        // gap that let this ship — so this uses a scene recorder that
+        // observes the real `fill_rect` calls instead.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        focused_with_selection(&mut state, &mut root, "abc");
+        assert_eq!(
+            widget(&root).editor.selected_text(),
+            Some("abc"),
+            "the drag produced a non-empty selection"
+        );
+
+        // Focused half of the contract: the highlight is painted.
+        let mut focused_rec = ChromeRecorder::default();
+        root.paint(&mut focused_rec, FrameTime::ZERO);
+        assert!(
+            focused_rec.rects.contains(&SELECTION),
+            "a focused field with a non-empty selection must paint the highlight"
+        );
+
+        // Blur without touching the selection model at all.
+        root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+        assert!(!root.is_focus_active(), "Escape blurs the field");
+        assert_eq!(
+            widget(&root).editor.selected_text(),
+            Some("abc"),
+            "the selection must survive blur so a later refocus restores the highlight"
+        );
+
+        // Blurred half of the contract: the fill stops even though the
+        // selection (and the text) is unchanged.
+        let mut blurred_rec = ChromeRecorder::default();
+        root.paint(&mut blurred_rec, FrameTime::ZERO);
+        assert!(
+            !blurred_rec.rects.contains(&SELECTION),
+            "a blurred field must stop painting its selection highlight"
+        );
     }
 
     #[test]
