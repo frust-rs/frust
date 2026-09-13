@@ -141,6 +141,11 @@ class FrustSurfaceView(
          * `ContentProvider` round-trip and well short of the user having
          * moved on and forgotten they asked. An answer arriving later is
          * dropped rather than pasted: see [readClipboardTextAsync].
+         *
+         * Measured from the ask being answered, which is the most recent one:
+         * a paste asked for while a resolution is outstanding folds into it
+         * and re-stamps this budget from its own press, so the window always
+         * belongs to the press still waiting on it.
          */
         private const val CLIPBOARD_RESOLUTION_TIMEOUT_MS = 2_000L
 
@@ -623,6 +628,38 @@ class FrustSurfaceView(
      * actually honours the interrupt.
      */
     private var clipboardResolutionEpoch = 0L
+
+    /**
+     * Who a URI-backed clipboard resolution is being run for: the framework
+     * focus session that asked for it ([nativeFocusEpoch]) and the
+     * `SystemClock.uptimeMillis` point past which that session no longer wants
+     * the answer. One record rather than two fields, so re-pointing a
+     * resolution at a later ask cannot move the session and leave the deadline
+     * behind it.
+     */
+    private data class PendingPaste(val session: Long, val deadlineUptimeMillis: Long)
+
+    /**
+     * The one URI-backed resolution [readClipboardTextAsync] has outstanding,
+     * or `null` when the resolver is free.
+     *
+     * Non-null is also the gate that keeps a second paste from being submitted
+     * while the first is still resolving. [clipboardWorker] runs ONE thread, so
+     * a second submit would wait in that executor's queue behind a
+     * `coerceToText` parked in the clip owner's process — a wait nothing on
+     * this side can interrupt — and would therefore be past its own deadline
+     * before it ever started. A request raised while this is non-null replaces
+     * it instead of submitting, so the single outstanding read answers
+     * whoever asked last (`crates/frust-shell-desktop/src/app_handler.rs`'s
+     * `read_in_flight`/`paste_session` pair is the same shape on that tier).
+     *
+     * Written and read on the UI thread, alongside [clipboardExecutor] and
+     * [clipboardResolutionEpoch] and by the same methods: every caller of
+     * [readClipboardText] runs there (see its doc), the answer clears it from
+     * a [mainHandler] post, and [shutdownClipboardExecutor] runs from
+     * [surfaceDestroyed]/[onPause]/[onDestroy].
+     */
+    private var pendingPaste: PendingPaste? = null
 
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
@@ -1384,6 +1421,31 @@ class FrustSurfaceView(
      * background thread — never one thread per paste — then hops back to the
      * UI thread via [mainHandler] to actually dispatch.
      *
+     * ONE RESOLUTION IS OUTSTANDING AT A TIME, and an ask raised while one is
+     * still running meets [pendingPaste], which is both the record of who is
+     * being answered and the gate on submitting. That thread is the reason:
+     * a second submit would sit in the executor's queue behind a
+     * `coerceToText` parked in the clip owner's process, so it could not
+     * start — and so could not answer inside its own deadline — until that
+     * provider returned. Such an ask instead re-points the outstanding read at
+     * itself, replacing the session to answer and re-stamping the deadline
+     * from its own press.
+     *
+     * Re-pointing, rather than keeping the first asker on record, is the only
+     * choice that can deliver anything when the two asks differ. They differ
+     * only by the focus session having moved between them — both read it from
+     * the same [nativeFocusEpoch] — and the arrival check below requires the
+     * recorded session to be the live one, so an answer still addressed to the
+     * earlier ask could no longer land anywhere, while the session that just
+     * asked would be left with nothing. When the two share a session,
+     * re-pointing moves only the deadline. It cannot misdeliver either: every
+     * value written is a session that asked for a paste, and the arrival check
+     * still has to find it live.
+     *
+     * What re-pointing does cost is that the later ask is answered with the
+     * item the outstanding read captured, so a clip replaced during the wait
+     * pastes the one that was on the clipboard when the first press asked.
+     *
      * On arrival the answer must still belong where it was asked for, and
      * FOUR things are checked, because the framework routes
      * `EditCommand::Paste` down whatever focus path is live at dispatch time
@@ -1392,16 +1454,18 @@ class FrustSurfaceView(
      * * [clipboardResolutionEpoch] is unmoved — the view did not tear down
      *   ([shutdownClipboardExecutor] is its only writer).
      * * `handle` is still live.
-     * * The framework's focus session is still the one that asked
-     *   ([nativeFocusEpoch]). This is the one that stops a resolved paste
-     *   landing in a DIFFERENT field: [imeActive] is a single view-wide flag
-     *   that only toggles on the active/inactive edge, so a move from one
+     * * The framework's focus session is still the one on record as having
+     *   asked ([nativeFocusEpoch]). This is the one that stops a resolved
+     *   paste landing in a DIFFERENT field: [imeActive] is a single view-wide
+     *   flag that only toggles on the active/inactive edge, so a move from one
      *   field to another never clears it and cannot be used for this.
      * * The text is non-empty.
      *
      * Any of those failing DROPS the paste silently: a paste landing in a
      * field the user has since moved away from is worse than one that never
-     * lands, and a dropped one is recoverable by asking again.
+     * lands. A paste dropped here can be asked for again — [pendingPaste] is
+     * released before these checks run, and the read it pointed at has
+     * returned by then, so the next ask submits a read of its own.
      *
      * The session check is an identity, not a proxy, and that decides what it
      * does NOT drop. Editing, moving the caret, or having the field reflowed
@@ -1411,17 +1475,28 @@ class FrustSurfaceView(
      * belongs. What moves the session is a focus claim the framework honoured
      * or a session release: switching fields, dismissing the keyboard, tapping
      * away — and a re-press inside the same field, which claims again and is
-     * therefore treated as a new session (conservative in the safe direction,
-     * costing at worst a paste the user can ask for again). A touch scroll is
-     * a press first, so it is judged as one: it re-claims if it started in a
-     * field and blurs if it started on nothing focusable.
+     * therefore treated as a new session (conservative in the safe direction).
+     * A re-press that is itself another paste re-points this resolution at the
+     * session it just created, so what that conservatism actually discards is
+     * a pending paste overtaken by a re-claim that asks for nothing to replace
+     * it. A touch scroll is a press first, so it is judged as one: it
+     * re-claims if it started in a field and blurs if it started on nothing
+     * focusable.
      *
      * The wait is also BOUNDED. `coerceToText` returns when the clip's owning
      * app decides to answer — or never — so a deadline is stamped at request
-     * time and an answer arriving past it is dropped. `shutdownNow()` cannot
-     * interrupt a thread already blocked inside another process's
-     * `ContentProvider`, so the deadline and the epoch are what actually stop
-     * a late answer from being delivered.
+     * time, re-stamped by a later ask folding in, and an answer arriving past
+     * the one then on record is dropped. `shutdownNow()` cannot interrupt a
+     * thread already blocked inside another process's `ContentProvider`, so
+     * the deadline and the epoch are what actually stop a late answer from
+     * being delivered, and the gate is what stops the next ask from queueing
+     * behind the thread still parked in that call.
+     *
+     * What none of that buys is a read that starts over while the first is
+     * still parked: there is one resolver thread, and it is unreachable until
+     * the provider returns or a teardown ([shutdownClipboardExecutor])
+     * discards it. Until then, asking again is answered by the read already
+     * out rather than by one of its own.
      *
      * When it does land, it calls the exact same
      * `nativeEditCommand`/[pollImeAfterDispatch] pair the synchronous fast
@@ -1443,6 +1518,19 @@ class FrustSurfaceView(
         if (requestedInSession == 0L) {
             return
         }
+        // Record this ask BEFORE the gate is consulted: an ask that folds into
+        // a resolution already under way is still an ask, and still names the
+        // session to answer and the point past which it stops wanting one.
+        val outstanding = pendingPaste != null
+        pendingPaste = PendingPaste(requestedInSession, deadlineUptimeMillis)
+        if (outstanding) {
+            Log.d(
+                TAG,
+                "a clipboard resolution is already outstanding; folding this paste request " +
+                    "into it rather than queueing behind it",
+            )
+            return
+        }
         try {
             clipboardWorker().execute {
                 val text = try {
@@ -1455,20 +1543,33 @@ class FrustSurfaceView(
                     null
                 }
                 mainHandler.post {
-                    if (epoch != clipboardResolutionEpoch ||
-                        handle == 0L ||
-                        text.isNullOrEmpty()
-                    ) {
+                    // Checked before the record is touched: a moved epoch means
+                    // a teardown already discarded this resolver AND the record
+                    // it was working for, so anything in [pendingPaste] now
+                    // belongs to a later ask on a newer resolver — not this
+                    // answer's to read, and not this answer's to clear.
+                    if (epoch != clipboardResolutionEpoch) {
                         return@post
                     }
-                    if (SystemClock.uptimeMillis() > deadlineUptimeMillis) {
+                    // Taking the record frees the resolver for the next ask,
+                    // and is done before the checks below because those decide
+                    // whether the ANSWER is still wanted, not whether the read
+                    // is still running: `coerceToText` returned before this
+                    // post was made. A record already taken leaves nothing to
+                    // answer.
+                    val pending = pendingPaste ?: return@post
+                    pendingPaste = null
+                    if (handle == 0L || text.isNullOrEmpty()) {
+                        return@post
+                    }
+                    if (SystemClock.uptimeMillis() > pending.deadlineUptimeMillis) {
                         Log.w(TAG, "clipboard read answered too late; dropping the paste")
                         return@post
                     }
                     // The session must be the one that asked. `imeActive` cannot
                     // answer this: it is view-wide and does not toggle when focus
                     // moves from one field to another.
-                    if (nativeFocusEpoch(handle) != requestedInSession) {
+                    if (nativeFocusEpoch(handle) != pending.session) {
                         return@post
                     }
                     nativeEditCommand(handle, EDIT_COMMAND_PASTE, text)
@@ -1478,7 +1579,11 @@ class FrustSurfaceView(
         } catch (e: RejectedExecutionException) {
             // The executor was torn down between the epoch snapshot above and
             // this submit (the view is tearing down right now) — the
-            // resolution simply does not happen.
+            // resolution simply does not happen. Release the record this call
+            // just wrote: no read is outstanding for it, and a record left
+            // behind would fold every later ask into a resolution that was
+            // never submitted.
+            pendingPaste = null
             Log.w(TAG, "clipboard read dropped: view is tearing down", e)
         }
     }
@@ -1490,6 +1595,14 @@ class FrustSurfaceView(
      * [shutdownClipboardExecutor] tears it down (and this getter re-creates
      * it on the next ask) at every point a live handle stops being
      * trustworthy.
+     *
+     * One thread is enough because [pendingPaste] gates the submit: at most
+     * one resolution is handed to this executor at a time, so its queue holds
+     * a task only while the one before it is on its way out, never while one
+     * is parked inside `coerceToText`. Re-creating rather than reusing a
+     * shut-down executor is what keeps that true across a teardown — the
+     * thread parked in a provider call belongs to the executor
+     * [shutdownClipboardExecutor] dropped, and cannot be handed the next ask.
      */
     private fun clipboardWorker(): ExecutorService {
         var executor = clipboardExecutor
@@ -1518,9 +1631,17 @@ class FrustSurfaceView(
      * and returns immediately; the epoch bump is what actually stops a late
      * answer from being delivered even on a provider call that does not
      * honour the interrupt.
+     *
+     * [pendingPaste] is released for the same reason and in the same breath:
+     * the resolution it records is no longer one this view is waiting for, and
+     * a record left behind would fold every later ask into a resolution whose
+     * answer the epoch bump has already condemned — a paste dead for the rest
+     * of this view's life, silently, since the answer that would otherwise
+     * release the record returns early on the epoch check.
      */
     private fun shutdownClipboardExecutor() {
         clipboardResolutionEpoch++
+        pendingPaste = null
         clipboardExecutor?.shutdownNow()
         clipboardExecutor = null
     }
