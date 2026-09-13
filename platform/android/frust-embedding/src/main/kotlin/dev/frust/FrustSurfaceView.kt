@@ -1216,9 +1216,9 @@ class FrustSurfaceView(
 
     /**
      * After every native dispatch, reconcile the soft keyboard with the focused
-     * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
-     * restart input so a fresh [FrustInputConnection] is seeded from the new
-     * state); newly-inactive ⇒ hide it.
+     * widget's IME surface: newly-active ⇒ take focus + restart input (and
+     * show the keyboard, unless [ImeWireState.suppressSoftKeyboard] says the
+     * field wants no on-screen keyboard); newly-inactive ⇒ hide it.
      *
      * A **steady-active** field whose [ImeWireState.contentType] changed since
      * the last poll (e.g. a field that starts `"normal"` and flips to
@@ -1230,6 +1230,12 @@ class FrustSurfaceView(
      * leaking into the suggestion strip under the stale, non-secure
      * `EditorInfo` (the exact gap this task closes — see `onCreateInputConnection`'s
      * doc for how the fresh `EditorInfo` is derived).
+     *
+     * A **steady-active** field whose [ImeWireState.suppressSoftKeyboard]
+     * flipped on since the last poll (an editable field went read-only, or
+     * focus moved onto a suppressed field without an intervening inactive
+     * edge) hides a keyboard that is already up — the `InputConnection` itself
+     * is untouched, since nothing about which field is focused changed.
      */
     private fun pollImeAfterDispatch() {
         if (handle == 0L) return
@@ -1237,12 +1243,22 @@ class FrustSurfaceView(
         val previous = lastKnownState
         lastKnownState = state
         val contentTypeChanged = previous != null && previous.contentType != state.contentType
+        val suppressSoftKeyboardChanged =
+            previous != null && previous.suppressSoftKeyboard != state.suppressSoftKeyboard
         if (state.active && !imeActive) {
             imeActive = true
             requestFocus()
-            // Rebuild the InputConnection so its mirror starts from `state`.
+            // Rebuild the InputConnection so its mirror starts from `state` —
+            // needed unconditionally: the connection is what carries copy
+            // (performContextMenuAction, hardware Ctrl+C), and a read-only
+            // field is still focusable and copyable even with no keyboard.
             imm.restartInput(this)
-            imm.showSoftInput(this, 0)
+            if (!state.suppressSoftKeyboard) {
+                imm.showSoftInput(this, 0)
+            }
+            // else: the field asked for the input surface without a keyboard
+            // — there is nothing to type into a read-only field, so leave the
+            // soft keyboard down while the connection above stays live.
         } else if (!state.active && imeActive) {
             imeActive = false
             imm.hideSoftInputFromWindow(windowToken, 0)
@@ -1254,13 +1270,21 @@ class FrustSurfaceView(
             // already-updated `lastKnownState`, so no separate `reconcileTo`
             // call is needed on this path.
             imm.restartInput(this)
+        } else if (state.active && suppressSoftKeyboardChanged && state.suppressSoftKeyboard) {
+            // The focused field itself didn't change (no show/hide edge, no
+            // content-type change) but it just became suppressed while the
+            // keyboard was already showing — e.g. an editable field went
+            // read-only under the same focus. The connection carries copy and
+            // stays exactly as it is; only the keyboard needs to go away.
+            imm.hideSoftInputFromWindow(windowToken, 0)
         } else if (state.active) {
-            // Steady active (no show/hide edge, same content type): reconcile
-            // the live mirror to the focused field's published state — a
-            // caret moved by a tap, or a whole-field text change from a field
-            // switch or a submit-clear. `reconcileTo` compares against the
-            // LIVE editable (not the racing `lastKnownState`), so a
-            // pre-advanced snapshot can't hide a change.
+            // Steady active (no show/hide edge, same content type, same
+            // suppression): reconcile the live mirror to the focused field's
+            // published state — a caret moved by a tap, or a whole-field text
+            // change from a field switch or a submit-clear. `reconcileTo`
+            // compares against the LIVE editable (not the racing
+            // `lastKnownState`), so a pre-advanced snapshot can't hide a
+            // change.
             activeConnection?.reconcileTo(state)
         }
     }
@@ -1677,6 +1701,7 @@ class FrustSurfaceView(
                 compBase = obj.optInt("compBase", -1),
                 compExt = obj.optInt("compExt", -1),
                 contentType = obj.optString("contentType", CONTENT_TYPE_NORMAL),
+                suppressSoftKeyboard = obj.optBoolean("suppressSoftKeyboard", false),
             )
         } catch (e: JSONException) {
             null
@@ -1699,6 +1724,15 @@ class FrustSurfaceView(
          * [pollImeAfterDispatch]'s content-type-change restart.
          */
         val contentType: String,
+        /**
+         * The wire `"suppressSoftKeyboard"` flag `nativeImeState` encodes from
+         * `frust_core::event::ImeState::suppress_soft_keyboard`. A read-only
+         * field that is still focusable and copyable sets this so
+         * [pollImeAfterDispatch] keeps the `InputConnection` alive (copy needs
+         * it) without ever calling `showSoftInput` — there is nothing for the
+         * user to type into such a field.
+         */
+        val suppressSoftKeyboard: Boolean,
     )
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -2090,11 +2124,21 @@ class FrustSurfaceView(
             val selEnd = Selection.getSelectionEnd(editable)
             val compStart = getComposingSpanStart(editable)
             val compEnd = getComposingSpanEnd(editable)
-            // `contentType` is irrelevant to this dedup snapshot — it never
-            // compares against `lastKnownState`, only against a prior call's
-            // own `snapshot` — so a fixed placeholder is correct here.
+            // `contentType`/`suppressSoftKeyboard` are irrelevant to this dedup
+            // snapshot — it never compares against `lastKnownState`, only
+            // against a prior call's own `snapshot` — so fixed placeholders
+            // are correct here.
             val snapshot =
-                ImeWireState(true, text, selStart, selEnd, compStart, compEnd, CONTENT_TYPE_NORMAL)
+                ImeWireState(
+                    true,
+                    text,
+                    selStart,
+                    selEnd,
+                    compStart,
+                    compEnd,
+                    CONTENT_TYPE_NORMAL,
+                    false,
+                )
             if (snapshot == lastPushed) return
             lastPushed = snapshot
 
