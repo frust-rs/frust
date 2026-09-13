@@ -81,22 +81,33 @@
 //! registering that pod each paint — open, or within
 //! [`ANCHORED_EXIT`](crate::overlay::ANCHORED_EXIT) of the latch having
 //! closed, so the exit is never truncated — and mirrors the latch's *close*
-//! back through [`TooltipView::on_open_change`], since the dismissal that used
-//! to drive that callback no longer exists. That mirror duplicates what
-//! [`TooltipTriggerView::on_open_change`] already reports; the method is kept
-//! for source compatibility with a caller written against the old shape, not
-//! because it now carries information the trigger's own callback lacks.
+//! back through [`TooltipView::on_open_change`]. **Before this port**, that
+//! callback fired `false` only when `crate::overlay::anchored`'s light
+//! dismiss closed the panel — an outside press, or Escape once it held focus
+//! — never on an ordinary hover-out. Neither mechanism exists any more, so
+//! [`TooltipLayerWidget`] now reports `false` on every open→closed transition
+//! of the latch instead, which includes the hover-out that ends every
+//! session: the exact transition [`TooltipTriggerView::on_open_change`]
+//! already reports. A caller installing both callbacks therefore receives
+//! `false` **twice** for one close; [`TooltipView::on_open_change`] is kept
+//! only so a caller already holding one from before this port still compiles,
+//! not because it reports anything the trigger's own callback does not.
 //!
 //! # Degradations against the web original
 //!
-//! - **No accessibility node while the label is up.** The panel now floats
-//!   through [`frust::authoring::OverlaySlot`], whose own docs list "the pod
-//!   contributes no semantics" among what the shared portal seam does not do
-//!   in v1 — a screen reader reaches nothing where the tooltip's text would
-//!   be; the trigger's own node is unaffected. `crate::overlay::anchored`'s
-//!   panels never had this gap, since they painted through the ordinary tree
-//!   walk; it is a cost specific to this port's switch to the framework
-//!   portal, not a `tooltip.tsx` degradation.
+//! - **No accessibility node while the label is up, for now.** The panel now
+//!   floats through [`frust::authoring::OverlaySlot`], whose own docs list
+//!   "the pod contributes no semantics" among what the shared portal seam
+//!   does not do in v1 — the root never walks a registered pod's
+//!   `semantics`, so [`TooltipPanelWidget`]'s node is unreachable today; a
+//!   screen reader learns nothing where the tooltip's text would be, only
+//!   the trigger's own node. The wiring itself is kept live rather than
+//!   deleted — a deliberate choice, matching `plugins/shadcn`'s own ported
+//!   tooltip — so the node resumes reaching an assistive technology the day
+//!   that v1 restriction lifts, with nothing here needing re-authoring.
+//!   `crate::overlay::anchored`'s panels never had this gap, since they
+//!   painted through the ordinary tree walk; it is a cost specific to this
+//!   port's switch to the framework portal, not a `tooltip.tsx` degradation.
 //! - **No Escape dismissal.** `crate::overlay::anchored` claimed focus on a
 //!   press and closed on Escape; [`frust::authoring::OverlayInput::Transparent`]
 //!   claims no focus at all (nor does the trigger), so Escape now has nothing
@@ -121,11 +132,18 @@
 //!   to carry one; [`TooltipView::arrow`] switches it off for the literal
 //!   upstream silhouette.
 //! - **`shadow-lg` becomes the `.glass` chrome shadow** every panel in this
-//!   catalog casts (`crate::tokens::glass_scale`). The old shared host
-//!   reserved extra room around its scale layer so the shadow was never
-//!   clipped mid-fade; the panel's own local ramp does not, so a sliver of it
-//!   may clip near the panel's edges for the ~120ms the exit runs — the same
-//!   simplification `plugins/shadcn`'s ported tooltip makes, for the same
+//!   catalog casts (`crate::tokens::glass_scale`). `crate::overlay::anchored`'s
+//!   own paint reserves extra room around its scale layer specifically
+//!   because a layer sized to the resting rect alone clips the shadow at
+//!   *every* partial alpha, not only while closing — that host pushes the
+//!   wider layer whenever `alpha < 1.0`, entrance included. The panel's own
+//!   local ramp does not reserve that room, so a sliver of the shadow may
+//!   clip near the panel's edges on *both* the entrance and the exit — and
+//!   for longer on the entrance: [`ANCHORED_EXIT`](crate::overlay::ANCHORED_EXIT)
+//!   is a fixed 120ms, while the entrance rides `Ramp::spring(SPRING_PANEL)`
+//!   (mass 0.5 / stiffness 420 / damping 40, over-damped), whose analytic
+//!   settle estimate runs several times longer. The same simplification
+//!   `plugins/shadcn`'s ported tooltip makes, for the same
 //!   panel-owns-its-ramp reason.
 //! - **Touch is inert.** A finger never hovers, so a touch device never sees a
 //!   tooltip — the same story `plugins/shadcn`'s
@@ -145,7 +163,7 @@ use frust::authoring::{
     Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, OutsideTap,
     OverlayAnchor as PortalAnchor, OverlayBand, OverlayInput, OverlayPlacement as PortalPlacement,
-    OverlaySide as PortalSide, OverlaySlot, PaintCtx, PaintScene, Point, PointerPhase, Rect,
+    OverlaySide as PortalSide, OverlaySlot, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
     SemanticsCtx, Size, Vec2, View, Widget, any, build_child, erase_callback_arg, rebuild_child,
     route_event_single, teardown_child, visit_children,
 };
@@ -224,12 +242,16 @@ fn mark_hidden(now: FrameTime) {
 pub struct TooltipHover {
     anchor: OverlayAnchor,
     open: Rc<Cell<bool>>,
-    /// Set when a press lands on the trigger with no label open yet — the tap
-    /// path in [`TooltipTriggerWidget::event`], so a press does not raise a
-    /// label behind whatever it just activated — and cleared when the pointer
-    /// leaves the trigger. No longer written by a dismissal: the framework
-    /// portal the panel floats through consumes no press (see the [module
-    /// docs](self)), so there is nothing left to suppress the trigger on.
+    /// Set by every press that lands on the trigger — [`TooltipTriggerWidget::event`]'s
+    /// `PointerPhase::Down` arm writes it unconditionally, whether or not the
+    /// label is already open — and cleared when the pointer leaves the
+    /// trigger. Only ever *consulted* while closed
+    /// ([`TooltipTriggerWidget::paint`]'s guard reads it inside `!is_open()`),
+    /// so a press while the label is already showing sets it with no visible
+    /// effect: the very next hover-out clears it again before the label could
+    /// reopen. No longer written by a dismissal: the framework portal the
+    /// panel floats through consumes no press (see the [module docs](self)),
+    /// so the trigger's own tap path above is the only writer left.
     suppressed: Rc<Cell<bool>>,
 }
 
@@ -522,11 +544,17 @@ impl Widget for TooltipPanelWidget {
         EventResult::Ignored
     }
 
-    fn semantics(&self, _ctx: &mut SemanticsCtx) {
-        // A pod registered through the framework overlay portal contributes
-        // no accessibility node in v1 (see the [module docs](self)'s
-        // Degradations list) — nothing is published rather than something at
-        // the wrong position.
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Unreachable today: the root never walks a pod registered through
+        // the framework overlay portal for semantics in v1 (see the [module
+        // docs](self)'s Degradations list). Kept live rather than deleted, so
+        // the node returns for free the day that restriction lifts, rather
+        // than needing to be re-authored from scratch — the same choice
+        // `plugins/shadcn`'s own ported tooltip makes for its panel.
+        if self.hover.is_open() {
+            let label = self.label.content().to_string();
+            ctx.push_node(Role::Tooltip, |node| node.set_label(label.as_str()));
+        }
     }
 }
 
@@ -601,14 +629,20 @@ impl<State: 'static> TooltipView<State> {
         self
     }
 
-    /// Set a callback reporting the panel's own close — a second, best-effort
-    /// mirror of the same [`TooltipHover`] latch
-    /// [`TooltipTriggerView::on_open_change`] already reports, kept for
-    /// source compatibility with a caller written against the old
-    /// dismissal-driven shape (see the [module docs](self)). It never
-    /// reported the hover-driven *open* even before this port, and still does
-    /// not; [`TooltipTriggerView::on_open_change`] is the one callback worth
-    /// installing today, since the two now fire from the same transition.
+    /// Set a callback reporting the panel's own close.
+    ///
+    /// **Before this port**, this fired `false` only when
+    /// `crate::overlay::anchored`'s light dismiss closed the panel — an
+    /// outside press, or Escape once it held focus — and never on an
+    /// ordinary hover-out. **Now** that host is gone, so this fires `false`
+    /// on every open→closed transition of the [`TooltipHover`] latch instead,
+    /// including the hover-out that ends every session: the exact transition
+    /// [`TooltipTriggerView::on_open_change`] already reports (see the
+    /// [module docs](self)). Installing both callbacks therefore delivers
+    /// `false` **twice** for one close. It never reported the hover-driven
+    /// *open* either before this port or after;
+    /// [`TooltipTriggerView::on_open_change`] is the one callback worth
+    /// installing today for a caller that only needs one.
     pub fn on_open_change<F: Fn(&mut State, bool) + 'static>(mut self, on_open_change: F) -> Self {
         self.on_open_change = Some(Rc::new(on_open_change));
         self
@@ -1185,6 +1219,32 @@ mod tests {
     }
 
     #[test]
+    fn a_close_is_reported_through_both_on_open_change_callbacks() {
+        // `TooltipView::on_open_change` no longer has a dismissal to fire
+        // from, so it mirrors the same close `TooltipTriggerView::on_open_change`
+        // already reports (see the module docs) — a caller installing both
+        // receives `false` twice for the one close.
+        let mut h = Harness::new();
+        h.open(0.0);
+        h.event(pointer(PointerPhase::Move, 11.0, 10.0));
+        assert_eq!(h.state.opens, vec![true], "the open, reported once");
+
+        h.event(pointer(PointerPhase::Move, 400.0, 400.0));
+        h.frame(1_000.0);
+        assert!(!h.hover.is_open(), "the paint above already closed it");
+
+        // The next event pass flushes both callbacks' own edge-triggered
+        // reports — the layer's mirror runs first (it sits on top), then the
+        // trigger's.
+        h.event(pointer(PointerPhase::Move, 13.0, 10.0));
+        assert_eq!(
+            h.state.opens,
+            vec![true, false, false],
+            "one close, reported by the layer and the trigger each"
+        );
+    }
+
+    #[test]
     fn a_controlled_open_pins_the_latch_and_bypasses_the_clock() {
         let mut h = Harness::new();
         h.controlled = Some(true);
@@ -1232,6 +1292,34 @@ mod tests {
         assert!(
             h.state.button_pressed,
             "a press on the trigger's own box is not swallowed either"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_placed_panel_itself_reaches_the_widget_beneath_it() {
+        // The load-bearing guard for `TooltipLayerWidget`'s registration:
+        // this is the one press that only a *transparent* overlay lets
+        // through, since it lands on the panel's own registered rect rather
+        // than merely near it. Flipping `TooltipView::build`'s
+        // `slot.set_input(OverlayInput::Transparent)` call to
+        // `OverlayInput::Interactive` makes this test fail — the root's
+        // overlay pre-pass then claims the press for the tooltip's own pod
+        // instead of letting it fall through — see the completion summary for
+        // the failing run.
+        let mut h = Harness::new();
+        h.open(0.0);
+        let rec = h.paint_at(2_000.0);
+        let (origin, size, _, _) = *rec
+            .rrects
+            .iter()
+            .find(|(_, _, r, _)| *r == style::RADIUS_LG)
+            .expect("the panel");
+        let center_x = origin.x + size.width / 2.0;
+        let center_y = origin.y + size.height / 2.0;
+        h.event(pointer(PointerPhase::Down, center_x, center_y));
+        assert!(
+            h.state.button_pressed,
+            "a press on the panel's own placed rect still reaches the page beneath it"
         );
     }
 
