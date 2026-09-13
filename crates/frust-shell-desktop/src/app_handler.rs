@@ -790,9 +790,11 @@ fn paste_input_event(text: PasteText) -> InputEvent {
 /// through an edit or a caret move inside the one session. Both accessors
 /// document the contrast.
 ///
-/// `None` for `asked_in` means nothing is on record and the answer is not this
-/// shell's to deliver. The record is taken, not copied, at the arrival site, so
-/// one request is answered at most once.
+/// `None` for `asked_in` means nothing on record addresses this answer, so it
+/// is not this shell's to deliver: either nothing asked, or an earlier answer
+/// already took the record — which is how a second read that raced the
+/// coalescing gate open loses its own answer. See
+/// [`ShellHandler::paste_session`] for why that is the accepted cost.
 ///
 /// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
 fn paste_answer_dispatch(asked_in: Option<u64>, live: u64, text: PasteText) -> Option<InputEvent> {
@@ -1741,12 +1743,34 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// answer arrives; see [`ShellHandler::request_clipboard_read`] and
     /// [`paste_answer_dispatch`].
     ///
-    /// Recorded here rather than threaded through [`ClipboardRequest`] and
-    /// [`ShellUserEvent`]: the coalescing gate
-    /// ([`ClipboardWorker::read_in_flight`]) allows at most one outstanding
-    /// read, so one slot on the handler describes the whole of what is in
-    /// flight, and neither of those two public types has to grow a field for
-    /// it.
+    /// # One slot, however many reads are out
+    ///
+    /// More than one read genuinely can be outstanding, so this slot does not
+    /// describe what is in flight and does not try to. The coalescing gate
+    /// ([`ClipboardWorker::read_in_flight`]) re-opens as the worker's read arm
+    /// ends — after the answer has been posted through the proxy, but before
+    /// the UI thread has consumed it — so a paste request raised inside that
+    /// window finds the gate open and starts a second read instead of folding
+    /// into the first.
+    ///
+    /// One slot is still enough, because an answer is decided against this
+    /// value alone and there are only three outcomes. It names the live
+    /// session: deliver, and to a field that did ask, since nothing but a
+    /// request ever writes here. It names a session that has since gone: drop.
+    /// It is empty, an earlier answer having taken it: drop. None of the three
+    /// asks which read an answer came from, so threading an identity through
+    /// [`ClipboardRequest`] and [`ShellUserEvent`] would buy a pairing the
+    /// decision never consults, at the price of a field on two public types.
+    ///
+    /// # A surplus answer is dropped
+    ///
+    /// The record is taken, not copied, so one recorded request is answered
+    /// once. A second read that does get past the gate therefore finds the slot
+    /// empty when its answer lands: two presses close enough together to race
+    /// it, inside one *unchanged* session, now produce one paste where this
+    /// shell previously produced two. That is a real lost paste, and the
+    /// tolerable direction of one — a paste that did not happen is a keystroke
+    /// away, and a paste that landed in the wrong field is not.
     ///
     /// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
     paste_session: Option<u64>,
@@ -2252,7 +2276,9 @@ where
             // session that has moved since the request means the answer belongs
             // to nobody who asked for it, and dispatching it would type the
             // clip into a field that did not (see `paste_answer_dispatch`). The
-            // record is taken either way, so one request is answered once.
+            // record is taken either way, so one request is answered once — and
+            // a surplus answer, from a second read that raced the coalescing
+            // gate open, finds the slot empty and is dropped.
             ShellUserEvent::ClipboardPaste(text) => {
                 let asked_in = self.paste_session.take();
                 if let Some(window) = self.window.clone()
@@ -3122,6 +3148,18 @@ mod tests {
     // rather than by writing a counter, so they keep their meaning if the
     // session mechanism is reimplemented. They are a matched pair on purpose: a
     // guard that dropped every answer would pass the second one alone.
+    //
+    // What they do NOT reach is the wiring on either side of
+    // `paste_answer_dispatch`: that `ShellHandler::request_clipboard_read`
+    // records `RenderRoot::focus_epoch` and not `focus_ime_generation`, and that
+    // `user_event`'s `ClipboardPaste` arm takes the record rather than copying
+    // it and compares it against a freshly read `focus_epoch`. Both sites live
+    // on a handler owning an `EventLoopProxy` and a `FrameExecutor`, neither of
+    // which can exist without a window and an event loop, so no unit test can
+    // construct one — the same wall `clipboard_loop` meets, and the reason it
+    // takes its collaborators generically. Those two sites are pinned by prose,
+    // not by a test: swapping the counter at the request site would leave both
+    // tests below green.
 
     /// A focusable stand-in for a text field: takes the focus session on a
     /// press inside itself, and records every paste it is handed.
