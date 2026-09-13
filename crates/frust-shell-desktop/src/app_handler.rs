@@ -747,8 +747,11 @@ struct ClipboardWorker {
     /// `arboard::Clipboard` — see [`spawn_clipboard_worker`] and
     /// [`CLIPBOARD_SHUTDOWN_WAIT`].
     stopped: Receiver<()>,
-    /// Whether a read is queued or its answer still in flight — the coalescing
-    /// gate. While a read is hung, every further paste request is dropped
+    /// Whether a read is queued or running — the coalescing gate. Held from the
+    /// request until the worker's read arm ends, which is once the answer has
+    /// been posted rather than once the UI thread has taken it.
+    ///
+    /// While a read is hung, every further paste request is dropped
     /// instead of queued behind it, so a user pressing Ctrl+V six more times at
     /// a frozen selection owner does not buy six more 24 s reads, nor six late
     /// pastes landing minutes later in whatever holds focus by then. Two
@@ -790,11 +793,10 @@ fn paste_input_event(text: PasteText) -> InputEvent {
 /// through an edit or a caret move inside the one session. Both accessors
 /// document the contrast.
 ///
-/// `None` for `asked_in` means nothing on record addresses this answer, so it
-/// is not this shell's to deliver: either nothing asked, or an earlier answer
-/// already took the record — which is how a second read that raced the
-/// coalescing gate open loses its own answer. See
-/// [`ShellHandler::paste_session`] for why that is the accepted cost.
+/// `None` for `asked_in` means no paste has ever been requested, so the answer
+/// is not this shell's to deliver. The caller reads that record without
+/// consuming it, so one answer never takes the addressee of another still
+/// behind it — see [`ShellHandler::paste_session`].
 ///
 /// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
 fn paste_answer_dispatch(asked_in: Option<u64>, live: u64, text: PasteText) -> Option<InputEvent> {
@@ -1729,8 +1731,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// reachable clipboard mechanism, a selection owner that never answers) are
     /// warned once per kind on the worker itself — see [`ClipboardWarnings`].
     clipboard_unreachable_logged: bool,
-    /// The focus session ([`RenderRoot::focus_epoch`]) that asked for the
-    /// clipboard read currently in flight — `None` when nothing has asked.
+    /// The focus session ([`RenderRoot::focus_epoch`]) that made the most
+    /// recent clipboard read request — `None` until something asks. Never
+    /// cleared on the way out, so it outlives the read it was written for; see
+    /// below for why that is safe.
     ///
     /// An `EditCommand::Paste` is focus-routed and carries text but no identity
     /// of its own, so an answer that arrives after focus has moved lands in
@@ -1762,15 +1766,22 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// [`ClipboardRequest`] and [`ShellUserEvent`] would buy a pairing the
     /// decision never consults, at the price of a field on two public types.
     ///
-    /// # A surplus answer is dropped
+    /// # The record outlives the answer it addresses
     ///
-    /// The record is taken, not copied, so one recorded request is answered
-    /// once. A second read that does get past the gate therefore finds the slot
-    /// empty when its answer lands: two presses close enough together to race
-    /// it, inside one *unchanged* session, now produce one paste where this
-    /// shell previously produced two. That is a real lost paste, and the
-    /// tolerable direction of one — a paste that did not happen is a keystroke
-    /// away, and a paste that landed in the wrong field is not.
+    /// Read, never consumed: a value stands until the next request overwrites
+    /// it. So when a second read does get past the gate, the same standing
+    /// record addresses its answer too, and two presses close enough together
+    /// to race the gate deliver two pastes — the count this shell produced
+    /// before any session check existed.
+    ///
+    /// A record outliving its answer cannot misdeliver, because the two
+    /// properties the guard rests on are unaffected by how long it stands.
+    /// Nothing but [`ShellHandler::request_clipboard_read`] ever writes here, so
+    /// any value standing is a session that asked. And a session is never
+    /// revisited: [`RenderRoot::focus_epoch`] advances on every honoured claim
+    /// and steps past `0`, so a value left behind cannot come to match some
+    /// later session by chance. Delivery still requires the live session to be
+    /// one that asked for a paste, which is the whole of the guarantee.
     ///
     /// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
     paste_session: Option<u64>,
@@ -2276,14 +2287,14 @@ where
             // session that has moved since the request means the answer belongs
             // to nobody who asked for it, and dispatching it would type the
             // clip into a field that did not (see `paste_answer_dispatch`). The
-            // record is taken either way, so one request is answered once — and
-            // a surplus answer, from a second read that raced the coalescing
-            // gate open, finds the slot empty and is dropped.
+            // record is read, not consumed: more than one read can be
+            // outstanding at once, and the standing value addresses each of
+            // their answers in turn, so a second read's answer is delivered
+            // rather than swallowed by the first.
             ShellUserEvent::ClipboardPaste(text) => {
-                let asked_in = self.paste_session.take();
                 if let Some(window) = self.window.clone()
                     && let Some(event) =
-                        paste_answer_dispatch(asked_in, self.root.focus_epoch(), text)
+                        paste_answer_dispatch(self.paste_session, self.root.focus_epoch(), text)
                 {
                     self.dispatch(&window, event);
                 }
@@ -3152,8 +3163,8 @@ mod tests {
     // What they do NOT reach is the wiring on either side of
     // `paste_answer_dispatch`: that `ShellHandler::request_clipboard_read`
     // records `RenderRoot::focus_epoch` and not `focus_ime_generation`, and that
-    // `user_event`'s `ClipboardPaste` arm takes the record rather than copying
-    // it and compares it against a freshly read `focus_epoch`. Both sites live
+    // `user_event`'s `ClipboardPaste` arm reads that record without consuming it
+    // and compares it against a freshly read `focus_epoch`. Both sites live
     // on a handler owning an `EventLoopProxy` and a `FrameExecutor`, neither of
     // which can exist without a window and an event loop, so no unit test can
     // construct one — the same wall `clipboard_loop` meets, and the reason it
