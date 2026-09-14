@@ -15,6 +15,7 @@ mod cache;
 pub mod config;
 pub mod extensions;
 mod logger;
+mod platform_view;
 mod render;
 
 pub use app_handler::{run_desktop, run_desktop_with};
