@@ -1,8 +1,8 @@
 //! The macOS native video view: a Rust-defined, layer-backed `NSView`
 //! subclass hosting an `AVPlayerLayer`, wrapped in a
-//! [`frust_plugin::desktop::DesktopViewFactory`] that the macOS desktop shell
-//! (a `crates/frust-shell-macos` platform-view host that is not yet
-//! written) resolves by `view_type` (see [`crate::VIEW_TYPE`]).
+//! [`frust_plugin::desktop::DesktopViewFactory`] that the macOS desktop
+//! shell's `crates/frust-shell-macos` platform-view host resolves by
+//! `view_type` (see [`crate::VIEW_TYPE`]).
 //!
 //! Written in Rust with `objc2`'s `define_class!`, reaching its session's
 //! player through [`crate::apple::player_for`] — no C export, no Swift, and
@@ -75,10 +75,10 @@
 //!   all — it borrows the still-shell-owned pointer as a `&VideoPlayerNSView`
 //!   and mutates the existing view in place.
 //!
-//! A future `crates/frust-shell-macos` platform-view host must take
-//! the pointer `create` returns with `Retained::from_raw` while its slot
-//! lives, and hand that same pointer back through `dispose` — exactly one
-//! retain exchanged, matching this module's half of the accounting.
+//! The `crates/frust-shell-macos` platform-view host takes the pointer
+//! `create` returns with `Retained::from_raw` while its slot lives, and hands
+//! that same pointer back through `dispose` — exactly one retain exchanged,
+//! matching this module's half of the accounting.
 //!
 //! # Main-thread-only, matching `frust_plugin::desktop`'s contract
 //!
@@ -94,6 +94,44 @@
 //! into AppKit (`docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the
 //! same discipline `plugins/native-widgets/src/apple/factory.rs` documents
 //! for its own three-method factory).
+//!
+//! # The failure contract: an empty view, never a declined create
+//!
+//! [`MacosVideoFactory::create`] hands the shell a fully built, `Some`
+//! [`DesktopViewHandle`] on every path except one. `crates/frust-shell-macos`'s
+//! platform-view host treats a declined create (`None`) as terminal for that
+//! slot id: it records nothing for the slot, and every later `Update` or
+//! `UpdateParams` naming that slot finds no entry and is silently ignored
+//! (`ViewHost::create`'s `Ok(None)` arm and the unknown-slot early returns in
+//! `update`/`update_params`) — the differ, in turn, never re-emits `Create`
+//! for a live slot whose `view_type` is unchanged, only `UpdateParams` with
+//! the new session id. So a factory that declines for a *recoverable*
+//! condition strands that slot empty forever, with no path back.
+//!
+//! [`crate::apple::player_for`]'s own frozen instruction governs which
+//! conditions are recoverable: `None` covers both an unknown/closed session
+//! and one whose player is still being constructed, so "attach nothing and
+//! wait for the next update" is the only response that keeps the slot
+//! reachable. `create_view` follows that instruction exactly like
+//! `ios_view.rs`'s `createView(paramsJson:)` does for the same two cases:
+//!
+//! - **Unreadable params, or no live player for the named session** — a
+//!   fully-built, detached [`VideoPlayerNSView`] (`setPlayer(None)` on its
+//!   layer): empty, not dead. [`update_view_params`] can still re-attach it
+//!   once the session resolves — on a session-id change, and, since the
+//!   player may still be under construction on the *same* id, on the next
+//!   update for that same id too, once the view is detached and
+//!   [`crate::apple::player_for`] now answers `Some`.
+//! - **A call off the main thread** — the one path that still answers `None`:
+//!   [`objc2::MainThreadMarker::new`] failing is a caller contract violation
+//!   (the shell is documented to call every [`DesktopViewFactory`] method only
+//!   from the main thread), not a recoverable session state, so there is no
+//!   `VideoPlayerNSView` this call could safely construct.
+//! - **A caught panic** (`MacosVideoFactory::create`'s `catch_unwind` arm) —
+//!   also `None`: the half-built view's state past a panic is untrustworthy,
+//!   so the slot is surrendered rather than reused, exactly as `ios_view.rs`'s
+//!   panic arm surrenders to an inert placeholder instead of returning what it
+//!   was building.
 //!
 //! # `unsafe`
 //!
@@ -155,7 +193,7 @@ define_class!(
     // - `NSView` (transitively `NSResponder`/`NSObject`) has no subclassing
     //   requirements this class violates.
     // - `VideoPlayerNSView` implements no `Drop`, so the macro generates no
-    //   `dealloc` override; the ivars (a `Retained<AVPlayerLayer>` plus two
+    //   `dealloc` override; the ivars (a `Retained<AVPlayerLayer>` plus three
     //   `Cell`s) are dropped by the ordinary ivar teardown the macro already
     //   emits.
     #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -181,12 +219,22 @@ struct ViewState {
     /// since that getter answers a plain `CALayer` and would need an
     /// unchecked downcast every time.
     layer: Retained<AVPlayerLayer>,
-    /// The session id most recently attached; `0` means "no session"
-    /// (`crate::apple`'s own reservation — every real id is minted from `1`).
+    /// The session id most recently named in a create or params update; `0`
+    /// means "no session" (`crate::apple`'s own reservation — every real id
+    /// is minted from `1`). Recorded through
+    /// [`VideoPlayerNSView::set_session`] even when the view ends up
+    /// detached, so a later update naming the same id is recognised as
+    /// "nothing changed" rather than re-parsed as new.
     session: Cell<i32>,
     /// The fit most recently applied, so a params update with an unchanged
     /// `fit` skips re-touching `videoGravity`.
     fit: Cell<VideoFit>,
+    /// Whether the layer currently has a player attached. Cheaper than
+    /// re-reading the layer's `player` property (a message send back into
+    /// AVFoundation) on every params update, and lets
+    /// [`update_view_params`] tell a genuinely empty view apart from one that
+    /// is intentionally showing no session.
+    attached: Cell<bool>,
 }
 
 impl VideoPlayerNSView {
@@ -208,6 +256,7 @@ impl VideoPlayerNSView {
             layer,
             session: Cell::new(0),
             fit: Cell::new(VideoFit::default()),
+            attached: Cell::new(false),
         };
         let this = Self::alloc(mtm).set_ivars(ivars);
         // SAFETY: `initWithFrame:` is `NSView`'s designated initializer,
@@ -236,6 +285,7 @@ impl VideoPlayerNSView {
         // whole lifetime, on the main thread (module doc's *Main-thread-only*
         // section).
         unsafe { self.ivars().layer.setPlayer(Some(player)) };
+        self.ivars().attached.set(true);
     }
 
     /// Detach whatever player is currently attached. Idempotent — detaching
@@ -244,6 +294,16 @@ impl VideoPlayerNSView {
     fn detach(&self) {
         // SAFETY: as `attach`.
         unsafe { self.ivars().layer.setPlayer(None) };
+        self.ivars().attached.set(false);
+    }
+
+    /// Whether this view currently has a player attached
+    /// (`ViewState::attached`). Cheaper than reading the layer's `player`
+    /// property back, and lets a caller tell an intentionally empty view
+    /// apart from a still-attached one without another AVFoundation message
+    /// send.
+    fn is_attached(&self) -> bool {
+        self.ivars().attached.get()
     }
 
     /// Apply `fit`'s `videoGravity` and record it, so a later params update
@@ -307,23 +367,25 @@ struct MacosVideoFactory;
 
 impl DesktopViewFactory for MacosVideoFactory {
     /// Build a new [`VideoPlayerNSView`] for the session/fit named in
-    /// `params_json`, or answer a dead slot (`None`) — never panic across
-    /// this boundary (module doc's *Main-thread-only* section).
+    /// `params_json`, attached when a live player already resolves and empty
+    /// (but reusable) when it does not — never panic across this boundary
+    /// (module doc's *Main-thread-only* and *The failure contract* sections).
     fn create(&self, params_json: &str) -> Option<DesktopViewHandle> {
         let outcome = catch_unwind(AssertUnwindSafe(|| create_view(params_json)));
         match outcome {
             Ok(handle) => handle,
             Err(_) => {
                 log::warn!(
-                    "frust-video-player: panic caught in macos create — returning a dead slot"
+                    "frust-video-player: panic caught in macos create — surrendering the slot"
                 );
                 None
             }
         }
     }
 
-    /// Re-attach on a session change, re-apply `videoGravity` on a fit
-    /// change — both diffed against the view's own `ViewState`.
+    /// Re-attach on a session change, re-attach an empty view whose session
+    /// resolves now, and re-apply `videoGravity` on a fit change — each
+    /// diffed against the view's own `ViewState`.
     fn update_params(&self, view: &DesktopViewHandle, params_json: &str) {
         let outcome = catch_unwind(AssertUnwindSafe(|| update_view_params(view, params_json)));
         if outcome.is_err() {
@@ -350,42 +412,57 @@ impl DesktopViewFactory for MacosVideoFactory {
 }
 
 /// The typed half of [`MacosVideoFactory::create`].
+///
+/// `None` only for the one unrecoverable case — an off-main-thread call
+/// (module doc's *The failure contract*). An unparsable payload or an
+/// unresolvable session still yields `Some`, wrapping a fully built but
+/// detached [`VideoPlayerNSView`] that [`update_view_params`] can attach
+/// later.
 fn create_view(params_json: &str) -> Option<DesktopViewHandle> {
-    let Some((session, fit)) = parse_params(params_json) else {
-        log::warn!("frust-video-player: macos create received unparsable params {params_json:?}");
-        return None;
-    };
-
-    let Some(player) = crate::apple::player_for(session) else {
-        log::debug!(
-            "frust-video-player: macos create for unknown/closed session {session} — dead slot"
-        );
-        return None;
-    };
-
     let Some(mtm) = MainThreadMarker::new() else {
         log::error!(
-            "frust-video-player: macos create called off the main thread — dead slot (the shell \
-             must call DesktopViewFactory::create only from the main thread)"
+            "frust-video-player: macos create called off the main thread — the shell must call \
+             DesktopViewFactory::create only from the main thread"
         );
         return None;
     };
 
     let view = VideoPlayerNSView::new(mtm);
-    view.attach(&player);
+
+    let Some((session, fit)) = parse_params(params_json) else {
+        log::warn!(
+            "frust-video-player: macos create received unparsable params {params_json:?} — the \
+             video slot stays empty until the next update"
+        );
+        return Some(publish(view));
+    };
+
     view.set_fit(fit);
     view.set_session(session);
 
-    // Consume the `Retained` into the raw pointer the shell now owns a +1
-    // over (module doc's *retain contract*); `Retained::into_raw` never
-    // answers null.
+    match crate::apple::player_for(session) {
+        Some(player) => view.attach(&player),
+        None => log::debug!(
+            "frust-video-player: macos create found no live player for session {session} yet — \
+             the video slot stays empty until the next update"
+        ),
+    }
+
+    Some(publish(view))
+}
+
+/// Consume `view`'s `Retained` into the raw pointer the shell now owns a +1
+/// over, wrapped in the [`DesktopViewHandle`] `create` hands back (module
+/// doc's *retain contract*).
+fn publish(view: Retained<VideoPlayerNSView>) -> DesktopViewHandle {
+    // `Retained::into_raw` never answers null.
     let ptr = Retained::into_raw(view);
     let ptr = NonNull::new(ptr).expect("Retained::into_raw never returns null");
     // SAFETY: `ptr` is the +1-retained `VideoPlayerNSView` (an `NSView`)
     // pointer just produced above; it stays valid until this same pointer
     // reaches `dispose`, and it is touched only on the main thread (this
     // whole function already required one).
-    Some(unsafe { DesktopViewHandle::from_raw(ptr.cast()) })
+    unsafe { DesktopViewHandle::from_raw(ptr.cast()) }
 }
 
 /// The typed half of [`MacosVideoFactory::update_params`].
@@ -416,6 +493,15 @@ fn update_view_params(handle: &DesktopViewHandle, params_json: &str) {
             }
         }
         view.set_session(session);
+    } else if !view.is_attached() {
+        // Same session as last time, but the view is still empty — the
+        // create or an earlier update found no live player yet (module doc's
+        // *The failure contract*: the session may still be under
+        // construction). Try again now rather than waiting for the id to
+        // change, which may never happen for a session that never closes.
+        if let Some(player) = crate::apple::player_for(session) {
+            view.attach(&player);
+        }
     }
 
     if view.fit() != fit {
