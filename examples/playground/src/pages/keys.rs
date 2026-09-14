@@ -616,6 +616,7 @@ pub fn sentinel_ime_state(active: bool, caret: Option<Rect>) -> ImeState {
         editing: sentinel_editing_state(),
         caret,
         content_type: ImeContentType::NoSuggestions,
+        suppress_soft_keyboard: false,
     }
 }
 

@@ -203,6 +203,16 @@
 //!   check runs from the frame loop as well as from a dispatched event, since
 //!   a focus move a signal drove reaches the tree with no event behind it
 //!   ([`stale_overlay_action`]).
+//! * **A focused read-only field.** [`ImeState::suppress_soft_keyboard`] asks
+//!   for the surface without the keyboard it would otherwise raise, so the
+//!   element carries `inputmode="none"` instead of any other `inputmode`
+//!   ([`overlay_attributes`]) — still focusable, still carrying its
+//!   `copy`/`cut` listeners, but no mobile browser summons a keyboard for it.
+//!   A field that flips this hint while it keeps focus — editable turning
+//!   read-only, or the reverse — is the same kind of stale element as a
+//!   content-type move: [`overlay_needs_rebuild`]/[`stale_overlay_action`]
+//!   compare both hints together ([`OverlayHint`]), so a change in either one
+//!   rebuilds the element the browser already classified wrong.
 //! * **A composition cancelled with Escape.** Browsers disagree about whether
 //!   `compositionend` fires (and with what data) for a cancel, so Escape is
 //!   read from the keystroke itself while composing
@@ -720,6 +730,17 @@ pub fn displaced_composition_signal(
 /// rule the iOS and Android bridges apply to their wire strings, reached here by
 /// having no fallback arm to get wrong.
 ///
+/// # Why the suppression hint is its own parameter, not a read off `ImeState`
+///
+/// The function already takes exactly the one fact it needs off the focused
+/// field's published surface rather than the whole [`ImeState`] — its editing
+/// text, selection and caret have nothing to say about the element's
+/// attributes. [`ImeState::suppress_soft_keyboard`] is the same shape of fact
+/// as `content_type`, so it joins it as a second plain parameter instead of
+/// widening the signature to the struct; the one call site
+/// (`ImeOverlay::build`) already destructures both off the same `Option<&
+/// ImeState>` before calling in.
+///
 /// # What each attribute is for
 ///
 /// `type="password"` is the one that matters: it is what makes the browser
@@ -735,7 +756,19 @@ pub fn displaced_composition_signal(
 /// see, and a suggestion strip would read text the app never showed it.
 /// `tabindex="-1"` keeps the overlay out of the page's own tab order; it is
 /// focused programmatically or not at all.
-pub fn overlay_attributes(content_type: ImeContentType) -> Vec<(&'static str, &'static str)> {
+///
+/// `inputmode="none"` is applied last, and instead of any other `inputmode`,
+/// when `suppress_soft_keyboard` is set: it is the platform contract for "this
+/// element is focusable and receives events but must not summon the virtual
+/// keyboard", which is exactly what a focused read-only field needs — the
+/// element still carries every listener below, so the DOM `copy`/`cut` route
+/// still serves it, but a mobile browser raises no keyboard for it. It must
+/// win over `content_type`'s own `inputmode="text"` rather than merge with it,
+/// since an element may carry only one `inputmode` value.
+pub fn overlay_attributes(
+    content_type: ImeContentType,
+    suppress_soft_keyboard: bool,
+) -> Vec<(&'static str, &'static str)> {
     let secret = content_type.is_secret();
     let mut attributes = vec![
         ("id", OVERLAY_ID),
@@ -746,27 +779,66 @@ pub fn overlay_attributes(content_type: ImeContentType) -> Vec<(&'static str, &'
         ("spellcheck", "false"),
         ("tabindex", "-1"),
     ];
-    if content_type.suppresses_suggestions() {
+    if suppress_soft_keyboard {
+        attributes.push(("inputmode", "none"));
+    } else if content_type.suppresses_suggestions() {
         attributes.push(("inputmode", "text"));
     }
     attributes
 }
 
+/// The two published hints that together decide whether a live overlay
+/// element still fits the focused field: its content-type hint and its
+/// soft-keyboard-suppression hint.
+///
+/// Bundled into one value rather than kept as two independent parameters
+/// because there is one element, built once from one hint pair, so "built"
+/// and "published" are each a single fact to compare, not two that could
+/// drift out of step with each other. Comparing the pair with one `==` is
+/// what gives [`overlay_needs_rebuild`] its "a change in *either* dimension
+/// is a rebuild, no change in either is not" rule for free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayHint {
+    /// What kind of content the field holds — see [`ImeContentType`].
+    pub content_type: ImeContentType,
+    /// Whether the field wants the platform input surface without an
+    /// on-screen keyboard — see [`ImeState::suppress_soft_keyboard`].
+    pub suppress_soft_keyboard: bool,
+}
+
+/// The hint pair a published surface asks for, defaulting to
+/// [`ImeContentType::Normal`] with no suppression when there is no surface to
+/// read one from — the paired form of [`published_content_type`], for the
+/// call sites that need both dimensions of the same hint rather than the
+/// content type alone.
+pub fn published_overlay_hint(ime: Option<&ImeState>) -> OverlayHint {
+    OverlayHint {
+        content_type: published_content_type(ime),
+        suppress_soft_keyboard: ime.is_some_and(|state| state.suppress_soft_keyboard),
+    }
+}
+
 /// Whether the live element must be replaced before it is used again.
 ///
-/// `built` is the content type the element in the document was created with
+/// `built` is the hint pair the element in the document was created with
 /// (`None` when there is no element); `published` is what the focused field
-/// says now. A browser decides secure entry — and the keyboard, suggestion and
-/// autofill behaviour that rides on it — from the element it has, so a hint that
-/// moved is answered with a fresh element rather than a mutated one: the
-/// alternative is an element a browser has already classified as ordinary text
-/// serving a field that has since declared itself secret.
-pub fn overlay_needs_rebuild(built: Option<ImeContentType>, published: ImeContentType) -> bool {
+/// says now. A browser decides secure entry, the keyboard it raises, and the
+/// suggestion/autofill behaviour that rides on both — from the element it
+/// has, so a hint that moved in *either* dimension is answered with a fresh
+/// element rather than a mutated one: the alternative is an element the
+/// browser has already classified wrong, whether that means ordinary text
+/// serving a field that has since declared itself secret, or a keyboard the
+/// field has since asked to go away. One hint pair changing (or both at
+/// once, e.g. a field that turns read-only while also changing its content
+/// type) is exactly one rebuild — the equality check below fires once either
+/// way, and the caller in [`ImeOverlay::sync`] rebuilds at most once per
+/// call regardless of how many fields of the pair moved.
+pub fn overlay_needs_rebuild(built: Option<OverlayHint>, published: OverlayHint) -> bool {
     built.is_some_and(|built| built != published)
 }
 
-/// What the frame loop does with a live element whose content-type hint no
-/// longer matches the focused field's — see [`stale_overlay_action`].
+/// What the frame loop does with a live element whose hint pair no longer
+/// matches the focused field's — see [`stale_overlay_action`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaleOverlay {
     /// The element still fits the field, or there is no element.
@@ -779,15 +851,16 @@ pub enum StaleOverlay {
     Close,
 }
 
-/// The frame loop's answer to a content-type hint that moved with no input
-/// event to carry it.
+/// The frame loop's answer to a hint pair that moved with no input event to
+/// carry it.
 ///
 /// [`overlay_needs_rebuild`] is consulted from a dispatched event, but a focus
-/// move a signal drove — a rebuild landing focus on an obscured field — reaches
-/// the tree with no event at all, and until the next one arrived the secret
-/// field would be served by an element the browser had already classified as
-/// plain text. So the frame loop asks too, with one input the dispatch path
-/// does not need: whether the old element actually holds DOM focus.
+/// move a signal drove — a rebuild landing focus on an obscured field, or one
+/// that lands on a field asking for suppression — reaches the tree with no
+/// event at all, and until the next one arrived the field would be served by
+/// an element the browser had already classified wrong. So the frame loop
+/// asks too, with one input the dispatch path does not need: whether the old
+/// element actually holds DOM focus.
 ///
 /// A replacement is focused only when the element it replaces was — that is
 /// not a focus change, it is the same focus on a new element. A stale element
@@ -795,8 +868,8 @@ pub enum StaleOverlay {
 /// closed instead: a frame never takes focus for the user, the same rule
 /// [`OverlayPolicy::poll`] applies to opening a session.
 pub fn stale_overlay_action(
-    built: Option<ImeContentType>,
-    published: ImeContentType,
+    built: Option<OverlayHint>,
+    published: OverlayHint,
     held_focus: bool,
 ) -> StaleOverlay {
     if !overlay_needs_rebuild(built, published) {
@@ -1067,7 +1140,7 @@ mod browser {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use frust_core::event::{EditCommand, ImeContentType, ImeState};
+    use frust_core::event::{EditCommand, ImeState};
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{
@@ -1078,11 +1151,11 @@ mod browser {
     use winit::window::Window;
 
     use super::{
-        ClipboardHandoff, DomEditEvent, OverlayAction, OverlayBox, OverlayPolicy, OverlaySync,
-        StaleOverlay, cancels_composition, clipboard_selection, clipboard_write_action,
-        forwards_to_canvas, hands_write_to_dom_event, key_path_dropped, overlay_attributes,
-        overlay_box, overlay_box_moved, overlay_needs_rebuild, published_content_type,
-        session_is_active, stale_overlay_action, withheld_from_key_path,
+        ClipboardHandoff, DomEditEvent, OverlayAction, OverlayBox, OverlayHint, OverlayPolicy,
+        OverlaySync, StaleOverlay, cancels_composition, clipboard_selection,
+        clipboard_write_action, forwards_to_canvas, hands_write_to_dom_event, key_path_dropped,
+        overlay_attributes, overlay_box, overlay_box_moved, overlay_needs_rebuild,
+        published_overlay_hint, session_is_active, stale_overlay_action, withheld_from_key_path,
     };
 
     /// The style declarations the overlay is created with, beyond its per-frame
@@ -1171,9 +1244,9 @@ mod browser {
         listeners: Vec<Listener>,
         signals: Rc<Signals>,
         last_box: Option<OverlayBox>,
-        /// The content type the live element was created with, `None` when
+        /// The hint pair the live element was created with, `None` when
         /// there is no element — the left half of [`overlay_needs_rebuild`].
-        built_content_type: Option<ImeContentType>,
+        built_hint: Option<OverlayHint>,
     }
 
     impl ImeOverlay {
@@ -1321,12 +1394,13 @@ mod browser {
                     self.focus();
                 }
                 OverlayAction::Update { refocus } => {
-                    // A field that changed its content type needs the browser
-                    // to re-read it, which it only does for an element it has
-                    // not classified yet. The replacement always takes focus
-                    // back, `refocus` or not: the element that held it is gone.
+                    // A field that changed its content type or its
+                    // suppression hint needs the browser to re-read it, which
+                    // it only does for an element it has not classified yet.
+                    // The replacement always takes focus back, `refocus` or
+                    // not: the element that held it is gone.
                     let rebuilt =
-                        overlay_needs_rebuild(self.built_content_type, published_content_type(ime));
+                        overlay_needs_rebuild(self.built_hint, published_overlay_hint(ime));
                     if rebuilt {
                         self.teardown();
                         detached = true;
@@ -1364,9 +1438,9 @@ mod browser {
             closing
         }
 
-        /// The frame loop's half of the content-type contract: replace an
-        /// element built for a hint the focused field no longer publishes, or
-        /// close it when it no longer holds focus — see
+        /// The frame loop's half of the hint contract: replace an element
+        /// built for a content-type or suppression hint the focused field no
+        /// longer publishes, or close it when it no longer holds focus — see
         /// [`stale_overlay_action`](super::stale_overlay_action). Returns
         /// whether a live element was removed, for
         /// [`teardown_signal`](super::teardown_signal).
@@ -1381,8 +1455,8 @@ mod browser {
                 return false;
             };
             let action = stale_overlay_action(
-                self.built_content_type,
-                published_content_type(ime),
+                self.built_hint,
+                published_overlay_hint(ime),
                 holds_dom_focus(element),
             );
             match action {
@@ -1444,11 +1518,11 @@ mod browser {
         /// Create the element, style it, install its listeners and append it to
         /// the document body.
         ///
-        /// The attributes come from the focused field's own content-type hint
-        /// ([`overlay_attributes`]) rather than from a constant, which is why
-        /// the published surface is threaded in here: `type="password"` is only
-        /// read by a browser when it classifies the element, so it has to be
-        /// set on creation.
+        /// The attributes come from the focused field's own content-type and
+        /// soft-keyboard-suppression hints ([`overlay_attributes`]) rather than
+        /// from a constant, which is why the published surface is threaded in
+        /// here: `type="password"` and `inputmode` are only read by a browser
+        /// when it classifies the element, so both have to be set on creation.
         ///
         /// Every step is fallible in a DOM that may not have a body yet; a
         /// failure logs and leaves `element` unset rather than panicking a
@@ -1472,8 +1546,9 @@ mod browser {
                 return;
             };
 
-            let content_type = published_content_type(ime);
-            for (name, value) in overlay_attributes(content_type) {
+            let hint = published_overlay_hint(ime);
+            for (name, value) in overlay_attributes(hint.content_type, hint.suppress_soft_keyboard)
+            {
                 let _ = element.set_attribute(name, value);
             }
             let style = element.style();
@@ -1487,7 +1562,7 @@ mod browser {
 
             self.install_listeners(&element, window);
             self.element = Some(element);
-            self.built_content_type = Some(content_type);
+            self.built_hint = Some(hint);
             self.last_box = None;
         }
 
@@ -1792,7 +1867,7 @@ mod browser {
                 element.remove();
             }
             self.listeners.clear();
-            self.built_content_type = None;
+            self.built_hint = None;
             self.last_box = None;
             self.signals.blurred.set(false);
             // The listeners that would have read it are gone; a fresh session
@@ -2010,11 +2085,11 @@ mod browser {
 mod tests {
     use super::{
         ClipboardHandoff, ClipboardVerb, DomEditEvent, MIN_OVERLAY_SIDE, OverlayAction, OverlayBox,
-        OverlayPolicy, StaleOverlay, cancels_composition, clipboard_selection, clipboard_verb,
-        clipboard_write_action, displaced_composition_signal, forwards_to_canvas,
+        OverlayHint, OverlayPolicy, StaleOverlay, cancels_composition, clipboard_selection,
+        clipboard_verb, clipboard_write_action, displaced_composition_signal, forwards_to_canvas,
         hands_write_to_dom_event, key_path_dropped, overlay_attributes, overlay_box,
-        overlay_box_moved, overlay_needs_rebuild, published_content_type, session_is_active,
-        stale_overlay_action, teardown_signal, withheld_from_key_path,
+        overlay_box_moved, overlay_needs_rebuild, published_content_type, published_overlay_hint,
+        session_is_active, stale_overlay_action, teardown_signal, withheld_from_key_path,
     };
     use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
     use kurbo::Rect;
@@ -2050,11 +2125,22 @@ mod tests {
         }
     }
 
-    fn attribute(content_type: ImeContentType, name: &str) -> Option<&'static str> {
-        overlay_attributes(content_type)
+    fn attribute(
+        content_type: ImeContentType,
+        suppress_soft_keyboard: bool,
+        name: &str,
+    ) -> Option<&'static str> {
+        overlay_attributes(content_type, suppress_soft_keyboard)
             .into_iter()
             .find(|(key, _)| *key == name)
             .map(|(_, value)| value)
+    }
+
+    fn hint(content_type: ImeContentType, suppress_soft_keyboard: bool) -> OverlayHint {
+        OverlayHint {
+            content_type,
+            suppress_soft_keyboard,
+        }
     }
 
     // --- session lifecycle ---
@@ -2242,26 +2328,29 @@ mod tests {
     #[test]
     fn an_obscured_fields_overlay_is_secret_typed_and_a_plain_fields_is_not() {
         assert_eq!(
-            attribute(ImeContentType::Password, "type"),
+            attribute(ImeContentType::Password, false, "type"),
             Some("password")
         );
         assert_eq!(
-            attribute(ImeContentType::Password, "autocomplete"),
+            attribute(ImeContentType::Password, false, "autocomplete"),
             Some("new-password"),
             "a secret field must refuse autofill, which a plain `off` does not"
         );
         assert_eq!(
-            attribute(ImeContentType::Password, "inputmode"),
+            attribute(ImeContentType::Password, false, "inputmode"),
             Some("text")
         );
 
-        assert_eq!(attribute(ImeContentType::Normal, "type"), Some("text"));
         assert_eq!(
-            attribute(ImeContentType::Normal, "autocomplete"),
+            attribute(ImeContentType::Normal, false, "type"),
+            Some("text")
+        );
+        assert_eq!(
+            attribute(ImeContentType::Normal, false, "autocomplete"),
             Some("off")
         );
         assert_eq!(
-            attribute(ImeContentType::Normal, "inputmode"),
+            attribute(ImeContentType::Normal, false, "inputmode"),
             None,
             "an ordinary field leaves the keyboard choice to the browser"
         );
@@ -2269,16 +2358,19 @@ mod tests {
         // Non-secret but suggestion-refusing: a plain-text element, pinned to
         // the plain-text keyboard.
         assert_eq!(
-            attribute(ImeContentType::NoSuggestions, "type"),
+            attribute(ImeContentType::NoSuggestions, false, "type"),
             Some("text")
         );
         assert_eq!(
-            attribute(ImeContentType::NoSuggestions, "inputmode"),
+            attribute(ImeContentType::NoSuggestions, false, "inputmode"),
             Some("text")
         );
-        assert_eq!(attribute(ImeContentType::Terminal, "type"), Some("text"));
         assert_eq!(
-            attribute(ImeContentType::Terminal, "inputmode"),
+            attribute(ImeContentType::Terminal, false, "type"),
+            Some("text")
+        );
+        assert_eq!(
+            attribute(ImeContentType::Terminal, false, "inputmode"),
             Some("text")
         );
 
@@ -2290,32 +2382,93 @@ mod tests {
             ImeContentType::NoSuggestions,
             ImeContentType::Terminal,
         ] {
-            assert_eq!(attribute(hint, "spellcheck"), Some("false"));
-            assert_eq!(attribute(hint, "autocorrect"), Some("off"));
-            assert_eq!(attribute(hint, "autocapitalize"), Some("off"));
-            assert_eq!(attribute(hint, "tabindex"), Some("-1"));
+            assert_eq!(attribute(hint, false, "spellcheck"), Some("false"));
+            assert_eq!(attribute(hint, false, "autocorrect"), Some("off"));
+            assert_eq!(attribute(hint, false, "autocapitalize"), Some("off"));
+            assert_eq!(attribute(hint, false, "tabindex"), Some("-1"));
         }
     }
 
     #[test]
-    fn a_hint_change_requests_a_rebuild() {
+    fn a_suppressed_keyboard_wins_inputmode_over_every_content_type() {
+        // `inputmode="none"` must win over a content type's own
+        // `inputmode="text"` (Password/NoSuggestions/Terminal) and over
+        // Normal's lack of one — exactly one `inputmode` entry either way.
+        for hint in [
+            ImeContentType::Normal,
+            ImeContentType::Password,
+            ImeContentType::NoSuggestions,
+            ImeContentType::Terminal,
+        ] {
+            let attributes = overlay_attributes(hint, true);
+            let inputmodes: Vec<_> = attributes
+                .iter()
+                .filter(|(key, _)| *key == "inputmode")
+                .collect();
+            assert_eq!(
+                inputmodes,
+                vec![&("inputmode", "none")],
+                "a suppressed field must carry exactly one `inputmode`, and it \
+                 must be `none`, for {hint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_content_type_change_requests_a_rebuild() {
         // A browser classifies the element it has; the hint that moved has to
-        // reach it as a new one.
+        // reach it as a new one. Suppression stays unchanged (false on both
+        // sides) throughout — this is the pre-existing content-type-only
+        // behaviour, which must not regress now that the check also compares
+        // suppression.
         assert!(overlay_needs_rebuild(
-            Some(ImeContentType::Normal),
-            ImeContentType::Password
+            Some(hint(ImeContentType::Normal, false)),
+            hint(ImeContentType::Password, false)
         ));
         assert!(overlay_needs_rebuild(
-            Some(ImeContentType::Password),
-            ImeContentType::Normal
+            Some(hint(ImeContentType::Password, false)),
+            hint(ImeContentType::Normal, false)
         ));
-        // An unchanged hint keeps the live element (and its DOM focus).
+        // Neither dimension moved: the live element (and its DOM focus) stays.
         assert!(!overlay_needs_rebuild(
-            Some(ImeContentType::Password),
-            ImeContentType::Password
+            Some(hint(ImeContentType::Password, false)),
+            hint(ImeContentType::Password, false)
         ));
         // Nothing built yet is an open, not a rebuild.
-        assert!(!overlay_needs_rebuild(None, ImeContentType::Password));
+        assert!(!overlay_needs_rebuild(
+            None,
+            hint(ImeContentType::Password, false)
+        ));
+    }
+
+    #[test]
+    fn a_suppression_only_change_also_requests_a_rebuild() {
+        // Same content type on both sides, suppression flips either way: a
+        // field turning read-only (or back) while it keeps focus is answered
+        // exactly like a content-type move — the browser has already
+        // classified the `inputmode` it has, and it will not re-read it
+        // without a fresh element.
+        assert!(overlay_needs_rebuild(
+            Some(hint(ImeContentType::Normal, false)),
+            hint(ImeContentType::Normal, true)
+        ));
+        assert!(overlay_needs_rebuild(
+            Some(hint(ImeContentType::Normal, true)),
+            hint(ImeContentType::Normal, false)
+        ));
+        // Neither dimension moved: no rebuild.
+        assert!(!overlay_needs_rebuild(
+            Some(hint(ImeContentType::Normal, true)),
+            hint(ImeContentType::Normal, true)
+        ));
+        // Both dimensions move at once (a field that turns read-only while
+        // also changing its content type): still one rebuild signal, not
+        // two — a plain equality check cannot double-fire no matter how many
+        // fields of the pair differ.
+        assert!(overlay_needs_rebuild(
+            Some(hint(ImeContentType::Normal, false)),
+            hint(ImeContentType::Password, true)
+        ));
     }
 
     #[test]
@@ -2324,15 +2477,19 @@ mod tests {
         // the focus, so the secret field is served by a secure element before
         // any further input arrives.
         assert_eq!(
-            stale_overlay_action(Some(ImeContentType::Normal), ImeContentType::Password, true),
+            stale_overlay_action(
+                Some(hint(ImeContentType::Normal, false)),
+                hint(ImeContentType::Password, false),
+                true
+            ),
             StaleOverlay::Replace
         );
         // The hint moved but the element had already lost focus: a frame never
         // takes focus for the user, so the session closes instead.
         assert_eq!(
             stale_overlay_action(
-                Some(ImeContentType::Normal),
-                ImeContentType::Password,
+                Some(hint(ImeContentType::Normal, false)),
+                hint(ImeContentType::Password, false),
                 false
             ),
             StaleOverlay::Close
@@ -2340,16 +2497,34 @@ mod tests {
         // An unchanged hint keeps the element whether or not it holds focus.
         assert_eq!(
             stale_overlay_action(
-                Some(ImeContentType::Password),
-                ImeContentType::Password,
+                Some(hint(ImeContentType::Password, false)),
+                hint(ImeContentType::Password, false),
                 false
             ),
             StaleOverlay::Keep
         );
         // No element is nothing to replace: opening is the dispatch path's.
         assert_eq!(
-            stale_overlay_action(None, ImeContentType::Password, true),
+            stale_overlay_action(None, hint(ImeContentType::Password, false), true),
             StaleOverlay::Keep
+        );
+        // A suppression-only move is replaced/closed on the same focus rule
+        // as a content-type move.
+        assert_eq!(
+            stale_overlay_action(
+                Some(hint(ImeContentType::Normal, false)),
+                hint(ImeContentType::Normal, true),
+                true
+            ),
+            StaleOverlay::Replace
+        );
+        assert_eq!(
+            stale_overlay_action(
+                Some(hint(ImeContentType::Normal, false)),
+                hint(ImeContentType::Normal, true),
+                false
+            ),
+            StaleOverlay::Close
         );
     }
 
@@ -2363,6 +2538,27 @@ mod tests {
         assert_eq!(
             published_content_type(Some(&surface_with(ImeContentType::Password))),
             ImeContentType::Password
+        );
+    }
+
+    #[test]
+    fn a_published_hint_pairs_content_type_with_suppression() {
+        assert_eq!(
+            published_overlay_hint(None),
+            hint(ImeContentType::Normal, false)
+        );
+        assert_eq!(
+            published_overlay_hint(Some(&active_surface(None))),
+            hint(ImeContentType::Normal, false)
+        );
+        let read_only_secret = ImeState {
+            content_type: ImeContentType::Password,
+            suppress_soft_keyboard: true,
+            ..active_surface(None)
+        };
+        assert_eq!(
+            published_overlay_hint(Some(&read_only_secret)),
+            hint(ImeContentType::Password, true)
         );
     }
 

@@ -217,7 +217,8 @@ pub(crate) struct CaretRect {
 ///
 /// ```text
 /// {"active":bool,"text":"...","selBase":n,"selExt":n,"compBase":n,"compExt":n,
-///  "caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"normal"}
+///  "caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"normal",
+///  "suppressSoftKeyboard":bool}
 /// ```
 ///
 /// Selection/composing indices are UTF-16 code units (the platform-native unit,
@@ -236,6 +237,16 @@ pub(crate) struct CaretRect {
 /// maps the enum to this string; unrecognized/future strings on the Swift side
 /// must fail closed to the most restrictive (`"password"`-equivalent)
 /// handling, never fall through to `"normal"`.
+///
+/// `suppress_soft_keyboard` is appended **last**, so every field before it
+/// keeps the position it already had and the Android bridge — which spells
+/// the key `"suppressSoftKeyboard"` and places it in the same slot — stays a
+/// byte-for-byte mirror (the claim both `content_type_wire` docs make). It
+/// defaults to `false`, so a field publishing no hint reads exactly as it
+/// always did. Set, it asks the Swift side to keep the first responder — the
+/// route `copy:` and the system edit menu travel — while handing UIKit an
+/// empty `inputView`, so a field whose text cannot be typed into raises no
+/// on-screen keyboard.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ime_state_json(
     active: bool,
@@ -246,6 +257,7 @@ pub(crate) fn ime_state_json(
     comp_ext: i32,
     caret: Option<CaretRect>,
     content_type: &str,
+    suppress_soft_keyboard: bool,
 ) -> String {
     let mut out = String::with_capacity(text.len() + 128);
     out.push_str("{\"active\":");
@@ -274,7 +286,13 @@ pub(crate) fn ime_state_json(
     push_num_or_null(&mut out, ch);
     out.push_str(",\"contentType\":\"");
     json_escape_into(content_type, &mut out);
-    out.push_str("\"}");
+    out.push_str("\",\"suppressSoftKeyboard\":");
+    out.push_str(if suppress_soft_keyboard {
+        "true"
+    } else {
+        "false"
+    });
+    out.push('}');
     out
 }
 
@@ -892,26 +910,27 @@ mod tests {
                 h: 16.0,
             }),
             "normal",
+            false,
         );
         assert_eq!(
             json,
-            r#"{"active":true,"text":"hi","selBase":0,"selExt":2,"compBase":-1,"compExt":-1,"caretX":4,"caretY":8,"caretW":2,"caretH":16,"contentType":"normal"}"#
+            r#"{"active":true,"text":"hi","selBase":0,"selExt":2,"compBase":-1,"compExt":-1,"caretX":4,"caretY":8,"caretW":2,"caretH":16,"contentType":"normal","suppressSoftKeyboard":false}"#
         );
     }
 
     #[test]
     fn ime_json_without_caret_emits_nulls() {
-        let json = ime_state_json(false, "", -1, -1, -1, -1, None, "normal");
+        let json = ime_state_json(false, "", -1, -1, -1, -1, None, "normal", false);
         assert_eq!(
             json,
-            r#"{"active":false,"text":"","selBase":-1,"selExt":-1,"compBase":-1,"compExt":-1,"caretX":null,"caretY":null,"caretW":null,"caretH":null,"contentType":"normal"}"#
+            r#"{"active":false,"text":"","selBase":-1,"selExt":-1,"compBase":-1,"compExt":-1,"caretX":null,"caretY":null,"caretW":null,"caretH":null,"contentType":"normal","suppressSoftKeyboard":false}"#
         );
     }
 
     #[test]
     fn ime_json_escapes_text_and_keeps_utf16_indices() {
         // Text with a quote is escaped; composing indices survive verbatim.
-        let json = ime_state_json(true, "a\"b", 1, 1, 0, 3, None, "normal");
+        let json = ime_state_json(true, "a\"b", 1, 1, 0, 3, None, "normal", false);
         assert!(json.contains(r#""text":"a\"b""#));
         assert!(json.contains(r#""compBase":0,"compExt":3"#));
     }
@@ -976,6 +995,7 @@ mod tests {
                 h: 10.0,
             }),
             "normal",
+            false,
         );
         // Non-finite components degrade to null rather than emitting `NaN`/`inf`
         // (which are not valid JSON); finite ones still serialize.
@@ -984,14 +1004,28 @@ mod tests {
 
     #[test]
     fn ime_json_encodes_content_type_password() {
-        let json = ime_state_json(true, "hunter2", 7, 7, -1, -1, None, "password");
+        let json = ime_state_json(true, "hunter2", 7, 7, -1, -1, None, "password", false);
         assert!(json.contains(r#""contentType":"password""#));
     }
 
     #[test]
     fn ime_json_encodes_content_type_no_suggestions() {
-        let json = ime_state_json(true, "ABC-123", 7, 7, -1, -1, None, "noSuggestions");
+        let json = ime_state_json(true, "ABC-123", 7, 7, -1, -1, None, "noSuggestions", false);
         assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    #[test]
+    fn ime_json_encodes_the_soft_keyboard_suppression_hint() {
+        // A focused read-only field: active (so the first responder, and with
+        // it `copy:` and the system edit menu, stay wired) with the keyboard
+        // asked down. Asserted as an exact string because the Android bridge
+        // emits the same bytes — the trailing key must stay last, and spelled
+        // this way, for that mirror to hold.
+        let json = ime_state_json(true, "read-only", 0, 9, -1, -1, None, "normal", true);
+        assert_eq!(
+            json,
+            r#"{"active":true,"text":"read-only","selBase":0,"selExt":9,"compBase":-1,"compExt":-1,"caretX":null,"caretY":null,"caretW":null,"caretH":null,"contentType":"normal","suppressSoftKeyboard":true}"#
+        );
     }
 
     // --- Edit-command wire ABI --------------

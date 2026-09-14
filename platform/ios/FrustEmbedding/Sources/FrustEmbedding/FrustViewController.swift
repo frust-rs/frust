@@ -115,6 +115,21 @@ open class FrustViewController: UIViewController {
     /// session (FINDINGS #31, reintroduced on this exact edge).
     private var lastAppliedContentType: String?
 
+    /// The `"suppressSoftKeyboard"` hint last applied to `forgeView`, or
+    /// `nil` when none has been since the field last went inactive.
+    ///
+    /// The role `lastAppliedContentType` plays, for the other half of the
+    /// published state UIKit latches at first-responder time. A change has to
+    /// reach a **steady-active** field too — a field toggling between
+    /// editable and read-only never blurs, because `forgeView` is the single
+    /// shared responder for the whole tree — and UIKit re-reads
+    /// `FrustView.inputView` only across a responder transition, so
+    /// `syncImeFocus` cycles the responder for it exactly as it does for a
+    /// classification change. Remembering the last applied value here is what
+    /// keeps that cycle to real changes: an unconditional cycle would resign
+    /// and re-become the responder on every single frame.
+    private var lastAppliedSuppressSoftKeyboard: Bool?
+
     /// Whether `syncImeFocus`'s `becomeFirstResponder()` retry has already
     /// been satisfied for the CURRENT Rust-reported activation — either it
     /// landed once (`forgeView.isFirstResponder` went true), or it exhausted
@@ -560,11 +575,13 @@ open class FrustViewController: UIViewController {
     /// mirror** with the tree: a newly-focused field seeds the mirror and shows
     /// the keyboard; a blurred field resigns; a **steady-active** field (still
     /// first responder, no focus edge) whose `"contentType"` classification
-    /// changed re-seeds the mirror, re-applies the traits and cycles the
-    /// responder so the keyboard actually picks them up (see
-    /// `applyImeContentType`'s doc for why a cycle, not just a trait
-    /// assignment, is required); and any other steady-active tick reconciles
-    /// the mirror against the published state.
+    /// or `"suppressSoftKeyboard"` hint changed re-seeds the mirror,
+    /// re-applies both and cycles the responder so UIKit actually picks them
+    /// up (see `applyImeContentType`'s doc for why a cycle, not just an
+    /// assignment, is required — UIKit latches the traits and
+    /// `FrustView.inputView` alike at the moment a responder becomes first
+    /// responder); and any other steady-active tick reconciles the mirror
+    /// against the published state.
     ///
     /// The two steady-active branches are the fix for the case a
     /// per-focus-edge-only application misses entirely: `forgeView` is the
@@ -583,6 +600,17 @@ open class FrustViewController: UIViewController {
     ///    with no widget-identity validation — silently replacing B's content
     ///    with A's. Re-seeding/reconciling the mirror on *both* steady-active
     ///    branches is what closes that; a trait-only fix does not.
+    ///
+    /// The `"suppressSoftKeyboard"` hint rides those same edges for the same
+    /// reason: a field toggling between editable and read-only never blurs
+    /// either, so applying it on focus edges alone would leave the keyboard
+    /// up over a field that can no longer accept a character — or withhold it
+    /// from one that now can. It is assigned where `applyImeContentType` is
+    /// called, before `becomeFirstResponder()`, and re-applied through the
+    /// same cycle, because `FrustView.inputView` is latched at exactly the
+    /// moment the traits are. Suppressing the keyboard is never a refusal to
+    /// focus: the first responder is what carries `copy:` and the system edit
+    /// menu, which is precisely what a focused read-only field must keep.
     ///
     /// The re-seed on the content-type branch deliberately happens **before**
     /// `resignFirstResponder()`: a resign can commit an open composition via
@@ -656,6 +684,11 @@ open class FrustViewController: UIViewController {
         guard let state = fetchImeState() else { return }
         let active = (state["active"] as? Bool) ?? false
         let contentType = state["contentType"] as? String
+        // A read-only field publishes this to keep the input surface — and so
+        // the first responder that carries `copy:` and the system edit menu —
+        // while asking for no keyboard. Absent or malformed reads as `false`,
+        // exactly the behaviour that predates the hint.
+        let suppressSoftKeyboard = (state["suppressSoftKeyboard"] as? Bool) ?? false
 
         if userInitiated && !forgeView.isFirstResponder {
             // An explicit user touch on the Frust surface is a legitimate
@@ -695,6 +728,7 @@ open class FrustViewController: UIViewController {
             if forgeView.isFirstResponder {
                 forgeView.resignFirstResponder()
                 lastAppliedContentType = nil
+                lastAppliedSuppressSoftKeyboard = nil
             }
             return
         }
@@ -726,6 +760,14 @@ open class FrustViewController: UIViewController {
             // this focus session.
             applyImeContentType(contentType)
             lastAppliedContentType = contentType
+            // Same ordering rule, same reason: UIKit reads the responder's
+            // `inputView` when it stands the keyboard up, not afterward. A
+            // focused read-only field must still BE first responder — that is
+            // the route `copy:` and the system edit menu travel — so its "no
+            // keyboard" is expressed as an empty input view, never as a
+            // refusal to focus.
+            forgeView.suppressSoftKeyboard = suppressSoftKeyboard
+            lastAppliedSuppressSoftKeyboard = suppressSoftKeyboard
             forgeView.becomeFirstResponder()
             if forgeView.isFirstResponder {
                 imeFocusSatisfied = true
@@ -739,11 +781,15 @@ open class FrustViewController: UIViewController {
                     imeFocusSatisfied = true
                 }
             }
-        } else if contentType != lastAppliedContentType {
+        } else if contentType != lastAppliedContentType
+            || suppressSoftKeyboard != lastAppliedSuppressSoftKeyboard
+        {
             // Same responder, no focus edge, but the classification
             // changed underneath it (obscure-toggle on one field, or
             // focus moved straight to a differently-classified field —
-            // see this function's doc). Re-seed the mirror first (the
+            // see this function's doc), and/or the keyboard-suppression
+            // hint did (a field turning read-only, or focus moving to one
+            // that already is). Re-seed the mirror first (the
             // ordering rule above), then re-apply the traits;
             // `applyImeContentType` alone is not enough here — see its doc
             // for the resign/become cycle this requires. Seed rather than
@@ -751,9 +797,19 @@ open class FrustViewController: UIViewController {
             // → `onCreateInputConnection` → `seed(state)`, an
             // unconditional re-seed paired with a fresh keyboard
             // configuration.
+            //
+            // That cycle is equally the only thing that makes a suppression
+            // change land: UIKit re-reads `FrustView.inputView` when a
+            // responder becomes first responder and at no other time. It is
+            // also why this branch is gated on an actual CHANGE in either
+            // value — cycling unconditionally would resign and re-become the
+            // responder every frame, the failure `applyImeContentType`'s doc
+            // warns about, for a field whose state never moved.
             forgeView.seedMirror(from: state)
             applyImeContentType(contentType)
             lastAppliedContentType = contentType
+            forgeView.suppressSoftKeyboard = suppressSoftKeyboard
+            lastAppliedSuppressSoftKeyboard = suppressSoftKeyboard
             forgeView.resignFirstResponder()
             forgeView.becomeFirstResponder()
         } else {

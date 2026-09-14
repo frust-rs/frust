@@ -292,9 +292,9 @@ spellings (`Copy`/`Cut`/`Paste` named keys, `Ctrl+Insert`, `Shift+Insert`, `Shif
 never a chord modifier, and any other chorded character is consumed rather than typed. Refusals are
 the field's own call and still count as *handled*: an obscured field copies and cuts nothing
 (neither the buffer nor its bullet mirror), a collapsed selection makes copy and cut no-ops, a paste
-sanitised down to nothing inserts nothing, and a disabled or read-only field never sees a verb at
-all because it never holds focus. Nothing here touches a host clipboard — see CORE_ARCHITECTURE.md
-for the write/request slots the shell drains.
+sanitised down to nothing inserts nothing, and a disabled field never sees a verb at all because it
+never holds focus — a read-only field does (see *Read-only Text Fields* below). Nothing here touches
+a host clipboard — see CORE_ARCHITECTURE.md for the write/request slots the shell drains.
 
 The bar itself is somebody else's widget: the field hosts an `OverlaySlot` and fills it from the
 process-wide selection-toolbar builder, so `frust-widgets` never names the view that floats and no
@@ -317,6 +317,22 @@ actions are advertised but not invocable today:** the shell-to-core accessibilit
 delivers them; the field's own half is complete the moment one arrives as an `EditCommand`. The
 selection range is not published either — accesskit models one as a pair of positions into
 `Role::TextRun` nodes, and this field contributes a single leaf carrying its text as a plain value.
+
+### Read-only Text Fields
+`TextInput::read_only(true)` makes a field uneditable without dimming it — dimming stays keyed to
+`enabled` alone, never to read-only, so a live-styled static mock does not pop to full alpha when it
+goes live. Focus and mutation answer separate questions: a read-only field is still **focusable and
+copyable** — Material 3's and Apple's HIG's convention, and the plain reading that visible text is
+text a user can select. It takes focus on a press, drag-selects, long-presses to a toolbar offering
+copy and select-all, and answers those verbs in full, while it refuses typed characters, IME
+composition and commits, and the editing/caret-motion keys; cut and paste are answered with no effect
+and no `on_change`. A paste chord never asks the shell to read the host clipboard at all, so an
+answer that could only be discarded never reaches the host (and never raises iOS's system paste
+prompt). Escape still ends the session — a field that can hold focus needs a keyboard way out — and
+its caret is drawn but does not blink, since a blink advertises an insertion point this field does
+not have. A focused read-only field publishes `ImeState { active: true, suppress_soft_keyboard:
+true, .. }` (see CORE_ARCHITECTURE.md's Key Types for the shell obligation this carries).
+`enabled(false)` remains the stronger claim: it refuses focus outright regardless of `read_only`.
 
 ### Scroll Physics
 `ScrollView`/`ListView` (`scroll.rs`/`list_view.rs`) share a pluggable scroll-motion strategy
