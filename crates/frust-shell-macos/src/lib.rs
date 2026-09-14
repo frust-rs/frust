@@ -38,6 +38,10 @@
 //!
 //! Neither route calls `std::process::exit`.
 //!
+//! - **native platform views**: a plugin's `NSView` hosted above the wgpu
+//!   surface and placed from the desktop core's per-frame command batch (the
+//!   `platform_view` module).
+//!
 //! # Inert off macOS
 //!
 //! This crate is a workspace member on every host: its AppKit bindings
@@ -45,14 +49,21 @@
 //! a `cfg(target_os = "macos")` dependency table (see `Cargo.toml`), and every
 //! module that names them is `cfg`-gated to match. Off macOS the type still
 //! exists and every hook still compiles — the menu is never built, the AppKit
-//! observer is never installed (so nothing ever reports a reopen), and the
-//! close policy — plain `winit` — is the only part that still runs. Nothing
-//! installs this extension off macOS anyway; the point is that the workspace
-//! builds. This mirrors `frust-shell-android`'s
+//! observer is never installed (so nothing ever reports a reopen), no platform
+//! view is ever parented, and the close policy — plain `winit` — is the only
+//! part that still runs. Nothing installs this extension off macOS anyway; the
+//! point is that the workspace builds. This mirrors `frust-shell-android`'s
 //! inert-off-target shape (see its own crate docs).
+//!
+//! The platform-view host is the one module that is only *half* gated: its
+//! AppKit operations are macOS-only, but the slot bookkeeping and retain
+//! accounting they drive are ordinary Rust compiled and unit-tested
+//! everywhere, against a fake factory. That is deliberate — see that module's
+//! own docs.
 
 use std::sync::Arc;
 
+use frust_shell_common::platform_view::ViewCommand;
 use frust_shell_desktop::config::{DEFAULT_APP_NAME, DesktopConfig, MenuSpec};
 use frust_shell_desktop::extensions::{CloseAction, DesktopExtensions};
 use winit::window::Window;
@@ -69,6 +80,12 @@ mod appkit_glue;
 mod lifecycle;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menu;
+// Half-gated, unlike the two above: the AppKit operations inside are
+// macOS-only, but the OS-neutral host they drive compiles everywhere so its
+// ownership accounting can be unit-tested on any build host. Off macOS that
+// host has no caller, hence the same scoped allow.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod platform_view;
 
 use lifecycle::{CloseDecision, Lifecycle};
 
@@ -96,6 +113,10 @@ pub struct MacosExtensions {
     /// The live reopen registration; dropping it unregisters.
     #[cfg(target_os = "macos")]
     activation: Option<appkit_glue::AppActivationObserver>,
+    /// The hosted native views: one `NSView` per live platform-view slot,
+    /// parented above the window's content view (see [`platform_view`]).
+    #[cfg(target_os = "macos")]
+    view_host: platform_view::AppKitViewHost,
 }
 
 impl MacosExtensions {
@@ -117,6 +138,8 @@ impl MacosExtensions {
             menu: None,
             #[cfg(target_os = "macos")]
             activation: None,
+            #[cfg(target_os = "macos")]
+            view_host: platform_view::AppKitViewHost::default(),
         }
     }
 }
@@ -156,6 +179,33 @@ impl DesktopExtensions for MacosExtensions {
         }
     }
 
+    fn on_platform_view_commands(
+        &mut self,
+        window: &Arc<Window>,
+        scale: f64,
+        commands: &[ViewCommand],
+    ) {
+        // `scale` goes unread on purpose, and that is the interesting part of
+        // this hook on macOS: AppKit places a subview in the very logical
+        // points the command already carries, so converting to physical px —
+        // what the mobile shells do at their own FFI boundary — would place
+        // every hosted view at `scale` times its correct size and offset on a
+        // Retina display. The other arguments are consumed here so the
+        // off-macOS build, where the body below does not exist, reads them
+        // too.
+        let _ = (scale, window, commands);
+        #[cfg(target_os = "macos")]
+        self.view_host.apply(window, commands);
+    }
+
+    fn on_platform_views_suspended(&mut self) {
+        // Not a hide: the view hierarchy these were parented into is going
+        // away, so every hosted view goes back to its factory. The next batch
+        // after the surface returns replays a `Create` for every live slot.
+        #[cfg(target_os = "macos")]
+        self.view_host.suspend();
+    }
+
     fn on_close_requested(&mut self) -> CloseAction {
         match self.lifecycle.on_close_requested() {
             CloseDecision::Quit => CloseAction::Exit,
@@ -176,7 +226,8 @@ impl std::fmt::Debug for MacosExtensions {
         #[cfg(target_os = "macos")]
         debug
             .field("menu_installed", &self.menu.is_some())
-            .field("reopen_observer", &self.activation.is_some());
+            .field("reopen_observer", &self.activation.is_some())
+            .field("hosted_platform_views", &self.view_host.hosted_count());
         debug.finish()
     }
 }
