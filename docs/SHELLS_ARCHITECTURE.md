@@ -41,7 +41,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through the facade's `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both of its device-creation sites; the Android and iOS shells forward the feature but do not install a handle yet, so `with_context` answers `None` there |
 | `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
-| `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, and the reopen observer in its `appkit_glue` unsafe zone |
+| `frust-shell-desktop::platform_view` | The OS-neutral desktop platform-view host: owns the shared differ, ingesting each paint's frames right after `RenderRoot::paint` and draining the batch to the per-OS hook right after the frame is submitted, then acknowledging it; plus the two lifecycle resets (replay on surface re-create, drop-everything on suspend) |
+| `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, the reopen observer in its `appkit_glue` unsafe zone, and the platform-view host below |
+| `frust-shell-macos::platform_view` | The AppKit (Mode A) native-view host: resolves a slot's `view_type` to a plugin factory, parents the returned `NSView` above winit's content view, and places/shows/disposes it from every later command. Its slot bookkeeping, geometry mapping and retain accounting sit behind a `NativeViewOps` seam and compile on every host; only the AppKit implementation is `cfg(target_os = "macos")` |
 | `frust-shell-windows` | Win32 integration: taskbar identity, window/taskbar icons, an `HMENU` menu bar with keyboard accelerators, and titlebar brightness — every `unsafe` and every `windows-sys` call confined to `win32_glue` |
 | `frust-shell-linux` | Wayland `app_id`/X11 `WM_CLASS` plus the X11 window icon, through winit's own cross-platform API. Deliberately thin: no GTK/X11 binding, no native menu (the menu is widget-drawn), no `unsafe`, one hook implemented |
 | `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; carries the theme precedence ladder and the conformance-pinned resolved-surface-mode publish site |
@@ -71,10 +73,19 @@ unconditionally. Platform FFI lives only in the concrete shells — `winit` + `a
 adapter) in `frust-shell-web`, and the per-OS desktop bindings below.
 
 **The three per-OS desktop crates depend only on `frust-shell-desktop`** plus `winit`, whatever
-narrow seam they push into (`frust-reactive` for menu activations, `frust-theme` for the Windows
-brightness hook) and their own native bindings — never on each other, never on
-`frust-shell-common`, and nothing in the shared core depends on them. The core is compiled for
-every desktop host; the native half is chosen above it.
+narrow seam they push into or are handed (`frust-reactive` for menu activations, `frust-theme` for
+the Windows brightness hook, and on macOS `frust-shell-common` for the `ViewCommand` vocabulary its
+platform-view hook receives) and their own native bindings — never on each other, and nothing in
+the shared core depends on them. The core is compiled for every desktop host; the native half is
+chosen above it.
+
+`frust-shell-macos` additionally depends on `frust-plugin`, to resolve a slot's `view_type` through
+the desktop view-factory registry: the **second shell → substrate edge** after `frust-shell-android`'s,
+in the same direction and for the same reason — a shell reads the leaf substrate so it can host a
+plugin's native view without depending on any plugin, and the edge only ever points that way (see
+[PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)). Both that edge and the `frust-shell-common`
+one are unconditional rather than macOS-gated, so the host's OS-neutral core stays compiled and
+unit-tested on every build host.
 
 **`frust-shell-web` depends only on `frust-shell-common`**, never on `frust-shell-desktop`, for the
 Overview's reasons. Its `winit` edge rides the identical workspace pin the desktop tier uses — a
@@ -114,7 +125,7 @@ seam race-free without a lock.
 
 ## The Desktop Extension Seam
 
-`DesktopExtensions` is a six-hook trait, every method defaulted to a no-op, invoked at the six
+`DesktopExtensions` is an eight-hook trait, every method defaulted to a no-op, invoked at the
 points in the loop where a native integration has something to say. `NoExtensions` implements none
 of them and is what the zero-config preview installs, so that path pays nothing for a seam it does
 not use.
@@ -126,14 +137,17 @@ not use.
 | `on_window_created(&Arc<Window>)` | once, after creation, before the window is shown | attaching a native menu to the live handle; retaining the window |
 | `pump` | once per frame, at the top of the redraw pass | draining the extension's own queue so what it delivers is visible to *this* frame's rebuild |
 | `on_theme_brightness_changed` | whenever the resolved brightness actually moves | Windows titlebar theming |
+| `on_platform_view_commands(&Arc<Window>, scale, &[ViewCommand])` | once per frame, right after the frame is submitted | placing plugin-provided native views — macOS's AppKit host |
+| `on_platform_views_suspended` | the window or its surface is going away | removing every hosted native view before it is orphaned |
 | `on_close_requested() -> CloseAction` | on a close request | macOS hide-instead-of-quit |
 
 Two contracts shape it. **Static dispatch, not `dyn`:** the builder hook hands out a
 `DesktopEventLoopBuilder` that a platform crate extends through winit's own `EventLoopBuilderExt*`
-traits (object safety would bite), and there is exactly one extension per binary anyway. **The
-window reaches an extension exactly once:** only `on_window_created` receives it, as an `&Arc` the
-extension clones and retains if a later hook needs it — which also keeps five of the six hooks
-unit-testable with no live event loop.
+traits (object safety would bite), and there is exactly one extension per binary anyway. **Only
+two hooks receive the window:** `on_window_created`, as an `&Arc` the extension clones and retains
+if a later hook needs it, and `on_platform_view_commands`, which fires from inside the frame path
+and must parent a hosted view into that exact window. That keeps the other six unit-testable with
+no live event loop.
 
 `CloseAction::Exit` (the default) exits the loop, which is what runs the real shutdown path:
 `run_app` returns, the frame executor drops, the render thread joins after a final present and its
@@ -465,8 +479,19 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   than a silent gap (`crates/frust-shell-web/src/app_handler.rs`'s `push_semantics`/`pump_devtools`).
   See [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
 - **Platform-view embedding:** paint-time view frames feed the `platform_view` differ, which
-  exposes a command backlog each shell's FFI layer polls and applies to the native view hierarchy,
-  frame-paired to keep geometry in sync.
+  exposes an idempotent create/update/dispose backlog. The two mobile shells **poll** it across
+  their FFI boundary and apply it frame-paired against present, converting each rect to physical px
+  on the way. Desktop has neither boundary nor poller: the differ is driven straight from the winit
+  loop — ingest after paint, then **push** the batch to
+  `DesktopExtensions::on_platform_view_commands` after the frame is submitted, acknowledged as the
+  hook returns, rects left in **logical points** (the hook also gets the window's scale factor, for
+  a host that does need physical px; AppKit does not). macOS is the one host implementing it,
+  parenting the plugin-provided `NSView` above winit's content view — Mode A, so nothing is
+  forwarded into it and the frust slot behind it is simply covered. Pushing before present means a
+  hosted view can lead its surroundings by **at most one frame**
+  (`desktop-platform-view-frame-lead` in [LIMITATIONS.md](LIMITATIONS.md)); pairing would need a
+  presented-frame id the desktop executor does not publish. A suspend removes every hosted view
+  rather than hiding it, and every surface bring-up replays `Create` + `Update` per live slot.
 - **Surface-mode resolution:** each mobile shell resolves the host's declared translucency mode
   against actual surface capabilities at configure time and republishes the resolved verdict every
   frame.
@@ -488,10 +513,10 @@ signal-driven repaint in the browser; see its own README for the milestone evide
 | `AppTree` / `new_boxed_app` / `new_boxed_app_with` | Type-erased app driver each shell's FFI/event-loop layer owns and calls into for every lifecycle callback. Beside the lifecycle passes it carries the host-signal drains a shell polls: `take_clipboard_write()`/`take_paste_request()` (destructive, one-shot) and `selection_toolbar()`/`selection_toolbar_generation()` (a level plus a counter to diff), each delegating to the matching `RenderRoot` accessor |
 | `FrameGate` / `FrameInputs` / `FrameDecision` | Shared run/skip decision the continuous-loop mobile shells consult every tick |
 | `RenderCommand` / `Ack` / `AckWaiter` / `SceneFrame` | UI-thread↔render-thread lifecycle and scene-handoff vocabulary underlying each shell's default split frame path |
-| `PlatformViewState` / `ViewCommand` | Generation-stamped native-sibling create/update/dispose backlog each mobile shell exposes to its embedding module |
+| `PlatformViewState` / `ViewCommand` | Generation-stamped native-sibling create/update/dispose backlog — polled by a mobile shell's embedding module, pushed by the desktop shell to its per-OS host |
 | `SurfaceMode` / `ResolvedSurfaceMode` / `SurfaceModeWatcher` | Host translucency declaration latch plus per-frame resolved-mode publication |
 | `WindowMetricsPublisher` | Shared, change-guarded path every shell drives to provide window-shape context without per-frame re-provides (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)) |
-| `DesktopExtensions` / `NoExtensions` / `CloseAction` / `DesktopEventLoopBuilder` | The per-OS desktop seam: its six hooks, the whole-set no-op, the close verdict, and the builder type a platform crate extends |
+| `DesktopExtensions` / `NoExtensions` / `CloseAction` / `DesktopEventLoopBuilder` | The per-OS desktop seam: its eight hooks — including `on_platform_view_commands` (the per-frame native-view batch) and `on_platform_views_suspended` (remove every hosted view) — the whole-set no-op, the close verdict, and the builder type a platform crate extends |
 | `DesktopConfig` / `MenuSpec` / `MenuItemSpec` / `MenuRole` / `IconData` | Platform-independent desktop identity and native-menu vocabulary, re-exported by the facade (`IconData` as `DesktopIconData`) |
 | `MacosExtensions` / `WindowsExtensions` / `LinuxExtensions` | The three per-OS implementations, each built from a borrowed `DesktopConfig` and installed by the facade under its own target `cfg` |
 | `android_app!` / `ios_app!` / `web_app!` / `app!` | Facade macros binding a generated app's state/logic to the fixed JNI / C-ABI export set, the wasm-bindgen start shim, and the desktop entry point |

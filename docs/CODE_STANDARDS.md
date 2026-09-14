@@ -187,23 +187,23 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
 
 ## Platform-View Conventions
 
-- **Mode B is a build-time host configuration, never an app Rust opt-in.** The embedding
-  module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s constructor
-  parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open var` —
-  different override mechanisms per platform, not a symmetric API) must drive the window
-  pixel format, the host's native-sibling z-order, and the
-  `declare_host_translucent_surface` call *together*, in the same branch — splitting them is
-  the exact defect that once shipped black rectangles. App Rust has no matching call; only the two shells' own
-  FFI-glue may declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
-- **Mode B paint contract: an unpainted region is a window, not a compositor bug.**
-  `platform_view` punches its own slot rect automatically; any other chrome region left
-  unpainted by a Mode B host shows raw OS content behind the frust surface — pair
-  translucency with an explicit opaque app-root background (the catalog's `AppBackground`
-  precedent).
-- **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is
-  OS-routed through the host's own view hierarchy, not `EventCtx` — there is no
-  hit-test/dispatch seam for a hosted view; don't add pointer handling to
-  `PlatformViewWidget`.
+- **Mode B is a build-time host configuration, never an app Rust opt-in, and Android/iOS only.** The
+  embedding module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s constructor
+  parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open var` — per-platform
+  mechanisms, not a symmetric API) must drive the window pixel format, the host's native-sibling z-order
+  and the `declare_host_translucent_surface` call *together*, in the same branch — splitting them is the
+  exact defect that once shipped black rectangles. App Rust has no matching call; only the two mobile
+  shells' own FFI glue may declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
+- **A desktop host is Mode A: `DesktopExtensions`' platform-view hooks, never an FFI poller.** It
+  resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate, leaves
+  rects and clips in **logical points** (no physical conversion, unlike the mobile FFI boundary), and
+  treats `on_platform_views_suspended` as remove-not-hide — the surface-recreate replay is the way back.
+- **Mode B paint contract: an unpainted region is a window, not a compositor bug.** `platform_view`
+  punches its own slot rect automatically; any other chrome region a Mode B host leaves unpainted shows
+  raw OS content — pair translucency with an opaque app-root background (the `AppBackground` precedent).
+- **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is OS-routed
+  through the host's own view hierarchy, not `EventCtx` — there is no hit-test/dispatch seam for a
+  hosted view; don't add pointer handling to `PlatformViewWidget`.
 
 ## GPU / Render-Engine Rules
 

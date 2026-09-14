@@ -319,7 +319,7 @@ cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ign
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android \
   -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
-  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n
+  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets additionally compiles cfg(test) — the plain checks above never do, so a
@@ -331,7 +331,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android 
 # must compile for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
   -p frust -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
-  -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n
+  -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 
