@@ -10,6 +10,7 @@
 //! spellings (state codes, error codes, `viewType`s, params keys). A device
 //! gate proves the backends; this proves the contract they implement.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -302,6 +303,94 @@ fn a_control_call_from_inside_the_listener_is_refused() {
     assert_eq!(host.commands(), Vec::new());
     // And the flag is per-delivery, not sticky: a later call succeeds.
     assert_eq!(session.play(), Ok(()));
+}
+
+#[test]
+fn closing_from_inside_the_listener_delivers_idle_after_the_outer_event() {
+    let session = Arc::new(open());
+    let host = session.mock_host();
+    let states: Arc<Mutex<Vec<PlaybackState>>> = Arc::default();
+    let depth: Arc<AtomicUsize> = Arc::default();
+    let max_depth: Arc<AtomicUsize> = Arc::default();
+    let sink = Arc::clone(&states);
+    let depth_sink = Arc::clone(&depth);
+    let max_depth_sink = Arc::clone(&max_depth);
+    let weak = Arc::downgrade(&session);
+    let _handle = session.set_listener(Box::new(move |event| {
+        let nested = depth_sink.fetch_add(1, Ordering::SeqCst) + 1;
+        max_depth_sink.fetch_max(nested, Ordering::SeqCst);
+
+        if let PlayerEvent::StateChanged(state) = event {
+            sink.lock().expect("states").push(state);
+            if state == PlaybackState::Playing
+                && let Some(session) = weak.upgrade()
+            {
+                session.close();
+            }
+        }
+
+        depth_sink.fetch_sub(1, Ordering::SeqCst);
+    }));
+
+    host.emit_state(PlaybackState::Playing);
+
+    assert_eq!(
+        *states.lock().expect("states"),
+        vec![PlaybackState::Playing, PlaybackState::Idle]
+    );
+    // The listener was never re-entered: the close's own publish waited for
+    // the outer call to return rather than running on top of it.
+    assert_eq!(max_depth.load(Ordering::SeqCst), 1);
+    assert_eq!(session.snapshot().state, PlaybackState::Idle);
+}
+
+#[test]
+fn a_control_call_after_an_inline_close_is_still_refused_inside_the_listener() {
+    let session = Arc::new(open());
+    let host = session.mock_host();
+    let outcome: Arc<Mutex<Option<Result<(), VideoError>>>> = Arc::default();
+    let sink = Arc::clone(&outcome);
+    let weak = Arc::downgrade(&session);
+    let _handle = session.set_listener(Box::new(move |event| {
+        if matches!(event, PlayerEvent::StateChanged(PlaybackState::Playing))
+            && let Some(session) = weak.upgrade()
+        {
+            session.close();
+            // The nested close published `Idle` behind the scenes, but this
+            // thread is still inside the outer `Playing` delivery — a
+            // control call here must still be refused as re-entrant, not
+            // as merely-closed.
+            *sink.lock().expect("outcome") = Some(session.play());
+        }
+    }));
+
+    host.emit_state(PlaybackState::Playing);
+
+    assert_eq!(
+        *outcome.lock().expect("outcome"),
+        Some(Err(VideoError::Reentrant))
+    );
+}
+
+#[test]
+fn the_delivering_flag_is_clear_after_a_nested_publish() {
+    let session = Arc::new(open());
+    let host = session.mock_host();
+    let weak = Arc::downgrade(&session);
+    let _handle = session.set_listener(Box::new(move |event| {
+        if matches!(event, PlayerEvent::StateChanged(PlaybackState::Playing))
+            && let Some(session) = weak.upgrade()
+        {
+            session.close();
+        }
+    }));
+
+    host.emit_state(PlaybackState::Playing);
+
+    // A second, unrelated session on the same thread is not caught by
+    // whatever the first session's nested publish left behind.
+    let other = open();
+    assert_eq!(other.play(), Ok(()));
 }
 
 #[test]

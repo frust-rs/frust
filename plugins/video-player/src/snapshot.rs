@@ -24,6 +24,17 @@
 //! from inside a delivery is refused with [`VideoError::Reentrant`] by
 //! [`reject_if_delivering`] rather than being allowed to re-enter the
 //! backend mid-callback.
+//!
+//! `close` is the one call exempt from that refusal (its own doc says why),
+//! and every backend's close publishes its own state change, so a publish
+//! can happen while this thread is already delivering another one. That
+//! nested publish is never run on the spot — it would put the listener back
+//! on this thread's own stack and would clear the delivering flag out from
+//! under the outer call the moment it finished. Instead it is queued and
+//! delivered after the outer listener call returns, on the same thread, in
+//! the order it was published: [`reject_if_delivering`] keeps refusing for
+//! the whole outer delivery, including whatever the nested publish's own
+//! drain runs, and the listener is never on the stack twice.
 
 //! # Why the publishing half carries a dead-code allowance
 //!
@@ -35,16 +46,21 @@
 //! `not(test)` rather than blanketed, so the path stays lint-covered in the
 //! configuration that does exercise it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::{PlaybackState, PlayerEvent, PlayerSnapshot, VideoError};
 
+/// A registered listener callback, without the generation tag — what a
+/// deferred delivery captures at publish time (module doc).
+type Listener = Arc<dyn Fn(PlayerEvent) + Send + Sync>;
+
 /// The listener currently registered on a session, tagged with the
 /// generation that registered it.
-type ListenerSlot = Mutex<Option<(u64, Arc<dyn Fn(PlayerEvent) + Send + Sync>)>>;
+type ListenerSlot = Mutex<Option<(u64, Listener)>>;
 
 /// One session's published state, shared between the backend (writer) and
 /// the app (reader) — see the module doc.
@@ -88,6 +104,12 @@ thread_local! {
     /// Whether *this* thread is currently inside [`Shared::publish`]'s
     /// listener invocation — see [`reject_if_delivering`].
     static DELIVERING: Cell<bool> = const { Cell::new(false) };
+
+    /// Events published while [`DELIVERING`] was already set on this thread
+    /// — see the module doc's deferred-delivery rule. Drained in FIFO order
+    /// by the outer [`Shared::publish`] once its own listener call returns.
+    static DEFERRED: RefCell<VecDeque<(Listener, PlayerEvent)>> =
+        RefCell::new(VecDeque::new());
 }
 
 /// Refuse a control call made from inside a listener invocation — the guard
@@ -103,15 +125,31 @@ pub(crate) fn reject_if_delivering() -> Result<(), VideoError> {
     Ok(())
 }
 
-/// Clears the delivering flag however [`Shared::publish`]'s listener call
-/// ends — including an unwind, so one panicking listener cannot leave the
-/// main thread permanently unable to issue control calls.
+/// Restores the delivering flag to whatever it was before this delivery
+/// began, however [`Shared::publish`]'s listener call ends — including an
+/// unwind, so one panicking listener cannot leave the main thread
+/// permanently unable to issue control calls. Restoring rather than
+/// unconditionally clearing matters once a nested delivery is possible: this
+/// guard is only ever constructed when the flag was clear (a publish that
+/// finds it already set queues instead — module doc), so the saved value is
+/// always `false` in practice, but clearing unconditionally would be
+/// correct only by accident.
+///
+/// An unwinding listener also drops whatever queued up behind it: a
+/// listener that panicked gets no guarantee its queued follow-up events are
+/// ever delivered, and delivering them to some unrelated later call would
+/// be worse than dropping them.
 #[cfg_attr(not(test), allow(dead_code))]
-struct DeliveryGuard;
+struct DeliveryGuard {
+    previous: bool,
+}
 
 impl Drop for DeliveryGuard {
     fn drop(&mut self) {
-        DELIVERING.with(|flag| flag.set(false));
+        if std::thread::panicking() {
+            DEFERRED.with(|queue| queue.borrow_mut().clear());
+        }
+        DELIVERING.with(|flag| flag.set(self.previous));
     }
 }
 
@@ -154,6 +192,16 @@ impl Shared {
     /// released **before** the call, so a listener that registers a
     /// replacement (or drops its handle) from inside delivery cannot
     /// deadlock against its own registration.
+    ///
+    /// If this thread is already inside a delivery — in practice, `close()`
+    /// called from a listener, since every backend's close publishes
+    /// `StateChanged(Idle)` — the event is not delivered now. It is pushed
+    /// onto a thread-local queue and this call returns immediately; the
+    /// outer call drains that queue, in the order events were published,
+    /// once its own listener call returns. The listener used for a queued
+    /// event is the one captured here, at publish time, matching the
+    /// clone-before-call rule above — not whatever happens to be registered
+    /// by the time the queue drains.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn publish(&self, event: PlayerEvent) {
         match &event {
@@ -186,9 +234,24 @@ impl Shared {
         }
 
         let listener = lock(&self.listener).as_ref().map(|(_, l)| Arc::clone(l));
-        if let Some(listener) = listener {
-            DELIVERING.with(|flag| flag.set(true));
-            let _guard = DeliveryGuard;
+        let Some(listener) = listener else {
+            return;
+        };
+
+        if DELIVERING.with(Cell::get) {
+            DEFERRED.with(|queue| queue.borrow_mut().push_back((listener, event)));
+            return;
+        }
+
+        let previous = DELIVERING.with(|flag| flag.replace(true));
+        let _guard = DeliveryGuard { previous };
+        listener(event);
+
+        // Drain whatever queued up while the listener above was running. An
+        // event queued while draining is appended to the same queue and
+        // picked up by this same loop, so delivery stays exactly publish
+        // order and the listener is never on the stack twice.
+        while let Some((listener, event)) = DEFERRED.with(|queue| queue.borrow_mut().pop_front()) {
             listener(event);
         }
     }
