@@ -100,7 +100,9 @@
 //! initial `Loading` itself (see the contract table above), and
 //! [`AndroidSession::close`] removes it *after* `close` returns, so a
 //! callback the host emits during its own teardown still reaches the
-//! snapshot; the removal is followed by publishing `Idle`, so a closed
+//! snapshot. `Idle` is published by whichever side reaches the snapshot
+//! first — the host's inline teardown callback on a main-thread close, or
+//! Rust's post-removal publish otherwise — and never twice; a closed
 //! session's snapshot reads `Idle` on this backend just as it does on
 //! `apple.rs` and the mock.
 //!
@@ -379,24 +381,24 @@ impl BackendSession for AndroidSession {
         })
     }
 
-    /// Release the host's player, drop the registry entry, then publish
-    /// `Idle` — the post-close contract every backend answers the same way
-    /// (module doc's *Session registry*).
+    /// Release the host's player, drop the registry entry, and conditionally
+    /// publish `Idle` — the post-close contract every backend answers the same
+    /// way (module doc's *Session registry*).
     ///
     /// Returns nothing, so a refusal is logged rather than reported — and a
     /// repeat call is harmless: the host answers
     /// [`COMMAND_UNKNOWN_SESSION`] for an id it has already released, which
     /// is exactly the debug-logged path below. The entry is removed **after**
     /// the call returns so a teardown callback the host emits from inside
-    /// `close` still reaches the snapshot, and only when it is still *this*
-    /// session's entry: a host that reuses an id for a later session must
-    /// not have that newer registration removed by an older session's close.
-    /// `Idle` is published only when this call is the one that actually
-    /// removed the entry — [`crate::backend::BackendSession::close`]'s own
-    /// doc already guarantees this runs at most once per session, so that
-    /// condition is a defensive match with the registry rather than a second
-    /// idempotence mechanism, and it also keeps a reused id's newer session
-    /// from having its own state overwritten by an older close.
+    /// `close` still reaches the snapshot. `Idle` is published only when this
+    /// call is the one that actually removed the entry, and only if the
+    /// snapshot does not already read `Idle` (i.e., the host's inline teardown
+    /// callback did not already move it there on the main thread). This
+    /// prevents publishing `Idle` twice on a main-thread close: once when the
+    /// host's inline `notifyState(STATE_IDLE)` reaches `nativeOnState`, then
+    /// again after the entry is removed. A defensive match with the registry
+    /// also keeps a reused id's newer session from having its own state
+    /// overwritten by an older close.
     fn close(&self) {
         if let Err(err) = self.command("FrustVideoPlayerHost.close", |env, class, session| {
             env.call_static_method(
@@ -423,7 +425,7 @@ impl BackendSession for AndroidSession {
             }
             is_this_session
         };
-        if removed {
+        if removed && should_publish_state(self.shared.snapshot().state, PlaybackState::Idle) {
             self.shared
                 .publish(PlayerEvent::StateChanged(PlaybackState::Idle));
         }
@@ -1158,6 +1160,22 @@ mod tests {
         assert!(should_publish_state(
             PlaybackState::Idle,
             PlaybackState::Loading
+        ));
+    }
+
+    /// When close runs on the main thread, the host's inline teardown callback
+    /// already moves the snapshot to Idle, so the post-removal publish must
+    /// not repeat it. This test guards the pure decision: a close after the
+    /// host already reported Idle publishes nothing more.
+    #[test]
+    fn a_close_after_the_host_already_reported_idle_publishes_nothing_more() {
+        assert!(!should_publish_state(
+            PlaybackState::Idle,
+            PlaybackState::Idle
+        ));
+        assert!(should_publish_state(
+            PlaybackState::Playing,
+            PlaybackState::Idle
         ));
     }
 }
