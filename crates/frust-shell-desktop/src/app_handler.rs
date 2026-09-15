@@ -80,6 +80,7 @@ use winit::window::{
 use crate::config::DesktopConfig;
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
 use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
+use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
@@ -941,6 +942,7 @@ where
         text_ctx: TextContext::new(),
         executor,
         scene: Scene::new(),
+        platform_views: DesktopPlatformViews::new(),
         cursor: Point::ZERO,
         modifiers: Modifiers::default(),
         secondary_down_delivered: false,
@@ -1610,6 +1612,11 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// split path a finished scene is moved out (replaced with a fresh one) to
     /// cross the handoff channel; inline reuses it in place.
     scene: Scene,
+    /// The platform-view host: the shared differ plus this shell's sequencing
+    /// around it (ingest after paint, push to the extension after submit, and
+    /// the surface-recreate/suspend resets). Costs nothing until a
+    /// `platform_view` widget actually paints — see [`crate::platform_view`].
+    platform_views: DesktopPlatformViews,
     /// Last known cursor position in logical pixels, updated on every
     /// `CursorMoved`. `MouseInput` (button press/release) carries no position of
     /// its own, so it reuses this — mirroring how winit models the two events.
@@ -2360,6 +2367,10 @@ where
                             scale: window.scale_factor(),
                         },
                     );
+                    // The host's view hierarchy went with the lost surface:
+                    // replay `Create` + `Update` for every live slot on the next
+                    // drain, which the redraw below drives.
+                    self.platform_views.on_surface_recreated();
                     window.request_redraw();
                 }
             }
@@ -2441,6 +2452,13 @@ where
                 event_loop.exit();
                 return;
             }
+            // A surface just came online, so any hosted native view the previous
+            // one carried is gone (`suspended` told the host to drop them all):
+            // queue the live-slot replay before the first paint after the
+            // resume, whose ingest would otherwise emit a bare `Update` for a
+            // view the host no longer has. A no-op on the first bring-up, where
+            // there are no live slots yet.
+            self.platform_views.on_surface_recreated();
         }
 
         // Seed the theme once, before the first rebuild: read the window's
@@ -2467,6 +2485,10 @@ where
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // Hosted native views go before the surface they were composited with,
+        // while the window is still intact for the host to detach them from. The
+        // matching replay is queued in `resumed`, which is the only way back.
+        self.platform_views.suspend(&mut self.extensions);
         // Drop the surface on suspend: rare on macOS, but keeps the
         // NoSurface path exercised on desktop and matches Android's lifecycle. In
         // the split path this is a barriered `SurfaceDestroyed` — the shell
@@ -2530,7 +2552,17 @@ where
             // hangs off the frame executor's drop once `run_app` returns, not
             // off this event.
             WindowEvent::CloseRequested => match self.extensions.on_close_requested() {
-                CloseAction::Exit => event_loop.exit(),
+                CloseAction::Exit => {
+                    // The window is about to be destroyed: let the host tear its
+                    // hosted views out of a hierarchy that still exists, rather
+                    // than leaving them to be dropped with it.
+                    self.platform_views.suspend(&mut self.extensions);
+                    event_loop.exit();
+                }
+                // Not a teardown — a macOS shell is only hiding its retained
+                // window, and the hosted views hide with it. Removing them here
+                // would strand the host with nothing to restore on reopen, since
+                // no surface is re-created on that path to replay them.
                 CloseAction::KeepRunning => {}
             },
 
@@ -2797,6 +2829,17 @@ where
                 };
                 let paint_dur = paint_start.elapsed();
 
+                // Platform views: ingest the pass that just painted — retire the
+                // slots whose widgets were torn down, then diff this pass's
+                // published frames into commands. Immediately after `paint` and
+                // never earlier: `RenderRoot::platform_view_frames` reflects only
+                // the most recent paint. Outside the paint span above, so the
+                // diff is not charged to paint time. The returned "anything
+                // changed" flag is deliberately not consulted — the drain below
+                // runs unconditionally because a backlog can also come from a
+                // surface-recreate replay that no ingest produced.
+                self.platform_views.after_paint(&mut self.root);
+
                 // Animation driver (spec v1 seam): if paint advanced animation
                 // state (e.g. a scroll fling) it asks for another frame here.
                 // `ControlFlow::Wait` would otherwise idle with no pending input,
@@ -2897,6 +2940,21 @@ where
                     frame_time,
                     size,
                 );
+
+                // Hand the platform-view batch to the per-OS host, on this
+                // thread, right after the scene is submitted. One call site
+                // covers both executors: `FrameExecutor::submit_frame` is the
+                // single entry for the inline and split paths alike
+                // (`crate::render`), so there is no second place a frame leaves
+                // the UI thread from. The batch describes the scene just
+                // submitted, so a hosted view leads the content it is pinned to
+                // by at most one frame — the present-sync gate that would close
+                // that gap needs a presented-frame *id* this crate's executor
+                // does not publish (see `crate::platform_view`'s timing
+                // section). Logical points, not physical px: `scale` rides along
+                // for a host that needs to convert.
+                self.platform_views
+                    .drain(&mut self.extensions, &window, scale);
             }
 
             _ => {}

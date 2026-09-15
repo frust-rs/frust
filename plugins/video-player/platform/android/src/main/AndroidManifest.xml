@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The INTERNET permission travels with this module: the Android manifest merger
+  folds it into any app that depends on `:frust-video-player`, so a consuming
+  app never edits its own AndroidManifest.xml and the permission cannot outlive
+  the plugin — the same shape `:frust-camera` uses for CAMERA. Unlike CAMERA it
+  is an install-time (normal) permission: there is no runtime dialog and no
+  request path on `FrustVideoPlayerHost`, it simply has to be declared or every
+  `VideoSource::Url` (progressive or HLS) fails to open while file and asset
+  sources keep working.
+
+  The provider below is how `FrustVideoPlayerHost` obtains an application
+  `Context` BEFORE any view exists. The frozen Rust->Kotlin contract
+  (`plugins/video-player/src/android.rs`) gives `openPlayer(...)` no Context
+  argument, and a session must be openable before its picture slot is created
+  (the slot's `params_json` carries the session id `openPlayer` returns) — so
+  the Activity handed through the platform-view factory seam is too late for
+  `ExoPlayer.Builder(context)`. A no-op `ContentProvider` whose `onCreate` runs
+  at process start is the standard library-self-initialization mechanism for
+  exactly this (`androidx.startup`'s `InitializationProvider`, Firebase's
+  `FirebaseInitProvider`), and it keeps the frozen contract untouched.
+
+  `${applicationId}` is substituted by AGP at manifest-merge time, so the
+  authority is unique per consuming app (two apps on one device cannot collide).
+  `exported="false"`: nothing outside the app may reach it — it exposes no data
+  and every ContentProvider operation returns null/0.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.videoplayer`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application>
+        <provider
+            android:name="dev.frust.videoplayer.FrustVideoPlayerInitProvider"
+            android:authorities="${applicationId}.frustvideoplayerinit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>

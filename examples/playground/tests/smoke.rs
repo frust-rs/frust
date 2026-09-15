@@ -288,7 +288,7 @@ fn out_of_range_section_falls_back() {
 /// The regression test for nav-label wrapping: at phone
 /// portrait width the bottom `navigation_bar` divides its width evenly across
 /// every [`SECTION_LABELS`] destination — 390px / `SECTION_LABELS.len()` per
-/// slot (≈55.7px at seven) — and
+/// slot (≈48.75px at eight) — and
 /// a label whose shaped text wraps to two lines overflows the bar's declared
 /// 64dp height (`label_y` = 42 inside a 64px box leaves only 22px, but two
 /// `labelMediumEmphasized` lines need 32px). Mounts the WHOLE

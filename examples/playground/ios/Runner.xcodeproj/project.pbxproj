@@ -11,6 +11,7 @@
 		ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */; };
 		ABCDABCDABCDABCDABCD0032 /* DemoStreamFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */; };
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
+		ABCDABCDABCDABCDABCD0041 /* frust-video-sample.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0040 /* frust-video-sample.mp4 */; };
 		ABCDABCDABCDABCDABCD0036 /* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0035 /* FrustEmbedding */; };
 		ABCDABCDABCDABCDABCD0039 /* FrustCamera in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0038 /* FrustCamera */; };
 /* End PBXBuildFile section */
@@ -22,6 +23,7 @@
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStreamFactory.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0040 /* frust-video-sample.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "frust-video-sample.mp4"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -42,6 +44,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */,
+				ABCDABCDABCDABCDABCD0041 /* frust-video-sample.mp4 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -72,6 +75,7 @@
 				ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
 				ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */,
+				ABCDABCDABCDABCDABCD0040 /* frust-video-sample.mp4 */,
 			);
 			path = Runner;
 			sourceTree = "<group>";

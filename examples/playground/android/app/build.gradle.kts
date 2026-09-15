@@ -179,6 +179,10 @@ dependencies {
     // (`dev.frust.nativewidgets`), supplied by the plugin's own library module
     // — this app carries no per-control Kotlin of its own.
     implementation(project(":frust-native-widgets"))
+    // frust-video-player: the session host (`FrustVideoPlayerHost`) + the
+    // SurfaceView-backed picture factory (`VideoPlayerViewFactory`) —
+    // `src/pages/video_player.rs`'s "Video" section.
+    implementation(project(":frust-video-player"))
     // frust-iap: the R8 keep-rule tripwire vehicle for the openiap-google pin
     // (docs/PLUGINS_DEVELOPMENT.md). This module is included so playground's
     // merged manifest exercises the module's transitive permissions and compiled

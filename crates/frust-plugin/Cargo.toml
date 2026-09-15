@@ -6,9 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-# Errors callers match on (PlatformHandleError) — thiserror per CODE_STANDARDS.
-# Unconditional so the crate (and its error type) exists on every target,
-# keeping it an always-on dependency for plugins regardless of platform.
+# Errors callers match on (PlatformHandleError, desktop::RegisterError) —
+# thiserror per CODE_STANDARDS. Unconditional so the crate (and its error
+# types) exist on every target, keeping it an always-on dependency for
+# plugins regardless of platform. The desktop view-factory registry
+# (src/desktop.rs) needs no dependency beyond this: it is built entirely on
+# std::sync/std::collections, so this crate stays a leaf.
 thiserror = { workspace = true }
 
 # The JNI runtime and the ndk-context handle store are only ever compiled for an

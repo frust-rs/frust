@@ -67,6 +67,23 @@ gradle.lifecycle.beforeProject {
     }
 }
 
+// frust-video-player: the same include/projectDir/build-dir-redirect trio as
+// `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
+// writes for this plugin's `Contribution::GradleModule`. Carried in-tree
+// because playground is a committed example, not a generated project.
+//
+// The module supplies the `dev.frust.videoplayer` session host + picture
+// factory; no per-control Kotlin lives in this app's own source tree.
+include(":frust-video-player")
+project(":frust-video-player").projectDir =
+    file("../../../plugins/video-player/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-video-player") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-video-player"))
+    }
+}
+
 // frust-iap: the R8 keep-rule tripwire vehicle for the openiap-google pin
 // (docs/PLUGINS_DEVELOPMENT.md, `openiap-google 3.0.1` row): this Gradle module
 // ensures the plugin's `consumer-rules.pro` keep rules are exercised during

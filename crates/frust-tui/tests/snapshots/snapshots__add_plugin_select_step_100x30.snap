@@ -7,7 +7,7 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (1-9 of 14)         │▓▓                
+                  │  Choose a plugin to add to this project  (1-9 of 15)         │▓▓                
  DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
    none found     │        Synchronous, thread-safe key-value store              │▓▓                
                   │    ( ) secure-storage                                        │▓▓                
@@ -24,8 +24,8 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
    DAP off · D    │        Minimal haptic feedback (selection tick, impact,      │▓▓                
                   │    ( ) iap                                                   │▓▓                
                   │        In-app purchases and subscriptions over Play Billing  │▓▓                
-                  │    ( ) database                                              │▓▓                
-                  │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+                  │    ( ) video-player                                          │▓▓                
+                  │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                

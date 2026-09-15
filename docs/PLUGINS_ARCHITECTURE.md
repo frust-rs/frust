@@ -2,37 +2,38 @@
 
 ## Overview
 
-PLUGINS is the leaf plugin tier sitting beside the `frust` facade. `frust-plugin` is a shared
-Android platform-handle substrate (JavaVM/Context) that plugins needing JNI use to reach the OS. On
-top of it sit six independent OS-capability plugins — `shared-preferences`, `secure-storage`,
-`camera`, `clipboard`, `haptics`, and `iap` — each exposing one platform-independent public API
-behind a per-platform backend. `iap` is in-app purchases and subscriptions over OpenIAP 3.0.1: Play
+PLUGINS is the leaf plugin tier sitting beside the `frust` facade. `frust-plugin` is the shared
+substrate, in two halves with opposite directions: the Android platform-handle slot
+(JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
+registry a plugin writes and a desktop shell reads. On top of it sit seven independent
+OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
+`iap`, and `video-player` — each exposing one platform-independent public API behind a
+per-platform backend. `iap` is in-app purchases and subscriptions over OpenIAP 3.0.1: Play
 Billing via the `openiap-google` Kotlin host on Android, StoreKit 2 via the `FrustIap` Swift glue on
 iOS, both sides speaking a JSON-string wire protocol, with purchase outcomes delivered on a
-registered event listener rather than as a call's return value. A seventh crate,
-`clean-signals-frust`, is a facade-tier plugin gluing the external `clean_signals`
-clean-architecture core into Frust's `Component`/reactive model; it is a standalone workspace
-excluded from the root Cargo graph pending a crates.io publication of its dependency. An eighth
-crate, `plugins/database` (`frust-database`), is the tier's first plugin with no OS integration
-at all: a synchronous embedded SQL API over a swappable engine seam — bundled SQLite via
-`rusqlite` by default, an optional Turso (Rust-native SQLite rewrite) engine. A ninth crate,
-`plugins/i18n` (`frust-i18n` plus its `frust-i18n-macros` companion — the tier's first
-proc-macro crate), is a Fluent Project + ICU4X internationalization plugin: compile-time Fluent
-bundle loading, locale-aware message resolution, system-locale detection, and (behind the
-`formatting` feature) ICU4X number/date/currency formatting — reaching no OS capability beyond
-a locale read.
+registered event listener rather than as a call's return value. `video-player` plays a local file,
+a bundled asset, or an `http(s)` URL — progressive download or HLS — over Media3 ExoPlayer on
+Android and AVPlayer on iOS *and* macOS, publishing its picture into a native platform-view slot
+rather than painting a frame itself.
 
-A tenth through fourteenth crate — `plugins/glyph`, `plugins/material`, `plugins/cupertino`,
-`plugins/shadcn`, `plugins/beui` (`frust-glyph`/`frust-material`/`frust-cupertino`/`frust-shadcn`/
-`frust-beui`) — are the tier's **design-system plugins**: five widget catalogs (Glyph, Material 3,
-Cupertino, shadcn/ui, beUI), the first three extracted in-tree from what used to be feature-gated
-`frust-widgets` modules and now shipping as ordinary sibling crates, each an app dependency beside
-`frust` rather than a cargo feature on it. `plugins/shadcn` (`frust-shadcn`) and `plugins/beui`
-(`frust-beui`) are the tier's **external-origin** catalogs — ports of third-party web registries
-(shadcn/ui v4, beUI v2) rather than in-tree extractions — the tier's proof case that the external
-design-system contract holds for a catalog authored outside this repo. They reach no OS capability
-at all and share nothing with the OS-capability plugins above beyond sitting in the same tier; see
-*Design-System Plugins* below.
+`clean-signals-frust` is a facade-tier plugin gluing the external `clean_signals`
+clean-architecture core into Frust's `Component`/reactive model; it is a standalone workspace
+excluded from the root Cargo graph pending a crates.io publication of its dependency. Two further
+crates reach no real OS capability at all: `plugins/database` (`frust-database`), the tier's first
+such, a synchronous embedded SQL API over a swappable SQLite/Turso engine seam; and `plugins/i18n`
+(`frust-i18n` plus its `frust-i18n-macros` companion — the tier's first proc-macro crate), a
+Fluent Project + ICU4X internationalization plugin reaching the OS only for a locale read.
+
+`plugins/glyph`, `plugins/material`, `plugins/cupertino`, `plugins/shadcn`, and `plugins/beui`
+(`frust-glyph`/`frust-material`/`frust-cupertino`/`frust-shadcn`/`frust-beui`) are the tier's
+**design-system plugins**: five widget catalogs (Glyph, Material 3, Cupertino, shadcn/ui, beUI),
+each an ordinary sibling crate an app depends on beside `frust` rather than a cargo feature on it.
+`frust-shadcn` and `frust-beui` are the tier's **external-origin** catalogs — ports of third-party
+web registries (shadcn/ui v4, beUI v2) rather than in-tree extractions of what used to be
+feature-gated `frust-widgets` modules — and so the tier's proof case that the external
+design-system contract holds for a catalog authored outside this repo. All five reach no OS
+capability at all and share nothing with the OS-capability plugins above beyond sitting in the same
+tier; see *Design-System Plugins* below.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other units.
 
@@ -40,13 +41,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 
 | Module | Responsibility |
 |--------|-----------------|
-| `crates/frust-plugin` | Android platform-handle substrate (JavaVM/Context) plus a scoped JNI-attach helper; inert on Apple |
+| `crates/frust-plugin` | Android platform-handle substrate (JavaVM/Context) plus a scoped JNI-attach helper, and the process-global desktop view-factory registry a plugin publishes a native-view factory into and a desktop shell resolves a `view_type` through. The registry half is std-only and compiles on every target; the Android half is inert off Android, and there is no Apple-specific surface at all |
 | `plugins/shared-preferences` | Synchronous KV store routed to NSUserDefaults, Android SharedPreferences, or a JSON file backend |
 | `plugins/secure-storage` | Synchronous, named-store secure string storage with an optional biometric gate, routed to Keychain, Android Keystore, or keyring-core |
 | `plugins/camera` | Camera capability (permission, still capture, image stream, barcode/QR decode, torch) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot |
 | `plugins/clipboard` | Synchronous plain-text clipboard over Android `ClipboardManager` (10+ returns nothing to an unfocused reader), iOS `UIPasteboard` (14+ shows a one-time paste banner), or desktop `arboard` (X11 clipboard content dies with the owning process unless a clipboard manager adopts it) |
 | `plugins/haptics` | Fire-and-forget haptic effects over Android `Vibrator`/`VibrationEffect` or iOS `UI*FeedbackGenerator`; desktop is unavailable by design (no first-class API to route to) |
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
+| `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot, never a frame this crate paints |
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
@@ -72,6 +74,7 @@ preview or a `frust build macos|windows|linux`. See
 | `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
 | `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
+| `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
@@ -80,8 +83,8 @@ preview or a `frust build macos|windows|linux`. See
 
 ## Layer Dependencies
 
-Every OS-capability plugin (`shared-preferences`, `secure-storage`, `camera`, `clipboard`,
-`haptics`, `iap`) depends on `frust-plugin` and, where it needs a data directory, `frust-paths`,
+Each of `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics` and `iap`
+depends on `frust-plugin` and, where it needs a data directory, `frust-paths`,
 plus its own target-gated FFI crates: `jni`/`ndk-context` on Android; `objc2` and the matching
 `objc2-*` crates (foundation, security, local-authentication, av-foundation, ui-kit, etc.) on
 Apple; `keyring-core` plus a secret-service/Credential-Manager backend for `secure-storage`'s
@@ -111,10 +114,19 @@ feature layers ICU4X's `icu_decimal`/`icu_datetime`/`icu_plurals`/`icu_experimen
 `icu_locale_core`/`tinystr`/`icu_provider` support crates underneath. Like `database`, it needs no
 `frust-paths` — it persists nothing itself.
 
+`video-player` likewise needs no `frust-paths`, depending on `frust-plugin` plus FFI crates alone:
+`jni` on Android; on `target_vendor = "apple"` the `objc2` family serving one AVFoundation session
+on iOS and macOS alike, narrowed per OS by `objc2-ui-kit` plus `objc2-avf-audio` on iOS (the
+hosting `UIView` and the playback audio-session category) and `objc2-app-kit` on macOS (the hosting
+`NSView`). Its app-facing half rides the same default-on `frust-api` feature `i18n` uses.
+
 This is an architectural charter, not just current practice: a plugin depends on `frust-plugin`
 (plus `frust-paths` where needed) and FFI crates only if it reaches the OS through one, never
 another `frust-*` framework crate; and the facade never depends on or re-exports a plugin — the
-dependency always runs from an app's own manifest into the plugin, never through the facade.
+dependency always runs from an app's own manifest into the plugin, never through the facade. The
+substrate is directional in both halves — **shells write platform handles and plugins read them;
+plugins write desktop view factories and desktop shells read them** — which is what keeps
+`frust-plugin` a leaf either way, with neither side ever naming the other.
 `database` is the first plugin to need neither `frust-plugin` nor an FFI crate at all — a pure-Rust
 plugin whose "platform" is the filesystem — which the charter accommodates rather than exempts: it
 still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
@@ -275,6 +287,22 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   that governs a raw image stream self-regulates decode cost. `rqrr` is the private v1 engine
   behind an internal, swappable decode-engine seam. Torch control is session-level state,
   independent of any stream, and dies with session close.
+- `video-player` is the tier's non-blocking counterexample: `VideoPlayer::open` and every control
+  method is a fire-and-forget command posted at the platform player from whatever thread asks — no
+  `spawn_blocking` pairing and no UI-thread guard anywhere. Outcomes come back the other way on the
+  platform **main thread**, into a lock-free snapshot and then the session's single listener: the
+  sanctioned alternative to `iap`'s plugin-owned event-delivery thread, available because both
+  backends already report on that thread, and the reason the plugin's reactive half writes an
+  `RwSignal` straight from a listener. A listener may only write — a control call from inside a
+  delivery is refused as `VideoError::Reentrant` rather than re-entering the backend mid-event.
+- A video session's lifetime is independent of the slot showing its picture, the same A6 contract
+  `camera`'s preview holds: a slot scrolled away and back reattaches to the same player, and only
+  closing (or dropping) the session releases it.
+- Both Apple view factories are Rust `define_class!` Objective-C classes registering themselves on
+  the first `open` — no Swift package and no C export, each reaching its player through a
+  crate-private accessor rather than an FFI symbol; on macOS the registration goes into
+  `frust-plugin`'s desktop registry, which is where the shell resolves it. Android's factory is
+  Kotlin inside the plugin's own Gradle module, resolved by the embedding by class name.
 - Blocking or gated calls (secure-storage's biometric gate, camera's permission/capture, every
   `iap` store call except `request_purchase`) fail fast with a typed UI-thread error rather than
   parking when invoked on the platform UI thread; callers re-issue the call via
@@ -347,4 +375,6 @@ Design-System Contract for the toolkit they all build against). Their shared cha
 | `frust_i18n::Engine` / `LocaleSet` / `Resolve` | The immutable, `Send + Sync` Fluent bundle core and its builder; the message-resolution trait both `locales!`-generated typed-key functions and the reactive `I18n` handle implement |
 | `locales!` | `frust-i18n-macros`' compile-time proc macro loading a locale directory into `locale_set()`/`engine()`/typed `keys` |
 | `fmt` (`CivilDate` / `CivilTime` / `DateLength`) | ICU4X-backed decimal/percent/currency/date/time formatting entry points and their date/time value types (`formatting` feature) |
+| `VideoPlayer` / `PlayerSession` / `VideoSource` / `PlaybackState` / `PlayerEvent` / `VideoError` / `VideoPlayerHandle` | The video entry point (opens sessions, never blocks); the open session carrying the controls, a lock-free snapshot, the one-listener registration, and the `view_type`/`params_json` its native view attaches through; the file/bundled-asset/URL source enum; the frozen seven-state lifecycle; the listener's event enum; the typed error enum (`NotSupported`, `Reentrant`, `Closed`, and the host-reported failures); and the reactive handle pairing a session with the five tracked signals a `build` reads |
+| `DesktopViewFactory` / `DesktopViewHandle` | `frust-plugin`'s desktop-registry vocabulary: the main-thread-only create/update-params/dispose trait a plugin registers per `view_type`, and the `!Send`, +1-retained native-view pointer handed to a desktop shell on create and given back on dispose |
 | `ButtonDecoration` / `OverflowObserver` | `frust_material`'s button-family extension seams: pluggable gradient decoration and label-overflow-strategy observation |

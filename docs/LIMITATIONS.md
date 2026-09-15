@@ -5720,3 +5720,145 @@ the browser. What is owed is observation of how each engine actually
 behaves: the browser gate so far has run on Safari only and only partially,
 the Chrome and Firefox legs are unconfirmed, and Firefox is not installed on
 the development machine.
+
+---
+
+### `video-mkv-webm-apple-unsupported` — Matroska/WebM plays on Android and not on Apple
+
+**Observed**: `frust-video-player` forwards a source to the platform player
+and reports what that player answers, so container/codec coverage is the
+platform's, not the plugin's. Media3's ExoPlayer extractor set covers
+Matroska/WebM (and the VP8/VP9 codecs usually inside them); AVFoundation's
+does not, so the same `.mkv`/`.webm` source that plays on Android publishes
+`VideoError::Decoder` on iOS and macOS. HLS runs the other way at the
+artifact level: it is native on Apple and needs Android's separately
+declared `media3-exoplayer-hls` artifact on the runtime classpath.
+
+**Applies to**: iOS and macOS. The asymmetry is AVFoundation's own supported
+format set, not something this plugin gates.
+
+**Why accepted**: the alternative is bundling a software decoder (a very
+large dependency, a battery cost, and no hardware path) or silently
+transcoding — neither is a plugin-tier decision. MP4/H.264 and HLS are the
+intersection that plays everywhere; an app targeting both platforms should
+ship that and treat a `Decoder` error as a per-platform answer.
+
+**Evidence**: platform format-matrix survey (Media3's extractor set vs
+AVFoundation's); the crate's own `Backends`/format-asymmetry note. Not yet
+reproduced on hardware — the device gate for this plugin is still owed. See
+also `video-web-windows-linux-unavailable-v1` below, and
+act_000001a05c9fb5e4jvgzTl2W for the engine-owned aliased-chip finding the
+playground's overlay chrome works around.
+
+---
+
+### `video-web-windows-linux-unavailable-v1` — no video backend on the web, Windows, or Linux
+
+**Observed**: `VideoPlayer::open` reports `VideoError::NotSupported` on every
+target that is not Android, iOS, or macOS — Windows and Linux desktop and
+`wasm32` included. It fails soft (never a panic), so an app can hide the
+control and degrade rather than crash, and `VIEW_TYPE` is the empty string
+there, reserving no platform-view slot.
+
+**Applies to**: Windows, Linux, and the browser tier. Not uniform in nature:
+Windows and Linux have real system players a future backend could reach
+(Media Foundation, GStreamer), so those are **deferrals** on mobile-first v1
+scope, the shape `iap-desktop-unavailable-v1` records. The browser is a
+different gap entirely — the whole platform-view mechanism is absent there
+(`web-no-plugins-native-widgets-platform-views-v1`), so a web backend would
+need a `<video>` element composited against the canvas, not just a session
+backend.
+
+**Why accepted**: mobile-first v1 scope plus one real desktop host (macOS)
+to prove the desktop platform-view path. The unsupported arm is a
+dependency-free module, not a stub around an unfinished backend, so a
+Linux/Windows preview build runs its real code path and simply gets a typed
+refusal.
+
+**Evidence**: the crate's target-gated backend selection and its
+`unsupported` module; `cargo check` on each target. No device run is owed
+here — there is nothing to run.
+
+---
+
+### `video-no-auto-pause-in-background` — playback keeps running when the app backgrounds
+
+**Observed**: sending an app to the background does not pause a video
+session on any platform. Audio keeps playing; on returning, playback has
+advanced.
+
+**Applies to**: Android, iOS, and macOS alike. Neither host registers a
+lifecycle observer of its own — Android's host explicitly registers no
+`ActivityLifecycleCallbacks`, and the Apple backend hooks no
+`UIApplication`/`NSApplication` notification.
+
+**Why accepted**: audio-only continuation is a legitimate app choice (a
+podcast-style player wants exactly this), and the plugin has no way to tell
+that intent from an app that wants a hard pause. The API an app needs is
+already there and non-blocking: call `pause`/`play` from your own lifecycle
+handling. Whether the default should flip — and whether a background-audio
+mode belongs in `PlayerOptions` — is an open ruling
+(act_000001a092460caeP920M89C); until it is decided the behaviour stays
+uniform across the three platforms rather than differing per host.
+
+**Evidence**: the Android host's own contract note and the absence of any
+lifecycle observer in either backend. Not yet exercised on hardware.
+
+---
+
+### `desktop-platform-view-mode-a-only` — a desktop hosted view is opaque, captures its own input, and has no Mode B
+
+**Observed**: on macOS a platform-view slot hosts a native `NSView` above
+the window's content view. Anything frust paints *under* that slot is
+covered rather than blended, so chrome stacked over a hosted view (a
+transport bar over a video, say) is invisible; and every pointer, wheel and
+scroll event inside the view's bounds is consumed by the native view, so a
+frust scroll view underneath it never sees them — scrolling with the pointer
+over a video does not scroll the page.
+
+**Applies to**: every desktop host. macOS is the only one with an
+implementation at all; Windows and Linux have no platform-view host, so a
+slot there hosts nothing.
+
+**Why accepted**: Mode A (composite an opaque native sibling above the
+surface) is the whole desktop v1 contract — no translucent window, no
+punched hole, no input forwarding. Mode B on the desktop would need a
+translucent swapchain plus per-host z-order and hit-test plumbing, which is
+a future plan rather than a missing line: the shield-rect channel the differ
+already carries is passed empty here, and that is the single place input
+forwarding would attach. Until then the rule for callers is the one the
+plugin READMEs state — put controls **beside** the picture, never on top of
+it (`docs/CODE_STANDARDS.md`'s Platform-View Conventions).
+
+**Evidence**: the macOS host's own z-order strategy (`addSubview:positioned:
+relativeTo:` above winit's content view, nothing made translucent anywhere)
+and the desktop host passing no shield rects. Runtime confirmation on a Mac
+is owed with the video-player device gate.
+
+---
+
+### `desktop-platform-view-frame-lead` — a desktop hosted view can lead its frust surroundings by one frame
+
+**Observed**: the desktop shell applies a platform-view command batch on the
+UI thread immediately after the scene it describes is submitted, i.e. before
+that scene is presented. A hosted view therefore reaches its new geometry up
+to one display frame ahead of the frust content it is pinned to — visible as
+a hosted view leading its surroundings while a scroll or resize animates,
+and invisible while it is static.
+
+**Applies to**: macOS (the only desktop host with a platform-view
+implementation). Both mobile shells are unaffected: they gate their release
+on a presented frame id through `FramePairing`.
+
+**Why accepted**: the lead is bounded at ≤1 frame by construction — the
+batch always describes the very scene being submitted, never an older one —
+and closing it is not a local change. `FramePairing` needs the id of the
+frame the render side actually *presented*, and the desktop frame executor
+publishes only a presented-frame **count**, with no id travelling with a
+submission; pairing would mean threading a new id channel through the
+render split, which is a larger seam than this one.
+
+**Evidence**: the desktop host's own timing contract and the executor's
+presented-frame counter. Not yet observed on a running Mac — the desktop
+half of the video-player device gate is owed, and that is where it would
+first become visible.
