@@ -610,8 +610,9 @@ impl BackendSession for AppleSession {
 /// payload's session number, and a stale or hostile payload may carry anything;
 /// an unknown id answers `None` rather than failing. `None` also covers a
 /// closed session, and one whose player is still being constructed — a factory
-/// that gets `None` should attach nothing and wait for the next update rather
-/// than treat it as an error.
+/// that gets `None` should attach nothing, remember the view, and let the
+/// `on_player_ready` call [`construct`] makes once the player is registered (or
+/// a later update) attach it, rather than treat it as an error.
 ///
 /// Callable only on the main thread: an `AVPlayerLayer` could not be attached
 /// from anywhere else, so an off-thread call is a caller bug — logged and
@@ -813,6 +814,15 @@ fn construct(session: i32, source: &ResolvedSource, mix_with_others: bool, mtm: 
 
     attach_observers(session, &player, &item, &observer, mtm);
 
+    // Any native view a slot created for this session before the player
+    // existed has been waiting for exactly this moment (each factory's
+    // *failure contract*); nothing else would ever re-invoke the factory for
+    // a slot whose params did not change.
+    #[cfg(target_os = "ios")]
+    crate::ios_view::on_player_ready(session, mtm);
+    #[cfg(target_os = "macos")]
+    crate::macos_view::on_player_ready(session, mtm);
+
     if want_play {
         start_playback(&player, rate);
     }
@@ -954,6 +964,12 @@ fn teardown(session: i32, mtm: MainThreadMarker) {
     let Some(entry) = entry else {
         return;
     };
+
+    // No player will ever be ready for a view still waiting on this session.
+    #[cfg(target_os = "ios")]
+    crate::ios_view::on_session_closed(session);
+    #[cfg(target_os = "macos")]
+    crate::macos_view::on_session_closed(session);
 
     let shared = Arc::clone(&entry.shared);
     if let Some(objects) = entry.objc.into_inner(mtm) {

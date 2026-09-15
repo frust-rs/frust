@@ -64,9 +64,13 @@
 //!   fully-built, empty [`VideoPlayerView`]: black, with a player layer
 //!   attached to nothing. This is deliberate, and it is
 //!   [`crate::apple::player_for`]'s own frozen instruction: a factory handed
-//!   `None` should attach nothing and wait for the next update rather than
-//!   treat it as an error, because `None` also covers a session whose player is
-//!   still being constructed. Collapsing that into an inert `UIView` would make
+//!   `None` should attach nothing and wait rather than treat it as an error,
+//!   because `None` also covers a session whose player is still being
+//!   constructed. Such a view is remembered as waiting for its session
+//!   ([`remember_pending`]) and attached by [`on_player_ready`] the moment
+//!   `crate::apple` registers the player — the host re-invokes this factory
+//!   only when a slot's params change, which a live session's never do on
+//!   their own. Collapsing that into an inert `UIView` would make
 //!   the slot permanently unrecoverable, since `updateParams:paramsJson:` would
 //!   then have no player layer to attach to.
 //! - **A caught panic** — a bare, inert [`UIView`] ([`dead_slot_view`]). The
@@ -160,10 +164,12 @@
 // the same allowance for the same reason).
 #![cfg_attr(test, allow(dead_code))]
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Once;
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyProtocol, NSObject, NSObjectProtocol};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, extern_protocol, msg_send};
 use objc2_av_foundation::{
@@ -338,7 +344,10 @@ define_class!(
         fn dispose_view(&self, view: &UIView) {
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 match view.downcast_ref::<VideoPlayerView>() {
-                    Some(view) => view.detach(),
+                    Some(view) => {
+                        forget_view(view);
+                        view.detach();
+                    }
                     None => log::debug!(
                         "frust-video-player: disposeView for a view this factory did not \
                          create — ignored"
@@ -477,6 +486,8 @@ impl VideoPlayerView {
     /// `which` names the calling selector for the log lines only; it carries no
     /// dispatch meaning.
     fn apply_params(&self, params: &str, which: &str) {
+        // Whatever this view was waiting on, the new params supersede it.
+        forget_view(self);
         let fit = parse_fit(params, which);
         self.set_fit(fit);
 
@@ -493,12 +504,98 @@ impl VideoPlayerView {
                 self.attach(&player, fit);
                 log::debug!("frust-video-player: {which} attached session {session}");
             }
-            None => log::warn!(
-                "frust-video-player: {which} found no live player for session {session} — the \
-                 video slot keeps its current picture until the next update"
-            ),
+            None => {
+                log::warn!(
+                    "frust-video-player: {which} found no live player for session {session} — \
+                     the video slot keeps its current picture until that session's player is \
+                     ready"
+                );
+                remember_pending(session, self, fit);
+            }
         }
     }
+}
+
+// --- Views waiting for a player ----------------------------------------------
+
+thread_local! {
+    /// Views whose last params named a session with no live player yet, keyed
+    /// by session id, each with the fit those params carried — the other half
+    /// of [`crate::apple::player_for`]'s "attach nothing and wait" instruction.
+    /// Weak, so the registry never extends a view's life: the host owns the
+    /// view, and one it has already released simply fails to load and is
+    /// dropped on the next touch. Main-thread only, like the views themselves.
+    static PENDING: RefCell<HashMap<i32, Waiting>> = RefCell::new(HashMap::new());
+}
+
+/// The views waiting for one session, each with the fit to attach them with.
+type Waiting = Vec<(Weak<VideoPlayerView>, VideoFit)>;
+
+/// Remember `view` as waiting for `session`'s player, to be attached with
+/// `fit`. Idempotent per view.
+fn remember_pending(session: i32, view: &VideoPlayerView, fit: VideoFit) {
+    PENDING.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        let waiting = pending.entry(session).or_default();
+        waiting.retain(|(weak, _)| weak.load().is_some());
+        let already = waiting
+            .iter()
+            .any(|(weak, _)| weak.load().is_some_and(|live| std::ptr::eq(&*live, view)));
+        if !already {
+            waiting.push((Weak::new(view), fit));
+        }
+    });
+}
+
+/// Drop `view` from every waiting list — its params changed, or it was
+/// disposed.
+fn forget_view(view: &VideoPlayerView) {
+    PENDING.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        pending.retain(|_, waiting| {
+            waiting.retain(|(weak, _)| weak.load().is_some_and(|live| !std::ptr::eq(&*live, view)));
+            !waiting.is_empty()
+        });
+    });
+}
+
+/// `crate::apple` calls this on the main thread the moment `session`'s
+/// `AVPlayer` is registered: every view still waiting for that session is
+/// attached now, with the fit its params asked for.
+///
+/// Without it a view created while the player was under construction — an
+/// off-main-thread open builds the player in a dispatched block, so a slot's
+/// `createView` can land first — would stay empty for good: the host calls
+/// `updateParams:` only when a slot's params change, and a live session's
+/// params (its id and fit) do not change on their own.
+pub(crate) fn on_player_ready(session: i32, _mtm: MainThreadMarker) {
+    let waiting = PENDING.with(|pending| pending.borrow_mut().remove(&session));
+    let Some(waiting) = waiting else {
+        return;
+    };
+    let Some(player) = player_for(session) else {
+        // Registered and torn down again before this ran: nothing to attach.
+        return;
+    };
+    let mut attached = 0usize;
+    for (weak, fit) in waiting {
+        let Some(view) = weak.load() else {
+            continue;
+        };
+        view.attach(&player, fit);
+        attached += 1;
+    }
+    if attached > 0 {
+        log::debug!("frust-video-player: attached {attached} waiting view(s) to session {session}");
+    }
+}
+
+/// `crate::apple` calls this when `session` is torn down: nothing will ever
+/// be ready for its waiting views, so the entry goes.
+pub(crate) fn on_session_closed(session: i32) {
+    PENDING.with(|pending| {
+        pending.borrow_mut().remove(&session);
+    });
 }
 
 /// Force the lazy Objective-C-runtime registration of the factory class, so the
