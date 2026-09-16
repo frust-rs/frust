@@ -71,6 +71,11 @@
 //! Both families are OFL-1.1 and ship with their license text and provenance
 //! record (`plugins/glyph/fonts/README.md`). [`install`] registers every face;
 //! [`font_data`] exposes the raw bytes for a host that wants them directly.
+//! Each family's italic face ships too, even though the catalog itself never
+//! requests `FontStyle::Italic` — see [`tokens::fonts`]'s module doc for the
+//! measurement behind keeping them (dropping them would silently fall back
+//! to plain upright text for an app's own italic request, not a synthesized
+//! oblique).
 
 pub mod accordion;
 pub mod alert;
