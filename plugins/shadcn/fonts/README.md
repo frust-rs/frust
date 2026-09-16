@@ -9,10 +9,15 @@ shadcn/ui itself mandates no typeface; the pairing bundled here is the one its
 official `next-template` ships — **Inter** for sans text and **JetBrains Mono**
 for monospace. Both families are SIL OFL-1.1 and — verified against each
 release's own license text — declare **no Reserved Font Name** (the copyright
-lines carry no "with Reserved Font Name" clause), so the unmodified faces ship
-here under their original names with the full license text vendored per family
+lines carry no "with Reserved Font Name" clause), so both faces ship here under
+their original names with the full license text vendored per family
 (`inter/OFL.txt`, `jetbrains-mono/OFL.txt`), as the license's
-license-inclusion term requires. Neither file's bytes are modified.
+license-inclusion term requires. JetBrains Mono's bytes are unmodified. Inter
+ships as a **`wght`-only instance** of the upstream `opsz`+`wght` variable font
+(see its Modification record below): `frust-text` never drives optical size, so
+`opsz` always rendered at its `fvar` default of 14 anyway, and pinning it there
+drops the deltas that vary it. The absence of a Reserved Font Name is what lets
+the instanced face keep the "Inter" name under OFL-1.1.
 
 These bytes are pure data: they are only ever returned by
 `frust_shadcn::font_data()`. Registering them into a live `TextContext` is a
@@ -34,10 +39,28 @@ shell's job — `frust_shadcn::install()` pushes them through the facade's
 
   | File | Source (within `Inter-4.1.zip`) | Family name (`name` ID 1) | Size |
   |---|---|---|---|
-  | `inter/InterVariable.ttf` | `InterVariable.ttf` | `Inter Variable` | 879,708 B |
+  | `inter/InterVariable.ttf` | `InterVariable.ttf` (instanced, see below) | `Inter Variable` | 636,684 B |
 
-  SHA-256 `4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf`.
-  Subtotal: 879,708 B (~859.1 KiB).
+  Upstream SHA-256 `4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf`
+  (879,708 B, axes `opsz` 14–32 + `wght` 100–900).
+- **Modification** (2026-09-17): the shipped file is a `wght`-only instance of
+  that upstream face, produced with the checked-in
+  `scripts/fonts/instance_variable_font.py` (fontTools 4.63.0,
+  `varLib.instancer`) by
+
+  ```
+  python3 scripts/fonts/instance_variable_font.py \
+      plugins/shadcn/fonts/inter/InterVariable.ttf \
+      plugins/shadcn/fonts/inter/InterVariable.ttf --keep wght
+  ```
+
+  which pins `opsz` at its `fvar` default (14) and keeps `wght` variable. All
+  2,937 glyphs are kept (no subsetting); `inter/OFL.txt` is unchanged.
+  Instanced SHA-256
+  `67ca63c5f8c1f2d04fe111e39501b4ae0783ee78a92246f2b210f32d9448dd2e`.
+  `frust-shadcn`'s tests assert the single `wght` axis and a < 700,000 B
+  ceiling. Regenerate (with `--keep wght --keep opsz`) if the text stack ever
+  starts driving optical size. Subtotal: 636,684 B (~621.8 KiB).
 
 ## JetBrains Mono Variable
 
@@ -63,9 +86,10 @@ shell's job — `frust_shadcn::install()` pushes them through the facade's
 
 ## Total
 
-**2 faces, 1,182,852 B (~1.13 MiB)** of font bytes, plus 8,779 B of license
-text (`1,191,631 B` for the whole directory). Both faces are *variable* fonts,
-so this one pair covers the whole weight range the catalog names (Regular
-through Bold) instead of one file per weight — which is why two files land in
-roughly the same budget seven static Glyph faces did. Subsetting to a narrower
-glyph range is a documented **deferred optimization**, as it is for Glyph.
+**2 faces, 939,828 B (~917.8 KiB)** of font bytes, plus 8,779 B of license
+text (`948,607 B` for the two families' directories, excluding this README).
+Both faces are *variable* along `wght`, so this one pair covers the whole
+weight range the catalog names (Regular through Bold) instead of one file per
+weight — which is why two files land under the budget seven static Glyph faces
+did. Subsetting to a narrower glyph range is a documented **deferred
+optimization**, as it is for Glyph.
