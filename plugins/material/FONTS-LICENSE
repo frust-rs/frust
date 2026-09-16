@@ -7,7 +7,9 @@ own (the `plugins/glyph/fonts/` and `plugins/shadcn/fonts/` precedent).
 
 This crate bundles two typefaces to ship Material 3 typography out of the box:
 **Roboto Flex** for display/heading/body text and **Roboto Mono** for monospace.
-Both families are sourced from Google Fonts and are unmodified.
+Both families are sourced from Google Fonts; Roboto Mono is unmodified, and
+Roboto Flex is a `wght`-only static-axis instance of the upstream variable
+font (see the Roboto Flex "Modification" record below).
 
 Roboto Flex declares no Reserved Font Name (the copyright lines carry no "with
 Reserved Font Name" clause), so the unmodified face ships under its original
@@ -41,11 +43,42 @@ shell's job — `frust_material::install()` pushes them through the facade's
 - **Retrieved**: 2026-08-19
 - **Source**: https://github.com/google/fonts/tree/main/ofl/robotoflex
 - **License**: SIL Open Font License 1.1 (OFL-1.1), no Reserved Font Name
-- **Vendored as**: `roboto-flex/RobotoFlex.ttf`
-- **Size**: 1,684,624 B (~1.61 MiB)
-- **SHA-256**: `2bd17942bba38048b2f86e00cdd6fb2242035c0b2c843d5979bb24f13d5512ef`
+- **Vendored as**: `roboto-flex/RobotoFlex.ttf` (instanced — see "Modification" below)
+- **Size** (as vendored, post-instancing): 175,900 B (~172 KiB)
+- **SHA-256** (as vendored, post-instancing): `446aa9ee34d3ce037bfeda0143b27353e71ef8e37dc9a87111c7a0e18ee40567`
 - **Family name** (`name` ID 1): `Roboto Flex`
 - **Usage**: Headlines, display text, and default body text in Material 3 type scale
+
+### Modification
+
+The vendored `roboto-flex/RobotoFlex.ttf` is **not** the unmodified upstream
+bytes: it is a `wght`-only static-axis instance of the upstream variable font,
+produced with `scripts/fonts/instance_variable_font.py` (fontTools
+`varLib.instancer`, fontTools 4.63.0). `crates/frust-text` only ever drives
+`StyleProperty::FontWeight`/`FontStyle` on a shaped run (see
+`plugins/material/src/tokens/fonts.rs`'s module doc) — no component anywhere
+requests `opsz`, `wdth`, `GRAD`, `slnt`, or any of Roboto Flex's parametric
+axes (`XOPQ`/`YOPQ`/`XTRA`/`YTUC`/`YTLC`/`YTAS`/`YTDE`/`YTFI`) — so every axis
+but `wght` always rendered at its own default position anyway. Pinning those
+twelve axes at their default values and keeping only `wght` variable drops
+their `gvar` deltas with no visual change and no glyph dropped (all 896 glyphs
+kept; no subsetting). The vendored OFL-1.1 license text (`roboto-flex/OFL.txt`)
+ships unchanged, and this instance declares no Reserved Font Name, the same as
+upstream.
+
+- **Upstream SHA-256** (pre-instancing download, per Google Fonts as retrieved
+  2026-08-19, 1,684,624 B): `2bd17942bba38048b2f86e00cdd6fb2242035c0b2c843d5979bb24f13d5512ef`
+- **Instanced SHA-256** (the bytes actually vendored, 175,900 B):
+  `446aa9ee34d3ce037bfeda0143b27353e71ef8e37dc9a87111c7a0e18ee40567`
+- **Command**:
+  `python3 scripts/fonts/instance_variable_font.py plugins/material/fonts/roboto-flex/RobotoFlex.ttf plugins/material/fonts/roboto-flex/RobotoFlex.ttf --keep wght`
+- **Date**: 2026-09-17
+- **Remaining axis**: `wght` (100–1000), default 400 — unchanged from upstream
+- **Regenerate when**: the text stack starts driving another axis (`opsz`,
+  `wdth`, `GRAD`, `slnt`, or any parametric axis) — re-download the upstream
+  variable font (the vendored file is already instanced, so instancing it
+  again would only narrow the axis set further) and re-run the command above
+  with an additional `--keep <axis>` per axis that must stay variable.
 
 ## Roboto Mono
 
@@ -64,8 +97,8 @@ shell's job — `frust_material::install()` pushes them through the facade's
 
 ## Total
 
-**2 faces, 1,866,012 B (~1.78 MiB)** of font bytes, plus license text
-(~1.5 KiB per family). Both faces are *variable* fonts, so this pair covers the
-whole weight range the catalog names instead of one file per weight. Subsetting
-to a narrower glyph range is a documented **deferred optimization**, as it is
-for Glyph and shadcn.
+**2 faces, 357,288 B (~349 KiB)** of font bytes, plus license text (~1.5 KiB
+per family). Both faces are *variable* fonts on their remaining axis (`wght`),
+so this pair covers the whole weight range the catalog names instead of one
+file per weight. Subsetting to a narrower glyph range is a documented
+**deferred optimization**, as it is for Glyph and shadcn.
