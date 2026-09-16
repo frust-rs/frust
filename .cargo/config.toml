@@ -1,0 +1,40 @@
+# Android link flags, applied at every Android target so `cargo`/`cargo ndk`
+# and Gradle's `cargoNdkBuild` task (which shells out to `cargo ndk` with this
+# checkout as its working directory) all pick them up without a Gradle-side
+# RUSTFLAGS injection:
+#
+# - `-Wl,--pack-dyn-relocs=android`: rewrites `.rela.dyn` into the compact
+#   Android-packed relocation format the Bionic dynamic linker understands
+#   from API 23 onward. Measured on the lean `frust_bench` arm64 release
+#   `.so`: 9,424,544 -> 9,156,128 bytes, `.rela.dyn` 308 KB -> 40 KB.
+# - `-Wl,--icf=all`: identical-code folding, merging functions whose compiled
+#   bodies are byte-identical. Measured alone: 9,424,544 -> 9,256,576 bytes;
+#   combined with the relocation packing above: -436 KB total.
+#
+# `android+relr` (the newer SHT_RELR relative-relocation format) is not used
+# here: it needs API 28+, and every Frust app/example/template target ships
+# `minSdk 26`, below that floor. `--pack-dyn-relocs=android` covers relative
+# relocations back to API 23, which the minSdk 26 floor comfortably clears.
+#
+# Cargo's config-file discovery walks every ancestor directory of the build
+# `cwd` and merges what it finds (concatenating array values such as
+# `rustflags`), so this single root-level file already governs every nested
+# workspace built in-tree — `benchmarks/frust_bench`, every `examples/*`
+# standalone workspace, and a `frust new` scaffold built from inside this
+# checkout — with no per-crate copy. Do not add another `.cargo/config.toml`
+# under `benchmarks/` or `examples/`; it would just duplicate these flags.
+# A `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` environment variable set by the
+# caller takes precedence over this file's `rustflags` and replaces it
+# entirely, per Cargo's own precedence rules.
+
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]

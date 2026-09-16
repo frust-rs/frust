@@ -112,6 +112,27 @@ fn assert_section_identical(header: &str, expect_keys: &[&str]) {
     }
 }
 
+/// The Android link-flags file at the repo root is inherited by every nested
+/// workspace built in-tree (Cargo's config discovery walks ancestor
+/// directories and merges what it finds), so there is exactly one canonical
+/// copy plus the app template's own copy (which a scaffolded project takes
+/// with it once it leaves this checkout and needs its own file). Those two
+/// must stay byte-identical the same way the hand-synced profile blocks do.
+#[test]
+fn android_cargo_config_identical_between_root_and_template() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root_config = std::fs::read_to_string(repo_root.join(".cargo/config.toml"))
+        .expect("failed to read root .cargo/config.toml");
+    let template_config =
+        std::fs::read_to_string(repo_root.join("templates/app/.cargo/config.toml"))
+            .expect("failed to read templates/app/.cargo/config.toml");
+    assert_eq!(
+        root_config, template_config,
+        "templates/app/.cargo/config.toml has drifted from the repo root's \
+         .cargo/config.toml — the two must stay byte-identical"
+    );
+}
+
 #[test]
 fn release_profile_identical_across_synced_manifests() {
     assert_section_identical(
