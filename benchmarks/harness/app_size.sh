@@ -187,7 +187,7 @@ echo
 if [ -n "${ATTRIBUTE_SO}" ]; then
   echo "-- Size attribution (${ATTRIBUTE_SO}) --"
   echo
-  python3 "${SCRIPT_DIR}/size_attribute.py" "${ATTRIBUTE_SO}" "${ATTRIBUTE_EXTRA_ARGS[@]}"
+  python3 "${SCRIPT_DIR}/size_attribute.py" "${ATTRIBUTE_SO}" ${ATTRIBUTE_EXTRA_ARGS[@]+"${ATTRIBUTE_EXTRA_ARGS[@]}"}
   echo
 fi
 

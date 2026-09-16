@@ -25,7 +25,33 @@ tools are located via `ANDROID_NDK_HOME`, then the highest-versioned NDK
 under `ANDROID_HOME`/`ANDROID_SDK_ROOT`'s `ndk/` directory, then `PATH`.
 
 `--compare OTHER.so` additionally attributes a second `.so` and prints the
-per-family byte delta (this file minus the other), sorted by |delta|.
+per-family byte delta (this file minus the other), sorted by |delta|. The
+delta uses the same deduplicated per-family totals the main report prints
+(see "Symbol de-duplication" below), never the raw, alias-inflated sums.
+
+# Symbol de-duplication
+
+`llvm-nm --print-size --demangle` prints one line per symbol *name* at an
+address, not one line per byte range: several names can share the exact
+same `(address, size)` region (compiler-generated aliases today; far more
+once link-time identical-code-folding is enabled). Summing `st_size` over
+every name double-counts that region once per alias. This script instead
+groups symbols by `(address, size)` and attributes each unique region
+exactly once, using the first name encountered in `llvm-nm`'s own output
+order for classification. The count of collapsed groups and the bytes that
+would otherwise have been double-counted are reported as a summary line
+next to the per-family table.
+
+A symbol whose size llvm-nm cannot report (`st_size == 0`, or an undefined
+symbol with no address at all) attributes 0 bytes but is still counted, in
+a "sizeless symbols" tally, instead of being silently dropped.
+
+# Per-section remainder
+
+For each headline ELF section, the report prints
+`section bytes − attributed bytes = unattributed remainder`, using the
+deduplicated symbol bytes whose address falls inside that section, so a
+short or inflated attribution total is visible instead of implied.
 
 Standard library only — no fontTools, no Pillow, no third-party package.
 """
@@ -179,23 +205,33 @@ class Section:
     addr: int
     offset: int
     size: int
+    flags: str = ""
+
+    @property
+    def is_allocated(self) -> bool:
+        """SHF_ALLOC — the `A` flag in `readelf -S`'s Flg column: this
+        section occupies memory in the loaded image, as opposed to a
+        debug/symtab section that exists only in the unstripped file on
+        disk."""
+        return "A" in self.flags
 
 
+# `[Nr] Name Type Address Off Size ES Flg Lk Inf Al` (llvm-readelf -S -W).
+# The flags column is a run of letters (e.g. "AX", "WAT", "AMS") and is
+# blank for a non-allocated section — restricting it to `[A-Za-z]*` (rather
+# than `\S*`) stops it from swallowing the numeric Lk column when blank.
 SECTION_LINE_RE = re.compile(
     r"^\s*\[\s*\d+\]\s+(?P<name>\S*)\s+(?P<type>\S+)\s+"
-    r"(?P<addr>[0-9a-fA-F]+)\s+(?P<off>[0-9a-fA-F]+)\s+(?P<size>[0-9a-fA-F]+)\b"
+    r"(?P<addr>[0-9a-fA-F]+)\s+(?P<off>[0-9a-fA-F]+)\s+(?P<size>[0-9a-fA-F]+)\s+"
+    r"(?P<es>[0-9a-fA-F]+)\s+(?P<flags>[A-Za-z]*)\b"
 )
 
 
-def read_sections(readelf: str, so_path: str) -> list[Section]:
-    out = subprocess.run(
-        [readelf, "-S", "-W", so_path],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+def parse_section_lines(text: str) -> list[Section]:
+    """Parse `llvm-readelf -S -W` output text into `Section`s. Pure function
+    over already-captured text, so it is testable without the NDK."""
     sections: list[Section] = []
-    for line in out.splitlines():
+    for line in text.splitlines():
         m = SECTION_LINE_RE.match(line)
         if not m or not m.group("name"):
             continue
@@ -205,9 +241,20 @@ def read_sections(readelf: str, so_path: str) -> list[Section]:
                 addr=int(m.group("addr"), 16),
                 offset=int(m.group("off"), 16),
                 size=int(m.group("size"), 16),
+                flags=m.group("flags"),
             )
         )
     return sections
+
+
+def read_sections(readelf: str, so_path: str) -> list[Section]:
+    out = subprocess.run(
+        [readelf, "-S", "-W", so_path],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return parse_section_lines(out)
 
 
 # --- Symbol table (via llvm-nm) -------------------------------------------
@@ -219,12 +266,71 @@ class Symbol:
     size: int
     sym_type: str
     name: str
+    has_size: bool = True
 
 
-NM_LINE_RE = re.compile(
+# The three line shapes `llvm-nm --print-size --demangle` prints:
+#   1. `<addr> <size> <type> <name>`   — defined, size known (the common case)
+#   2. `<addr> <type> <name>`         — defined, but `st_size == 0`: llvm-nm
+#      prints no size column at all rather than an explicit zero.
+#   3. `<type> <name>`, right-padded with spaces where the address/size
+#      columns would be — undefined (no address, no size), e.g. `U`/`w`.
+# Tried in this order so a genuine (addr, size) pair is never mistaken for
+# (addr, type) — restricting the type group to letters/`?` (nm's symbol-type
+# alphabet, never a digit) keeps a lone hex-letter size from being confused
+# with a type code.
+NM_TYPE_CHAR = r"[A-Za-z?]"
+NM_LINE_FULL_RE = re.compile(
     r"^(?P<addr>[0-9a-fA-F]{1,16})\s+(?P<size>[0-9a-fA-F]{1,16})\s+"
-    r"(?P<type>\S)\s+(?P<name>.+)$"
+    rf"(?P<type>{NM_TYPE_CHAR})\s+(?P<name>.+)$"
 )
+NM_LINE_ADDR_ONLY_RE = re.compile(
+    rf"^(?P<addr>[0-9a-fA-F]{{1,16}})\s+(?P<type>{NM_TYPE_CHAR})\s+(?P<name>.+)$"
+)
+NM_LINE_NO_ADDR_RE = re.compile(rf"^\s+(?P<type>{NM_TYPE_CHAR})\s+(?P<name>.+)$")
+
+
+def parse_symbol_lines(text: str) -> list[Symbol]:
+    """Parse `llvm-nm --print-size --demangle` output text into `Symbol`s,
+    including size-less lines (`has_size=False`, size reported as 0) instead
+    of dropping them. Pure function over already-captured text, so it is
+    testable without the NDK."""
+    symbols: list[Symbol] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        m = NM_LINE_FULL_RE.match(line)
+        if m:
+            symbols.append(
+                Symbol(
+                    addr=int(m.group("addr"), 16),
+                    size=int(m.group("size"), 16),
+                    sym_type=m.group("type"),
+                    name=m.group("name"),
+                    has_size=True,
+                )
+            )
+            continue
+        m = NM_LINE_ADDR_ONLY_RE.match(line)
+        if m:
+            symbols.append(
+                Symbol(
+                    addr=int(m.group("addr"), 16),
+                    size=0,
+                    sym_type=m.group("type"),
+                    name=m.group("name"),
+                    has_size=False,
+                )
+            )
+            continue
+        m = NM_LINE_NO_ADDR_RE.match(line)
+        if m:
+            symbols.append(
+                Symbol(addr=0, size=0, sym_type=m.group("type"), name=m.group("name"), has_size=False)
+            )
+            continue
+        # Header/noise line (no known shape) — ignored, same as before.
+    return symbols
 
 
 def read_symbols(nm: str, so_path: str) -> list[Symbol]:
@@ -234,20 +340,55 @@ def read_symbols(nm: str, so_path: str) -> list[Symbol]:
         capture_output=True,
         text=True,
     ).stdout
-    symbols: list[Symbol] = []
-    for line in out.splitlines():
-        m = NM_LINE_RE.match(line)
-        if not m:
+    return parse_symbol_lines(out)
+
+
+# --- De-duplication: one attribution per unique (address, size) region ----
+
+
+@dataclass
+class DedupResult:
+    symbols: list[Symbol]
+    alias_groups: int
+    alias_suppressed_bytes: int
+    sizeless_count: int
+
+
+def dedup_symbols(symbols: list[Symbol]) -> DedupResult:
+    """Collapse symbols sharing an exact `(address, size)` region into one
+    attribution, keeping the first name seen (in `llvm-nm`'s own order) for
+    classification. Symbols with `size <= 0` (including every size-less
+    line) are excluded from the deduplicated list and instead counted in
+    `sizeless_count`."""
+    groups: dict[tuple[int, int], list[Symbol]] = {}
+    order: list[tuple[int, int]] = []
+    sizeless_count = 0
+    for sym in symbols:
+        if not sym.has_size or sym.size <= 0:
+            sizeless_count += 1
             continue
-        symbols.append(
-            Symbol(
-                addr=int(m.group("addr"), 16),
-                size=int(m.group("size"), 16),
-                sym_type=m.group("type"),
-                name=m.group("name"),
-            )
-        )
-    return symbols
+        key = (sym.addr, sym.size)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(sym)
+
+    deduped: list[Symbol] = []
+    alias_groups = 0
+    alias_suppressed_bytes = 0
+    for key in order:
+        members = groups[key]
+        deduped.append(members[0])
+        if len(members) > 1:
+            alias_groups += 1
+            alias_suppressed_bytes += key[1] * (len(members) - 1)
+
+    return DedupResult(
+        symbols=deduped,
+        alias_groups=alias_groups,
+        alias_suppressed_bytes=alias_suppressed_bytes,
+        sizeless_count=sizeless_count,
+    )
 
 
 # --- Crate/family classification -----------------------------------------
@@ -359,12 +500,34 @@ def classify_family(demangled_name: str) -> str:
 
 
 def symbol_family_totals(symbols: list[Symbol]) -> dict[str, int]:
+    """Sum bytes per crate/family. `symbols` is expected to already be
+    deduplicated (see `dedup_symbols`) — this no longer filters `size <= 0`
+    itself beyond trusting that contract, so double-counted alias bytes
+    never reach this table."""
     totals: dict[str, int] = {}
     for sym in symbols:
         if sym.size <= 0:
             continue
         family = classify_family(sym.name)
         totals[family] = totals.get(family, 0) + sym.size
+    return totals
+
+
+# --- Per-section attribution (uses deduplicated symbols) -------------------
+
+
+def attributed_bytes_by_section(
+    sections: list[Section], deduped_symbols: list[Symbol]
+) -> dict[str, int]:
+    """For each section, sum the deduplicated symbol bytes whose address
+    falls inside it — the figure the per-section remainder line subtracts
+    from the section's own reported size."""
+    totals = {s.name: 0 for s in sections}
+    for sym in deduped_symbols:
+        for s in sections:
+            if s.addr <= sym.addr < s.addr + s.size:
+                totals[s.name] += sym.size
+                break
     return totals
 
 
@@ -454,11 +617,11 @@ def _parse_sfnt_at(data: bytes, idx: int) -> int | None:
 
 
 def rodata_accounting(
-    section: Section, file_bytes: bytes, symbols: list[Symbol]
+    section: Section, file_bytes: bytes, deduped_symbols: list[Symbol]
 ) -> RodataAccounting:
     acc = RodataAccounting()
     lo, hi = section.addr, section.addr + section.size
-    for sym in symbols:
+    for sym in deduped_symbols:
         if sym.size <= 0:
             continue
         if lo <= sym.addr < hi:
@@ -473,7 +636,9 @@ def rodata_accounting(
         acc.string_bytes[bucket] = acc.string_bytes.get(bucket, 0) + len(text)
 
     named_by_addr = sorted(
-        ((s.addr, s.addr + s.size, s.name) for s in symbols if lo <= s.addr < hi and s.size > 0)
+        (s.addr, s.addr + s.size, s.name)
+        for s in deduped_symbols
+        if lo <= s.addr < hi and s.size > 0
     )
 
     def label_for(offset_in_section: int) -> str:
@@ -496,9 +661,13 @@ def rodata_accounting(
 class Attribution:
     so_path: str
     file_size: int
-    sections: dict[str, int]
+    sections: list[Section]
+    section_attributed: dict[str, int]
     family_totals: dict[str, int]
+    dedup: DedupResult
     rodata: RodataAccounting | None
+    allocated_total: int
+    non_allocated_total: int
 
 
 def attribute(readelf: str, nm: str, so_path: str) -> Attribution:
@@ -506,22 +675,32 @@ def attribute(readelf: str, nm: str, so_path: str) -> Attribution:
         file_bytes = f.read()
 
     sections = read_sections(readelf, so_path)
-    symbols = read_symbols(nm, so_path)
+    raw_symbols = read_symbols(nm, so_path)
 
-    section_sizes = {s.name: s.size for s in sections}
-    family_totals = symbol_family_totals(symbols)
+    dedup = dedup_symbols(raw_symbols)
+    family_totals = symbol_family_totals(dedup.symbols)
+    section_attributed = attributed_bytes_by_section(sections, dedup.symbols)
+
+    allocated_total = sum(s.size for s in sections if s.is_allocated)
+    non_allocated_total = sum(s.size for s in sections if not s.is_allocated)
 
     rodata_section = next((s for s in sections if s.name == ".rodata"), None)
     rodata = (
-        rodata_accounting(rodata_section, file_bytes, symbols) if rodata_section else None
+        rodata_accounting(rodata_section, file_bytes, dedup.symbols)
+        if rodata_section
+        else None
     )
 
     return Attribution(
         so_path=so_path,
         file_size=len(file_bytes),
-        sections=section_sizes,
+        sections=sections,
+        section_attributed=section_attributed,
         family_totals=family_totals,
+        dedup=dedup,
         rodata=rodata,
+        allocated_total=allocated_total,
+        non_allocated_total=non_allocated_total,
     )
 
 
@@ -533,17 +712,30 @@ def print_report(attribution: Attribution) -> None:
     print(f"File size: {fmt_bytes(attribution.file_size)}")
     print()
 
+    section_sizes = {s.name: s.size for s in attribution.sections}
+
     print("-- ELF sections --")
     for name in HEADLINE_SECTIONS:
-        size = attribution.sections.get(name)
+        size = section_sizes.get(name)
         if size is None:
             print(f"  {name:<16} not present")
-        else:
-            print(f"  {name:<16} {fmt_bytes(size)}")
+            continue
+        attributed = attribution.section_attributed.get(name, 0)
+        remainder = size - attributed
+        print(f"  {name:<16} {fmt_bytes(size)}")
+        print(
+            f"    {'attributed':<14} {fmt_bytes(attributed)}  "
+            f"remainder {remainder:,} B"
+        )
     other_total = sum(
-        size for name, size in attribution.sections.items() if name not in HEADLINE_SECTIONS
+        size for name, size in section_sizes.items() if name not in HEADLINE_SECTIONS
     )
     print(f"  {'(other sections)':<16} {fmt_bytes(other_total)}")
+    print(f"  {'Allocated total (SHF_ALLOC)':<16} {fmt_bytes(attribution.allocated_total)}")
+    print(
+        f"  {'Non-allocated total (debug/symtab — unstripped-only)':<16} "
+        f"{fmt_bytes(attribution.non_allocated_total)}"
+    )
     print()
 
     print("-- Symbol bytes by crate/family (llvm-nm --print-size --demangle) --")
@@ -553,6 +745,12 @@ def print_report(attribution: Attribution) -> None:
     ):
         print(f"  {family:<24} {fmt_bytes(size)}")
     print(f"  {'(attributed total)':<24} {fmt_bytes(attributed_total)}")
+    dedup = attribution.dedup
+    print(
+        f"  {'(alias groups collapsed)':<24} {dedup.alias_groups:,} groups, "
+        f"{fmt_bytes(dedup.alias_suppressed_bytes)} suppressed"
+    )
+    print(f"  {'(sizeless symbols)':<24} {dedup.sizeless_count:,} symbols, 0 B")
     print()
 
     if attribution.rodata is not None:
