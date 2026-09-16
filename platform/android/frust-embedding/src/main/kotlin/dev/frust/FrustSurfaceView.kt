@@ -2118,6 +2118,22 @@ class FrustSurfaceView(
          */
         private fun sync() {
             if (batchDepth > 0 || handle == 0L) return
+            // A superseded connection must never push. `restartInput` (a field
+            // switch, a content-type change, a wholesale reseed) makes this
+            // instance stale the moment `onCreateInputConnection` installs its
+            // successor, but the input manager still delivers one last
+            // `finishComposingText()` to the PREVIOUS connection from inside
+            // that restart — its own bypass of the inactive-connection check.
+            // By then focus has already moved in Rust, and `nativeImeApply` is
+            // focus-routed with no session identity, so this mirror's text
+            // (the field the user just LEFT) would be written into the field
+            // that now holds focus. Observed on a Pixel 5 with Gboard: type into
+            // a password field, tap another field, re-tap the password field,
+            // tap the other field again — its content became the password.
+            // `super` has already applied the edit to this instance's own
+            // mirror above the callers, which is harmless; only the push is
+            // withheld. The live connection's own `sync()` is unaffected.
+            if (activeConnection !== this) return
 
             val text = editable.toString()
             val selStart = Selection.getSelectionStart(editable)
