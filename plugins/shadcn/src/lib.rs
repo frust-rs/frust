@@ -237,4 +237,97 @@ mod tests {
         crate::install();
         crate::install();
     }
+
+    /// Read a big-endian `u16` out of an sfnt-family byte slice at `offset`.
+    fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    /// Read a big-endian `u32` out of an sfnt-family byte slice at `offset`.
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    /// Minimal sfnt `fvar` table reader: locates the `fvar` table via the
+    /// sfnt table directory, then returns the axis tag of every axis record
+    /// (`fvar+8` axisCount, `fvar+4` offsetToAxesArray, 20-byte axis records —
+    /// see OpenType spec "Variable Fonts" § `fvar`). No third-party font
+    /// parser: the whole point of this check is a dependency-free regression
+    /// tripwire on `frust-shadcn`'s own bundled bytes, mirroring
+    /// `frust-material`'s identical check on Roboto Flex.
+    ///
+    /// Returns an empty `Vec` for a font with no `fvar` table (i.e. a static,
+    /// non-variable font) rather than panicking.
+    fn fvar_axis_tags(bytes: &[u8]) -> Vec<[u8; 4]> {
+        let num_tables = read_u16(bytes, 4) as usize;
+        let mut fvar_offset = None;
+        for i in 0..num_tables {
+            let record = 12 + i * 16;
+            let tag = &bytes[record..record + 4];
+            if tag == b"fvar" {
+                fvar_offset = Some(read_u32(bytes, record + 8) as usize);
+                break;
+            }
+        }
+        let Some(fvar_offset) = fvar_offset else {
+            return Vec::new();
+        };
+
+        let axes_array_offset = read_u16(bytes, fvar_offset + 4) as usize;
+        let axis_count = read_u16(bytes, fvar_offset + 8) as usize;
+        let axis_size = read_u16(bytes, fvar_offset + 10) as usize;
+        assert_eq!(axis_size, 20, "fvar axis record size must be 20 bytes");
+
+        (0..axis_count)
+            .map(|i| {
+                let record = fvar_offset + axes_array_offset + i * axis_size;
+                let mut tag = [0u8; 4];
+                tag.copy_from_slice(&bytes[record..record + 4]);
+                tag
+            })
+            .collect()
+    }
+
+    /// Inter must be the `wght`-only instance `tokens::fonts`'s module doc
+    /// documents, not the 2-axis (`opsz`+`wght`) upstream font: one `fvar`
+    /// axis, tagged `wght`. A regression back to the full variable font (or
+    /// the loss of `wght` variability) must fail this test, not silently
+    /// re-bloat the plugin's bundled bytes.
+    ///
+    /// Indexes `font_data()[0]` directly rather than through
+    /// `tokens::fonts::INTER_VARIABLE_INDEX` (private to the `tokens::fonts`
+    /// module): `font_data`'s own doc comment documents the array's fixed
+    /// order as "Inter Variable, then JetBrains Mono Variable", so `[0]` is
+    /// Inter by that public contract, not an incidental array position.
+    #[test]
+    fn inter_is_a_wght_only_instance() {
+        let bytes = crate::font_data()[0];
+        let axes = fvar_axis_tags(bytes);
+        assert_eq!(
+            axes,
+            vec![*b"wght"],
+            "Inter must carry exactly one fvar axis, `wght`; got {axes:?}"
+        );
+    }
+
+    /// Length ceiling on the vendored Inter bytes: well above the ~636 KB
+    /// instanced size, but far below the ~880 KB upstream `opsz`+`wght` font,
+    /// so a regression to the full variable font fails this test instead of
+    /// silently landing in a release build. See `inter_is_a_wght_only_instance`
+    /// for why `[0]` is Inter.
+    #[test]
+    fn inter_is_smaller_than_the_upstream_variable_font() {
+        let bytes = crate::font_data()[0];
+        assert!(
+            bytes.len() < 700_000,
+            "Inter must be the wght-only instance (< 700,000 B); got {} B \
+             — did the bundled font regress to the full upstream variable font?",
+            bytes.len()
+        );
+    }
 }
