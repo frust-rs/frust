@@ -611,11 +611,7 @@ fn select_hint(lines: u64, budget: usize) -> String {
 }
 
 fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow: bool) {
-    let running = state
-        .sessions
-        .iter()
-        .filter(|s| !s.state.is_terminal())
-        .count();
+    let running = state.live_session_count();
     let (dot, dot_color, label) = if running > 0 {
         ("●", theme.success(), format!("{running} running"))
     } else {
@@ -643,7 +639,16 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
                 .add_modifier(Modifier::BOLD),
         ),
         None => {
-            let mut hint = "r run · b build · d doctor · ⌘ palette · ? help".to_string();
+            // `d` is DevTools with a session active and Doctor otherwise — the
+            // same `has_active_session` predicate `runner::translate_key`
+            // gates the two contexts on, so the hint never claims a key the
+            // keyboard doesn't currently honor.
+            let d_hint = if state.active_session().is_some() {
+                "d devtools"
+            } else {
+                "d doctor"
+            };
+            let mut hint = format!("r run · b build · {d_hint} · ⌘ palette · ? help");
             if narrow {
                 // The narrow-breakpoint sidebar-overlay toggle only matters
                 // (and only shows) once the sidebar has actually collapsed

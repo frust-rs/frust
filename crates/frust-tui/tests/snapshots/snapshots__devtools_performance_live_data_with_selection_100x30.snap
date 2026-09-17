@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: performance │ [1234][ ] tabs · Esc back to log        [mouse ✓]
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

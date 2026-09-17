@@ -3353,4 +3353,160 @@ mod tests {
             vec![Message::CloseDapSettings]
         );
     }
+
+    // ── Palette-vs-runner hint drift tripwire ─────────────────────────────────
+
+    /// One fixture per palette gate shape (`has_project`, `has_devices`,
+    /// `has_session`, `running`, `has_projects`, `inspector_live` —
+    /// `crate::engine::palette::commands`'s own local predicate names): builds
+    /// the minimal `AppState` satisfying exactly the requested combination.
+    /// Always `Screen::Workbench`, so a workbench-scoped unconditional command
+    /// (`n`, `R`, `m`, …) still routes the way the real workbench would.
+    fn gate_state(
+        has_project: bool,
+        has_devices: bool,
+        has_session: bool,
+        running: bool,
+        has_projects: bool,
+        inspector_live: bool,
+    ) -> AppState {
+        use crate::engine::{ConnState, DeviceRow, DevtoolsTab, SessionView};
+
+        let root = PathBuf::from("/tmp/huddle");
+        let mut state = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        if has_project {
+            state.project_root = Some(root.clone());
+        }
+        if has_projects {
+            state.projects.push(root.clone());
+        }
+        if has_devices {
+            state.devices.push(DeviceRow {
+                device: frust_drive::devices::Device {
+                    id: "d".into(),
+                    name: "Pixel".into(),
+                    platform: Platform::Android,
+                    kind: frust_drive::devices::Kind::Emulator,
+                    os_version: None,
+                    connection_state: None,
+                },
+                selected: false,
+            });
+        }
+        if has_session || running || inspector_live {
+            let mut session = if inspector_live {
+                SessionView::with_devtools(
+                    SessionId(0),
+                    root.clone(),
+                    "desktop",
+                    DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+                    Some(SessionTarget::Desktop),
+                )
+            } else {
+                SessionView::new(SessionId(0), root.clone(), "desktop")
+            };
+            session.state = if running {
+                SessionState::Running
+            } else {
+                SessionState::Configuring
+            };
+            if inspector_live {
+                session.devtools.open = true;
+                session.devtools.active_tab = DevtoolsTab::Inspector;
+                session.devtools.conn = ConnState::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                };
+            }
+            state.sessions.push(session);
+            state.active_session = Some(0);
+        }
+        state
+    }
+
+    /// Every single-key palette hint really produces the message the registry
+    /// claims: for each `commands(&state)` entry whose hint is exactly one
+    /// printable character (letter, digit, `/`, `:`), build a state
+    /// satisfying that entry's own gate via [`gate_state`], translate the
+    /// matching key event (uppercase hints get `SHIFT`) and assert the result
+    /// is exactly `vec![entry.message]`. A mismatch means the registry's hint
+    /// drifted from the binding it advertises — fix the hint, never the key.
+    ///
+    /// Deliberately excluded (not every single-char hint enters this sweep):
+    /// - multi-key hints (`^O`, `⌥m`) — filtered out by the one-char check
+    ///   itself, not a hand-picked skip.
+    /// - the `d` pair ("Doctor" / "DevTools") — both hint `d`, one binding
+    ///   per context (workbook §B12's full-namespace swap); asserted
+    ///   separately in `d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log`
+    ///   and would need its own has-session-vs-not distinction this sweep's
+    ///   six gate shapes don't carry.
+    /// - `y` ("Copy selection") — gated on `has_selection`, not one of the
+    ///   six shapes above; asserted inside the selection mode's own key table
+    ///   in `v_enters_the_mode_and_the_cursor_keys_then_move_the_selection`.
+    #[test]
+    fn every_single_key_palette_hint_matches_its_runner_binding() {
+        use crate::engine::palette;
+
+        let regions = MouseRegions::new();
+        let excluded_hints = ["d", "y"];
+
+        for cmd in palette::commands(&AppState::default()) {
+            let mut chars = cmd.hint.chars();
+            let Some(c) = chars.next() else { continue };
+            if chars.next().is_some() || !c.is_ascii_graphic() {
+                continue; // multi-char hint (e.g. `^O`, `⌥m`) — not a candidate.
+            }
+            if excluded_hints.contains(&cmd.hint) {
+                continue;
+            }
+
+            let state = match cmd.title {
+                "Run on device(s)…" | "Build…" | "Clean…" | "Add plugin…" => {
+                    gate_state(true, false, false, false, false, false)
+                }
+                "Stop session" => gate_state(false, false, false, true, false, false),
+                "Close tab"
+                | "Toggle follow-tail"
+                | "Toggle line wrap"
+                | "Search logs…"
+                | "Select lines…"
+                | "Cycle log level filter"
+                | "Toggle nearest backtrace fold" => {
+                    gate_state(false, false, true, false, false, false)
+                }
+                "Refresh widget tree" => gate_state(false, false, false, false, false, true),
+                // "always enabled" commands: no gate flag needed, just the
+                // workbench screen `gate_state`'s all-false shape provides.
+                "Toolchain setup…"
+                | "New project…"
+                | "Refresh devices"
+                | "MCP server…"
+                | "Start/stop MCP server"
+                | "DAP server…"
+                | "Quit" => gate_state(false, false, false, false, false, false),
+                other => panic!(
+                    "single-char hint `{}` on {other:?} has no fixture wired in this tripwire — \
+                     add one rather than skipping it",
+                    cmd.hint
+                ),
+            };
+
+            let mods = if c.is_ascii_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            let ev = Event::Key(KeyEvent::new(KeyCode::Char(c), mods));
+            assert_eq!(
+                translate_event(ev, &state, &regions),
+                vec![cmd.message.clone()],
+                "palette hint `{}` (\"{}\") does not match its runner binding",
+                cmd.hint,
+                cmd.title
+            );
+        }
+    }
 }

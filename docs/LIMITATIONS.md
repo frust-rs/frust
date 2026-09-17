@@ -5862,3 +5862,59 @@ render split, which is a larger seam than this one.
 presented-frame counter. Not yet observed on a running Mac — the desktop
 half of the video-player device gate is owed, and that is where it would
 first become visible.
+
+---
+
+### `tui-physical-ios-app-death-undetected` — a physical iOS device session can outlive the app it is watching
+
+**Observed**: `frust-tui` detects neither the app being stopped from the workbench nor the app dying
+on the device for a physical-iOS session. Android gets a liveness prober (`spawn_liveness_prober`)
+that asks `adb ... pidof` every `LIVENESS_PROBE_INTERVAL`, closing the session with `APP_GONE_NOTE`
+after `LIVENESS_STRIKES` consecutive misses; the iOS Simulator needs no prober because its
+`simctl launch --console-pty` bridge is a child of the app and its console pipe exits with it. A
+physical iOS device has neither: `TerminationTarget` has no variant for it (`devicectl` exposes no
+app-termination call this crate uses), so a workbench-initiated stop is stream-only, and no prober
+exists for it because `devicectl`'s console behavior on app death is unverified on real hardware — a
+physical-iOS session can therefore linger as `Running` after the app is gone until the user closes
+its tab by hand.
+
+**Applies to**: `frust-tui`'s `Supervisor` for a device session whose `TerminationTarget` is a
+physical iOS device (the Simulator and Android targets are both covered as described above).
+
+**Why accepted**: a prober needs a signal to poll, and `devicectl`'s behavior on app death has not
+been measured on real hardware — building one on a guess risks a false "gone" on a device that is
+still running fine. This is the same least-verified-target gap `devtools-ios-physical-forward-
+deferred` and `tui-device-stop-app-termination-residual` already record for physical iOS. This entry
+would be removed once a verified `devicectl` console-exit behavior (or a real-hardware process-list
+probe) lands and a prober or termination call can be built on it.
+
+**Evidence**: `crates/frust-tui/src/supervise/supervisor.rs`'s module doc ("Detecting the app dying
+(Android liveness prober)" and the physical-iOS paragraph that follows it), `spawn_liveness_prober`/
+`probe_liveness`/`TerminationTarget`.
+
+---
+
+### `tui-clipboard-osc52-terminal-support` — an SSH/headless copy depends on the terminal's own OSC 52 support
+
+**Observed**: the workbench picks its clipboard backend once at startup (`clipboard::detect`): the
+OS clipboard (`arboard`) when a display server is reachable, an OSC 52 escape sequence over SSH or on
+a headless tty, and disabled (with a startup warning) when neither applies; `FRUST_TUI_CLIPBOARD=
+system|osc52|off` overrides the detection. Over SSH the copy therefore relies entirely on the
+terminal emulator relaying OSC 52 — tmux needs `set -g set-clipboard on`, iTerm2 needs Preferences →
+General → Selection → "Applications in terminal may access clipboard", and GNU screen only accepts
+the sequence DCS-wrapped (`write_osc52`'s `screen` chunking). A terminal that does not implement OSC
+52 at all drops the copy silently — there is no error path back to the workbench, since the escape
+sequence is fire-and-forget to stdout.
+
+**Applies to**: every `y`/"Copy selection", `v`→`y` line-selection copy, and context-menu "Copy line"
+/"Copy artifact path(s)" action running in `ClipboardMode::Osc52` (SSH sessions and headless ttys
+under `ClipboardMode::Auto`).
+
+**Why accepted**: OSC 52 is the only clipboard channel that can reach a local machine from inside a
+remote SSH session at all — there is no local display server to hand `arboard` — so the alternative
+to "silently ignored by an unsupporting terminal" is no remote-copy capability whatsoever. No removal
+is planned: this is a property of the terminal the user chose, not something `frust-tui` can detect
+or work around from inside the pty.
+
+**Evidence**: `crates/frust-tui/src/clipboard.rs`'s module doc, `ClipboardMode`/`detect`/`write`/
+`write_osc52`.

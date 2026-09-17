@@ -2,27 +2,27 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(80, 24, &state)"
 ---
-               ╭ Keyboard Shortcuts ────────────────────────────╮ain ◌ checking…
-               │                                                │▓▓             
-               │  r       Run on device(s)…                     │▓▓             
-               │  x       Stop session                          │▓▓             
-               │  X       Close tab                             │▓▓             
-               │  b       Build…                                │▓▓             
-               │  c       Clean…                                │▓▓             
-               │  d       Doctor                                │▓▓             
-               │  i       Toolchain setup…                      │▓▓             
-               │  n       New project…                          │▓▓             
-               │  a       Add plugin…                           │▓▓             
-               │  ^O      Switch project…                       │▓▓             
-               │  R       Refresh devices                       │▓▓             
-               │  m       MCP server…                           │▓▓             
-               │  M       Start/stop MCP server                 │▓▓             
-               │  D       DAP server…                           │▓▓             
-               │  ⌥m      Toggle mouse capture                  │▓▓             
-               │  f       Toggle follow-tail                    │▓▓             
-               │  /       Search logs…                          │▓▓             
-               │  v       Select lines…                         │▓▓             
-               │  y       Copy selection                        │▓▓             
-               │  l       Cycle log level filter                │▓▓             
-               │  z       Toggle nearest backtrace fold         │▓▓             
-? help · ⌘ pale╰────────────────────────────────────────────────╯▓▓    [mouse ✓]
+                                                           toolchain ◌ checking…
+                                                                                
+  ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮   
+  │                                                                         │▓▓ 
+  │  r   Run on device(s)…               D   DAP server…                    │▓▓ 
+  │  —   Run on all devices              —   Start/stop DAP server          │▓▓ 
+  │  x   Stop session                    ⌥m  Toggle mouse capture           │▓▓ 
+  │  X   Close tab                       f   Toggle follow-tail             │▓▓ 
+  │  b   Build…                          w   Toggle line wrap               │▓▓ 
+  │  c   Clean…                          /   Search logs…                   │▓▓ 
+  │  d   Doctor                          v   Select lines…                  │▓▓ 
+  │  i   Toolchain setup…                y   Copy selection                 │▓▓ 
+  │  n   New project…                    l   Cycle log level filter         │▓▓ 
+  │  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓ 
+  │  ^O  Switch project…                 d   DevTools                       │▓▓ 
+  │  R   Refresh devices                 r   Refresh widget tree            │▓▓ 
+  │  m   MCP server…                     q   Quit                           │▓▓ 
+  │  M   Start/stop MCP server                                              │▓▓ 
+  │                                                                         │▓▓ 
+  │  — = palette/mouse only                                                 │▓▓ 
+  │  Esc close                                                              │▓▓ 
+  ╰─────────────────────────────────────────────────────────────────────────╯▓▓ 
+    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 
+? help · ⌘ palette · a add plugin · q quit                             [mouse ✓]

@@ -193,6 +193,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no active session",
         ),
         gated(
+            "Toggle line wrap",
+            "w",
+            Message::ToggleWrap,
+            has_session,
+            "no active session",
+        ),
+        gated(
             "Search logs…",
             "/",
             Message::SearchOpen,
