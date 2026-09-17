@@ -1,9 +1,12 @@
 # Bundled shadcn fonts
 
 Raw variable-TTF bytes embedded into `frust-shadcn` via `include_bytes!`
-(`plugins/shadcn/src/tokens/fonts.rs`), unconditionally — the design-system
-plugin *is* the shadcn opt-in, so the bytes carry no Cargo feature of their
-own (the `plugins/glyph/fonts/` precedent).
+(`plugins/shadcn/src/tokens/fonts.rs`) behind the crate's `bundled-fonts`
+Cargo feature (default on), the same shape as `plugins/glyph/fonts/`. An app
+that sets `default-features = false` on its `frust-shadcn` dependency ships
+none of these bytes and `install()` registers no faces; text then resolves
+through fontique to the generic slot each stack ends in — the platform's
+sans-serif for the Inter stack, its monospace for the JetBrains Mono stack.
 
 shadcn/ui itself mandates no typeface; the pairing bundled here is the one its
 official `next-template` ships — **Inter** for sans text and **JetBrains Mono**
