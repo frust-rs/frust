@@ -113,6 +113,21 @@ pub use serve::{
 /// `./pkg/app.js` default — see the module doc's `--out-name` section.
 pub const BINDGEN_OUT_NAME: &str = "app";
 
+/// The `wasm-bindgen` version this workspace pins (LAW — the root
+/// `Cargo.toml`'s `[workspace.dependencies]` row reads
+/// `wasm-bindgen = "=0.2.128"`, exact because the crate and the host
+/// `wasm-bindgen-cli` share a schema version and the CLI refuses a
+/// mismatched pair).
+///
+/// Carried as a constant so the host-tool check
+/// (`crate::doctor::wasm_bindgen_cli`) names a version rather than a
+/// vaguely-worded "recent enough", exactly as
+/// `desktop_build::CARGO_PACKAGER_PINNED` does for `cargo-packager`. It is
+/// the *framework's* pin: a project declaring its own `wasm-bindgen`
+/// dependency is checked against that instead, by
+/// [`preflight`]'s `wasm-bindgen CLI` row — see its doc comment.
+pub const WASM_BINDGEN_PINNED: &str = "0.2.128";
+
 /// How many trailing output lines a failed tool invocation reports — the same
 /// bound the desktop/Android/iOS pipelines use.
 const FAILURE_TAIL_LINES: usize = 50;

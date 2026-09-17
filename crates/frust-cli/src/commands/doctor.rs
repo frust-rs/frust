@@ -21,16 +21,21 @@ use frust_drive::web_build::{self, WebPreflight};
 /// can be tested against a scripted environment rather than against
 /// whatever toolchains the machine running the test happens to have.
 ///
-/// The browser checks are appended under their own "Web" heading rather than
-/// folded into `default_validators()`'s flat list:
-/// `frust-drive::doctor::report::Area` has no `Web` grouping of its own (the
-/// component-level `DoctorReport`/`build_report` this crate never touches —
-/// see that module's doc comment), so this is a CLI-side heading over the
-/// same [`frust_drive::doctor::report::Component`] rows the browser pipeline
-/// itself reports through, not a new `frust-drive` area. Each Web row prints
-/// the preflight's own icon and summary (`[✗]` for a missing wasm-bindgen,
-/// `[!]` for an absent wasm-opt) exactly as the browser pipeline reports it:
-/// the rows are excluded from the exit code, not reworded.
+/// The host's browser toolchain — the wasm32 target, the `wasm-bindgen` CLI
+/// and `wasm-opt` — is reported by the validator list above, by the three
+/// validators `frust_drive::doctor::default_validators` registers for it
+/// (each `Partial` at worst, so none of them can move the exit code). The
+/// "Web" heading below therefore prints only what those rows cannot know:
+/// the *project's* own browser inputs — its `frust.toml [web]` section, the
+/// host page that would be staged, that page's module name, the artifact
+/// directory's safety, and a `wasm-bindgen` pin the project declares that the
+/// installed CLI disagrees with. That subset is
+/// [`frust_drive::web_build::WebPreflight::project_rows`]'s, chosen there
+/// rather than here so the filter lives beside the rows it names.
+///
+/// Each Web row prints the preflight's own icon and summary exactly as the
+/// browser pipeline reports it: the rows are excluded from the exit code, not
+/// reworded.
 pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let env = RealEnv;
     let ctx = DoctorCtx {
@@ -41,9 +46,9 @@ pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     // The browser preflight is project-aware (it reports the resolved host
     // page and `[web]` manifest section), so it runs against the current
     // directory the same way `frust build`/`frust run` resolve their own
-    // project root — a project-less directory still reports every host-tool
-    // row honestly, just with the project-specific rows degraded rather
-    // than failed (see `web_build::preflight`'s own doc comment).
+    // project root — a directory that is no project still reports its rows
+    // honestly, degraded rather than failed (see `web_build::preflight`'s own
+    // doc comment).
     let cwd = std::env::current_dir().context("reading current directory")?;
     let validators = frust_drive::doctor::default_validators();
     Ok(run_with(&ctx, &validators, &cwd, verbose))
@@ -95,14 +100,19 @@ fn print_results(results: &[(String, Validation)], verbose: bool) {
     }
 }
 
-/// Renders [`WebPreflight`]'s rows under a "Web" heading, in the same
-/// icon/indented-message shape [`print_results`] uses for the flat validator
-/// list above — a browser-build row is exactly as actionable as a validator
-/// one, just carried in `frust-drive`'s newer `Component` shape rather than
-/// the older `Validation` one (see `run_in`'s doc comment).
+/// Renders [`WebPreflight`]'s project-dependent rows under a "Web" heading,
+/// in the same icon/indented-message shape [`print_results`] uses for the flat
+/// validator list above — a browser-build row is exactly as actionable as a
+/// validator one, just carried in `frust-drive`'s newer `Component` shape
+/// rather than the older `Validation` one.
+///
+/// Only [`WebPreflight::project_rows`] is printed: the host-tool rows are the
+/// three web validators' job in the list above, and printing them twice would
+/// state the same gap in two different severities (see [`run_in`]'s doc
+/// comment).
 fn print_web_results(preflight: &WebPreflight, verbose: bool) {
     println!("Web");
-    for component in &preflight.components {
+    for component in preflight.project_rows() {
         let icon = match component.status {
             ComponentStatus::Ok => "[\u{2713}]",
             ComponentStatus::Partial => "[!]",
@@ -260,6 +270,97 @@ mod tests {
             run_with(&ctx(&present, &env), &validators, &dir, false),
             run_with(&ctx(&absent, &env), &validators, &dir, false),
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An env lookup with a scripted map, for the one test that runs the
+    /// *real* validator set and therefore needs the Android variables set.
+    struct MapEnv(&'static [(&'static str, &'static str)]);
+
+    impl EnvLookup for MapEnv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    /// The rule the three web validators were added under, on the real
+    /// validator set: a host with no browser toolchain at all still exits 0.
+    ///
+    /// Runs through [`run_with`] rather than [`run_in`] because `run_in`
+    /// binds the real environment and the real current directory, which would
+    /// make the assertion depend on the machine running the test — the same
+    /// reason every other exit-code test here is scripted.
+    #[test]
+    fn a_wholly_absent_web_toolchain_exits_zero_on_the_real_validator_set() {
+        let dir = empty_dir("web-partial");
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustc --version",
+                ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"),
+            )
+            .with("cargo --version", ok("cargo 1.91.1\n"))
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"),
+            )
+            .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .with("adb version", ok("Android Debug Bridge version 1.0.41\n"))
+            .with("cargo packager --version", ok("cargo-packager 0.11.8\n"))
+            .missing("wasm-bindgen --version")
+            .missing("wasm-opt --version");
+        let env = MapEnv(&[
+            ("ANDROID_HOME", "/sdk"),
+            ("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"),
+        ]);
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let validators = frust_drive::doctor::default_validators();
+        let results = frust_drive::doctor::run_all(&ctx, &validators);
+        for name in ["wasm32 target", "wasm-bindgen CLI", "wasm-opt"] {
+            let row = results
+                .iter()
+                .filter(|(n, _)| n == name)
+                .collect::<Vec<_>>();
+            assert_eq!(row.len(), 1, "`{name}` must appear exactly once");
+            assert_eq!(row[0].1.status, Status::Partial, "{name}");
+        }
+        assert_eq!(run_with(&ctx, &validators, &dir, false), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Web heading is now the project's rows only — the host-tool rows it
+    /// used to duplicate belong to the validator list above.
+    #[test]
+    fn the_web_heading_drops_the_rows_the_validators_now_own() {
+        let dir = empty_dir("web-heading");
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("wasm32-unknown-unknown\n"),
+            )
+            .with("wasm-bindgen --version", ok("wasm-bindgen 0.2.128\n"))
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"));
+        let preflight = web_build::preflight(&runner, &dir);
+        let printed: Vec<&str> = preflight
+            .project_rows()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        for host_row in [
+            web_build::TARGET_COMPONENT,
+            web_build::BINDGEN_COMPONENT,
+            web_build::WASM_OPT_COMPONENT,
+        ] {
+            assert!(!printed.contains(&host_row), "{host_row} still printed");
+        }
+        assert!(printed.contains(&web_build::EMBEDDER_COMPONENT));
+        print_web_results(&preflight, true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,6 +1,6 @@
 //! Component-level toolchain report: a structured, per-component
 //! breakdown of `doctor`'s checks, grouped by area
-//! (Prerequisites / Android / iOS / Desktop), each component carrying a
+//! (Prerequisites / Android / iOS / Desktop / Web), each component carrying a
 //! human summary and zero-or-more structured, possibly-runnable fix
 //! commands — the shape the TUI bootstrap wizard (fdemon's InstallWizard is
 //! a pattern source only, BSL-1.1) and titlebar toolchain chip consume.
@@ -19,8 +19,10 @@ use crate::ios_build::team;
 use super::mobile_targets::{self, ANDROID_TARGETS, IOS_TARGETS};
 use super::{
     AndroidSdkValidator, CargoNdkValidator, DoctorCtx, RustToolchainValidator, Status, Validation,
-    Validator, XcodeValidator,
+    Validator, WasmBindgenCliValidator, WasmOptValidator, WasmTargetValidator, XcodeValidator,
 };
+use crate::build_info::WASM_TARGET_TRIPLE;
+use crate::web_build::WASM_BINDGEN_PINNED;
 
 /// Per-component/per-area/whole-report status: a tri-state distinct from
 /// [`Status`] (which stays the CLI's flat pass/partial/fail surface) —
@@ -157,13 +159,16 @@ fn worst(statuses: impl Iterator<Item = ComponentStatus>) -> ComponentStatus {
 /// re-shelling: Prerequisites always runs; Android always runs
 /// (cross-compiled from any host, like
 /// [`MobileTargetsValidator`]); iOS runs only on a macOS host (`xcodebuild`/
-/// the simulator toolchain don't exist elsewhere); Desktop is always `Ok`.
+/// the simulator toolchain don't exist elsewhere); Desktop is always `Ok`;
+/// Web always runs (a browser build cross-compiles from any host, like
+/// Android).
 pub fn build_report(ctx: &DoctorCtx) -> DoctorReport {
     let mut areas = vec![prerequisites_area(ctx), android_area(ctx)];
     if ctx.is_macos {
         areas.push(ios_area(ctx));
     }
     areas.push(desktop_area());
+    areas.push(web_area(ctx));
     DoctorReport { areas }
 }
 
@@ -232,6 +237,95 @@ fn desktop_area() -> Area {
             summary: "always available (`cargo run`)".to_string(),
             fix_commands: Vec::new(),
         }],
+    }
+}
+
+/// The browser toolchain, from the three web validators' own `validate`
+/// results (never re-shelled). Non-core like every platform area, and its
+/// components are `Partial` at worst by construction — the validators never
+/// return [`Status::Fail`], because a host that will never build for the
+/// browser is not a broken host — so a completely absent web toolchain
+/// degrades [`DoctorReport::rollup`] to `Partial` and nothing worse.
+fn web_area(ctx: &DoctorCtx) -> Area {
+    Area {
+        name: "Web".to_string(),
+        components: vec![
+            wasm_target_component(ctx),
+            wasm_bindgen_component(ctx),
+            wasm_opt_component(ctx),
+        ],
+    }
+}
+
+fn wasm_target_component(ctx: &DoctorCtx) -> Component {
+    let validation = WasmTargetValidator.validate(ctx);
+    let status: ComponentStatus = validation.status.into();
+    let fix_commands = match status {
+        ComponentStatus::Ok => Vec::new(),
+        _ => vec![FixCommand::runnable(
+            format!("rustup target add {WASM_TARGET_TRIPLE}"),
+            "rustup",
+            vec![
+                "target".to_string(),
+                "add".to_string(),
+                WASM_TARGET_TRIPLE.to_string(),
+            ],
+        )],
+    };
+    Component {
+        name: WasmTargetValidator.name().to_string(),
+        status,
+        summary: validation.messages.join("; "),
+        fix_commands,
+    }
+}
+
+/// The fix names [`WASM_BINDGEN_PINNED`] — the framework's pin — because this
+/// report has no project in hand; a project pinning something else is checked
+/// against its own pin by `crate::web_build::preflight`, and the validator's
+/// message says which wins.
+fn wasm_bindgen_component(ctx: &DoctorCtx) -> Component {
+    let validation = WasmBindgenCliValidator.validate(ctx);
+    let status: ComponentStatus = validation.status.into();
+    let fix_commands = match status {
+        ComponentStatus::Ok => Vec::new(),
+        _ => vec![FixCommand::runnable(
+            format!("cargo install -f wasm-bindgen-cli --version {WASM_BINDGEN_PINNED}"),
+            "cargo",
+            vec![
+                "install".to_string(),
+                "-f".to_string(),
+                "wasm-bindgen-cli".to_string(),
+                "--version".to_string(),
+                WASM_BINDGEN_PINNED.to_string(),
+            ],
+        )],
+    };
+    Component {
+        name: WasmBindgenCliValidator.name().to_string(),
+        status,
+        summary: validation.messages.join("; "),
+        fix_commands,
+    }
+}
+
+/// Guidance, not a command: binaryen ships as a platform package (brew, apt,
+/// a release archive), so there is no one invocation a wizard could run.
+fn wasm_opt_component(ctx: &DoctorCtx) -> Component {
+    let validation = WasmOptValidator.validate(ctx);
+    let status: ComponentStatus = validation.status.into();
+    let fix_commands = match status {
+        ComponentStatus::Ok => Vec::new(),
+        _ => vec![FixCommand::guidance(
+            "Install binaryen (provides wasm-opt)",
+            Some("https://github.com/WebAssembly/binaryen/releases"),
+        )],
+    };
+    Component {
+        name: WasmOptValidator.name().to_string(),
+        status,
+        summary: validation.messages.join("; "),
+        fix_commands,
     }
 }
 
@@ -439,8 +533,13 @@ mod tests {
             .with("cargo --version", ok("cargo 1.91.1\n"))
             .with(
                 "rustup target list --installed",
-                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\naarch64-apple-ios\naarch64-apple-ios-sim\n"),
+                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\naarch64-apple-ios\naarch64-apple-ios-sim\nwasm32-unknown-unknown\n"),
             )
+            .with(
+                "wasm-bindgen --version",
+                ok(&format!("wasm-bindgen {WASM_BINDGEN_PINNED}\n")),
+            )
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"))
             .with(
                 "cargo ndk --version",
                 ok("cargo-ndk 3.5.4\n"),
@@ -559,9 +658,14 @@ mod tests {
             .with("cargo --version", ok("cargo 1.91.1\n"))
             .with(
                 "rustup target list --installed",
-                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"),
+                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\nwasm32-unknown-unknown\n"),
             )
             .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .with(
+                "wasm-bindgen --version",
+                ok(&format!("wasm-bindgen {WASM_BINDGEN_PINNED}\n")),
+            )
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"))
             .with(
                 "/opt/jdk17/bin/java -version",
                 ok_stderr("openjdk version \"17.0.9\" 2024-01-16\n"),
@@ -608,7 +712,7 @@ mod tests {
     fn missing_rust_targets_emit_auto_runnable_rustup_fix() {
         let runner = all_green_runner().with(
             "rustup target list --installed",
-            ok("aarch64-linux-android\n"),
+            ok("aarch64-linux-android\nwasm32-unknown-unknown\n"),
         );
         let env = all_green_env();
         let ctx = DoctorCtx {
@@ -664,6 +768,147 @@ mod tests {
         let signing = ios.components.iter().find(|c| c.name == "Signing").unwrap();
         assert_eq!(signing.status, ComponentStatus::Partial);
         assert_eq!(report.rollup(), ComponentStatus::Partial);
+    }
+
+    /// The Web area is present on every host and green when the whole
+    /// browser toolchain is installed.
+    #[test]
+    fn a_complete_web_toolchain_is_an_ok_area_on_any_host() {
+        let runner = all_green_runner();
+        let env = all_green_env();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = build_report(&ctx);
+        let web = report.areas.iter().find(|a| a.name == "Web").unwrap();
+        assert_eq!(web.status(), ComponentStatus::Ok);
+        assert_eq!(web.components.len(), 3);
+        assert_eq!(report.rollup(), ComponentStatus::Ok);
+    }
+
+    /// The area's whole point: a host with no browser toolchain at all is a
+    /// `Partial` rollup, never `Missing` — web is optional everywhere, so it
+    /// must not gate handback the way the core area does.
+    #[test]
+    fn a_fully_missing_web_area_degrades_the_rollup_to_partial_not_missing() {
+        let runner = all_green_runner()
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"),
+            )
+            .missing("wasm-bindgen --version")
+            .missing("wasm-opt --version");
+        let env = all_green_env();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = build_report(&ctx);
+        let web = report.areas.iter().find(|a| a.name == "Web").unwrap();
+        assert!(
+            web.components
+                .iter()
+                .all(|c| c.status == ComponentStatus::Partial),
+            "{web:?}"
+        );
+        assert_eq!(web.status(), ComponentStatus::Partial);
+        assert_eq!(report.rollup(), ComponentStatus::Partial);
+    }
+
+    /// The fix shapes a wizard renders: runnable commands for the target and
+    /// the CLI, guidance for binaryen (no single install command exists).
+    #[test]
+    fn web_fixes_are_runnable_for_the_target_and_cli_and_guidance_for_wasm_opt() {
+        let runner = all_green_runner()
+            .with(
+                "rustup target list --installed",
+                ok("x86_64-unknown-linux-gnu\n"),
+            )
+            .missing("wasm-bindgen --version")
+            .missing("wasm-opt --version");
+        let env = all_green_env();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = build_report(&ctx);
+        let web = report.areas.iter().find(|a| a.name == "Web").unwrap();
+
+        let target = web
+            .components
+            .iter()
+            .find(|c| c.name == "wasm32 target")
+            .unwrap();
+        let fix = &target.fix_commands[0];
+        assert!(fix.auto_runnable);
+        assert_eq!(fix.program, "rustup");
+        assert_eq!(fix.args, vec!["target", "add", "wasm32-unknown-unknown"]);
+
+        let bindgen = web
+            .components
+            .iter()
+            .find(|c| c.name == "wasm-bindgen CLI")
+            .unwrap();
+        let fix = &bindgen.fix_commands[0];
+        assert!(fix.auto_runnable);
+        assert_eq!(fix.program, "cargo");
+        assert_eq!(
+            fix.args,
+            vec![
+                "install",
+                "-f",
+                "wasm-bindgen-cli",
+                "--version",
+                WASM_BINDGEN_PINNED
+            ]
+        );
+
+        let wasm_opt = web
+            .components
+            .iter()
+            .find(|c| c.name == "wasm-opt")
+            .unwrap();
+        let fix = &wasm_opt.fix_commands[0];
+        assert!(!fix.auto_runnable);
+        assert!(fix.program.is_empty());
+        assert_eq!(
+            fix.doc_link.as_deref(),
+            Some("https://github.com/WebAssembly/binaryen/releases")
+        );
+    }
+
+    /// A CLI whose version differs from the framework pin is a `Partial`
+    /// component carrying the install command for the pinned version.
+    #[test]
+    fn a_bindgen_version_mismatch_is_partial_with_the_pinned_install_command() {
+        let runner =
+            all_green_runner().with("wasm-bindgen --version", ok("wasm-bindgen 0.2.100\n"));
+        let env = all_green_env();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = build_report(&ctx);
+        let bindgen = report
+            .areas
+            .iter()
+            .find(|a| a.name == "Web")
+            .unwrap()
+            .components
+            .iter()
+            .find(|c| c.name == "wasm-bindgen CLI")
+            .unwrap();
+        assert_eq!(bindgen.status, ComponentStatus::Partial);
+        assert!(bindgen.summary.contains("0.2.100"), "{}", bindgen.summary);
+        assert_eq!(
+            bindgen.fix_commands[0].display,
+            format!("cargo install -f wasm-bindgen-cli --version {WASM_BINDGEN_PINNED}")
+        );
     }
 
     #[test]

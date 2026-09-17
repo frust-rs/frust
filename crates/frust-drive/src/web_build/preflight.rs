@@ -14,6 +14,20 @@
 //! app's own, whether its `?module=` default agrees with the `--out-name`
 //! this build would resolve ([`HOST_PAGE_COMPONENT`]).
 //!
+//! # One probe per host tool, two severities
+//!
+//! The wasm32 target, the `wasm-bindgen` CLI and `wasm-opt` are each probed
+//! by exactly one piece of code, living with the doctor validator of the same
+//! name (`crate::doctor::wasm_target`, `wasm_bindgen_cli`, `wasm_opt`); this
+//! module reads those probes rather than shelling out again, so a flat
+//! `frust doctor` row and a browser-preflight row can never describe the same
+//! host differently. What does differ is severity, and it differs on purpose:
+//! a doctor row answers "is this host set up for the browser", where every
+//! gap is optional-tier, while a row here answers "can the build that was
+//! just asked for run", where a missing target or CLI cannot be proceeded
+//! past. [`WebPreflight::project_rows`] is the other half of that division —
+//! the rows a front end printing the validators should still print.
+//!
 //! # Reported in `doctor`'s shape, not a shape of its own
 //!
 //! Every check comes back as a [`Component`] — the same struct
@@ -51,6 +65,9 @@ use std::path::Path;
 
 use crate::build_info::WASM_TARGET_TRIPLE;
 use crate::doctor::report::{Component, ComponentStatus, FixCommand};
+use crate::doctor::wasm_bindgen_cli;
+use crate::doctor::wasm_opt::{self, WasmOptProbe};
+use crate::doctor::wasm_target::{self, TargetProbe};
 use crate::manifest::{self, WebSection};
 use crate::process::ProcessRunner;
 
@@ -66,6 +83,11 @@ pub const WASM_OPT_COMPONENT: &str = "wasm-opt";
 pub const EMBEDDER_COMPONENT: &str = "Browser host page";
 pub const HOST_PAGE_COMPONENT: &str = "Host page module name";
 pub const ARTIFACT_DIR_COMPONENT: &str = "Artifact directory safety";
+
+/// The phrase [`bindgen_check`] builds a project-pin disagreement's summary
+/// around, and the marker [`WebPreflight::project_rows`] recognises it by —
+/// kept beside the text that writes it so the two cannot drift apart.
+const PROJECT_PIN_CONFLICT: &str = "but the project pins";
 
 /// Every browser-build environment check, in report order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +121,29 @@ impl WebPreflight {
     /// version, a missing `wasm-opt`) degrades the result, never blocks it.
     pub fn is_ready(&self) -> bool {
         self.status() != ComponentStatus::Missing
+    }
+
+    /// The subset of rows that depend on the **project** rather than on the
+    /// host's own toolchain — what a front end that already renders the
+    /// `wasm32 target` / `wasm-bindgen CLI` / `wasm-opt` doctor validators
+    /// should print, so a developer is told about each host tool once rather
+    /// than twice.
+    ///
+    /// The `wasm-bindgen CLI` row survives the filter in exactly one case: a
+    /// project declaring a pin that disagrees with the installed CLI. That is
+    /// the one thing the validator cannot know — it compares against the
+    /// framework's [`crate::web_build::WASM_BINDGEN_PINNED`], having no
+    /// project in hand — and it is also the case that blocks a build, so
+    /// dropping it would hide the reason a build is about to refuse.
+    pub fn project_rows(&self) -> Vec<&Component> {
+        self.components
+            .iter()
+            .filter(|component| match component.name.as_str() {
+                TARGET_COMPONENT | WASM_OPT_COMPONENT => false,
+                BINDGEN_COMPONENT => component.summary.contains(PROJECT_PIN_CONFLICT),
+                _ => true,
+            })
+            .collect()
     }
 
     /// The rows that make [`is_ready`](Self::is_ready) false — what a refusal
@@ -187,48 +232,30 @@ fn manifest_check(project_dir: &Path) -> (Component, Option<crate::manifest::Man
 
 /// `wasm32-unknown-unknown` installed on the active toolchain.
 ///
-/// Probes `rustup` directly rather than through
-/// `doctor::mobile_targets`'s shared installed-target probe: that module is
-/// private to `doctor`, and reaching it would mean widening a surface for one
-/// three-line call. The invocation is identical, so the two never disagree
-/// about what "installed" means.
+/// Delegates to [`wasm_target::probe`], the same probe the `wasm32 target`
+/// doctor validator runs, and renders [`TargetProbe::summary`]'s wording, so
+/// the two surfaces can never describe one host differently. Only the
+/// severity differs and deliberately so: the validator answers "is this host
+/// set up for the browser", where a missing target is optional-tier
+/// (`Partial`), while this row answers "can the build that was just asked for
+/// run", where it cannot.
 fn target_check(runner: &dyn ProcessRunner) -> Component {
-    let installed = match runner.run("rustup", &["target", "list", "--installed"]) {
-        Ok(out) if out.success => out.stdout,
-        _ => {
-            return Component {
-                name: TARGET_COMPONENT.to_string(),
-                status: ComponentStatus::Missing,
-                summary: "rustup could not be run, so the installed targets are unknown"
-                    .to_string(),
-                fix_commands: vec![FixCommand {
-                    display: "Install rustup".to_string(),
-                    program: String::new(),
-                    args: Vec::new(),
-                    auto_runnable: false,
-                    doc_link: Some("https://rustup.rs".to_string()),
-                }],
-            };
-        }
-    };
-
-    if installed
-        .lines()
-        .any(|line| line.trim() == WASM_TARGET_TRIPLE)
-    {
-        Component {
-            name: TARGET_COMPONENT.to_string(),
+    let probe = wasm_target::probe(runner);
+    let name = TARGET_COMPONENT.to_string();
+    let summary = probe.summary();
+    match probe {
+        TargetProbe::Installed => Component {
+            name,
             status: ComponentStatus::Ok,
-            summary: format!("{WASM_TARGET_TRIPLE} installed"),
+            summary,
             fix_commands: Vec::new(),
-        }
-    } else {
-        Component {
-            name: TARGET_COMPONENT.to_string(),
+        },
+        TargetProbe::NotInstalled => Component {
+            name,
             status: ComponentStatus::Missing,
-            summary: format!("{WASM_TARGET_TRIPLE} is not installed on the active toolchain"),
+            summary,
             fix_commands: vec![FixCommand {
-                display: format!("rustup target add {WASM_TARGET_TRIPLE}"),
+                display: wasm_target::add_target_command(),
                 program: "rustup".to_string(),
                 args: vec![
                     "target".to_string(),
@@ -238,7 +265,19 @@ fn target_check(runner: &dyn ProcessRunner) -> Component {
                 auto_runnable: true,
                 doc_link: None,
             }],
-        }
+        },
+        TargetProbe::RustupUnavailable => Component {
+            name,
+            status: ComponentStatus::Missing,
+            summary,
+            fix_commands: vec![FixCommand {
+                display: "Install rustup".to_string(),
+                program: String::new(),
+                args: Vec::new(),
+                auto_runnable: false,
+                doc_link: Some("https://rustup.rs".to_string()),
+            }],
+        },
     }
 }
 
@@ -266,7 +305,7 @@ fn bindgen_check(runner: &dyn ProcessRunner, project_dir: &Path) -> Component {
             name,
             status: ComponentStatus::Missing,
             summary: format!(
-                "installed {installed}, but the project pins {declared} — the CLI and the \
+                "installed {installed}, {PROJECT_PIN_CONFLICT} {declared} — the CLI and the \
                  crate share a schema version and must be equal, so a build would fail after \
                  compiling"
             ),
@@ -304,26 +343,25 @@ fn install_bindgen_fix(version: Option<&str>) -> FixCommand {
 }
 
 /// `wasm-opt` — optional by design, so its absence is never `Missing`.
+///
+/// Delegates to [`wasm_opt::probe`], the same probe the `wasm-opt` doctor
+/// validator runs, and reports the identical absent wording
+/// ([`wasm_opt::ABSENT_SUMMARY`]); unlike the target row, this check's
+/// severity matches the validator's too, because a build genuinely proceeds
+/// without the optimizer.
 fn wasm_opt_check(runner: &dyn ProcessRunner) -> Component {
     let name = WASM_OPT_COMPONENT.to_string();
-    match runner.run("wasm-opt", &["--version"]) {
-        Ok(out) if out.success => Component {
+    match wasm_opt::probe(runner) {
+        WasmOptProbe::Present(version_line) => Component {
             name,
             status: ComponentStatus::Ok,
-            summary: out
-                .stdout
-                .lines()
-                .next()
-                .unwrap_or("installed")
-                .trim()
-                .to_string(),
+            summary: version_line,
             fix_commands: Vec::new(),
         },
-        _ => Component {
+        WasmOptProbe::Absent => Component {
             name,
             status: ComponentStatus::Partial,
-            summary: "not on PATH — builds succeed without it, the shipped .wasm is just larger"
-                .to_string(),
+            summary: wasm_opt::ABSENT_SUMMARY.to_string(),
             fix_commands: vec![FixCommand {
                 display: "Install binaryen (provides wasm-opt)".to_string(),
                 program: String::new(),
@@ -461,18 +499,13 @@ fn normalize_version(raw: &str) -> String {
 }
 
 /// The installed CLI's version, from `wasm-bindgen --version`'s
-/// `wasm-bindgen 0.2.128` line.
+/// `wasm-bindgen 0.2.128` banner — [`wasm_bindgen_cli::installed_version`],
+/// the same parse the `wasm-bindgen CLI` doctor validator runs. Only the
+/// comparison differs between the two surfaces: the validator compares
+/// against the framework's [`crate::web_build::WASM_BINDGEN_PINNED`], this
+/// module against whatever the project itself declares ([`bindgen_check`]).
 fn installed_bindgen_version(runner: &dyn ProcessRunner) -> Option<String> {
-    let out = runner.run("wasm-bindgen", &["--version"]).ok()?;
-    if !out.success {
-        return None;
-    }
-    out.stdout
-        .lines()
-        .next()?
-        .split_whitespace()
-        .nth(1)
-        .map(str::to_string)
+    wasm_bindgen_cli::installed_version(runner)
 }
 
 /// Whether `[web] out-dir` can be prepared without destroying anything: the
@@ -705,6 +738,122 @@ mod tests {
             ComponentStatus::Partial
         );
         assert!(report.is_ready());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The shared-probe rule, asserted rather than assumed: the preflight row
+    /// and the doctor validator read the same host the same way, and differ
+    /// only in the severity each attaches.
+    #[test]
+    fn the_target_and_wasm_opt_rows_agree_with_their_validators() {
+        use crate::doctor::{DoctorCtx, EnvLookup, Status, Validator};
+
+        struct NoEnv;
+        impl EnvLookup for NoEnv {
+            fn get(&self, _key: &str) -> Option<String> {
+                None
+            }
+        }
+
+        let (root, project) = checkout("probe-agreement", PINNED_MANIFEST);
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("x86_64-unknown-linux-gnu\n"),
+            )
+            .with("wasm-bindgen --version", ok("wasm-bindgen 0.2.128\n"))
+            .missing("wasm-opt --version");
+        let env = NoEnv;
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = preflight(&runner, &project);
+
+        let target = component(&report, TARGET_COMPONENT);
+        let target_validation = crate::doctor::WasmTargetValidator.validate(&ctx);
+        assert_eq!(target.status, ComponentStatus::Missing);
+        assert_eq!(target_validation.status, Status::Partial);
+        assert!(
+            target_validation.messages[0].starts_with(&target.summary),
+            "{} / {}",
+            target.summary,
+            target_validation.messages[0]
+        );
+
+        let opt = component(&report, WASM_OPT_COMPONENT);
+        let opt_validation = crate::doctor::WasmOptValidator.validate(&ctx);
+        assert_eq!(opt.status, ComponentStatus::Partial);
+        assert_eq!(opt_validation.status, Status::Partial);
+        assert_eq!(opt.summary, opt_validation.messages[0]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The filter a front end rendering the doctor validators uses: the three
+    /// host-tool rows drop out, the project-dependent ones stay.
+    #[test]
+    fn project_rows_drop_the_host_tool_rows() {
+        let (root, project) = checkout("project-rows", PINNED_MANIFEST);
+        let report = preflight(&healthy_runner(), &project);
+        let names: Vec<&str> = report
+            .project_rows()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                MANIFEST_COMPONENT,
+                EMBEDDER_COMPONENT,
+                HOST_PAGE_COMPONENT,
+                ARTIFACT_DIR_COMPONENT
+            ]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The one host-tool row that survives the filter: a project pin the
+    /// installed CLI disagrees with is a fact no validator can know.
+    #[test]
+    fn project_rows_keep_a_bindgen_row_that_disagrees_with_the_project_pin() {
+        let (root, project) = checkout("project-rows-pin", PINNED_MANIFEST);
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("wasm32-unknown-unknown\n"),
+            )
+            .with("wasm-bindgen --version", ok("wasm-bindgen 0.2.100\n"))
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"));
+        let report = preflight(&runner, &project);
+        assert!(
+            report
+                .project_rows()
+                .iter()
+                .any(|c| c.name == BINDGEN_COMPONENT),
+            "{:?}",
+            report.project_rows()
+        );
+
+        // Absent-from-PATH is the validator's story, not this heading's.
+        let absent = preflight(
+            &FakeProcessRunner::new()
+                .with(
+                    "rustup target list --installed",
+                    ok("wasm32-unknown-unknown\n"),
+                )
+                .missing("wasm-bindgen --version")
+                .missing("wasm-opt --version"),
+            &project,
+        );
+        assert!(
+            absent
+                .project_rows()
+                .iter()
+                .all(|c| c.name != BINDGEN_COMPONENT),
+            "{:?}",
+            absent.project_rows()
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
