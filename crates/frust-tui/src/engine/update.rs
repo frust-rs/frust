@@ -916,6 +916,31 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
 
+        // ── Quit confirm dialog ──────────────────────────────────────────────
+        Message::RequestQuit => {
+            if state.live_session_count() == 0 {
+                state.should_quit = true;
+                Outcome::idle()
+            } else {
+                state.quit_confirm = true;
+                Outcome::redraw()
+            }
+        }
+        Message::ConfirmQuit => {
+            state.quit_confirm = false;
+            state.should_quit = true;
+            // No point drawing a frame we're about to tear down.
+            Outcome::idle()
+        }
+        Message::CloseQuitConfirm => {
+            if state.quit_confirm {
+                state.quit_confirm = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+
         // ── Build artifact copy-path ────────────────────────────────────────
         Message::CopyBuiltArtifacts => {
             let joined = state
@@ -3856,6 +3881,69 @@ mod tests {
         assert!(out.redraw);
         assert!(st.clean_confirm.is_none());
         assert_eq!(update(&mut st, Message::ConfirmClean).effect, None);
+    }
+
+    // ── Quit confirm dialog ──────────────────────────────────────────────────
+
+    #[test]
+    fn request_quit_with_no_live_session_quits_immediately() {
+        let mut st = workbench_with_project();
+        assert_eq!(st.live_session_count(), 0);
+        let out = update(&mut st, Message::RequestQuit);
+        assert!(
+            st.should_quit,
+            "no live session — behaves exactly like Quit"
+        );
+        assert!(!st.quit_confirm);
+        assert!(!out.redraw, "about to tear down, no point drawing a frame");
+    }
+
+    #[test]
+    fn request_quit_with_a_live_session_opens_the_dialog_instead_of_quitting() {
+        let mut st = workbench_with_project();
+        register(&mut st, 1, "/tmp/huddle", "desktop");
+        assert_eq!(st.live_session_count(), 1);
+        let out = update(&mut st, Message::RequestQuit);
+        assert!(!st.should_quit, "asks first rather than quitting outright");
+        assert!(st.quit_confirm);
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn a_terminal_session_does_not_count_toward_request_quit() {
+        let mut st = workbench_with_project();
+        let id = register(&mut st, 1, "/tmp/huddle", "desktop");
+        let idx = st.session_index(id).unwrap();
+        st.sessions[idx].state = SessionState::Exited(true);
+        assert_eq!(st.live_session_count(), 0);
+        update(&mut st, Message::RequestQuit);
+        assert!(
+            st.should_quit,
+            "an exited session never blocks a quit request"
+        );
+    }
+
+    #[test]
+    fn confirm_quit_quits_and_clears_the_dialog() {
+        let mut st = workbench_with_project();
+        register(&mut st, 1, "/tmp/huddle", "desktop");
+        update(&mut st, Message::RequestQuit);
+        assert!(st.quit_confirm);
+        let out = update(&mut st, Message::ConfirmQuit);
+        assert!(st.should_quit);
+        assert!(!st.quit_confirm);
+        assert!(!out.redraw);
+    }
+
+    #[test]
+    fn close_quit_confirm_clears_the_flag_without_quitting() {
+        let mut st = workbench_with_project();
+        register(&mut st, 1, "/tmp/huddle", "desktop");
+        update(&mut st, Message::RequestQuit);
+        let out = update(&mut st, Message::CloseQuitConfirm);
+        assert!(out.redraw);
+        assert!(!st.quit_confirm);
+        assert!(!st.should_quit);
     }
 
     // ── Build artifact copy-path ────────────────────────────────────────────

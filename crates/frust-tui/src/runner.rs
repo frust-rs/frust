@@ -1311,6 +1311,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             ActiveModal::DapSettings(settings) => translate_dap_settings_key(code, settings.focus),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
+            ActiveModal::QuitConfirm => translate_quit_confirm_key(code),
             ActiveModal::HelpOverlay => translate_help_key(code),
         };
     }
@@ -1339,12 +1340,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
 
-    // Ctrl+C stops the active running session, else falls through to quit.
+    // Ctrl+C stops the active running session, else asks to quit (like `q`,
+    // not the `Ctrl+Q` bypass — no running session here doesn't mean no live
+    // session elsewhere, e.g. a background build tab).
     if ctrl && matches!(code, KeyCode::Char('c')) {
         return if active_running {
             vec![Message::StopSession]
         } else {
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         };
     }
 
@@ -1385,8 +1388,9 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     let devices_focused = workbench && !has_active_session;
 
     match code {
-        // Global quit.
-        KeyCode::Char('q') => vec![Message::Quit],
+        // Global quit — asks first with a live session (see `RequestQuit`);
+        // `Ctrl+Q` above is the only unconditional bypass.
+        KeyCode::Char('q') => vec![Message::RequestQuit],
 
         // `i` opens the toolchain bootstrap wizard from either screen (mouse
         // parity: the titlebar toolchain chip) — the fresh-machine flow.
@@ -1547,7 +1551,7 @@ fn translate_devtools_key(
     let connected = matches!(devtools.phase(), DevtoolsPhase::Connected);
 
     match code {
-        KeyCode::Char('q') => return vec![Message::Quit],
+        KeyCode::Char('q') => return vec![Message::RequestQuit],
         KeyCode::Char('d') => return vec![Message::DevtoolsClose],
         KeyCode::Esc => {
             if on_performance && devtools.performance.has_selection() {
@@ -1862,6 +1866,19 @@ fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
     }
 }
 
+/// Translate one key press while the quit-confirm dialog is open. `Esc`/`n`
+/// cancels, `Enter`/`y` confirms (mouse parity: the dialog's Quit/Cancel
+/// buttons); everything else is swallowed. `Ctrl+Q` still wins over this —
+/// it is matched at the very top of `translate_key`, before modal routing —
+/// so the deliberate bypass works even with this dialog already open.
+fn translate_quit_confirm_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('n') => vec![Message::CloseQuitConfirm],
+        KeyCode::Enter | KeyCode::Char('y') => vec![Message::ConfirmQuit],
+        _ => vec![],
+    }
+}
+
 /// Translate one key press while the keyboard/help overlay is open —
 /// read-only reference content, so `Esc` or `?` again are its only
 /// bindings.
@@ -2025,21 +2042,78 @@ mod tests {
     }
 
     #[test]
-    fn q_quits() {
+    fn q_requests_quit() {
         let state = AppState::default();
         let regions = MouseRegions::new();
         assert_eq!(
             translate_event(key(KeyCode::Char('q')), &state, &regions),
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         );
     }
 
     #[test]
-    fn ctrl_q_quits() {
+    fn ctrl_q_quits_unconditionally() {
         let state = AppState::default();
         let regions = MouseRegions::new();
         let ev = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert_eq!(translate_event(ev, &state, &regions), vec![Message::Quit]);
+    }
+
+    /// `Ctrl+Q` is the deliberate bypass: it still quits unconditionally even
+    /// with the quit-confirm dialog already open, where every other key is
+    /// routed to `translate_quit_confirm_key` instead.
+    #[test]
+    fn ctrl_q_bypasses_the_quit_confirm_dialog() {
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(translate_event(ev, &state, &regions), vec![Message::Quit]);
+    }
+
+    #[test]
+    fn quit_confirm_dialog_keys() {
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Enter), &state, &regions),
+            vec![Message::ConfirmQuit]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('y')), &state, &regions),
+            vec![Message::ConfirmQuit]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::CloseQuitConfirm]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('n')), &state, &regions),
+            vec![Message::CloseQuitConfirm]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('z')), &state, &regions),
+            Vec::<Message>::new(),
+            "everything else is swallowed"
+        );
+    }
+
+    /// `Ctrl+C` with no running session asks to quit exactly like `q`,
+    /// rather than the old unconditional `Quit`.
+    #[test]
+    fn ctrl_c_with_no_running_session_requests_quit() {
+        let state = AppState::default();
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::RequestQuit]
+        );
     }
 
     #[test]
@@ -2640,7 +2714,7 @@ mod tests {
         );
         assert_eq!(
             translate_event(key(KeyCode::Char('q')), &state, &regions),
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         );
 
         let msgs = translate_event(key(KeyCode::Esc), &state, &regions);

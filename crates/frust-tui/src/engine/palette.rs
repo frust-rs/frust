@@ -226,7 +226,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             inspector_live,
             "open DevTools' Inspector tab first",
         ),
-        always("Quit", "q", Message::Quit),
+        always("Quit", "q", Message::RequestQuit),
     ]
 }
 

@@ -150,6 +150,13 @@ pub struct AppState {
     /// runs against. While `Some`, it captures input and suppresses
     /// background mouse regions like the other modals.
     pub clean_confirm: Option<PathBuf>,
+    /// The quit-confirm dialog's open flag (`q` / the palette Quit entry,
+    /// with a live session). A bool is enough — the running-session count it
+    /// warns about is read live at render via
+    /// [`Self::live_session_count`], never cached here. While `true`, it
+    /// captures input and suppresses background mouse regions like the other
+    /// modals.
+    pub quit_confirm: bool,
     /// The cached component-level toolchain report + titlebar-chip rollup
     /// source. Populated by a startup preflight and re-run after a
     /// guided-fix session; present regardless of whether the wizard is open.
@@ -309,6 +316,7 @@ impl AppState {
             doctor_panel_open: false,
             build_launcher: None,
             clean_confirm: None,
+            quit_confirm: false,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
             add_plugin: None,
@@ -423,6 +431,18 @@ impl AppState {
     /// Whether any tracked session is still in a live (non-terminal) state.
     pub fn any_session_running(&self) -> bool {
         self.sessions.iter().any(|s| !s.state.is_terminal())
+    }
+
+    /// The number of tracked sessions still in a live (non-terminal) state —
+    /// what the quit-confirm dialog warns about before every one of them is
+    /// force-stopped (see `crate::engine::update`'s `RequestQuit` arm and
+    /// `crate::ui::views::quit_confirm`), read live at render rather than
+    /// cached on the dialog itself.
+    pub fn live_session_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| !s.state.is_terminal())
+            .count()
     }
 
     /// The live session already running `project_root` on `target`, if there
@@ -552,6 +572,7 @@ impl Default for AppState {
             doctor_panel_open: false,
             build_launcher: None,
             clean_confirm: None,
+            quit_confirm: false,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
             add_plugin: None,

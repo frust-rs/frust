@@ -738,6 +738,17 @@ fn clean_confirm_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
+// ── Quit confirm dialog ────────────────────────────────────────────────────────
+
+/// The quit-confirm dialog open over the workbench with one live session —
+/// singular body text ("1 running session…").
+#[test]
+fn quit_confirm_one_session_100x30() {
+    let mut state = single_session_state();
+    state.quit_confirm = true;
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
 // ── Build artifact copy-path ──────────────────────────────────────────────────
 
 fn built_session_state() -> AppState {

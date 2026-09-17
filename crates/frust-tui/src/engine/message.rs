@@ -150,6 +150,10 @@ pub enum RegionId {
     CleanConfirmYes,
     /// The clean-confirm dialog's cancel button.
     CleanConfirmNo,
+    /// The quit-confirm dialog's confirm button.
+    QuitConfirmYes,
+    /// The quit-confirm dialog's cancel button.
+    QuitConfirmNo,
     /// The log status row's "copy built artifact path(s)" affordance.
     CopyArtifactsAction,
     /// A command row in the open command palette (0-based index into the
@@ -280,7 +284,11 @@ pub enum ContextTarget {
 /// `==`/`assert_eq!`, which `PartialEq` alone satisfies.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    /// Quit requested (`q` / `Ctrl+Q`). Sets `should_quit`; the loop exits.
+    /// The deliberate quit bypass — `Ctrl+Q` only. Sets `should_quit`
+    /// directly, skipping the quit-confirm dialog even with live sessions.
+    /// Every other former `Quit` producer (`q` from the welcome/workbench
+    /// screen or the DevTools pane, `Ctrl+C` with no running session, and the
+    /// palette's Quit entry) now emits [`Self::RequestQuit`] instead.
     Quit,
     /// A tick from the frame interval — ages the toast stack (the app's only
     /// animated state) and is otherwise a no-op (dirty-frame skip keeps it
@@ -609,6 +617,20 @@ pub enum Message {
     /// Confirm the clean (`Enter`/`y`) — routed to the runner as
     /// [`super::Effect::RunClean`].
     ConfirmClean,
+
+    // ── Quit confirm dialog ─────────────────────────────────────────────────────
+    /// Ask to quit (`q` from the welcome/workbench screen or the DevTools
+    /// pane, `Ctrl+C` with no running session, or the palette's Quit entry —
+    /// every former [`Self::Quit`] producer except `Ctrl+Q`). With no live
+    /// session ([`super::AppState::live_session_count`] `== 0`) this behaves
+    /// exactly like [`Self::Quit`]; otherwise it opens the quit-confirm
+    /// dialog (`state.quit_confirm = true`) instead of quitting outright.
+    RequestQuit,
+    /// Confirm the quit from the dialog (`Enter`/`y`) — the old unconditional
+    /// `Quit` behaviour: sets `should_quit` and clears the dialog.
+    ConfirmQuit,
+    /// Close the quit-confirm dialog without quitting (`Esc`/`n`).
+    CloseQuitConfirm,
 
     // ── Build artifact copy-path ──────────────────────────────────────────────
     /// Copy the active (build) session's reported artifact path(s) to the
