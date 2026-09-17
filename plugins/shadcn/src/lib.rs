@@ -74,13 +74,16 @@
 //!
 //! # Fonts
 //!
-//! Inter Variable and JetBrains Mono Variable are bundled **unconditionally**
-//! (`include_bytes!`) — depending on this plugin is itself the opt-in, so there
-//! is no second feature to switch them off with. Both are OFL-1.1 with no
-//! Reserved Font Name, and ship with their license text and provenance record
-//! (`plugins/shadcn/fonts/README.md`). [`install`] registers both faces and the
-//! theme binds Inter into the `NativeTypefaces` slots native controls read;
-//! [`font_data`] exposes the raw bytes for a host that wants them directly.
+//! Inter Variable and JetBrains Mono Variable are compiled in and registered
+//! by [`install`] behind the crate's `bundled-fonts` feature (default on); an
+//! app that sets `default-features = false` on this dependency compiles in
+//! no font bytes, `install()` registers neither face, and text falls back to
+//! the platform's system faces through fontique (Roboto on Android). Both
+//! are OFL-1.1 with no Reserved Font Name, and ship with their license text
+//! and provenance record (`plugins/shadcn/fonts/README.md`). When bundled,
+//! the theme binds Inter into the `NativeTypefaces` slots native controls
+//! read; [`font_data`] exposes the raw bytes for a host that wants them
+//! directly.
 
 mod components;
 mod hit;
@@ -130,8 +133,9 @@ pub use tokens::theme::theme;
 ///    exactly what shadcn's own `.dark` class variant does on the web).
 /// 2. `frust::register_app_fonts` for both bundled faces, so the type scale's
 ///    Inter stack and [`mono_family`](tokens::mono_family)'s JetBrains Mono
-///    stack actually resolve. The faces are compiled in unconditionally (see the
-///    crate docs' *Fonts* section).
+///    stack actually resolve. The faces are compiled in behind the crate's
+///    `bundled-fonts` feature (default on) — see the crate docs' *Fonts*
+///    section for the `default-features = false` opt-out.
 ///
 /// The seeded theme is the `neutral` base preset; an app wanting another calls
 /// `set_default_theme` itself with one of the `theme_*` constructors.

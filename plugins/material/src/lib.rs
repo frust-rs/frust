@@ -341,8 +341,11 @@ pub use tokens::{
 ///    brightness, so an app installed this way still follows system dark mode.
 /// 2. `frust::register_app_fonts` for both bundled faces (Roboto Flex, Roboto
 ///    Mono), so the type scale's Roboto Flex stack and any mono-text component
-///    actually resolve. The faces are compiled in unconditionally (see the
-///    crate docs' font coverage).
+///    actually resolve. The faces are compiled in behind the crate's
+///    `bundled-fonts` feature (default on); an app that sets
+///    `default-features = false` on this dependency compiles in no font
+///    bytes, `install()` registers neither face, and text falls back to the
+///    platform's system faces through fontique (Roboto on Android).
 ///
 /// # Timing: must run before the first frame
 ///

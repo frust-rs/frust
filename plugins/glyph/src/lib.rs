@@ -66,11 +66,14 @@
 //! # Fonts
 //!
 //! The Space Mono and IBM Plex Mono faces the Glyph type scale names are
-//! bundled **unconditionally** (`include_bytes!`) — depending on this plugin is
-//! itself the opt-in, so there is no second feature to switch them off with.
-//! Both families are OFL-1.1 and ship with their license text and provenance
-//! record (`plugins/glyph/fonts/README.md`). [`install`] registers every face;
-//! [`font_data`] exposes the raw bytes for a host that wants them directly.
+//! compiled in and registered by [`install`] behind the crate's
+//! `bundled-fonts` feature (default on); an app that sets
+//! `default-features = false` on this dependency compiles in no font bytes,
+//! `install()` registers none, and text falls back to the platform's system
+//! faces through fontique (Roboto on Android). Both families are OFL-1.1 and
+//! ship with their license text and provenance record
+//! (`plugins/glyph/fonts/README.md`). [`font_data`] exposes the raw bytes for
+//! a host that wants them directly.
 //! Each family's italic face ships too, even though the catalog itself never
 //! requests `FontStyle::Italic` — see [`tokens::fonts`]'s module doc for the
 //! measurement behind keeping them (dropping them would silently fall back
@@ -155,7 +158,9 @@ pub use tokens::{GlyphInk, baseline, font_data};
 ///    brightness, so a Glyph app still follows system dark mode.
 /// 2. `frust::register_app_fonts` for every bundled Glyph face, so the Glyph
 ///    type scale's families actually resolve. The faces are compiled in
-///    unconditionally (see the crate docs' *Fonts* section).
+///    behind the crate's `bundled-fonts` feature (default on) — see the
+///    crate docs' *Fonts* section for the `default-features = false`
+///    opt-out.
 ///
 /// # Timing: must run before the first frame
 ///
