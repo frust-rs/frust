@@ -1,28 +1,28 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1721
 expression: "render_to_string(100, 30, &state)"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
-━━━━━━━━                 ╭ Keyboard Shortcuts ────────────────────────────╮                         
-                         │                                                │▓▓                       
- PROJECTS                │  r       Run on device(s)…                     │▓▓                       
-  ▸ huddle               │  x       Stop session                          │▓▓                       
-                         │  X       Close tab                             │▓▓                       
- DEVICES ↻ r             │  b       Build…                                │▓▓                       
-   none found            │  c       Clean…                                │▓▓b here.                
-                         │  d       Doctor                                │▓▓                       
- SESSIONS                │  i       Toolchain setup…                      │▓▓                       
-   none running          │  n       New project…                          │▓▓                       
-                         │  a       Add plugin…                           │▓▓                       
- ACTIONS                 │  ^O      Switch project…                       │▓▓                       
-   New project · n       │  R       Refresh devices                       │▓▓                       
-   Add plugin · a        │  m       MCP server…                           │▓▓                       
-   Doctor · d            │  M       Start/stop MCP server                 │▓▓                       
-   Build · b             │  D       DAP server…                           │▓▓                       
-   Clean · c             │  ⌥m      Toggle mouse capture                  │▓▓                       
-   MCP off · M           │  f       Toggle follow-tail                    │▓▓                       
-   DAP off · D           │  /       Search logs…                          │▓▓                       
+⚙ Frust │ huddle ▾ · frus╭ Keyboard Shortcuts ────────────────────────────╮        ▶ Run    ⚒ Build 
+━━━━━━━━                 │                                                │▓▓                       
+                         │  r       Run on device(s)…                     │▓▓                       
+ PROJECTS                │  x       Stop session                          │▓▓                       
+  ▸ huddle               │  X       Close tab                             │▓▓                       
+                         │  b       Build…                                │▓▓                       
+ DEVICES ↻ r             │  c       Clean…                                │▓▓                       
+   none found            │  d       Doctor                                │▓▓b here.                
+                         │  i       Toolchain setup…                      │▓▓                       
+ SESSIONS                │  n       New project…                          │▓▓                       
+   none running          │  a       Add plugin…                           │▓▓                       
+                         │  ^O      Switch project…                       │▓▓                       
+ ACTIONS                 │  R       Refresh devices                       │▓▓                       
+   New project · n       │  m       MCP server…                           │▓▓                       
+   Add plugin · a        │  M       Start/stop MCP server                 │▓▓                       
+   Doctor · d            │  D       DAP server…                           │▓▓                       
+   Build · b             │  ⌥m      Toggle mouse capture                  │▓▓                       
+   Clean · c             │  f       Toggle follow-tail                    │▓▓                       
+   MCP off · M           │  /       Search logs…                          │▓▓                       
+   DAP off · D           │  v       Select lines…                         │▓▓                       
+                         │  y       Copy selection                        │▓▓                       
                          │  l       Cycle log level filter                │▓▓                       
                          │  z       Toggle nearest backtrace fold         │▓▓                       
                          │  d       DevTools                              │▓▓                       
@@ -31,5 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                │▓▓                       
                          │  Esc close                                     │▓▓                       
                          ╰────────────────────────────────────────────────╯▓▓                       
-                         │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                       
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓              [mouse ✓]

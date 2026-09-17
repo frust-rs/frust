@@ -1,7 +1,8 @@
 //! The engine-side, pure view-model of a supervised session: its identity and
 //! metadata, a bounded ring buffer of retained log lines, and the log-view
-//! interaction state (follow-tail vs. an absolute scroll anchor, and a
-//! copy-while-scrolling line selection) the [`crate::ui`] log view renders.
+//! interaction state (follow-tail vs. an absolute scroll anchor, and the
+//! copy-while-scrolling line selection — plus the per-session
+//! **line-selection mode** that drives it) the [`crate::ui`] log view renders.
 //!
 //! Everything here is plain data + pure functions — no threads, no tokio, no
 //! terminal — so the scroll/selection/eviction invariants are unit-tested
@@ -30,6 +31,24 @@ use crate::supervise::{DeviceTarget, PhaseLabel, SessionId, SessionState};
 /// unbounded memory. The drive const is private to that crate, so this is a
 /// deliberate by-value alignment (one number, two layers), not a shared symbol.
 pub const LOG_LINE_CAP: usize = 10_000;
+
+/// How far above the bottom-anchored row line-selection mode keeps its cursor
+/// before scrolling the view for it.
+///
+/// The engine is terminal-free by contract — it never learns the log
+/// viewport's height, and [`Scroll::Anchored`] names the *bottom* row alone —
+/// so [`SessionView::ensure_visible`] enforces "the cursor row stays on
+/// screen" against this conservative floor instead of a real height: any
+/// viewport at least this tall always shows the cursor, and a shorter one
+/// merely scrolls a little sooner than it strictly must (recoverable, where
+/// losing the cursor off-screen is not).
+pub const SELECT_CURSOR_WINDOW: u64 = 10;
+
+/// How many visible entries one `PageUp`/`PageDown` moves the selection
+/// cursor. Aligned by value with the runner's own log-scroll page step (one
+/// number, two layers — the runner's is a key-table detail, this one is
+/// model state the message `SelectPage` carries only a direction for).
+pub const SELECT_PAGE_LINES: u64 = 10;
 
 /// A bounded, drop-oldest ring of a session's stdout lines, addressed by a
 /// stable **absolute** index (the count of lines ever pushed) so a scroll
@@ -281,6 +300,20 @@ pub struct SessionView {
     pub scroll: Scroll,
     /// The copy-while-scrolling selection, if any.
     pub selection: Option<LineSelection>,
+    /// Whether this session's log view is in **line-selection mode** (`v`):
+    /// the log-view keys move a selection cursor instead of scrolling,
+    /// follow-tail is paused, and a row click sets the range. Per session, so
+    /// switching tabs neither carries the mode along nor cancels it on the
+    /// tab it belongs to.
+    pub select_mode: bool,
+    /// Whether follow-tail was engaged when the mode was entered — what
+    /// [`Self::exit_select_mode`] restores (only with the cursor still at the
+    /// tail; see its doc). `None` outside the mode.
+    pub follow_before_select: Option<bool>,
+    /// Whether a log row has been clicked since the mode was entered: the
+    /// first click re-anchors the selection, later ones only move its range
+    /// end (see [`Self::clicked_since_enter`]).
+    clicked_since_enter: bool,
     /// Cumulative count of output lines the supervisor dropped because its
     /// bounded engine channel was full (drop-newest overflow — see
     /// [`crate::supervise`]). `0` for a healthy session; a non-zero value means
@@ -357,6 +390,9 @@ impl SessionView {
             log: LogBuffer::default(),
             scroll: Scroll::Follow,
             selection: None,
+            select_mode: false,
+            follow_before_select: None,
+            clicked_since_enter: false,
             dropped: 0,
             close_on_exit: false,
             perf: PerfPanel::default(),
@@ -637,8 +673,10 @@ impl SessionView {
 
     /// Scroll down (toward newer entries) by `n` **visible** steps — the
     /// mirror of [`Self::scroll_up`]. Reaching the last visible entry
-    /// re-engages follow-tail; a no-op while already following (there is
-    /// nothing below the tail) or while nothing is visible.
+    /// re-engages follow-tail (except in line-selection mode, which keeps
+    /// follow paused — see [`Self::enter_select_mode`]); a no-op while
+    /// already following (there is nothing below the tail) or while nothing
+    /// is visible.
     pub fn scroll_down(&mut self, n: u64, filter: Option<&str>) {
         if self.is_following() {
             return;
@@ -649,10 +687,13 @@ impl SessionView {
         }
         let last = vis.len() - 1;
         let pos = self.bottom_pos(&vis).saturating_add(clamp_steps(n));
-        self.scroll = if pos >= last {
+        self.scroll = if pos >= last && !self.select_mode {
+            // Line-selection mode holds follow-tail paused for its whole
+            // life, so a wheel back down to the tail stops *at* the tail line
+            // rather than re-engaging follow under the cursor.
             Scroll::Follow
         } else {
-            Scroll::Anchored(vis[pos])
+            Scroll::Anchored(vis[pos.min(last)])
         };
     }
 
@@ -709,37 +750,213 @@ impl SessionView {
         };
     }
 
-    /// Begin a selection anchored at the newest line.
-    pub fn begin_selection(&mut self) {
-        let end = self.log.end_index();
-        if end == 0 {
-            return;
+    /// Clear any selection.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    // ── Line-selection mode ─────────────────────────────────────────────────
+
+    /// Whether a log row has already been clicked since the mode was entered
+    /// — the first click of a mode session re-anchors ([`Self::anchor_at`]),
+    /// every later one only moves the range end ([`Self::cursor_to`]).
+    pub fn clicked_since_enter(&self) -> bool {
+        self.clicked_since_enter
+    }
+
+    /// Enter line-selection mode: anchor a one-line selection on the newest
+    /// **visible** entry (the bottom row of the current viewport — the newest
+    /// line while following, the bottom-anchored one while scrolled up),
+    /// freeze follow-tail so incoming lines can never drag the viewport out
+    /// from under the cursor, and remember whether follow was on so
+    /// [`Self::exit_select_mode`] can put it back.
+    ///
+    /// A no-op (returning `false`) on an empty log, on a log whose filters
+    /// currently hide every line — there is no row to anchor on — and while
+    /// the mode is already engaged. `filter` is the committed free-text
+    /// search filter, as everywhere else the visible sequence is measured
+    /// (see [`Self::visible_indices`]).
+    pub fn enter_select_mode(&mut self, filter: Option<&str>) -> bool {
+        if self.select_mode {
+            return false;
         }
-        let at = end - 1;
+        let vis = self.visible_indices(filter);
+        if vis.is_empty() {
+            return false;
+        }
+        let at = vis[self.bottom_pos(&vis)];
+        self.follow_before_select = Some(self.is_following());
+        self.scroll = Scroll::Anchored(at);
         self.selection = Some(LineSelection {
             anchor: at,
             cursor: at,
         });
+        self.clicked_since_enter = false;
+        self.select_mode = true;
+        true
     }
 
-    /// Extend the selection cursor toward older lines by `n`.
-    pub fn extend_selection_up(&mut self, n: u64) {
-        if let Some(sel) = self.selection.as_mut() {
-            sel.cursor = sel.cursor.saturating_sub(n).max(self.log.base_index());
+    /// Leave line-selection mode, dropping the selection.
+    ///
+    /// **Follow-tail is restored only when it was on at entry *and* the
+    /// cursor is still sitting on the newest visible entry.** Having walked
+    /// the cursor away from the tail is a deliberate "I am reading here"
+    /// statement, so leaving the mode keeps the anchored scroll exactly where
+    /// the user left it rather than snapping the view back to the tail; `f`
+    /// (or scrolling to the bottom) re-engages follow the usual way.
+    ///
+    /// Returns whether anything changed.
+    pub fn exit_select_mode(&mut self, filter: Option<&str>) -> bool {
+        if !self.select_mode {
+            return false;
         }
-    }
-
-    /// Extend the selection cursor toward newer lines by `n`.
-    pub fn extend_selection_down(&mut self, n: u64) {
-        if let Some(sel) = self.selection.as_mut() {
-            let last = self.log.end_index().saturating_sub(1);
-            sel.cursor = sel.cursor.saturating_add(n).min(last);
-        }
-    }
-
-    /// Clear any selection.
-    pub fn clear_selection(&mut self) {
+        let vis = self.visible_indices(filter);
+        let at_tail = match (self.selection, vis.last()) {
+            (Some(sel), Some(last)) => sel.cursor == *last,
+            _ => false,
+        };
+        self.select_mode = false;
+        self.clicked_since_enter = false;
         self.selection = None;
+        if self.follow_before_select.take() == Some(true) && at_tail {
+            self.scroll = Scroll::Follow;
+        }
+        true
+    }
+
+    /// Step the selection cursor `delta` **visible** entries (negative =
+    /// toward older lines), clamped to the ends of the visible sequence, and
+    /// scroll only as far as [`Self::ensure_visible`] needs to keep the
+    /// cursor row on screen. One step is one drawn row, exactly like the
+    /// scroll keys: a filtered-out line is never landed on and a collapsed
+    /// panic block is crossed in a single step.
+    ///
+    /// Returns whether the cursor (or the scroll) actually moved.
+    pub fn move_cursor(&mut self, delta: i64, filter: Option<&str>) -> bool {
+        if !self.select_mode {
+            return false;
+        }
+        let vis = self.visible_indices(filter);
+        let (Some(sel), false) = (self.selection, vis.is_empty()) else {
+            return false;
+        };
+        let pos = pos_of(&vis, sel.cursor) as i64;
+        let last = (vis.len() - 1) as i64;
+        let next = pos.saturating_add(delta).clamp(0, last) as usize;
+        self.set_cursor(vis[next], &vis)
+    }
+
+    /// [`Self::move_cursor`] by one page (`dir` is the sign: `-1` older, `1`
+    /// newer) — [`SELECT_PAGE_LINES`] visible entries.
+    pub fn move_cursor_page(&mut self, dir: i8, filter: Option<&str>) -> bool {
+        let delta = i64::from(dir.signum()) * SELECT_PAGE_LINES as i64;
+        self.move_cursor(delta, filter)
+    }
+
+    /// Jump the selection cursor to the oldest visible entry.
+    pub fn cursor_home(&mut self, filter: Option<&str>) -> bool {
+        self.jump_cursor(filter, |vis| vis.first().copied())
+    }
+
+    /// Jump the selection cursor to the newest visible entry.
+    pub fn cursor_end(&mut self, filter: Option<&str>) -> bool {
+        self.jump_cursor(filter, |vis| vis.last().copied())
+    }
+
+    /// Shared body of [`Self::cursor_home`]/[`Self::cursor_end`]: pick an end
+    /// of the visible sequence and put the cursor there.
+    fn jump_cursor(
+        &mut self,
+        filter: Option<&str>,
+        pick: impl FnOnce(&[u64]) -> Option<u64>,
+    ) -> bool {
+        if !self.select_mode || self.selection.is_none() {
+            return false;
+        }
+        let vis = self.visible_indices(filter);
+        match pick(&vis) {
+            Some(abs) => self.set_cursor(abs, &vis),
+            None => false,
+        }
+    }
+
+    /// Start a fresh one-line selection at absolute line `abs` (the first log
+    /// row click after entering the mode). A no-op outside the mode or on a
+    /// line the ring no longer retains.
+    ///
+    /// Unlike the cursor keys this never scrolls: `abs` came from a row the
+    /// user just clicked, so it is on screen by construction, and moving the
+    /// view under a click would be the one thing a click must not do.
+    pub fn anchor_at(&mut self, abs: u64) -> bool {
+        if !self.select_mode || self.log.get(abs).is_none() {
+            return false;
+        }
+        self.selection = Some(LineSelection {
+            anchor: abs,
+            cursor: abs,
+        });
+        self.clicked_since_enter = true;
+        true
+    }
+
+    /// Move the selection's moving end to absolute line `abs` (a later log
+    /// row click), leaving the anchor where it is — the whole range between
+    /// the two becomes selected. Scrolls no more than [`Self::anchor_at`]
+    /// does, and for the same reason.
+    pub fn cursor_to(&mut self, abs: u64) -> bool {
+        if !self.select_mode || self.log.get(abs).is_none() {
+            return false;
+        }
+        let moved = self.selection.is_some_and(|sel| sel.cursor != abs);
+        if let Some(sel) = self.selection.as_mut() {
+            sel.cursor = abs;
+        }
+        moved
+    }
+
+    /// The plain text of the line at absolute index `abs` — ANSI-stripped
+    /// exactly like [`Self::selected_text`], and read from the same
+    /// **redacted** ring the log view renders, so a copy can never resurrect
+    /// a redacted devtools handshake token. `None` once the line has been
+    /// evicted.
+    pub fn line_text(&self, abs: u64) -> Option<String> {
+        self.log.get(abs).map(strip_ansi)
+    }
+
+    /// Put the cursor on `abs` and scroll only as far as needed to keep it on
+    /// screen; returns whether anything moved.
+    fn set_cursor(&mut self, abs: u64, vis: &[u64]) -> bool {
+        let before = (self.selection.map(|s| s.cursor), self.scroll);
+        if let Some(sel) = self.selection.as_mut() {
+            sel.cursor = abs;
+        }
+        self.ensure_visible(abs, vis);
+        before != (self.selection.map(|s| s.cursor), self.scroll)
+    }
+
+    /// Move the scroll anchor the minimum distance that keeps absolute line
+    /// `abs` on screen, measured in the visible sequence `vis`.
+    ///
+    /// The engine is terminal-free and the scroll anchor names the *bottom*
+    /// row alone, so "on screen" is enforced against [`SELECT_CURSOR_WINDOW`]
+    /// rather than a real viewport height: `abs` is never left below the
+    /// bottom row, and never more than `SELECT_CURSOR_WINDOW - 1` rows above
+    /// it. A no-op while `abs` already sits inside that window — walking the
+    /// cursor a few rows up does not scroll the view.
+    pub fn ensure_visible(&mut self, abs: u64, vis: &[u64]) {
+        if vis.is_empty() {
+            return;
+        }
+        let target = pos_of(vis, abs);
+        let bottom = self.bottom_pos(vis);
+        let next = if target > bottom {
+            target
+        } else if bottom - target >= SELECT_CURSOR_WINDOW as usize {
+            target + SELECT_CURSOR_WINDOW as usize - 1
+        } else {
+            return;
+        };
+        self.scroll = Scroll::Anchored(vis[next.min(vis.len() - 1)]);
     }
 
     /// The artifact paths a completed build session reported, in the order
@@ -783,6 +1000,32 @@ fn clamp_steps(n: u64) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
 }
 
+/// The position within `vis` of absolute line `abs`, resolving a line the
+/// sequence does not hold (filtered out, or absorbed into a collapsed panic
+/// block) to the entry that visually stands in for it — the same resolution
+/// [`SessionView::bottom_pos`] gives a stale scroll anchor, so a cursor and
+/// an anchor can never disagree about where a line "is".
+fn pos_of(vis: &[u64], abs: u64) -> usize {
+    match vis.binary_search(&abs) {
+        Ok(p) => p,
+        Err(0) => 0,
+        Err(p) => p - 1,
+    }
+}
+
+/// Truncate `s` to at most `max` Unicode scalar values, marking a cut with a
+/// trailing ellipsis — the one-line preview a "copied this line" notice
+/// shows. Counted in `char`s (not bytes) so a multi-byte line can never be
+/// split mid-scalar; a string already within `max` is returned unchanged,
+/// with no ellipsis to suggest a cut that never happened.
+pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().nth(max).is_some() {
+        out.push('\u{2026}');
+    }
+    out
+}
+
 /// Whether `line` matches a case-insensitive substring `query` (ANSI-stripped).
 pub fn line_matches(line: &str, query: &str) -> bool {
     strip_ansi(line)
@@ -807,6 +1050,245 @@ mod tests {
             role: LineRole::Normal,
             source_prefix_strip: 0,
         }
+    }
+
+    // ── Line-selection mode ─────────────────────────────────────────────
+
+    /// A session holding `n` lines, following its tail.
+    fn seeded(n: u64) -> SessionView {
+        let mut s = sess();
+        for i in 0..n {
+            s.push_line_at(format!("line {i}"), "00:00:00");
+        }
+        s
+    }
+
+    fn cursor(s: &SessionView) -> u64 {
+        s.selection.expect("a selection").cursor
+    }
+
+    fn bounds(s: &SessionView) -> (u64, u64) {
+        let sel = s.selection.expect("a selection");
+        (sel.lo(), sel.hi())
+    }
+
+    #[test]
+    fn entering_anchors_the_newest_visible_line_and_freezes_follow() {
+        let mut s = seeded(30);
+        assert!(s.enter_select_mode(None));
+        assert!(s.select_mode);
+        assert_eq!(bounds(&s), (29, 29));
+        assert_eq!(s.follow_before_select, Some(true));
+        assert_eq!(s.scroll, Scroll::Anchored(29), "follow is frozen in place");
+        assert!(!s.enter_select_mode(None), "entering twice is a no-op");
+    }
+
+    #[test]
+    fn entering_while_scrolled_up_anchors_the_bottom_row_on_screen() {
+        let mut s = seeded(30);
+        s.scroll_up(10, None);
+        let Scroll::Anchored(bottom) = s.scroll else {
+            panic!("scrolled up → anchored");
+        };
+        assert_eq!(bottom, 19);
+
+        assert!(s.enter_select_mode(None));
+
+        assert_eq!(bounds(&s), (19, 19), "not the tail — the bottom row");
+        assert_eq!(s.follow_before_select, Some(false));
+    }
+
+    #[test]
+    fn entering_an_empty_or_wholly_filtered_log_is_a_no_op() {
+        let mut empty = sess();
+        assert!(!empty.enter_select_mode(None));
+        assert!(!empty.select_mode);
+        assert_eq!(empty.selection, None);
+
+        let mut s = seeded(5);
+        assert!(!s.enter_select_mode(Some("nothing matches this")));
+        assert!(!s.select_mode);
+    }
+
+    #[test]
+    fn the_cursor_clamps_at_both_ends_of_the_visible_sequence() {
+        let mut s = seeded(10);
+        s.enter_select_mode(None);
+        assert!(s.move_cursor(-3, None));
+        assert_eq!(bounds(&s), (6, 9));
+        assert!(s.move_cursor(-100, None));
+        assert_eq!(cursor(&s), 0, "clamped at the oldest retained line");
+        assert!(!s.move_cursor(-1, None), "already clamped — nothing moved");
+        assert!(s.move_cursor(100, None));
+        assert_eq!(cursor(&s), 9, "clamped at the newest line");
+        assert!(!s.move_cursor(1, None));
+    }
+
+    #[test]
+    fn a_page_move_steps_a_page_of_visible_entries() {
+        let mut s = seeded(40);
+        s.enter_select_mode(None);
+        assert!(s.move_cursor_page(-1, None));
+        assert_eq!(cursor(&s), 39 - SELECT_PAGE_LINES);
+        assert!(s.move_cursor_page(1, None));
+        assert_eq!(cursor(&s), 39);
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_ends_of_the_visible_sequence() {
+        let mut s = seeded(12);
+        s.enter_select_mode(None);
+        assert!(s.cursor_home(None));
+        assert_eq!(bounds(&s), (0, 11));
+        assert!(s.cursor_end(None));
+        assert_eq!(bounds(&s), (11, 11));
+    }
+
+    #[test]
+    fn the_cursor_steps_through_visible_entries_not_raw_indices() {
+        let mut s = sess();
+        s.push_line_at("plain".into(), "00:00:00"); // Info
+        s.push_line_at("warning: careful".into(), "00:00:01"); // Warn
+        s.push_line_at("error: boom".into(), "00:00:02"); // Error
+        s.set_level_filter(LevelFilter::WarnPlus);
+        assert_eq!(s.visible_indices(None), vec![1, 2]);
+
+        s.enter_select_mode(None);
+        assert_eq!(cursor(&s), 2);
+        s.move_cursor(-1, None);
+        assert_eq!(cursor(&s), 1, "the hidden Info line is never landed on");
+        s.move_cursor(-1, None);
+        assert_eq!(cursor(&s), 1, "and it is not below the oldest visible one");
+    }
+
+    #[test]
+    fn the_view_scrolls_only_as_far_as_the_cursor_needs() {
+        let mut s = seeded(60);
+        s.enter_select_mode(None);
+        let anchored = s.scroll;
+
+        // Inside the cursor window the view holds still…
+        for _ in 0..(SELECT_CURSOR_WINDOW - 1) {
+            s.move_cursor(-1, None);
+        }
+        assert_eq!(s.scroll, anchored, "no scroll while the cursor is in view");
+
+        // …and beyond it the anchor follows one row at a time, keeping the
+        // cursor exactly `SELECT_CURSOR_WINDOW - 1` rows above the bottom.
+        s.move_cursor(-1, None);
+        assert_eq!(
+            s.scroll,
+            Scroll::Anchored(cursor(&s) + SELECT_CURSOR_WINDOW - 1)
+        );
+
+        // Jumping back down puts the cursor on the bottom row rather than
+        // leaving it below the viewport.
+        s.cursor_end(None);
+        assert_eq!(s.scroll, Scroll::Anchored(59));
+    }
+
+    #[test]
+    fn a_click_anchors_once_then_moves_the_range_end() {
+        let mut s = seeded(20);
+        s.enter_select_mode(None);
+        assert!(!s.clicked_since_enter());
+
+        let anchored = s.scroll;
+
+        assert!(s.anchor_at(4));
+        assert!(s.clicked_since_enter());
+        assert_eq!(bounds(&s), (4, 4));
+
+        assert!(s.cursor_to(11));
+        assert_eq!(bounds(&s), (4, 11), "the range runs between the two");
+        assert!(s.cursor_to(2));
+        assert_eq!(bounds(&s), (2, 4), "the anchor never moved");
+        assert_eq!(s.scroll, anchored, "a click never scrolls the view");
+
+        assert!(!s.cursor_to(999), "an unretained line is refused");
+    }
+
+    #[test]
+    fn a_click_outside_the_mode_changes_nothing() {
+        let mut s = seeded(5);
+        assert!(!s.anchor_at(2));
+        assert!(!s.cursor_to(2));
+        assert_eq!(s.selection, None);
+    }
+
+    #[test]
+    fn exiting_restores_follow_only_from_the_tail() {
+        // Cursor still at the tail: the follow that was paused comes back.
+        let mut s = seeded(10);
+        s.enter_select_mode(None);
+        assert!(s.exit_select_mode(None));
+        assert!(!s.select_mode);
+        assert_eq!(s.selection, None);
+        assert_eq!(s.follow_before_select, None);
+        assert!(s.is_following());
+
+        // Cursor walked away from the tail: the anchored scroll stays put.
+        let mut s = seeded(10);
+        s.enter_select_mode(None);
+        s.move_cursor(-4, None);
+        let anchored = s.scroll;
+        s.exit_select_mode(None);
+        assert!(!s.is_following());
+        assert_eq!(s.scroll, anchored);
+
+        // Follow was already off at entry: it stays off at the tail too.
+        let mut s = seeded(10);
+        s.scroll_up(3, None);
+        s.enter_select_mode(None);
+        s.cursor_end(None);
+        s.exit_select_mode(None);
+        assert!(!s.is_following());
+
+        assert!(!s.exit_select_mode(None), "leaving twice is a no-op");
+    }
+
+    #[test]
+    fn a_selection_clamps_and_then_drops_as_its_lines_are_evicted() {
+        let mut s = sess();
+        for i in 0..LOG_LINE_CAP as u64 {
+            s.push_line_at(format!("line {i}"), "00:00:00");
+        }
+        s.enter_select_mode(None);
+        s.move_cursor(-2, None); // the three newest lines
+        let (lo, hi) = bounds(&s);
+
+        // Enough incoming output to evict the older half of the selection.
+        for i in 0..(lo + 2) {
+            s.push_line_at(format!("more {i}"), "00:00:00");
+        }
+        let base = s.log.base_index();
+        assert!(base > lo && base <= hi);
+        assert_eq!(bounds(&s), (base, hi), "clamped up to the oldest retained");
+        assert!(s.select_mode, "the mode outlives the eviction");
+
+        // And once every selected line is gone, so is the selection.
+        for i in 0..(hi - base + 1) {
+            s.push_line_at(format!("even more {i}"), "00:00:00");
+        }
+        assert_eq!(s.selection, None);
+    }
+
+    #[test]
+    fn line_text_reads_the_redacted_ring_ansi_stripped() {
+        let mut s = sess();
+        s.push_line_at("\u{1b}[31mred alert\u{1b}[0m".into(), "00:00:00");
+        assert_eq!(s.line_text(0).as_deref(), Some("red alert"));
+        assert_eq!(s.line_text(9), None, "an unretained line has no text");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_counts_scalars_and_only_marks_a_real_cut() {
+        assert_eq!(truncate_with_ellipsis("short", 60), "short");
+        assert_eq!(truncate_with_ellipsis("abcdef", 6), "abcdef");
+        assert_eq!(truncate_with_ellipsis("abcdefg", 6), "abcdef\u{2026}");
+        // Multi-byte input is cut on scalar boundaries, never mid-character.
+        assert_eq!(truncate_with_ellipsis("héllo wörld", 5), "héllo\u{2026}");
+        assert_eq!(truncate_with_ellipsis("", 0), "");
     }
 
     #[test]

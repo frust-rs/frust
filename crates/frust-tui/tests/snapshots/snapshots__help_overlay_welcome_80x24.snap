@@ -1,6 +1,5 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1732
 expression: "render_to_string(80, 24, &state)"
 ---
                ╭ Keyboard Shortcuts ────────────────────────────╮ain ◌ checking…
@@ -22,8 +21,8 @@ expression: "render_to_string(80, 24, &state)"
                │  ⌥m      Toggle mouse capture                  │▓▓             
                │  f       Toggle follow-tail                    │▓▓             
                │  /       Search logs…                          │▓▓             
+               │  v       Select lines…                         │▓▓             
+               │  y       Copy selection                        │▓▓             
                │  l       Cycle log level filter                │▓▓             
                │  z       Toggle nearest backtrace fold         │▓▓             
-               │  d       DevTools                              │▓▓             
-               │  r       Refresh widget tree                   │▓▓             
 ? help · ⌘ pale╰────────────────────────────────────────────────╯▓▓    [mouse ✓]

@@ -167,6 +167,11 @@ pub enum RegionId {
     /// The keyboard/help overlay — a click anywhere in the panel
     /// closes it (mouse parity for `Esc`).
     HelpClose,
+    /// A drawn log row, carrying the absolute index of the line it draws;
+    /// click sets the line-selection mode's anchor / range end (outside the
+    /// mode the click is idle — the region is registered every frame either
+    /// way, so a scrolled viewport always maps rows to current lines).
+    LogRow(u64),
     /// A panic/backtrace block's `▶ n frames…` fold affordance row (the
     /// block's identity: the absolute index of its panic-header line); click
     /// toggles its collapsed state.
@@ -272,8 +277,15 @@ pub enum ContextTarget {
     DeviceRow(usize),
     /// A project row (index into `AppState::projects`).
     ProjectRow(usize),
-    /// The log view pane.
-    LogView,
+    /// The log view pane. `row` is the absolute log-line index of the row
+    /// under the cursor — `None` for the pane-wide region (empty space below
+    /// the last line), which is why the row-specific entries are gated on it
+    /// rather than assuming a row was hit.
+    LogView {
+        /// The absolute log-line index under the cursor, if a drawn row was
+        /// hit.
+        row: Option<u64>,
+    },
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -415,17 +427,41 @@ pub enum Message {
     SearchCommit,
     /// Close the search overlay without changing the committed filter (`Esc`).
     SearchCancel,
-    /// Begin a copy-while-scrolling selection at the newest line (`v`).
-    SelectionBegin,
-    /// Extend the selection toward older lines (`Shift+Up`).
-    SelectionExtendUp(u64),
-    /// Extend the selection toward newer lines (`Shift+Down`).
-    SelectionExtendDown(u64),
-    /// Clear the current selection (`Esc`).
-    SelectionClear,
+    /// Enter the active session's **line-selection mode** (`v`, the log
+    /// view's context menu, the palette's "Select lines…"): anchor a
+    /// one-line selection on the newest visible line and pause follow-tail.
+    /// A no-op on an empty (or wholly filtered-out) log — see
+    /// [`super::SessionView::enter_select_mode`].
+    SelectEnter,
+    /// Step the selection cursor `n` **visible** entries while in the mode
+    /// (negative = toward older lines): `↑`/`k`/`Shift+↑` and
+    /// `↓`/`j`/`Shift+↓`.
+    SelectMove(i64),
+    /// Move the selection cursor one page (sign only: `-1` = `PageUp`,
+    /// `1` = `PageDown`).
+    SelectPage(i8),
+    /// Jump the selection cursor to the oldest visible line (`Home`).
+    SelectHome,
+    /// Jump the selection cursor to the newest visible line (`End`).
+    SelectEnd,
+    /// Leave line-selection mode, dropping the selection (`Esc`, or `v`
+    /// again) — restores follow-tail only under
+    /// [`super::SessionView::exit_select_mode`]'s rule.
+    SelectExit,
+    /// A left click landed on the log row drawing absolute line index `n`
+    /// (every rendered row registers one; see `crate::ui::views::sessions`).
+    /// The runner stays dumb about the mode: outside it this is idle, inside
+    /// it the first click re-anchors the selection and every later one moves
+    /// its range end.
+    LogRowClicked(u64),
     /// Copy the current selection to the clipboard (`y`) — routed to the runner
-    /// as an [`super::Effect::Copy`].
+    /// as an [`super::Effect::Copy`]. In line-selection mode this also leaves
+    /// the mode, so `v`…`y` is a complete copy gesture.
     CopySelection,
+    /// Copy the single log line at absolute index `n` (the log view's
+    /// right-click "Copy line") — routed as an [`super::Effect::Copy`], or a
+    /// warning when the ring has already evicted it.
+    CopyLine(u64),
     /// Toggle a panic/backtrace block's fold state by its id (the block's
     /// panic-header absolute line index) — a click on its `▶ n frames…`
     /// affordance row.

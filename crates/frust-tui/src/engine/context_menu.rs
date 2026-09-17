@@ -21,9 +21,17 @@
 //! | Device row · Run…         | `OpenRunConfig`      | `r` / `Enter` · palette "Run on device(s)…" |
 //! | Device row · Toggle select| `SelectDeviceAt`     | `Space` (device panel)        |
 //! | Project row · Open        | `SwitchProject`      | sidebar click / switcher `Enter`/digit |
-//! | Log view · Copy selection | `CopySelection`      | `y` · palette (via selection) |
+//! | Log view · Copy line      | `CopyLine`           | mouse-only — `v`/`y` copies a range |
+//! | Log view · Copy selection | `CopySelection`      | `y` · palette "Copy selection" |
+//! | Log view · Select lines…  | `SelectEnter`        | `v` · palette "Select lines…" |
 //! | Log view · Follow         | `ToggleFollow`       | `f` · palette "Toggle follow-tail" |
 //! | Log view · Search…        | `SearchOpen`         | `/` · palette "Search logs…"  |
+//!
+//! "Copy line" is the one deliberate exception to the parity column: a
+//! single log line has no keyboard address (the keyboard picks *ranges*, via
+//! line-selection mode), so its row is mouse-only rather than wired to a key
+//! nothing else could reach. It is still not a menu-only *command* — the
+//! message is `CopyLine`, which the model owns like any other.
 //!
 //! Entries the v1 target list names but no existing `Message` covers
 //! (session-tab "restart", project-row "remove from recents") are
@@ -188,13 +196,25 @@ pub fn entries_for(state: &AppState, target: ContextTarget) -> Vec<MenuEntry> {
                 Message::SwitchProject(i),
             )]
         }
-        ContextTarget::LogView => {
+        ContextTarget::LogView { row } => {
             let Some(session) = state.active_session() else {
                 return Vec::new();
             };
             let has_selection = session.selection.is_some();
             vec![
+                // The one mouse-only row in any menu (hence the empty
+                // keyhint): a single line has no keyboard address of its own
+                // — `v`/`y` is the keyboard path to the same clipboard, over
+                // a range the cursor keys pick. Disabled (and copying
+                // nothing) when the click landed below the last drawn row.
+                MenuEntry::gated(
+                    "Copy line",
+                    "",
+                    Message::CopyLine(row.unwrap_or_default()),
+                    row.is_some(),
+                ),
                 MenuEntry::gated("Copy selection", "y", Message::CopySelection, has_selection),
+                MenuEntry::on("Select lines…", "v", Message::SelectEnter),
                 MenuEntry::on("Toggle follow-tail", "f", Message::ToggleFollow),
                 MenuEntry::on("Search logs…", "/", Message::SearchOpen),
             ]
@@ -296,7 +316,7 @@ mod tests {
         assert!(!entries_for(&st, ContextTarget::DeviceRow(0)).is_empty());
         assert!(!entries_for(&st, ContextTarget::ProjectRow(0)).is_empty());
         // No session / no active session → log-view and session-tab menus empty.
-        assert!(entries_for(&st, ContextTarget::LogView).is_empty());
+        assert!(entries_for(&st, ContextTarget::LogView { row: None }).is_empty());
         assert!(entries_for(&st, ContextTarget::SessionTab(0)).is_empty());
     }
 
@@ -305,7 +325,7 @@ mod tests {
         let mut menu = ContextMenu {
             x: 0,
             y: 0,
-            target: ContextTarget::LogView,
+            target: ContextTarget::LogView { row: None },
             entries: vec![
                 MenuEntry::on("a", "", Message::ToggleFollow),
                 MenuEntry::on("b", "", Message::SearchOpen),

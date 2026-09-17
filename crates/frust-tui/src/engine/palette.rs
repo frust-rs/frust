@@ -77,6 +77,9 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();
     let has_session = state.active_session().is_some();
+    let has_selection = state
+        .active_session()
+        .is_some_and(|s| s.selection.is_some());
     let running = state
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
@@ -195,6 +198,24 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             Message::SearchOpen,
             has_session,
             "no active session",
+        ),
+        // The line-selection pair. "Copy selection" is gated on there being a
+        // selection at all rather than on a session, because `y` outside the
+        // mode has nothing to copy — the palette says so instead of running a
+        // command that would silently do nothing.
+        gated(
+            "Select lines…",
+            "v",
+            Message::SelectEnter,
+            has_session,
+            "no active session",
+        ),
+        gated(
+            "Copy selection",
+            "y",
+            Message::CopySelection,
+            has_selection,
+            "no lines selected",
         ),
         gated(
             "Cycle log level filter",

@@ -18,10 +18,15 @@ use super::dap_settings::{DapFocus, DapIdeReport, DapSetting, IdeConfigRequest};
 use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab, PerfFrame};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::{SessionTarget, SessionView};
+use super::session_view::{SessionTarget, SessionView, truncate_with_ellipsis};
 use super::state::{AppState, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
+
+/// How much of a copied log line the "Copied: …" notice previews before
+/// eliding the rest — counted in Unicode scalar values, not bytes (see
+/// [`truncate_with_ellipsis`]).
+const COPY_LINE_PREVIEW_CHARS: usize = 60;
 
 /// A side effect the (terminal/supervisor-owning) runner performs after a
 /// transition — the pure core requests it, the runner enacts it.
@@ -454,10 +459,24 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        Message::SelectionBegin => with_active(state, |s| s.begin_selection()),
-        Message::SelectionExtendUp(n) => with_active(state, |s| s.extend_selection_up(n)),
-        Message::SelectionExtendDown(n) => with_active(state, |s| s.extend_selection_down(n)),
-        Message::SelectionClear => with_active(state, |s| s.clear_selection()),
+        Message::SelectEnter => with_active_changed(state, |s, f| s.enter_select_mode(f)),
+        Message::SelectExit => with_active_changed(state, |s, f| s.exit_select_mode(f)),
+        Message::SelectMove(n) => with_active_changed(state, |s, f| s.move_cursor(n, f)),
+        Message::SelectPage(dir) => with_active_changed(state, |s, f| s.move_cursor_page(dir, f)),
+        Message::SelectHome => with_active_changed(state, |s, f| s.cursor_home(f)),
+        Message::SelectEnd => with_active_changed(state, |s, f| s.cursor_end(f)),
+        // The runner translates a row click without knowing the mode; the
+        // mode semantics live here: the first click of a mode session
+        // re-anchors, every later one drags the range end to the clicked row.
+        Message::LogRowClicked(abs) => with_active_changed(state, |s, _| {
+            if !s.select_mode {
+                false
+            } else if s.clicked_since_enter() {
+                s.cursor_to(abs)
+            } else {
+                s.anchor_at(abs)
+            }
+        }),
         Message::ToggleFold(block_start) => with_active(state, |s| {
             s.toggle_fold(block_start);
         }),
@@ -466,17 +485,47 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         }),
         Message::CycleLevelFilter(delta) => with_active(state, |s| s.cycle_level_filter(delta)),
         Message::SetLevelFilter(filter) => with_active(state, |s| s.set_level_filter(filter)),
-        Message::CopySelection => match state.active_session().and_then(|s| s.selected_text()) {
+        // `y` is the whole copy gesture: it copies the range *and* leaves the
+        // mode (follow-tail restored under `exit_select_mode`'s rule), so the
+        // highlight never lingers over a log the user has finished with.
+        Message::CopySelection => {
+            let filter = state.search.filter.clone();
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            let Some(text) = session.selected_text() else {
+                return Outcome::idle();
+            };
+            let lines = session.selection.map_or(0, |s| s.hi() - s.lo() + 1);
+            session.exit_select_mode(filter.as_deref());
+            state
+                .toasts
+                .push(ToastKind::Info, format!("Copied: {lines} lines"));
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::Copy(text)),
+            }
+        }
+        // The log view's right-click "Copy line". The text comes from the
+        // same redacted ring the view renders (never a raw line), and an
+        // already-evicted index says so instead of copying nothing.
+        Message::CopyLine(abs) => match state.active_session().and_then(|s| s.line_text(abs)) {
             Some(text) => {
+                let preview = truncate_with_ellipsis(&text, COPY_LINE_PREVIEW_CHARS);
                 state
                     .toasts
-                    .push(ToastKind::Success, "Copied selection to clipboard");
+                    .push(ToastKind::Info, format!("Copied: {preview}"));
                 Outcome {
                     redraw: true,
                     effect: Some(Effect::Copy(text)),
                 }
             }
-            None => Outcome::idle(),
+            None => {
+                state
+                    .toasts
+                    .push(ToastKind::Warn, "Line no longer available");
+                Outcome::redraw()
+            }
         },
 
         // ── Devices panel + run-config modal ────────────────────────────────
@@ -2525,6 +2574,20 @@ fn with_active_filtered(
     }
 }
 
+/// [`with_active_filtered`] for the transitions that report whether they
+/// actually changed anything (the line-selection-mode moves, each of which is
+/// a no-op at a clamp or outside the mode) — a no-op costs no redraw.
+fn with_active_changed(
+    state: &mut AppState,
+    f: impl FnOnce(&mut SessionView, Option<&str>) -> bool,
+) -> Outcome {
+    let filter = state.search.filter.clone();
+    match state.active_session_mut() {
+        Some(s) => Outcome::dirty(f(s, filter.as_deref())),
+        None => Outcome::idle(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3535,19 +3598,220 @@ mod tests {
         );
     }
 
-    #[test]
-    fn copy_selection_emits_effect_with_the_selected_text() {
+    // ── Line-selection mode (`v` … `y`) ─────────────────────────────────────
+
+    /// A workbench with one session holding `n` seeded lines, following its
+    /// tail — the starting point every mode flow below drives with messages.
+    fn selection_state(n: usize) -> AppState {
         let mut st = welcome();
         let a = register(&mut st, 0, "/tmp/a", "desktop");
-        for i in 0..5 {
+        for i in 0..n {
             update(&mut st, line(a, &format!("line {i}")));
         }
-        update(&mut st, Message::SelectionBegin); // anchors newest (line 4)
-        update(&mut st, Message::SelectionExtendUp(2)); // -> lines 2..=4
+        st
+    }
+
+    fn selected(st: &AppState) -> Option<(u64, u64)> {
+        st.active_session()
+            .and_then(|s| s.selection)
+            .map(|sel| (sel.lo(), sel.hi()))
+    }
+
+    fn toast_texts(st: &AppState, kind: ToastKind) -> Vec<&str> {
+        st.toasts
+            .items
+            .iter()
+            .filter(|t| t.kind == kind)
+            .map(|t| t.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn select_enter_anchors_one_line_at_the_tail_and_pauses_follow() {
+        let mut st = selection_state(5);
+        assert!(st.active_session().unwrap().is_following());
+
+        let out = update(&mut st, Message::SelectEnter);
+
+        assert!(out.redraw);
+        assert_eq!(out.effect, None);
+        let session = st.active_session().unwrap();
+        assert!(session.select_mode);
+        assert_eq!(selected(&st), Some((4, 4)), "`v` selects the newest line");
+        assert!(!session.is_following(), "the mode pauses follow-tail");
+        assert_eq!(session.follow_before_select, Some(true));
+    }
+
+    #[test]
+    fn select_move_down_extends_the_range_a_row_at_a_time() {
+        let mut st = selection_state(8);
+        update(&mut st, Message::SelectEnter);
+        // From the tail the cursor can only walk back up the log.
+        for _ in 0..3 {
+            update(&mut st, Message::SelectMove(-1));
+        }
+        assert_eq!(selected(&st), Some((4, 7)), "four lines selected");
+        // …and back down again, shrinking the range.
+        update(&mut st, Message::SelectMove(1));
+        assert_eq!(selected(&st), Some((5, 7)));
+    }
+
+    #[test]
+    fn select_move_clamps_at_both_ends_and_home_end_jump_to_them() {
+        let mut st = selection_state(6);
+        update(&mut st, Message::SelectEnter);
+        for _ in 0..20 {
+            update(&mut st, Message::SelectMove(-1));
+        }
+        assert_eq!(selected(&st), Some((0, 5)), "clamped at the oldest line");
+        let out = update(&mut st, Message::SelectMove(-1));
+        assert!(!out.redraw, "a clamped move is not a repaint");
+
+        update(&mut st, Message::SelectEnd);
+        assert_eq!(selected(&st), Some((5, 5)), "cursor back at the tail");
+        update(&mut st, Message::SelectHome);
+        assert_eq!(selected(&st), Some((0, 5)));
+        update(&mut st, Message::SelectPage(1));
+        assert_eq!(selected(&st), Some((5, 5)), "a page covers this short log");
+    }
+
+    #[test]
+    fn a_row_click_anchors_once_then_drags_the_range_end() {
+        let mut st = selection_state(10);
+        update(&mut st, Message::SelectEnter);
+
+        // First click re-anchors at the clicked row…
+        update(&mut st, Message::LogRowClicked(2));
+        assert_eq!(selected(&st), Some((2, 2)));
+        // …every later one only moves the range end.
+        update(&mut st, Message::LogRowClicked(6));
+        assert_eq!(selected(&st), Some((2, 6)));
+        update(&mut st, Message::LogRowClicked(4));
+        assert_eq!(selected(&st), Some((2, 4)), "the anchor stays put");
+    }
+
+    #[test]
+    fn a_row_click_outside_the_mode_is_idle() {
+        let mut st = selection_state(4);
+        let out = update(&mut st, Message::LogRowClicked(1));
+        assert!(!out.redraw);
+        assert_eq!(out.effect, None);
+        assert_eq!(selected(&st), None);
+    }
+
+    #[test]
+    fn copy_selection_emits_the_joined_lines_toasts_and_leaves_the_mode() {
+        let mut st = selection_state(5);
+        update(&mut st, Message::SelectEnter); // anchors newest (line 4)
+        update(&mut st, Message::SelectMove(-2)); // -> lines 2..=4
+
         let out = update(&mut st, Message::CopySelection);
+
         assert_eq!(
             out.effect,
             Some(Effect::Copy("line 2\nline 3\nline 4".to_string()))
+        );
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 3 lines"]);
+        let session = st.active_session().unwrap();
+        assert!(!session.select_mode, "`y` is the whole gesture");
+        assert_eq!(session.selection, None);
+        assert!(
+            !session.is_following(),
+            "the cursor was walked off the tail, so the view stays where it was"
+        );
+    }
+
+    #[test]
+    fn copying_at_the_tail_restores_the_follow_it_paused() {
+        let mut st = selection_state(5);
+        update(&mut st, Message::SelectEnter);
+        let out = update(&mut st, Message::CopySelection);
+        assert_eq!(out.effect, Some(Effect::Copy("line 4".to_string())));
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 1 lines"]);
+        assert!(st.active_session().unwrap().is_following());
+    }
+
+    #[test]
+    fn select_exit_leaves_the_mode_without_copying() {
+        let mut st = selection_state(5);
+        update(&mut st, Message::SelectEnter);
+        update(&mut st, Message::SelectMove(-1));
+
+        let out = update(&mut st, Message::SelectExit);
+
+        assert_eq!(out.effect, None, "`Esc` copies nothing");
+        assert!(out.redraw);
+        let session = st.active_session().unwrap();
+        assert!(!session.select_mode);
+        assert_eq!(session.selection, None);
+        assert!(st.toasts.items.is_empty());
+        assert!(
+            !update(&mut st, Message::SelectExit).redraw,
+            "leaving a mode that is already left is idle"
+        );
+    }
+
+    #[test]
+    fn the_mode_is_per_session_and_survives_a_tab_switch() {
+        let mut st = selection_state(4);
+        let b = register(&mut st, 1, "/tmp/a", "Pixel 7");
+        update(&mut st, line(b, "other"));
+
+        update(&mut st, Message::SelectTab(0));
+        update(&mut st, Message::SelectEnter);
+        update(&mut st, Message::SelectTab(1));
+        assert!(
+            !st.active_session().unwrap().select_mode,
+            "the other tab is not in the mode"
+        );
+        update(&mut st, Message::SelectTab(0));
+        assert!(
+            st.active_session().unwrap().select_mode,
+            "the tab that entered the mode is still in it"
+        );
+    }
+
+    #[test]
+    fn a_terminal_session_event_does_not_leave_the_mode() {
+        let mut st = selection_state(3);
+        let a = SessionId(0);
+        update(&mut st, Message::SelectEnter);
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Exited(true)),
+            }),
+        );
+        assert!(
+            st.active_session().unwrap().select_mode,
+            "the log is still there to select from"
+        );
+    }
+
+    #[test]
+    fn copy_line_copies_one_line_with_a_previewed_toast() {
+        let mut st = selection_state(3);
+        let long = "x".repeat(80);
+        update(&mut st, line(SessionId(0), &long));
+
+        let out = update(&mut st, Message::CopyLine(3));
+
+        assert_eq!(out.effect, Some(Effect::Copy(long.clone())));
+        let preview = toast_texts(&st, ToastKind::Info);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0], format!("Copied: {}\u{2026}", "x".repeat(60)));
+    }
+
+    #[test]
+    fn copy_line_on_an_evicted_line_warns_instead_of_copying() {
+        let mut st = selection_state(3);
+        let out = update(&mut st, Message::CopyLine(99));
+        assert_eq!(out.effect, None);
+        assert!(out.redraw);
+        assert_eq!(
+            toast_texts(&st, ToastKind::Warn),
+            vec!["Line no longer available"]
         );
     }
 
@@ -4390,17 +4654,21 @@ mod tests {
     fn context_menu_nav_activate_redispatches_and_closes() {
         let mut st = welcome();
         register(&mut st, 0, "/tmp/a", "desktop");
-        // Log-view menu: Copy selection (disabled, no selection) / Follow / Search.
+        // Log-view menu, clicked below the last row (no row under the
+        // cursor): Copy line (disabled) / Copy selection (disabled, nothing
+        // selected) / Select lines… / Toggle follow-tail / Search.
         update(
             &mut st,
             Message::OpenContextMenu {
                 x: 10,
                 y: 10,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
             },
         );
-        // Move to "Toggle follow-tail" (index 1) and activate it.
-        update(&mut st, Message::ContextMenuCursorDown);
+        // Move to "Toggle follow-tail" (index 3) and activate it.
+        for _ in 0..3 {
+            update(&mut st, Message::ContextMenuCursorDown);
+        }
         let following_before = st.active_session().unwrap().is_following();
         let out = update(&mut st, Message::ContextMenuActivate);
         assert!(out.redraw);
@@ -4421,10 +4689,10 @@ mod tests {
             Message::OpenContextMenu {
                 x: 10,
                 y: 10,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
             },
         );
-        // Index 0 is "Copy selection", disabled with no selection.
+        // Index 0 is "Copy line", disabled with no row under the cursor.
         let out = update(&mut st, Message::ContextMenuActivateAt(0));
         assert!(!out.redraw);
         assert!(st.context_menu.is_some(), "a disabled entry doesn't close");

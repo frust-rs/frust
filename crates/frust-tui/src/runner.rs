@@ -1266,7 +1266,6 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
 /// keyboard-parity policy).
 fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Message> {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
-    let shift = mods.contains(KeyModifiers::SHIFT);
     let alt = mods.contains(KeyModifiers::ALT);
 
     // Ctrl+Q always quits, even while typing a search or in a modal.
@@ -1325,6 +1324,15 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             KeyCode::Char(c) if !ctrl => vec![Message::SearchInput(c)],
             _ => vec![],
         };
+    }
+
+    // Line-selection mode owns the whole key namespace for the active
+    // session while it is engaged (see `translate_select_key`) — checked
+    // after the blocks above, which are the surfaces that sit *over* the log
+    // pane (an open context menu, a modal, the search overlay), and before
+    // every other key below.
+    if state.active_session().is_some_and(|s| s.select_mode) {
+        return translate_select_key(code);
     }
 
     // `?` opens the keyboard/help overlay from either top-level screen —
@@ -1491,23 +1499,56 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('l') if has_active_session => vec![Message::CycleLevelFilter(1)],
         KeyCode::Char('L') if has_active_session => vec![Message::CycleLevelFilter(-1)],
         KeyCode::Char('z') if has_active_session => vec![Message::ToggleNearestFold],
-        KeyCode::Char('v') if has_active_session => vec![Message::SelectionBegin],
+        // `v` enters line-selection mode (`translate_select_key` owns every
+        // key from there until it is left); `y` copies whatever is selected.
+        KeyCode::Char('v') if has_active_session => vec![Message::SelectEnter],
         KeyCode::Char('y') if has_active_session => vec![Message::CopySelection],
-        KeyCode::Up if has_active_session && shift => vec![Message::SelectionExtendUp(1)],
-        KeyCode::Down if has_active_session && shift => vec![Message::SelectionExtendDown(1)],
         KeyCode::Up if has_active_session => vec![Message::LogScrollUp(1)],
         KeyCode::Down if has_active_session => vec![Message::LogScrollDown(1)],
         KeyCode::PageUp if has_active_session => vec![Message::LogScrollUp(PAGE_LINES)],
         KeyCode::PageDown if has_active_session => vec![Message::LogScrollDown(PAGE_LINES)],
         KeyCode::Home if has_active_session => vec![Message::LogScrollToTop],
         KeyCode::End if has_active_session => vec![Message::LogScrollToBottom],
-        KeyCode::Esc
-            if state
-                .active_session()
-                .is_some_and(|s| s.selection.is_some()) =>
-        {
-            vec![Message::SelectionClear]
-        }
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the active session's log view is in
+/// **line-selection mode** (`v`): the cursor keys move the selection's end
+/// instead of scrolling the pane, `y` copies the range (and leaves the mode),
+/// and `Esc` — or `v` again — leaves it.
+///
+/// | Key | Message |
+/// |-----|---------|
+/// | `↑` / `k` / `Shift+↑` | [`Message::SelectMove`]`(-1)` |
+/// | `↓` / `j` / `Shift+↓` | [`Message::SelectMove`]`(1)` |
+/// | `PageUp` / `PageDown` | [`Message::SelectPage`]`(∓1)` |
+/// | `Home` / `End` | [`Message::SelectHome`] / [`Message::SelectEnd`] |
+/// | `y` | [`Message::CopySelection`] |
+/// | `Esc` / `v` | [`Message::SelectExit`] |
+///
+/// **Every other key is swallowed** (an empty `Vec`), the same full-namespace
+/// takeover [`translate_devtools_key`] performs for the DevTools pane: a
+/// modal-opening or session-mutating key pressed by reflex mid-selection must
+/// not fire behind the highlight. The exceptions are the global chords
+/// matched above this table — `Ctrl+Q` (quit) and `Alt+m` (mouse capture) —
+/// plus an already-open context menu / modal / search overlay, all of which
+/// `translate_key` routes before it reaches here.
+///
+/// `Shift+↑`/`Shift+↓` need no arm of their own: the modifier is not part of
+/// the match, so they land on the plain arrow arms as aliases (the shifted
+/// pair is what extended a selection before the mode existed, so the muscle
+/// memory keeps working).
+fn translate_select_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => vec![Message::SelectMove(-1)],
+        KeyCode::Down | KeyCode::Char('j') => vec![Message::SelectMove(1)],
+        KeyCode::PageUp => vec![Message::SelectPage(-1)],
+        KeyCode::PageDown => vec![Message::SelectPage(1)],
+        KeyCode::Home => vec![Message::SelectHome],
+        KeyCode::End => vec![Message::SelectEnd],
+        KeyCode::Char('y') => vec![Message::CopySelection],
+        KeyCode::Esc | KeyCode::Char('v') => vec![Message::SelectExit],
         _ => vec![],
     }
 }
@@ -2293,7 +2334,7 @@ mod tests {
             context_menu: Some(ContextMenu {
                 x: 0,
                 y: 0,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
                 entries: vec![MenuEntry {
                     label: "Search logs…",
                     hint: "/",
@@ -2622,6 +2663,169 @@ mod tests {
             translate_event(key(KeyCode::Char('t')), &workbench, &regions),
             Vec::<Message>::new(),
             "no active session — no-op"
+        );
+    }
+
+    // ── Line-selection mode key routing ───────────────────────────────────────
+
+    /// A workbench with one running desktop session holding `n` seeded lines.
+    fn log_state(n: u64) -> AppState {
+        use crate::engine::SessionView;
+        let mut session = SessionView::new(SessionId(0), PathBuf::from("/tmp/huddle"), "desktop");
+        session.state = SessionState::Running;
+        for i in 0..n {
+            session.push_line_at(format!("line {i}"), "12:00:00");
+        }
+        AppState {
+            screen: Screen::Workbench,
+            project_root: Some(PathBuf::from("/tmp/huddle")),
+            projects: vec![PathBuf::from("/tmp/huddle")],
+            sessions: vec![session],
+            active_session: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// `v` enters the mode through the real translate → `update` path, after
+    /// which the cursor keys move the selection instead of scrolling.
+    #[test]
+    fn v_enters_the_mode_and_the_cursor_keys_then_move_the_selection() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(20);
+
+        let msgs = translate_event(key(KeyCode::Char('v')), &state, &regions);
+        assert_eq!(msgs, vec![Message::SelectEnter]);
+        update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().select_mode);
+
+        for (code, expected) in [
+            (KeyCode::Up, Message::SelectMove(-1)),
+            (KeyCode::Char('k'), Message::SelectMove(-1)),
+            (KeyCode::Down, Message::SelectMove(1)),
+            (KeyCode::Char('j'), Message::SelectMove(1)),
+            (KeyCode::PageUp, Message::SelectPage(-1)),
+            (KeyCode::PageDown, Message::SelectPage(1)),
+            (KeyCode::Home, Message::SelectHome),
+            (KeyCode::End, Message::SelectEnd),
+            (KeyCode::Char('y'), Message::CopySelection),
+            (KeyCode::Esc, Message::SelectExit),
+            (KeyCode::Char('v'), Message::SelectExit),
+        ] {
+            assert_eq!(
+                translate_event(key(code), &state, &regions),
+                vec![expected],
+                "{code:?} in line-selection mode"
+            );
+        }
+
+        // Shift+Up/Down are aliases of the plain arrows (the pre-mode
+        // extend-selection chord keeps working).
+        for (code, expected) in [
+            (KeyCode::Up, Message::SelectMove(-1)),
+            (KeyCode::Down, Message::SelectMove(1)),
+        ] {
+            let ev = Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT));
+            assert_eq!(translate_event(ev, &state, &regions), vec![expected]);
+        }
+    }
+
+    /// The mode owns the whole namespace: every other key is swallowed rather
+    /// than firing a workbench command behind the highlight. Only the global
+    /// chords still get through.
+    #[test]
+    fn the_mode_swallows_every_other_key_but_the_global_chords() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(20);
+        update(&mut state, Message::SelectEnter);
+
+        for swallowed in [
+            'q', 'r', 'b', 'd', 'x', 'X', 'f', 'w', 'z', 'l', '/', '?', 'i', '1',
+        ] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char(swallowed)), &state, &regions),
+                Vec::<Message>::new(),
+                "`{swallowed}` belongs to the log view, not the selection mode"
+            );
+        }
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            Vec::<Message>::new(),
+            "even tab switching waits until the selection is done"
+        );
+
+        let ctrl_q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate_event(ctrl_q, &state, &regions),
+            vec![Message::Quit],
+            "Ctrl+Q keeps its global precedence"
+        );
+        let alt_m = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            translate_event(alt_m, &state, &regions),
+            vec![Message::ToggleMouseCapture],
+            "⌥m keeps its global precedence"
+        );
+
+        // Leaving the mode hands the namespace straight back.
+        update(&mut state, Message::SelectExit);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('f')), &state, &regions),
+            vec![Message::ToggleFollow]
+        );
+    }
+
+    /// Every drawn log row registers a click region carrying the absolute
+    /// line it draws — re-registered each frame, so a *scrolled* viewport
+    /// maps rows to the lines actually under them rather than to the tail.
+    #[test]
+    fn a_log_row_click_carries_the_absolute_line_under_a_scrolled_viewport() {
+        use crate::engine::{ContextTarget, Scroll};
+        use crate::ui::mouse::MouseCtx;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = log_state(80);
+        // Freeze the view with line 39 on the bottom row.
+        state.sessions[0].scroll = Scroll::Anchored(39);
+
+        let mut regions = MouseRegions::new();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::frust_dark();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                crate::ui::render(frame, &state, &theme, &mut ctx);
+            })
+            .expect("draw");
+
+        // Hit-test straight down the log pane and collect what each row says
+        // it draws.
+        let hits: Vec<u64> = (0..30)
+            .filter_map(|y| match regions.click_at(40, y) {
+                Some(Message::LogRowClicked(abs)) => Some(abs),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!hits.is_empty(), "the log pane registered row regions");
+        assert_eq!(
+            *hits.last().unwrap(),
+            39,
+            "the bottom row is the anchored line, not the tail"
+        );
+        let expected: Vec<u64> = (40 - hits.len() as u64..=39).collect();
+        assert_eq!(hits, expected, "rows map to consecutive absolute lines");
+
+        // And a right-click on the same row targets that line's context menu.
+        let row_y = (0..30)
+            .find(|y| matches!(regions.click_at(40, *y), Some(Message::LogRowClicked(_))))
+            .expect("a log row");
+        assert_eq!(
+            regions.context_at(40, row_y),
+            Some(ContextTarget::LogView { row: Some(hits[0]) })
         );
     }
 
