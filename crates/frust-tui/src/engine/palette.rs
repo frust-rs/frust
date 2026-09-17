@@ -210,6 +210,15 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         // selection at all rather than on a session, because `y` outside the
         // mode has nothing to copy — the palette says so instead of running a
         // command that would silently do nothing.
+        //
+        // "Select lines…" is *not* additionally gated on the DevTools pane
+        // being closed, even though that pane owns `v`'s own key and refuses
+        // the mode: the palette stays reachable over DevTools (global
+        // `Ctrl+P`), and disabling this row there would hide the row's own
+        // "why" from a keyboard-only user. `update`'s `Message::SelectEnter`
+        // arm is the single choke point instead — it silently refuses (no
+        // toast) while the active session's DevTools pane is open, so
+        // executing this row there is a no-op rather than a lie.
         gated(
             "Select lines…",
             "v",

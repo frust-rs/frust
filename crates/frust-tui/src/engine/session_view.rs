@@ -151,6 +151,17 @@ pub enum Scroll {
 
 /// An inclusive, whole-line selection over the log, addressed by **absolute**
 /// line index so it, too, survives incoming lines (copy-while-scrolling).
+///
+/// `[lo, hi]` names an absolute range, but what the selection *means* — the
+/// count the status row shows ([`SessionView::selected_visible_count`]) and
+/// the lines it copies ([`SessionView::selected_text`]) — is restricted to
+/// the same **visible sequence** ([`SessionView::visible_indices`]) the
+/// highlight itself is drawn against: a line the level filter or the
+/// committed search filter hides, or one absorbed into a collapsed panic
+/// block's `▶ n frames…` row, contributes nothing even though its absolute
+/// index falls inside `[lo, hi]`; a collapsed block's single visible entry
+/// counts (and copies) as the one row the fold draws, never as every line it
+/// absorbs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineSelection {
     /// Where the selection was started.
@@ -477,7 +488,19 @@ impl SessionView {
         }
         if let Some(sel) = self.selection {
             if sel.hi() < base {
-                self.selection = None;
+                // The whole selection is gone — a selection with nothing
+                // left to highlight is not a state line-selection mode can
+                // be in, so the mode ends with it rather than lingering with
+                // `select_mode && selection.is_none()`. The dropped range can
+                // never still be the visible tail (it is strictly older than
+                // every retained line), so `exit_select_mode`'s "cursor still
+                // at the tail" follow-restore rule correctly never fires here
+                // regardless of the filter passed — `None` is as good as any.
+                if self.select_mode {
+                    self.exit_select_mode(None);
+                } else {
+                    self.selection = None;
+                }
             } else if sel.lo() < base {
                 self.selection = Some(LineSelection {
                     anchor: sel.anchor.max(base),
@@ -974,12 +997,19 @@ impl SessionView {
     }
 
     /// The selected lines joined by newlines, ANSI-stripped, ready for the
-    /// clipboard — or `None` if nothing is selected / retained.
-    pub fn selected_text(&self) -> Option<String> {
+    /// clipboard — or `None` if nothing is selected / retained. Restricted to
+    /// the **visible sequence** between the selection's bounds (see
+    /// [`LineSelection`]'s doc for the rule) — `filter` is the committed
+    /// free-text search filter, as everywhere else the visible sequence is
+    /// measured (see [`Self::visible_indices`]).
+    pub fn selected_text(&self, filter: Option<&str>) -> Option<String> {
         let sel = self.selection?;
         let mut out = String::new();
         let mut any = false;
-        for abs in sel.lo()..=sel.hi() {
+        for abs in self.visible_indices(filter) {
+            if !sel.contains(abs) {
+                continue;
+            }
             if let Some(line) = self.log.get(abs) {
                 if any {
                     out.push('\n');
@@ -989,6 +1019,20 @@ impl SessionView {
             }
         }
         any.then_some(out)
+    }
+
+    /// The number of entries in the **visible sequence** the current
+    /// selection spans — the same count [`Self::selected_text`] copies and
+    /// the status row's `SELECT · {n} lines` hint shows (see
+    /// [`LineSelection`]'s doc for the rule). `0` with no selection.
+    pub fn selected_visible_count(&self, filter: Option<&str>) -> u64 {
+        let Some(sel) = self.selection else {
+            return 0;
+        };
+        self.visible_indices(filter)
+            .into_iter()
+            .filter(|abs| sel.contains(*abs))
+            .count() as u64
     }
 }
 
@@ -1266,11 +1310,17 @@ mod tests {
         assert_eq!(bounds(&s), (base, hi), "clamped up to the oldest retained");
         assert!(s.select_mode, "the mode outlives the eviction");
 
-        // And once every selected line is gone, so is the selection.
+        // And once every selected line is gone, so is the selection — and,
+        // since a mode with nothing selected is not a state this reaches, the
+        // mode itself.
         for i in 0..(hi - base + 1) {
             s.push_line_at(format!("even more {i}"), "00:00:00");
         }
         assert_eq!(s.selection, None);
+        assert!(
+            !s.select_mode,
+            "the mode ends once its selection is fully evicted"
+        );
     }
 
     #[test]
@@ -1531,7 +1581,33 @@ mod tests {
                 cursor: 4
             })
         );
-        assert_eq!(s.selected_text().as_deref(), Some("line 2\nline 3\nline 4"));
+        assert_eq!(
+            s.selected_text(None).as_deref(),
+            Some("line 2\nline 3\nline 4")
+        );
+    }
+
+    /// The WarnPlus counterexample: a Warn/Info/Warn triple with the level
+    /// filter hiding the middle line — the selection's absolute range still
+    /// spans all three, but the copy and the count see only the two visible
+    /// rows the highlight itself draws over.
+    #[test]
+    fn selected_text_and_count_are_restricted_to_the_visible_sequence() {
+        let mut s = sess();
+        s.push_line_at("warn a".into(), "00:00:00"); // Warn — abs 0
+        s.push_line_at("info b".into(), "00:00:01"); // Info — abs 1, hidden
+        s.push_line_at("warn c".into(), "00:00:02"); // Warn — abs 2
+        s.set_level_filter(LevelFilter::WarnPlus);
+        s.selection = Some(LineSelection {
+            anchor: 0,
+            cursor: 2,
+        });
+        assert_eq!(
+            s.selected_visible_count(None),
+            2,
+            "the hidden Info line does not count"
+        );
+        assert_eq!(s.selected_text(None).as_deref(), Some("warn a\nwarn c"));
     }
 
     #[test]

@@ -333,6 +333,31 @@ fn select_mode_three_line_range_120x30() {
     insta::assert_snapshot!(render_with_selection_marks(120, 30, &state));
 }
 
+/// The WarnPlus counterexample: entering the mode anchors the newest
+/// *visible* line (the trailing error), and one step up lands on the warning
+/// two lines above it in the raw log — the two hidden Info lines between them
+/// are skipped entirely. The highlight, the copy, and the status row's count
+/// all agree on two selected lines, not the three the raw absolute span
+/// would suggest.
+#[test]
+fn select_mode_skips_hidden_lines_under_a_level_filter_120x30() {
+    let mut state = single_session_state();
+    state
+        .active_session_mut()
+        .unwrap()
+        .set_level_filter(LevelFilter::WarnPlus);
+    update(&mut state, Message::SelectEnter);
+    update(&mut state, Message::SelectMove(-1));
+    let session = state.active_session().expect("a session");
+    assert!(session.select_mode);
+    assert_eq!(
+        session.selected_visible_count(None),
+        2,
+        "the two hidden Info lines between them do not count"
+    );
+    insta::assert_snapshot!(render_with_selection_marks(120, 30, &state));
+}
+
 /// The log view's right-click menu, opened over a drawn row: "Copy line" is
 /// enabled for that row, and "Select lines…" offers the mode by mouse.
 #[test]

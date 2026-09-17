@@ -623,11 +623,17 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
     // being picked, the global `r`/`b`/`d` hints name keys the mode swallows,
     // so showing them would be a lie. Accent-styled, so the row also reads as
     // a mode indicator and not just a different list of keys.
+    //
+    // Keyed on `select_mode` alone: the mode always ends the moment its
+    // selection would otherwise become empty (`SessionView::push_line_at`'s
+    // eviction clamp), so `select_mode && selection.is_none()` never reaches
+    // here. The count is the selected range's **visible** entries, not its
+    // raw `hi - lo + 1` span — the same rule `y` copies under (see
+    // `LineSelection`'s doc).
     let select = state
         .active_session()
         .filter(|s| s.select_mode)
-        .and_then(|s| s.selection)
-        .map(|sel| sel.hi() - sel.lo() + 1);
+        .map(|s| s.selected_visible_count(state.search.filter.as_deref()));
     let used_left = format!("{dot} {label}").chars().count() + "  │  ".chars().count();
     let indicator = crate::ui::mouse_indicator(state).chars().count();
     let budget = (area.width as usize).saturating_sub(used_left + indicator + 2);

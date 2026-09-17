@@ -459,7 +459,21 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        Message::SelectEnter => with_active_changed(state, |s, f| s.enter_select_mode(f)),
+        // Refused (idle, no toast) while the active session's tab is showing
+        // DevTools: that pane owns the whole key namespace (`translate_key`'s
+        // early return on `devtools.open`), so a `v` press can never reach
+        // here — but the palette's "Select lines…" row re-dispatches this
+        // same `Message` regardless of which pane is in front, and the
+        // palette is the one surface that stays reachable over DevTools
+        // (see `palette::commands`'s "Select lines…" entry). Gating here
+        // rather than disabling the palette row keeps the choke point single
+        // and covers every future caller of this message alike.
+        Message::SelectEnter => with_active_changed(state, |s, f| {
+            if s.devtools.open {
+                return false;
+            }
+            s.enter_select_mode(f)
+        }),
         Message::SelectExit => with_active_changed(state, |s, f| s.exit_select_mode(f)),
         Message::SelectMove(n) => with_active_changed(state, |s, f| s.move_cursor(n, f)),
         Message::SelectPage(dir) => with_active_changed(state, |s, f| s.move_cursor_page(dir, f)),
@@ -493,14 +507,15 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             let Some(session) = state.active_session_mut() else {
                 return Outcome::idle();
             };
-            let Some(text) = session.selected_text() else {
+            let Some(text) = session.selected_text(filter.as_deref()) else {
                 return Outcome::idle();
             };
-            let lines = session.selection.map_or(0, |s| s.hi() - s.lo() + 1);
+            let lines = session.selected_visible_count(filter.as_deref());
             session.exit_select_mode(filter.as_deref());
+            let word = if lines == 1 { "line" } else { "lines" };
             state
                 .toasts
-                .push(ToastKind::Info, format!("Copied: {lines} lines"));
+                .push(ToastKind::Info, format!("Copied: {lines} {word}"));
             Outcome {
                 redraw: true,
                 effect: Some(Effect::Copy(text)),
@@ -3910,6 +3925,22 @@ mod tests {
         assert_eq!(session.follow_before_select, Some(true));
     }
 
+    /// DevTools owns the whole key namespace while it is open (workbook
+    /// §B12); the palette's "Select lines…" row re-dispatches the same
+    /// `Message::SelectEnter` a `v` press would, so the refusal has to live
+    /// in `update` itself rather than in `translate_key`'s early return.
+    #[test]
+    fn select_enter_is_refused_while_devtools_owns_the_pane() {
+        let mut st = selection_state(5);
+        st.active_session_mut().unwrap().devtools.open = true;
+
+        let out = update(&mut st, Message::SelectEnter);
+
+        assert!(!out.redraw, "no toast, no highlight — a silent refusal");
+        assert!(!st.active_session().unwrap().select_mode);
+        assert_eq!(st.active_session().unwrap().selection, None);
+    }
+
     #[test]
     fn select_move_down_extends_the_range_a_row_at_a_time() {
         let mut st = selection_state(8);
@@ -3989,13 +4020,39 @@ mod tests {
         );
     }
 
+    /// The WarnPlus counterexample: a Warn/Info/Warn triple with the level
+    /// filter hiding the middle line. The cursor keys skip the hidden line
+    /// (already covered in `session_view`), and `y` copies and counts only
+    /// the two visible rows, even though the absolute range spans all three.
+    #[test]
+    fn copy_selection_counts_only_the_visible_sequence_across_a_level_filter() {
+        use crate::engine::logstyle::LevelFilter;
+
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        update(&mut st, line(a, "warn a"));
+        update(&mut st, line(a, "info b"));
+        update(&mut st, line(a, "warn c"));
+        st.active_session_mut()
+            .unwrap()
+            .set_level_filter(LevelFilter::WarnPlus);
+
+        update(&mut st, Message::SelectEnter); // anchors the newest visible: warn c
+        update(&mut st, Message::SelectMove(-1)); // -> warn a, the hidden info skipped
+
+        let out = update(&mut st, Message::CopySelection);
+
+        assert_eq!(out.effect, Some(Effect::Copy("warn a\nwarn c".to_string())));
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 2 lines"]);
+    }
+
     #[test]
     fn copying_at_the_tail_restores_the_follow_it_paused() {
         let mut st = selection_state(5);
         update(&mut st, Message::SelectEnter);
         let out = update(&mut st, Message::CopySelection);
         assert_eq!(out.effect, Some(Effect::Copy("line 4".to_string())));
-        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 1 lines"]);
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 1 line"]);
         assert!(st.active_session().unwrap().is_following());
     }
 

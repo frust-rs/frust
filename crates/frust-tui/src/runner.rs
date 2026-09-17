@@ -2783,6 +2783,39 @@ mod tests {
         );
     }
 
+    /// `v` itself never reaches `Message::SelectEnter` while DevTools is
+    /// open — `translate_key` returns out of the DevTools branch before its
+    /// `v` arm — but the palette's "Select lines…" row re-dispatches the same
+    /// message through `Ctrl+P`, which stays reachable as a global chord even
+    /// with DevTools open. That round trip must not put the session in the
+    /// mode either: `update`'s `SelectEnter` arm is the single choke point.
+    #[test]
+    fn palette_select_lines_is_refused_while_devtools_owns_the_pane() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(5);
+        state.active_session_mut().unwrap().devtools.open = true;
+
+        let ctrl_p = Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let msgs = translate_event(ctrl_p, &state, &regions);
+        assert_eq!(
+            msgs,
+            vec![Message::OpenPalette],
+            "the palette is a global chord, reachable over DevTools"
+        );
+        update(&mut state, msgs[0].clone());
+
+        for c in "select lines".chars() {
+            update(&mut state, Message::PaletteInput(c));
+        }
+        update(&mut state, Message::PaletteExecute);
+
+        assert!(
+            !state.active_session().unwrap().select_mode,
+            "DevTools owns the key namespace; the palette entry must not enter the mode"
+        );
+    }
+
     /// Every drawn log row registers a click region carrying the absolute
     /// line it draws — re-registered each frame, so a *scrolled* viewport
     /// maps rows to the lines actually under them rather than to the tail.
