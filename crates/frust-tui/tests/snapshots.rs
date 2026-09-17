@@ -253,6 +253,7 @@ fn registered_session_tracks_tail_through_update_100x30() {
             project_root: PathBuf::from("/tmp/huddle"),
             target_label: "desktop".to_string(),
             devtools: DevtoolsLaunch::unavailable(),
+            target: None,
         },
     );
     for batch in 0..5 {
@@ -276,6 +277,101 @@ fn registered_session_tracks_tail_through_update_100x30() {
     // — redact the per-line timestamp column so the snapshot stays
     // reproducible across runs/days.
     insta::assert_snapshot!(redact_clock(&render_to_string(100, 30, &state)));
+}
+
+// ── Line-selection mode (`v` … `y`) ─────────────────────────────────────────
+
+/// [`render_to_string`] with the selection highlight made *text*-visible: the
+/// cell grid carries symbols only (see the module doc), and the highlight is
+/// a background color, so each row is prefixed `SEL` when it carries the
+/// selection's overlay background anywhere along it, and blank when it does
+/// not. Without this a snapshot of the mode could not tell a highlighted
+/// range from an ordinary log. The mark covers the whole terminal row, so a
+/// marked row also carries whatever the sidebar draws beside the log.
+fn render_with_selection_marks(w: u16, h: u16, state: &AppState) -> String {
+    let backend = TestBackend::new(w, h);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark();
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            frust_tui::ui::render(frame, state, &theme, &mut ctx);
+        })
+        .expect("draw");
+    let buf = terminal.backend().buffer();
+    let area = buf.area;
+    let mut out = String::new();
+    for y in area.top()..area.bottom() {
+        let selected = (area.left()..area.right()).any(|x| {
+            buf.cell(Position::new(x, y))
+                .is_some_and(|c| c.bg == theme.overlay())
+        });
+        out.push_str(if selected { "SEL " } else { "    " });
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell(Position::new(x, y)) {
+                out.push_str(cell.symbol());
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The mode entered and the cursor walked two rows up through the real
+/// `update` path: three log lines highlighted, and the workbench status bar's
+/// hint row replaced by the SELECT row naming the count and the keys.
+#[test]
+fn select_mode_three_line_range_120x30() {
+    let mut state = single_session_state();
+    update(&mut state, Message::SelectEnter);
+    update(&mut state, Message::SelectMove(-1));
+    update(&mut state, Message::SelectMove(-1));
+    let session = state.active_session().expect("a session");
+    assert!(session.select_mode);
+    assert!(!session.is_following(), "the mode pauses follow-tail");
+    insta::assert_snapshot!(render_with_selection_marks(120, 30, &state));
+}
+
+/// The WarnPlus counterexample: entering the mode anchors the newest
+/// *visible* line (the trailing error), and one step up lands on the warning
+/// two lines above it in the raw log — the two hidden Info lines between them
+/// are skipped entirely. The highlight, the copy, and the status row's count
+/// all agree on two selected lines, not the three the raw absolute span
+/// would suggest.
+#[test]
+fn select_mode_skips_hidden_lines_under_a_level_filter_120x30() {
+    let mut state = single_session_state();
+    state
+        .active_session_mut()
+        .unwrap()
+        .set_level_filter(LevelFilter::WarnPlus);
+    update(&mut state, Message::SelectEnter);
+    update(&mut state, Message::SelectMove(-1));
+    let session = state.active_session().expect("a session");
+    assert!(session.select_mode);
+    assert_eq!(
+        session.selected_visible_count(None),
+        2,
+        "the two hidden Info lines between them do not count"
+    );
+    insta::assert_snapshot!(render_with_selection_marks(120, 30, &state));
+}
+
+/// The log view's right-click menu, opened over a drawn row: "Copy line" is
+/// enabled for that row, and "Select lines…" offers the mode by mouse.
+#[test]
+fn context_menu_log_row_100x30() {
+    let mut state = single_session_state();
+    update(
+        &mut state,
+        Message::OpenContextMenu {
+            x: 20,
+            y: 10,
+            target: ContextTarget::LogView { row: Some(5) },
+        },
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
 #[test]
@@ -737,6 +833,17 @@ fn clean_confirm_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
+// ── Quit confirm dialog ────────────────────────────────────────────────────────
+
+/// The quit-confirm dialog open over the workbench with one live session —
+/// singular body text ("1 running session…").
+#[test]
+fn quit_confirm_one_session_100x30() {
+    let mut state = single_session_state();
+    state.quit_confirm = true;
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
 // ── Build artifact copy-path ──────────────────────────────────────────────────
 
 fn built_session_state() -> AppState {
@@ -980,6 +1087,7 @@ fn devtools_state(build: frust_drive::build_info::BuildMode, lines: &[&str]) -> 
         PathBuf::from(root),
         "desktop",
         DevtoolsLaunch::from_launch(build, None),
+        None,
     );
     sess.state = SessionState::Running;
     for (i, l) in lines.iter().enumerate() {
@@ -1317,6 +1425,7 @@ fn devtools_performance_log_fallback_100x30() {
         PathBuf::from("/tmp/huddle"),
         "desktop",
         DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+        None,
     );
     sess.state = SessionState::Running;
     for i in 0..12u64 {

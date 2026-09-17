@@ -20,6 +20,11 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 embedded servers' loopback `TcpListener`s bind on this crate's own runtime rather than depending on
 another workspace member's feature unification.
 
+`frust-tui`'s `crate::clipboard` system-clipboard backend consumes the `arboard =3.6.1` pin owned by
+the PLUGINS unit (see [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s Version Pins row), which
+also lists this crate among the pin's tripwire consumers — re-run `cargo check -p frust-tui`
+alongside that row's other checks after touching the pin.
+
 The DAP settings dialog's preferences persist in the same `~/.config/frust/tui.toml` the
 recent-projects store uses, under a `[dap]` table (`enabled`, `auto_start_in_ide`,
 `auto_configure_ide`, `port`, `ide_override`) loaded through the same format-preserving `toml_edit`

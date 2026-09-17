@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │  ▄▄▄▄▄▅▅▅▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇█                                
                          │  perf n=40 p50=8ms p95=14ms p99=22ms skipped=0 total_frames=40           
                          │  startup: app_created=2ms first_frame_presented=45ms                     
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

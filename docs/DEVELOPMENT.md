@@ -180,8 +180,9 @@ frust run -d web [--no-open]     # the same build, served at http://127.0.0.1:<p
 frust create --platforms web     # opt-in web scaffold (templates/app/web.tmpl; absent from the default platform set)
 ```
 
-`frust doctor` prints an informational "Web" heading that never affects its exit code. `[web]`
-`frust.toml` keys and the dev server's containment/security posture:
+`frust doctor` checks the host's wasm32 target, `wasm-bindgen` CLI and `wasm-opt` as non-fatal
+validators; its "Web" heading lists only project-dependent preflight rows — neither affects the exit
+code. `[web]` `frust.toml` keys and the dev server's containment/security posture:
 [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md). **MANUAL WEB GATE** (browser matrix; no automated pixel
 gate exists — a person must look): serve `examples/web-gallery` or a `--platforms web` scaffold per
 its README, then run [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)'s Browser manual gate checklist

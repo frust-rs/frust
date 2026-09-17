@@ -19,6 +19,7 @@
 //! pipelines) and never on the framework render stack
 //! (`frust-core`/`vello`/`wgpu`) — same isolation charter as `frust-cli`.
 
+mod clipboard;
 pub mod engine;
 mod runner;
 pub mod supervise;
