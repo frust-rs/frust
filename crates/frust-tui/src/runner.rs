@@ -7,7 +7,7 @@
 //! skip (only `terminal.draw` when the state changed or something is
 //! animating).
 
-use std::io::{self, IsTerminal, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,10 +30,11 @@ use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::clipboard::{self, Backend as ClipboardBackend, ClipboardMode};
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
     BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
-    Engine, Message, Outcome, RegionId, RunFocus, Screen, WizardStep,
+    Engine, Message, Outcome, RegionId, RunFocus, Screen, ToastKind, WizardStep,
 };
 use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
@@ -163,6 +164,23 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         msg_tx.clone(),
         Arc::new(RealProcessRunner),
     ));
+    // The clipboard backend (`crate::clipboard`): picked once here, since
+    // stdout's TTY-ness is fixed for the process's life, and kept for the
+    // whole run through `EffectCtx` rather than re-detected on every copy.
+    // `FRUST_TUI_CLIPBOARD` (system|osc52|off; anything else/unset is auto)
+    // overrides the environment-detected choice.
+    let clipboard_mode = ClipboardMode::parse(std::env::var("FRUST_TUI_CLIPBOARD").ok().as_deref());
+    let clipboard_backend = clipboard::detect(
+        |name| std::env::var(name).ok(),
+        io::stdout().is_terminal(),
+        clipboard_mode,
+    );
+    if let ClipboardBackend::Disabled { reason } = clipboard_backend {
+        let _ = msg_tx.send(Message::Notify {
+            level: ToastKind::Warn,
+            text: format!("Clipboard unavailable: {reason}"),
+        });
+    }
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
     // populate on open (the doctor run is the titlebar chip's cached
@@ -221,6 +239,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                     next_adhoc_id: &mut next_adhoc_id,
                                     records: &mut mcp_records,
                                     backend: &backend,
+                                    clipboard: clipboard_backend,
                                 },
                             );
                         }
@@ -266,6 +285,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
                             backend: &backend,
+                            clipboard: clipboard_backend,
                         },
                     );
                 }
@@ -288,6 +308,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         next_adhoc_id: &mut next_adhoc_id,
                         records: &mut mcp_records,
                         backend: &backend,
+                        clipboard: clipboard_backend,
                     },
                 );
             }
@@ -310,6 +331,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
                             backend: &backend,
+                            clipboard: clipboard_backend,
                         },
                     );
                 }
@@ -419,6 +441,10 @@ struct EffectCtx<'a> {
     /// built once per run, so an MCP agent and a DAP client drive the same
     /// session world rather than two backends over the same supervisor.
     backend: &'a SharedBackend,
+    /// The clipboard backend `run_loop` picked once at startup (see
+    /// `crate::clipboard`'s module doc) — kept for the whole run rather than
+    /// re-detected on every copy.
+    clipboard: ClipboardBackend,
 }
 
 /// Enact an engine-requested [`Effect`] — the runner owns the side effects the
@@ -435,10 +461,18 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         next_adhoc_id,
         records,
         backend,
+        clipboard: clipboard_backend,
     } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
-        Some(Effect::Copy(text)) => copy_to_clipboard(&text),
+        Some(Effect::Copy(text)) => {
+            if let Err(reason) = clipboard::write(*clipboard_backend, &text) {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: format!("Copy failed: {reason}"),
+                });
+            }
+        }
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
         Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
@@ -537,6 +571,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                         next_adhoc_id,
                         records,
                         backend,
+                        clipboard: *clipboard_backend,
                     },
                 );
             }
@@ -1141,41 +1176,6 @@ fn target_label(target: &DeviceTarget) -> String {
         DeviceTarget::Desktop => "desktop".to_string(),
         DeviceTarget::Device(device) => device.name.clone(),
     }
-}
-
-/// Copy `text` to the terminal's clipboard via an OSC 52 escape (broadly
-/// supported, no clipboard-crate dependency). Best-effort: a terminal that
-/// ignores OSC 52 simply drops it.
-fn copy_to_clipboard(text: &str) {
-    let payload = base64_encode(text.as_bytes());
-    let seq = format!("\u{1b}]52;c;{payload}\u{07}");
-    let mut out = stdout();
-    let _ = out.write_all(seq.as_bytes());
-    let _ = out.flush();
-}
-
-/// Minimal standard base64 (no dependency) for the OSC 52 clipboard payload.
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = *chunk.get(1).unwrap_or(&0);
-        let b2 = *chunk.get(2).unwrap_or(&0);
-        out.push(TABLE[(b0 >> 2) as usize] as char);
-        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(b2 & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// Translate one crossterm event into zero or more engine messages, using the

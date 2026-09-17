@@ -2755,6 +2755,7 @@ version = "0.1.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
+ "arboard",
  "crossterm",
  "frust-dap",
  "frust-devtools-protocol",

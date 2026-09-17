@@ -1541,6 +1541,10 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             state.dap_settings.last_ide_config = Some(report);
             Outcome::redraw()
         }
+        Message::Notify { level, text } => {
+            state.toasts.push(level, text);
+            Outcome::redraw()
+        }
     }
 }
 
@@ -5394,6 +5398,25 @@ mod tests {
         update(&mut st, Message::DapIdeConfig(report.clone()));
         assert_eq!(st.dap_settings.last_ide_config, Some(report));
         assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+    }
+
+    #[test]
+    fn notify_pushes_the_given_toast_kind_and_text() {
+        let mut st = welcome();
+        let out = update(
+            &mut st,
+            Message::Notify {
+                level: ToastKind::Warn,
+                text: "Copy failed: system clipboard unavailable".to_string(),
+            },
+        );
+        assert!(out.redraw);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Warn);
+        assert_eq!(
+            st.toasts.items[0].text,
+            "Copy failed: system clipboard unavailable"
+        );
     }
 
     #[test]

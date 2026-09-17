@@ -19,6 +19,7 @@ use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
+use super::toast::ToastKind;
 use crate::supervise::mcp_backend::McpCommand;
 use crate::supervise::{SessionEvent, SessionId};
 
@@ -884,4 +885,18 @@ pub enum Message {
     /// An IDE-config generation finished (or was refused before it started):
     /// its outcome, retained for the dialog's status area.
     DapIdeConfig(DapIdeReport),
+
+    /// Show a toast from the runner — the seam an impure side effect the
+    /// pure core cannot see into (e.g. `crate::clipboard::write`'s outcome)
+    /// uses to reach `AppState::toasts`, since the runner has no direct
+    /// access to the model. `update`'s handling is pure (just a
+    /// `Toasts::push`); the runner decides the `level`/`text` and the
+    /// moment to send it (a startup clipboard-unavailable warning, or a
+    /// failed copy).
+    Notify {
+        /// The toast's severity.
+        level: ToastKind,
+        /// The toast's text.
+        text: String,
+    },
 }
