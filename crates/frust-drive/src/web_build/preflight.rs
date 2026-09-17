@@ -84,15 +84,34 @@ pub const EMBEDDER_COMPONENT: &str = "Browser host page";
 pub const HOST_PAGE_COMPONENT: &str = "Host page module name";
 pub const ARTIFACT_DIR_COMPONENT: &str = "Artifact directory safety";
 
-/// The phrase [`bindgen_check`] builds a project-pin disagreement's summary
-/// around, and the marker [`WebPreflight::project_rows`] recognises it by —
-/// kept beside the text that writes it so the two cannot drift apart.
-const PROJECT_PIN_CONFLICT: &str = "but the project pins";
+/// What kind of project-derived information the `wasm-bindgen CLI` row
+/// carries, once [`bindgen_check`] has resolved it — the structured signal
+/// [`WebPreflight::project_rows`] keys off instead of sniffing the row's
+/// summary text for a marker phrase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindgenRowKind {
+    /// Nothing here a validator does not already know: installed and
+    /// matching, installed with no project pin to compare against, or absent
+    /// with no project pin either — the flat `wasm-bindgen CLI` doctor row
+    /// already says one of these.
+    HostOnly,
+    /// The installed CLI's version disagrees with the version the project
+    /// itself pins — a build-blocking fact only the project's own
+    /// `Cargo.toml` can supply.
+    ProjectPinConflict,
+    /// The CLI is not on `PATH` at all, and the project declares its own
+    /// pin — kept because its fix command names *that* pin, not the
+    /// framework's.
+    AbsentWithProjectPin,
+}
 
 /// Every browser-build environment check, in report order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebPreflight {
     pub components: Vec<Component>,
+    /// The [`BindgenRowKind`] [`bindgen_check`] resolved the `wasm-bindgen
+    /// CLI` row to — what [`project_rows`](Self::project_rows) keys off.
+    pub bindgen_row_kind: BindgenRowKind,
 }
 
 impl WebPreflight {
@@ -129,18 +148,30 @@ impl WebPreflight {
     /// should print, so a developer is told about each host tool once rather
     /// than twice.
     ///
-    /// The `wasm-bindgen CLI` row survives the filter in exactly one case: a
-    /// project declaring a pin that disagrees with the installed CLI. That is
-    /// the one thing the validator cannot know — it compares against the
-    /// framework's [`crate::web_build::WASM_BINDGEN_PINNED`], having no
-    /// project in hand — and it is also the case that blocks a build, so
-    /// dropping it would hide the reason a build is about to refuse.
+    /// The `wasm-bindgen CLI` row survives the filter in exactly two cases,
+    /// both carrying a fact the validator cannot know because it has no
+    /// project in hand — it compares only against the framework's own
+    /// [`crate::web_build::WASM_BINDGEN_PINNED`]:
+    ///
+    /// - [`BindgenRowKind::ProjectPinConflict`] — a project pin that
+    ///   disagrees with the installed CLI. It is also the case that blocks a
+    ///   build, so dropping it would hide the reason a build is about to
+    ///   refuse.
+    /// - [`BindgenRowKind::AbsentWithProjectPin`] — no CLI on `PATH` at all,
+    ///   but the project declares its own pin, so the fix command this row
+    ///   carries names *that* pin rather than the framework's.
+    ///
+    /// An absent CLI with no project pin at all ([`BindgenRowKind::HostOnly`])
+    /// is dropped — the validator's own row already covers it.
     pub fn project_rows(&self) -> Vec<&Component> {
         self.components
             .iter()
             .filter(|component| match component.name.as_str() {
                 TARGET_COMPONENT | WASM_OPT_COMPONENT => false,
-                BINDGEN_COMPONENT => component.summary.contains(PROJECT_PIN_CONFLICT),
+                BINDGEN_COMPONENT => matches!(
+                    self.bindgen_row_kind,
+                    BindgenRowKind::ProjectPinConflict | BindgenRowKind::AbsentWithProjectPin
+                ),
                 _ => true,
             })
             .collect()
@@ -179,16 +210,19 @@ pub fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight
         .and_then(|m| m.web.clone())
         .unwrap_or_default();
 
+    let (bindgen_component, bindgen_row_kind) = bindgen_check(runner, project_dir);
+
     WebPreflight {
         components: vec![
             manifest_component,
             target_check(runner),
-            bindgen_check(runner, project_dir),
+            bindgen_component,
             wasm_opt_check(runner),
             embedder_check(project_dir, &web),
             host_page_module_check(project_dir, &web, &app_name),
             artifact_dir_safety_check(project_dir, &web),
         ],
+        bindgen_row_kind,
     }
 }
 
@@ -282,44 +316,63 @@ fn target_check(runner: &dyn ProcessRunner) -> Component {
 }
 
 /// `wasm-bindgen` present, and its version equal to the one the project pins.
-fn bindgen_check(runner: &dyn ProcessRunner, project_dir: &Path) -> Component {
+///
+/// Returns the [`BindgenRowKind`] alongside the [`Component`] — the
+/// structured signal [`WebPreflight::project_rows`] filters on, set here
+/// rather than sniffed back out of `summary`'s wording later.
+fn bindgen_check(runner: &dyn ProcessRunner, project_dir: &Path) -> (Component, BindgenRowKind) {
     let name = BINDGEN_COMPONENT.to_string();
     let declared = declared_bindgen_version(project_dir);
     let Some(installed) = installed_bindgen_version(runner) else {
-        return Component {
+        let kind = if declared.is_some() {
+            BindgenRowKind::AbsentWithProjectPin
+        } else {
+            BindgenRowKind::HostOnly
+        };
+        let component = Component {
             name,
             status: ComponentStatus::Missing,
             summary: "wasm-bindgen is not on PATH".to_string(),
             fix_commands: vec![install_bindgen_fix(declared.as_deref())],
         };
+        return (component, kind);
     };
 
     match declared {
-        Some(declared) if declared == installed => Component {
-            name,
-            status: ComponentStatus::Ok,
-            summary: format!("{installed}, matching the project's pin"),
-            fix_commands: Vec::new(),
-        },
-        Some(declared) => Component {
-            name,
-            status: ComponentStatus::Missing,
-            summary: format!(
-                "installed {installed}, {PROJECT_PIN_CONFLICT} {declared} — the CLI and the \
-                 crate share a schema version and must be equal, so a build would fail after \
-                 compiling"
-            ),
-            fix_commands: vec![install_bindgen_fix(Some(&declared))],
-        },
-        None => Component {
-            name,
-            status: ComponentStatus::Partial,
-            summary: format!(
-                "{installed} installed, but the project declares no wasm-bindgen dependency to \
-                 match it against"
-            ),
-            fix_commands: Vec::new(),
-        },
+        Some(declared) if declared == installed => (
+            Component {
+                name,
+                status: ComponentStatus::Ok,
+                summary: format!("{installed}, matching the project's pin"),
+                fix_commands: Vec::new(),
+            },
+            BindgenRowKind::HostOnly,
+        ),
+        Some(declared) => (
+            Component {
+                name,
+                status: ComponentStatus::Missing,
+                summary: format!(
+                    "installed {installed}, but the project pins {declared} — the CLI and the \
+                     crate share a schema version and must be equal, so a build would fail after \
+                     compiling"
+                ),
+                fix_commands: vec![install_bindgen_fix(Some(&declared))],
+            },
+            BindgenRowKind::ProjectPinConflict,
+        ),
+        None => (
+            Component {
+                name,
+                status: ComponentStatus::Partial,
+                summary: format!(
+                    "{installed} installed, but the project declares no wasm-bindgen dependency to \
+                     match it against"
+                ),
+                fix_commands: Vec::new(),
+            },
+            BindgenRowKind::HostOnly,
+        ),
     }
 }
 
@@ -363,11 +416,11 @@ fn wasm_opt_check(runner: &dyn ProcessRunner) -> Component {
             status: ComponentStatus::Partial,
             summary: wasm_opt::ABSENT_SUMMARY.to_string(),
             fix_commands: vec![FixCommand {
-                display: "Install binaryen (provides wasm-opt)".to_string(),
+                display: wasm_opt::INSTALL_GUIDANCE.to_string(),
                 program: String::new(),
                 args: Vec::new(),
                 auto_runnable: false,
-                doc_link: Some("https://github.com/WebAssembly/binaryen/releases".to_string()),
+                doc_link: Some(wasm_opt::INSTALL_DOC_LINK.to_string()),
             }],
         },
     }
@@ -813,8 +866,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The one host-tool row that survives the filter: a project pin the
-    /// installed CLI disagrees with is a fact no validator can know.
+    /// The one host-tool row kept for a version disagreement: a project pin
+    /// the installed CLI disagrees with is a fact no validator can know.
     #[test]
     fn project_rows_keep_a_bindgen_row_that_disagrees_with_the_project_pin() {
         let (root, project) = checkout("project-rows-pin", PINNED_MANIFEST);
@@ -826,6 +879,7 @@ mod tests {
             .with("wasm-bindgen --version", ok("wasm-bindgen 0.2.100\n"))
             .with("wasm-opt --version", ok("wasm-opt version 130\n"));
         let report = preflight(&runner, &project);
+        assert_eq!(report.bindgen_row_kind, BindgenRowKind::ProjectPinConflict);
         assert!(
             report
                 .project_rows()
@@ -834,25 +888,63 @@ mod tests {
             "{:?}",
             report.project_rows()
         );
+        let _ = fs::remove_dir_all(&root);
+    }
 
-        // Absent-from-PATH is the validator's story, not this heading's.
-        let absent = preflight(
-            &FakeProcessRunner::new()
-                .with(
-                    "rustup target list --installed",
-                    ok("wasm32-unknown-unknown\n"),
-                )
-                .missing("wasm-bindgen --version")
-                .missing("wasm-opt --version"),
-            &project,
+    /// An absent CLI is kept under this heading when the project declares its
+    /// own pin: the fix this row carries names *that* pin, information the
+    /// validator's own row (which only knows the framework's pin) cannot
+    /// offer.
+    #[test]
+    fn project_rows_keep_an_absent_bindgen_row_when_the_project_declares_a_pin() {
+        let (root, project) = checkout("project-rows-absent-pinned", PINNED_MANIFEST);
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("wasm32-unknown-unknown\n"),
+            )
+            .missing("wasm-bindgen --version")
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"));
+        let report = preflight(&runner, &project);
+        assert_eq!(
+            report.bindgen_row_kind,
+            BindgenRowKind::AbsentWithProjectPin
         );
         assert!(
-            absent
+            report
+                .project_rows()
+                .iter()
+                .any(|c| c.name == BINDGEN_COMPONENT),
+            "{:?}",
+            report.project_rows()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An absent CLI with no project pin either is dropped — the validator's
+    /// own row already covers this, with no project-derived fact to add.
+    #[test]
+    fn project_rows_drop_an_absent_bindgen_row_when_the_project_has_no_pin() {
+        let (root, project) = checkout(
+            "project-rows-absent-unpinned",
+            "[package]\nname = \"app\"\n\n[dependencies]\nfrust = { path = \"../../crates/frust\" }\n",
+        );
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("wasm32-unknown-unknown\n"),
+            )
+            .missing("wasm-bindgen --version")
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"));
+        let report = preflight(&runner, &project);
+        assert_eq!(report.bindgen_row_kind, BindgenRowKind::HostOnly);
+        assert!(
+            report
                 .project_rows()
                 .iter()
                 .all(|c| c.name != BINDGEN_COMPONENT),
             "{:?}",
-            absent.project_rows()
+            report.project_rows()
         );
         let _ = fs::remove_dir_all(&root);
     }

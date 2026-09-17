@@ -26,6 +26,16 @@ pub(crate) enum WasmOptProbe {
 pub(crate) const ABSENT_SUMMARY: &str = "not on PATH — builds succeed without it, the shipped \
                                          .wasm is just larger; install binaryen";
 
+/// The guidance text `doctor::report` and `web_build::preflight` both attach
+/// to an absent `wasm-opt` row: there is no one install command (binaryen
+/// ships as a platform package — brew, apt, a release archive), so this is
+/// guidance with a doc link, never a runnable [`super::FixCommand`].
+pub(crate) const INSTALL_GUIDANCE: &str = "Install binaryen (provides wasm-opt)";
+
+/// The doc link paired with [`INSTALL_GUIDANCE`], kept beside it so the two
+/// surfaces that display it can never drift apart.
+pub(crate) const INSTALL_DOC_LINK: &str = "https://github.com/WebAssembly/binaryen/releases";
+
 /// The single `wasm-opt` probe: one invocation, one classification, shared by
 /// [`WasmOptValidator`] and `web_build::preflight`'s wasm-opt row.
 pub(crate) fn probe(runner: &dyn ProcessRunner) -> WasmOptProbe {

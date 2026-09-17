@@ -378,6 +378,12 @@ mod tests {
     /// whatever `web_build::preflight` reports on this host).
     #[test]
     fn print_web_results_handles_empty_components() {
-        print_web_results(&WebPreflight { components: vec![] }, true);
+        print_web_results(
+            &WebPreflight {
+                components: vec![],
+                bindgen_row_kind: web_build::BindgenRowKind::HostOnly,
+            },
+            true,
+        );
     }
 }

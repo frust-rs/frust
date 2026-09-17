@@ -20,6 +20,7 @@ use super::mobile_targets::{self, ANDROID_TARGETS, IOS_TARGETS};
 use super::{
     AndroidSdkValidator, CargoNdkValidator, DoctorCtx, RustToolchainValidator, Status, Validation,
     Validator, WasmBindgenCliValidator, WasmOptValidator, WasmTargetValidator, XcodeValidator,
+    wasm_bindgen_cli, wasm_opt, wasm_target,
 };
 use crate::build_info::WASM_TARGET_TRIPLE;
 use crate::web_build::WASM_BINDGEN_PINNED;
@@ -263,7 +264,7 @@ fn wasm_target_component(ctx: &DoctorCtx) -> Component {
     let fix_commands = match status {
         ComponentStatus::Ok => Vec::new(),
         _ => vec![FixCommand::runnable(
-            format!("rustup target add {WASM_TARGET_TRIPLE}"),
+            wasm_target::add_target_command(),
             "rustup",
             vec![
                 "target".to_string(),
@@ -290,7 +291,7 @@ fn wasm_bindgen_component(ctx: &DoctorCtx) -> Component {
     let fix_commands = match status {
         ComponentStatus::Ok => Vec::new(),
         _ => vec![FixCommand::runnable(
-            format!("cargo install -f wasm-bindgen-cli --version {WASM_BINDGEN_PINNED}"),
+            wasm_bindgen_cli::install_command(WASM_BINDGEN_PINNED),
             "cargo",
             vec![
                 "install".to_string(),
@@ -317,8 +318,8 @@ fn wasm_opt_component(ctx: &DoctorCtx) -> Component {
     let fix_commands = match status {
         ComponentStatus::Ok => Vec::new(),
         _ => vec![FixCommand::guidance(
-            "Install binaryen (provides wasm-opt)",
-            Some("https://github.com/WebAssembly/binaryen/releases"),
+            wasm_opt::INSTALL_GUIDANCE,
+            Some(wasm_opt::INSTALL_DOC_LINK),
         )],
     };
     Component {
@@ -908,6 +909,63 @@ mod tests {
         assert_eq!(
             bindgen.fix_commands[0].display,
             format!("cargo install -f wasm-bindgen-cli --version {WASM_BINDGEN_PINNED}")
+        );
+    }
+
+    /// The Web area's fix strings are never re-derived independently of the
+    /// probe modules that own them — each display string matches the
+    /// corresponding module's own helper output exactly, the same guarantee
+    /// [`crate::web_build::preflight`] gives for its own rows.
+    #[test]
+    fn web_area_fix_text_matches_the_probe_modules_own_helpers() {
+        let runner = all_green_runner()
+            .with(
+                "rustup target list --installed",
+                ok("x86_64-unknown-linux-gnu\n"),
+            )
+            .missing("wasm-bindgen --version")
+            .missing("wasm-opt --version");
+        let env = all_green_env();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = build_report(&ctx);
+        let web = report.areas.iter().find(|a| a.name == "Web").unwrap();
+
+        let target = web
+            .components
+            .iter()
+            .find(|c| c.name == "wasm32 target")
+            .unwrap();
+        assert_eq!(
+            target.fix_commands[0].display,
+            wasm_target::add_target_command()
+        );
+
+        let bindgen = web
+            .components
+            .iter()
+            .find(|c| c.name == "wasm-bindgen CLI")
+            .unwrap();
+        assert_eq!(
+            bindgen.fix_commands[0].display,
+            wasm_bindgen_cli::install_command(WASM_BINDGEN_PINNED)
+        );
+
+        let wasm_opt_row = web
+            .components
+            .iter()
+            .find(|c| c.name == "wasm-opt")
+            .unwrap();
+        assert_eq!(
+            wasm_opt_row.fix_commands[0].display,
+            wasm_opt::INSTALL_GUIDANCE
+        );
+        assert_eq!(
+            wasm_opt_row.fix_commands[0].doc_link.as_deref(),
+            Some(wasm_opt::INSTALL_DOC_LINK)
         );
     }
 
