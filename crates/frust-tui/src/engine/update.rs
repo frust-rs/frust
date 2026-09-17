@@ -2327,7 +2327,14 @@ fn remove_session(state: &mut AppState, idx: usize) {
         Some(active) if active > idx => Some(active - 1),
         other => other,
     };
-    if matches!(&state.context_menu, Some(m) if m.target == ContextTarget::SessionTab(idx)) {
+    // A positional context menu is invalidated when a session at or before its
+    // target index is removed; all higher indices shift down by one. Close the
+    // menu to prevent a destructive misfire when re-dispatching its entry message
+    // against the shifted state.
+    if matches!(
+        &state.context_menu,
+        Some(m) if matches!(m.target, ContextTarget::SessionTab(i) if i >= idx)
+    ) {
         state.context_menu = None;
     }
 }
@@ -3115,6 +3122,153 @@ mod tests {
             st.context_menu.is_none(),
             "the menu targeted the tab that just closed"
         );
+    }
+
+    #[test]
+    fn closing_a_live_session_invalidates_a_higher_indexed_context_menu() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        st.sessions[0].state = SessionState::Running;
+
+        // Close tab 0 (live); removal is deferred until its terminal event lands.
+        let out = update(&mut st, Message::CloseTab(0));
+        assert!(out.effect.is_some());
+        assert_eq!(st.sessions.len(), 3);
+        assert!(st.sessions[0].close_on_exit);
+
+        // Open a context menu on tab 2 (which will become index 1 after the
+        // deferred removal).
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(2),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(2)
+        ));
+
+        // Tab 0's terminal event lands and removes it.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert_eq!(st.sessions.len(), 2);
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.sessions[1].id, c);
+        // The menu targeting the old tab 2 should have been cleared because its
+        // index >= the removed index.
+        assert!(
+            st.context_menu.is_none(),
+            "menu targeting old tab 2 should clear when tab 0 is removed"
+        );
+
+        // A fresh menu on the tab that was at index 2 (now 1) should yield the
+        // correct CloseTab(1) message. The label may be "Stop & close" or "Close tab"
+        // depending on session state.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(1),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        let entries = &st.context_menu.as_ref().unwrap().entries;
+        let close_tab_entry = entries
+            .iter()
+            .find(|e| e.label == "Close tab" || e.label == "Stop & close")
+            .expect("Close tab / Stop & close entry should exist");
+        // Verify the entry has the correct message for the shifted index.
+        assert!(
+            matches!(&close_tab_entry.message, Message::CloseTab(1)),
+            "close_tab_entry message should target index 1, not the old index 2"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_lower_index_survives_when_higher_tab_removed() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Open a context menu on tab 0.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(0)
+        ));
+
+        // Remove tab 2 via CloseTab.
+        update(&mut st, Message::CloseTab(2));
+        assert_eq!(st.sessions.len(), 2);
+        assert_eq!(st.sessions[0].id, a);
+        assert_eq!(st.sessions[1].id, b);
+
+        // Menu targeting tab 0 should survive because 0 < 2.
+        assert!(
+            st.context_menu.is_some(),
+            "menu on tab 0 should survive when tab 2 is removed"
+        );
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(0)
+        ));
+    }
+
+    #[test]
+    fn context_menu_on_log_view_survives_tab_removal() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        for id in [a, b] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Open a context menu on a LogView target.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::LogView { row: Some(42) },
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::LogView { .. }
+        ));
+
+        // Remove tab 0.
+        update(&mut st, Message::CloseTab(0));
+        assert_eq!(st.sessions.len(), 1);
+
+        // Menu targeting LogView should survive (not a SessionTab).
+        assert!(
+            st.context_menu.is_some(),
+            "menu on LogView should survive tab removal"
+        );
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::LogView { .. }
+        ));
     }
 
     #[test]
