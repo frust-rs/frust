@@ -5862,3 +5862,62 @@ render split, which is a larger seam than this one.
 presented-frame counter. Not yet observed on a running Mac — the desktop
 half of the video-player device gate is owed, and that is where it would
 first become visible.
+
+---
+
+### `lean-android-hashbrown-split` — the lean Android release graph carries two `hashbrown` copies
+
+**Observed**: `hashbrown` resolves to two versions on the lean Android release graph —
+0.16.1 and 0.17.1. `parley`/`fontique` (and `frust-engine`'s vendored `vello_common`/`glifo`
+stack) already sit on 0.17.1; the 0.16.1 copy is held down by `accesskit_consumer 0.38.0`,
+`gpu-allocator 0.28.0`, and `tree_arena 0.2.0`.
+
+**Applies to**: every Android release build (lean or full feature set) — the split is on the
+resolved dependency graph, not behind a feature flag.
+
+**Why accepted**: none of the three crates holding the graph at 0.16.1 is a pin this
+workspace owns under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy, so closing the
+split means bumping `accesskit`/`accesskit_consumer`, `gpu-allocator`, or `tree_arena` on
+their own schedule rather than frust-text's. Measured cost of the second copy is negligible
+under this workspace's `lto = "fat"`/`codegen-units = 1` release profile plus the Android
+`--icf=all` link flag (`.cargo/config.toml`): two near-identical hashing implementations fold
+heavily under fat LTO's dead-code elimination and identical-code folding, leaving the second
+`hashbrown` monomorphization set well under the noise floor of a full release build.
+
+**Trigger for removal**: `accesskit_consumer`, `gpu-allocator`, or `tree_arena` moving to a
+`hashbrown 0.17` requirement.
+
+**Evidence**: `Cargo.lock` (two `hashbrown` entries, 0.16.1 and 0.17.1, and their reverse
+dependencies); the lean Android graph in `benchmarks/frust_bench`.
+
+---
+
+### `release-opt-level-z-bar-unadjudicated` — the cold-set opt-level "z" 5% CPU bar was measured on a noisy rig, not adjudicated
+
+**Observed**: the per-crate release `opt-level = "z"` cold set (17 named crates, hand-synced
+across the eight Android manifests — see [DEVELOPMENT.md](DEVELOPMENT.md)'s Release-profile
+hardening) landed against a measured render-CPU cost-sum bar of ≤5%, but the only rig
+available for that measurement was a Pixel 5 over Wi-Fi adb with the charger on. On that rig
+the *unchanged* baseline itself drifted +14% (S1) / +24% (S4) between two runs of the
+identical binary, purely from block-run order — noise larger than the bar the cold set is
+supposed to clear. The phases a CPU opt-level can actually move stayed flat inside that
+noise: S4 work +1.9%, S5 +0.4%, GPU time unchanged.
+
+**Applies to**: every Android release build using the shared `[profile.release.package.*]`
+cold-set block (root manifest, `templates/app/Cargo.toml.tmpl`, and the six other
+hand-synced Android manifests `profile_sync` covers).
+
+**Why accepted**: the flat cost-sum on the two CPU-bound phases the cold set could plausibly
+hurt, plus the measured static-size win (stripped `.so` -9.2%, `.text` -17.9%), was judged
+good enough to ship provisionally rather than block the size work on rig availability — the
+static-size win is device-independent evidence; the CPU bar is a secondary check that has
+not actually cleared under controlled conditions.
+
+**Trigger for removal**: none — this stays open until a controlled re-measure runs (a
+OnePlus 9 with the charger off, or a block-interleaved run design that cancels session-level
+drift) and either confirms the ≤5% bar or exceeds it. If a re-measure shows more than +5%
+render-CPU cost, the revert is one `[profile.release.package.*]` block removal per manifest
+plus the corresponding `profile_sync` list entries.
+
+**Evidence**: the cold-set change's own measured static-size deltas; the unresolved Pixel 5
+Wi-Fi-adb rig session (S1/S4 baseline drift, S4/S5 work deltas) cited above.
