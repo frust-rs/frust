@@ -5911,13 +5911,19 @@ hand-synced Android manifests `profile_sync` covers).
 hurt, plus the measured static-size win (stripped `.so` -9.2%, `.text` -17.9%), was judged
 good enough to ship provisionally rather than block the size work on rig availability — the
 static-size win is device-independent evidence; the CPU bar is a secondary check that has
-not actually cleared under controlled conditions.
+not actually cleared under controlled conditions. The one cold-set member with a real
+per-frame call site, `jni`, was never isolated in that measurement: `frust-shell-android`
+(`crates/frust-shell-android/src/jni_glue.rs`, `native_ime_state`) plus the clipboard-drain
+and system-UI polls it drives are all called once per rendered frame from
+`FrustSurfaceView.kt`'s `doFrame`, so its "z" cost sits inside the same unadjudicated bar.
 
 **Trigger for removal**: none — this stays open until a controlled re-measure runs (a
 OnePlus 9 with the charger off, or a block-interleaved run design that cancels session-level
-drift) and either confirms the ≤5% bar or exceeds it. If a re-measure shows more than +5%
-render-CPU cost, the revert is one `[profile.release.package.*]` block removal per manifest
-plus the corresponding `profile_sync` list entries.
+drift) and either confirms the ≤5% bar or exceeds it. The re-measure must include an S1
+block with a focused text field so the IME poll (`native_ime_state` via `doFrame`) actually
+runs every frame during the run, not just the clipboard/system-UI polls. If a re-measure
+shows more than +5% render-CPU cost, the revert is one `[profile.release.package.*]` block
+removal per manifest plus the corresponding `profile_sync` list entries.
 
 **Evidence**: the cold-set change's own measured static-size deltas; the unresolved Pixel 5
 Wi-Fi-adb rig session (S1/S4 baseline drift, S4/S5 work deltas) cited above.
