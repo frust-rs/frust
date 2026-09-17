@@ -1468,6 +1468,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
 
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
+        // `X` closes the active tab (`Message::CloseActiveTab`): a live
+        // session is stopped and removed once it lands terminal, an already
+        // terminal one is removed on the spot (mouse parity: the session
+        // tab's context-menu "Close tab" / "Stop & close" entry).
+        KeyCode::Char('X') if has_active_session => vec![Message::CloseActiveTab],
         // `t` toggles the active session's perf sparkline panel.
         KeyCode::Char('t') if has_active_session => vec![Message::TogglePerfPanel],
         KeyCode::Tab if has_active_session => vec![Message::NextTab],

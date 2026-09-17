@@ -382,6 +382,14 @@ pub enum Message {
     /// Stop the active session (`Ctrl+C` / `x`) — routed to the supervisor as
     /// an [`super::Effect::StopSession`].
     StopSession,
+    /// Close a tab by index into `sessions` (the context menu's "Close tab" /
+    /// "Stop & close" entries, and the palette's "Close tab" command). A
+    /// session already in a terminal state is removed immediately; a live
+    /// one is stopped exactly like [`Self::StopSession`] and removed once its
+    /// terminal event lands (see `super::update::on_session_event`).
+    CloseTab(usize),
+    /// [`Self::CloseTab`] for the active tab (`X`).
+    CloseActiveTab,
     /// Toggle follow-tail on the active session's log view (`f`).
     ToggleFollow,
     /// Toggle soft-wrap on the log view (`w`).

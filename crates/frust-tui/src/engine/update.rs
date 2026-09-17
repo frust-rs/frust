@@ -389,6 +389,11 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Some(id) => Outcome::effect(Effect::StopSession(id)),
             None => Outcome::idle(),
         },
+        Message::CloseTab(idx) => close_tab(state, idx),
+        Message::CloseActiveTab => match state.active_session {
+            Some(idx) => close_tab(state, idx),
+            None => Outcome::idle(),
+        },
         Message::ToggleFollow => {
             let Some(session) = state.active_session_mut() else {
                 return Outcome::idle();
@@ -2216,9 +2221,65 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
         effects.extend(metrics_start(state, idx));
     }
     let effect = batch(effects);
-    Outcome {
+    let mut outcome = Outcome {
         redraw: outcome.redraw || effect.is_some(),
         effect: outcome.effect.or(effect),
+    };
+    // A tab `close_tab` marked `close_on_exit` while it was still live
+    // removes itself the instant its terminal state lands — after the
+    // bookkeeping/effects above, so its devtools/metrics bridges still get
+    // their disconnect first.
+    if state.sessions[idx].state.is_terminal() && state.sessions[idx].close_on_exit {
+        remove_session(state, idx);
+        outcome.redraw = true;
+    }
+    outcome
+}
+
+/// Close the tab at `idx`. A session already in a terminal state is removed
+/// immediately; a live one is marked `close_on_exit` and stopped exactly like
+/// [`Message::StopSession`] — the removal itself happens once its terminal
+/// [`SessionEvent`] lands in [`on_session_event`].
+fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
+    let Some(session) = state.sessions.get(idx) else {
+        return Outcome::idle();
+    };
+    if session.state.is_terminal() {
+        remove_session(state, idx);
+        Outcome::redraw()
+    } else {
+        let id = session.id;
+        state.sessions[idx].close_on_exit = true;
+        Outcome::effect(Effect::StopSession(id))
+    }
+}
+
+/// Remove `sessions[idx]`, repairing `active_session` and closing a context
+/// menu that targeted the removed tab.
+///
+/// Index-repair rule: if the removed tab was active, the tab that slides into
+/// its slot becomes active (the "next tab" — same index, now the following
+/// session) when one exists, else the previous tab, else no tab at all. If
+/// the removed tab was *before* the active one, the active index shifts down
+/// by one to keep pointing at the same session; if it was after, the active
+/// index is untouched.
+fn remove_session(state: &mut AppState, idx: usize) {
+    state.sessions.remove(idx);
+    state.active_session = match state.active_session {
+        Some(active) if active == idx => {
+            if idx < state.sessions.len() {
+                Some(idx)
+            } else if idx > 0 {
+                Some(idx - 1)
+            } else {
+                None
+            }
+        }
+        Some(active) if active > idx => Some(active - 1),
+        other => other,
+    };
+    if matches!(&state.context_menu, Some(m) if m.target == ContextTarget::SessionTab(idx)) {
+        state.context_menu = None;
     }
 }
 
@@ -2844,6 +2905,153 @@ mod tests {
         // With no session, stop is a no-op.
         let mut empty = welcome();
         assert_eq!(update(&mut empty, Message::StopSession).effect, None);
+    }
+
+    #[test]
+    fn close_tab_on_a_terminal_session_removes_it_and_repairs_the_active_index() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Closing the active tab (first) activates the tab that slides into
+        // its slot — the next tab.
+        st.active_session = Some(0);
+        let out = update(&mut st, Message::CloseTab(0));
+        assert!(out.redraw);
+        assert_eq!(st.sessions.len(), 2);
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.active_session, Some(0), "b slides into slot 0");
+
+        // Closing the active (now last) tab with no next tab falls back to
+        // the previous one.
+        st.active_session = Some(1);
+        update(&mut st, Message::CloseTab(1));
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.active_session, Some(0));
+
+        // Closing the only remaining tab leaves no active tab, and the
+        // workbench falls back to its no-session path.
+        update(&mut st, Message::CloseTab(0));
+        assert!(st.sessions.is_empty());
+        assert_eq!(st.active_session, None);
+    }
+
+    #[test]
+    fn close_tab_on_a_non_active_terminal_session_only_shifts_a_left_neighbor() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+        st.active_session = Some(1); // b is active
+
+        // Closing a tab to the *right* of the active one leaves the active
+        // index untouched.
+        update(&mut st, Message::CloseTab(2));
+        assert_eq!(st.active_session, Some(1));
+        assert_eq!(st.sessions[st.active_session.unwrap()].id, b);
+
+        // Closing a tab to the *left* of the active one shifts the active
+        // index down by one, still pointing at the same session.
+        update(&mut st, Message::CloseTab(0));
+        assert_eq!(st.active_session, Some(0));
+        assert_eq!(st.sessions[st.active_session.unwrap()].id, b);
+    }
+
+    #[test]
+    fn close_tab_on_a_live_session_stops_it_and_removes_it_once_terminal() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::CloseTab(0));
+        assert_eq!(out.effect, Some(Effect::StopSession(a)));
+        assert!(
+            !out.redraw,
+            "the removal happens once the terminal event lands, not here"
+        );
+        assert_eq!(st.sessions.len(), 1, "a live session is not removed yet");
+        assert!(st.sessions[0].close_on_exit);
+
+        // The terminal event now removes it exactly once.
+        let out = update(&mut st, state_event(a, SessionState::Killed));
+        assert!(out.redraw);
+        assert!(st.sessions.is_empty());
+        assert_eq!(st.active_session, None);
+
+        // A terminal event for the id it just removed is ignored — no panic,
+        // no second removal.
+        let out = update(&mut st, state_event(a, SessionState::Killed));
+        assert!(!out.redraw);
+        assert!(st.sessions.is_empty());
+    }
+
+    #[test]
+    fn close_active_tab_resolves_to_the_active_index() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        update(&mut st, state_event(a, SessionState::Exited(true)));
+
+        let out = update(&mut st, Message::CloseActiveTab);
+        assert!(out.redraw);
+        assert!(st.sessions.is_empty());
+
+        // With no active session, closing the active tab is a no-op.
+        let mut empty = welcome();
+        let out = update(&mut empty, Message::CloseActiveTab);
+        assert!(!out.redraw);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn digit_select_after_removal_targets_the_shifted_tab() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Remove `a` (index 0); `b` and `c` shift down to 0 and 1.
+        update(&mut st, Message::CloseTab(0));
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.sessions[1].id, c);
+
+        // `SelectTab(1)` (what pressing `2` resolves to) now targets `c`, not
+        // the stale pre-removal tab that index used to name.
+        update(&mut st, Message::SelectTab(1));
+        assert_eq!(st.active_session, Some(1));
+        assert_eq!(st.sessions[st.active_session.unwrap()].id, c);
+    }
+
+    #[test]
+    fn closing_a_tab_clears_a_context_menu_that_targeted_it() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        update(&mut st, state_event(a, SessionState::Exited(true)));
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+
+        update(&mut st, Message::CloseTab(0));
+        assert!(
+            st.context_menu.is_none(),
+            "the menu targeted the tab that just closed"
+        );
     }
 
     #[test]

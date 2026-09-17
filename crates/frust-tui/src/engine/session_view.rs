@@ -287,6 +287,12 @@ pub struct SessionView {
     /// the log is missing lines the consumer couldn't keep up with, which the
     /// UI can surface. Mirrors `frust_drive::process::LineReceiver::dropped_lines`.
     pub dropped: u64,
+    /// Set by `Message::CloseTab`/`CloseActiveTab` when the tab was closed
+    /// while the session was still live: the session is stopped as normal,
+    /// and the moment its terminal event lands the tab removes itself (see
+    /// `super::update::on_session_event`) instead of staying around like an
+    /// ordinary stopped session. `false` for every ordinary session.
+    pub close_on_exit: bool,
     /// The parsed `frust-perf` sparkline/stats panel for this session —
     /// fed one line at a time from [`Self::push_line`].
     pub perf: PerfPanel,
@@ -352,6 +358,7 @@ impl SessionView {
             scroll: Scroll::Follow,
             selection: None,
             dropped: 0,
+            close_on_exit: false,
             perf: PerfPanel::default(),
             level_filter: LevelFilter::default(),
             panic_tracker: PanicTracker::default(),

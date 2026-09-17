@@ -1,11 +1,13 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 1732
 expression: "render_to_string(80, 24, &state)"
 ---
                ╭ Keyboard Shortcuts ────────────────────────────╮ain ◌ checking…
                │                                                │▓▓             
                │  r       Run on device(s)…                     │▓▓             
                │  x       Stop session                          │▓▓             
+               │  X       Close tab                             │▓▓             
                │  b       Build…                                │▓▓             
                │  c       Clean…                                │▓▓             
                │  d       Doctor                                │▓▓             
@@ -24,5 +26,4 @@ expression: "render_to_string(80, 24, &state)"
                │  z       Toggle nearest backtrace fold         │▓▓             
                │  d       DevTools                              │▓▓             
                │  r       Refresh widget tree                   │▓▓             
-               │  q       Quit                                  │▓▓             
 ? help · ⌘ pale╰────────────────────────────────────────────────╯▓▓    [mouse ✓]

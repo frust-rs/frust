@@ -1,13 +1,14 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 1721
 expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
-━━━━━━━━                                                                                            
-                         ╭ Keyboard Shortcuts ────────────────────────────╮                         
- PROJECTS                │                                                │▓▓                       
-  ▸ huddle               │  r       Run on device(s)…                     │▓▓                       
-                         │  x       Stop session                          │▓▓                       
+━━━━━━━━                 ╭ Keyboard Shortcuts ────────────────────────────╮                         
+                         │                                                │▓▓                       
+ PROJECTS                │  r       Run on device(s)…                     │▓▓                       
+  ▸ huddle               │  x       Stop session                          │▓▓                       
+                         │  X       Close tab                             │▓▓                       
  DEVICES ↻ r             │  b       Build…                                │▓▓                       
    none found            │  c       Clean…                                │▓▓b here.                
                          │  d       Doctor                                │▓▓                       

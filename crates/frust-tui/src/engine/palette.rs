@@ -131,6 +131,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no running session",
         ),
         gated(
+            "Close tab",
+            "X",
+            Message::CloseActiveTab,
+            has_session,
+            "no active session",
+        ),
+        gated(
             "Build…",
             "b",
             Message::OpenBuildLauncher,
