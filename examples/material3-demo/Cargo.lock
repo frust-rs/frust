@@ -1502,8 +1502,11 @@ dependencies = [
 name = "frust-shell-macos"
 version = "0.1.0"
 dependencies = [
+ "frust-plugin",
  "frust-reactive",
+ "frust-shell-common",
  "frust-shell-desktop",
+ "kurbo",
  "log",
  "muda",
  "objc2 0.6.4",

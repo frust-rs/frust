@@ -136,7 +136,7 @@ web-time = "1.1.0"
 # to `console.*`, `console_error_panic_hook` routes panics to `console.error`.
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
-parley = "0.11.0"
+parley = "0.11.1"
 peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
