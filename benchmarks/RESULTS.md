@@ -700,11 +700,31 @@ into a total; the totals above come only from this pass's re-measurement:
 | shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
 | Glyph italics | measured-keep | 0 | no italic subset landed |
 | `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B |
-| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); the 5 % render-CPU bar was not adjudicable on the available Pixel 5 rig (block-order drift larger than the bar), CPU-work phases flat — a controlled re-measure is owed |
+| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below |
 | `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | |
 | `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
 | `android_logger` regex feature off | dependency hygiene | ~0 | |
 | bundled-fonts opt-out feature | default on | 0 in these artifacts | an app opting out saves its own bundled font bytes |
+
+**Cold-set 5 % CPU bar — adjudicated 2026-09-17 (OnePlus 9), cleared.** The bar the
+`opt-level = "z"` row above is gated on was re-measured under control and passes on every
+scenario. Two `--profile` APKs differing only in the cold set (arm64 `.so` 9,134,208 B with it,
+9,878,576 B without) were interleaved B,V,B,V per scenario — 12 runs × 30 s per block, each
+block's own first 2 runs discarded — on a OnePlus 9 over USB adb with airplane mode on, refresh
+pinned to 120 Hz and brightness fixed. Cost-sum p50/p95 (cold set vs none, mean of each
+variant's two blocks): S1 −1.0 %/+0.5 %, S4 +1.0 %/−0.4 %, S5 +3.4 %/+3.3 %, S6 −0.3 %/+0.0 %.
+CPU-work phases (rebuild+layout+paint+encode) p50: −0.3 %, −3.0 %, −0.1 %, +0.8 %. S1 `gpu_main`
+6.31 ms both variants (+0.01 %); all sixteen blocks held ~120 fps. S5 is the one real signal —
+both cold-set blocks put ~0.2 ms more in `submit` (5.58/5.59 → 5.78/5.80 ms) on the image-upload
+path — inside the bar, worth naming. Unlike the Pixel 5 attempt, this rig's own drift is smaller
+than the bar: re-running the *identical* no-cold-set binary later in the session moved cost-sum
+p50 by 0.04–2.15 % per scenario, against that session's +14 %/+24 %. Two caveats ride with it:
+the focused-text-field S1 leg was not run (no text field exists in the bench app and the
+fallback catalogs carry no deep-link filter), and `dumpsys battery unplug` only made the
+framework report unpowered — the phone stayed on USB power with its level pinned at 100 %, so
+PROTOCOL §3's charger-off control was not literally met and these absolute numbers are not
+comparable to battery-run passes. Both are recorded in
+[LIMITATIONS.md](../docs/LIMITATIONS.md)'s `release-opt-level-z-bar-unadjudicated`.
 
 **Size attribution (re-run, de-duplicated).** `size_attribute.py --nm-dir
 <ndk bin>` on this pass's unstripped lean arm64 `.so` (15,728,352 B

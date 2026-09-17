@@ -5892,38 +5892,51 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `release-opt-level-z-bar-unadjudicated` — the cold-set opt-level "z" 5% CPU bar was measured on a noisy rig, not adjudicated
+### `release-opt-level-z-bar-unadjudicated` — the cold-set opt-level "z" CPU bar is cleared, except for the focused-IME leg
 
-**Observed**: the per-crate release `opt-level = "z"` cold set (17 named crates, hand-synced
-across the eight Android manifests — see [DEVELOPMENT.md](DEVELOPMENT.md)'s Release-profile
-hardening) landed against a measured render-CPU cost-sum bar of ≤5%, but the only rig
-available for that measurement was a Pixel 5 over Wi-Fi adb with the charger on. On that rig
-the *unchanged* baseline itself drifted +14% (S1) / +24% (S4) between two runs of the
-identical binary, purely from block-run order — noise larger than the bar the cold set is
-supposed to clear. The phases a CPU opt-level can actually move stayed flat inside that
-noise: S4 work +1.9%, S5 +0.4%, GPU time unchanged.
+**Observed**: the ≤5% render-CPU bar gating the per-crate release `opt-level = "z"` cold set
+(17 named crates, hand-synced across the eight Android manifests — see
+[DEVELOPMENT.md](DEVELOPMENT.md)'s Release-profile hardening) was re-measured under control on
+2026-09-17 and **cleared on every scenario**. Method: OnePlus 9 (LE2115, Snapdragon 888 /
+Adreno 660, Android 15) over USB adb, airplane mode on, radios off, refresh pinned to 120 Hz,
+brightness fixed; two `--profile` APKs differing only in the cold set (with it, arm64 `.so`
+9,134,208 B; without, 9,878,576 B); per scenario the blocks run B,V,B,V — 12 runs × 30 s each,
+each block's own first 2 runs discarded — so session drift cancels. Cost-sum p50/p95 (V vs B,
+mean of each variant's two blocks): S1 −1.0%/+0.5%, S4 +1.0%/−0.4%, S5 +3.4%/+3.3%, S6
+−0.3%/+0.0%. The phases a CPU opt-level can actually move (rebuild+layout+paint+encode) are
+flat everywhere — −0.3% (S1), −3.0% (S4, whose phase sum is only 0.20 ms, so its percentages
+are the noisiest), −0.1% (S5), +0.8% (S6) — S1 `gpu_main` is unchanged (6.31 ms both variants,
++0.01%), and every block holds ~120 fps. S5 carries the one consistent signal: both V blocks
+put ~0.2 ms more in `submit` than both B blocks (5.58/5.59 → 5.78/5.80 ms), well inside the
+bar but a real effect on the image-upload path through `wgpu-core`. The rig that defeated the
+first attempt is demonstrably controlled here — re-running the *identical* B binary later in
+the session moved cost-sum p50 by 0.04–2.15% depending on scenario, against the Pixel 5
+session's +14%/+24%.
 
-**Applies to**: every Android release build using the shared `[profile.release.package.*]`
-cold-set block (root manifest, `templates/app/Cargo.toml.tmpl`, and the six other
-hand-synced Android manifests `profile_sync` covers).
+**Applies to**: what that re-measure did *not* cover. (1) The focused-text-field S1 block the
+previous trigger demanded was not run: `benchmarks/frust_bench` contains no text field, and
+the fallback catalogs (`examples/material3-demo`, `examples/playground`) register no
+deep-link intent filter, so the harness cannot drive a focused field without new bench-app
+code. The concern is narrower than it was written, though — `FrustSurfaceView`'s `doFrame`
+calls `pollImeAfterDispatch`, which calls `nativeImeState` **unconditionally every frame**
+regardless of focus, so the per-frame `jni` path (guard, reactive pump, JSON build, `JString`
+allocation) already ran in all 16 blocks above; focusing a field grows the serialized payload
+rather than introducing the call. (2) The session ran on mains power: `dumpsys battery unplug`
+makes the framework report unpowered (which is what disables plugged-in DVFS boost policies)
+but does not physically cut charging, and the level sat pinned at 100% across all ~2 h, so
+PROTOCOL §3's "charger disconnected" was not literally met.
 
-**Why accepted**: the flat cost-sum on the two CPU-bound phases the cold set could plausibly
-hurt, plus the measured static-size win (stripped `.so` -9.2%, `.text` -17.9%), was judged
-good enough to ship provisionally rather than block the size work on rig availability — the
-static-size win is device-independent evidence; the CPU bar is a secondary check that has
-not actually cleared under controlled conditions. The one cold-set member with a real
-per-frame call site, `jni`, was never isolated in that measurement: `frust-shell-android`
-(`crates/frust-shell-android/src/jni_glue.rs`, `native_ime_state`) plus the clipboard-drain
-and system-UI polls it drives are all called once per rendered frame from
-`FrustSurfaceView.kt`'s `doFrame`, so its "z" cost sits inside the same unadjudicated bar.
+**Why accepted**: the bar the cold set was gated on is cleared with margin on exactly the
+metrics an opt-level can move, on a rig whose own drift is now smaller than the bar. The
+power caveat is common-mode — both variants ran interleaved under identical conditions — so
+it cancels in the V-vs-B ratio the bar is about; it does mean these absolute numbers are not
+protocol-comparable to battery-run passes on other devices.
 
-**Trigger for removal**: none — this stays open until a controlled re-measure runs (a
-OnePlus 9 with the charger off, or a block-interleaved run design that cancels session-level
-drift) and either confirms the ≤5% bar or exceeds it. The re-measure must include an S1
-block with a focused text field so the IME poll (`native_ime_state` via `doFrame`) actually
-runs every frame during the run, not just the clipboard/system-UI polls. If a re-measure
-shows more than +5% render-CPU cost, the revert is one `[profile.release.package.*]` block
-removal per manifest plus the corresponding `profile_sync` list entries.
+**Trigger for removal**: delete this entry once the focused-IME leg is measured. That needs a
+focusable text field the harness can actually reach (a bench-app scenario, or a deep-linkable
+text page in a catalog app) — a code change, not another measurement pass. A battery-run
+repeat would additionally retire the power caveat.
 
-**Evidence**: the cold-set change's own measured static-size deltas; the unresolved Pixel 5
-Wi-Fi-adb rig session (S1/S4 baseline drift, S4/S5 work deltas) cited above.
+**Evidence**: the 2026-09-17 OnePlus 9 controlled A/B described above — 16 blocks, 4 scenarios
+× B,V,B,V, ~43,200 raw frame lines per block; `benchmarks/RESULTS.md`'s App-size per-lever
+table records the same result.
