@@ -186,7 +186,11 @@ mod tests {
         let _: crate::ShadcnSidebar = crate::ShadcnBase::Zinc.dark().sidebar;
         let _: crate::ShadcnRadius = crate::ShadcnTokens::shadcn().radius;
         assert_eq!(crate::RADIUS_BASE, theme.shape.medium);
-        assert_eq!(crate::font_data().len(), 2);
+        if cfg!(feature = "bundled-fonts") {
+            assert_eq!(crate::font_data().len(), 2);
+        } else {
+            assert!(crate::font_data().is_empty());
+        }
 
         // ...and the module paths the components consume read-only.
         assert_eq!(crate::style::HEIGHT_DEFAULT, 36.0);
@@ -239,11 +243,13 @@ mod tests {
     }
 
     /// Read a big-endian `u16` out of an sfnt-family byte slice at `offset`.
+    #[cfg(feature = "bundled-fonts")]
     fn read_u16(bytes: &[u8], offset: usize) -> u16 {
         u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
     }
 
     /// Read a big-endian `u32` out of an sfnt-family byte slice at `offset`.
+    #[cfg(feature = "bundled-fonts")]
     fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_be_bytes([
             bytes[offset],
@@ -263,6 +269,7 @@ mod tests {
     ///
     /// Returns an empty `Vec` for a font with no `fvar` table (i.e. a static,
     /// non-variable font) rather than panicking.
+    #[cfg(feature = "bundled-fonts")]
     fn fvar_axis_tags(bytes: &[u8]) -> Vec<[u8; 4]> {
         let num_tables = read_u16(bytes, 4) as usize;
         let mut fvar_offset = None;
@@ -304,6 +311,7 @@ mod tests {
     /// module): `font_data`'s own doc comment documents the array's fixed
     /// order as "Inter Variable, then JetBrains Mono Variable", so `[0]` is
     /// Inter by that public contract, not an incidental array position.
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn inter_is_a_wght_only_instance() {
         let bytes = crate::font_data()[0];
@@ -320,6 +328,7 @@ mod tests {
     /// so a regression to the full variable font fails this test instead of
     /// silently landing in a release build. See `inter_is_a_wght_only_instance`
     /// for why `[0]` is Inter.
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn inter_is_smaller_than_the_upstream_variable_font() {
         let bytes = crate::font_data()[0];

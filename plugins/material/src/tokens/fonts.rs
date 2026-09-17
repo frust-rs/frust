@@ -34,9 +34,10 @@
 //! stack ever starts requesting one of those axes, e.g. an optical-size
 //! (`opsz`) or width (`wdth`) style property.
 //!
-//! The bytes are compiled in **unconditionally**: depending on this plugin at
-//! all is the Material opt-in, so there is no second feature to switch the faces
-//! off with (the `frust-glyph` and `frust-shadcn` precedent).
+//! The bytes are gated behind the crate's `bundled-fonts` feature (default
+//! on): with it off, [`font_data`] returns an empty slice and neither face is
+//! compiled into the binary, so an app that ships its own fonts or accepts
+//! the platform's system sans can drop the bundled bytes entirely.
 //!
 //! This module stays pure-data: [`font_data`] only returns bytes. Registering
 //! them into a live `TextContext` (and forcing the relayout
@@ -47,9 +48,11 @@
 /// Roboto Flex Variable, upright (font version `3.200;gftools[0.9.32]`,
 /// OFL-1.1, © 2017 The Roboto Flex Project Authors). See
 /// `fonts/roboto-flex/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const ROBOTO_FLEX_VARIABLE: &[u8] = include_bytes!("../../fonts/roboto-flex/RobotoFlex.ttf");
 /// Roboto Mono Variable, upright (Google Fonts, OFL-1.1). See
 /// `fonts/roboto-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const ROBOTO_MONO_VARIABLE: &[u8] = include_bytes!("../../fonts/roboto-mono/RobotoMono.ttf");
 
 /// Index of the Roboto Flex face in [`font_data`]'s array — the face
@@ -74,11 +77,22 @@ pub const ROBOTO_MONO_VARIABLE_INDEX: usize = 1;
 ///
 /// The two `*_INDEX` constants above are the one place this order is
 /// load-bearing; keep them in step with the array literal below.
+///
+/// Returns an empty slice with the `bundled-fonts` feature off — see the
+/// module doc.
+#[cfg(feature = "bundled-fonts")]
 pub fn font_data() -> &'static [&'static [u8]] {
     &[ROBOTO_FLEX_VARIABLE, ROBOTO_MONO_VARIABLE]
 }
 
-#[cfg(test)]
+/// See the feature-on [`font_data`] above; with `bundled-fonts` off there are
+/// no bytes to hand out.
+#[cfg(not(feature = "bundled-fonts"))]
+pub fn font_data() -> &'static [&'static [u8]] {
+    &[]
+}
+
+#[cfg(all(test, feature = "bundled-fonts"))]
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
@@ -162,5 +176,16 @@ mod tests {
                 "face {i} must be the same `&'static [u8]` on every call"
             );
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "bundled-fonts")))]
+mod no_bundled_fonts_tests {
+    /// With `bundled-fonts` off, `font_data()` must hand out nothing rather
+    /// than fail to build — `install()`/`native_typefaces()` then register no
+    /// face, so typography falls back to whatever fontique resolves.
+    #[test]
+    fn font_data_is_empty_without_the_feature() {
+        assert!(super::font_data().is_empty());
     }
 }

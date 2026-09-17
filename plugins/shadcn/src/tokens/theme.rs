@@ -389,6 +389,7 @@ pub fn theme_taupe() -> Theme {
 #[cfg(test)]
 mod tests {
     use super::super::extension::{RADIUS_BASE, ShadcnRadius};
+    #[cfg(feature = "bundled-fonts")]
     use super::super::fonts::JETBRAINS_MONO_VARIABLE_INDEX;
     use super::*;
     use frust::authoring::text::FamilyName;
@@ -620,6 +621,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn native_typefaces_bind_the_bundled_inter_bytes_by_identity() {
         // The native publish guard de-duplicates by pointer/length, so the

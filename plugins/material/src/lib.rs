@@ -451,6 +451,7 @@ mod baseline_tests {
     }
 
     /// Verify that font_data() returns non-empty bytes and basic TTF magic.
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn font_bytes_are_non_empty_and_sniff_as_ttf() {
         let fonts = crate::tokens::font_data();
@@ -471,11 +472,13 @@ mod baseline_tests {
     }
 
     /// Read a big-endian `u16` out of an sfnt-family byte slice at `offset`.
+    #[cfg(feature = "bundled-fonts")]
     fn read_u16(bytes: &[u8], offset: usize) -> u16 {
         u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
     }
 
     /// Read a big-endian `u32` out of an sfnt-family byte slice at `offset`.
+    #[cfg(feature = "bundled-fonts")]
     fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_be_bytes([
             bytes[offset],
@@ -495,6 +498,7 @@ mod baseline_tests {
     ///
     /// Returns an empty `Vec` for a font with no `fvar` table (i.e. a static,
     /// non-variable font) rather than panicking.
+    #[cfg(feature = "bundled-fonts")]
     fn fvar_axis_tags(bytes: &[u8]) -> Vec<[u8; 4]> {
         let num_tables = read_u16(bytes, 4) as usize;
         let mut fvar_offset = None;
@@ -536,6 +540,7 @@ mod baseline_tests {
     /// `font_data`'s own doc comment documents the array's fixed order as
     /// "Roboto Flex Variable, then Roboto Mono Variable", so `[0]` is Roboto
     /// Flex by that public contract, not an incidental array position.
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn roboto_flex_is_a_wght_only_instance() {
         let bytes = crate::tokens::font_data()[0];
@@ -552,6 +557,7 @@ mod baseline_tests {
     /// font, so a regression to the full variable font fails this test
     /// instead of silently landing in a release build. See
     /// `roboto_flex_is_a_wght_only_instance` for why `[0]` is Roboto Flex.
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn roboto_flex_is_smaller_than_the_upstream_variable_font() {
         let bytes = crate::tokens::font_data()[0];

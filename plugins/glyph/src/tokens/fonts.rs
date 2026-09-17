@@ -12,9 +12,11 @@
 //! and license-inclusion terms. Neither font's reserved name ("Space Mono",
 //! "Plex") is modified here; this module ships the upstream bytes unmodified.
 //!
-//! The bytes are compiled in **unconditionally**: depending on this plugin at
-//! all is the Glyph opt-in, so there is no second feature to switch the faces
-//! off with (the in-tree catalog's `glyph-fonts` gate has no counterpart here).
+//! The bytes are gated behind the crate's `bundled-fonts` feature (default
+//! on): with it off, [`font_data`] returns an empty slice and none of the
+//! seven faces are compiled into the binary, so an app that ships its own
+//! fonts or accepts the platform's system monospace can drop the bundled
+//! bytes entirely.
 //!
 //! This module stays pure-data: [`font_data`] only returns bytes. Registering
 //! them into a live `TextContext` (and forcing the relayout
@@ -53,22 +55,29 @@
 //! regression rather than for a comparably-italic synthesized substitute.
 
 /// Space Mono Regular (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const SPACE_MONO_REGULAR: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Regular.ttf");
 /// Space Mono Bold (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const SPACE_MONO_BOLD: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Bold.ttf");
 /// Space Mono Italic (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const SPACE_MONO_ITALIC: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Italic.ttf");
 
 /// IBM Plex Mono Regular (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_REGULAR: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf");
 /// IBM Plex Mono Medium (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_MEDIUM: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf");
 /// IBM Plex Mono SemiBold (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_SEMIBOLD: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-SemiBold.ttf");
 /// IBM Plex Mono Italic (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_ITALIC: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-Italic.ttf");
 
@@ -89,6 +98,10 @@ pub(crate) const IBM_PLEX_MONO_REGULAR_INDEX: usize = 3;
 ///
 /// The two `*_INDEX` constants above are the one place this order is load-
 /// bearing; keep them in step with the array literal below.
+///
+/// Returns an empty slice with the `bundled-fonts` feature off — see the
+/// module doc.
+#[cfg(feature = "bundled-fonts")]
 pub fn font_data() -> &'static [&'static [u8]] {
     &[
         SPACE_MONO_REGULAR,
@@ -101,7 +114,14 @@ pub fn font_data() -> &'static [&'static [u8]] {
     ]
 }
 
-#[cfg(test)]
+/// See the feature-on [`font_data`] above; with `bundled-fonts` off there are
+/// no bytes to hand out.
+#[cfg(not(feature = "bundled-fonts"))]
+pub fn font_data() -> &'static [&'static [u8]] {
+    &[]
+}
+
+#[cfg(all(test, feature = "bundled-fonts"))]
 mod tests {
     use super::font_data;
     use frust::authoring::text::{FontFamily, FontStyle, TextContext, TextStyle};
@@ -231,5 +251,16 @@ mod tests {
                 "face {i} must be the same `&'static [u8]` on every call"
             );
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "bundled-fonts")))]
+mod no_bundled_fonts_tests {
+    /// With `bundled-fonts` off, `font_data()` must hand out nothing rather
+    /// than fail to build — `install()`/`native_typefaces()` then register no
+    /// face, so typography falls back to whatever fontique resolves.
+    #[test]
+    fn font_data_is_empty_without_the_feature() {
+        assert!(super::font_data().is_empty());
     }
 }
