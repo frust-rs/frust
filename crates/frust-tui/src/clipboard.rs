@@ -21,10 +21,30 @@
 //! The TUI runs in raw mode for its entire life, so nothing here ever prints
 //! to stdout/stderr outside of the OSC 52 escape sequence itself — a failure
 //! is reported only through the returned [`Result`], which the runner turns
-//! into a toast (see [`super::engine::Message::Notify`]).
+//! into a toast (see [`super::engine::Message::Notify`]). A success still
+//! carries a [`CopyOutcome`], so the runner can toast when an oversized OSC 52
+//! payload was silently shortened instead of failing outright.
+//!
+//! Two hardening details, both answering deferred review minors:
+//!
+//! - [`write_system`]'s detached `arboard` thread can outlive the
+//!   [`SYSTEM_CLIPBOARD_TIMEOUT`] wait (a wedged X11 selection owner can take
+//!   far longer than 2s to unwedge). Without a cancellation signal, that
+//!   stale thread can call `set_text` long after the caller gave up and
+//!   already fell back to OSC 52 — silently clobbering whatever the user
+//!   copied next with the abandoned, stale payload. An `Arc<AtomicBool>`
+//!   "still wanted" flag closes that window: the caller clears it the moment
+//!   it times out, and the thread checks it immediately before `set_text`,
+//!   dropping the payload instead of applying it once abandoned.
+//! - [`write_osc52`] caps the raw payload at [`OSC52_MAX_BYTES`] so a huge
+//!   paste cannot blow past what real terminals accept for one control
+//!   sequence; an oversized payload is truncated at a char boundary and
+//!   reported back as [`CopyOutcome::Truncated`] rather than silently losing
+//!   data or failing outright.
 
 use std::io::Write;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 /// How the runner should pick a clipboard backend, from the `FRUST_TUI_CLIPBOARD`
@@ -148,6 +168,21 @@ pub fn detect(
 /// here does not kill it, it simply stops blocking the caller on it.
 const SYSTEM_CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// What [`write`] actually did with the requested text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyOutcome {
+    /// The whole text was copied unchanged.
+    Complete,
+    /// The text exceeded [`OSC52_MAX_BYTES`] and was truncated to `kept_bytes`
+    /// before copying — OSC 52 only, since the OS clipboard has no such
+    /// limit. The caller should toast this rather than treat it as silent
+    /// success.
+    Truncated {
+        /// How many bytes of the original (UTF-8) text were actually copied.
+        kept_bytes: usize,
+    },
+}
+
 /// Write `text` to the clipboard [`detect`] chose.
 ///
 /// Never blocks the caller longer than [`SYSTEM_CLIPBOARD_TIMEOUT`] even when
@@ -156,53 +191,156 @@ const SYSTEM_CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// `arboard::Clipboard` on a detached `std::thread`, and this call abandons
 /// the wait — falling back to a plain OSC 52 write on the same (calling)
 /// thread — the moment either the timeout elapses or the thread itself
-/// reports failure.
+/// reports failure. The abandoned thread is signalled to drop its payload
+/// rather than apply it late (see [`write_system`]'s doc), so it can never
+/// clobber a clipboard write that happened after the fallback.
 ///
 /// The TUI runs in raw mode for its whole life: this function and everything
 /// it calls must never `println!`/`eprintln!`. A failure is reported only
-/// through the returned `Err`, which the caller turns into a toast.
-pub fn write(backend: Backend, text: &str) -> Result<(), String> {
+/// through the returned `Err`; a success carries a [`CopyOutcome`] so the
+/// caller can toast a truncation. Both are turned into a toast by the caller.
+pub fn write(backend: Backend, text: &str) -> Result<CopyOutcome, String> {
     match backend {
         Backend::Disabled { reason } => Err(reason.to_string()),
         Backend::Osc52 { screen } => write_osc52(text, screen),
-        Backend::System => write_system(text).or_else(|_| write_osc52(text, false)),
+        Backend::System => write_system(text)
+            .map(|()| CopyOutcome::Complete)
+            .or_else(|_| write_osc52(text, false)),
     }
 }
 
 /// [`Backend::System`]'s half of [`write`]: construct `arboard::Clipboard`
 /// and set `text` on a detached thread, waiting at most
 /// [`SYSTEM_CLIPBOARD_TIMEOUT`].
+///
+/// The thread and the caller share a "still wanted" flag: `write_system`
+/// clears it the instant the wait times out (before falling back to OSC 52),
+/// and the thread checks it immediately before calling `set_text`, dropping
+/// the payload rather than applying it if the flag is already clear. Without
+/// this, a `Clipboard::new()`/`set_text` pair that is still wedged past the
+/// timeout can complete arbitrarily late and silently overwrite whatever a
+/// later, successful copy already placed on the clipboard.
 fn write_system(text: &str) -> Result<(), String> {
+    write_system_with(text, SYSTEM_CLIPBOARD_TIMEOUT, |owned, still_wanted| {
+        arboard::Clipboard::new()
+            .and_then(|mut clipboard| {
+                if still_wanted.load(Ordering::Acquire) {
+                    clipboard.set_text(owned)
+                } else {
+                    // Abandoned: the caller already timed out and fell back
+                    // to OSC 52. Applying this payload now would clobber
+                    // whatever the clipboard holds since then.
+                    Ok(())
+                }
+            })
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// The cancellable-thread protocol behind [`write_system`], generic over the
+/// actual write so tests can inject a fake slow writer instead of touching
+/// the real OS clipboard.
+///
+/// Spawns a detached thread running `write_fn(text, still_wanted)`, waits at
+/// most `timeout` for it to report a result, and on timeout clears
+/// `still_wanted` before returning the timeout error — `write_fn` is
+/// responsible for checking the flag immediately before performing its
+/// side effect and skipping it once cleared.
+fn write_system_with(
+    text: &str,
+    timeout: Duration,
+    write_fn: impl FnOnce(String, &AtomicBool) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
     let (done_tx, done_rx) = mpsc::channel();
     let owned = text.to_string();
+    let still_wanted = Arc::new(AtomicBool::new(true));
+    let thread_wanted = Arc::clone(&still_wanted);
     // Deliberately detached (not joined): a wedged clipboard mechanism must
     // never hang the caller, and joining would do exactly that. The thread
     // sending into a channel nobody is listening to any more once this
     // function has already timed out and returned is harmless — `send`
     // simply reports the (ignored) disconnect.
     std::thread::spawn(move || {
-        let result = arboard::Clipboard::new()
-            .and_then(|mut clipboard| clipboard.set_text(owned))
-            .map_err(|e| e.to_string());
+        let result = write_fn(owned, &thread_wanted);
         let _ = done_tx.send(result);
     });
-    match done_rx.recv_timeout(SYSTEM_CLIPBOARD_TIMEOUT) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("system clipboard timed out".to_string()),
+    match done_rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => {
+            still_wanted.store(false, Ordering::Release);
+            Err("system clipboard timed out".to_string())
+        }
     }
 }
 
+/// Maximum raw (pre-base64) text bytes an OSC 52 write accepts before
+/// truncating.
+///
+/// fdemon (`fdemon-app::services::clipboard::osc52::MAX_TEXT_BYTES`) caps
+/// this at 74_994 bytes, derived so the whole *encoded* control sequence
+/// (base64 expands ~4/3, plus the 7-byte header and 1-byte BEL) stays under
+/// xterm's 100_000-byte limit on one OSC 52 sequence. This cap is applied to
+/// the raw payload directly instead, at a round 100_000 bytes — a looser
+/// bound chosen for simplicity, since the cap here exists to bound an
+/// egregious paste rather than to hit xterm's figure exactly; terminals
+/// tolerate the resulting encoded sequence running somewhat past 100_000
+/// bytes for payloads near the cap.
+pub const OSC52_MAX_BYTES: usize = 100_000;
+
+/// Bound a single `write_all` call to this many bytes at a time when writing
+/// the OSC 52 sequence to stdout — see [`write_osc52`]'s doc for why.
+const OSC52_WRITE_CHUNK_BYTES: usize = 4096;
+
 /// [`Backend::Osc52`]'s half of [`write`]: emit `ESC ] 52 ; c ; <base64> BEL`
-/// to stdout — the same fd the TUI renders to — flushed immediately, DCS-chunked
-/// in 76-byte pieces when `screen` (GNU screen does not understand OSC 52 but
-/// passes DCS contents through unchanged).
-fn write_osc52(text: &str, screen: bool) -> Result<(), String> {
-    let seq = osc52_sequence(text, screen);
+/// to stdout — the same fd the TUI renders to — DCS-chunked in 76-byte pieces
+/// when `screen` (GNU screen does not understand OSC 52 but passes DCS
+/// contents through unchanged). `text` is truncated to [`OSC52_MAX_BYTES`]
+/// first when oversized; the result reports that as [`CopyOutcome::Truncated`]
+/// rather than failing.
+///
+/// This write stays synchronous on the calling thread rather than moving to
+/// a detached thread the way [`write_system`] does. `crate::runner` applies
+/// effects and calls `terminal.draw()` from the same event-loop iteration
+/// with nothing else concurrently touching stdout, so a synchronous write
+/// here is already ordered against every frame — a detached thread would
+/// give up that guarantee: the next `terminal.draw()` could run on another
+/// OS thread microseconds later, and a payload near the cap needs more than
+/// one `write()` syscall to land (typical pipe/tty buffers are far smaller
+/// than 100_000 bytes), so its later syscalls could interleave with a
+/// concurrently-running frame flush on the same fd with no lock between
+/// them. `write_system`'s OS-clipboard call carries no such risk (`arboard`
+/// never touches stdout) and can genuinely hang for seconds, which is why
+/// only that half moved off-thread. Writing in bounded
+/// [`OSC52_WRITE_CHUNK_BYTES`]-sized pieces here (rather than one call for
+/// the whole buffer) keeps each individual `write_all` short without
+/// weakening that ordering guarantee, since every chunk still lands before
+/// this function returns.
+fn write_osc52(text: &str, screen: bool) -> Result<CopyOutcome, String> {
+    let (payload, outcome) = truncate_to_osc52_cap(text);
+    let seq = osc52_sequence(payload, screen);
     let mut out = std::io::stdout();
-    out.write_all(&seq)
-        .and_then(|_| out.flush())
-        .map_err(|e| format!("OSC 52 clipboard write failed: {e}"))
+    for chunk in seq.chunks(OSC52_WRITE_CHUNK_BYTES) {
+        out.write_all(chunk)
+            .map_err(|e| format!("OSC 52 clipboard write failed: {e}"))?;
+    }
+    out.flush()
+        .map_err(|e| format!("OSC 52 clipboard write failed: {e}"))?;
+    Ok(outcome)
+}
+
+/// Truncate `text` to at most [`OSC52_MAX_BYTES`], backing up to a char
+/// boundary, and report whether truncation happened.
+fn truncate_to_osc52_cap(text: &str) -> (&str, CopyOutcome) {
+    if text.len() <= OSC52_MAX_BYTES {
+        return (text, CopyOutcome::Complete);
+    }
+    // Cannot underflow: byte 0 is always a char boundary (and a UTF-8 char
+    // spans at most 4 bytes, so this backs up at most 3).
+    let mut end = OSC52_MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], CopyOutcome::Truncated { kept_bytes: end })
 }
 
 /// DCS chunk payload size used for GNU screen wrapping (matches go-osc52 and
@@ -471,6 +609,135 @@ mod tests {
         assert_eq!(base64_encode(b"a"), "YQ==");
         assert_eq!(base64_encode(b"ab"), "YWI=");
         assert_eq!(base64_encode(b"abc"), "YWJj");
+    }
+
+    // ─── OSC 52 payload cap ──────────────────────────────────────────────
+
+    #[test]
+    fn cap_boundary_below_limit_is_unchanged() {
+        let text = "a".repeat(OSC52_MAX_BYTES - 1);
+        let (payload, outcome) = truncate_to_osc52_cap(&text);
+        assert_eq!(payload.len(), OSC52_MAX_BYTES - 1);
+        assert_eq!(outcome, CopyOutcome::Complete);
+    }
+
+    #[test]
+    fn cap_boundary_at_limit_is_unchanged() {
+        let text = "a".repeat(OSC52_MAX_BYTES);
+        let (payload, outcome) = truncate_to_osc52_cap(&text);
+        assert_eq!(payload.len(), OSC52_MAX_BYTES);
+        assert_eq!(outcome, CopyOutcome::Complete);
+    }
+
+    #[test]
+    fn cap_boundary_above_limit_truncates() {
+        let text = "a".repeat(OSC52_MAX_BYTES + 1000);
+        let (payload, outcome) = truncate_to_osc52_cap(&text);
+        assert_eq!(payload.len(), OSC52_MAX_BYTES);
+        assert_eq!(
+            outcome,
+            CopyOutcome::Truncated {
+                kept_bytes: OSC52_MAX_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn cap_truncation_backs_up_to_a_char_boundary() {
+        // Fill so a 4-byte emoji straddles the cap.
+        let mut text = "a".repeat(OSC52_MAX_BYTES - 2);
+        text.push('🦀'); // 4 bytes, crosses OSC52_MAX_BYTES
+        text.push_str(&"b".repeat(100));
+        let (payload, outcome) = truncate_to_osc52_cap(&text);
+        assert!(payload.len() <= OSC52_MAX_BYTES);
+        assert_eq!(payload.len(), OSC52_MAX_BYTES - 2);
+        assert!(payload.is_char_boundary(payload.len()));
+        assert_eq!(
+            outcome,
+            CopyOutcome::Truncated {
+                kept_bytes: OSC52_MAX_BYTES - 2
+            }
+        );
+    }
+
+    #[test]
+    fn write_osc52_reports_truncated_outcome_for_oversized_text() {
+        let text = "a".repeat(OSC52_MAX_BYTES + 1000);
+        let outcome = write_osc52(&text, false).unwrap();
+        assert_eq!(
+            outcome,
+            CopyOutcome::Truncated {
+                kept_bytes: OSC52_MAX_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn write_osc52_reports_complete_for_text_within_the_cap() {
+        let outcome = write_osc52("hello", false).unwrap();
+        assert_eq!(outcome, CopyOutcome::Complete);
+    }
+
+    // ─── write_system cancellation protocol ─────────────────────────────
+
+    #[test]
+    fn abandoned_write_is_not_applied_after_timeout() {
+        let applied = Arc::new(AtomicBool::new(false));
+        let inner_applied = Arc::clone(&applied);
+        let done = Arc::new(AtomicBool::new(false));
+        let inner_done = Arc::clone(&done);
+        let result = write_system_with(
+            "text",
+            Duration::from_millis(20),
+            move |_owned, still_wanted| {
+                // Simulate a wedged clipboard mechanism: sleep well past the
+                // caller's timeout before checking whether it's still wanted.
+                std::thread::sleep(Duration::from_millis(150));
+                if still_wanted.load(Ordering::Acquire) {
+                    inner_applied.store(true, Ordering::Release);
+                }
+                inner_done.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("system clipboard timed out".to_string()));
+
+        // Wait for the detached thread to actually run its check.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(done.load(Ordering::Acquire), "writer thread never ran");
+        assert!(
+            !applied.load(Ordering::Acquire),
+            "abandoned write must not be applied once the caller gave up"
+        );
+    }
+
+    #[test]
+    fn write_within_timeout_is_applied_and_succeeds() {
+        let applied = Arc::new(AtomicBool::new(false));
+        let inner_applied = Arc::clone(&applied);
+        let result = write_system_with(
+            "text",
+            Duration::from_secs(1),
+            move |_owned, still_wanted| {
+                if still_wanted.load(Ordering::Acquire) {
+                    inner_applied.store(true, Ordering::Release);
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert!(applied.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn write_system_with_propagates_the_writer_error() {
+        let result = write_system_with("text", Duration::from_secs(1), |_owned, _still_wanted| {
+            Err("boom".to_string())
+        });
+        assert_eq!(result, Err("boom".to_string()));
     }
 
     // ─── write() ─────────────────────────────────────────────────────────

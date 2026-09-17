@@ -465,14 +465,21 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
     } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
-        Some(Effect::Copy(text)) => {
-            if let Err(reason) = clipboard::write(*clipboard_backend, &text) {
+        Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
+            Ok(clipboard::CopyOutcome::Complete) => {}
+            Ok(clipboard::CopyOutcome::Truncated { kept_bytes }) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Info,
+                    text: format!("Copied (shortened to {} KB)", kept_bytes / 1024),
+                });
+            }
+            Err(reason) => {
                 let _ = tx.send(Message::Notify {
                     level: ToastKind::Warn,
                     text: format!("Copy failed: {reason}"),
                 });
             }
-        }
+        },
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
         Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
