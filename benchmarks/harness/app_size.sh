@@ -8,19 +8,43 @@
 # iOS release .app bundle size, for both benchmarks/frust_bench and
 # benchmarks/flutter_bench.
 #
-# Usage: benchmarks/harness/app_size.sh
+# Usage: benchmarks/harness/app_size.sh [--attribute <unstripped.so> [size_attribute.py args...]]
 #
 # This script never builds anything — it only measures whatever release
 # artifacts already exist on disk. A missing artifact degrades to a printed
 # "not built" note (with the command that would produce it), never a
 # failure; the only non-zero exit is a bad invocation (unexpected argument).
+#
+# --attribute <unstripped.so>  After the size tables below, additionally
+#   shell out to benchmarks/harness/size_attribute.py on the given unstripped
+#   .so for a per-crate / per-ELF-section breakdown. Any further arguments
+#   are forwarded verbatim to size_attribute.py (e.g. --nm-dir, --compare).
+#   This still never builds the .so — see size_attribute.py's own header for
+#   the NDK invocation that produces one.
 
 set -uo pipefail
 
-if [ $# -gt 0 ]; then
-  echo "error: app_size.sh takes no arguments" >&2
-  exit 2
-fi
+ATTRIBUTE_SO=""
+declare -a ATTRIBUTE_EXTRA_ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --attribute)
+      [ $# -ge 2 ] || { echo "error: --attribute requires a path argument" >&2; exit 2; }
+      ATTRIBUTE_SO="$2"
+      shift 2
+      ;;
+    *)
+      if [ -n "${ATTRIBUTE_SO}" ]; then
+        ATTRIBUTE_EXTRA_ARGS+=("$1")
+        shift
+      else
+        echo "error: unrecognized argument '$1'" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
@@ -157,5 +181,14 @@ if [ ! -d "${FLUTTER_IOS_RELEASE}" ]; then
   report_app_bundle "profile Runner.app (config differs — not release)" "${FLUTTER_IOS_PROFILE}"
 fi
 echo
+
+# --- Optional per-crate/section attribution -----------------------------
+
+if [ -n "${ATTRIBUTE_SO}" ]; then
+  echo "-- Size attribution (${ATTRIBUTE_SO}) --"
+  echo
+  python3 "${SCRIPT_DIR}/size_attribute.py" "${ATTRIBUTE_SO}" ${ATTRIBUTE_EXTRA_ARGS[@]+"${ATTRIBUTE_EXTRA_ARGS[@]}"}
+  echo
+fi
 
 echo "== End of report =="

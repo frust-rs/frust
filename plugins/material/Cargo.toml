@@ -22,6 +22,17 @@ frust = { path = "../../crates/frust", default-features = false }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 
+[features]
+default = ["bundled-fonts"]
+# Roboto Flex + Roboto Mono, compiled in via `include_bytes!`. An app that
+# ships its own fonts or is content with the platform's system sans (Roboto
+# on Android, San Francisco on iOS, via fontique's system-font discovery) can
+# turn this off to drop the bundled bytes from its binary; `font_data()`
+# returns an empty slice and `install()`/`native_typefaces()` register
+# nothing, so the type scale's named families fall back to whatever fontique
+# resolves for them. Default on: unchanged out-of-the-box behavior.
+bundled-fonts = []
+
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
 # `test-support` compiles `PaintCtx::for_test` (a `FrameTime`-seeded `PaintCtx`

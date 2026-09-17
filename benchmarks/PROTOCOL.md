@@ -1105,3 +1105,61 @@ template this protocol feeds. Every published number must:
 
 Losses are reported the same as wins — a scenario where Flutter measures
 better is published in `RESULTS.md`, not omitted.
+
+## 11. App size (release) — method
+
+`benchmarks/harness/app_size.sh` measures release-artifact sizes for both
+apps: the Android release APK (universal + arm64-v8a split, with a per-ABI
+`.so`/dex breakdown for Frust's APK via `unzip -l` — the
+`scripts/size-report.sh` technique) and the iOS release `.app` bundle size
+(`du -sk`). It never builds anything — a missing artifact degrades to a
+printed "not built" note naming the command that would produce it. Frust is
+measured on both axes of its `db` feature (on by default; off via
+`--no-default-features --features lean`), since that axis is a real size
+lever and both columns belong in `RESULTS.md`'s App-size table.
+
+**Per-crate / per-section attribution.** `app_size.sh`'s whole-artifact
+numbers say *how big*; `benchmarks/harness/size_attribute.py` says *where the
+bytes went*, from an UNSTRIPPED build of the same arm64-v8a target:
+
+```
+(cd benchmarks/frust_bench && CARGO_PROFILE_RELEASE_STRIP=false \
+  cargo ndk -t arm64-v8a build --release --no-default-features --features lean)
+benchmarks/harness/size_attribute.py <path to the unstripped .so>
+```
+
+(`frust build` has no `--no-default-features` knob, so the direct `cargo ndk`
+invocation above is the route to an unstripped lean release `.so`; the
+release profile's own `strip = "symbols"` is what the shipped, distributed
+artifact uses instead — the unstripped build is a measurement artifact only,
+never distributed, the same rule `docs/DEVELOPMENT.md` states for the no-`db`
+size-matrix APK.) The script shells out to the Android NDK's `llvm-readelf`
+and `llvm-nm` (located via `ANDROID_NDK_HOME`, an `ANDROID_HOME`/
+`ANDROID_SDK_ROOT` `ndk/` probe, or an explicit `--nm-dir`) to report:
+
+- ELF section sizes (`.text`, `.rodata`, `.eh_frame`, `.rela.dyn`,
+  `.data.rel.ro`);
+- symbol bytes bucketed by crate/family (`llvm-nm --print-size --demangle`,
+  covering both legacy and `v0` Rust mangling, plus C-prefix families for
+  bundled C libraries such as `sqlite3`/`png`/`zlib`, with an `anon.` bucket
+  for symbols no crate can be recovered from);
+- a `.rodata` accounting: named data-symbol bytes, printable strings (≥ 12
+  chars) split into `wgsl` / `source_paths` / `panic_messages` / `other`, and
+  any embedded `sfnt` font blobs (detected by parsing their table directory)
+  with their byte length.
+
+`--compare <other.so>` attributes a second `.so` and prints the per-family
+byte delta against it (the `db`-on-vs-off comparison in `RESULTS.md`'s
+App-size section was produced this way). `app_size.sh --attribute
+<unstripped.so>` runs the attribution after the size tables above, in the
+same invocation; it accepts the same extra flags (`--nm-dir`, `--compare`)
+verbatim.
+
+**Size claims must name the section and crate family they came from.** "The
+shader stack is large" is not a publishable claim; "`naga` is ~0.9 MiB across
+`.text`+`.rodata`" is — every size figure in `RESULTS.md` traces back to a row
+in this attribution output (or the whole-artifact tables above), not to an ad
+hoc measurement redone by hand each time. `RESULTS.md`'s App-size section
+also carries a per-lever table, one row per landed size change; sizes there
+are always re-measured against the change's own base, never derived by
+subtracting one pass's total from another's.

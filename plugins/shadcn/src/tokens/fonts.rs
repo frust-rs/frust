@@ -15,12 +15,43 @@
 //! sizes) is recorded in `plugins/shadcn/fonts/README.md`, alongside the full
 //! OFL-1.1 license text for each family (`fonts/inter/OFL.txt`,
 //! `fonts/jetbrains-mono/OFL.txt`) — required by the license's
-//! license-inclusion term. Neither family declares a Reserved Font Name, and
-//! this module ships the upstream bytes unmodified under the upstream names.
+//! license-inclusion term. Neither family declares a Reserved Font Name.
 //!
-//! The bytes are compiled in **unconditionally**: depending on this plugin at
-//! all is the shadcn opt-in, so there is no second feature to switch the faces
-//! off with (the `frust-glyph` precedent).
+//! JetBrains Mono ships the upstream bytes unmodified under its upstream
+//! name. **Inter does not**: it is a `wght`-only static-axis instance of the
+//! upstream `opsz`+`wght` variable font, produced with
+//! `scripts/fonts/instance_variable_font.py` (fontTools `varLib.instancer`,
+//! fontTools 4.63.0). `crates/frust-text` only ever drives
+//! `StyleProperty::FontWeight`/`FontStyle` on a shaped run — no component
+//! anywhere requests `opsz` — so Inter's optical-size axis always rendered at
+//! its own default position (`opsz` = 14, its `fvar`-declared minimum and
+//! default) anyway. Pinning `opsz` there and keeping only `wght` variable
+//! drops its `gvar` deltas with no visual change and no glyph dropped (all
+//! 2,937 glyphs kept; no subsetting). The vendored OFL-1.1 license text
+//! (`fonts/inter/OFL.txt`) ships unchanged, and this instance declares no
+//! Reserved Font Name, the same as upstream.
+//!
+//! ### Modification record — Inter Variable
+//!
+//! - **Upstream SHA-256** (pre-instancing, `v4.1` release asset, 879,708 B):
+//!   `4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf`
+//! - **Instanced SHA-256** (the bytes actually vendored, 636,684 B):
+//!   `67ca63c5f8c1f2d04fe111e39501b4ae0783ee78a92246f2b210f32d9448dd2e`
+//! - **Command**: `python3 scripts/fonts/instance_variable_font.py
+//!   plugins/shadcn/fonts/inter/InterVariable.ttf
+//!   plugins/shadcn/fonts/inter/InterVariable.ttf --keep wght`
+//! - **Date**: 2026-09-17
+//! - **Remaining axis**: `wght` (100–900), default 400 — unchanged from
+//!   upstream
+//! - **Regenerate when**: the text stack starts driving `opsz` (or any other
+//!   axis) — re-download the upstream `v4.1` variable font and re-run the
+//!   command above with an additional `--keep <axis>` per axis that must stay
+//!   variable.
+//!
+//! The bytes are gated behind the crate's `bundled-fonts` feature (default
+//! on): with it off, [`font_data`] returns an empty slice and neither face is
+//! compiled into the binary, so an app that ships its own fonts or accepts
+//! the platform's system sans can drop the bundled bytes entirely.
 //!
 //! This module stays pure-data: [`font_data`] only returns bytes. Registering
 //! them into a live `TextContext` (and forcing the relayout
@@ -30,9 +61,11 @@
 
 /// Inter Variable, upright (rsms/inter `v4.1`, OFL-1.1). See
 /// `fonts/inter/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const INTER_VARIABLE: &[u8] = include_bytes!("../../fonts/inter/InterVariable.ttf");
 /// JetBrains Mono Variable, upright (JetBrains `v2.304`, OFL-1.1). See
 /// `fonts/jetbrains-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const JETBRAINS_MONO_VARIABLE: &[u8] =
     include_bytes!("../../fonts/jetbrains-mono/JetBrainsMono-Variable.ttf");
 
@@ -57,11 +90,22 @@ pub const JETBRAINS_MONO_VARIABLE_INDEX: usize = 1;
 ///
 /// The two `*_INDEX` constants above are the one place this order is
 /// load-bearing; keep them in step with the array literal below.
+///
+/// Returns an empty slice with the `bundled-fonts` feature off — see the
+/// module doc.
+#[cfg(feature = "bundled-fonts")]
 pub fn font_data() -> &'static [&'static [u8]] {
     &[INTER_VARIABLE, JETBRAINS_MONO_VARIABLE]
 }
 
-#[cfg(test)]
+/// See the feature-on [`font_data`] above; with `bundled-fonts` off there are
+/// no bytes to hand out.
+#[cfg(not(feature = "bundled-fonts"))]
+pub fn font_data() -> &'static [&'static [u8]] {
+    &[]
+}
+
+#[cfg(all(test, feature = "bundled-fonts"))]
 mod tests {
     use super::*;
     use crate::tokens::theme::{INTER_FAMILY, JETBRAINS_MONO_FAMILY};
@@ -125,5 +169,16 @@ mod tests {
                 "face {i} must be the same `&'static [u8]` on every call"
             );
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "bundled-fonts")))]
+mod no_bundled_fonts_tests {
+    /// With `bundled-fonts` off, `font_data()` must hand out nothing rather
+    /// than fail to build — `install()`/`native_typefaces()` then register no
+    /// face, so typography falls back to whatever fontique resolves.
+    #[test]
+    fn font_data_is_empty_without_the_feature() {
+        assert!(super::font_data().is_empty());
     }
 }

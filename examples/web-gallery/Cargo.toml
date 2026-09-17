@@ -160,3 +160,18 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# NO `[profile.release.package.*]` overrides here, deliberately. The eight
+# manifests that build an ANDROID artifact (Frust's root `Cargo.toml`,
+# `templates/app/Cargo.toml.tmpl`, `examples/huddle`, `examples/glyph-catalog`,
+# `examples/material3-demo`, `examples/playground`, `examples/shadertoy` and
+# `benchmarks/frust_bench`) additionally carry a hand-synced cold-set
+# `opt-level = "z"` block — crates that do no per-frame work, shrunk for
+# footprint. That set was chosen against measured ARM64 device numbers; the
+# wasm target has no equivalent measurement, and a `.wasm`'s size/speed
+# tradeoff is not the same one (no ELF, a different codegen backend, and
+# browser-side streaming compilation). So this manifest mirrors
+# `[profile.release]` ONLY, and `crates/frust-cli/tests/profile_sync.rs`
+# asserts exactly that: web-gallery is in the release-block sync list and is
+# deliberately NOT in the Android package-override list. Measure before
+# copying the block here.

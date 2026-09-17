@@ -666,51 +666,62 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 
 ---
 
-## App size (release) — Frust re-measured 2026-09-06, Flutter 2026-09-05
+## App size (release) — Frust re-measured 2026-09-17, Flutter 2026-09-05
 
-Frust's rows are release builds of `21076221`; the Flutter column is the
-2026-09-05 `app_size.sh` snapshot of Flutter 3.47.2 (`flutter build apk
---release [--split-per-abi]` / `flutter build ios --release`), unchanged this
-pass and dated accordingly. The Frust Android release is signed with a
-throwaway local keystore purely to satisfy the CLI's release-signing gate;
-signing does not change the size class. Sizes are MiB alongside the exact byte
-count, which is the authoritative figure.
+Frust's rows are release builds of this checkout, rebuilt after the app-size
+plan's font/link-flag/opt-level/pin levers landed; the Flutter column is
+unchanged since the 2026-09-05 `app_size.sh` snapshot of Flutter 3.47.2
+(`flutter build apk --release [--split-per-abi]` / `flutter build ios
+--release`) and dated accordingly. This pass builds via the `cargo ndk` +
+Gradle `assembleRelease -x cargoNdkBuild` route directly (`frust build apk
+--release` refuses without release signing and has no
+`--no-default-features` knob), so no keystore is configured and Gradle falls
+back to debug signing with a warning — signing does not change the size
+class either way. Sizes are MiB alongside the exact byte count, which is the
+authoritative figure. iOS rows are the 2026-09-06 figures, unchanged and
+dated — **not re-measured this pass (no macOS host available)**.
 
 | Axis | Frust, `db` on (default) | Frust, `db` off (`--no-default-features --features lean`) | Flutter (2026-09-05) |
 |---|---|---|---|
-| Android universal release APK (3 ABIs) | **31.47 MiB** (33,002,246 B) | not built as universal | 49.36 MiB (51,762,140 B) |
-| Android arm64-v8a split APK | **10.95 MiB** (11,480,155 B) | **9.09 MiB** (9,533,659 B) | 17.45 MiB (18,295,458 B) |
-| in-APK `lib/arm64-v8a/libfrustbench.so` | 10.83 MiB (11,352,480 B) | 8.97 MiB (9,405,968 B) | 16.55 MiB (engine + app) |
-| on-disk arm64 `.so` (stripped) | 10.83 MiB (11,352,488 B) | 8.97 MiB (9,405,976 B) | n/a |
-| iOS release `.app` (`du -sk`) | **11.63 MiB** (11,908 KB) | not built | 16.64 MiB |
-| iOS `Runner` binary | 11.54 MiB (12,103,152 B) | not built | n/a |
+| Android universal release APK (3 ABIs) | **24.58 MiB** (25,775,054 B) | not built as universal | 49.36 MiB (51,762,140 B) |
+| Android arm64-v8a split APK | **8.57 MiB** (8,981,843 B) | **6.63 MiB** (6,953,291 B) | 17.45 MiB (18,295,458 B) |
+| in-APK `lib/arm64-v8a/libfrustbench.so` | 8.43 MiB (8,837,768 B) | 6.49 MiB (6,809,216 B) | 16.55 MiB (engine + app) |
+| on-disk arm64 `.so` (stripped) | 8.43 MiB (8,837,776 B) | 6.49 MiB (6,809,224 B) | n/a |
+| iOS release `.app` (`du -sk`), 2026-09-06 | 11.63 MiB (11,908 KB) | not built | 16.64 MiB |
+| iOS `Runner` binary, 2026-09-06 | 11.54 MiB (12,103,152 B) | not built | n/a |
 
-Two findings from this measurement, both about where the bytes are:
+**Per-lever contributions**, each measured on the lean arm64 release `.so` of
+its own base by the card that landed it — quoted as measured, never summed
+into a total; the totals above come only from this pass's re-measurement:
 
-- **Routing `wgpu` per target saves ~0 bytes.** Restricting each target to the
-  backends and `naga` writers it can actually use (Android → `vulkan`/`spv-out`,
-  Apple → `metal`/`msl-out`, Windows → `dx12`+`vulkan`/`hlsl-out`+`spv-out`,
-  from `dx12`+`metal`+`vulkan` everywhere) moves the universal APK by 0 bytes
-  and the arm64 `.so` by +16 B. Fat LTO with `codegen-units = 1` had already
-  dead-stripped the unreferenced writers: per-crate attribution of the
-  unstripped arm64 `.so` is byte-identical across the change — `naga` 890,515 B
-  both ways, attributed total 7,406,938 → 7,406,834 B. The change is build
-  hygiene and correctness of intent, not a size lever.
-- **The `db` feature gate is the lever.** Turning the DB scenarios off drops the
-  arm64 `.so` from 11,352,488 to 9,405,976 B (−1,946,512 B, −17.1 %) and the
-  arm64 split APK by the same −1,946,496 B (−17.0 %). Attributed symbol bytes
-  fall 7,406,834 → 5,722,214; the rows that disappear are bundled `sqlite3`
-  (671,557 B), its unmangled C helpers (951,967 B) and `rusqlite`. What remains
-  on top is led by `naga` 890,515, `core` 660,128, `wgpu_core` 550,868,
-  `harfrust` 387,678 and `skrifa` 288,148 — so the next size question is the
-  shader-translation and GPU-plumbing tier, not SQLite.
+| Lever | Base → after (B) | Δ (B) | Note |
+|---|---|---|---|
+| Material Roboto Flex wght-only instance | 9,471,648 → 7,962,896 | −1,508,752 | font file 1,684,624 → 175,900 B |
+| shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
+| Glyph italics | measured-keep | 0 | no italic subset landed |
+| `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B |
+| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); the 5 % render-CPU bar was not adjudicable on the available Pixel 5 rig (block-order drift larger than the bar), CPU-work phases flat — a controlled re-measure is owed |
+| `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | |
+| `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
+| `android_logger` regex feature off | dependency hygiene | ~0 | |
+| bundled-fonts opt-out feature | default on | 0 in these artifacts | an app opting out saves its own bundled font bytes |
 
-Frust stays the smaller artifact on every axis it shares with Flutter. Against
-the 2026-07-21 vello-era snapshot it is still larger (universal 21.25 → 31.47
-MB, arm64 `.so` 7.42 → 10.83 MiB, iOS 7.96 → 11.63 MiB), and the bench app itself
-grew between the two snapshots because the `d1`/`d2` scenarios pull in
-`frust-database` with a bundled SQLite — the `db`-off column above is the size
-of that difference, and the remainder is the open renderer-attribution question.
+**Size attribution (re-run, de-duplicated).** `size_attribute.py --nm-dir
+<ndk bin>` on this pass's unstripped lean arm64 `.so` (15,728,352 B
+unstripped; 6,812,544 B allocated/`SHF_ALLOC`): attributed total 4,623,257 B,
+led by `core` 498,008 B, `naga` 414,759 B, `harfrust` 332,786 B, `wgpu_core`
+321,020 B, `read_fonts` 313,648 B and `skrifa` 288,192 B; `sqlite3` does not
+appear (this is the `db`-off/lean build). These rows replace the previously
+published pre-dedup ones (`naga` 890,515 B, attributed total 7,406,938 →
+7,406,834 B, `core` 660,128 B, `wgpu_core` 550,868 B, `sqlite3` 671,557 B) —
+the de-duplicated tool attributes each `(address, size)` region once, so the
+old and new rows are not comparable byte-for-byte.
+
+Frust stays the smaller artifact on every axis it shares with Flutter. The
+`db` feature gate is still the largest single lever available to an app: the
+arm64 `.so` drops 8,837,776 → 6,809,224 B (−2,028,552 B, −22.9 %) with `db`
+off, on top of everything the font/link-flag/opt-level/pin levers above
+already removed from both builds.
 
 ## Renderer transition (vello → frust-engine) — regression check, 2026-09-05
 

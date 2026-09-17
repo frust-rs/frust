@@ -655,6 +655,20 @@ mod tests {
             "{gitignore}"
         );
         assert!(dest.join("assets/.gitkeep").exists());
+        // The Android link-flags file: a dot-directory manifest entry
+        // (`.cargo/config.toml`), carried verbatim so a scaffolded app
+        // inherits `--pack-dyn-relocs=android`/`--icf=all` the same way this
+        // checkout's own root file does.
+        assert!(dest.join(".cargo/config.toml").exists());
+        let cargo_config = fs::read_to_string(dest.join(".cargo/config.toml")).unwrap();
+        let root_cargo_config = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cargo/config.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            cargo_config, root_cargo_config,
+            "the scaffolded .cargo/config.toml must be byte-identical to the repo root's"
+        );
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());
 

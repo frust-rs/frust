@@ -173,10 +173,19 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), Material's bundled Roboto Flex (OFL-1.1) and
   Roboto Mono (OFL-1.1, `plugins/material/fonts/`), shadcn's bundled Inter Variable and JetBrains
   Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/shadcn/fonts/`), beUI's bundled Geist
-  Variable and Geist Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/beui/fonts/`) — each
-  registered unconditionally, not behind a feature, since none of the four crates has a feature to
-  gate them with. A call after shell construction takes effect only on a later theme reseed, which
-  may never happen.
+  Variable and Geist Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/beui/fonts/`). Glyph,
+  Material and shadcn register theirs behind a `bundled-fonts` feature (default on;
+  `default-features = false` opts an app out onto the platform's system faces and leaves the bytes
+  out of the binary), beUI unconditionally, Cupertino not at all. A call after shell construction
+  takes effect only on a later theme reseed, which may never happen.
+- **Material's Roboto Flex and shadcn's Inter ship as `wght`-only instances** of their upstream
+  variable fonts, regenerated with `scripts/fonts/instance_variable_font.py` (fontTools
+  `varLib.instancer`): `frust-text` drives only weight and style on a shaped run, so every other
+  axis always rendered at its own default position and pinning it there is visually identical —
+  provenance in `plugins/material/FONTS-LICENSE`, `plugins/shadcn/fonts/README.md` and each crate's
+  `tokens/fonts.rs`. The other bundled faces are upstream bytes unmodified. Glyph keeps its two
+  italic faces for the opposite reason: Frust never applies fontique's synthetic oblique, so an
+  italic request with no italic face would render upright with no sign italics were asked for.
 - **`frust_glyph::baseline()`, `frust_material::baseline()`, `frust_shadcn::theme()`, and
   `frust_beui::theme()` all attach the `NativeTypefaces` theme extension** — the bundled faces reach
   `frust-native-widgets`' native controls through this attach, not through any
