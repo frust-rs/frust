@@ -247,8 +247,11 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   create --platforms web` renders `templates/app/web.tmpl`, opt-in and absent from the default
   platform set. `frust doctor`'s Web heading now prints only `WebPreflight::project_rows()` — the
   project-dependent checks (manifest, host page, host-page module name, and the blocking artifact-
-  directory-safety row) — since the three host-tool rows (wasm32 target, wasm-bindgen CLI,
-  wasm-opt) already appear once, in the validator list above; the heading's rows stay purely
+  directory-safety row), plus the `wasm-bindgen CLI` row when it survives that filter — since the
+  wasm32-target and wasm-opt host-tool rows always appear once, in the validator list above, while
+  the CLI row rejoins them only when the project's own pin disagrees with the installed CLI, or the
+  CLI is absent on `PATH` while the project declares a pin of its own (the row's fix then names that
+  pin, which the host-tool validator has no project in hand to know); the heading's rows stay purely
   informational and never affect `doctor`'s exit code.
 - `tui` (explicit subcommand, or the bare-`frust` default above): `Command::Tui` hands off entirely
   to `frust-tui`'s own async runtime (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), which may in

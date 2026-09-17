@@ -159,7 +159,10 @@ server started.
   Warn toast ('<name>: already running here — stop it first') in the workbench and a typed
   `EmbeddedError::AlreadyRunning` over MCP/DAP; ad-hoc (targetless: build/clean/bootstrap-fix) and
   terminal sessions never occupy a target, and the guard is blind to build mode/flavor — only
-  project root and target identity matter.
+  project root and target identity matter. Roots are compared lexically (`Path::components`,
+  trailing separators and `.` segments ignored) rather than canonicalised, so a symlink and its
+  target, or a `..`-relative path resolving to the same place, still count as different projects and
+  can each hold their own "live" session.
 - Quit path: `Message::RequestQuit` (global `q`, the DevTools-pane `q`, Ctrl+C with no running
   session, or the palette's Quit) checks `AppState::live_session_count()`: zero live sessions quits
   immediately, otherwise `AppState.quit_confirm` opens a dialog warning that N running session(s)
@@ -172,8 +175,11 @@ server started.
   removed once its terminal-state bookkeeping (toast, DevTools disconnect, metrics stop) has run.
   Index repair on removal: the active tab if it was the removed one moves to whatever now sits at
   that index, else the previous index, else none; an index before the active one shifts the active
-  index down by one; an index after it leaves the active index unchanged. A context menu targeting
-  the closed tab is cleared; the supervisor's session map is not pruned.
+  index down by one; an index after it leaves the active index unchanged. Any open context menu is
+  closed on a session removal — not only one targeting the closed tab, since a removal can shift a
+  positional tab index or invalidate a menu built against the session that was active when it
+  opened; the supervisor's session map is not pruned. A device-list reload closes an open context
+  menu targeting a device row the same way, leaving a menu on a session tab untouched.
 - Build sessions: a picked `ArtifactKind` becomes a `BuildTargetSpec`; a desktop bundle target runs
   `frust_drive::desktop_build::build` under `spawn_blocking`, with each returned `BundleNote`
   (missing/undersized icon, generated `Info.plist`, unsigned bundle, …) appended as a `note:` log
@@ -185,20 +191,28 @@ server started.
   the tail.
 - Log line-selection mode: `v` (`Message::SelectEnter`) enters a per-session mode, anchored at the
   newest visible line, that pauses follow-tail and swaps the runner's whole key namespace to a
-  dedicated table: `↑`/`k`/`Shift+↑` and `↓`/`j`/`Shift+↓` move the range cursor one line
-  (`Message::SelectMove`), `PageUp`/`PageDown` move it a page (`Message::SelectPage`), `Home`/`End`
-  jump to the ends (`Message::SelectHome`/`SelectEnd`), `y` copies the range from the redacted log
-  store with an Info toast and exits the mode (`Message::CopySelection`), and `Esc`/`v` exit without
-  copying (`Message::SelectExit`). Every other key is swallowed — a modal- or session-mutating key
-  pressed mid-selection must not fire behind the highlight — except the global `Ctrl+Q`/`Alt+m`
-  chords and an already-open menu/modal/search, which keep their usual precedence; the mouse wheel
-  still scrolls the view. The engine has no viewport height of its own, so the cursor is kept on
-  screen against a fixed row window rather than a real scroll extent. Every drawn log row also
-  registers a per-row `RegionId::LogRow(abs)` region firing `Message::LogRowClicked(abs)`: the first
-  click after entering the mode anchors the range, a later click moves its end — what a click means
-  is decided in `update()`, not by the region itself. The status bar shows an accent SELECT
-  indicator while the mode is active (degrading by segment below roughly 120 columns). Terminal
-  mouse modes are unaffected; `Alt+m` still suspends mouse capture as usual.
+  dedicated table — refused silently (no toast) while the session's DevTools pane is in front, since
+  that pane owns the whole key namespace itself; the palette's 'Select lines…' row, the mode's other
+  entry point, is refused the same way rather than staying reachable over DevTools. Once entered:
+  `↑`/`k`/`Shift+↑` and `↓`/`j`/`Shift+↓` move the range cursor one line (`Message::SelectMove`),
+  `PageUp`/`PageDown` move it a page (`Message::SelectPage`), `Home`/`End` jump to the ends
+  (`Message::SelectHome`/`SelectEnd`), `y` copies and exits the mode (`Message::CopySelection`), and
+  `Esc`/`v` exit without copying (`Message::SelectExit`). The mode also ends on its own once every
+  selected line has been evicted from the ring — a selection with nothing left to highlight never
+  lingers — restoring follow-tail under the same at-the-tail rule as any other exit. Every other key
+  is swallowed — a modal- or session-mutating key pressed mid-selection must not fire behind the
+  highlight — except the global `Ctrl+Q`/`Alt+m` chords and an already-open menu/modal/search, which
+  keep their usual precedence; the mouse wheel still scrolls the view. The engine has no viewport
+  height of its own, so the cursor is kept on screen against a fixed row window rather than a real
+  scroll extent. Every drawn log row also registers a per-row `RegionId::LogRow(abs)` region firing
+  `Message::LogRowClicked(abs)`: the first click after entering the mode anchors the range, a later
+  click moves its end — what a click means is decided in `update()`, not by the region itself. `y`
+  copies and counts exactly the **visible sequence** between anchor and cursor — level filter,
+  search filter, and folded panic blocks applied the same way scrolling sees them, never the raw
+  absolute range — as an Info toast ('Copied: 1 line' / 'Copied: N lines'); the status bar's SELECT
+  indicator shows that same visible count while the mode is active (degrading by segment below
+  roughly 120 columns). Terminal mouse modes are unaffected; `Alt+m` still suspends mouse capture as
+  usual.
 - Copy affordances: besides selection-mode `y`, a row-carrying `ContextTarget::LogView { row }`
   backs a right-click 'Copy line' entry (`Message::CopyLine(abs)`) that copies one line from the
   redacted store with an Info toast (a preview truncated to 60 characters) or a Warn toast if the
@@ -209,7 +223,13 @@ server started.
   read once at startup and held for the run. A `Disabled` backend shows a one-time startup Warn
   toast naming the reason; any write failure shows a 'Copy failed: <reason>' toast via the pure
   `Message::Notify { level, text }`, which the runner turns into a rendered toast without `update()`
-  itself performing any I/O.
+  itself performing any I/O. A System write that outlasts a 2s timeout is cancelled rather than
+  landing late — the abandoned OS-clipboard attempt checks a shared "still wanted" flag immediately
+  before applying and drops its payload once cleared — and falls back to a plain OSC 52 write on the
+  calling thread instead. Every OSC 52 write, screen-chunked or not, stays synchronous on that same
+  thread (ordered against frame redraws) and caps the raw payload at 100 KB, reporting the
+  difference as an Info toast ('Copied (shortened to N KB)') rather than failing or silently
+  dropping the rest.
 - Build-phase labels: while a session is `Building`/`Installing`, the supervisor's drain path runs
   `supervise::progress` over the streamed lines and emits a `SessionEventKind::Phase`; the engine
   stores the latest label as `current_phase` on the session view and clears it on any state
