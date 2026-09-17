@@ -207,7 +207,7 @@ log = "0.4"
 jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
-android_logger = "0.15"
+android_logger = { version = "0.15", default-features = false }
 # Platform priority self-boost for the render-thread split:
 # `frust-shell-android` calls `setpriority(THREAD_PRIORITY_DISPLAY)` and
 # `frust-shell-ios` calls `pthread_set_qos_class_self_np(USER_INTERACTIVE)` at
