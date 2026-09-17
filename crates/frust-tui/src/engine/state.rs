@@ -14,7 +14,7 @@ use super::doctor::DoctorState;
 use super::message::{DragKind, RegionId};
 use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::SessionView;
+use super::session_view::{SessionTarget, SessionView};
 use super::toast::Toasts;
 use crate::supervise::{
     DapServerHandle, DapStatus, McpServerHandle, McpStatus, SessionId, SessionState,
@@ -425,6 +425,52 @@ impl AppState {
         self.sessions.iter().any(|s| !s.state.is_terminal())
     }
 
+    /// The live session already running `project_root` on `target`, if there
+    /// is one — the one-live-session-per-(project, target) guard every launch
+    /// path consults before starting anything (the run-config modal,
+    /// run-on-all-devices, and MCP/DAP's `run_app`).
+    ///
+    /// "Live" means non-terminal: a session that has `Exited` or been
+    /// `Killed` never blocks a relaunch. Targets compare by
+    /// [`SessionTarget::is_same_place_as`] (devices by id), and a session
+    /// with no target at all — an ad-hoc build/clean/toolchain-fix tab —
+    /// is never a match, so building a project does not stop it being run.
+    /// The same project on a different device, or a different project on the
+    /// same device, are both allowed: only the pair is exclusive.
+    pub fn live_session_for(
+        &self,
+        project_root: &Path,
+        target: &SessionTarget,
+    ) -> Option<SessionId> {
+        self.live_session_for_excluding(project_root, target, None)
+    }
+
+    /// [`Self::live_session_for`], ignoring one session id.
+    ///
+    /// The exclusion is what a restart needs: `restart_app` stops the session
+    /// it is restarting before launching its spec again, so a 1-for-1 swap
+    /// must not be refused by the very session it replaces — while any
+    /// *other* live session on that target still refuses it (mirroring how
+    /// `McpSessionRecords::live_count` excludes the restarted session from
+    /// its own cap check).
+    pub fn live_session_for_excluding(
+        &self,
+        project_root: &Path,
+        target: &SessionTarget,
+        except: Option<SessionId>,
+    ) -> Option<SessionId> {
+        self.sessions
+            .iter()
+            .filter(|s| Some(s.id) != except)
+            .filter(|s| !s.state.is_terminal() && s.project_root == project_root)
+            .find(|s| {
+                s.target
+                    .as_ref()
+                    .is_some_and(|t| t.is_same_place_as(target))
+            })
+            .map(|s| s.id)
+    }
+
     /// Clamp `device_cursor` into range after the device list changes (an
     /// empty list parks it at 0).
     pub fn clamp_device_cursor(&mut self) {
@@ -758,5 +804,112 @@ mod tests {
             .sessions
             .push(session_with_state(SessionState::Building));
         assert!(state.animating(), "one transient session is enough");
+    }
+
+    // ── live_session_for ────────────────────────────────────────────────────
+
+    fn pixel_7() -> SessionTarget {
+        SessionTarget::Device {
+            id: "emulator-5554".to_string(),
+            name: "Pixel 7".to_string(),
+            platform: frust_drive::devices::Platform::Android,
+        }
+    }
+
+    /// A live session on `root`/`target`, id `id`.
+    fn running_on(id: u64, root: &str, target: Option<SessionTarget>) -> SessionView {
+        let label = target
+            .as_ref()
+            .map_or_else(|| "build".to_string(), SessionTarget::label);
+        let mut view = crate::engine::SessionView::with_devtools(
+            SessionId(id),
+            PathBuf::from(root),
+            label,
+            crate::engine::DevtoolsLaunch::unavailable(),
+            target,
+        );
+        view.state = SessionState::Running;
+        view
+    }
+
+    fn state_with(sessions: Vec<SessionView>) -> AppState {
+        AppState {
+            sessions,
+            ..AppState::default()
+        }
+    }
+
+    #[test]
+    fn a_live_session_on_the_same_project_and_target_is_found() {
+        let state = state_with(vec![running_on(3, "/tmp/huddle", Some(pixel_7()))]);
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &pixel_7()),
+            Some(SessionId(3))
+        );
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &SessionTarget::Desktop),
+            None,
+            "desktop and a device are different places"
+        );
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/other"), &pixel_7()),
+            None,
+            "the pair is exclusive, not the device"
+        );
+    }
+
+    #[test]
+    fn a_device_matches_by_id_alone() {
+        let state = state_with(vec![running_on(0, "/tmp/huddle", Some(pixel_7()))]);
+        let renamed = SessionTarget::Device {
+            id: "emulator-5554".to_string(),
+            name: "Ed's Pixel".to_string(),
+            platform: frust_drive::devices::Platform::Android,
+        };
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &renamed),
+            Some(SessionId(0)),
+            "a rediscovered device with a new display name is the same phone"
+        );
+    }
+
+    #[test]
+    fn terminal_and_targetless_sessions_never_occupy_a_target() {
+        let mut exited = running_on(0, "/tmp/huddle", Some(SessionTarget::Desktop));
+        exited.state = SessionState::Exited(true);
+        let mut killed = running_on(1, "/tmp/huddle", Some(SessionTarget::Desktop));
+        killed.state = SessionState::Killed;
+        // A live ad-hoc build of the same project: no target at all.
+        let ad_hoc = running_on(2, "/tmp/huddle", None);
+        let state = state_with(vec![exited, killed, ad_hoc]);
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &SessionTarget::Desktop),
+            None
+        );
+    }
+
+    #[test]
+    fn the_excluded_session_does_not_block_its_own_relaunch() {
+        let state = state_with(vec![
+            running_on(0, "/tmp/huddle", Some(SessionTarget::Desktop)),
+            running_on(1, "/tmp/huddle", Some(SessionTarget::Desktop)),
+        ]);
+        assert_eq!(
+            state.live_session_for_excluding(
+                Path::new("/tmp/huddle"),
+                &SessionTarget::Desktop,
+                Some(SessionId(0)),
+            ),
+            Some(SessionId(1)),
+            "excluding one session must not hide another on the same target"
+        );
+        assert_eq!(
+            state.live_session_for_excluding(
+                Path::new("/tmp/huddle"),
+                &SessionTarget::Desktop,
+                Some(SessionId(1)),
+            ),
+            Some(SessionId(0))
+        );
     }
 }

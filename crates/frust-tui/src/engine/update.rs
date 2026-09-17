@@ -18,7 +18,7 @@ use super::dap_settings::{DapFocus, DapIdeReport, DapSetting, IdeConfigRequest};
 use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab, PerfFrame};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::SessionView;
+use super::session_view::{SessionTarget, SessionView};
 use super::state::{AppState, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
@@ -357,6 +357,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             project_root,
             target_label,
             devtools,
+            target,
         } => {
             if state.session_index(id).is_some() {
                 return Outcome::idle();
@@ -366,7 +367,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // an existing absolute line index, and a freshly registered
             // session has no lines yet — so `Follow` is the only valid
             // starting state.
-            let view = SessionView::with_devtools(id, project_root, target_label, devtools);
+            let view = SessionView::with_devtools(id, project_root, target_label, devtools, target);
             state.sessions.push(view);
             // Auto-select the first session that appears.
             if state.active_session.is_none() {
@@ -550,9 +551,12 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Some(modal) if modal.any_selected() => {
                 let specs = modal.launch_specs();
                 state.run_config = None;
+                // The modal closes either way: a refusal is explained by its
+                // own toast, not by leaving the dialog up.
+                let specs = drop_already_running(state, specs);
                 Outcome {
                     redraw: true,
-                    effect: Some(Effect::LaunchSessions(specs)),
+                    effect: (!specs.is_empty()).then_some(Effect::LaunchSessions(specs)),
                 }
             }
             // Modal open but nothing checked, or no modal: nothing to launch.
@@ -1961,10 +1965,50 @@ fn run_on_all_devices(state: &mut AppState) -> Outcome {
     if specs.is_empty() {
         return Outcome::idle();
     }
+    let specs = drop_already_running(state, specs);
+    if specs.is_empty() {
+        // Every device already runs this project; the toasts say so.
+        return Outcome::redraw();
+    }
     Outcome {
         redraw: true,
         effect: Some(Effect::LaunchSessions(specs)),
     }
+}
+
+/// Keep only the specs whose (project, target) has no live session yet,
+/// pushing one `Warn` toast per refused spec — the one-live-session-per-
+/// (project, device) guard on the workbench's own launch paths (its MCP/DAP
+/// counterpart is `crate::supervise::mcp_backend`'s typed refusal).
+///
+/// Refusing here rather than in the runner keeps the decision in the pure
+/// core, where it is testable and where the toast explaining it is written:
+/// a spec that survives is one nothing is running yet, so the effect the
+/// runner enacts never needs a second opinion. Launching the same app onto
+/// the same device twice is never what the user meant — the second install
+/// replaces the first app's process behind its own still-streaming session
+/// tab, leaving a tab that logs nothing and a stop that stops the wrong
+/// thing.
+fn drop_already_running(state: &mut AppState, specs: Vec<SessionSpec>) -> Vec<SessionSpec> {
+    let mut launchable = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let target = SessionTarget::of(&spec.target);
+        if state
+            .live_session_for(&spec.project_root, &target)
+            .is_some()
+        {
+            state.toasts.push(
+                ToastKind::Warn,
+                format!(
+                    "{}: already running here — stop it first (x)",
+                    target.label()
+                ),
+            );
+        } else {
+            launchable.push(spec);
+        }
+    }
+    launchable
 }
 
 /// A project's short display name (its final path component), for a toast.
@@ -2510,17 +2554,45 @@ mod tests {
     // ── Session wiring ──────────────────────────────────────────────────────
 
     fn register(state: &mut AppState, id: u64, project: &str, label: &str) -> SessionId {
-        register_with(state, id, project, label, DevtoolsLaunch::unavailable())
+        register_with(
+            state,
+            id,
+            project,
+            label,
+            DevtoolsLaunch::unavailable(),
+            None,
+        )
+    }
+
+    /// [`register`] for a session that occupies a run target — what the
+    /// one-live-session guard reads.
+    fn register_on(
+        state: &mut AppState,
+        id: u64,
+        project: &str,
+        target: SessionTarget,
+    ) -> SessionId {
+        let label = target.label();
+        register_with(
+            state,
+            id,
+            project,
+            &label,
+            DevtoolsLaunch::unavailable(),
+            Some(target),
+        )
     }
 
     /// [`register`] for a real app session — `launch` decides whether it
-    /// could host a devtools service (workbook §B12).
+    /// could host a devtools service (workbook §B12), and `target` is where
+    /// it runs (`None` for an ad-hoc build/clean session).
     fn register_with(
         state: &mut AppState,
         id: u64,
         project: &str,
         label: &str,
         launch: DevtoolsLaunch,
+        target: Option<SessionTarget>,
     ) -> SessionId {
         let id = SessionId(id);
         update(
@@ -2530,6 +2602,7 @@ mod tests {
                 project_root: PathBuf::from(project),
                 target_label: label.to_string(),
                 devtools: launch,
+                target,
             },
         );
         id
@@ -2556,6 +2629,7 @@ mod tests {
                 project_root: PathBuf::from("/tmp/huddle"),
                 target_label: "desktop".into(),
                 devtools: DevtoolsLaunch::unavailable(),
+                target: None,
             },
         );
         assert!(!out.redraw);
@@ -3012,6 +3086,7 @@ mod tests {
                     project_root: spec.project_root.clone(),
                     target_label: label,
                     devtools: DevtoolsLaunch::unavailable(),
+                    target: Some(SessionTarget::of(&spec.target)),
                 },
             );
         }
@@ -3032,6 +3107,198 @@ mod tests {
         assert!(
             st.run_config.is_some(),
             "modal stays open with nothing to launch"
+        );
+    }
+
+    // ── One live session per (project, target) ──────────────────────────────
+
+    /// A `Pixel 7` emulator, as both the discovery panel and the guard see it.
+    fn pixel_7() -> Device {
+        dev(
+            "emulator-5554",
+            "Pixel 7",
+            Platform::Android,
+            Kind::Emulator,
+        )
+    }
+
+    /// The identity of [`pixel_7`].
+    fn pixel_7_target() -> SessionTarget {
+        SessionTarget::of(&DeviceTarget::Device(pixel_7()))
+    }
+
+    /// Load `devices`, select them all in the panel, and open the run-config
+    /// modal — which checks exactly the selected devices (row 0, desktop, is
+    /// left unchecked once any device is selected).
+    fn run_config_on_devices(st: &mut AppState, devices: Vec<Device>) {
+        let count = devices.len();
+        update(st, Message::DevicesLoaded(devices));
+        for _ in 0..count {
+            update(st, Message::ToggleDeviceSelect);
+            update(st, Message::DeviceCursorDown);
+        }
+        update(st, Message::OpenRunConfig);
+    }
+
+    fn warn_texts(st: &AppState) -> Vec<&str> {
+        st.toasts
+            .items
+            .iter()
+            .filter(|t| t.kind == ToastKind::Warn)
+            .map(|t| t.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn launching_a_target_that_is_already_running_is_refused_with_a_toast() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::OpenRunConfig); // desktop checked by default
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        assert_eq!(
+            out.effect, None,
+            "a refused launch must not reach the supervisor at all"
+        );
+        assert!(
+            st.run_config.is_none(),
+            "the modal still closes — the toast is what explains the refusal"
+        );
+        assert_eq!(
+            warn_texts(&st),
+            vec!["desktop: already running here — stop it first (x)"]
+        );
+    }
+
+    #[test]
+    fn a_mixed_launch_starts_only_the_targets_that_are_free() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+        // Check desktop too, so the batch is {desktop (free), Pixel 7 (busy)}.
+        update(&mut st, Message::RunConfigToggleTargetAt(0));
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!("the free target must still launch, got {:?}", out.effect);
+        };
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].target, DeviceTarget::Desktop);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["Pixel 7: already running here — stop it first (x)"],
+            "one toast, naming the device that was refused"
+        );
+    }
+
+    #[test]
+    fn a_terminal_session_does_not_block_relaunching_its_target() {
+        let mut st = workbench_with_project();
+        let id = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id,
+                kind: SessionEventKind::State(crate::supervise::SessionState::Exited(true)),
+            }),
+        );
+        update(&mut st, Message::OpenRunConfig);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            "an exited session occupies nothing, got {:?}",
+            out.effect
+        );
+        assert!(warn_texts(&st).is_empty());
+    }
+
+    #[test]
+    fn a_different_project_on_the_same_device_is_allowed() {
+        let mut st = workbench_with_project();
+        // Another project is already on the Pixel 7 — the pair is what is
+        // exclusive, not the device.
+        register_on(&mut st, 0, "/tmp/other-app", pixel_7_target());
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!(
+                "a different project must still launch, got {:?}",
+                out.effect
+            );
+        };
+        assert_eq!(specs.len(), 1);
+        assert!(warn_texts(&st).is_empty());
+    }
+
+    #[test]
+    fn an_ad_hoc_session_never_blocks_a_launch() {
+        let mut st = workbench_with_project();
+        // A build of the same project: live, same root, but no target.
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+        update(&mut st, Message::OpenRunConfig);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            "building a project must not stop it being run, got {:?}",
+            out.effect
+        );
+        assert!(warn_texts(&st).is_empty());
+    }
+
+    #[test]
+    fn run_on_all_devices_skips_the_devices_already_running_this_project() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                pixel_7(),
+                dev(
+                    "emulator-5556",
+                    "Pixel 8",
+                    Platform::Android,
+                    Kind::Emulator,
+                ),
+            ]),
+        );
+
+        let out = update(&mut st, Message::RunOnAllDevices);
+
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!("the free device must still launch, got {:?}", out.effect);
+        };
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0].target, DeviceTarget::Device(d) if d.name == "Pixel 8"),
+            "only the device with no live session launches"
+        );
+        assert_eq!(
+            warn_texts(&st),
+            vec!["Pixel 7: already running here — stop it first (x)"]
+        );
+    }
+
+    #[test]
+    fn run_on_all_devices_emits_no_effect_when_every_device_is_busy() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        update(&mut st, Message::DevicesLoaded(vec![pixel_7()]));
+
+        let out = update(&mut st, Message::RunOnAllDevices);
+
+        assert_eq!(out.effect, None);
+        assert!(out.redraw, "the toast explaining it is itself a paint");
+        assert_eq!(
+            warn_texts(&st),
+            vec!["Pixel 7: already running here — stop it first (x)"]
         );
     }
 
@@ -4052,7 +4319,14 @@ mod tests {
     /// A workbench with one running, devtools-capable desktop session.
     fn devtools_workbench() -> (AppState, SessionId) {
         let mut st = workbench_with_project();
-        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", debug_launch());
+        let id = register_with(
+            &mut st,
+            0,
+            "/tmp/huddle",
+            "desktop",
+            debug_launch(),
+            Some(SessionTarget::Desktop),
+        );
         update(&mut st, state_event(id, SessionState::Running));
         (st, id)
     }
@@ -4135,7 +4409,18 @@ mod tests {
             frust_drive::build_info::BuildMode::Profile,
             Some("emulator-5554".to_string()),
         );
-        let id = register_with(&mut st, 0, "/tmp/huddle", "Pixel 8", launch);
+        let id = register_with(
+            &mut st,
+            0,
+            "/tmp/huddle",
+            "Pixel 8",
+            launch,
+            Some(SessionTarget::Device {
+                id: "serial-8".to_string(),
+                name: "Pixel 8".to_string(),
+                platform: frust_drive::devices::Platform::Android,
+            }),
+        );
         update(&mut st, line(id, DISCOVERY));
         let out = update(&mut st, Message::DevtoolsToggle);
         assert_eq!(
@@ -4148,7 +4433,14 @@ mod tests {
     fn a_release_session_never_connects_and_shows_the_unavailable_screen() {
         let mut st = workbench_with_project();
         let launch = DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Release, None);
-        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", launch);
+        let id = register_with(
+            &mut st,
+            0,
+            "/tmp/huddle",
+            "desktop",
+            launch,
+            Some(SessionTarget::Desktop),
+        );
         update(&mut st, line(id, DISCOVERY));
         let out = update(&mut st, Message::DevtoolsToggle);
         assert_eq!(out.effect, None);

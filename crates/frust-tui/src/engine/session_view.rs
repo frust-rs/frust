@@ -11,13 +11,15 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use frust_drive::devices::Platform;
+
 use super::devtools::{DevtoolsLaunch, DevtoolsState};
 use super::logstyle::{
     LevelFilter, LineMeta, LogLevel, PanicBlock, PanicTracker, classify_level, classify_source,
     now_hms,
 };
 use super::perf::PerfPanel;
-use crate::supervise::{PhaseLabel, SessionId, SessionState};
+use crate::supervise::{DeviceTarget, PhaseLabel, SessionId, SessionState};
 
 /// Ring-buffer cap for a session's retained log lines.
 ///
@@ -186,6 +188,75 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// *Where* a session runs, as an identity rather than display text.
+///
+/// [`SessionView::target_label`] answers "what should this tab say"; this
+/// answers "is another session already running the same app in the same
+/// place", which is what the one-live-session-per-(project, target) guard
+/// needs ([`super::AppState::live_session_for`]). They are separate on
+/// purpose: two distinct devices can share a display name, so a label is not
+/// an identity.
+///
+/// Built from the supervise layer's [`DeviceTarget`] by [`Self::of`]. An
+/// ad-hoc session (build/clean/toolchain-fix) has no target at all and
+/// carries `None` instead, so it never takes part in the guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTarget {
+    /// The desktop `cargo run` preview — one place, so two desktop sessions
+    /// of the same project always name the same target.
+    Desktop,
+    /// A concrete device. `id` is the identity (`adb` serial / simulator
+    /// udid); `name` and `platform` are carried for the messages this target
+    /// appears in, and are deliberately **not** part of
+    /// [`Self::is_same_place_as`].
+    Device {
+        /// The discoverer's stable device id.
+        id: String,
+        /// The device's display name, as the run-config modal shows it.
+        name: String,
+        /// Which mobile platform the device belongs to.
+        platform: Platform,
+    },
+}
+
+impl SessionTarget {
+    /// The identity of a launch target.
+    pub fn of(target: &DeviceTarget) -> Self {
+        match target {
+            DeviceTarget::Desktop => Self::Desktop,
+            DeviceTarget::Device(device) => Self::Device {
+                id: device.id.clone(),
+                name: device.name.clone(),
+                platform: device.platform,
+            },
+        }
+    }
+
+    /// Whether `self` and `other` name the same place to run.
+    ///
+    /// Devices compare by **id only**: a rediscovery reporting a renamed (or
+    /// re-cased) device is still the same phone, and treating it as a new
+    /// target would let the same app be launched onto it twice — exactly what
+    /// the guard exists to prevent.
+    pub fn is_same_place_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Desktop, Self::Desktop) => true,
+            (Self::Device { id, .. }, Self::Device { id: other_id, .. }) => id == other_id,
+            (Self::Desktop, Self::Device { .. }) | (Self::Device { .. }, Self::Desktop) => false,
+        }
+    }
+
+    /// How to name this target to the user (`desktop`, or the device's own
+    /// name) — the subject of the "already running here" toast and of the
+    /// MCP refusal.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Desktop => "desktop".to_string(),
+            Self::Device { name, .. } => name.clone(),
+        }
+    }
+}
+
 /// The engine's mirror of one supervised session: identity + metadata, the
 /// retained log ring, and the per-session log-view state (scroll + selection).
 #[derive(Debug, Clone)]
@@ -196,6 +267,11 @@ pub struct SessionView {
     pub project_root: PathBuf,
     /// A short target label for the tab (`desktop`, or a device name).
     pub target_label: String,
+    /// *Where* this session runs, as an identity — `None` for an ad-hoc
+    /// build/clean/toolchain-fix session, which runs nothing on a target and
+    /// so never blocks (or is blocked by) a launch. Distinct from
+    /// [`Self::target_label`], which is display text: see [`SessionTarget`].
+    pub target: Option<SessionTarget>,
     /// The last lifecycle state the supervisor reported (drives the status
     /// glyph).
     pub state: SessionState,
@@ -240,30 +316,37 @@ pub struct SessionView {
 
 impl SessionView {
     /// A fresh session view (empty log, following the tail, no selection) for
-    /// a session that cannot host a devtools service — see
-    /// [`Self::with_devtools`] for a real app session.
+    /// an **ad-hoc** session: one that can neither host a devtools service
+    /// nor run an app on a target, so it carries no [`SessionTarget`] and
+    /// takes no part in the one-live-session guard (a build and a run of the
+    /// same project are not the same thing). See [`Self::with_devtools`] for
+    /// a real app session.
     pub fn new(id: SessionId, project_root: PathBuf, target_label: impl Into<String>) -> Self {
         Self::with_devtools(
             id,
             project_root,
             target_label,
             DevtoolsLaunch::unavailable(),
+            None,
         )
     }
 
     /// [`Self::new`] with the session's own devtools launch metadata (build
     /// mode + Android serial), which decides §B12's app-without-devtools
-    /// state and how the bridge reaches the service.
+    /// state and how the bridge reaches the service, plus the
+    /// [`SessionTarget`] it runs on (`None` for an ad-hoc session).
     pub fn with_devtools(
         id: SessionId,
         project_root: PathBuf,
         target_label: impl Into<String>,
         devtools: DevtoolsLaunch,
+        target: Option<SessionTarget>,
     ) -> Self {
         Self {
             id,
             project_root,
             target_label: target_label.into(),
+            target,
             state: SessionState::Configuring,
             log: LogBuffer::default(),
             scroll: Scroll::Follow,
@@ -1240,6 +1323,7 @@ mod tests {
                 frust_drive::build_info::BuildMode::Debug,
                 None,
             ),
+            Some(SessionTarget::Desktop),
         );
         assert!(!s.push_line("app: booting up".to_string()));
         assert!(s.push_line(
@@ -1293,6 +1377,7 @@ mod tests {
                 frust_drive::build_info::BuildMode::Debug,
                 None,
             ),
+            Some(SessionTarget::Desktop),
         );
         let discovered =
             s.push_line("frust-devtools listening on 53214 token cafe1234".to_string());
@@ -1323,6 +1408,7 @@ mod tests {
                 frust_drive::build_info::BuildMode::Debug,
                 None,
             ),
+            Some(SessionTarget::Desktop),
         );
         let raw = "\u{1b}[32mfrust-devtools listening on 53214 token cafe1234\u{1b}[0m";
         let discovered = s.push_line(raw.to_string());
@@ -1354,6 +1440,7 @@ mod tests {
                 frust_drive::build_info::BuildMode::Debug,
                 None,
             ),
+            Some(SessionTarget::Desktop),
         );
         let raw = "\u{1b}[32mfrust-devtools listening on 53214 token cafe1234 \u{1b}[0m(ready)";
         let discovered = s.push_line(raw.to_string());

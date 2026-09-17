@@ -253,6 +253,7 @@ fn registered_session_tracks_tail_through_update_100x30() {
             project_root: PathBuf::from("/tmp/huddle"),
             target_label: "desktop".to_string(),
             devtools: DevtoolsLaunch::unavailable(),
+            target: None,
         },
     );
     for batch in 0..5 {
@@ -980,6 +981,7 @@ fn devtools_state(build: frust_drive::build_info::BuildMode, lines: &[&str]) -> 
         PathBuf::from(root),
         "desktop",
         DevtoolsLaunch::from_launch(build, None),
+        None,
     );
     sess.state = SessionState::Running;
     for (i, l) in lines.iter().enumerate() {
@@ -1317,6 +1319,7 @@ fn devtools_performance_log_fallback_100x30() {
         PathBuf::from("/tmp/huddle"),
         "desktop",
         DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+        None,
     );
     sess.state = SessionState::Running;
     for i in 0..12u64 {

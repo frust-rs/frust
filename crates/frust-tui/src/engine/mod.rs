@@ -60,7 +60,9 @@ pub use persist::{
     save_mouse_capture, save_sidebar_width,
 };
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
-pub use session_view::{LineSelection, LogBuffer, Scroll, SessionView, line_matches, strip_ansi};
+pub use session_view::{
+    LineSelection, LogBuffer, Scroll, SessionTarget, SessionView, line_matches, strip_ansi,
+};
 pub use state::{
     AppState, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen, SearchState,
     clamp_sidebar_width,

@@ -45,6 +45,13 @@
 //!   no variant for it, and reporting one as `ios-sim:<udid>` would be a lie.
 //! - **`restart_app` on a session with no launch record** — nothing here can
 //!   reconstruct a spec it never saw ([`EmbeddedError::Unsupported`]).
+//! - **`run_app` onto a (project, target) the workbench is already running**
+//!   — refused as [`EmbeddedError::AlreadyRunning`], naming the live session
+//!   so an agent can `stop_app` or `restart_app` it. The guard reads the
+//!   workbench's *own* sessions, not only MCP-launched ones (one session
+//!   world), and runs before the cap check and before any bookkeeping.
+//!   `restart_app` excludes the session it restarts — it stops it first — so
+//!   a 1-for-1 relaunch is never refused by its own predecessor.
 //! - **`run_app`/`restart_app` once [`MCP_RECORD_CAP`] MCP-launched sessions
 //!   are already live** — refused as [`EmbeddedError::TooManySessions`],
 //!   with **no bookkeeping**: no record, no `RegisterSession`, no ad-hoc tab.
@@ -84,7 +91,9 @@ use super::{
     DeviceTarget, DevtoolsBridge, SessionEvent, SessionEventKind, SessionId, SessionSpec,
     SessionState, Supervisor,
 };
-use crate::engine::{AppState, ConnState, DevtoolsLaunch, Message, SamplingState, SessionView};
+use crate::engine::{
+    AppState, ConnState, DevtoolsLaunch, Message, SamplingState, SessionTarget, SessionView,
+};
 
 /// How long a backend method waits for the event loop to answer before
 /// reporting [`EmbeddedError::WorkbenchUnreachable`].
@@ -161,6 +170,22 @@ pub enum EmbeddedError {
     TooManySessions {
         /// The cap that was hit ([`MCP_RECORD_CAP`]).
         cap: usize,
+    },
+    /// The workbench is already running this project on this target. Refused
+    /// **before any bookkeeping**, exactly like [`Self::TooManySessions`] —
+    /// one live session per (project, device), whichever front end launched
+    /// it. The message names the session an agent can act on, since the
+    /// blocker may well be one the *user* started by hand.
+    #[error(
+        "session {session} is already running {target} — stop it (stop_app) or restart it \
+         (restart_app)"
+    )]
+    AlreadyRunning {
+        /// The live session occupying the target.
+        session: u64,
+        /// The target it occupies, named the way the workbench names it
+        /// (`desktop`, or the device's own name).
+        target: String,
     },
 }
 
@@ -914,9 +939,12 @@ fn no_devtools_reason(view: &SessionView) -> String {
 /// Launch one session for the workbench's active project.
 ///
 /// Refuses **before any bookkeeping** — no spec built, no supervisor call,
-/// no record, no `RegisterSession` — once [`MCP_RECORD_CAP`] MCP-launched
-/// sessions are already live: a refusal that still registered a session
-/// would grow `AppState::sessions` faster than a successful launch does.
+/// no record, no `RegisterSession` — in two cases: the workbench already has
+/// a live session for this project on this target
+/// ([`EmbeddedError::AlreadyRunning`]), or [`MCP_RECORD_CAP`] MCP-launched
+/// sessions are already live ([`EmbeddedError::TooManySessions`]). A refusal
+/// that still registered a session would grow `AppState::sessions` faster
+/// than a successful launch does.
 ///
 /// Otherwise, a launch that cannot start (no project open, or a spawn
 /// failure) still produces a session: it is registered under an ad-hoc id
@@ -928,6 +956,19 @@ fn run_app(
     target: DeviceTarget,
     mode: BuildMode,
 ) -> Result<McpSessionId, EmbeddedError> {
+    // The duplicate guard runs first, and against the *workbench's* sessions
+    // rather than only MCP-launched ones: the session already on this target
+    // is as likely to be one the user started by hand, and launching a second
+    // one would replace its app behind its own still-streaming tab.
+    if let Some(project_root) = ctx.state.project_root.as_deref() {
+        let identity = SessionTarget::of(&target);
+        if let Some(live) = ctx.state.live_session_for(project_root, &identity) {
+            return Err(EmbeddedError::AlreadyRunning {
+                session: live.0,
+                target: identity.label(),
+            });
+        }
+    }
     if ctx.records.live_count(ctx.state, None) >= MCP_RECORD_CAP {
         return Err(EmbeddedError::TooManySessions {
             cap: MCP_RECORD_CAP,
@@ -970,6 +1011,9 @@ fn start_session(ctx: &mut McpServeCtx<'_>, spec: SessionSpec) -> McpSessionId {
                 project_root: spec.project_root.clone(),
                 target_label: label,
                 devtools: devtools_launch(&spec),
+                // An MCP/DAP launch owns its target exactly like a
+                // user-driven one — one session world, one guard.
+                target: Some(SessionTarget::of(&spec.target)),
             });
             ctx.records.insert(id, spec);
             ctx.records.retain_bounded(ctx.state);
@@ -1006,6 +1050,9 @@ fn failed_launch(
         project_root: spec.project_root.clone(),
         target_label: label,
         devtools: DevtoolsLaunch::unavailable(),
+        // A launch that never started occupies no target: this tab exists
+        // only to carry the error, and is `Exited` a message later anyway.
+        target: None,
     });
     let _ = ctx.tx.send(Message::Session(SessionEvent {
         id,
@@ -1025,7 +1072,9 @@ fn failed_launch(
 /// Refused at [`MCP_RECORD_CAP`] like `run_app`, but excluding the session
 /// being restarted from the live count: a 1-for-1 restart nets no growth in
 /// live sessions, so it must not be refused just because the cap is already
-/// exactly met.
+/// exactly met. The duplicate guard is excluded the same way and for the same
+/// reason — the session it would trip over is the one being replaced — while
+/// any *other* live session on that target still refuses it.
 fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSessionId, EmbeddedError> {
     let Some(view) = mcp_view(ctx.state, ctx.records, id) else {
         return Err(EmbeddedError::NoSuchSession(id.0));
@@ -1039,6 +1088,19 @@ fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSession
             what: "restart_app",
             why: "this session never launched — it exists only to report the error. \
                   Fix the cause and call run_app again",
+        });
+    }
+    // The duplicate guard, excluding the session being restarted — it is
+    // stopped below, so it must not refuse its own relaunch. Any *other* live
+    // session on that target still does.
+    let identity = SessionTarget::of(&record.spec.target);
+    if let Some(live) =
+        ctx.state
+            .live_session_for_excluding(&record.spec.project_root, &identity, Some(session))
+    {
+        return Err(EmbeddedError::AlreadyRunning {
+            session: live.0,
+            target: identity.label(),
         });
     }
     if ctx.records.live_count(ctx.state, Some(session)) >= MCP_RECORD_CAP {
@@ -1355,6 +1417,29 @@ mod tests {
             PathBuf::from("/tmp/frust-tui-mcp-unit"),
             "desktop",
         )
+    }
+
+    /// A *live* session that occupies `target` — what the duplicate guard
+    /// reads, as opposed to [`view`]'s targetless ad-hoc tab.
+    fn app_view(id: u64, target: SessionTarget) -> SessionView {
+        let mut view = SessionView::with_devtools(
+            SessionId(id),
+            PathBuf::from("/tmp/frust-tui-mcp-unit"),
+            target.label(),
+            DevtoolsLaunch::unavailable(),
+            Some(target),
+        );
+        view.state = SessionState::Running;
+        view
+    }
+
+    /// An `AppState` open on the unit-test project, holding `sessions`.
+    fn open_state(sessions: Vec<SessionView>) -> AppState {
+        AppState {
+            project_root: Some(PathBuf::from("/tmp/frust-tui-mcp-unit")),
+            sessions,
+            ..AppState::default()
+        }
     }
 
     fn backend() -> TuiSessionBackend {
@@ -1704,6 +1789,154 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "the refusal must post no message onto the engine channel at all"
+        );
+    }
+
+    #[test]
+    fn run_app_refuses_a_target_the_workbench_is_already_running() {
+        let (tx, mut rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        // The blocker is a session the *user* started: no MCP record at all,
+        // so nothing but the workbench's own model can see it.
+        let state = open_state(vec![app_view(4, SessionTarget::Desktop)]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        let result = run_app(&mut ctx, DeviceTarget::Desktop, BuildMode::Debug);
+
+        assert_eq!(
+            result,
+            Err(EmbeddedError::AlreadyRunning {
+                session: 4,
+                target: "desktop".to_string(),
+            })
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("stop it (stop_app)") && message.contains("restart it (restart_app)"),
+            "the refusal must name the way out: {message}"
+        );
+        // Refused before any bookkeeping, exactly like the cap refusal.
+        assert!(records.by_id.is_empty(), "a refusal inserts no record");
+        assert!(
+            rx.try_recv().is_err(),
+            "a refusal posts no message onto the engine channel"
+        );
+    }
+
+    #[test]
+    fn run_app_allows_a_target_no_live_session_occupies() {
+        let (tx, _rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        let state = open_state(vec![app_view(4, SessionTarget::Desktop)]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        // A device is a different place from the desktop preview the live
+        // session occupies. (The launch itself still fails past the guard —
+        // `FakeProcessRunner` has no script for it — which is
+        // `start_session`'s concern, not this one.)
+        let result = run_app(
+            &mut ctx,
+            DeviceTarget::Device(device(Platform::Android, Kind::Emulator)),
+            BuildMode::Debug,
+        );
+
+        assert!(
+            !matches!(result, Err(EmbeddedError::AlreadyRunning { .. })),
+            "only the same (project, target) pair is exclusive: {result:?}"
+        );
+    }
+
+    #[test]
+    fn restart_app_is_never_refused_by_the_session_it_restarts() {
+        let (tx, _rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let state = open_state(vec![app_view(0, SessionTarget::Desktop)]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        let result = restart_app(&mut ctx, McpSessionId(0));
+
+        assert!(
+            !matches!(result, Err(EmbeddedError::AlreadyRunning { .. })),
+            "a restart stops the session it replaces, so it cannot block itself: {result:?}"
+        );
+    }
+
+    #[test]
+    fn restart_app_is_refused_when_another_session_holds_the_target() {
+        let (tx, _rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(0), spec(DeviceTarget::Desktop));
+        // A second, user-started session took the same target meanwhile.
+        let state = open_state(vec![
+            app_view(0, SessionTarget::Desktop),
+            app_view(1, SessionTarget::Desktop),
+        ]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        assert_eq!(
+            restart_app(&mut ctx, McpSessionId(0)),
+            Err(EmbeddedError::AlreadyRunning {
+                session: 1,
+                target: "desktop".to_string(),
+            }),
+            "the exemption covers the restarted session only"
         );
     }
 

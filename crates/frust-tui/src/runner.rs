@@ -34,7 +34,7 @@ use crate::clipboard::{self, Backend as ClipboardBackend, ClipboardMode};
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
     BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
-    Engine, Message, Outcome, RegionId, RunFocus, Screen, ToastKind, WizardStep,
+    Engine, Message, Outcome, RegionId, RunFocus, Screen, SessionTarget, ToastKind, WizardStep,
 };
 use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
@@ -737,6 +737,9 @@ fn launch_bootstrap_fix_session(
         // A toolchain fix runs `rustup`/`cargo`, not the app — there is no
         // devtools service to reach.
         devtools: DevtoolsLaunch::unavailable(),
+        // …and it occupies no run target, so it neither blocks nor is
+        // blocked by a launch.
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -779,8 +782,10 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
         id,
         project_root: spec.project_root.clone(),
         target_label: format!("build {}", build_target_label(&spec.target)),
-        // A build session produces an artifact; nothing is running to inspect.
+        // A build session produces an artifact; nothing is running to inspect,
+        // and nothing occupies a run target.
         devtools: DevtoolsLaunch::unavailable(),
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -936,8 +941,10 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
         id,
         project_root: project_root.clone(),
         target_label: "clean".to_string(),
-        // A clean session removes build output; nothing is running to inspect.
+        // A clean session removes build output; nothing is running to inspect,
+        // and nothing occupies a run target.
         devtools: DevtoolsLaunch::unavailable(),
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -1144,6 +1151,10 @@ fn launch_sessions(
                     project_root: spec.project_root.clone(),
                     target_label: target_label(&spec.target),
                     devtools: devtools_launch(&spec),
+                    // An app launch owns its target until it goes terminal —
+                    // what `AppState::live_session_for` reads to refuse a
+                    // second launch of this project onto the same place.
+                    target: Some(SessionTarget::of(&spec.target)),
                 });
                 // Record the launch even with no MCP server running: an agent
                 // that connects later must see the sessions the *user*
@@ -1945,6 +1956,7 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp/frust-tui-dispatch"),
             target_label: "desktop".to_string(),
             devtools: DevtoolsLaunch::unavailable(),
+            target: Some(SessionTarget::Desktop),
         });
         let view = engine
             .state
@@ -2545,6 +2557,7 @@ mod tests {
             PathBuf::from("/tmp/huddle"),
             "desktop",
             DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+            Some(SessionTarget::Desktop),
         );
         session.state = SessionState::Running;
         session.push_line_at(

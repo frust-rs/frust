@@ -19,6 +19,7 @@ use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
+use super::session_view::SessionTarget;
 use super::toast::ToastKind;
 use crate::supervise::mcp_backend::McpCommand;
 use crate::supervise::{SessionEvent, SessionId};
@@ -357,6 +358,12 @@ pub enum Message {
         /// ad-hoc build/clean/toolchain session passes
         /// [`DevtoolsLaunch::unavailable`].
         devtools: DevtoolsLaunch,
+        /// *Where* the session runs, as the identity the one-live-session
+        /// guard compares ([`SessionTarget`]) — `Some` for every app launch
+        /// (the run-config modal, run-on-all-devices, and MCP/DAP's
+        /// `run_app`), `None` for an ad-hoc build/clean/toolchain-fix
+        /// session, which occupies no target.
+        target: Option<SessionTarget>,
     },
     /// Select the next / previous session tab (`Tab` / `Shift+Tab`).
     NextTab,
