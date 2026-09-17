@@ -1159,4 +1159,7 @@ verbatim.
 shader stack is large" is not a publishable claim; "`naga` is ~0.9 MiB across
 `.text`+`.rodata`" is — every size figure in `RESULTS.md` traces back to a row
 in this attribution output (or the whole-artifact tables above), not to an ad
-hoc measurement redone by hand each time.
+hoc measurement redone by hand each time. `RESULTS.md`'s App-size section
+also carries a per-lever table, one row per landed size change; sizes there
+are always re-measured against the change's own base, never derived by
+subtracting one pass's total from another's.
