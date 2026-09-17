@@ -4,6 +4,7 @@
   "frust.toml.tmpl",
   "README.md.tmpl",
   ".gitignore",
+  ".cargo/config.toml",
   "assets/.gitkeep",
   "assets/logo.png",
   "src/lib.rs.tmpl",

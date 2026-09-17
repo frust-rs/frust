@@ -12,33 +12,72 @@
 //! and license-inclusion terms. Neither font's reserved name ("Space Mono",
 //! "Plex") is modified here; this module ships the upstream bytes unmodified.
 //!
-//! The bytes are compiled in **unconditionally**: depending on this plugin at
-//! all is the Glyph opt-in, so there is no second feature to switch the faces
-//! off with (the in-tree catalog's `glyph-fonts` gate has no counterpart here).
+//! The bytes are gated behind the crate's `bundled-fonts` feature (default
+//! on): with it off, [`font_data`] returns an empty slice and none of the
+//! seven faces are compiled into the binary, so an app that ships its own
+//! fonts or accepts the platform's system monospace can drop the bundled
+//! bytes entirely.
 //!
 //! This module stays pure-data: [`font_data`] only returns bytes. Registering
 //! them into a live `TextContext` (and forcing the relayout
 //! `TextContext::register_fonts`'s contract requires) is a shell's job —
 //! [`install`](crate::install) hands them to `frust::register_app_fonts`, and
 //! each shell drains that queue into its own `TextContext`.
+//!
+//! ## Why the two italic faces stay bundled
+//!
+//! Neither `SPACE_MONO_ITALIC` nor `IBM_PLEX_MONO_ITALIC` is requested by
+//! this crate's own catalog, but an app built on Glyph can still ask for
+//! `FontStyle::Italic` through the baseline `Text` widget
+//! (`crates/frust-widgets/src/text.rs`'s `TextWidget::italic`), so the
+//! question is what that request would render as if the two files were
+//! dropped.
+//!
+//! Measured (see `tests::italic_style_resolves_to_the_bundled_italic_face`
+//! below, driven through this module's own [`font_data`]/registration path)
+//! and confirmed by source inspection: fontique 0.11's family/style matcher
+//! does compute a synthetic-oblique flag for an italic request against an
+//! upright-only face with no `slnt`/`ital` axis (`fontique::FontInfo::synthesis`,
+//! `fontique-0.11.0/src/font.rs`, sets `skew = 14`) — but that flag never
+//! reaches a Frust render. `frust-text`'s parley -> scene-run lowering
+//! (`crates/frust-text/src/convert.rs::layout_to_scene_runs`) reads a
+//! matched run's font, size, brush and glyph positions only; it never calls
+//! `parley::layout::Run::synthesis()`. `frust_scene::GlyphRun`/`FontHandle`
+//! (`crates/frust-scene/src/glyph.rs`) carry no skew/synthesis field for a
+//! later stage to apply either, and `crates/frust-engine/src/text/mod.rs`
+//! documents the same policy explicitly ("no synthetic oblique, no
+//! synthetic bold, no variation coordinates"). So dropping these two files
+//! would not trade a designed italic for a faux-slanted one — every
+//! `FontStyle::Italic` request against Space Mono or IBM Plex Mono would
+//! silently render as plain upright text, with no visual sign italics were
+//! ever asked for. That upright-fallback outcome is why both faces stay:
+//! removing them would trade real italics for a silent, undetectable
+//! regression rather than for a comparably-italic synthesized substitute.
 
 /// Space Mono Regular (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const SPACE_MONO_REGULAR: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Regular.ttf");
 /// Space Mono Bold (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const SPACE_MONO_BOLD: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Bold.ttf");
 /// Space Mono Italic (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const SPACE_MONO_ITALIC: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Italic.ttf");
 
 /// IBM Plex Mono Regular (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_REGULAR: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf");
 /// IBM Plex Mono Medium (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_MEDIUM: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf");
 /// IBM Plex Mono SemiBold (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_SEMIBOLD: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-SemiBold.ttf");
 /// IBM Plex Mono Italic (IBM, OFL-1.1). See `fonts/ibm-plex-mono/OFL.txt`.
+#[cfg(feature = "bundled-fonts")]
 const IBM_PLEX_MONO_ITALIC: &[u8] =
     include_bytes!("../../fonts/ibm-plex-mono/IBMPlexMono-Italic.ttf");
 
@@ -59,6 +98,10 @@ pub(crate) const IBM_PLEX_MONO_REGULAR_INDEX: usize = 3;
 ///
 /// The two `*_INDEX` constants above are the one place this order is load-
 /// bearing; keep them in step with the array literal below.
+///
+/// Returns an empty slice with the `bundled-fonts` feature off — see the
+/// module doc.
+#[cfg(feature = "bundled-fonts")]
 pub fn font_data() -> &'static [&'static [u8]] {
     &[
         SPACE_MONO_REGULAR,
@@ -71,10 +114,17 @@ pub fn font_data() -> &'static [&'static [u8]] {
     ]
 }
 
-#[cfg(test)]
+/// See the feature-on [`font_data`] above; with `bundled-fonts` off there are
+/// no bytes to hand out.
+#[cfg(not(feature = "bundled-fonts"))]
+pub fn font_data() -> &'static [&'static [u8]] {
+    &[]
+}
+
+#[cfg(all(test, feature = "bundled-fonts"))]
 mod tests {
     use super::font_data;
-    use frust::authoring::text::TextContext;
+    use frust::authoring::text::{FontFamily, FontStyle, TextContext, TextStyle};
 
     #[test]
     fn font_data_registers_and_resolves_both_families_by_name() {
@@ -135,6 +185,60 @@ mod tests {
         );
     }
 
+    /// The italic-face decision measurement (see this module's doc comment):
+    /// with both italic faces registered through this module's own
+    /// [`font_data`] path, a `FontStyle::Italic` run against "Space Mono"
+    /// must resolve to the bundled italic file's own bytes — a real,
+    /// distinct authored face — and not to the Regular face fontique would
+    /// fall back to (and Frust would then render unskewed) if the italic
+    /// file were absent. `FontStyle::Normal` is the control: it must resolve
+    /// to Regular either way.
+    #[test]
+    fn italic_style_resolves_to_the_bundled_italic_face() {
+        let mut cx = TextContext::new();
+        for bytes in font_data() {
+            cx.register_fonts(bytes.to_vec())
+                .expect("bundled Glyph font bytes must register as valid faces");
+        }
+
+        let resolved_bytes = |cx: &mut TextContext, style: FontStyle| -> Vec<u8> {
+            let text_style = TextStyle {
+                family: FontFamily::named("Space Mono"),
+                style,
+                ..TextStyle::new(16.0, peniko::Color::BLACK)
+            };
+            let layout = cx.layout("frust", &text_style, None);
+            let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+            runs.first()
+                .expect("expected at least one glyph run")
+                .font
+                .font()
+                .data
+                .as_ref()
+                .to_vec()
+        };
+
+        let italic_run = resolved_bytes(&mut cx, FontStyle::Italic);
+        let normal_run = resolved_bytes(&mut cx, FontStyle::Normal);
+
+        assert_eq!(
+            italic_run,
+            super::SPACE_MONO_ITALIC,
+            "an italic-styled \"Space Mono\" run must resolve to the bundled \
+             italic face's own bytes, not a synthesized variant of another face"
+        );
+        assert_eq!(
+            normal_run,
+            super::SPACE_MONO_REGULAR,
+            "an upright-styled \"Space Mono\" run must resolve to the Regular face"
+        );
+        assert_ne!(
+            italic_run, normal_run,
+            "the italic and normal runs must resolve to two distinct registered \
+             faces while `SPACE_MONO_ITALIC` stays registered"
+        );
+    }
+
     #[test]
     fn font_data_hands_out_the_same_bytes_on_every_call() {
         // The identity guarantee the native-control publish guard depends on
@@ -147,5 +251,16 @@ mod tests {
                 "face {i} must be the same `&'static [u8]` on every call"
             );
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "bundled-fonts")))]
+mod no_bundled_fonts_tests {
+    /// With `bundled-fonts` off, `font_data()` must hand out nothing rather
+    /// than fail to build — `install()`/`native_typefaces()` then register no
+    /// face, so typography falls back to whatever fontique resolves.
+    #[test]
+    fn font_data_is_empty_without_the_feature() {
+        assert!(super::font_data().is_empty());
     }
 }

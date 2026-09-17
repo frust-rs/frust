@@ -136,7 +136,7 @@ web-time = "1.1.0"
 # to `console.*`, `console_error_panic_hook` routes panics to `console.error`.
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
-parley = "0.11.0"
+parley = "0.11.1"
 peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
@@ -207,7 +207,11 @@ log = "0.4"
 jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
-android_logger = "0.15"
+# Dropped default feature: `regex` (pulls in `env_filter`'s `regex`
+# sub-feature) — unused because frust-shell-android configures the logger
+# with `Config::default().with_max_level(...)` and never parses a filter
+# spec.
+android_logger = { version = "0.15", default-features = false }
 # Platform priority self-boost for the render-thread split:
 # `frust-shell-android` calls `setpriority(THREAD_PRIORITY_DISPLAY)` and
 # `frust-shell-ios` calls `pthread_set_qos_class_self_np(USER_INTERACTIVE)` at
@@ -730,7 +734,11 @@ opt-level = 1
 # carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"
 # measured 7.28MB (-3.2%): neither clears the >5% meaningfully-wins
 # bar once the carve-out that protects render-path perf is in place, so
-# `opt-level` stays at its default (3) and no carve-out is needed. This
+# `opt-level` stays at its default (3) and no carve-out is needed. That
+# finding still stands for the GLOBAL opt-level and is why there is no
+# `opt-level` key in this block; what the cold-set block below adds is its
+# inverse — per-package `"z"` for named crates that do no per-frame work,
+# which is a different (and measured-larger) win. This
 # block and the wildcard dev override above are hand-synced across
 # `templates/app/Cargo.toml.tmpl` and `examples/huddle/Cargo.toml`
 # (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
@@ -742,3 +750,114 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
+# Release cold-set `opt-level = "z"`: the *global* release `opt-level` stays at
+# its default 3 for the reason recorded above (a whole-binary "s"/"z" didn't
+# clear the 5% size bar once the render stack was carved back out). This block
+# is the inverse of that rejected shape and is what actually pays: instead of
+# shrinking everything and exempting the hot crates, it shrinks only crates
+# that are COLD on the per-frame path and leaves everything else at 3.
+#
+# "Cold" here means the crate does no measurable work inside the steady-state
+# frame loop, so its code size is pure footprint:
+#   * shader translation / GPU object setup — `naga`, `wgpu-core`,
+#     `wgpu-types`, `codespan-reporting` (naga's diagnostics), `ash`,
+#     `gpu-allocator`: these run at pipeline-creation and
+#     resource-allocation time, not per frame (the per-frame GPU cost is
+#     queue submission and the driver's own work).
+#   * platform glue invoked only a few times across an app's lifetime, not
+#     per frame — `accesskit`, `accesskit_consumer`, `accesskit_android`
+#     (accessibility tree pushes are event-driven).
+#   * `jni` (both graph versions) — the one accepted exception in this cold
+#     set: IME state, clipboard and system-UI state are each polled through
+#     JNI once per rendered frame (frust-shell-android's `native_ime_state`;
+#     `FrustSurfaceView.kt`'s `doFrame`), not off the per-frame path at all.
+#     Kept at "z" anyway: each poll is a single short JNI call whose cost the
+#     landing measurement could not distinguish from noise — folded into the
+#     owed controlled re-measure recorded in docs/LIMITATIONS.md's
+#     `release-opt-level-z-bar-unadjudicated` entry.
+#   * one-shot parsing / asset decode / async plumbing — `serde_json`,
+#     `roxmltree`, `fontique` (font enumeration at startup), `tokio`, `mio`,
+#     `image`, `png`.
+#
+# Deliberately KEPT at `opt-level = 3` — every crate that runs per frame, per
+# glyph or per pixel, where a smaller-code tradeoff would cost frame time:
+# `frust-engine`, `frust-gpu`, `frust-render`, `frust-text`, `harfrust`,
+# `skrifa`, `read-fonts`, `zune-jpeg`, `parley`.
+#
+# # `wgpu-hal` is deliberately NOT in the cold set, and that is a measured
+# exclusion rather than an oversight: it sits on the per-frame submit path,
+# so it was built and benchmarked as its OWN variant on top of this set. That
+# variant bought a further 37 KB (0.55% of the stripped lean `.so`) while
+# costing a small but consistent amount of per-frame CPU work in every
+# scenario measured. The cost sits inside the measurement noise, so the
+# trade was refused rather than forced: a crate on the submit path needs a
+# better reason than 0.55%. Re-measure it on its own if that changes.
+#
+# The set is measured, not assumed — it is gated on the render-stack CPU
+# carve-out bar docs/DEVELOPMENT.md records (a smaller opt-level must not cost
+# more than 5% on the measured CPU path) and was re-measured on device before
+# landing. `[profile.profile]` inherits these overrides along with the rest of
+# `[profile.release]`, which is what makes the benchmark build measure the
+# shipping configuration.
+#
+# Hand-synced, byte-for-byte, across the EIGHT manifests that build an Android
+# artifact: this root manifest, `templates/app/Cargo.toml.tmpl`,
+# `examples/huddle`, `examples/glyph-catalog`, `examples/material3-demo`,
+# `examples/playground`, `examples/shadertoy` and
+# `benchmarks/frust_bench`. `crates/frust-cli/tests/profile_sync.rs` is the
+# tripwire. `examples/web-gallery` is wasm-only and deliberately carries NO
+# package overrides (wasm perf is unmeasured) — see its own manifest.
+
+[profile.release.package.naga]
+opt-level = "z"
+
+[profile.release.package.wgpu-core]
+opt-level = "z"
+
+[profile.release.package.wgpu-types]
+opt-level = "z"
+
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+[profile.release.package.ash]
+opt-level = "z"
+
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+
+[profile.release.package.jni]
+opt-level = "z"
+
+[profile.release.package.accesskit]
+opt-level = "z"
+
+[profile.release.package.accesskit_consumer]
+opt-level = "z"
+
+[profile.release.package.accesskit_android]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
+[profile.release.package.roxmltree]
+opt-level = "z"
+
+[profile.release.package.fontique]
+opt-level = "z"
+
+[profile.release.package.tokio]
+opt-level = "z"
+
+[profile.release.package.mio]
+opt-level = "z"
+
+[profile.release.package.image]
+opt-level = "z"
+
+[profile.release.package.png]
+opt-level = "z"
+# END release cold-set opt-level overrides

@@ -1,9 +1,12 @@
 # Bundled Glyph fonts
 
 Raw TTF bytes embedded into `frust-glyph` via `include_bytes!`
-(`plugins/glyph/src/tokens/fonts.rs`), unconditionally — the design-system
-plugin *is* the Glyph opt-in, so the bytes carry no Cargo feature of their
-own. Both families are OFL-1.1; the full license text is vendored per family
+(`plugins/glyph/src/tokens/fonts.rs`) behind the crate's `bundled-fonts`
+Cargo feature (default on). An app that sets `default-features = false` on
+its `frust-glyph` dependency ships none of these bytes, `install()` registers
+no faces, and every Glyph text style — whose stacks all end in
+`GenericSlot::Monospace` — resolves to the platform's system monospace
+through fontique. Both families are OFL-1.1; the full license text is vendored per family
 (`space-mono/OFL.txt`, `ibm-plex-mono/OFL.txt`) and neither family's reserved
 font name ("Space Mono", "Plex") has been modified.
 

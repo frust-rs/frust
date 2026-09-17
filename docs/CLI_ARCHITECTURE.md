@@ -155,7 +155,11 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   no platform manifest, so `--deeplink-scheme`/`--deeplink-host`/`--arch` are rejected outright
   rather than silently ignored; its README documents that the three built-ins are sibling plugin
   crates, not `frust` cargo features, so there is no "never re-enable a catalog feature" rule left
-  to state — a design-system crate cannot turn one on by existing.
+  to state — a design-system crate cannot turn one on by existing. The rendered app also ships a
+  `.cargo/config.toml` (a verbatim `template_manifest.json` entry) holding the Android link flags,
+  byte-identical to the repository root's copy and kept so by `profile_sync` — the scaffold leaves
+  the checkout, and with it the reach of the root file Cargo would otherwise have merged in (see
+  [DEVELOPMENT.md](DEVELOPMENT.md) § Build).
 - `doctor`/`devices`: `dispatch` runs `frust-drive`'s independent, non-fatal `Validator`/
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
