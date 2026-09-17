@@ -73,7 +73,9 @@ app's lean arm64 release: stripped `.so` −9.2%, `.text` −17.9%, profile APK 
 `[profile.profile]` inherits the overrides, so a benchmark build measures the shipping
 configuration. The global `opt-level` stays 3 because a whole-binary `"s"`/`"z"` never cleared the
 5% bar against a render-stack CPU-perf carve-out (`scripts/size-report.sh` below); the cold set is
-gated on that same bar. `cargo test -p frust-cli --test profile_sync` keeps every mirror identical —
+gated on that same bar, which the rig it landed on could not adjudicate — see
+[LIMITATIONS.md](LIMITATIONS.md) `release-opt-level-z-bar-unadjudicated` for the owed re-measure and
+the revert path. `cargo test -p frust-cli --test profile_sync` keeps every mirror identical —
 three lists (dev overrides ×5, `[profile.release]` identity ×9, the Android cold set ×8) — and also
 asserts the template's `.cargo/config.toml` is byte-identical to the root's.
 
