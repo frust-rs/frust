@@ -554,6 +554,15 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 .collect();
             state.devices_refreshing = false;
             state.clamp_device_cursor();
+            // The device list is replaced wholesale. Any open context menu
+            // targeting a DeviceRow becomes stale since the entry's SelectDeviceAt
+            // is positional; close it. A menu on a SessionTab is untouched.
+            if matches!(
+                &state.context_menu,
+                Some(m) if matches!(m.target, ContextTarget::DeviceRow(_))
+            ) {
+                state.context_menu = None;
+            }
             Outcome::redraw()
         }
         Message::DeviceCursorUp => move_device_cursor(state, -1),
@@ -2327,16 +2336,11 @@ fn remove_session(state: &mut AppState, idx: usize) {
         Some(active) if active > idx => Some(active - 1),
         other => other,
     };
-    // A positional context menu is invalidated when a session at or before its
-    // target index is removed; all higher indices shift down by one. Close the
-    // menu to prevent a destructive misfire when re-dispatching its entry message
-    // against the shifted state.
-    if matches!(
-        &state.context_menu,
-        Some(m) if matches!(m.target, ContextTarget::SessionTab(i) if i >= idx)
-    ) {
-        state.context_menu = None;
-    }
+    // Any open context menu is invalidated by a session removal: a positional
+    // tab index shifts or becomes stale, and a LogView menu was built against
+    // the then-active session, which may have changed. Closing is the safe
+    // repair — the user reopens on the context they meant.
+    state.context_menu = None;
 }
 
 /// A fresh devtools discovery line landed for the session at `idx`. While
@@ -3191,7 +3195,7 @@ mod tests {
     }
 
     #[test]
-    fn context_menu_on_lower_index_survives_when_higher_tab_removed() {
+    fn context_menu_on_lower_index_closes_when_any_tab_removed() {
         let mut st = welcome();
         let a = register(&mut st, 0, "/tmp/a", "desktop");
         let b = register(&mut st, 1, "/tmp/b", "desktop");
@@ -3221,19 +3225,16 @@ mod tests {
         assert_eq!(st.sessions[0].id, a);
         assert_eq!(st.sessions[1].id, b);
 
-        // Menu targeting tab 0 should survive because 0 < 2.
+        // Menu targeting tab 0 closes even though the removed tab is after it.
+        // Any session removal invalidates any open context menu.
         assert!(
-            st.context_menu.is_some(),
-            "menu on tab 0 should survive when tab 2 is removed"
+            st.context_menu.is_none(),
+            "menu on tab 0 should close when tab 2 is removed"
         );
-        assert!(matches!(
-            st.context_menu.as_ref().unwrap().target,
-            ContextTarget::SessionTab(0)
-        ));
     }
 
     #[test]
-    fn context_menu_on_log_view_survives_tab_removal() {
+    fn context_menu_on_log_view_closes_on_tab_removal() {
         let mut st = welcome();
         let a = register(&mut st, 0, "/tmp/a", "desktop");
         let b = register(&mut st, 1, "/tmp/b", "desktop");
@@ -3260,14 +3261,127 @@ mod tests {
         update(&mut st, Message::CloseTab(0));
         assert_eq!(st.sessions.len(), 1);
 
-        // Menu targeting LogView should survive (not a SessionTab).
+        // Menu targeting LogView closes: the menu was built against the
+        // then-active session, which may have changed or may not match
+        // what the menu entries expect to operate on.
         assert!(
-            st.context_menu.is_some(),
-            "menu on LogView should survive tab removal"
+            st.context_menu.is_none(),
+            "menu on LogView should close on tab removal"
         );
+    }
+
+    #[test]
+    fn deferred_menu_on_active_session_closes_when_session_removed() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        st.sessions[0].state = SessionState::Running;
+        st.active_session = Some(0);
+
+        // Close tab 0 (live); removal is deferred until its terminal event lands.
+        let out = update(&mut st, Message::CloseTab(0));
+        assert!(out.effect.is_some());
+        assert_eq!(st.sessions.len(), 2);
+        assert!(st.sessions[0].close_on_exit);
+
+        // Open a context menu on the active session's log view. The menu is built
+        // against session 0, which is about to be removed.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::LogView { row: Some(10) },
+            },
+        );
+        assert!(st.context_menu.is_some());
         assert!(matches!(
             st.context_menu.as_ref().unwrap().target,
             ContextTarget::LogView { .. }
+        ));
+
+        // Tab 0's terminal event lands and removes it.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].id, b);
+
+        // The menu closes: even though it targets a LogView (not a SessionTab),
+        // it was built against the active session, which is gone. A later
+        // 'CopyLine' action cannot read from the wrong session.
+        assert!(
+            st.context_menu.is_none(),
+            "menu on removed active session should close"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_device_row_closes_when_devices_reload() {
+        let mut st = workbench_with_project();
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                dev("a", "A", Platform::Android, Kind::Emulator),
+                dev("b", "B", Platform::Android, Kind::Emulator),
+            ]),
+        );
+
+        // Open a context menu on device row 1.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::DeviceRow(1),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::DeviceRow(1)
+        ));
+
+        // Devices reload with a reordered/shorter list: row 1's entry is stale.
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![dev("b", "B", Platform::Android, Kind::Emulator)]),
+        );
+
+        assert!(
+            st.context_menu.is_none(),
+            "menu on a DeviceRow should close when the device list reloads"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_session_tab_survives_devices_reload() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+
+        // Open a context menu on a session tab.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+
+        // A device list reload is unrelated to a SessionTab menu; it stays open
+        // and still targets the same tab.
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![dev("a", "A", Platform::Android, Kind::Emulator)]),
+        );
+
+        assert!(
+            st.context_menu.is_some(),
+            "menu on a SessionTab should survive a device list reload"
+        );
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(0)
         ));
     }
 

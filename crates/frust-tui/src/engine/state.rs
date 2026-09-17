@@ -473,6 +473,23 @@ impl AppState {
     /// *other* live session on that target still refuses it (mirroring how
     /// `McpSessionRecords::live_count` excludes the restarted session from
     /// its own cap check).
+    ///
+    /// **Invariant:** `project_root` is compared here by lexical
+    /// normalisation only ([`same_project_root`]) — no filesystem I/O. This
+    /// method is reached from `update()` on the `RunConfigLaunch`,
+    /// `run_on_all_devices`, and MCP `run_app` paths, and the engine's
+    /// `update` must stay free of filesystem I/O, so canonicalisation is not
+    /// an option here.
+    ///
+    /// `project_root` is **not** canonicalised at its entry points today:
+    /// opening a project, the project switcher, and MCP's `run_app` all
+    /// produce a raw, uncanonicalised `PathBuf`. So two paths that name the
+    /// same directory on disk but differ in representation — a symlink and
+    /// its target, or a `..`-relative path that resolves to the same place —
+    /// still compare unequal here and can each spawn their own "live"
+    /// session on the same project. Canonicalising at those entry points
+    /// (where filesystem I/O is already expected) is a follow-up, not done
+    /// by this method.
     pub fn live_session_for_excluding(
         &self,
         project_root: &Path,
@@ -482,7 +499,7 @@ impl AppState {
         self.sessions
             .iter()
             .filter(|s| Some(s.id) != except)
-            .filter(|s| !s.state.is_terminal() && s.project_root == project_root)
+            .filter(|s| !s.state.is_terminal() && same_project_root(&s.project_root, project_root))
             .find(|s| {
                 s.target
                     .as_ref()
@@ -605,6 +622,18 @@ pub(crate) fn is_transient(state: &SessionState) -> bool {
         state,
         SessionState::Configuring | SessionState::Building | SessionState::Installing
     )
+}
+
+/// Whether `a` and `b` name the same project root, compared *lexically* —
+/// no filesystem I/O. [`Path::components`] already normalises away trailing
+/// separators and `.` (current-dir) segments, so `/tmp/huddle`,
+/// `/tmp/huddle/`, and `/tmp/huddle/.` all compare equal here. This is
+/// deliberately not canonicalisation: two paths that are equal on disk but
+/// differ in representation (a symlink and its target, `..` segments that
+/// resolve to the same place) still compare unequal. See
+/// [`AppState::live_session_for_excluding`] for why that gap is accepted.
+fn same_project_root(a: &Path, b: &Path) -> bool {
+    a.components().eq(b.components())
 }
 
 /// Bounded depth-2 walk from `root` for `frust.toml` project markers: `root`
@@ -931,6 +960,39 @@ mod tests {
                 Some(SessionId(1)),
             ),
             Some(SessionId(0))
+        );
+    }
+
+    #[test]
+    fn project_root_comparison_is_lexical_not_canonical() {
+        // A trailing separator and a redundant `.` segment name the same
+        // directory and must still match, purely from Path::components().
+        assert!(same_project_root(
+            Path::new("/tmp/huddle"),
+            Path::new("/tmp/huddle/")
+        ));
+        assert!(same_project_root(
+            Path::new("/tmp/huddle"),
+            Path::new("/tmp/huddle/.")
+        ));
+        // A different directory never matches, lexically identical prefix or not.
+        assert!(!same_project_root(
+            Path::new("/tmp/huddle"),
+            Path::new("/tmp/huddle2")
+        ));
+
+        // The same rule is what live_session_for_excluding relies on: a
+        // trailing-slash variant of a live session's project_root still
+        // finds it, with no filesystem access.
+        let state = state_with(vec![running_on(
+            0,
+            "/tmp/huddle",
+            Some(SessionTarget::Desktop),
+        )]);
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle/"), &SessionTarget::Desktop),
+            Some(SessionId(0)),
+            "a trailing separator names the same project root"
         );
     }
 }
