@@ -836,10 +836,12 @@ mod tests {
         /// The freshness gate on `frust run`'s legacy fallback: a
         /// pre-migration APK that predates this run's own Gradle invocation
         /// (never touched, since the fixture's `./gradlew` is a fake that
-        /// writes nothing) is rejected outright rather than installed onto
-        /// the device as if it were freshly built.
+        /// writes nothing — exactly what an UP-TO-DATE Gradle packaging task
+        /// does on a source-unchanged rerun) is still installed, with a
+        /// warning that it predates this build; it must never be a hard
+        /// error, or every second `frust run` of an unmigrated app fails.
         #[test]
-        fn pre_migration_layout_rejects_a_stale_apk() {
+        fn pre_migration_layout_still_installs_a_stale_apk_with_a_warning() {
             let dir = unique_project_dir("legacy-layout-stale");
             let out_dir = dir.join("android/app/build/outputs/apk/debug");
             fs::create_dir_all(&out_dir).unwrap();
@@ -852,12 +854,16 @@ mod tests {
                 .set_modified(stale)
                 .unwrap();
 
-            let runner = preflight_ok_runner().with(
-                gradlew_key(
-                    &dir,
-                    "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            let apk_str = apk_path.to_string_lossy().into_owned();
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
                 ),
-                ok("BUILD SUCCESSFUL"),
+                &apk_str,
             );
 
             let never = AtomicBool::new(false);
@@ -872,22 +878,33 @@ mod tests {
                 &mut |l| lines.push(l.to_string()),
                 &never,
             );
+            // The pipeline reached `adb install` with the stale APK (the
+            // fixture stops it there): a source-unchanged rerun of an
+            // unmigrated app keeps working.
             let err = match outcome {
                 Err(err) => err,
-                Ok(_) => panic!("expected the stale legacy artifact to be rejected"),
+                Ok(_) => panic!("expected the `adb install` fixture to stop the pipeline"),
             };
-            let message = err.to_string();
-            assert!(message.contains("predates this build"), "{message}");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            let stale_warnings: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("predates this build"))
+                .collect();
+            assert_eq!(stale_warnings.len(), 1, "{lines:?}");
+            assert!(stale_warnings[0].contains("frust clean"), "{lines:?}");
             assert!(
-                message.contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC),
-                "{message}"
+                lines
+                    .iter()
+                    .any(|l| l.contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC)),
+                "{lines:?}"
             );
 
             let _ = fs::remove_dir_all(&dir);
         }
 
-        /// The build-lane warning's `frust run` twin: a leftover
-        /// `android/app/src/main/jniLibs` (no longer packaged since r1-04)
+        /// The build-lane warning's `frust run` twin: on a MIGRATED project
+        /// (its own `android/app/build.gradle.kts` carries the r1-04
+        /// `setSrcDirs` redirect) a leftover `android/app/src/main/jniLibs`
         /// is warned about exactly once, naming the migration recipe.
         #[test]
         fn prepare_session_warns_once_about_a_legacy_jni_libs_leftover() {
@@ -899,6 +916,15 @@ mod tests {
             let jni_dir = dir.join("android/app/src/main/jniLibs/arm64-v8a");
             fs::create_dir_all(&jni_dir).unwrap();
             fs::write(jni_dir.join("libapp.so"), b"stale").unwrap();
+            fs::create_dir_all(dir.join("android/app")).unwrap();
+            fs::write(
+                dir.join("android/app/build.gradle.kts"),
+                format!(
+                    "sourceSets.getByName(\"main\").jniLibs.setSrcDirs(listOf(\"../../{}\"))\n",
+                    crate::build_dirs::BuildLayout::android_jni_libs().display()
+                ),
+            )
+            .unwrap();
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(

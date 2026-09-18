@@ -33,31 +33,66 @@ use crate::build_info::BuildMode;
 pub(crate) const MIGRATION_RECIPE_DOC: &str =
     "docs/DEVELOPMENT.md, `Migrating an already-scaffolded app to the build/ layout`";
 
-/// The pre-migration, AGP-default jniLibs source set — replaced by the
-/// `setSrcDirs` redirect the generated app template and every in-repo
-/// example now carry (r1-04). AGP no longer reads this directory at all, so
-/// a leftover here after that change is dead weight, not a packaging
-/// vector; [`warn_if_legacy_jni_libs`] flags it and
-/// [`crate::build_dirs::LEGACY_CLEAN_DIRS`] is what `frust clean` actually
-/// removes it with.
+/// The pre-migration, AGP-default jniLibs source set. The generated app
+/// template and every in-repo example replace it with a `setSrcDirs`
+/// redirect onto [`BuildLayout::android_jni_libs`] (r1-04) — but only a
+/// project whose *own* `android/app/build.gradle.kts` carries that redirect
+/// has stopped packaging from here. An unmigrated project (the population
+/// [`legacy_output_dir`]'s fallback exists for) still has this directory as
+/// its live packaging input, so [`warn_if_legacy_jni_libs`] reads the
+/// project's Gradle config before deciding what to say, and never tells an
+/// unmigrated project to delete it. [`crate::build_dirs::LEGACY_CLEAN_DIRS`]
+/// is what `frust clean` removes it with.
 const LEGACY_JNI_LIBS_DIR: &str = "android/app/src/main/jniLibs";
+
+/// Whether `project_dir`'s `android/app/build.gradle.kts` carries the
+/// migrated jniLibs redirect (`setSrcDirs` onto
+/// [`BuildLayout::android_jni_libs`]) — the same read-the-project's-own-
+/// generated-config technique `desktop_build::windows` uses for
+/// `windows/build.rs`. A missing/unreadable Gradle file counts as
+/// unmigrated (the safe direction: never claim a directory is dead).
+fn app_gradle_redirects_jni_libs(project_dir: &Path) -> bool {
+    let gradle = project_dir.join("android/app/build.gradle.kts");
+    let Ok(contents) = std::fs::read_to_string(gradle) else {
+        return false;
+    };
+    let jni_libs = BuildLayout::android_jni_libs();
+    let jni_libs = jni_libs.to_string_lossy();
+    contents.contains("setSrcDirs") && contents.contains(jni_libs.as_ref())
+}
 
 /// Emits a one-time [`on_line`] warning when `project_dir`'s legacy
 /// `android/app/src/main/jniLibs` directory exists and is non-empty — see
 /// [`LEGACY_JNI_LIBS_DIR`]. Read-only: nothing here deletes it. Called once
 /// per invocation by both Android lanes (`android_build::build_with_env`,
-/// `android_run::prepare_session`) so a project that hasn't run `frust
-/// clean` since regenerating its Gradle config is told the leftover is
-/// inert, on `frust build` and `frust run` alike.
+/// `android_run::prepare_session`). The wording depends on the project's own
+/// `android/app/build.gradle.kts` (see [`app_gradle_redirects_jni_libs`]):
+/// a migrated project is told the leftover is inert and `frust clean`
+/// removes it; an unmigrated project is told the directory is still its live
+/// packaging input and pointed at the migration recipe — never at deletion.
 pub fn warn_if_legacy_jni_libs(project_dir: &Path, on_line: &mut dyn FnMut(&str)) {
     let dir = project_dir.join(LEGACY_JNI_LIBS_DIR);
     let non_empty = std::fs::read_dir(&dir)
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
-    if non_empty {
+    if !non_empty {
+        return;
+    }
+    let jni_libs = BuildLayout::android_jni_libs();
+    if app_gradle_redirects_jni_libs(project_dir) {
         on_line(&format!(
             "{LEGACY_JNI_LIBS_DIR} is a pre-build/ layout leftover and is no longer packaged \
-             (see {MIGRATION_RECIPE_DOC}); run `frust clean` to remove it"
+             (this project's android/app/build.gradle.kts redirects jniLibs to `{}`; see \
+             {MIGRATION_RECIPE_DOC}); run `frust clean` to remove it",
+            jni_libs.display(),
+        ));
+    } else {
+        on_line(&format!(
+            "Warning: {LEGACY_JNI_LIBS_DIR} is still this project's live native-library \
+             packaging input — its android/app/build.gradle.kts does not redirect jniLibs to \
+             `{}` yet, so do not delete it; migrate the project with the recipe in \
+             {MIGRATION_RECIPE_DOC}",
+            jni_libs.display(),
         ));
     }
 }
@@ -287,13 +322,15 @@ fn artifact_extension(target: &AndroidArtifact) -> &'static str {
 /// from before the move. The warning is emitted only on the step that
 /// actually falls back, so a migrated project never sees it.
 ///
-/// `legacy_not_before` gates the legacy branch on freshness: when set, the
-/// legacy directory is used only if it holds at least one `target`-extension
-/// file whose mtime is at or after that instant; otherwise this errors,
-/// naming the migration recipe, instead of warning-and-returning a directory
-/// whose contents predate the build that just ran (a stale leftover the
-/// legacy Gradle config failed to rebuild would otherwise be silently
-/// reported/installed as fresh).
+/// `legacy_not_before` adds a freshness *warning* to the legacy branch: when
+/// set and the legacy directory holds no `target`-extension file whose mtime
+/// is at or after that instant, a second warning says the artifact predates
+/// the Gradle invocation that just ran. It is deliberately not an error:
+/// Gradle leaves the APK untouched when its packaging task is UP-TO-DATE, so
+/// a source-unchanged rerun of a pre-migration project legitimately produces
+/// nothing new and must still install what the last successful build made.
+/// The warning tells the user how to tell the two cases apart (`frust clean`
+/// + rebuild) without breaking the run loop for unmigrated apps.
 fn resolve_output_dir(
     project_dir: &Path,
     target: &AndroidArtifact,
@@ -309,20 +346,6 @@ fn resolve_output_dir(
 
     let legacy = legacy_output_dir(project_dir, target, mode, flavor);
     if legacy.is_dir() {
-        if let Some(not_before) = legacy_not_before {
-            let extension = artifact_extension(target);
-            if !has_fresh_artifact(&legacy, extension, not_before) {
-                bail!(
-                    "found a pre-migration Android artifact under `{}`, but it predates this \
-                     build — its `.{extension}` file(s) were not modified by the Gradle \
-                     invocation that just ran, so it looks like a stale leftover rather than \
-                     what this build actually produced; migrate this project with the recipe in \
-                     {MIGRATION_RECIPE_DOC}, or remove the stale output (`frust clean`) and \
-                     rebuild",
-                    legacy.display(),
-                );
-            }
-        }
         on_line(&format!(
             "Warning: reading Android build output from the pre-migration path `{}`. \
              This project's generated Gradle config still writes build output into its \
@@ -331,6 +354,18 @@ fn resolve_output_dir(
             legacy.display(),
             current.display(),
         ));
+        if let Some(not_before) = legacy_not_before {
+            let extension = artifact_extension(target);
+            if !has_fresh_artifact(&legacy, extension, not_before) {
+                on_line(&format!(
+                    "Warning: the `.{extension}` under `{}` predates this build — the Gradle \
+                     invocation that just ran did not rewrite it (its packaging task was \
+                     up-to-date, or the legacy config wrote elsewhere). If the installed app \
+                     looks stale, run `frust clean` and rebuild.",
+                    legacy.display(),
+                ));
+            }
+        }
         return Ok(legacy);
     }
 
@@ -339,12 +374,12 @@ fn resolve_output_dir(
 
 /// Whether `dir` contains at least one `extension` file whose mtime is at or
 /// after `not_before` — a coarse freshness peek for
-/// [`resolve_output_dir`]'s legacy-fallback gate; the full listing, count
+/// [`resolve_output_dir`]'s legacy-fallback warning; the full listing, count
 /// validation, and per-target naming stay in [`discover_in_dir`]. An
 /// unreadable directory or unreadable mtime counts as "not fresh" (the
 /// caller already checked `dir.is_dir()`, so a read error here is the rarer
 /// permissions/race case, not the common "doesn't exist" one) — favoring the
-/// migration-recipe error over silently treating an artifact as fresh.
+/// stale-artifact warning over silently treating an artifact as fresh.
 fn has_fresh_artifact(dir: &Path, extension: &str, not_before: SystemTime) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -849,10 +884,11 @@ mod tests {
     }
 
     /// A legacy artifact whose mtime predates the Gradle invocation's start
-    /// instant is rejected outright, naming the migration recipe — never
-    /// silently reported as this build's fresh output.
+    /// instant is still returned (Gradle's UP-TO-DATE packaging task leaves
+    /// the APK untouched on a source-unchanged rerun, which must keep
+    /// working), but a second warning says it predates this build.
     #[test]
-    fn discover_since_rejects_a_stale_legacy_artifact() {
+    fn discover_since_accepts_a_stale_legacy_artifact_with_a_second_warning() {
         let dir = unique_temp_dir("legacy-stale");
         let out_dir = dir.join("android/app/build/outputs/apk/release");
         fs::create_dir_all(&out_dir).unwrap();
@@ -865,18 +901,21 @@ mod tests {
             .unwrap();
         let build_start = SystemTime::now();
 
-        let err = discover_since(
+        let mut lines = Vec::new();
+        let paths = discover_since(
             &dir,
             &apk(&["arm64-v8a"]),
             BuildMode::Release,
             None,
             Some(build_start),
-            &mut silent(),
+            &mut |l| lines.push(l.to_string()),
         )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("predates this build"), "{message}");
-        assert!(message.contains(MIGRATION_RECIPE_DOC), "{message}");
+        .unwrap();
+        assert_eq!(paths, vec![apk_path]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains(MIGRATION_RECIPE_DOC), "{lines:?}");
+        assert!(lines[1].contains("predates this build"), "{lines:?}");
+        assert!(lines[1].contains("frust clean"), "{lines:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -926,6 +965,7 @@ mod tests {
         let jni_dir = dir.join("android/app/src/main/jniLibs");
         fs::create_dir_all(jni_dir.join("arm64-v8a")).unwrap();
         fs::write(jni_dir.join("arm64-v8a/libapp.so"), b"fake").unwrap();
+        write_migrated_app_gradle(&dir);
 
         let mut lines = Vec::new();
         warn_if_legacy_jni_libs(&dir, &mut |line| lines.push(line.to_string()));
@@ -937,6 +977,58 @@ mod tests {
         assert!(lines[0].contains(MIGRATION_RECIPE_DOC), "{lines:?}");
         assert!(lines[0].contains("frust clean"), "{lines:?}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An UNMIGRATED project (no `setSrcDirs` redirect in its own
+    /// `android/app/build.gradle.kts`) still packages from
+    /// `src/main/jniLibs`, so the warning must say so and must never advise
+    /// deleting the directory.
+    #[test]
+    fn warn_if_legacy_jni_libs_never_advises_deletion_for_an_unmigrated_project() {
+        let dir = unique_temp_dir("legacy-jnilibs-unmigrated");
+        let jni_dir = dir.join("android/app/src/main/jniLibs");
+        fs::create_dir_all(jni_dir.join("arm64-v8a")).unwrap();
+        fs::write(jni_dir.join("arm64-v8a/libapp.so"), b"live").unwrap();
+        fs::create_dir_all(dir.join("android/app")).unwrap();
+        fs::write(
+            dir.join("android/app/build.gradle.kts"),
+            "android {\n    namespace = \"x\"\n}\n",
+        )
+        .unwrap();
+
+        let mut lines = Vec::new();
+        warn_if_legacy_jni_libs(&dir, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("live native-library packaging input"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("do not delete it"), "{lines:?}");
+        assert!(lines[0].contains(MIGRATION_RECIPE_DOC), "{lines:?}");
+        assert!(!lines[0].contains("no longer packaged"), "{lines:?}");
+
+        // No Gradle file at all is treated the same way (never "dead").
+        fs::remove_file(dir.join("android/app/build.gradle.kts")).unwrap();
+        lines.clear();
+        warn_if_legacy_jni_libs(&dir, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("do not delete it"), "{lines:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Writes the migrated `setSrcDirs` redirect the app template carries
+    /// since r1-04, derived from `BuildLayout` exactly like the template's
+    /// tripwire test does.
+    fn write_migrated_app_gradle(dir: &Path) {
+        fs::create_dir_all(dir.join("android/app")).unwrap();
+        fs::write(
+            dir.join("android/app/build.gradle.kts"),
+            format!(
+                "android {{\n    sourceSets.getByName(\"main\").jniLibs.setSrcDirs(listOf(\"../../{}\"))\n}}\n",
+                BuildLayout::android_jni_libs().display()
+            ),
+        )
+        .unwrap();
     }
 
     #[test]

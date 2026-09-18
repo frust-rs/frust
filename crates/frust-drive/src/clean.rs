@@ -20,7 +20,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::build_dirs::{CLEAN_DIRS, LEGACY_CLEAN_DIRS};
+use crate::build_dirs::{
+    CLEAN_DIRS, LEGACY_CLEAN_DIRS, LEGACY_WINDOWS_ICON, LEGACY_WINDOWS_ICON_MARKER,
+};
 use crate::process::ProcessRunner;
 
 /// The outcome of a [`run`] call.
@@ -65,7 +67,9 @@ pub enum CleanReport {
 /// reach `on_line` as they arrive.
 ///
 /// Every entry in [`build_dirs::CLEAN_DIRS`] and
-/// [`build_dirs::LEGACY_CLEAN_DIRS`] is removed whether it names a directory
+/// [`build_dirs::LEGACY_CLEAN_DIRS`] — plus [`build_dirs::LEGACY_WINDOWS_ICON`]
+/// and its [`build_dirs::LEGACY_WINDOWS_ICON_MARKER`] when the marker says
+/// Frust mirrored the icon there — is removed whether it names a directory
 /// or a file; a missing entry is not an error, reported through `on_line`
 /// with the wording `` Removed `<path>`. `` on success. See [`remove_path`]
 /// for the symlink/containment semantics an entry can also hit. A removal
@@ -100,6 +104,24 @@ pub fn run(
         .with_context(|| format!("resolving `{}`", project_dir.display()))?;
     for rel in CLEAN_DIRS.iter().chain(LEGACY_CLEAN_DIRS) {
         remove_path(&canonical_project_dir, project_dir, rel, on_line)?;
+    }
+    // The root-level `windows/icon.ico` is Frust output only when the
+    // desktop pipeline mirrored it there for a pre-`build/`-layout
+    // `windows/build.rs`, which it records with a sidecar marker; a
+    // marker-less icon is the project owner's and is never touched.
+    if project_dir.join(LEGACY_WINDOWS_ICON_MARKER).is_file() {
+        remove_path(
+            &canonical_project_dir,
+            project_dir,
+            LEGACY_WINDOWS_ICON,
+            on_line,
+        )?;
+        remove_path(
+            &canonical_project_dir,
+            project_dir,
+            LEGACY_WINDOWS_ICON_MARKER,
+            on_line,
+        )?;
     }
 
     Ok(CleanReport::Cleaned {
@@ -313,10 +335,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// `windows/icon.ico` at the project root is no longer a Frust output
-    /// (b2-04 moved the generated icon under `build/desktop/windows/`), so
-    /// `clean` must leave a file still sitting there alone — it belongs to
-    /// the project owner, not to Frust.
+    /// `windows/icon.ico` at the project root without the mirror marker is
+    /// the project owner's hand-placed input (b2-04 moved the *generated*
+    /// icon under `build/desktop/windows/`), so `clean` must leave it alone.
     #[test]
     fn a_hand_placed_windows_icon_is_not_touched_by_clean() {
         let dir = unique_project_dir("hand-placed-icon");
@@ -328,6 +349,50 @@ mod tests {
         run(&runner, &dir, &mut noop_sink).unwrap();
 
         assert!(dir.join("windows/icon.ico").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The desktop pipeline's one-release mirror of the icon for a
+    /// pre-`build/`-layout `windows/build.rs` writes `windows/icon.ico` next
+    /// to the marker sidecar — that pair IS Frust output and `clean` removes
+    /// both, reporting each, so no generated file survives outside `build/`.
+    #[test]
+    fn a_frust_mirrored_windows_icon_and_its_marker_are_removed_by_clean() {
+        let dir = unique_project_dir("mirrored-icon");
+        write_manifest(&dir);
+        fs::create_dir_all(dir.join("windows")).unwrap();
+        fs::write(dir.join(LEGACY_WINDOWS_ICON), [0u8; 4]).unwrap();
+        fs::write(
+            dir.join(LEGACY_WINDOWS_ICON_MARKER),
+            "written by frust build\n",
+        )
+        .unwrap();
+        fs::write(dir.join("windows/build.rs"), "fn main() {}\n").unwrap();
+
+        let runner = FakeProcessRunner::new().with("cargo clean", ok());
+        let mut lines = Vec::new();
+        run(&runner, &dir, &mut |l| lines.push(l.to_string())).unwrap();
+
+        assert!(!dir.join(LEGACY_WINDOWS_ICON).exists());
+        assert!(!dir.join(LEGACY_WINDOWS_ICON_MARKER).exists());
+        assert!(
+            dir.join("windows/build.rs").exists(),
+            "project sources must survive"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == &format!("Removed `{}`.", dir.join(LEGACY_WINDOWS_ICON).display())),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l
+                == &format!(
+                    "Removed `{}`.",
+                    dir.join(LEGACY_WINDOWS_ICON_MARKER).display()
+                )),
+            "{lines:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

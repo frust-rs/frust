@@ -35,8 +35,9 @@ use super::{BundleNote, BundleReport, DesktopBuildError, DesktopBundleTarget};
 
 /// The path literal the *pre-`build/`-layout* `windows/build.rs` template
 /// embedded (`git show 12f9b29e:templates/app/windows.tmpl/build.rs.tmpl`),
-/// relative to the project root rather than under `build/desktop/windows`.
-const LEGACY_ICON_LITERAL: &str = "windows/icon.ico";
+/// relative to the project root rather than under `build/desktop/windows`
+/// — shared with `clean` through [`build_dirs::LEGACY_WINDOWS_ICON`].
+const LEGACY_ICON_LITERAL: &str = crate::build_dirs::LEGACY_WINDOWS_ICON;
 
 /// The path literal the current template embeds — checked first so a
 /// project already on the new layout is never mistaken for a legacy one
@@ -103,9 +104,31 @@ fn mirror_legacy_icon(project_dir: &Path, generated_ico: &Path, notes: &mut Vec<
         return;
     }
     let legacy_ico = project_dir.join(LEGACY_ICON_LITERAL);
-    if fs::copy(generated_ico, &legacy_ico).is_ok() {
-        notes.push(BundleNote::LegacyWindowsIconAlsoWritten);
+    // Never write through a symlink sitting at the legacy path: `fs::copy`
+    // would follow it and overwrite whatever it points at, outside the
+    // pipeline's own output. Leave it alone and skip the note.
+    if fs::symlink_metadata(&legacy_ico)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return;
     }
+    if fs::copy(generated_ico, &legacy_ico).is_err() {
+        return;
+    }
+    // The sidecar is what lets `clean` tell this Frust-written mirror apart
+    // from a hand-placed icon at the same path (see
+    // `build_dirs::LEGACY_WINDOWS_ICON_MARKER`). A marker that fails to
+    // write leaves the icon in place but uncleanable — still report the
+    // mirror, since the `.exe` did get its icon.
+    let _ = fs::write(
+        project_dir.join(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER),
+        "written by `frust build`: windows/icon.ico next to this file is a mirror of \
+         build/desktop/windows/icon.ico for a pre-build/-layout windows/build.rs; `frust clean` \
+         removes both. Migrate with docs/DEVELOPMENT.md \"Migrating an already-scaffolded app to \
+         the build/ layout\".\n",
+    );
+    notes.push(BundleNote::LegacyWindowsIconAlsoWritten);
 }
 
 /// Assembles `build/desktop/windows/` around the compiled `binary`. `icon` is

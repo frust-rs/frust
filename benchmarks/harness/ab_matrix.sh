@@ -1273,14 +1273,15 @@ install_apk() {
 }
 
 # frust_bench_apk_path / material3_demo_apk_path — the AGP `profile`
-# build-type's default universal-APK output path (mirrors the `release`
-# path app_size.sh already reports, e.g.
-# .../outputs/apk/release/app-release.apk).
+# build-type's default universal-APK output path under the app's single
+# `build/` root (the scaffold's settings.gradle.kts redirects `:app` to
+# `build/android/app`, see docs/DEVELOPMENT.md "Build Output Layout"; the
+# `release` twin is .../outputs/apk/release/app-release.apk).
 frust_bench_apk_path() {
-  echo "${FRUST_BENCH_DIR}/android/app/build/outputs/apk/profile/app-profile.apk"
+  echo "${FRUST_BENCH_DIR}/build/android/app/outputs/apk/profile/app-profile.apk"
 }
 material3_demo_apk_path() {
-  echo "${MATERIAL3_DEMO_DIR}/android/app/build/outputs/apk/profile/app-profile.apk"
+  echo "${MATERIAL3_DEMO_DIR}/build/android/app/outputs/apk/profile/app-profile.apk"
 }
 
 # frame_sanity_check <scen_out> — for the KEPT run-*.log files under

@@ -1514,7 +1514,53 @@ mod tests {
             "legacy windows/icon.ico was not also written"
         );
         assert!(
+            fixture
+                .path(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER)
+                .is_file(),
+            "the mirror marker `clean` relies on was not written"
+        );
+        assert!(
             report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// A symlink parked at the legacy path is never written through (that
+    /// would overwrite whatever it points at, outside the pipeline's own
+    /// output): no copy, no marker, no note.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_legacy_icon_path_is_never_written_through() {
+        let legacy_build_rs = "fn main() {\n    \
+             let icon_path = std::path::Path::new(\"windows/icon.ico\");\n}\n";
+        let fixture = Fixture::new("windows-legacy-symlink")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe")
+            .file("windows/build.rs", legacy_build_rs)
+            .file("elsewhere/target.ico", "user-owned bytes");
+        std::os::unix::fs::symlink(
+            fixture.path("elsewhere/target.ico"),
+            fixture.path("windows/icon.ico"),
+        )
+        .unwrap();
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(fixture.path("elsewhere/target.ico")).unwrap(),
+            "user-owned bytes"
+        );
+        assert!(
+            !fixture
+                .path(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER)
+                .exists()
+        );
+        assert!(
+            !report
                 .notes
                 .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
             "{:?}",
@@ -1538,6 +1584,11 @@ mod tests {
         let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
 
         assert!(!fixture.path("windows/icon.ico").exists());
+        assert!(
+            !fixture
+                .path(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER)
+                .exists()
+        );
         assert!(
             !report
                 .notes

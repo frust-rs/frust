@@ -134,6 +134,20 @@ impl BuildLayout {
 /// doc's `CARGO_TARGET_DIR` precedence).
 pub const CLEAN_DIRS: &[&str] = &[BUILD_ROOT];
 
+/// The project-root icon path a *pre-`build/`-layout* `windows/build.rs`
+/// still embeds. Frust writes here only as a one-release mirror of
+/// [`BuildLayout::windows_icon`] (`desktop_build::windows::mirror_legacy_icon`),
+/// always together with [`LEGACY_WINDOWS_ICON_MARKER`]; the migration recipe
+/// moves the project off it.
+pub const LEGACY_WINDOWS_ICON: &str = "windows/icon.ico";
+
+/// Sidecar `desktop_build::windows` writes next to a *mirrored*
+/// [`LEGACY_WINDOWS_ICON`], recording that Frust generated that icon. It is
+/// the single source of truth `clean::run` consults before removing the
+/// root-level icon: marker present → both files are Frust output and are
+/// removed; marker absent → the icon is user-owned and left alone.
+pub const LEGACY_WINDOWS_ICON_MARKER: &str = "windows/icon.ico.frust-mirrored";
+
 /// Build-output paths from before the [`BUILD_ROOT`] migration.
 ///
 /// Removed for a pre-migration app whose generated Gradle/Xcode config still
@@ -141,12 +155,13 @@ pub const CLEAN_DIRS: &[&str] = &[BUILD_ROOT];
 /// getting cleaned even before it regenerates that config onto the new
 /// layout.
 ///
-/// `windows/icon.ico` — the project-root path the *generated* desktop icon
-/// used before b2-04 moved it under [`BuildLayout::windows_icon`]
-/// (`build/desktop/windows/icon.ico`, already covered by [`CLEAN_DIRS`]'s
-/// `build/` removal) — is deliberately **not** listed here. Frust no longer
-/// generates anything at that root-level path, so a file still there belongs
-/// to the project owner, not to Frust output; `clean` must never delete it.
+/// [`LEGACY_WINDOWS_ICON`] (`windows/icon.ico`) is deliberately **not**
+/// listed here: a file at that root-level path is only Frust output when
+/// `desktop_build::windows` *mirrored* it there for a pre-`build/`-layout
+/// `windows/build.rs` — and then it sits next to the
+/// [`LEGACY_WINDOWS_ICON_MARKER`] sidecar. `clean` removes the icon only when
+/// that marker is present (see `clean::run`); without the marker the file is
+/// the project owner's hand-placed input and is never touched.
 pub const LEGACY_CLEAN_DIRS: &[&str] = &[
     "android/app/build",
     "android/build",
@@ -231,6 +246,12 @@ mod tests {
 
     #[test]
     fn legacy_clean_dirs_no_longer_lists_the_root_windows_icon() {
-        assert!(!LEGACY_CLEAN_DIRS.contains(&"windows/icon.ico"));
+        assert!(!LEGACY_CLEAN_DIRS.contains(&LEGACY_WINDOWS_ICON));
+        assert!(!LEGACY_CLEAN_DIRS.contains(&LEGACY_WINDOWS_ICON_MARKER));
+        // The marker sits next to the icon it describes.
+        assert_eq!(
+            Path::new(LEGACY_WINDOWS_ICON_MARKER).parent(),
+            Path::new(LEGACY_WINDOWS_ICON).parent()
+        );
     }
 }

@@ -437,8 +437,9 @@ mod tests {
     }
 
     /// The build lane's half of the jniLibs Major: a leftover
-    /// `android/app/src/main/jniLibs` (r1-04 replaced AGP's default source
-    /// set, so this directory is never packaged into anything Gradle
+    /// `android/app/src/main/jniLibs` on a MIGRATED project (its own
+    /// `android/app/build.gradle.kts` carries the r1-04 `setSrcDirs`
+    /// redirect, so this directory is never packaged into anything Gradle
     /// produces anymore) is warned about exactly once, naming the migration
     /// recipe — the build itself still succeeds.
     #[test]
@@ -450,6 +451,15 @@ mod tests {
         let jni_dir = dir.join("android/app/src/main/jniLibs/arm64-v8a");
         fs::create_dir_all(&jni_dir).unwrap();
         fs::write(jni_dir.join("libapp.so"), b"stale").unwrap();
+        fs::create_dir_all(dir.join("android/app")).unwrap();
+        fs::write(
+            dir.join("android/app/build.gradle.kts"),
+            format!(
+                "sourceSets.getByName(\"main\").jniLibs.setSrcDirs(listOf(\"../../{}\"))\n",
+                crate::build_dirs::BuildLayout::android_jni_libs().display()
+            ),
+        )
+        .unwrap();
 
         let runner = preflight_ok_runner().with(
             gradlew_key(

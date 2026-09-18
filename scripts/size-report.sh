@@ -114,6 +114,24 @@ fi
 echo "Build OK."
 echo
 
+# app_target_dir <app-dir> — cargo's real target directory for an app,
+# honouring the same precedence every frust pipeline uses: CARGO_TARGET_DIR
+# wins, else the app's own `.cargo/config.toml` `[build] target-dir`
+# (`build/rust` for a scaffolded app), else cargo's default — read back via
+# `cargo metadata` so this script never hard-codes `target/`.
+app_target_dir() {
+  local app="$1"
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    case "${CARGO_TARGET_DIR}" in
+      /*) echo "${CARGO_TARGET_DIR}" ;;
+      *) echo "${app}/${CARGO_TARGET_DIR}" ;;
+    esac
+    return 0
+  fi
+  (cd "${app}" && cargo metadata --format-version 1 --no-deps 2>/dev/null) \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'
+}
+
 # --- Step 2: unstripped / stripped .so size ---------------------------------
 
 # The lib target's file stem is the package name with '-' replaced by '_'
@@ -125,11 +143,20 @@ if [ -z "${PKG_NAME}" ]; then
   exit 1
 fi
 LIB_STEM="$(printf '%s' "${PKG_NAME}" | tr '-' '_')"
-SO_PATH="${APP_DIR}/target/aarch64-linux-android/release/lib${LIB_STEM}.so"
+TARGET_DIR="$(app_target_dir "${APP_DIR}")"
+if [ -z "${TARGET_DIR}" ]; then
+  echo "error: could not resolve cargo's target directory for ${APP_DIR} (cargo metadata failed)" >&2
+  exit 1
+fi
+SO_PATH="${TARGET_DIR}/aarch64-linux-android/release/lib${LIB_STEM}.so"
 
 echo "-- Release .so size (arm64-v8a) --"
 if [ ! -f "${SO_PATH}" ]; then
-  echo "note: expected .so not found at ${SO_PATH} — skipping .so size section"
+  # The build above succeeded, so a missing .so means this script's idea of
+  # the output path is wrong — fail loudly rather than print a report with
+  # no measurements.
+  echo "error: release .so not found at ${SO_PATH} after a successful build" >&2
+  exit 1
 else
   UNSTRIPPED_BYTES="$(file_size_bytes "${SO_PATH}")"
   printf '%-28s %s\n' "unstripped" "$(to_mb "${UNSTRIPPED_BYTES}") (${UNSTRIPPED_BYTES} bytes)"
@@ -161,7 +188,7 @@ echo
 # --- Step 3: APK/AAB report (only if artifacts already exist) --------------
 
 echo "-- APK/AAB report (existing build outputs only; no Gradle build run) --"
-OUTPUTS_DIR="${APP_DIR}/android/app/build/outputs"
+OUTPUTS_DIR="${APP_DIR}/build/android/app/outputs"
 if [ ! -d "${OUTPUTS_DIR}" ]; then
   echo "note: no ${OUTPUTS_DIR} — run \`frust build apk\`/\`appbundle\` first for this section"
 else
