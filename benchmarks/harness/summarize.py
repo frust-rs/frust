@@ -169,8 +169,8 @@ def breakdown_line(bd: dict) -> str:
 def total_pss_mib(scn_dir: Path, discard: int) -> tuple[float | None, float | None, float | None, int]:
     """Mean/min/max TOTAL PSS in MiB (KiB/1024 — `dumpsys meminfo`'s unit is
     KiB, never decimal MB) over the kept post-run snapshots, plus the kept
-    sample count. RESULTS.md's idle-memory row (RESULTS.md line ~970's
-    hand-computed control: 116,328.5 KiB mean -> 113.6 MiB)."""
+    sample count. Matches the hand-computed control RESULTS.md quotes:
+    116,328.5 KiB mean -> 113.6 MiB."""
     snaps = sorted(scn_dir.glob("run-[0-9][0-9].pss_after.txt"))[discard:]
     vals = []
     for p in snaps:
