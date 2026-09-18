@@ -153,7 +153,15 @@ fn build_with_env(
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     let props = tasks::gradle_properties(target, &info.defines, &feature_refs);
 
-    let mut args: Vec<&str> = Vec::with_capacity(1 + props.len());
+    // The same leading `--project-cache-dir <project>/build/android/.gradle`
+    // `android_run::gradle::assemble` passes, taken from that one place
+    // rather than re-spelled here — the two Gradle lanes must not drift on
+    // where Gradle's own cache goes (see `gradle::leading_args`).
+    let leading = crate::android_run::gradle::leading_args(project_dir);
+    let mut args: Vec<&str> = Vec::with_capacity(leading.len() + 1 + props.len());
+    for arg in &leading {
+        args.push(arg.as_str());
+    }
     args.push(task.as_str());
     for prop in &props {
         args.push(prop.as_str());
@@ -200,7 +208,13 @@ fn build_with_env(
         return Err(signing::debug_signed_error());
     }
 
-    let paths = artifacts::discover(&android_dir, target, info.mode, info.flavor.as_deref())?;
+    let paths = artifacts::discover(
+        project_dir,
+        target,
+        info.mode,
+        info.flavor.as_deref(),
+        on_line,
+    )?;
     for path in &paths {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         on_line(&format!("{} ({size} bytes)", path.display()));
@@ -227,6 +241,21 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const JAVA_HOME: &str = "/opt/jdk17";
+
+    /// The `FakeProcessRunner` key for a Frust-driven `./gradlew` invocation
+    /// in the project at `project_dir`: every one now leads with
+    /// `--project-cache-dir <project>/build/android/.gradle` (see
+    /// `android_run::gradle::leading_args`), so a fixture has to carry it
+    /// too. Registering the whole argv — the fake only falls back to a
+    /// registered key that is a *prefix* of the real one — is what makes
+    /// these tests assert the argv: drop or misplace the cache flag and no
+    /// fixture matches at all.
+    fn gradlew_key(project_dir: &Path, task_and_props: &str) -> String {
+        format!(
+            "./gradlew --project-cache-dir {} {task_and_props}",
+            crate::android_run::gradle::project_cache_dir(project_dir).display()
+        )
+    }
 
     fn unique_project_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -305,12 +334,15 @@ mod tests {
     fn full_pipeline_debug_apk_no_flavor_asserts_exact_gradlew_invocation_and_artifacts() {
         let dir = unique_project_dir("full-debug-apk");
         let android_dir = dir.join("android");
-        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-debug.apk"), b"fake-apk-bytes").unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -343,6 +375,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The legacy fixture for the `frust build` lane: a project whose
+    /// generated Gradle config predates the `build/android/` redirect still
+    /// writes its APK to AGP's own `android/app/build/outputs/…`. The build
+    /// must still find it — and say so exactly once, naming the migration
+    /// recipe — rather than failing on a directory that project was never
+    /// going to write to. (The `--project-cache-dir` argument is unaffected:
+    /// it comes off the command line, not out of the project's Gradle
+    /// config, so even a pre-migration project gets its cache relocated.)
+    #[test]
+    fn full_pipeline_finds_a_pre_migration_apk_and_warns_once() {
+        let dir = unique_project_dir("legacy-layout-apk");
+        let out_dir = dir.join("android/app/build/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake-apk-bytes").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &info(BuildMode::Debug, None),
+            &arm64_apk(),
+            NO_EXTRA,
+            &fake_env(),
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
+
+        let warnings: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("pre-migration path"))
+            .collect();
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(warnings[0].contains("docs/DEVELOPMENT.md"), "{warnings:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// The `--features` passthrough reaches `cargo ndk`: the extras land in
     /// the SAME base64 `-Pfrust.cargoFeatures` CSV as the mode's own features,
     /// appended after them. The gradlew fixture is registered with the exact,
@@ -352,16 +434,18 @@ mod tests {
     #[test]
     fn passthrough_features_ride_the_cargo_features_csv_after_the_modes_own() {
         let dir = unique_project_dir("passthrough-apk");
-        let android_dir = dir.join("android");
-        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-debug.apk"), b"fake-apk-bytes").unwrap();
 
         let runner = preflight_ok_runner().with(
             // base64("frust/perf-trace,frust/devtools,hybrid-tier")
-            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a \
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a \
 -Pfrust.splitPerAbi=false \
 -Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scyxoeWJyaWQtdGllcg==",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -397,8 +481,7 @@ mod tests {
         // must be caught as an error, never silently printed as "Built"
         // alongside/instead of the real artifact.
         let dir = unique_project_dir("stale-leftover");
-        let android_dir = dir.join("android");
-        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-debug.apk"), b"fresh-apk-bytes").unwrap();
         fs::write(
@@ -408,7 +491,10 @@ mod tests {
         .unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -448,13 +534,16 @@ mod tests {
         let dir = unique_project_dir("full-release-flavor-defines");
         let android_dir = dir.join("android");
         write_release_signing(&android_dir);
-        let out_dir = android_dir.join("app/build/outputs/apk/paid/release");
+        let out_dir = dir.join("build/android/app/outputs/apk/paid/release");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew assemblePaidRelease -Pfrust.targetPlatforms=arm64-v8a,x86_64 \
+            gradlew_key(
+                &dir,
+                "assemblePaidRelease -Pfrust.targetPlatforms=arm64-v8a,x86_64 \
 -Pfrust.splitPerAbi=false -Pfrust.defines=QT0xO0I9Mg==",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -530,9 +619,12 @@ mod tests {
     /// Registers a successful `assembleRelease` whose output carries `warning`,
     /// against a release-signed project with a real artifact on disk — so
     /// nothing *but* the marker can fail the build.
-    fn release_runner_emitting(warning: &str) -> FakeProcessRunner {
+    fn release_runner_emitting(project_dir: &Path, warning: &str) -> FakeProcessRunner {
         preflight_ok_runner().with(
-            "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                project_dir,
+                "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: true,
                 stdout: format!("> Task :app:assembleRelease\n{warning}\nBUILD SUCCESSFUL"),
@@ -551,8 +643,8 @@ mod tests {
     /// Plants the release APK `artifacts::discover` would find, so a build that
     /// wrongly *passes* the marker check reports success rather than tripping
     /// over a missing artifact — the failure has to come from the marker.
-    fn plant_release_apk(android_dir: &Path) -> PathBuf {
-        let out_dir = android_dir.join("app/build/outputs/apk/release");
+    fn plant_release_apk(project_dir: &Path) -> PathBuf {
+        let out_dir = project_dir.join("build/android/app/outputs/apk/release");
         fs::create_dir_all(&out_dir).unwrap();
         let apk = out_dir.join("app-release.apk");
         fs::write(&apk, b"fake").unwrap();
@@ -569,9 +661,9 @@ mod tests {
         let dir = unique_project_dir("gradle-debug-signed");
         let android_dir = dir.join("android");
         write_release_signing(&android_dir);
-        plant_release_apk(&android_dir);
+        plant_release_apk(&dir);
 
-        let runner = release_runner_emitting(FALLBACK_WARNING);
+        let runner = release_runner_emitting(&dir, FALLBACK_WARNING);
         let build_info = info(BuildMode::Release, None);
         let err = build_with_env(
             &runner,
@@ -599,9 +691,9 @@ mod tests {
         let dir = unique_project_dir("gradle-debug-signed-legacy");
         let android_dir = dir.join("android");
         write_release_signing(&android_dir);
-        plant_release_apk(&android_dir);
+        plant_release_apk(&dir);
 
-        let runner = release_runner_emitting(FALLBACK_WARNING_LEGACY);
+        let runner = release_runner_emitting(&dir, FALLBACK_WARNING_LEGACY);
         let build_info = info(BuildMode::Release, None);
         let err = build_with_env(
             &runner,
@@ -625,15 +717,14 @@ mod tests {
     #[test]
     fn external_signing_still_passes_when_gradle_reports_debug_signing() {
         let dir = unique_project_dir("external-debug-signed");
-        let android_dir = dir.join("android");
         fs::write(
             dir.join("frust.toml"),
             "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[signing]\nexternal = true\n",
         )
         .unwrap();
-        let apk = plant_release_apk(&android_dir);
+        let apk = plant_release_apk(&dir);
 
-        let runner = release_runner_emitting(FALLBACK_WARNING);
+        let runner = release_runner_emitting(&dir, FALLBACK_WARNING);
         let build_info = info(BuildMode::Release, None);
         let mut lines = Vec::new();
         let result = build_with_env(
@@ -662,13 +753,15 @@ mod tests {
     #[test]
     fn a_debug_build_is_not_failed_by_the_marker() {
         let dir = unique_project_dir("debug-marker");
-        let android_dir = dir.join("android");
-        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: true,
                 stdout: format!("{FALLBACK_WARNING}\nBUILD SUCCESSFUL"),
@@ -695,7 +788,10 @@ mod tests {
     fn missing_flavor_gradle_failure_is_reexplained() {
         let dir = unique_project_dir("missing-flavor");
         let runner = preflight_ok_runner().with(
-            "./gradlew assemblePaidRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                &dir,
+                "assemblePaidRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: false,
                 stdout: String::new(),
@@ -732,7 +828,10 @@ mod tests {
     fn other_gradle_failure_passes_through_stderr_tail() {
         let dir = unique_project_dir("other-failure");
         let runner = preflight_ok_runner().with(
-            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: false,
                 stdout: String::new(),
@@ -775,12 +874,15 @@ mod tests {
         let android_dir = dir.join("android");
         write_release_signing(&android_dir);
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
-        let out_dir = android_dir.join("app/build/outputs/apk/release");
+        let out_dir = dir.join("build/android/app/outputs/apk/release");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            gradlew_key(
+                &dir,
+                "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -828,13 +930,16 @@ mod tests {
             "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
         )
         .unwrap();
-        let out_dir = android_dir.join("app/build/outputs/apk/release");
+        let out_dir = dir.join("build/android/app/outputs/apk/release");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a \
+            gradlew_key(
+                &dir,
+                "assembleRelease -Pfrust.targetPlatforms=arm64-v8a \
 -Pfrust.splitPerAbi=false -Pfrust.cargoFeatures=bGVhbg==",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -871,12 +976,15 @@ mod tests {
     fn appbundle_build_asserts_bundle_task_and_all_abis() {
         let dir = unique_project_dir("appbundle");
         let android_dir = dir.join("android");
-        let out_dir = android_dir.join("app/build/outputs/bundle/release");
+        let out_dir = dir.join("build/android/app/outputs/bundle/release");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-release.aab"), b"fake").unwrap();
 
         let runner = preflight_ok_runner().with(
-            "./gradlew bundleRelease -Pfrust.targetPlatforms=arm64-v8a,armeabi-v7a,x86_64",
+            gradlew_key(
+                &dir,
+                "bundleRelease -Pfrust.targetPlatforms=arm64-v8a,armeabi-v7a,x86_64",
+            ),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),

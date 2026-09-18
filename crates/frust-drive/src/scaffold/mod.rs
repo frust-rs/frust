@@ -825,7 +825,8 @@ mod tests {
             "project(\":frust-embedding\").projectDir =",
             "file(providers.gradleProperty(\"frust.embedding.dir\").get())",
             "gradle.lifecycle.beforeProject {",
-            "layout.buildDirectory.set(rootDir.resolve(\"build/frust-embedding\"))",
+            "layout.buildDirectory.set(rootDir.resolve(\"../build/android/app\"))",
+            "layout.buildDirectory.set(rootDir.resolve(\"../build/android/frust-embedding\"))",
         ] {
             assert!(
                 settings.contains(needle),
