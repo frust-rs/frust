@@ -756,17 +756,25 @@ panic = "abort"
 #     `gpu-allocator`: these run at pipeline-creation and
 #     resource-allocation time, not per frame (the per-frame GPU cost is
 #     queue submission and the driver's own work).
-#   * platform glue invoked only a few times across an app's lifetime, not
-#     per frame — `accesskit`, `accesskit_consumer`, `accesskit_android`
-#     (accessibility tree pushes are event-driven).
 #   * one-shot parsing / asset decode / async plumbing — `serde_json`,
-#     `roxmltree`, `fontique` (font enumeration at startup), `tokio`, `mio`,
+#     `roxmltree`, `fontique` (font enumeration at startup), `mio`,
 #     `image`, `png`.
 #
 # Deliberately KEPT at `opt-level = 3` — every crate that runs per frame, per
 # glyph or per pixel, where a smaller-code tradeoff would cost frame time:
 # `frust-engine`, `frust-gpu`, `frust-render`, `frust-text`, `harfrust`,
 # `skrifa`, `read-fonts`, `zune-jpeg`, `parley`.
+#
+# Also kept at 3, for a different reason than the render-stack crates above:
+# `tokio` and the three `accesskit`/`accesskit_consumer`/`accesskit_android`
+# crates do per-frame work that falls outside the spans the render-stack CPU
+# bar measures — `tokio`'s reactive-pump runtime entry
+# (`ReactiveRuntime::pump_local` -> `Handle::enter`, at least four times a
+# frame) and accesskit's semantics publish on every frame whose semantics
+# generation changed — so the bar cannot see their per-frame cost the way it
+# sees the render stack's. Both were re-measured directly instead: see
+# benchmarks/RESULTS.md's tokio/accesskit microbench note for the numbers
+# that keep them out of the cold set.
 #
 # # `wgpu-hal` is deliberately NOT in the cold set, and that is a measured
 # exclusion rather than an oversight: it sits on the per-frame submit path,
@@ -810,15 +818,6 @@ opt-level = "z"
 [profile.release.package.gpu-allocator]
 opt-level = "z"
 
-[profile.release.package.accesskit]
-opt-level = "z"
-
-[profile.release.package.accesskit_consumer]
-opt-level = "z"
-
-[profile.release.package.accesskit_android]
-opt-level = "z"
-
 [profile.release.package.serde_json]
 opt-level = "z"
 
@@ -826,9 +825,6 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.fontique]
-opt-level = "z"
-
-[profile.release.package.tokio]
 opt-level = "z"
 
 [profile.release.package.mio]
