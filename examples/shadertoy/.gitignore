@@ -1,7 +1,6 @@
 # All generated/compiled build output for a Frust app lands under this one
-# project-relative root (kept in sync with `crates/frust-drive`'s
-# `build_dirs::BuildLayout`/`build_dirs::CLEAN_DIRS`, and with `frust
-# clean`'s REMOVED_DIRS) — Rust artifacts (`build/rust`, the `[build]
+# project-relative root (kept in sync with frust_drive::build_dirs::{CLEAN_DIRS,
+# LEGACY_CLEAN_DIRS}) — Rust artifacts (`build/rust`, the `[build]
 # target-dir` set in this project's `.cargo/config.toml`), Android's Gradle
 # output (`build/android`), iOS's `xcodebuild` output (`build/ios`), the
 # default web build (`build/web`), and desktop bundles (`build/desktop`).
