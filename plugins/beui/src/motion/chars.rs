@@ -42,6 +42,15 @@
 //!   wants a colour sweep drives the rebuild; one that wants a brightness sweep
 //!   should use alpha instead and stay on the paint path.
 //!
+//! # The family comes from the theme
+//!
+//! Each cell leaf opts into `frust::text`'s `.themed_family(role)`, so its
+//! family is read from the live theme's type scale at layout. The role is
+//! [`CHAR_CELLS_ROLE`] unless [`CharCellsView::themed_family`] names another.
+//! The leaf keys its shaped run on the resolved style, so a theme swap
+//! reshapes every cell. [`CharCellsView::style`] names the family in code and
+//! wins over the theme, as `Text::style` does.
+//!
 //! # Grapheme splitting is an approximation
 //!
 //! Splitting on `char` boundaries would break every combining sequence in the
@@ -56,15 +65,22 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::authoring::text::TextStyle;
+use frust::authoring::text::{FontStyle, TextStyle};
 use frust::authoring::{
     Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, Vec2, View,
     Widget, any, build_child, rebuild_children, teardown_child, visit_children,
 };
-use frust::{Color, FrameTime, Theme, text};
+use frust::{Color, FrameTime, TextView, Theme, text};
 
 use super::stagger::{Stagger, StaggerDirection};
+use crate::text::ThemeTextType;
+
+/// The type-scale role a cell's family resolves from by default.
+///
+/// `body_medium`: the role `text_animation` shapes its whole-run variants in,
+/// so that component paints one face whether it renders per letter or not.
+pub const CHAR_CELLS_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 
 /// The vertical travel of a cascading letter, as a fraction of its own height.
 ///
@@ -335,6 +351,11 @@ pub struct CharCellsView<State: 'static> {
     cells: CharCells,
     views: Vec<AnyView<State>>,
     style: TextStyle,
+    /// Whether [`Self::style`] named the family. While `false`, the cells take
+    /// `family_role`'s family from the theme at layout.
+    family_explicit: bool,
+    /// The type-scale role the cells' family resolves from.
+    family_role: ThemeTextType,
     color: Option<Color>,
     stagger: Stagger,
     effect: Option<EffectFn>,
@@ -349,6 +370,8 @@ pub fn char_cascade<State: 'static>(content: impl AsRef<str>) -> CharCellsView<S
         cells: CharCells::split(content.as_ref()),
         views: Vec::new(),
         style: TextStyle::default(),
+        family_explicit: false,
+        family_role: CHAR_CELLS_ROLE,
         color: None,
         stagger: Stagger::sprung(CASCADE_STAGGER, crate::tokens::motion::SPRING_SWAP),
         effect: None,
@@ -359,9 +382,20 @@ pub fn char_cascade<State: 'static>(content: impl AsRef<str>) -> CharCellsView<S
 }
 
 impl<State: 'static> CharCellsView<State> {
-    /// Style every cell.
+    /// Style every cell. The style's family is taken as explicit and wins over
+    /// the theme's, whatever order the builders run in. To keep the themed
+    /// family, set only the size and colour.
     pub fn style(mut self, style: TextStyle) -> Self {
         self.style = style;
+        self.family_explicit = true;
+        self.rebuild_views();
+        self
+    }
+
+    /// Resolve the cells' family from the theme's `role` rather than
+    /// [`CHAR_CELLS_ROLE`]. Ignored once [`Self::style`] has named a family.
+    pub fn themed_family(mut self, role: ThemeTextType) -> Self {
+        self.family_role = role;
         self.rebuild_views();
         self
     }
@@ -421,13 +455,38 @@ impl<State: 'static> CharCellsView<State> {
             .cells()
             .iter()
             .map(|cell| {
-                let mut leaf = text(cell.text()).style(self.style.clone());
+                let mut leaf = if self.family_explicit {
+                    text(cell.text()).style(self.style.clone())
+                } else {
+                    themed_leaf(cell.text(), &self.style, self.family_role)
+                };
                 if let Some(color) = self.color {
                     leaf = leaf.color(color);
                 }
                 any(leaf)
             })
             .collect();
+    }
+}
+
+/// A cell leaf with every field of `style` except its family, which the leaf
+/// resolves from `role` at layout. `.style()` would mark the family explicit,
+/// so the fields are set one by one. The ink is set explicitly, which is what
+/// `.style()` did. Only `.style()` can set an oblique style, and it takes the
+/// explicit path, so upright and italic are all this needs to carry.
+fn themed_leaf(content: &str, style: &TextStyle, role: ThemeTextType) -> TextView {
+    let leaf = text(content)
+        .size(style.size)
+        .color(style.color)
+        .weight(style.weight)
+        .letter_spacing(style.letter_spacing)
+        .line_height(style.line_height)
+        .align(style.align)
+        .themed_family(role);
+    if style.style == FontStyle::Italic {
+        leaf.italic()
+    } else {
+        leaf
     }
 }
 
@@ -991,5 +1050,84 @@ mod tests {
             mid[0] < mid[3],
             "and the head has genuinely gone first: {mid:?}"
         );
+    }
+
+    // ---- Typeface: the cells' family follows the live theme ----------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The window every typeface probe paints the cells into.
+    const PROBE_WINDOW: Size = Size::new(240.0, 60.0);
+
+    #[test]
+    fn the_cells_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist(
+            "the cascade's cells",
+            |_: &mut ()| char_cascade::<()>("Ship"),
+            PROBE_WINDOW,
+        );
+    }
+
+    #[test]
+    fn the_cells_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap(
+            "the cascade's cells",
+            |_: &mut ()| {
+                char_cascade::<()>("Ship")
+                    .size(24.0)
+                    .color(Color::from_rgb8(1, 2, 3))
+            },
+            PROBE_WINDOW,
+        );
+    }
+
+    #[test]
+    fn a_named_role_resolves_that_roles_family() {
+        // Only title_large carries Geist Mono, so the default role stays Geist
+        // and the named one does not.
+        let mut theme = crate::theme();
+        theme.type_scale.title_large.family = crate::tokens::mono_family();
+        let default = Probe::new(
+            |_: &mut ()| char_cascade::<()>("Ship"),
+            PROBE_WINDOW,
+            theme.clone(),
+        )
+        .frame();
+        assert_eq!(default, vec![Face::Geist; 4]);
+        let named = Probe::new(
+            |_: &mut ()| char_cascade::<()>("Ship").themed_family(ThemeTextType::TitleLarge),
+            PROBE_WINDOW,
+            theme,
+        )
+        .frame();
+        assert_eq!(named, vec![Face::GeistMono; 4]);
+    }
+
+    #[test]
+    fn an_explicit_style_family_wins_over_the_theme() {
+        // `.style()` names the family, before or after `.themed_family()`.
+        let mono = TextStyle {
+            family: crate::tokens::mono_family(),
+            ..TextStyle::default()
+        };
+        for view in [
+            char_cascade::<()>("Ship")
+                .style(mono.clone())
+                .themed_family(ThemeTextType::BodyMedium),
+            char_cascade::<()>("Ship")
+                .themed_family(ThemeTextType::BodyMedium)
+                .style(mono.clone()),
+        ] {
+            let mut view = Some(view);
+            let faces = Probe::new(
+                move |_: &mut ()| view.take().expect("built once"),
+                PROBE_WINDOW,
+                crate::theme(),
+            )
+            .frame();
+            assert_eq!(faces, vec![Face::GeistMono; 4]);
+        }
     }
 }

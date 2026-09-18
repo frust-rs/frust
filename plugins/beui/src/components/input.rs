@@ -88,7 +88,7 @@ use super::switch;
 use crate::motion::Ramp;
 use crate::press::{Lane, inside_inclusive as inside, keyframes_at, lerp_color};
 use crate::style;
-use crate::text::Label as ShapedText;
+use crate::text::{Label as ShapedText, ThemeTextType};
 use crate::tokens::{BeuiTokens, sans_family};
 
 /// Field width used when the incoming constraints are horizontally unbounded —
@@ -402,7 +402,14 @@ impl<State: 'static> InputView<State> {
     }
 }
 
-/// The label's text style: `text-sm font-medium text-foreground`.
+/// The type-scale role the label's family resolves from at layout.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the message's family resolves from at layout.
+const MESSAGE_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The label's text style: `text-sm font-medium text-foreground`. The family
+/// here is the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s family.
 fn label_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -413,7 +420,8 @@ fn label_style(color: Color) -> TextStyle {
     }
 }
 
-/// The message's text style: `text-xs text-destructive`.
+/// The message's text style: `text-xs text-destructive`. The family here is
+/// the unthemed base; `layout` shapes in [`MESSAGE_ROLE`]'s family.
 fn message_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -620,11 +628,11 @@ impl Widget for InputWidget {
         let tint = |color: Color| style::disabled_tint(color, self.disabled, DISABLED_OPACITY);
 
         let label_size = match &mut self.label {
-            Some(label) => label.layout(ctx, &label_style(tint(ink))),
+            Some(label) => label.layout_themed(ctx, &label_style(tint(ink)), LABEL_ROLE),
             None => Size::ZERO,
         };
         if let Some(message) = &mut self.message {
-            message.layout(ctx, &message_style(destructive));
+            message.layout_themed(ctx, &message_style(destructive), MESSAGE_ROLE);
         }
 
         let width = if bc.max().width.is_finite() {
@@ -1411,4 +1419,35 @@ mod tests {
     }
     // `ShapedText` (aliasing `crate::text::Label`) carries its own leaf test
     // in `crate::text`'s test module now.
+
+    // ---- Typeface: label and message follow the live theme -----------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(320.0, 200.0);
+
+    /// A labelled field with an error message. The value and placeholder are
+    /// empty: the wrapped baseline field has no themed-family opt-in, so its
+    /// own text would paint the system face and is not what these tests pin.
+    fn probe_view(_: &mut ()) -> InputView<()> {
+        input::<(), _>("", |_: &mut (), _| {})
+            .label("Email")
+            .error("Enter a valid address")
+    }
+
+    #[test]
+    fn label_and_message_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the input's label and message", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn label_and_message_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap(
+            "the input's label and message",
+            probe_view,
+            PROBE_WINDOW,
+        );
+    }
 }

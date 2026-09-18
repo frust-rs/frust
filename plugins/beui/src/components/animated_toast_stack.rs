@@ -118,7 +118,7 @@ use frust::{FrameTime, SpringDescription, Theme};
 use crate::motion::{Presence, PresencePhase, Ramp};
 use crate::press::{Lane, presses};
 use crate::style::{self, with_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::BeuiTokens;
 use crate::tokens::motion::{EASE_OUT, SPRING_GLIDE};
 
@@ -577,27 +577,21 @@ fn resolve_colors(status: AnimatedToastStackStatus, theme: Option<&Theme>) -> To
     }
 }
 
-/// The title style (`text-sm font-medium`).
+/// The title style (`text-sm font-medium`), in the theme's `label_large`
+/// family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// The description style (`text-xs`, regular weight).
+/// The description style (`text-xs`, regular weight), in the theme's
+/// `body_small` family.
 fn body_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.body_small.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_XS as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(style::TEXT_XS as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::BodySmall, theme)
 }
 
 /// The action label style (`text-xs font-medium`).
@@ -2125,5 +2119,33 @@ mod tests {
             .filter(|(_, node)| node.role() == Role::Button)
             .count();
         assert_eq!(buttons, 2, "toast 1's action and close, toast 2's neither");
+    }
+
+    // ---- Typeface: title, description and action follow the live theme -----
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// One toast carrying all three text runs.
+    fn probe_view(_: &mut ()) -> AnimatedToastStackView<()> {
+        animated_toast_stack::<(), _>(
+            vec![
+                animated_toast(1, "Saved")
+                    .description("Your draft is safe")
+                    .action("Undo"),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn toast_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the toast's text", probe_view, AREA);
+    }
+
+    #[test]
+    fn toast_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the toast's text", probe_view, AREA);
     }
 }
