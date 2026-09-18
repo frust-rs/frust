@@ -126,7 +126,7 @@ use crate::components::popover::lerp;
 use crate::motion::{Presence, PresencePhase, Ramp};
 use crate::press::{Lane, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -339,15 +339,14 @@ fn resolve_colors(theme: Option<&Theme>) -> ExpandableTabsColors {
     }
 }
 
-/// The tab-label style (`text-sm font-medium`).
+/// The tab-label style (`text-sm font-medium`), in the theme's `label_large`
+/// family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..crate::text::label_style(style::TEXT_SM)
-    }
+    themed_style(
+        crate::text::label_style(style::TEXT_SM),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 /// One retained tab.
@@ -1668,5 +1667,39 @@ mod tests {
             1,
             "exactly one selected tab"
         );
+    }
+
+    // ---- Typeface: the tab labels follow the live theme ---------------------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(600.0, 400.0);
+
+    /// Two tabs with glyph-free icons and panels, the first open so its label
+    /// is on screen.
+    fn probe_view(_: &mut ()) -> ExpandableTabsView<()> {
+        let blank = || frust::SizedBox::<()>(Some(16.0), Some(16.0));
+        expandable_tabs::<(), _>(
+            Some("home".to_string()),
+            vec![
+                expandable_tabs_item("home", "Home", blank(), blank()),
+                expandable_tabs_item("settings", "Settings", blank(), blank()),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn the_tab_labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the tab labels", probe_view, PROBE_WINDOW);
+        let runs = Probe::new(probe_view, PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(runs.len(), 1, "the open tab's label");
+    }
+
+    #[test]
+    fn the_tab_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the tab labels", probe_view, PROBE_WINDOW);
     }
 }

@@ -86,7 +86,7 @@ use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 use crate::motion::Ramp;
 use crate::press::{is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 /// The gap between triggers, in logical px (`gap-1`; the segment variant packs
@@ -309,17 +309,14 @@ fn resolve_colors(theme: Option<&Theme>) -> TabsColors {
     }
 }
 
-/// The trigger label style: the theme's Geist stack at `text-sm`/`font-medium`,
-/// or the bundled sans stack unthemed.
+/// The trigger label style: `text-sm`/`font-medium` in the theme's
+/// `label_large` family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
 /// Which way an arrow key moves along the strip, or `None`.
@@ -1329,5 +1326,38 @@ mod tests {
             1,
             "exactly one selected tab"
         );
+    }
+
+    // ---- Typeface: the trigger labels follow the live theme ------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(600.0, 400.0);
+
+    /// Three triggers over glyph-free panels, so every painted run is a
+    /// trigger label.
+    fn probe_view(_: &mut ()) -> TabsView<()> {
+        let panel = || frust::SizedBox::<()>(Some(40.0), Some(40.0));
+        tabs::<(), _>(
+            "overview",
+            vec![
+                tabs_tab("overview", "Overview", panel()),
+                tabs_tab("activity", "Activity", panel()),
+                tabs_tab("settings", "Settings", panel()).disabled(true),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn trigger_labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the tab triggers", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn trigger_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the tab triggers", probe_view, PROBE_WINDOW);
     }
 }

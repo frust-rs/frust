@@ -48,8 +48,8 @@ use std::rc::Rc;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, View, Widget, any, build_child, erase_callback,
-    rebuild_child, route_event, teardown_child, text::FontWeight, visit_children,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any, build_child,
+    erase_callback, rebuild_child, route_event, teardown_child, text::FontWeight, visit_children,
 };
 use frust::{TextView, Theme, text};
 
@@ -76,16 +76,19 @@ fn muted(theme: Option<&Theme>) -> Color {
     theme.map_or(FALLBACK.muted, |t| t.scheme().surface_container_highest)
 }
 
-/// A `text-sm` table cell label in `foreground` — the text form of upstream's
-/// `TableCell`. A body cell takes any view; this is the common one.
+/// A `text-sm` table cell label in the live theme's `BodyMedium` family, in
+/// `foreground` — the text form of upstream's `TableCell`. A body cell takes any
+/// view; this is the common one.
 pub fn table_cell(label: impl Into<String>) -> TextView {
     text(label.into())
         .size(style::TEXT_SM as f32)
-        .family(crate::tokens::sans_family())
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurface)
 }
 
-/// A `text-sm font-medium` head/footer label in `foreground`.
+/// A `text-sm font-medium` head/footer label in `foreground`. It keeps
+/// [`table_cell`]'s `BodyMedium` family, so every band of one table shares a
+/// face under a theme whose roles differ.
 fn strong_cell(label: &str) -> TextView {
     table_cell(label.to_string()).weight(FontWeight::MEDIUM)
 }
@@ -1047,6 +1050,36 @@ mod tests {
                 .filter(|(_, n)| n.role() == Role::Row)
                 .any(|(_, n)| n.supports_action(Action::Click)),
             "an activatable row exposes the Click action"
+        );
+    }
+
+    // ---- Typeface: the cells and caption follow the live theme ------------
+
+    /// Every text band the table generates or ships a helper for: head labels,
+    /// `table_cell` body cells, footer labels and the caption.
+    #[cfg(feature = "bundled-fonts")]
+    fn invoices(_: &mut ()) -> TableView<()> {
+        table([table_row([table_cell("INV001"), table_cell("Paid")])])
+            .header(["Invoice", "Status"])
+            .footer(["Total", "$250.00"])
+            .caption("A list of your recent invoices.")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_cells_and_caption_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a table's cells and caption",
+            invoices,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_cells_and_caption_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a table's cells and caption",
+            invoices,
         );
     }
 }

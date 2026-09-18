@@ -38,9 +38,9 @@ use std::rc::Rc;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextColor, View, Widget,
-    any, build_child, erase_callback_arg, rebuild_child, route_event, teardown_child,
-    text::FontWeight, visit_children,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextColor,
+    ThemeTextType, View, Widget, any, build_child, erase_callback_arg, rebuild_child, route_event,
+    teardown_child, text::FontWeight, visit_children,
 };
 use frust::{TextView, Theme, text};
 
@@ -165,11 +165,12 @@ impl<State: 'static> PaginationView<State> {
     }
 }
 
-/// A pagination item's label: `text-sm` in `foreground`.
+/// A pagination item's label: `text-sm` in the live theme's `LabelLarge`
+/// family (a button look's label), in `foreground`.
 fn item_text(label: &str) -> TextView {
     text(label.to_string())
         .size(style::TEXT_SM as f32)
-        .family(crate::tokens::sans_family())
+        .themed_family(ThemeTextType::LabelLarge)
         .themed_role(ThemeTextColor::OnSurface)
 }
 
@@ -1065,6 +1066,42 @@ mod tests {
                 .count(),
             1,
             "aria-current=page on exactly one link"
+        );
+    }
+
+    // ---- Typeface: the item labels follow the live theme ------------------
+
+    /// Previous, three page numbers (one current), an ellipsis (a glyph drawn
+    /// as dots, not text) and next.
+    #[cfg(feature = "bundled-fonts")]
+    fn navigator(_: &mut ()) -> PaginationView<()> {
+        pagination(
+            [
+                PaginationItem::Page(1),
+                PaginationItem::Page(2),
+                PaginationItem::Page(3),
+                PaginationItem::Ellipsis,
+            ],
+            2,
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_item_labels_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a pagination's item labels",
+            navigator,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_item_labels_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a pagination's item labels",
+            navigator,
         );
     }
 }

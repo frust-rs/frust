@@ -95,7 +95,7 @@ use frust::{FrameTime, Theme};
 use crate::motion::{Presence, PresencePhase, Ramp};
 use crate::press::{Lane, presses};
 use crate::style::{self, scale_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 use crate::tokens::{BEUI_LIGHT, BeuiPalette, sans_family};
 
@@ -585,7 +585,11 @@ impl SidebarColors {
     }
 }
 
-/// A row's text style: `text-sm`.
+/// The type-scale role a row's label takes its family from at layout.
+const ROW_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// A row's text style: `text-sm`. The family here is the unthemed base;
+/// `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1067,7 +1071,7 @@ impl Widget for AiSidebarWidget {
         let style = row_style();
         let mut height = 0.0;
         for row in &mut self.rows {
-            row.label.layout(ctx, &style);
+            row.label.layout_themed(ctx, &style, ROW_ROLE);
             let shown = row.shown.clamp(0.0, 1.0);
             height += (AI_SIDEBAR_ROW_HEIGHT + AI_SIDEBAR_ROW_GAP) * shown;
         }
@@ -1938,5 +1942,27 @@ mod tests {
         let themed = SidebarColors::resolve(Some(&theme));
         assert_eq!(themed.ink, theme.scheme().on_surface);
         assert_eq!(themed.pill, theme.scheme().surface_container_highest);
+    }
+
+    // ---- Typeface: the row labels follow the live theme ----------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The trimmed workspace with its first root expanded, so nested rows
+    /// paint beside the roots.
+    fn probe_view(_: &mut ()) -> AiSidebarView<()> {
+        ai_sidebar::<()>(tree()).default_expanded(vec!["release".to_owned()])
+    }
+
+    #[test]
+    fn row_labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the sidebar's rows", probe_view, RAIL);
+    }
+
+    #[test]
+    fn row_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the sidebar's rows", probe_view, RAIL);
     }
 }

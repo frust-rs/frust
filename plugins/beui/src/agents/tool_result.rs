@@ -71,7 +71,7 @@ use crate::agents::code_block::{
 use crate::motion::Ramp;
 use crate::press::{inside, is_activation_key, presses};
 use crate::style::{self, with_alpha};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL};
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -334,16 +334,14 @@ pub struct ToolResultWidget {
     on_retry: Option<ErasedCallback>,
 }
 
-/// The title style (`text-sm font-medium`).
+/// The title style (`text-sm font-medium`), in the theme's `label_large`
+/// family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(TOOL_RESULT_TITLE_SIZE as f32, SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
 impl<State: 'static> View<State> for ToolResultView<State> {
@@ -711,6 +709,8 @@ impl Widget for ToolResultWidget {
         self.width = bc.max().width;
         let theme = Theme::from_layout_ctx(ctx);
         self.title.layout(ctx, &title_style(theme));
+        // The tool name, the status word and the meta keep the mono family
+        // `code_style` names explicitly.
         let mono = code_style(TOOL_RESULT_META_SIZE);
         self.tool.layout(ctx, &mono);
         self.status_label.layout(ctx, &mono);
@@ -1567,6 +1567,50 @@ mod tests {
         assert_eq!(
             layout(&mut w).height,
             TOOL_RESULT_HEADER_HEIGHT + TOOL_RESULT_CONTENT_GAP + 60.0
+        );
+    }
+
+    // ---- Typeface: the title follows the live theme, the rest stays mono -----
+
+    use crate::agents::code_block::mixed_face_probe::{
+        assert_mixed_follows_a_live_family_swap, assert_paints_geist_beside_mono,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(420.0, 400.0);
+
+    /// The explicit mono runs [`probe_view`] paints: the meta, the tool name
+    /// and the status word. With no copy or retry there is no action row, so
+    /// the status word does not paint a second time in the panel's foot.
+    const PROBE_MONO_RUNS: usize = 3;
+
+    /// An open result over a glyph-free payload, so the title is the one
+    /// themed run.
+    fn probe_view(_: &mut ()) -> ToolResultView<()> {
+        tool_result::<(), _>(
+            "bash",
+            "npm run build",
+            frust::SizedBox::<()>(Some(40.0), Some(20.0)),
+        )
+        .meta("1.8s")
+    }
+
+    #[test]
+    fn the_title_paints_in_geist_beside_mono_meta() {
+        assert_paints_geist_beside_mono(
+            "the tool result",
+            probe_view,
+            PROBE_WINDOW,
+            PROBE_MONO_RUNS,
+        );
+    }
+
+    #[test]
+    fn the_title_follows_a_live_theme_family_swap() {
+        assert_mixed_follows_a_live_family_swap(
+            "the tool result",
+            probe_view,
+            PROBE_WINDOW,
+            PROBE_MONO_RUNS,
         );
     }
 }

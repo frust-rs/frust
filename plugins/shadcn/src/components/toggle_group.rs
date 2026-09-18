@@ -62,14 +62,15 @@ use frust::Theme;
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
     Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, Toggled, View, Widget, erase_callback_arg,
+    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, Toggled, View, Widget,
+    erase_callback_arg,
     text::{FontWeight, TextStyle},
 };
 
 use crate::components::toggle::{ToggleSize, ToggleVariant};
 use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE, precedence_fill, precedence_ink};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::ShadcnTokens;
 
 /// Horizontal padding per item, in logical px (`px-3` — the group's own override
@@ -253,17 +254,18 @@ fn resolve_colors(theme: Option<&Theme>, variant: ToggleVariant) -> GroupColors 
     }
 }
 
-/// The label style: the theme's (Inter) family at `text-sm`/`font-medium`, or the
-/// bundled sans stack unthemed.
+/// The label style: `text-sm`/`font-medium` in the live theme's `LabelLarge`
+/// family, or the bundled sans stack unthemed.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-    }
+    themed_family(
+        TextStyle {
+            family: crate::tokens::sans_family(),
+            weight: FontWeight::MEDIUM,
+            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::LabelLarge,
+    )
 }
 
 /// Whether `key` activates the focused item.
@@ -1356,5 +1358,38 @@ mod tests {
         assert_eq!(buttons[0].1.toggled(), Some(Toggled::True));
         assert_eq!(buttons[1].1.toggled(), Some(Toggled::False));
         assert!(buttons[2].1.is_disabled());
+    }
+
+    // ---- Typeface: the item labels follow the live theme ------------------
+
+    /// A pressed item and a released one.
+    #[cfg(feature = "bundled-fonts")]
+    fn formatting(_: &mut ()) -> ToggleGroupView<()> {
+        toggle_group::<(), _>(
+            vec![
+                toggle_group_item("bold", "Bold"),
+                toggle_group_item("italic", "Italic"),
+            ],
+            vec!["bold".to_string()],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_item_labels_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a toggle group's item labels",
+            formatting,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_item_labels_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a toggle group's item labels",
+            formatting,
+        );
     }
 }

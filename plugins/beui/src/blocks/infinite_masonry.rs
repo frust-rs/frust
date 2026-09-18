@@ -104,7 +104,7 @@ use crate::components::popover::{PanelChrome, paint_panel_hairline, resolve_pane
 use crate::motion::Ramp;
 use crate::press::{inside, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -881,28 +881,22 @@ impl<State: 'static> View<State> for InfiniteMasonryView<State> {
     fn teardown(&self, _element: &mut MasonryWidget, _ctx: &mut BuildCtx<'_>) {}
 }
 
-/// The label family: the theme's own scale, with the catalog's sans stack as
-/// the unthemed fallback.
-fn family_of(theme: Option<&Theme>) -> frust::authoring::text::FontFamily {
-    theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    })
-}
-
-/// A card title's style.
+/// A card title's style, in the theme's `label_large` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(style::TEXT_SM)
-    }
+    themed_style(
+        crate::text::label_style(style::TEXT_SM),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
-/// A card caption's style.
+/// A card caption's style, in the theme's `label_large` family.
 fn caption_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(style::TEXT_XS)
-    }
+    themed_style(
+        crate::text::label_style(style::TEXT_XS),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 impl Widget for MasonryWidget {
@@ -1816,5 +1810,47 @@ mod tests {
             "a reduced-motion reveal faded: {:?}",
             rec.layers
         );
+    }
+
+    // ---- Typeface: cards, the error tail and the empty line follow the theme
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// Two captioned cards over the retryable error tail.
+    fn feed_view(_: &mut ()) -> InfiniteMasonryView<()> {
+        infinite_masonry::<(), _>(
+            vec![
+                masonry_item("Aurora").caption("Iceland"),
+                masonry_item("Dunes").caption("Sahara"),
+            ],
+            |_: &mut ()| {},
+        )
+        .error("Could not load more")
+        .on_retry(|_: &mut ()| {})
+    }
+
+    /// A finished feed with nothing in it: the empty line alone.
+    fn empty_view(_: &mut ()) -> InfiniteMasonryView<()> {
+        infinite_masonry::<(), _>(Vec::new(), |_: &mut ()| {}).has_more(false)
+    }
+
+    #[test]
+    fn feed_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the feed's text", feed_view, WINDOW);
+        let runs = Probe::new(feed_view, WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            6,
+            "two titles, two captions, the error and retry"
+        );
+        assert_paints_only_in_geist("the empty line", empty_view, WINDOW);
+    }
+
+    #[test]
+    fn feed_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the feed's text", feed_view, WINDOW);
+        assert_follows_a_live_family_swap("the empty line", empty_view, WINDOW);
     }
 }

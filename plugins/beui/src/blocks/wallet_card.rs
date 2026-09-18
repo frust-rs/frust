@@ -111,7 +111,7 @@ use crate::motion::stagger::StaggerDirection;
 use crate::motion::{Presence, Ramp, Stagger};
 use crate::press::{Lane, inside, is_activation_key, press_scale, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL, SPRING_PRESS};
 
 /// The label this block's GPU pass is diagnosed under.
@@ -1047,20 +1047,13 @@ impl<State: 'static> View<State> for WalletCardView<State> {
     }
 }
 
-/// The label family: the theme's own scale, with the catalog's sans stack as
-/// the unthemed fallback.
-fn family_of(theme: Option<&Theme>) -> frust::authoring::text::FontFamily {
-    theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    })
-}
-
-/// One label style at `size`.
+/// One label style at `size`, in the theme's `label_large` family.
 fn wallet_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 impl Widget for WalletCardWidget {
@@ -2729,5 +2722,84 @@ mod tests {
         let flags = View::<()>::rebuild(&off, &again, &mut widget, &mut ctx);
         assert!(flags.contains(ChangeFlags::PAINT));
         assert!(!widget.gpu_fan);
+    }
+
+    // ---- Typeface: the card and both panels follow the live theme ----------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap,
+        assert_follows_a_live_family_swap_on, assert_paints_only_in_geist,
+    };
+
+    /// The card with a balance change and one recent search term.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        frust::Stack(vec![any(wallet_card::<()>(accounts(), 12_345.67)
+            .change(2.5)
+            .search_recent(vec!["ethereum".to_string()]))])
+    }
+
+    /// The account trigger's centre, in window space.
+    const ACCOUNT_TRIGGER: Point = Point::new(
+        WALLET_PADDING + 40.0,
+        WALLET_PADDING + WALLET_HEAD_HEIGHT / 2.0,
+    );
+
+    /// The search button's centre, in window space.
+    fn search_button() -> Point {
+        let inner = WALLET_WIDTH - WALLET_PADDING * 2.0;
+        let icons = WALLET_ICON_BUTTON * 2.0 + style::SPACING_UNIT;
+        Point::new(
+            WALLET_PADDING + inner - icons + WALLET_ICON_BUTTON / 2.0,
+            WALLET_PADDING + WALLET_HEAD_HEIGHT / 2.0,
+        )
+    }
+
+    /// A probe with the panel behind the head button at `at` opened by a press.
+    fn opened_probe(
+        at: Point,
+    ) -> Probe<frust::StackView<()>, impl FnMut(&mut ()) -> frust::StackView<()>> {
+        let mut probe = Probe::new(probe_view, WINDOW, crate::theme());
+        probe.frame();
+        probe.event(&pointer(PointerPhase::Down, at.x, at.y));
+        probe.event(&pointer(PointerPhase::Up, at.x, at.y));
+        probe
+    }
+
+    #[test]
+    fn card_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the card's text", probe_view, WINDOW);
+        assert_control("the panels' text", WINDOW);
+        let switcher = opened_probe(ACCOUNT_TRIGGER).frame();
+        assert_all(
+            "the account switcher",
+            "under the beUI theme",
+            &switcher,
+            Face::Geist,
+        );
+        let search = opened_probe(search_button()).frame();
+        assert_all(
+            "the search panel",
+            "under the beUI theme",
+            &search,
+            Face::Geist,
+        );
+        // The switcher adds each account's name, short address and initial; the
+        // search panel adds its one recent term.
+        let resting = Probe::new(probe_view, WINDOW, crate::theme()).frame();
+        assert_eq!(switcher.len(), resting.len() + 6);
+        assert_eq!(search.len(), resting.len() + 1);
+    }
+
+    #[test]
+    fn card_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the card's text", probe_view, WINDOW);
+        assert_follows_a_live_family_swap_on(
+            "the account switcher",
+            &mut opened_probe(ACCOUNT_TRIGGER),
+        );
+        assert_follows_a_live_family_swap_on(
+            "the search panel",
+            &mut opened_probe(search_button()),
+        );
     }
 }

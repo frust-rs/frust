@@ -74,7 +74,7 @@ use crate::motion::{Ramp, Stagger};
 use crate::overlay::OverlayAnchor;
 use crate::press::{Lane, draw_focus_ring, inside, is_activation_key, presses};
 use crate::style::{self, with_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::BeuiTokens;
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL};
 
@@ -138,6 +138,22 @@ pub const CITATION_PREVIEW_WIDTH: f64 = 260.0;
 
 /// The ramp the reference list's disclosure plays, in both directions.
 pub const CITATION_REVEAL: Ramp = Ramp::spring(SPRING_PANEL);
+
+/// The type-scale role a numbered marker — a chip, an index badge, the list's
+/// count — takes its family from at layout.
+const BADGE_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
+/// The type-scale role a citation's title takes its family from at layout, in
+/// the preview and on a reference row.
+const TITLE_ROLE: ThemeTextType = ThemeTextType::TitleSmall;
+
+/// The type-scale role a citation's display domain takes its family from at
+/// layout.
+const DOMAIN_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The type-scale role the reference list's header word takes its family from
+/// at layout — the disclosure's control label.
+const HEADER_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 /// The cascade chips and reference rows arrive on.
 pub fn citation_cascade() -> Stagger {
@@ -442,7 +458,7 @@ impl Widget for CitationsWidget {
         let mut x = 0.0;
         let mut y = 0.0;
         for chip in &mut self.chips {
-            let measured = chip.layout(ctx, &style);
+            let measured = chip.layout_themed(ctx, &style, BADGE_ROLE);
             let width =
                 (measured.width + CITATION_CHIP_PADDING_X * 2.0).max(CITATION_CHIP_MIN_WIDTH);
             if x > 0.0 && x + width > self.width {
@@ -708,21 +724,26 @@ impl Widget for CitationPreviewWidget {
         let width = bc.max().width.min(CITATION_PREVIEW_WIDTH);
         let inner =
             (width - CITATION_PREVIEW_PADDING * 2.0 - CITATION_GLYPH_BOX - style::GAP_MD).max(0.0);
-        self.title_height = self
-            .title
-            .layout(ctx, &strong_style(style::TEXT_SM), inner)
-            .height;
+        let title = themed_style(
+            strong_style(style::TEXT_SM),
+            TITLE_ROLE,
+            Theme::from_layout_ctx(ctx),
+        );
+        self.title_height = self.title.layout(ctx, &title, inner).height;
         if let Some(domain) = &mut self.domain {
-            domain.layout(ctx, &prose_style(style::TEXT_XS));
+            domain.layout_themed(ctx, &prose_style(style::TEXT_XS), DOMAIN_ROLE);
         }
         self.url_height = match &mut self.url {
+            // Explicit: the URL is set in the mono stack, and `TypeScale` has
+            // no monospace role to take it from.
             Some(url) => {
                 url.layout(ctx, &code_style(CITATION_CHIP_SIZE), inner)
                     .height
             }
             None => 0.0,
         };
-        self.index.layout(ctx, &strong_style(CITATION_CHIP_SIZE));
+        self.index
+            .layout_themed(ctx, &strong_style(CITATION_CHIP_SIZE), BADGE_ROLE);
 
         let mut height = CITATION_PREVIEW_PADDING * 2.0 + self.title_height;
         if self.domain.is_some() {
@@ -1075,13 +1096,17 @@ impl CitationListWidget {
 impl Widget for CitationListWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         self.width = bc.max().width;
-        self.title.layout(ctx, &strong_style(style::TEXT_SM));
-        self.count.layout(ctx, &strong_style(CITATION_CHIP_SIZE));
+        self.title
+            .layout_themed(ctx, &strong_style(style::TEXT_SM), HEADER_ROLE);
+        self.count
+            .layout_themed(ctx, &strong_style(CITATION_CHIP_SIZE), BADGE_ROLE);
         for row in &mut self.rows {
-            row.title.layout(ctx, &strong_style(style::TEXT_SM));
-            row.index.layout(ctx, &strong_style(CITATION_CHIP_SIZE));
+            row.title
+                .layout_themed(ctx, &strong_style(style::TEXT_SM), TITLE_ROLE);
+            row.index
+                .layout_themed(ctx, &strong_style(CITATION_CHIP_SIZE), BADGE_ROLE);
             if let Some(domain) = &mut row.domain {
-                domain.layout(ctx, &prose_style(style::TEXT_XS));
+                domain.layout_themed(ctx, &prose_style(style::TEXT_XS), DOMAIN_ROLE);
             }
         }
         bc.constrain(Size::new(self.width, CITATION_HEADER_HEIGHT + self.band()))
@@ -1904,5 +1929,61 @@ mod tests {
         assert_eq!(size.height, 0.0);
         paint_of(&mut no_chips, size, None, 0.0);
         assert_eq!(no_chips.hit(Point::ZERO), None);
+    }
+
+    // ---- Typeface: chips, preview and list follow the live theme -----------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// Two sources with titles and domains, and no URL.
+    fn probe_sources() -> Vec<Citation> {
+        vec![
+            citation("a", "Rust reference").domain("doc.rust-lang.org"),
+            citation("b", "The Book").domain("rust-lang.org"),
+        ]
+    }
+
+    /// The chip row, a preview and an opened reference list — every sans run
+    /// this module shapes. The preview carries no URL: that run is mono on
+    /// purpose, and `the_preview_url_stays_in_geist_mono` pins it.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(citations::<()>(probe_sources())),
+            frust::any(citation_preview(probe_sources()[0].clone(), 1)),
+            frust::any(citation_list::<()>(probe_sources()).open(true)),
+        ])
+    }
+
+    #[test]
+    fn citation_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the citation text", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn citation_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the citation text", probe_view, PROBE_WINDOW);
+    }
+
+    /// The explicit site: under the beUI theme, whose every role is Geist, the
+    /// preview's URL still paints in Geist Mono beside its Geist runs.
+    #[test]
+    fn the_preview_url_stays_in_geist_mono() {
+        let logic = |_: &mut ()| {
+            frust::Column(vec![frust::any(citation_preview(
+                citation("a", "Rust reference").url("https://doc.rust-lang.org"),
+                1,
+            ))])
+        };
+        let faces = Probe::new(logic, PROBE_WINDOW, crate::theme()).frame();
+        let mono = faces.iter().filter(|f| **f == Face::GeistMono).count();
+        assert_eq!(mono, 1, "exactly the URL is mono: {faces:?}");
+        assert!(
+            faces.iter().all(|f| *f != Face::Other),
+            "every run is a bundled face: {faces:?}"
+        );
     }
 }

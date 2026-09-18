@@ -102,7 +102,7 @@ use frust::{FrameTime, ScrollInfo, Theme};
 use crate::motion::{Presence, Ramp, ScrollFx, Stagger};
 use crate::press::{Lane, inside, presses};
 use crate::style::{self, scale_alpha};
-use crate::text::Label;
+use crate::text::{Label, ThemeTextType};
 use crate::tokens::motion::{EASE_OUT, SPRING_PRESS};
 use crate::tokens::{BEUI_LIGHT, BeuiPalette, sans_family};
 
@@ -712,7 +712,7 @@ impl Widget for MessageScrollerWidget {
             0.0
         };
         let ink = ScrollerPaint::resolve(Theme::from_layout_ctx(ctx)).button_ink;
-        let label = self.jump.layout(ctx, &jump_style(ink));
+        let label = self.jump.layout_themed(ctx, &jump_style(ink), JUMP_ROLE);
         self.jump_width = label.width
             + MESSAGE_SCROLLER_BUTTON_PADDING_X * 2.0
             + BUTTON_ICON_GAP
@@ -1062,7 +1062,12 @@ impl ScrollerPaint {
     }
 }
 
-/// The jump button's label style: `text-xs font-medium`.
+/// The type-scale role the jump button's label takes its family from at
+/// layout.
+const JUMP_ROLE: ThemeTextType = ThemeTextType::LabelMedium;
+
+/// The jump button's label style: `text-xs font-medium`. The family here is
+/// the unthemed base; `layout` shapes in [`JUMP_ROLE`]'s family.
 fn jump_style(ink: Color) -> frust::authoring::text::TextStyle {
     frust::authoring::text::TextStyle {
         family: sans_family(),
@@ -1661,5 +1666,46 @@ mod tests {
         let (rec, needs_frame) = painted(&mut widget, 10, None);
         assert!(rec.layers.is_empty());
         assert!(!needs_frame);
+    }
+
+    // ---- Typeface: the jump button's label follows the live theme ------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap_on,
+    };
+
+    /// A glyph-free transcript scrolled away from its live edge, so the jump
+    /// button's label is the one painted run.
+    fn scrolled_probe()
+    -> Probe<MessageScrollerView<()>, impl FnMut(&mut ()) -> MessageScrollerView<()>> {
+        let logic = |_: &mut ()| {
+            message_scroller::<()>(
+                (0..20)
+                    .map(|_| any(frust::SizedBox::<()>(Some(200.0), Some(40.0))))
+                    .collect(),
+            )
+        };
+        let mut probe = Probe::new(logic, BOX, crate::theme());
+        probe.frame();
+        probe.event(&wheel(-300.0));
+        probe
+    }
+
+    #[test]
+    fn the_jump_label_paints_in_geist_under_the_beui_theme() {
+        assert_control("the jump button", BOX);
+        let faces = scrolled_probe().frame();
+        assert_eq!(faces.len(), 1, "exactly the jump label paints");
+        assert_all(
+            "the jump button",
+            "under the beUI theme",
+            &faces,
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn the_jump_label_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on("the jump button", &mut scrolled_probe());
     }
 }

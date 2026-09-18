@@ -744,6 +744,8 @@ impl FileDiffWidget {
 impl Widget for FileDiffWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         self.width = bc.max().width;
+        // Explicit: every run here is code in the mono stack, and `TypeScale`
+        // has no monospace role to take it from.
         let code = code_style(CODE_TEXT_SIZE);
         self.file.layout(ctx, &code);
         self.additions.layout(ctx, &code);
@@ -1672,5 +1674,24 @@ mod tests {
         View::<Toggled>::rebuild(&shrunk, &next, &mut w, &mut ctx);
         assert_eq!(w.hunks.len(), 1, "a shape change rebuilds the hunks");
         assert_eq!(w.focused, DiffTarget::File, "and resets the cursor");
+    }
+
+    // ---- Typeface: the code runs keep the mono stack -----------------------
+
+    /// The explicit site: under the beUI theme, whose every role is Geist,
+    /// every run of an open diff — file, counts, hunk headers, line numbers,
+    /// markers and content — still paints in Geist Mono.
+    #[test]
+    fn every_run_stays_in_geist_mono_under_the_beui_theme() {
+        use crate::text::typeface_probe::{Face, Probe, assert_all};
+
+        let logic = |_: &mut ()| file_diff::<()>(model());
+        let faces = Probe::new(logic, Size::new(600.0, 600.0), crate::theme()).frame();
+        assert_all(
+            "the diff's code runs",
+            "under the beUI theme",
+            &faces,
+            Face::GeistMono,
+        );
     }
 }

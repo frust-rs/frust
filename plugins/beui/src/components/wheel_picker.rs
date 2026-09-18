@@ -128,7 +128,7 @@ use crate::gpu_fx::quad3d::{Quad3d, QuadFace};
 use crate::gpu_fx::schedule::request_frame;
 use crate::press::{inside_inclusive as inside, presses};
 use crate::style;
-use crate::text::Label as ShapedText;
+use crate::text::{Label as ShapedText, ThemeTextType};
 use crate::tokens::sans_family;
 
 /// Width used when the incoming constraints are horizontally unbounded — the
@@ -509,7 +509,11 @@ fn resolve_colors(theme: Option<&Theme>) -> WheelColors {
     }
 }
 
-/// A row label's style: `font-medium` at the theme's body size.
+/// The type-scale role a row label's family resolves from at layout.
+const ROW_ROLE: ThemeTextType = ThemeTextType::BodyLarge;
+
+/// A row label's style: `font-medium` at the theme's body size. The family
+/// here is the unthemed base; `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -961,8 +965,8 @@ impl Widget for WheelPickerWidget {
         let dim = row_style(colors.dim);
         let ink = row_style(colors.ink);
         for (dimmed, crisp) in &mut self.labels {
-            dimmed.layout(ctx, &dim);
-            crisp.layout(ctx, &ink);
+            dimmed.layout_themed(ctx, &dim, ROW_ROLE);
+            crisp.layout_themed(ctx, &ink, ROW_ROLE);
         }
 
         let width = if bc.max().width.is_finite() {
@@ -2130,5 +2134,28 @@ mod tests {
         // ...and the teardown is total whether or not anything was ever held.
         View::<Picked>::teardown(&off, &mut widget, &mut ctx);
         assert!(!widget.fx.is_active());
+    }
+
+    // ---- Typeface: the dimmed and crisp rows follow the live theme ---------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(WIDTH, 400.0);
+
+    /// A drum mid-list, so rows paint on both sides of the centre band.
+    fn probe_view(_: &mut ()) -> WheelPicker<()> {
+        wheel_picker::<(), _>(options(12), "03", |_: &mut (), _| {})
+    }
+
+    #[test]
+    fn rows_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the drum's rows", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn rows_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the drum's rows", probe_view, PROBE_WINDOW);
     }
 }

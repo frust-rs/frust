@@ -177,7 +177,7 @@ use crate::overlay::{
 };
 use crate::press::inside;
 use crate::style;
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL};
 
 /// How long the pointer rests on a trigger before its label appears
@@ -201,6 +201,10 @@ pub const TOOLTIP_ARROW_SIZE: f64 = 6.0;
 
 /// How wide the arrow's base is, in logical px.
 pub const TOOLTIP_ARROW_WIDTH: f64 = 12.0;
+
+/// The type-scale role the label takes its family from at layout — a small
+/// caption.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 
 thread_local! {
     /// `lastHiddenAt`: when any tooltip on this thread last hid, so the next one
@@ -441,7 +445,9 @@ impl<State: 'static> View<State> for TooltipPanelView {
 
 impl Widget for TooltipPanelWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let text = self.label.layout(ctx, &label_style(style::TEXT_XS));
+        let text = self
+            .label
+            .layout_themed(ctx, &label_style(style::TEXT_XS), LABEL_ROLE);
         let panel = Size::new(
             text.width + TOOLTIP_PAD_X * 2.0,
             text.height + TOOLTIP_PAD_Y * 2.0,
@@ -1410,5 +1416,45 @@ mod tests {
             size.height > TOOLTIP_PAD_Y * 2.0 && size.width > TOOLTIP_PAD_X * 2.0,
             "the panel is its text plus its padding: {size:?}"
         );
+    }
+
+    // ---- Typeface: the label follows the live theme ------------------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap_on,
+    };
+
+    /// A trigger held open by its controlled flag, so the label floats up
+    /// through the framework portal without a hover.
+    fn open_probe() -> Probe<frust::StackView<()>, impl FnMut(&mut ()) -> frust::StackView<()>> {
+        let hover = TooltipHover::new();
+        let logic = move |_: &mut ()| {
+            frust::Stack(vec![
+                any(
+                    tooltip_trigger(&hover, SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)))
+                        .open(Some(true)),
+                ),
+                any(tooltip::<()>(&hover, "Add to library")),
+            ])
+        };
+        let mut probe = Probe::new(logic, WINDOW, crate::theme());
+        probe.frame();
+        probe
+    }
+
+    #[test]
+    fn the_label_paints_in_geist_under_the_beui_theme() {
+        assert_control("the tooltip label", WINDOW);
+        assert_all(
+            "the tooltip label",
+            "under the beUI theme",
+            &open_probe().frame(),
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn the_label_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on("the tooltip label", &mut open_probe());
     }
 }

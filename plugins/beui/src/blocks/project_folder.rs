@@ -117,7 +117,7 @@ use crate::gpu_fx::schedule::request_frame;
 use crate::motion::Ramp;
 use crate::press::{Lane, inside, is_activation_key, press_scale, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{SPRING_LAYOUT, SPRING_PRESS};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -695,20 +695,13 @@ fn sheet_runs(previews: &[ProjectFolderPreview]) -> Vec<LabelRun> {
         .collect()
 }
 
-/// The label family: the theme's own scale, with the catalog's sans stack as
-/// the unthemed fallback.
-fn family_of(theme: Option<&Theme>) -> frust::authoring::text::FontFamily {
-    theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    })
-}
-
-/// One label style at `size`.
+/// One label style at `size`, in the theme's `label_large` family.
 fn folder_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 impl Widget for ProjectFolderWidget {
@@ -1585,5 +1578,44 @@ mod tests {
             first.rrects, second.rrects,
             "a reduced-motion fan is already where it is going"
         );
+    }
+
+    // ---- Typeface: the flap's runs and the sheet labels follow the theme ---
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A three-sheet folder, fanned `open` or at rest.
+    fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
+        move |_: &mut ()| {
+            frust::Stack(vec![any(project_folder::<()>(
+                "Brand kit",
+                vec![
+                    folder_preview("Logo"),
+                    folder_preview("Type"),
+                    folder_preview("Colour"),
+                ],
+            )
+            .open(open))])
+        }
+    }
+
+    #[test]
+    fn folder_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the resting folder's text", probe_logic(false), WINDOW);
+        assert_paints_only_in_geist("the fanned folder's text", probe_logic(true), WINDOW);
+        let runs = Probe::new(probe_logic(true), WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            6,
+            "the title, count and description, then three sheet labels"
+        );
+    }
+
+    #[test]
+    fn folder_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the resting folder's text", probe_logic(false), WINDOW);
+        assert_follows_a_live_family_swap("the fanned folder's text", probe_logic(true), WINDOW);
     }
 }

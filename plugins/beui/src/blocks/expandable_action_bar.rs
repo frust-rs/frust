@@ -97,7 +97,7 @@ use crate::motion::stagger::StaggerDirection;
 use crate::motion::{Ramp, Stagger};
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 
 // ---- Metrics ---------------------------------------------------------------
 
@@ -675,15 +675,13 @@ impl Entry {
     }
 }
 
-/// A label's style at `size`.
+/// A label's style at `size`, in the theme's `label_large` family.
 fn label_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 impl Widget for ExpandableActionBarWidget {
@@ -831,15 +829,10 @@ impl Widget for ExpandableActionBarWidget {
     visit_children!(icons);
 }
 
-/// A shortcut's style (`text-[10px]`).
+/// A shortcut's style (`text-[10px]`), in the theme's `label_small` family.
 fn label_style_small(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(ACTION_BAR_SHORTCUT_TEXT as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(ACTION_BAR_SHORTCUT_TEXT as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 impl ExpandableActionBarWidget {
@@ -1386,5 +1379,36 @@ mod tests {
         );
         // Three labels and one shortcut.
         assert!(rec.inks.len() >= 4, "every run painted: {}", rec.inks.len());
+    }
+
+    // ---- Typeface: labels and shortcuts follow the live theme ---------------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The expanded bar with glyph-free icons, two labels and an ASCII
+    /// shortcut.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        frust::Stack(vec![any(expandable_action_bar::<(), _>(
+            vec![
+                action_bar_item(icon::<()>(), "Reply"),
+                action_bar_item(icon::<()>(), "Forward").shortcut("Ctrl F"),
+            ],
+            |_: &mut (), _| {},
+        )
+        .expanded(true))])
+    }
+
+    #[test]
+    fn bar_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the action bar's text", probe_view, WINDOW);
+        let runs = Probe::new(probe_view, WINDOW, crate::theme()).frame();
+        assert_eq!(runs.len(), 3, "two labels and a shortcut");
+    }
+
+    #[test]
+    fn bar_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the action bar's text", probe_view, WINDOW);
     }
 }

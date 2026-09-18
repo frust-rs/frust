@@ -105,7 +105,7 @@ use crate::components::checkbox::{CHECK_POINTS, ICON_VIEWBOX, mark_path};
 use crate::motion::{Presence, Ramp, Stagger};
 use crate::press::{Lane, inside_inclusive, presses};
 use crate::style;
-use crate::text::Label;
+use crate::text::{Label, ThemeTextType};
 use crate::tokens::motion::EASE_OUT;
 use crate::tokens::{BeuiTokens, sans_family};
 
@@ -440,6 +440,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
     fn field_view(&self) -> AnyView<State> {
         let on_change = self.on_message_change.clone();
         any(
+            // Not themed: the baseline `text_input` has no themed-family opt-in.
             text_input(self.message.clone(), move |state: &mut State, text| {
                 on_change(state, text);
             })
@@ -728,7 +729,15 @@ fn resolve_colors(theme: Option<&Theme>) -> FeedbackColors {
     }
 }
 
-/// `font-semibold` at `size`.
+/// The type-scale role the three titles take their family from at layout.
+const TITLE_ROLE: ThemeTextType = ThemeTextType::TitleSmall;
+
+/// The type-scale role the sent and error bodies take their family from at
+/// layout.
+const BODY_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// `font-semibold` at `size`. The family here is the unthemed base; `layout`
+/// shapes in [`TITLE_ROLE`]'s family.
 fn semibold(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -739,7 +748,8 @@ fn semibold(size: f64, color: Color) -> TextStyle {
     }
 }
 
-/// A plain run at `size`.
+/// A plain run at `size`. The family here is the unthemed base; `layout`
+/// shapes in [`BODY_ROLE`]'s family.
 fn plain(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -890,16 +900,14 @@ impl Widget for FeedbackWidgetWidget {
             .min(available * PANEL_WIDTH_FRACTION)
             .max(TRIGGER_SIZE);
 
-        self.title
-            .layout(ctx, &semibold(style::TEXT_SM, colors.ink));
-        self.sent_title
-            .layout(ctx, &semibold(style::TEXT_SM, colors.ink));
-        self.sent_body
-            .layout(ctx, &plain(style::TEXT_XS, colors.muted));
+        let title_style = semibold(style::TEXT_SM, colors.ink);
+        let body_style = plain(style::TEXT_XS, colors.muted);
+        self.title.layout_themed(ctx, &title_style, TITLE_ROLE);
+        self.sent_title.layout_themed(ctx, &title_style, TITLE_ROLE);
+        self.sent_body.layout_themed(ctx, &body_style, BODY_ROLE);
         self.error_title
-            .layout(ctx, &semibold(style::TEXT_SM, colors.ink));
-        self.error_body
-            .layout(ctx, &plain(style::TEXT_XS, colors.muted));
+            .layout_themed(ctx, &title_style, TITLE_ROLE);
+        self.error_body.layout_themed(ctx, &body_style, BODY_ROLE);
 
         // The message field, laid out only while the form is what is showing —
         // a closed block gives its pods no box to be hit in.
@@ -2005,5 +2013,54 @@ mod tests {
         assert_eq!(FeedbackStatus::Sending.view(), PanelView::Form);
         assert_eq!(FeedbackStatus::Sent.view(), PanelView::Sent);
         assert_eq!(FeedbackStatus::Error.view(), PanelView::Error);
+    }
+
+    // ---- Typeface: the three views' titles and bodies follow the theme -----
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(600.0, 600.0);
+
+    /// The block open on `status`'s view. The message, placeholder and button
+    /// labels are empty: the wrapped baseline field has no themed-family
+    /// opt-in and the buttons are `button`'s own text, so neither is what
+    /// these tests pin.
+    fn probe_logic(status: FeedbackStatus) -> impl FnMut(&mut ()) -> FeedbackWidgetView<()> {
+        move |_: &mut ()| {
+            feedback_widget::<(), _, _>(status, "", |_: &mut (), _| {}, |_: &mut (), _| {})
+                .placeholder("")
+                .action_labels("", "")
+                .error_copy(
+                    "Something went wrong",
+                    "We could not send your feedback.",
+                    "",
+                )
+        }
+    }
+
+    /// Each open view and the runs it paints: the form's title, then each
+    /// result view's title and body.
+    const VIEWS: [(FeedbackStatus, &str, usize); 3] = [
+        (FeedbackStatus::Open, "the form's title", 1),
+        (FeedbackStatus::Sent, "the thanks view's text", 2),
+        (FeedbackStatus::Error, "the failure view's text", 2),
+    ];
+
+    #[test]
+    fn view_text_paints_in_geist_under_the_beui_theme() {
+        for (status, what, runs) in VIEWS {
+            assert_paints_only_in_geist(what, probe_logic(status), PROBE_WINDOW);
+            let faces = Probe::new(probe_logic(status), PROBE_WINDOW, crate::theme()).frame();
+            assert_eq!(faces.len(), runs, "{what}");
+        }
+    }
+
+    #[test]
+    fn view_text_follows_a_live_theme_family_swap() {
+        for (status, what, _) in VIEWS {
+            assert_follows_a_live_family_swap(what, probe_logic(status), PROBE_WINDOW);
+        }
     }
 }

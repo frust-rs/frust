@@ -73,7 +73,7 @@ use crate::style::{
     PRESS_SCALE, RADIUS_CONTROL, RADIUS_ICON_BUTTON, SIZE_ICON_BUTTON, TEXT_BASE, TEXT_SM, TEXT_XS,
     disabled_tint, resolve_radius, scale_alpha, with_alpha,
 };
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 use crate::tokens::color_scheme_light;
 use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT, SPRING_MOUSE, SPRING_PRESS, SPRING_SWAP};
 
@@ -212,6 +212,10 @@ pub const MAGNETIC_STRENGTH: f64 = 0.25;
 /// The width the stateful icon slot opens to: `width: "1.5rem"`
 /// (`button/stateful.tsx`'s `ICON_VARIANTS`).
 const ICON_SLOT_WIDTH: f64 = 24.0;
+
+/// The type-scale role every state label's family resolves from at layout —
+/// a control label. [`label_style`]'s own family is the unthemed base.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 /// How long a state's label takes to hand over. Upstream's exit is
 /// `{ duration: 0.16, ease: EASE_OUT }`; the entrance is `SPRING_SWAP`, and the
@@ -635,7 +639,8 @@ impl<State: 'static> View<State> for ButtonView<State> {
 impl Widget for ButtonWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let style = label_style(self.size.font_size());
-        let mut content = self.labels[ButtonState::Idle as usize].layout(ctx, &style);
+        let mut content =
+            self.labels[ButtonState::Idle as usize].layout_themed(ctx, &style, LABEL_ROLE);
 
         if self.variant == ButtonVariant::Stateful {
             // The box is sized for the widest state so the row never resizes
@@ -645,7 +650,7 @@ impl Widget for ButtonWidget {
                 ButtonState::Success,
                 ButtonState::Error,
             ] {
-                let size = self.labels[state as usize].layout(ctx, &style);
+                let size = self.labels[state as usize].layout_themed(ctx, &style, LABEL_ROLE);
                 content.width = content.width.max(size.width);
                 content.height = content.height.max(size.height);
             }
@@ -1786,4 +1791,35 @@ mod tests {
     // `inside`/`presses` (the hit-test and pointer-admission leaf helpers) and
     // `LabelRun`/`label_style` (the shaped-run cache) each carry their own
     // leaf tests in `crate::press` / `crate::text` now.
+
+    // ---- Typeface: the labels follow the live theme ------------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 200.0);
+
+    /// A base button, which paints its idle run, over a stateful one showing
+    /// its success label, which is shaped by the widest-state loop.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(button::<()>("Save", |_| {})),
+            frust::any(
+                button::<()>("Save", |_| {})
+                    .variant(ButtonVariant::Stateful)
+                    .state(ButtonState::Success),
+            ),
+        ])
+    }
+
+    #[test]
+    fn labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the button labels", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the button labels", probe_view, PROBE_WINDOW);
+    }
 }

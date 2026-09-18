@@ -65,7 +65,7 @@ use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT, SPRING_PRESS, SPRING_SWAP};
 
 use super::button::ButtonTone;
 use crate::press::{SpringScalar, inside, presses, stroke_outline};
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 
 /// The blur swap's timing: `BLUR_TRANSITION = { duration: 0.2, ease: "easeInOut" }`,
 /// resolved against beUI's own symmetric curve rather than the CSS keyword the
@@ -90,6 +90,10 @@ const CASCADE_TRAVEL: f64 = 1.05;
 
 /// The scale a blur-swapped label pops from: `scale: 0.94`.
 const BLUR_SCALE: f64 = 0.94;
+
+/// The type-scale role the label runs (whole and per-cell) take their family
+/// from at layout — a control label, as on [`button`](super::button).
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 /// Which treatment a swap plays.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -432,7 +436,7 @@ impl Widget for ActionSwapWidget {
         let per_cell = self.transition.is_per_cell();
         let mut content = Size::ZERO;
         for run in &mut self.runs {
-            let whole = run.whole.layout(ctx, &style);
+            let whole = run.whole.layout_themed(ctx, &style, LABEL_ROLE);
             content.height = content.height.max(whole.height);
             if per_cell {
                 // The cascade lays its own cells out, so the label it reserves
@@ -441,7 +445,7 @@ impl Widget for ActionSwapWidget {
                 run.offsets.clear();
                 let mut x = 0.0;
                 for cell in &mut run.cells {
-                    let size = cell.layout(ctx, &style);
+                    let size = cell.layout_themed(ctx, &style, LABEL_ROLE);
                     run.offsets.push(x);
                     x += size.width;
                     content.height = content.height.max(size.height);
@@ -1224,5 +1228,32 @@ mod tests {
         assert_eq!(rec.rrects[0].3, theme().scheme().surface_container);
         assert!(!rec.strokes.is_empty(), "secondary is bordered");
         assert_eq!(w.tone, ButtonTone::Secondary);
+    }
+
+    // ---- Typeface: whole and per-cell labels follow the live theme ---------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 200.0);
+
+    /// A blur swap, which paints the whole run, over a cascade, which paints
+    /// the per-grapheme cells.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(action_swap::<()>(items())),
+            frust::any(action_swap::<()>(items()).transition(ActionSwapTransition::Cascade)),
+        ])
+    }
+
+    #[test]
+    fn labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the action-swap labels", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the action-swap labels", probe_view, PROBE_WINDOW);
     }
 }
