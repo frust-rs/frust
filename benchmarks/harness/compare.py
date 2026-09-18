@@ -107,11 +107,11 @@ def main(argv=None) -> int:
             out.append(f"| first-frame span median (ms) | {fo['median']} | {fn['median']} | {pct(fo['median'], fn['median'])} |")
             if abs(float(pct(fo['median'], fn['median']).rstrip('%'))) > a.flag_pct:
                 flags.append(f"S7 first-frame span {pct(fo['median'], fn['median'])} ({fo['median']}→{fn['median']} ms)")
-        po, pn = o7.get("idle_pss_mb"), n7.get("idle_pss_mb")
+        po, pn = o7.get("idle_pss_mib"), n7.get("idle_pss_mib")
         if po and pn and po[0] and pn[0]:
-            out.append(f"| idle TOTAL PSS mean (MB) | {po[0]:.1f} | {pn[0]:.1f} | {pct(po[0], pn[0])} |")
+            out.append(f"| idle TOTAL PSS mean (MiB) | {po[0]:.1f} | {pn[0]:.1f} | {pct(po[0], pn[0])} |")
             if abs(float(pct(po[0], pn[0]).rstrip('%'))) > a.flag_pct:
-                flags.append(f"S7 idle PSS {pct(po[0], pn[0])} ({po[0]:.1f}→{pn[0]:.1f} MB)")
+                flags.append(f"S7 idle PSS {pct(po[0], pn[0])} ({po[0]:.1f}→{pn[0]:.1f} MiB)")
         co, cn = o7.get("coldstart"), n7.get("coldstart")
         if co and cn:
             out.append(f"| external cold start median (ms) | {co['median']} | {cn['median']} | {pct(co['median'], cn['median'])} |")

@@ -166,13 +166,17 @@ def breakdown_line(bd: dict) -> str:
     return s
 
 
-def total_pss_mb(scn_dir: Path, discard: int) -> tuple[float | None, float | None, float | None, int]:
+def total_pss_mib(scn_dir: Path, discard: int) -> tuple[float | None, float | None, float | None, int]:
+    """Mean/min/max TOTAL PSS in MiB (KiB/1024 — `dumpsys meminfo`'s unit is
+    KiB, never decimal MB) over the kept post-run snapshots, plus the kept
+    sample count. RESULTS.md's idle-memory row (RESULTS.md line ~970's
+    hand-computed control: 116,328.5 KiB mean -> 113.6 MiB)."""
     snaps = sorted(scn_dir.glob("run-[0-9][0-9].pss_after.txt"))[discard:]
     vals = []
     for p in snaps:
         m = re.search(r"TOTAL PSS:\s+(\d+)", p.read_text(errors="replace"))
         if m:
-            vals.append(int(m.group(1)) / 1000.0)
+            vals.append(int(m.group(1)) / 1024.0)
     if not vals:
         return None, None, None, 0
     return statistics.fmean(vals), min(vals), max(vals), len(vals)
@@ -353,9 +357,9 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
                 continue
             spans[key] = startup_spans(side / "s7")
             cold[key] = coldstart(side / "s7")
-            pss[key] = total_pss_mb(side / "s7", D)
+            pss[key] = total_pss_mib(side / "s7", D)
             cpu[key] = idle_cpu(side / "s7", pkg)
-            entry[key] = {"startup": spans[key], "coldstart": cold[key], "idle_pss_mb": pss[key], "idle_cpu": cpu[key]}
+            entry[key] = {"startup": spans[key], "coldstart": cold[key], "idle_pss_mib": pss[key], "idle_cpu": cpu[key]}
 
         def cell_cold(k):
             c = cold.get(k)
@@ -375,7 +379,7 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
 
         def cell_pss(k):
             p = pss.get(k)
-            return f"~{p[0]:.1f} MB ({p[1]:.1f}–{p[2]:.1f}, {p[3]} kept snapshots)" if p and p[0] is not None else "n/a"
+            return f"~{p[0]:.1f} MiB ({p[1]:.1f}–{p[2]:.1f}, {p[3]} kept snapshots)" if p and p[0] is not None else "n/a"
 
         def cell_cpu(k):
             c = cpu.get(k)
