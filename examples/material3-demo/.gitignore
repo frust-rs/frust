@@ -6,6 +6,8 @@
 # output (`build/android`), iOS's `xcodebuild` output (`build/ios`), the
 # default web build (`build/web`), and desktop bundles (`build/desktop`).
 /build
+# pre-build/-layout output and out-of-app cargo invocations; never commit
+/target
 
 # Android release signing material — never commit (see frust.toml [signing]).
 android/key.properties
