@@ -63,24 +63,24 @@ slow enough on mobile CPUs to trip the iOS launch watchdog. They stay hand-synce
 `examples/{huddle,glyph-catalog,material3-demo,playground,shadertoy,web-gallery}` and
 `benchmarks/frust_bench`. The **eight** that build an Android artifact (the nine minus the wasm-only
 `web-gallery`) additionally carry an identical `[profile.release.package.<crate>] opt-level = "z"`
-**cold set** — crates that do no per-frame work, with one deliberate exception: `naga`, `wgpu-core`,
-`wgpu-types`, `codespan-reporting`, `ash`, `gpu-allocator`, `jni`, `accesskit`, `accesskit_consumer`,
-`accesskit_android`, `serde_json`, `roxmltree`, `fontique`, `tokio`, `mio`, `image`, `png`. `jni` is
-the exception: `frust-shell-android` polls IME, clipboard-drain, and system-UI state through JNI
-once per rendered frame (`FrustSurfaceView.kt`'s `doFrame`), yet stays at "z" — one short call per
-poll, cost indistinguishable from noise on the landing rig. Every per-frame crate stays at 3
-(`frust-engine`, `frust-gpu`, `frust-render`, `frust-text`, `harfrust`, `skrifa`, `read-fonts`,
-`zune-jpeg`, `parley`), and `wgpu-hal` is excluded by measurement — on the submit path, it cost
-consistent per-frame CPU for 0.55% of the `.so`. Measured on the benchmark app's lean arm64 release:
-stripped `.so` −9.2%, `.text` −17.9%, profile APK −7.4%; `[profile.profile]` inherits the overrides,
-so a benchmark build measures the shipping configuration. The global `opt-level` stays 3 because a
-whole-binary `"s"`/`"z"` never cleared the 5% bar against a render-stack CPU-perf carve-out
-(`scripts/size-report.sh` below); the cold set — including the `jni` exception — is gated on that
-same bar, which the rig it landed on could not adjudicate — see [LIMITATIONS.md](LIMITATIONS.md)
-`release-opt-level-z-bar-unadjudicated` for the owed re-measure (which must cover the per-frame
-`jni` poll path) and the revert path. `cargo test -p frust-cli --test profile_sync` keeps every
-mirror identical — three lists (dev overrides ×5, `[profile.release]` identity ×9, the Android cold
-set ×8) — and also asserts the template's `.cargo/config.toml` is byte-identical to the root's.
+**cold set**: `naga`, `wgpu-core`, `wgpu-types`, `codespan-reporting`, `ash`, `gpu-allocator`,
+`accesskit`, `accesskit_consumer`, `accesskit_android`, `serde_json`, `roxmltree`, `fontique`,
+`tokio`, `mio`, `image`, `png`. `frust-engine`, `frust-gpu`, `frust-render`, `frust-text`,
+`harfrust`, `skrifa`, `read-fonts`, `zune-jpeg` and `parley` stay at 3. `jni` stays at 3 too: its
+IME, clipboard-drain and system-UI polls (once per frame, from `FrustSurfaceView.kt`'s `doFrame`)
+run in separate JNI entries after `nativeOnFrame` returns, outside every span the benchmark's
+`total_us` sums, so the bar cannot measure it.
+`wgpu-hal` is excluded by measurement — on the submit path, it cost consistent per-frame CPU
+for 0.55% of the `.so`. Measured on the benchmark app's lean arm64 release with `jni` in the set (at
+3 it adds 0.44% to the `.so`): stripped `.so` −9.2%, `.text` −17.9%, profile APK −7.4%;
+`[profile.profile]` inherits the overrides, so a benchmark build measures the shipping
+configuration. The global `opt-level` stays 3 because a whole-binary `"s"`/`"z"` never cleared the
+5% bar against a render-stack CPU-perf carve-out (`scripts/size-report.sh` below); the cold set is
+gated on that same bar and clears it on a OnePlus 9 for the frame's own spans (see
+[RESULTS.md](../benchmarks/RESULTS.md)'s cold-set
+note). `cargo test -p frust-cli --test profile_sync` keeps every mirror identical — three lists (dev
+overrides ×5, `[profile.release]` identity ×9, the Android cold set ×8) — and also asserts the
+template's `.cargo/config.toml` is byte-identical to the root's.
 
 **Android link flags.** The repo-root `.cargo/config.toml` adds two linker flags on all four Android
 targets: `-C link-arg=-Wl,--pack-dyn-relocs=android` (Bionic's packed relocation format, API 23+ —
