@@ -439,7 +439,7 @@ pub fn build_installer(
 
     let out_dir = format
         .target()
-        .dist_dir(project_dir)
+        .output_dir(project_dir)
         .join("installer")
         .join(format.as_str());
     prepare_out_dir(&out_dir)?;
@@ -803,8 +803,8 @@ impl PackagerConfig {
                 }
             }),
             // The build's own answer first, verbatim: re-deriving it here
-            // would trust whatever file happens to sit at the predictable dist
-            // path rather than what this bundle was actually signed with.
+            // would trust whatever file happens to sit at the predictable
+            // output path rather than what this bundle was actually signed with.
             entitlements: bundle
                 .entitlements
                 .clone()
@@ -886,7 +886,7 @@ mod tests {
         }
 
         fn bundle(&self, target: DesktopBundleTarget, binary_name: &str) -> BundleReport {
-            let root = target.dist_dir(&self.dir).join(binary_name);
+            let root = target.output_dir(&self.dir).join(binary_name);
             let executable = root.join(binary_name);
             fs::create_dir_all(&root).unwrap();
             fs::write(&executable, b"#!/bin/sh\ntrue\n").unwrap();
@@ -909,7 +909,7 @@ mod tests {
         /// no `CFBundleIconFile` key either.
         fn macos_app(&self, binary_name: &str, icon: bool) -> BundleReport {
             let root = DesktopBundleTarget::Macos
-                .dist_dir(&self.dir)
+                .output_dir(&self.dir)
                 .join("My App.app");
             let contents = root.join("Contents");
             let resources = contents.join("Resources");
@@ -1176,7 +1176,7 @@ mod tests {
             let bundle = fixture.bundle(target, binary);
 
             let expected_out_dir = target
-                .dist_dir(&fixture.dir)
+                .output_dir(&fixture.dir)
                 .join("installer")
                 .join(format.as_str());
             let expected_config_path = expected_out_dir.join("packager.json");
@@ -1261,7 +1261,7 @@ mod tests {
         .unwrap();
         let bundle = fixture.bundle(DesktopBundleTarget::Macos, "my_app");
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1326,7 +1326,7 @@ mod tests {
 
     /// The entitlements a packaging pass signs with are the ones **this
     /// build's** `codesign` was given, taken off the report verbatim — never
-    /// re-derived by probing the dist path, which would trust whatever file
+    /// re-derived by probing the output path, which would trust whatever file
     /// happens to sit there. Proven by handing the report a path the probe
     /// would never answer with, while a project `macos/app.entitlements` (the
     /// probe's answer) sits right there.
@@ -1344,11 +1344,11 @@ mod tests {
         )
         .unwrap();
         let mut bundle = fixture.macos_app("my_app", true);
-        let resolved = fixture.path("dist/macos/my_app.entitlements");
+        let resolved = fixture.path("build/desktop/macos/my_app.entitlements");
         bundle.entitlements = Some(resolved.clone());
 
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1400,7 +1400,7 @@ mod tests {
         .unwrap();
         let bundle = fixture.macos_app("my_app", true);
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1481,7 +1481,7 @@ mod tests {
         );
         let bundle = fixture.macos_app("my_app", true);
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1546,7 +1546,7 @@ mod tests {
         );
         let bundle = fixture.macos_app("my_app", true);
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1603,7 +1603,7 @@ mod tests {
         );
         let bundle = fixture.macos_app("my_app", true);
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1674,7 +1674,7 @@ mod tests {
                 Fixture::new(&format!("no-notarize-note-{format}")).manifest(manifest_body);
             let bundle = fixture.bundle(target, binary);
             let out_dir = target
-                .dist_dir(&fixture.dir)
+                .output_dir(&fixture.dir)
                 .join("installer")
                 .join(format.as_str());
             let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1744,7 +1744,7 @@ mod tests {
         fs::write(fixture.path("assets/icon.png"), b"not-really-a-png").unwrap();
         let bundle = fixture.macos_app("my_app", true);
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1815,7 +1815,7 @@ mod tests {
         fs::write(fixture.path("assets/icon.png"), b"not-really-a-png").unwrap();
         let bundle = fixture.macos_app("my_app", false);
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1852,7 +1852,7 @@ mod tests {
         let fixture = Fixture::new("dmg-macos-block-unsigned").default_manifest();
         let bundle = fixture.bundle(DesktopBundleTarget::Macos, "my_app");
         let out_dir = DesktopBundleTarget::Macos
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1914,7 +1914,7 @@ mod tests {
             );
             let bundle = fixture.bundle(target, binary);
             let out_dir = target
-                .dist_dir(&fixture.dir)
+                .output_dir(&fixture.dir)
                 .join("installer")
                 .join(format.as_str());
             let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1941,7 +1941,7 @@ mod tests {
         let fixture = Fixture::new("no-icon").default_manifest();
         let bundle = fixture.bundle(DesktopBundleTarget::Linux, "my_app");
         let out_dir = DesktopBundleTarget::Linux
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("deb");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -1974,7 +1974,7 @@ mod tests {
         let fixture = Fixture::new("on-line").default_manifest();
         let bundle = fixture.bundle(DesktopBundleTarget::Linux, "my_app");
         let out_dir = DesktopBundleTarget::Linux
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("deb");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
@@ -2016,7 +2016,7 @@ mod tests {
         let fixture = Fixture::new("packaging-failed").default_manifest();
         let bundle = fixture.bundle(DesktopBundleTarget::Linux, "my_app");
         let out_dir = DesktopBundleTarget::Linux
-            .dist_dir(&fixture.dir)
+            .output_dir(&fixture.dir)
             .join("installer")
             .join("appimage");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();

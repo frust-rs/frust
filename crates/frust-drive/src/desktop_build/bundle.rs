@@ -22,36 +22,37 @@ use std::path::{Component, Path, PathBuf};
 use crate::icons::{IconReport, SourceWarning};
 
 use super::config::DesktopConfig;
-use super::{BundleNote, DIST_DIR, DesktopBuildError};
+use super::{BundleNote, DesktopBuildError, desktop_root};
 
 /// Creates `dir` fresh: an existing directory is removed first, so a rebuild
 /// can never leave a previous run's file (a renamed icon, a dropped launcher
 /// entry) inside the bundle it hands back.
 ///
 /// **Guarded**, because `remove_dir_all` is the most dangerous primitive in
-/// this module: `dir` must be a strict descendant of `<project_dir>/dist`, or
-/// the call is a typed refusal ([`DesktopBuildError::UnsafeBundleDir`]) and
-/// nothing is touched. Every bundle path is built from manifest values, and
-/// `config` already refuses the ones that could escape — this is the second
-/// layer, positioned at the delete itself so a future caller composing a path
-/// some other way (a new target, a new layout) cannot reopen the hole.
+/// this module: `dir` must be a strict descendant of
+/// `<project_dir>/build/desktop`, or the call is a typed refusal
+/// ([`DesktopBuildError::UnsafeBundleDir`]) and nothing is touched. Every
+/// bundle path is built from manifest values, and `config` already refuses
+/// the ones that could escape — this is the second layer, positioned at the
+/// delete itself so a future caller composing a path some other way (a new
+/// target, a new layout) cannot reopen the hole.
 ///
 /// The check is lexical and runs in two parts, both needed: a `..` component
 /// anywhere is refused outright (`Path::starts_with` compares components, so
-/// `dist/linux/../../..` "starts with" `dist` while resolving nowhere near
-/// it), and what remains must sit under the dist root. Symlinks are not
-/// resolved — [`std::fs::remove_dir_all`] does not follow a symlinked
-/// directory, it unlinks it, so a link inside `dist/` cannot be used to delete
-/// the tree it points at.
+/// `build/desktop/linux/../../../..` "starts with" `build/desktop` while
+/// resolving nowhere near it), and what remains must sit under the output
+/// root. Symlinks are not resolved — [`std::fs::remove_dir_all`] does not
+/// follow a symlinked directory, it unlinks it, so a link inside
+/// `build/desktop/` cannot be used to delete the tree it points at.
 pub(super) fn prepare_dir(dir: &Path, project_dir: &Path) -> Result<(), DesktopBuildError> {
-    let dist_root = project_dir.join(DIST_DIR);
+    let output_root = project_dir.join(desktop_root());
     let contained = !dir.components().any(|c| matches!(c, Component::ParentDir))
-        && dir.starts_with(&dist_root)
-        && dir != dist_root;
+        && dir.starts_with(&output_root)
+        && dir != output_root;
     if !contained {
         return Err(DesktopBuildError::UnsafeBundleDir {
             path: dir.to_path_buf(),
-            dist_root,
+            output_root,
         });
     }
     if dir.exists() {
@@ -165,7 +166,11 @@ mod tests {
     #[test]
     fn prepare_dir_clears_previous_contents() {
         let dir = temp_dir("prepare");
-        let bundle = dir.join("dist").join("linux").join("my_app");
+        let bundle = dir
+            .join("build")
+            .join("desktop")
+            .join("linux")
+            .join("my_app");
         fs::create_dir_all(bundle.join("nested")).unwrap();
         fs::write(bundle.join("nested/stale"), b"x").unwrap();
 
@@ -177,10 +182,10 @@ mod tests {
     }
 
     /// Defense in depth for the module's one dangerous primitive: a target
-    /// outside `dist/` is refused, and — the part that matters — **nothing is
-    /// deleted** on the way to that refusal.
+    /// outside `build/desktop/` is refused, and — the part that matters —
+    /// **nothing is deleted** on the way to that refusal.
     #[test]
-    fn prepare_dir_refuses_a_target_outside_the_projects_dist_directory() {
+    fn prepare_dir_refuses_a_target_outside_the_projects_build_desktop_directory() {
         let dir = temp_dir("prepare-outside");
         let project = dir.join("project");
         let outside = dir.join("precious");
@@ -190,11 +195,12 @@ mod tests {
         for target in [
             outside.clone(),
             // A traversal that `Path::starts_with` alone would wave through:
-            // component-wise, this *does* start with `<project>/dist`.
-            project.join("dist/linux/../../../precious"),
-            // The dist root itself, and a sibling of it.
-            project.join("dist"),
-            project.join("distant/linux/my_app"),
+            // component-wise, this *does* start with `<project>/build/desktop`.
+            project.join("build/desktop/linux/../../../../precious"),
+            // The output root itself, and a sibling of it (another `build/`
+            // subdirectory, not the desktop one).
+            project.join("build/desktop"),
+            project.join("build/rust/linux/my_app"),
             PathBuf::from("/"),
         ] {
             let err = prepare_dir(&target, &project).unwrap_err();
@@ -205,7 +211,7 @@ mod tests {
             );
             assert!(
                 outside.join("keep.txt").is_file(),
-                "{} deleted a file outside dist/",
+                "{} deleted a file outside build/desktop/",
                 target.display()
             );
         }
@@ -214,15 +220,15 @@ mod tests {
     }
 
     /// Both bundle-directory shapes the three assemblers actually produce —
-    /// `dist/<target>` itself (Windows) and `dist/<target>/<name>`
-    /// (macOS/Linux) — stay allowed.
+    /// `build/desktop/<target>` itself (Windows) and
+    /// `build/desktop/<target>/<name>` (macOS/Linux) — stay allowed.
     #[test]
     fn prepare_dir_accepts_every_shape_the_assemblers_produce() {
         let dir = temp_dir("prepare-accepts");
         for target in [
-            dir.join("dist/windows"),
-            dir.join("dist/macos/My App.app"),
-            dir.join("dist/linux/my_app"),
+            dir.join("build/desktop/windows"),
+            dir.join("build/desktop/macos/My App.app"),
+            dir.join("build/desktop/linux/my_app"),
         ] {
             prepare_dir(&target, &dir).unwrap();
             assert!(target.is_dir(), "{}", target.display());

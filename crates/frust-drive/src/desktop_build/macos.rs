@@ -3,7 +3,7 @@
 //! Layout (the shared desktop-bundle contract):
 //!
 //! ```text
-//! dist/macos/<Display Name>.app/
+//! build/desktop/macos/<Display Name>.app/
 //!   Contents/
 //!     Info.plist
 //!     MacOS/<binary>
@@ -425,9 +425,10 @@ pub(super) fn xml_escape(value: &str) -> String {
     out
 }
 
-/// The assembled bundle's own `Contents/Info.plist` — the **dist copy** every
-/// post-assembly step reads and edits (the plugin-contribution merge, the
-/// installer's packager config), never the project's own `macos/Info.plist`.
+/// The assembled bundle's own `Contents/Info.plist` — the **build copy**
+/// every post-assembly step reads and edits (the plugin-contribution merge,
+/// the installer's packager config), never the project's own
+/// `macos/Info.plist`.
 pub(super) fn info_plist_path(app_root: &Path) -> PathBuf {
     app_root.join("Contents").join("Info.plist")
 }
@@ -437,7 +438,7 @@ pub(super) fn info_plist_path(app_root: &Path) -> PathBuf {
 /// installer step, a UI label).
 pub(super) fn app_path(project_dir: &Path, display_name: &str) -> PathBuf {
     DesktopBundleTarget::Macos
-        .dist_dir(project_dir)
+        .output_dir(project_dir)
         .join(format!("{display_name}.app"))
 }
 
@@ -511,13 +512,13 @@ mod tests {
     fn the_app_directory_is_named_after_the_display_name() {
         assert_eq!(
             app_path(Path::new("/projects/my_app"), "My App"),
-            Path::new("/projects/my_app/dist/macos/My App.app")
+            Path::new("/projects/my_app/build/desktop/macos/My App.app")
         );
     }
 
     /// The assembled bundle's own plist — the file that ships, and therefore
     /// the one read back.
-    const PLIST: &str = "/projects/my_app/dist/macos/My App.app/Contents/Info.plist";
+    const PLIST: &str = "/projects/my_app/build/desktop/macos/My App.app/Contents/Info.plist";
 
     /// The default project identity every reconciliation test compares
     /// against: binary `my_app`, identifier `dev.f0x.my_app`.

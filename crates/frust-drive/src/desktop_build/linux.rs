@@ -3,7 +3,7 @@
 //! Layout (the shared desktop-bundle contract):
 //!
 //! ```text
-//! dist/linux/<binary>/
+//! build/desktop/linux/<binary>/
 //!   <binary>
 //!   <identifier>.desktop
 //!   share/icons/hicolor/<N>x<N>/apps/<identifier>.png
@@ -42,7 +42,7 @@ use super::bundle::{copy_file, icon_source, prepare_dir, record_icons, write_fil
 use super::config::DesktopConfig;
 use super::{BundleNote, BundleReport, DesktopBuildError, DesktopBundleTarget};
 
-/// Assembles `dist/linux/<binary>/` around the compiled `binary`.
+/// Assembles `build/desktop/linux/<binary>/` around the compiled `binary`.
 pub(super) fn assemble(
     project_dir: &Path,
     config: &DesktopConfig,
@@ -50,7 +50,7 @@ pub(super) fn assemble(
     notes: &mut Vec<BundleNote>,
 ) -> Result<BundleReport, DesktopBuildError> {
     let root = DesktopBundleTarget::Linux
-        .dist_dir(project_dir)
+        .output_dir(project_dir)
         .join(&config.binary_name);
     prepare_dir(&root, project_dir)?;
 
@@ -103,7 +103,7 @@ pub(super) fn assemble(
 }
 
 /// The assembled bundle's desktop entry: `<identifier>.desktop` inside the
-/// bundle root — the **dist copy** a post-assembly step (the plugin-
+/// bundle root — the **build copy** a post-assembly step (the plugin-
 /// contribution merge) edits, never the project's own `linux/app.desktop`.
 pub(super) fn entry_path(root: &Path, config: &DesktopConfig) -> PathBuf {
     root.join(format!("{}.desktop", config.identifier))
