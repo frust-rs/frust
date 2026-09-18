@@ -690,13 +690,22 @@ ios` has no `--no-default-features` knob either.
 | Android universal release APK (3 ABIs) | **24.58 MiB** (25,775,054 B) | not built as universal | 49.36 MiB (51,762,140 B) |
 | Android arm64-v8a split APK | **8.57 MiB** (8,981,843 B) | **6.63 MiB** (6,953,291 B) | 17.45 MiB (18,295,458 B) |
 | in-APK `lib/arm64-v8a/libfrustbench.so` | 8.43 MiB (8,837,768 B) | 6.49 MiB (6,809,216 B) | 16.55 MiB (engine + app) |
-| on-disk arm64 `.so` (stripped) | 8.43 MiB (8,837,776 B) | 6.49 MiB (6,809,224 B) | n/a |
+| on-disk arm64 `.so` (stripped), 2026-09-18 | 8.46 MiB (8,872,080 B) | 6.53 MiB (6,843,064 B) | n/a |
 | iOS release `.app` (`du -sk`), 2026-09-18 | **11.44 MiB** (11,716 KB) | not built | 16.64 MiB |
 | iOS `Runner` binary, 2026-09-18 | **11.35 MiB** (11,903,616 B) | not built | n/a |
 
+The on-disk `.so` row was re-measured on 2026-09-18, after `jni` left the cold set (per-lever
+table below); the other Android rows were not, and predate that change. Against it, the arm64
+split-APK and in-APK `.so` rows read about 30 KB low (the arm64 `.so` grew +30,184 B lean,
++30,576 B db-on). The universal APK carries one `.so` per ABI, each linking `jni`, so it likely
+reads low by more than that (one `.so` per ABI) — not measured. The in-APK and
+on-disk `.so` rows are also not directly comparable: their ~34 KB gap includes ~3.7 KB of
+unrelated work that landed between the two measurements.
+
 **Per-lever contributions**, each measured on the lean arm64 release `.so` of
 its own base by the card that landed it — quoted as measured, never summed
-into a total; the totals above come only from this pass's re-measurement:
+into a total; Frust's totals above come only from re-measurement (the 2026-09-17 pass, or
+2026-09-18 where a row says so):
 
 | Lever | Base → after (B) | Δ (B) | Note |
 |---|---|---|---|
@@ -704,7 +713,8 @@ into a total; the totals above come only from this pass's re-measurement:
 | shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
 | Glyph italics | measured-keep | 0 | no italic subset landed |
 | `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B; `ANDROID_RELA` confirmed on the shipped `.so` and the artifact run on-device 2026-09-18 (see below). **Android-only**: `.cargo/config.toml` scopes both flags to the four `*-linux-android*` targets, so no iOS artifact is affected |
-| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below. **iOS-relevant**: `[profile.release.package.*]` is not target-scoped, so the cold set applies to `aarch64-apple-ios` as well — with a second-order cost there, see the iOS-delta note below |
+| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below. **iOS-relevant**: `[profile.release.package.*]` is not target-scoped, so the cold set applies to `aarch64-apple-ios` as well — with a second-order cost there, see the iOS-delta note below. `jni` has since left this set (next row) |
+| `jni` removed from the cold set, 2026-09-18 | 6,812,880 → 6,843,064 | +30,184 | db-on +30,576 B (8,841,504 → 8,872,080). The render-CPU bar could not see `jni`'s per-frame work: Android's per-frame JNI polls run in separate JNI entries after `nativeOnFrame` returns, outside every span `total_us` sums. Removed rather than kept on an unmeasured exception. The bar does see per-frame cost inside the frame's own spans — the submit-path cost S5 shows below comes from the cold set |
 | `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | **iOS-relevant** (a workspace dependency, not target-scoped); its iOS share is folded into the `__TEXT.__text` figure in the note below and was not isolated |
 | `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
 | `android_logger` regex feature off | dependency hygiene | ~0 | |
@@ -731,13 +741,20 @@ plausible candidate). It passes, but the headroom is not wide: S5's +3.4 % leave
 percentage points against an S1 block-order drift of 2.15 % on the same rig. Unlike the Pixel 5
 attempt, this rig's own drift is smaller than the bar: re-running the *identical* no-cold-set
 binary later in the session moved cost-sum p50 by 0.04–2.15 % per scenario, against that
-session's +14 %/+24 %. Two caveats ride with it:
-the focused-text-field S1 leg was not run (no text field exists in the bench app and the
-fallback catalogs carry no deep-link filter), and `dumpsys battery unplug` only made the
-framework report unpowered — the phone stayed on USB power with its level pinned at 100 %, so
-PROTOCOL §3's charger-off control was not literally met and these absolute numbers are not
-comparable to battery-run passes. Both are recorded in
-[LIMITATIONS.md](../docs/LIMITATIONS.md)'s `release-opt-level-z-bar-unadjudicated`.
+session's +14 %/+24 %. What the bar covers is the frame's own spans. It never measured
+`jni`'s per-frame work, which falls outside them: Android's per-frame JNI polls run in separate
+JNI entries after `nativeOnFrame` returns, outside every span `total_us` sums, however often they
+execute. `jni` was therefore removed from the cold set on 2026-09-18 (per-lever table above)
+rather than kept on an unmeasured exception, which also retires the focused-text-field S1 leg
+this pass could not run. `jni` is not the only cold-set crate with per-frame work outside those
+spans, and the rest was not measured either: `tokio`'s runtime-context entry (`Handle::enter`)
+runs at every reactive pump — at least four times a frame: once before the rebuild span, then at
+the top of `native_ime_state` and of both clipboard drains (`native_take_clipboard_write`,
+`native_take_paste_request`), with more on frames that carry input — and `frame()` calls the accesskit semantics publish between the layout
+and paint spans. Both stay in the cold set. A further caveat: `dumpsys battery unplug` only made
+the framework report unpowered — the phone stayed on USB power with its level pinned at 100 %,
+so PROTOCOL §3's charger-off control was not literally met and these absolute numbers are not
+comparable to battery-run passes.
 
 **Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
 the font and link-flag levers above.

@@ -769,14 +769,6 @@ panic = "abort"
 #   * platform glue invoked only a few times across an app's lifetime, not
 #     per frame — `accesskit`, `accesskit_consumer`, `accesskit_android`
 #     (accessibility tree pushes are event-driven).
-#   * `jni` (both graph versions) — the one accepted exception in this cold
-#     set: IME state, clipboard and system-UI state are each polled through
-#     JNI once per rendered frame (frust-shell-android's `native_ime_state`;
-#     `FrustSurfaceView.kt`'s `doFrame`), not off the per-frame path at all.
-#     Kept at "z" anyway: each poll is a single short JNI call whose cost the
-#     landing measurement could not distinguish from noise — folded into the
-#     owed controlled re-measure recorded in docs/LIMITATIONS.md's
-#     `release-opt-level-z-bar-unadjudicated` entry.
 #   * one-shot parsing / asset decode / async plumbing — `serde_json`,
 #     `roxmltree`, `fontique` (font enumeration at startup), `tokio`, `mio`,
 #     `image`, `png`.
@@ -826,9 +818,6 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.gpu-allocator]
-opt-level = "z"
-
-[profile.release.package.jni]
 opt-level = "z"
 
 [profile.release.package.accesskit]
