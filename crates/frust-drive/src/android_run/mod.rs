@@ -13,7 +13,7 @@ pub mod project;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
@@ -207,6 +207,13 @@ fn prepare_session(
     let project = project::detect(root)?;
     let android_dir = project::require_android_dir(&project.root)?;
 
+    // r1-04 replaced AGP's default jniLibs source set with the `build/`
+    // redirect (setSrcDirs) in the generated template and every in-repo
+    // example, so a leftover `android/app/src/main/jniLibs` is no longer
+    // packaged into anything Gradle produces — flag it once, the same as
+    // `android_build::build_with_env` does for `frust build`.
+    crate::android_build::artifacts::warn_if_legacy_jni_libs(&project.root, on_line);
+
     let preflight_ctx = preflight::PreflightCtx {
         runner,
         env,
@@ -274,6 +281,11 @@ fn prepare_session(
 
     on_line(&format!("Building `{}`…", project.app_id));
     let build_start = Instant::now();
+    // Wall-clock twin of `build_start`, captured at the same point: `Instant`
+    // is monotonic-only (right for the elapsed-time report below) and can't
+    // be compared against a file's mtime, which the freshness gate on the
+    // legacy-fallback artifact (below) needs.
+    let build_start_time = SystemTime::now();
     let build_out = gradle::assemble(
         runner,
         &project.root,
@@ -313,8 +325,20 @@ fn prepare_session(
         return Ok(None);
     }
 
-    let apk_path =
-        gradle::apk_output_path(&project.root, info.mode, info.flavor.as_deref(), on_line)?;
+    // The freshness-aware counterpart of `gradle::apk_output_path` (same
+    // directory-resolution/glob/count logic, via `discover_since`): an APK
+    // this pipeline is about to install onto a device must not be a stale
+    // leftover under the pre-migration legacy path that the project's
+    // (unmigrated) Gradle config failed to actually rebuild. The
+    // migrated-path fast path is unaffected — see
+    // `artifacts::resolve_output_dir`'s doc comment.
+    let apk_path = crate::android_build::artifacts::discover_single_apk_since(
+        &project.root,
+        info.mode,
+        info.flavor.as_deref(),
+        Some(build_start_time),
+        on_line,
+    )?;
     let apk_path = apk_path.to_string_lossy().into_owned();
 
     on_line(&format!("Installing on {}…", device.name));
@@ -753,8 +777,19 @@ mod tests {
             let dir = unique_project_dir("legacy-layout-run");
             let out_dir = dir.join("android/app/build/outputs/apk/debug");
             fs::create_dir_all(&out_dir).unwrap();
-            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
-            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let planted_apk = out_dir.join("app-debug.apk");
+            fs::write(&planted_apk, b"fake").unwrap();
+            // The freshness gate on the legacy fallback rejects anything
+            // older than `prepare_session`'s own Gradle-invocation start
+            // instant; this fixture plants the file before that call (the
+            // fake `./gradlew` never touches the filesystem), so its mtime
+            // is pinned into the future to stand in for "this run's Gradle
+            // just (re)built it".
+            fs::File::open(&planted_apk)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+                .unwrap();
+            let apk_path = planted_apk.to_string_lossy().into_owned();
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
@@ -790,7 +825,119 @@ mod tests {
                 .filter(|l| l.contains("pre-migration path"))
                 .collect();
             assert_eq!(warnings.len(), 1, "{lines:?}");
-            assert!(warnings[0].contains("docs/DEVELOPMENT.md"), "{warnings:?}");
+            assert!(
+                warnings[0].contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC),
+                "{warnings:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The freshness gate on `frust run`'s legacy fallback: a
+        /// pre-migration APK that predates this run's own Gradle invocation
+        /// (never touched, since the fixture's `./gradlew` is a fake that
+        /// writes nothing) is rejected outright rather than installed onto
+        /// the device as if it were freshly built.
+        #[test]
+        fn pre_migration_layout_rejects_a_stale_apk() {
+            let dir = unique_project_dir("legacy-layout-stale");
+            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            let apk_path = out_dir.join("app-debug.apk");
+            fs::write(&apk_path, b"fake").unwrap();
+            // Predates any `SystemTime::now()` captured during this test.
+            let stale = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+            fs::File::open(&apk_path)
+                .unwrap()
+                .set_modified(stale)
+                .unwrap();
+
+            let runner = preflight_ok_runner().with(
+                gradlew_key(
+                    &dir,
+                    "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                ),
+                ok("BUILD SUCCESSFUL"),
+            );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let outcome = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            );
+            let err = match outcome {
+                Err(err) => err,
+                Ok(_) => panic!("expected the stale legacy artifact to be rejected"),
+            };
+            let message = err.to_string();
+            assert!(message.contains("predates this build"), "{message}");
+            assert!(
+                message.contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC),
+                "{message}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The build-lane warning's `frust run` twin: a leftover
+        /// `android/app/src/main/jniLibs` (no longer packaged since r1-04)
+        /// is warned about exactly once, naming the migration recipe.
+        #[test]
+        fn prepare_session_warns_once_about_a_legacy_jni_libs_leftover() {
+            let dir = unique_project_dir("legacy-jnilibs-run");
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let jni_dir = dir.join("android/app/src/main/jniLibs/arm64-v8a");
+            fs::create_dir_all(&jni_dir).unwrap();
+            fs::write(jni_dir.join("libapp.so"), b"stale").unwrap();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let outcome = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            );
+            let err = match outcome {
+                Err(err) => err,
+                Ok(_) => panic!("expected the `adb install` fixture to stop the pipeline"),
+            };
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let warnings: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("jniLibs is a pre-build/ layout leftover"))
+                .collect();
+            assert_eq!(warnings.len(), 1, "{lines:?}");
+            assert!(
+                warnings[0].contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC),
+                "{warnings:?}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }

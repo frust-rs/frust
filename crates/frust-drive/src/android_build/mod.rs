@@ -102,6 +102,14 @@ fn build_with_env(
 ) -> Result<BuiltArtifacts> {
     let android_dir = project_dir.join("android");
 
+    // r1-04 replaced AGP's default jniLibs source set with the `build/`
+    // redirect (setSrcDirs) in the generated template and every in-repo
+    // example, so a leftover `android/app/src/main/jniLibs` is no longer
+    // packaged into anything Gradle produces — flag it once so a project
+    // that hasn't run `frust clean` since regenerating isn't left wondering
+    // why its native libs still sit there.
+    artifacts::warn_if_legacy_jni_libs(project_dir, on_line);
+
     let preflight_ctx = PreflightCtx {
         runner,
         env,
@@ -420,7 +428,64 @@ mod tests {
             .filter(|l| l.contains("pre-migration path"))
             .collect();
         assert_eq!(warnings.len(), 1, "{lines:?}");
-        assert!(warnings[0].contains("docs/DEVELOPMENT.md"), "{warnings:?}");
+        assert!(
+            warnings[0].contains(artifacts::MIGRATION_RECIPE_DOC),
+            "{warnings:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The build lane's half of the jniLibs Major: a leftover
+    /// `android/app/src/main/jniLibs` (r1-04 replaced AGP's default source
+    /// set, so this directory is never packaged into anything Gradle
+    /// produces anymore) is warned about exactly once, naming the migration
+    /// recipe — the build itself still succeeds.
+    #[test]
+    fn full_pipeline_warns_once_about_a_legacy_jni_libs_leftover() {
+        let dir = unique_project_dir("legacy-jnilibs");
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake-apk-bytes").unwrap();
+        let jni_dir = dir.join("android/app/src/main/jniLibs/arm64-v8a");
+        fs::create_dir_all(&jni_dir).unwrap();
+        fs::write(jni_dir.join("libapp.so"), b"stale").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            ),
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &info(BuildMode::Debug, None),
+            &arm64_apk(),
+            NO_EXTRA,
+            &fake_env(),
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
+
+        let warnings: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("jniLibs is a pre-build/ layout leftover"))
+            .collect();
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(
+            warnings[0].contains(artifacts::MIGRATION_RECIPE_DOC),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("frust clean"), "{warnings:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }
