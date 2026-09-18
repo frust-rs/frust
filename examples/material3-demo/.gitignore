@@ -1,4 +1,11 @@
-/target
+# All generated/compiled build output for a Frust app lands under this one
+# project-relative root (kept in sync with `crates/frust-drive`'s
+# `build_dirs::BuildLayout`/`build_dirs::CLEAN_DIRS`, and with `frust
+# clean`'s REMOVED_DIRS) — Rust artifacts (`build/rust`, the `[build]
+# target-dir` set in this project's `.cargo/config.toml`), Android's Gradle
+# output (`build/android`), iOS's `xcodebuild` output (`build/ios`), the
+# default web build (`build/web`), and desktop bundles (`build/desktop`).
+/build
 
 # Android release signing material — never commit (see frust.toml [signing]).
 android/key.properties
@@ -11,22 +18,19 @@ android/key.properties
 # in `git status`, a build was killed hard; delete it.
 android/.frust-signing.properties
 
-# CLI-generated build output (kept in sync with `frust clean`'s REMOVED_DIRS).
-# `android/build/` is the `:frust-embedding` module's redirected output — see
-# android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block.
+# legacy layout — harmless to keep: build-output paths from before the
+# `build/` root migration (kept in sync with `build_dirs::LEGACY_CLEAN_DIRS`,
+# which `frust clean` still removes for a pre-migration app whose generated
+# Gradle/Xcode config still writes to these paths). `android/build/` is the
+# `:frust-embedding` module's redirected output — see
+# android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block. The
+# scaffold's companion `windows/icon.ico` entry is dropped: this example
+# grafts no `windows/` directory (see frust.toml).
 android/app/build/
 android/build/
 android/.gradle/
-build/
-
-# Desktop bundle output (`frust build macos|windows|linux`) — build output,
-# never commit (kept in sync with `frust clean`'s REMOVED_DIRS). The scaffold's
-# companion `windows/icon.ico` entry is dropped: this example grafts no
-# `windows/` directory (see frust.toml).
 dist/
+android/app/src/main/jniLibs/
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
-
-# Rust-built JNI libraries copied in by the gradle preBuild step — build output, never commit.
-android/app/src/main/jniLibs/

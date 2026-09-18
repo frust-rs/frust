@@ -153,6 +153,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // Native libraries are packaged from this app's `build/android/jniLibs`,
+    // where `cargoNdkBuild` below stages them (`-o`) — nothing is written
+    // under `src/main/jniLibs` any more, so the source tree stays free of
+    // build output and `frust clean` can remove the `.so`s with everything
+    // else. Paths in this file resolve against the module directory
+    // (`android/app/`), so `../../` is the app root.
+    //
+    // `srcDir` ADDS a directory; AGP's own `src/main/jniLibs` default stays in
+    // the set, so a project migrated from the old layout still packages any
+    // stale `.so`s sitting there until `frust clean` removes them. The ABI
+    // split/versionCode block below is unaffected either way — it reads the
+    // variant's ABI filters, not the library files.
+    sourceSets.getByName("main").jniLibs.srcDir("../../build/android/jniLibs")
+
     // Example flavor scaffold — uncomment and mirror frust.toml's [flavors].
     // flavorDimensions += "env"
     // productFlavors {
@@ -204,9 +218,12 @@ androidComponents {
 
 // Builds the Rust `.so`(s) via `cargo ndk` before every Gradle build.
 // `workingDir` is the Rust app root (two levels up from `android/app/`); `-o`
-// points at this module's `jniLibs` so the resulting
-// `<abi>/libfrustbench.so` lands where Gradle packages native
-// libraries from automatically.
+// points at that same app root's `build/android/jniLibs`, the app-owned build
+// directory registered as a `jniLibs` source directory in the `android` block
+// above — so the resulting `<abi>/libfrustbench.so` is packaged by
+// Gradle without any of it landing in `src/main/`. Keep the two paths in step:
+// staging somewhere Gradle does not read produces an APK that installs and
+// then crashes on `System.loadLibrary`, not a build failure.
 //
 // The cargo profile is chosen from the invoked task names (debug → `build`,
 // profile → `build --profile profile`, release → `build --release`) so the
@@ -244,7 +261,7 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
             add("ndk")
             addAll(cargoTargetArgs)
             add("-o")
-            add(file("src/main/jniLibs").absolutePath)
+            add(file("../../build/android/jniLibs").absolutePath)
             addAll(cargoProfileArgs)
             addAll(cargoFeatureArgs)
         },

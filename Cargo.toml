@@ -25,27 +25,19 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # examples/huddle (renamed from its prior directory name) is the
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
-# [workspace] root, own Cargo.lock) for two independent reasons: (1) its
+# [workspace] root, own Cargo.lock) because its
 # `clean-signals` dependency is git+rev-pinned to a repo outside this one,
 # which must never enter the root workspace
-# graph (see docs/DEVELOPMENT.md's Version-Pin Policy); (2) its generated
-# Android AND iOS projects (`frust run`/`build` install targets) need a
-# project-local `target/` dir — the generated iOS Xcode
-# build phase resolves `target/<triple>/<profile>/libhuddle.a` relative to
-# the project directory, which a root-workspace member's shared `target/`
-# would break (the same rationale the now-deleted `catalog` example carried).
-# examples/shadertoy (the shader showcase) is standalone for huddle's reason
-# (2) alone: it is a full `frust create` scaffold whose generated Android/iOS
-# projects need a project-local `target/` dir, and its generated Cargo.toml
-# carries its own `[profile.*]` blocks, which only take effect in a
-# workspace root.
+# graph (see docs/DEVELOPMENT.md's Version-Pin Policy).
+# examples/shadertoy (the shader showcase) is standalone because it is a full
+# `frust create` scaffold whose generated Cargo.toml carries its own
+# `[profile.*]` blocks, which only take effect in a workspace root.
 # examples/glyph-catalog (the Glyph design-system catalog) is standalone for
 # the same reason as shadertoy: a full `frust create` scaffold with its own
-# project-local `target/` dir and hand-synced `[profile.*]` blocks (its
-# generated Android/iOS projects need a project-local `target/`).
+# hand-synced `[profile.*]` blocks, which only take effect in a workspace
+# root.
 # examples/playground (the plugin/native-capability testing ground) is
-# standalone for glyph-catalog's reason: a full `frust create` scaffold whose
-# generated Android/iOS projects need a project-local `target/` dir, plus
+# standalone for glyph-catalog's reason: a full `frust create` scaffold with
 # hand-synced `[profile.*]` blocks that only take effect in a workspace root.
 # examples/design-system-sample (the out-of-tree design-system proof) is
 # standalone for a historical reason plus a live one. Historically it had to
@@ -61,10 +53,8 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # standalone for glyph-catalog's reason, arrived at later: it started as a
 # root-workspace member while it was desktop-only, and became a full `frust
 # create` scaffold once it had to run on Android and iOS devices — its
-# generated projects need a project-local `target/` dir (the iOS Xcode build
-# phase resolves `target/<triple>/<profile>/libmaterial3demo.a` relative to
-# the project directory), and its `[profile.*]` blocks only take effect in a
-# workspace root. Gate it from its own directory (see its README).
+# `[profile.*]` blocks only take effect in a workspace root. Gate it from its
+# own directory (see its README).
 # plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
