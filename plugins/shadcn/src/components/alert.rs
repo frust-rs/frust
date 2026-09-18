@@ -27,7 +27,6 @@
 //! [`frust::authoring::AnyView`] slot, the same "caller themes its own
 //! content" contract this catalog's other multi-slot containers use).
 
-use frust::authoring::ThemeTextColor;
 use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
@@ -35,6 +34,7 @@ use frust::authoring::{
     Size, View, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
     route_event_single, teardown_child,
 };
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 use frust::{Theme, text};
 
 use crate::style::{BORDER_WIDTH, PATH_TOLERANCE, with_alpha};
@@ -74,6 +74,7 @@ pub fn alert_title<State: 'static>(
     };
     any(text(text_content)
         .weight(FontWeight::MEDIUM)
+        .themed_family(ThemeTextType::TitleMedium)
         .themed_role(role))
 }
 
@@ -85,16 +86,18 @@ pub fn alert_description<State: 'static>(
     variant: AlertVariant,
 ) -> AnyView<State> {
     match variant {
-        AlertVariant::Default => {
-            any(text(text_content).themed_role(ThemeTextColor::OnSurfaceVariant))
-        }
+        AlertVariant::Default => any(text(text_content)
+            .themed_family(ThemeTextType::BodyLarge)
+            .themed_role(ThemeTextColor::OnSurfaceVariant)),
         AlertVariant::Destructive => {
             // No `ThemeTextColor` role reads as "error at 90% alpha", so this
             // row shapes an explicit color rather than a themed role — the
             // one deliberate exception in this catalog's title/description
             // helpers, since the alpha wash has no `ColorScheme` counterpart.
             let ink = with_alpha(Color::from_rgb8(0xE7, 0x00, 0x0B), 0.9);
-            any(text(text_content).color(ink))
+            any(text(text_content)
+                .themed_family(ThemeTextType::BodyLarge)
+                .color(ink))
         }
     }
 }
@@ -417,5 +420,31 @@ mod tests {
         let mut seen = 0usize;
         Widget::visit_children(&w, &mut |_pod| seen += 1);
         assert_eq!(seen, 3, "icon + title + description");
+    }
+
+    // ---- Typeface: the title and description follow the live theme ------
+
+    /// Both variants: the destructive description's explicit color must not
+    /// pin its family.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_paint_in_the_theme_face() {
+        for variant in [AlertVariant::Default, AlertVariant::Destructive] {
+            crate::text::typeface_probe::assert_paints_in_the_theme_face(
+                &format!("a {variant:?} alert's title and description"),
+                |_: &mut ()| build_alert(variant),
+            );
+        }
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_follow_a_live_theme_swap() {
+        for variant in [AlertVariant::Default, AlertVariant::Destructive] {
+            crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+                &format!("a {variant:?} alert's title and description"),
+                |_: &mut ()| build_alert(variant),
+            );
+        }
     }
 }

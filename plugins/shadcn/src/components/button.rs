@@ -38,7 +38,7 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, RoundedRect,
-    SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
+    SemanticsCtx, Shape, Size, ThemeTextType, Vec2, View, Widget, erase_callback,
 };
 
 use crate::hit::{inside, presses};
@@ -47,7 +47,7 @@ use crate::style::{
     SHADOW_XS, TEXT_SM, TEXT_XS, disabled_tint, draw_focus_ring, draw_shadow, focus_border,
     ring_color, with_alpha,
 };
-use crate::text::Label;
+use crate::text::{Label, themed_family};
 use crate::tokens::ShadcnTokens;
 
 /// cva `variant` axis. `Default` is shadcn's own `default`.
@@ -321,10 +321,14 @@ impl Widget for ButtonWidget {
         let theme = Theme::from_layout_ctx(ctx);
         let paint = self.variant.resolve(theme);
         let ink = disabled_tint(paint.ink, self.disabled);
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(self.size.font_size() as f32, ink)
-        };
+        let style = themed_family(
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(self.size.font_size() as f32, ink)
+            },
+            theme,
+            ThemeTextType::LabelLarge,
+        );
         let label_size = self.label.layout(ctx, &style);
 
         if self.size.is_icon() {
@@ -750,5 +754,30 @@ mod tests {
         let size = layout(&mut w, Some(&theme));
         let rec = paint(&mut w, size, Some(&theme));
         assert_eq!(rec.rrects[0].3, disabled_tint(theme.scheme().primary, true));
+    }
+
+    // ---- Typeface: the label follows the live theme ----------------------
+
+    /// Both label sizes: `text-sm`, and `Xs`'s `text-xs`.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_paints_in_the_theme_face() {
+        for size in [ButtonSize::Default, ButtonSize::Xs] {
+            crate::text::typeface_probe::assert_paints_in_the_theme_face(
+                &format!("a {size:?} button's label"),
+                |_: &mut ()| button::<()>("Save", |_| {}).size(size),
+            );
+        }
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_follows_a_live_theme_swap() {
+        for size in [ButtonSize::Default, ButtonSize::Xs] {
+            crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+                &format!("a {size:?} button's label"),
+                |_: &mut ()| button::<()>("Save", |_| {}).size(size),
+            );
+        }
     }
 }

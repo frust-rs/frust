@@ -25,7 +25,6 @@
 //! flagged this in the task brief), so [`CardWidget`] claims nothing and
 //! fires no callback — it only forwards events to its single composed child.
 
-use frust::authoring::ThemeTextColor;
 use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
@@ -33,6 +32,7 @@ use frust::authoring::{
     Size, View, Widget, any, build_child, rebuild_child, route_event_single, teardown_child,
     visit_children,
 };
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 use frust::{
     Column, CrossAxisAlignment, EdgeInsets, Padding, Row, Theme, flexible, inflexible, text,
 };
@@ -105,6 +105,7 @@ pub fn card_header_with_action<State: 'static>(
 pub fn card_title<State: 'static>(text_content: impl Into<String>) -> AnyView<State> {
     any(text(text_content)
         .weight(FontWeight::SEMI_BOLD)
+        .themed_family(ThemeTextType::TitleMedium)
         .themed_role(ThemeTextColor::OnSurface))
 }
 
@@ -112,6 +113,7 @@ pub fn card_title<State: 'static>(text_content: impl Into<String>) -> AnyView<St
 pub fn card_description<State: 'static>(text_content: impl Into<String>) -> AnyView<State> {
     any(text(text_content)
         .size(TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurfaceVariant))
 }
 
@@ -354,5 +356,35 @@ mod tests {
         // Reaching this far without a panic proves the header composes
         // (flexible column + inflexible action) without a layout blow-up;
         // exact geometry is `FlexView`'s own well-tested contract.
+    }
+
+    // ---- Typeface: the title and description follow the live theme ------
+
+    /// A header only: `sample_card`'s body is the caller's own plain `text`,
+    /// which this catalog does not style.
+    #[cfg(feature = "bundled-fonts")]
+    fn titled(_: &mut ()) -> CardView<()> {
+        card(vec![card_header(vec![
+            card_title("Notifications"),
+            card_description("You have 3 unread messages."),
+        ])])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a card's title and description",
+            titled,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a card's title and description",
+            titled,
+        );
     }
 }

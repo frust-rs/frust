@@ -41,8 +41,8 @@ use std::rc::Rc;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, ErasedCallback,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, View, Widget, any, build_child, erase_callback,
-    rebuild_child, route_event, route_event_single, teardown_child, visit_children,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any, build_child,
+    erase_callback, rebuild_child, route_event, route_event_single, teardown_child, visit_children,
 };
 use frust::{TextView, Theme, text};
 
@@ -206,7 +206,7 @@ impl<State: 'static> InputGroupView<State> {
 pub fn input_group_text(label: impl Into<String>) -> TextView {
     text(label.into())
         .size(style::TEXT_SM as f32)
-        .family(crate::tokens::sans_family())
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurfaceVariant)
 }
 
@@ -516,7 +516,7 @@ impl<State: 'static> InputGroupButtonView<State> {
     fn label_view(&self) -> AnyView<State> {
         any(text(self.label.clone())
             .size(style::TEXT_SM as f32)
-            .family(crate::tokens::sans_family())
+            .themed_family(ThemeTextType::LabelLarge)
             .themed_role(ThemeTextColor::OnSurface))
     }
 }
@@ -1129,6 +1129,39 @@ mod tests {
         assert!(
             update.nodes.iter().any(|(_, n)| n.role() == Role::Button),
             "the addon button's node too"
+        );
+    }
+
+    // ---- Typeface: the addon text and button follow the live theme -------
+
+    /// A text addon at each edge and a button addon, around a text-free
+    /// control (the control is the caller's own view).
+    #[cfg(feature = "bundled-fonts")]
+    fn addons(_: &mut ()) -> InputGroupView<()> {
+        input_group::<(), _>(frust::SizedBox(Some(160.0), Some(20.0)))
+            .addon(InputGroupAlign::InlineStart, input_group_text("https://"))
+            .addon(
+                InputGroupAlign::InlineEnd,
+                input_group_button("Go", |_: &mut ()| {}),
+            )
+            .addon(InputGroupAlign::BlockEnd, input_group_text("optional"))
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_addons_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "an input group's text and button addons",
+            addons,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_addons_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "an input group's text and button addons",
+            addons,
         );
     }
 }

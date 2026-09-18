@@ -80,8 +80,9 @@ use frust::authoring::{
     AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, ScrollDelta, SemanticsCtx,
-    Size, ThemeTextColor, View, Widget, any, build_child, erase_callback_arg, rebuild_child,
-    rebuild_children, route_event_single, teardown_child, text::FontWeight, visit_children,
+    Size, ThemeTextColor, ThemeTextType, View, Widget, any, build_child, erase_callback_arg,
+    rebuild_child, rebuild_children, route_event_single, teardown_child, text::FontWeight,
+    visit_children,
 };
 use frust::input::WHEEL_LINE_PX;
 use frust::{
@@ -265,6 +266,9 @@ impl<State: 'static> CommandView<State> {
 
     /// The wrapped baseline search field, with its own chrome suppressed (this
     /// widget paints the row's rule and icon).
+    ///
+    /// Its query text keeps the system UI family: `text_input` takes a style
+    /// only at build and has no theme-resolved family to opt into.
     fn input(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(
@@ -323,6 +327,7 @@ fn heading_view<State: 'static>(name: &str) -> AnyView<State> {
         text(name.to_string())
             .size(style::TEXT_XS as f32)
             .weight(FontWeight::MEDIUM)
+            .themed_family(ThemeTextType::LabelMedium)
             .themed_role(ThemeTextColor::OnSurfaceVariant),
     ))
 }
@@ -338,6 +343,7 @@ fn empty_view<State: 'static>(label: &str) -> AnyView<State> {
         EdgeInsets::symmetric(ROW_PAD_X, EMPTY_PAD_Y),
         text(label.to_string())
             .size(style::TEXT_SM as f32)
+            .themed_family(ThemeTextType::BodyMedium)
             .themed_role(ThemeTextColor::OnSurfaceVariant),
     ))
 }
@@ -349,7 +355,9 @@ fn empty_view<State: 'static>(label: &str) -> AnyView<State> {
 /// the authoring seam's themed text roles carry no alpha, and the muted role is
 /// the catalog's dimmed ink.
 fn item_view<State: 'static>(item: &CommandItem) -> AnyView<State> {
-    let label = text(item.label.clone()).size(style::TEXT_SM as f32);
+    let label = text(item.label.clone())
+        .size(style::TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium);
     let label = if item.disabled {
         label.themed_role(ThemeTextColor::OnSurfaceVariant)
     } else {
@@ -360,6 +368,7 @@ fn item_view<State: 'static>(item: &CommandItem) -> AnyView<State> {
         children.push(inflexible(
             text(shortcut.clone())
                 .size(style::TEXT_XS as f32)
+                .themed_family(ThemeTextType::BodySmall)
                 .themed_role(ThemeTextColor::OnSurfaceVariant),
         ));
     }
@@ -1498,5 +1507,39 @@ mod tests {
         let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
         w.event(&mut ctx, &escape());
         assert_eq!(state.dismissed, 1);
+    }
+
+    // ---- Typeface: the rows follow the live theme -------------------------
+
+    /// Every text row the palette builds: a heading, an item with a shortcut, a
+    /// disabled item, and the empty row. The palette's search field is not
+    /// here: it is the baseline `text_input`, which has no theme-resolved
+    /// family to opt into (see `CommandView::input`).
+    #[cfg(feature = "bundled-fonts")]
+    fn palette_rows(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            heading_view("Suggestions"),
+            item_view(&command_item("Calendar").shortcut("Ctrl+K")),
+            item_view(&command_item("Search emoji").disabled(true)),
+            empty_view("No results found."),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_rows_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the palette's rows",
+            palette_rows,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_rows_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the palette's rows",
+            palette_rows,
+        );
     }
 }
