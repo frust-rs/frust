@@ -840,8 +840,8 @@ variant's two same-position runs' own medians, per the Method note above):
 | timer (one parked task) | big (cpu4-6) | 54.35 ns | 52.95 ns | +1.40 ns (≈ its own A/A floor) |
 
 Worst case is the little core's timer workload. Per-frame extrapolation (≥4 pumps/frame, per the
-card): 14.75 ns × 4 = **59.0 ns/frame**, which is **0.14 % of the 42.75 µs threshold** — well
-under the 0.5 % bar. **`tokio` meets the rule.**
+card): 14.75 ns × 4 = **59.0 ns/frame**, which is **0.14 % of the 42.75 µs threshold** — far under
+the threshold. **`tokio` meets the rule.**
 
 **accesskit result** (ns/publish, `z − 3`; `z`/`3` columns are each the mean of that variant's
 two same-position runs' own medians, per the Method note above):
@@ -922,8 +922,8 @@ on size; that tension is a conductor-level call, not one this pre-registered CPU
 resolves.
 
 **Outcome under the pre-registered rule.** `tokio`: **meets the rule** — its worst-case per-frame
-extra (little core, timer workload) is 0.14 % of the 42.75 µs threshold, well inside the 0.5 %
-bar — stays. accesskit: **fails the rule at N=2000**, the value the rule uses — its little-core
+extra (little core, timer workload) is 0.14 % of the 42.75 µs threshold, far under the
+threshold — stays. accesskit: **fails the rule at N=2000**, the value the rule uses — its little-core
 delta (the worse of the two cores, and the one clearly resolved above its own A/A floor) is 2.15×
 the threshold; its big-core delta alone would meet the rule (2.5 % of the threshold) but sits
 inside its own A/A floor and is not the core the rule selects. Recommended out, on the same
