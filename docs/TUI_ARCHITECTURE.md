@@ -152,6 +152,10 @@ server started.
   plan resolved by `frust_drive::desktop_run`, the same construction site `frust-cli run` and
   `frust-mcp` use — or Android/iOS build → install → launch → logcat), streaming output back as
   `SessionState` transitions and log messages the engine consumes.
+- Clean session: an ad-hoc, targetless session delegating straight to `frust_drive::clean::run`,
+  streaming its lines into the session log the same way a build does. A failed `cargo clean` ends
+  the session `Exited(false)` (failed), never succeeding silently — the same `CleanReport`
+  contract `frust-cli`'s own exit code follows (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 - Launch guard: one live (non-terminal) session per `(project root, target)` — `AppState::live_session_for`
   (`live_session_for_excluding` for a restart, which exempts the session being replaced) is
   consulted by the run-config modal, run-on-all-devices, and the embedded MCP/DAP backend alike, so

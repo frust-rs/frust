@@ -39,11 +39,11 @@ pub enum ArtifactKind {
     Ios,
     /// An archived + exported iOS `.ipa`.
     Ipa,
-    /// A macOS `.app` bundle (`dist/macos`) — macOS hosts only.
+    /// A macOS `.app` bundle (`build/desktop/macos`) — macOS hosts only.
     Macos,
-    /// A Windows `.exe` layout (`dist/windows`) — Windows hosts only.
+    /// A Windows `.exe` layout (`build/desktop/windows`) — Windows hosts only.
     Windows,
-    /// A Linux bundle directory (`dist/linux`) — Linux hosts only.
+    /// A Linux bundle directory (`build/desktop/linux`) — Linux hosts only.
     Linux,
 }
 

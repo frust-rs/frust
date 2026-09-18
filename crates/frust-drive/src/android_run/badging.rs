@@ -473,7 +473,7 @@ launchable-activity: name='$(reboot)'
         let dir = unique_temp_dir("resolve-ok");
         let sdk = plant_sdk(&dir, &["35.0.1"]);
         let aapt2 = sdk.join(BUILD_TOOLS_DIR).join("35.0.1").join(AAPT2_BIN);
-        let apk = "/tmp/app/build/outputs/apk/dev/debug/app-dev-debug.apk";
+        let apk = "/tmp/app/build/android/app/outputs/apk/dev/debug/app-dev-debug.apk";
         let runner = FakeProcessRunner::new().with(
             format!("{} dump badging {apk}", aapt2.to_string_lossy()),
             ok(BADGING_SUFFIXED),

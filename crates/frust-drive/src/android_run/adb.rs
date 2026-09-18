@@ -165,13 +165,13 @@ mod tests {
     #[test]
     fn install_builds_expected_command() {
         let runner = FakeProcessRunner::new().with(
-            "adb -s emulator-5554 install -r android/app/build/outputs/apk/debug/app-debug.apk",
+            "adb -s emulator-5554 install -r build/android/app/outputs/apk/debug/app-debug.apk",
             ok(""),
         );
         let out = install(
             &runner,
             "emulator-5554",
-            "android/app/build/outputs/apk/debug/app-debug.apk",
+            "build/android/app/outputs/apk/debug/app-debug.apk",
         )
         .unwrap();
         assert!(out.success);

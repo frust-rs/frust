@@ -15,7 +15,7 @@
 //! binary name is the Linux bundle directory's, the identifier is the
 //! `.desktop` file's stem and each hicolor icon leaf's name. Those directories
 //! are then created — and, for a rebuild, recursively **deleted** — so a value
-//! carrying `../..` or a leading `/` would reach outside `dist/` with the full
+//! carrying `../..` or a leading `/` would reach outside `build/desktop/<os>` with the full
 //! force of `remove_dir_all`. The three identity values are therefore checked
 //! to be single file-name segments, and `[desktop] icon` to be a project-relative
 //! path that stays inside the project, *before* the resolved config exists at

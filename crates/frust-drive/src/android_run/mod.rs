@@ -13,7 +13,7 @@ pub mod project;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
@@ -207,6 +207,13 @@ fn prepare_session(
     let project = project::detect(root)?;
     let android_dir = project::require_android_dir(&project.root)?;
 
+    // r1-04 replaced AGP's default jniLibs source set with the `build/`
+    // redirect (setSrcDirs) in the generated template and every in-repo
+    // example, so a leftover `android/app/src/main/jniLibs` is no longer
+    // packaged into anything Gradle produces — flag it once, the same as
+    // `android_build::build_with_env` does for `frust build`.
+    crate::android_build::artifacts::warn_if_legacy_jni_libs(&project.root, on_line);
+
     let preflight_ctx = preflight::PreflightCtx {
         runner,
         env,
@@ -274,8 +281,14 @@ fn prepare_session(
 
     on_line(&format!("Building `{}`…", project.app_id));
     let build_start = Instant::now();
+    // Wall-clock twin of `build_start`, captured at the same point: `Instant`
+    // is monotonic-only (right for the elapsed-time report below) and can't
+    // be compared against a file's mtime, which the freshness gate on the
+    // legacy-fallback artifact (below) needs.
+    let build_start_time = SystemTime::now();
     let build_out = gradle::assemble(
         runner,
+        &project.root,
         &android_dir,
         &outcome.java_home,
         &task,
@@ -312,7 +325,20 @@ fn prepare_session(
         return Ok(None);
     }
 
-    let apk_path = gradle::apk_output_path(&android_dir, info.mode, info.flavor.as_deref())?;
+    // The freshness-aware counterpart of `gradle::apk_output_path` (same
+    // directory-resolution/glob/count logic, via `discover_since`): an APK
+    // this pipeline is about to install onto a device must not be a stale
+    // leftover under the pre-migration legacy path that the project's
+    // (unmigrated) Gradle config failed to actually rebuild. The
+    // migrated-path fast path is unaffected — see
+    // `artifacts::resolve_output_dir`'s doc comment.
+    let apk_path = crate::android_build::artifacts::discover_single_apk_since(
+        &project.root,
+        info.mode,
+        info.flavor.as_deref(),
+        Some(build_start_time),
+        on_line,
+    )?;
     let apk_path = apk_path.to_string_lossy().into_owned();
 
     on_line(&format!("Installing on {}…", device.name));
@@ -605,6 +631,21 @@ mod tests {
             dir
         }
 
+        /// The `FakeProcessRunner` key for a Frust-driven `./gradlew` invocation
+        /// in the project at `project_dir`: every one now leads with
+        /// `--project-cache-dir <project>/build/android/.gradle` (see
+        /// `android_run::gradle::leading_args`), so a fixture has to carry it
+        /// too. Registering the whole argv — the fake only falls back to a
+        /// registered key that is a *prefix* of the real one — is what makes
+        /// these tests assert the argv: drop or misplace the cache flag and no
+        /// fixture matches at all.
+        fn gradlew_key(project_dir: &Path, task_and_props: &str) -> String {
+            format!(
+                "./gradlew --project-cache-dir {} {task_and_props}",
+                crate::android_run::gradle::project_cache_dir(project_dir).display()
+            )
+        }
+
         /// Complete release signing material for a default-configured
         /// project: the four values `signing::check_release_signing`
         /// resolves, plus a placeholder file at the `storeFile` path they
@@ -697,14 +738,17 @@ mod tests {
         fn debug_default_assembles_debug_and_installs_debug_apk_unchanged() {
             let dir = unique_project_dir("debug-default");
             let android_dir = dir.join("android");
-            let out_dir = android_dir.join("app/build/outputs/apk/debug");
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
                     ok("BUILD SUCCESSFUL"),
                 ),
                 &apk_path,
@@ -722,12 +766,214 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
         }
 
+        /// The legacy fixture for the `frust run` lane: a project whose
+        /// generated Gradle config predates the `build/android/` redirect
+        /// still writes its APK to AGP's own
+        /// `android/app/build/outputs/…`. `prepare_session` must install
+        /// THAT file — the fixture matches only on its exact path — and warn
+        /// once, naming the migration recipe.
+        #[test]
+        fn pre_migration_layout_still_installs_and_warns_once() {
+            let dir = unique_project_dir("legacy-layout-run");
+            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            let planted_apk = out_dir.join("app-debug.apk");
+            fs::write(&planted_apk, b"fake").unwrap();
+            // The freshness gate on the legacy fallback rejects anything
+            // older than `prepare_session`'s own Gradle-invocation start
+            // instant; this fixture plants the file before that call (the
+            // fake `./gradlew` never touches the filesystem), so its mtime
+            // is pinned into the future to stand in for "this run's Gradle
+            // just (re)built it".
+            fs::File::open(&planted_apk)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+                .unwrap();
+            let apk_path = planted_apk.to_string_lossy().into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let outcome = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            );
+            let err = match outcome {
+                Err(err) => err,
+                Ok(_) => panic!("expected the `adb install` fixture to stop the pipeline"),
+            };
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let warnings: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("pre-migration path"))
+                .collect();
+            assert_eq!(warnings.len(), 1, "{lines:?}");
+            assert!(
+                warnings[0].contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC),
+                "{warnings:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The freshness gate on `frust run`'s legacy fallback: a
+        /// pre-migration APK that predates this run's own Gradle invocation
+        /// (never touched, since the fixture's `./gradlew` is a fake that
+        /// writes nothing — exactly what an UP-TO-DATE Gradle packaging task
+        /// does on a source-unchanged rerun) is still installed, with a
+        /// warning that it predates this build; it must never be a hard
+        /// error, or every second `frust run` of an unmigrated app fails.
+        #[test]
+        fn pre_migration_layout_still_installs_a_stale_apk_with_a_warning() {
+            let dir = unique_project_dir("legacy-layout-stale");
+            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            let apk_path = out_dir.join("app-debug.apk");
+            fs::write(&apk_path, b"fake").unwrap();
+            // Predates any `SystemTime::now()` captured during this test.
+            let stale = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+            fs::File::open(&apk_path)
+                .unwrap()
+                .set_modified(stale)
+                .unwrap();
+
+            let apk_str = apk_path.to_string_lossy().into_owned();
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_str,
+            );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let outcome = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            );
+            // The pipeline reached `adb install` with the stale APK (the
+            // fixture stops it there): a source-unchanged rerun of an
+            // unmigrated app keeps working.
+            let err = match outcome {
+                Err(err) => err,
+                Ok(_) => panic!("expected the `adb install` fixture to stop the pipeline"),
+            };
+            assert!(err.to_string().contains("adb install"), "{err}");
+            let stale_warnings: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("predates this build"))
+                .collect();
+            assert_eq!(stale_warnings.len(), 1, "{lines:?}");
+            assert!(stale_warnings[0].contains("frust clean"), "{lines:?}");
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC)),
+                "{lines:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The build-lane warning's `frust run` twin: on a MIGRATED project
+        /// (its own `android/app/build.gradle.kts` carries the r1-04
+        /// `setSrcDirs` redirect) a leftover `android/app/src/main/jniLibs`
+        /// is warned about exactly once, naming the migration recipe.
+        #[test]
+        fn prepare_session_warns_once_about_a_legacy_jni_libs_leftover() {
+            let dir = unique_project_dir("legacy-jnilibs-run");
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let jni_dir = dir.join("android/app/src/main/jniLibs/arm64-v8a");
+            fs::create_dir_all(&jni_dir).unwrap();
+            fs::write(jni_dir.join("libapp.so"), b"stale").unwrap();
+            fs::create_dir_all(dir.join("android/app")).unwrap();
+            fs::write(
+                dir.join("android/app/build.gradle.kts"),
+                format!(
+                    "sourceSets.getByName(\"main\").jniLibs.setSrcDirs(listOf(\"../../{}\"))\n",
+                    crate::build_dirs::BuildLayout::android_jni_libs().display()
+                ),
+            )
+            .unwrap();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let outcome = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            );
+            let err = match outcome {
+                Err(err) => err,
+                Ok(_) => panic!("expected the `adb install` fixture to stop the pipeline"),
+            };
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let warnings: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("jniLibs is a pre-build/ layout leftover"))
+                .collect();
+            assert_eq!(warnings.len(), 1, "{lines:?}");
+            assert!(
+                warnings[0].contains(crate::android_build::artifacts::MIGRATION_RECIPE_DOC),
+                "{warnings:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
         #[test]
         fn release_assembles_release_and_installs_release_apk() {
             let dir = unique_project_dir("release-default");
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
-            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            let out_dir = dir.join("build/android/app/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -737,7 +983,7 @@ mod tests {
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(&dir, "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"),
                     ok("BUILD SUCCESSFUL"),
                 ),
                 &apk_path,
@@ -763,7 +1009,7 @@ mod tests {
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
             fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
-            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            let out_dir = dir.join("build/android/app/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -773,7 +1019,7 @@ mod tests {
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(&dir, "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"),
                     ok("BUILD SUCCESSFUL"),
                 ),
                 &apk_path,
@@ -818,7 +1064,7 @@ mod tests {
                 "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
             )
             .unwrap();
-            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            let out_dir = dir.join("build/android/app/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -828,8 +1074,11 @@ mod tests {
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a \
+                    gradlew_key(
+                        &dir,
+                        "assembleRelease -Pfrust.targetPlatforms=arm64-v8a \
 -Pfrust.splitPerAbi=false -Pfrust.cargoFeatures=bGVhbg==",
+                    ),
                     ok("BUILD SUCCESSFUL"),
                 ),
                 &apk_path,
@@ -870,14 +1119,19 @@ mod tests {
             let dir = unique_project_dir("gradle-debug-signed");
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
-            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            let out_dir = dir.join("build/android/app/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
 
             let runner = preflight_ok_runner().with(
-                "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
-                ok("> Task :app:assembleRelease\nFrust: release build is debug-signed. \
-[FRUST-SIGNING-FALLBACK] Build with `frust build apk --release` …\nBUILD SUCCESSFUL"),
+                gradlew_key(
+                    &dir,
+                    "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                ),
+                ok(
+                    "> Task :app:assembleRelease\nFrust: release build is debug-signed. \
+[FRUST-SIGNING-FALLBACK] Build with `frust build apk --release` …\nBUILD SUCCESSFUL",
+                ),
             );
 
             let build_info = info(BuildMode::Release, None);
@@ -897,13 +1151,12 @@ mod tests {
         #[test]
         fn external_signing_still_proceeds_when_gradle_reports_debug_signing() {
             let dir = unique_project_dir("external-debug-signed");
-            let android_dir = dir.join("android");
             fs::write(
                 dir.join("frust.toml"),
                 "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[signing]\nexternal = true\n",
             )
             .unwrap();
-            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            let out_dir = dir.join("build/android/app/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -913,7 +1166,7 @@ mod tests {
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(&dir, "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"),
                     ok("Frust: release build is debug-signed. [FRUST-SIGNING-FALLBACK]\n\
                         BUILD SUCCESSFUL"),
                 ),
@@ -947,8 +1200,7 @@ mod tests {
         #[test]
         fn profile_assembles_profile_and_installs_profile_apk() {
             let dir = unique_project_dir("profile-default");
-            let android_dir = dir.join("android");
-            let out_dir = android_dir.join("app/build/outputs/apk/profile");
+            let out_dir = dir.join("build/android/app/outputs/apk/profile");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-profile.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -958,7 +1210,7 @@ mod tests {
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assembleProfile -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(&dir, "assembleProfile -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"),
                     ok("BUILD SUCCESSFUL"),
                 ),
                 &apk_path,
@@ -977,7 +1229,7 @@ mod tests {
             let dir = unique_project_dir("flavor-release");
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
-            let out_dir = android_dir.join("app/build/outputs/apk/paid/release");
+            let out_dir = dir.join("build/android/app/outputs/apk/paid/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -987,7 +1239,7 @@ mod tests {
 
             let runner = stop_after_install(
                 preflight_ok_runner().with(
-                    "./gradlew assemblePaidRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(&dir, "assemblePaidRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"),
                     ok("BUILD SUCCESSFUL"),
                 ),
                 &apk_path,
@@ -1019,8 +1271,7 @@ mod tests {
         #[test]
         fn device_abi_flows_into_target_platforms_property() {
             let dir = unique_project_dir("device-abi-x86-64");
-            let android_dir = dir.join("android");
-            let out_dir = android_dir.join("app/build/outputs/apk/debug");
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
@@ -1032,7 +1283,7 @@ mod tests {
                         ok("x86_64\n"),
                     )
                     .with(
-                        "./gradlew assembleDebug -Pfrust.targetPlatforms=x86_64 -Pfrust.splitPerAbi=false",
+                        gradlew_key(&dir, "assembleDebug -Pfrust.targetPlatforms=x86_64 -Pfrust.splitPerAbi=false"),
                         ok("BUILD SUCCESSFUL"),
                     ),
                 &apk_path,
@@ -1071,7 +1322,7 @@ mod tests {
         #[test]
         fn badging_identity_drives_both_the_launch_component_and_the_pid_poll() {
             let dir = unique_project_dir("badging-flavor");
-            let out_dir = dir.join("android/app/build/outputs/apk/dev/debug");
+            let out_dir = dir.join("build/android/app/outputs/apk/dev/debug");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-dev-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1082,7 +1333,7 @@ mod tests {
 
             let runner = preflight_ok_runner()
                 .with(
-                    "./gradlew assembleDevDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(&dir, "assembleDevDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"),
                     ok("BUILD SUCCESSFUL"),
                 )
                 .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
@@ -1136,22 +1387,31 @@ mod tests {
         #[test]
         fn unreadable_badging_warns_once_and_falls_back_to_the_frust_toml_identity() {
             let dir = unique_project_dir("badging-fallback");
-            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
 
             let runner = preflight_ok_runner()
                 .with(
-                    "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
                     ok("BUILD SUCCESSFUL"),
                 )
-                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    format!("adb -s emulator-5554 install -r {apk_path}"),
+                    ok(""),
+                )
                 .with(
                     "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
                     ok(""),
                 )
-                .with("adb -s emulator-5554 shell pidof dev.f0x.myapp", ok("4242\n"));
+                .with(
+                    "adb -s emulator-5554 shell pidof dev.f0x.myapp",
+                    ok("4242\n"),
+                );
 
             let never = AtomicBool::new(false);
             let mut lines = Vec::new();
@@ -1189,22 +1449,31 @@ mod tests {
         #[test]
         fn spawn_session_reaches_a_drainable_logcat_stream() {
             let dir = unique_project_dir("spawn-happy");
-            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
 
             let runner = preflight_ok_runner()
                 .with(
-                    "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
                     ok("BUILD SUCCESSFUL"),
                 )
-                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    format!("adb -s emulator-5554 install -r {apk_path}"),
+                    ok(""),
+                )
                 .with(
                     "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
                     ok(""),
                 )
-                .with("adb -s emulator-5554 shell pidof dev.f0x.myapp", ok("4242\n"))
+                .with(
+                    "adb -s emulator-5554 shell pidof dev.f0x.myapp",
+                    ok("4242\n"),
+                )
                 .with_stream(
                     "adb -s emulator-5554 logcat --pid 4242",
                     ["D/frust: hello", "D/frust: world"],

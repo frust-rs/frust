@@ -13,8 +13,18 @@
 pub mod android_build;
 pub mod android_id;
 pub mod android_run;
+/// Single source of truth for where a Frust app's build output lives under
+/// `build/`, and the directories [`clean`] removes ([`build_dirs::CLEAN_DIRS`]
+/// plus the pre-migration [`build_dirs::LEGACY_CLEAN_DIRS`]).
+pub mod build_dirs;
 pub mod build_info;
 pub mod cargo_manifest;
+/// Print-free `frust clean` core: `cargo clean` via the injected
+/// [`process::ProcessRunner`], then [`build_dirs::CLEAN_DIRS`]/
+/// [`build_dirs::LEGACY_CLEAN_DIRS`] removal, reporting through an `on_line`
+/// sink — the shared implementation `frust-cli`'s `clean` command and
+/// `frust-tui`'s clean session both call into.
+pub mod clean;
 /// Desktop bundle assembly (`cargo build` + the per-OS `.app`/dist-dir/bundle
 /// layouts, icons, optional macOS codesign) — host-locked per target.
 pub mod desktop_build;

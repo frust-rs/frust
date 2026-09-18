@@ -57,44 +57,9 @@ slow enough on mobile CPUs to trip the iOS launch watchdog. They stay hand-synce
 (`cargo test -p frust-cli --test profile_sync`); a `[profile.dev.package."*"]` wildcard (`opt-level
 = 1`) widens every other dependency's debug optimization the same way.
 
-**Release-profile hardening.** `[profile.release]` (`lto = "fat"`, `codegen-units = 1`, `strip =
-"symbols"`, `panic = "abort"`, the global `opt-level` left at its default 3) is hand-synced across
-**nine** manifests: root, `templates/app/Cargo.toml.tmpl`,
-`examples/{huddle,glyph-catalog,material3-demo,playground,shadertoy,web-gallery}` and
-`benchmarks/frust_bench`. The **eight** that build an Android artifact (the nine minus the wasm-only
-`web-gallery`) additionally carry an identical `[profile.release.package.<crate>] opt-level = "z"`
-**cold set**: `naga`, `wgpu-core`, `wgpu-types`, `codespan-reporting`, `ash`, `gpu-allocator`,
-`accesskit`, `accesskit_consumer`, `accesskit_android`, `serde_json`, `roxmltree`, `fontique`,
-`tokio`, `mio`, `image`, `png`. `frust-engine`, `frust-gpu`, `frust-render`, `frust-text`,
-`harfrust`, `skrifa`, `read-fonts`, `zune-jpeg` and `parley` stay at 3. `jni` stays at 3 too: its
-IME, clipboard-drain and system-UI polls (once per frame, from `FrustSurfaceView.kt`'s `doFrame`)
-run in separate JNI entries after `nativeOnFrame` returns, outside every span the benchmark's
-`total_us` sums, so the bar cannot measure it.
-`wgpu-hal` is excluded by measurement — on the submit path, it cost consistent per-frame CPU
-for 0.55% of the `.so`. Measured on the benchmark app's lean arm64 release with `jni` in the set (at
-3 it adds 0.44% to the `.so`): stripped `.so` −9.2%, `.text` −17.9%, profile APK −7.4%;
-`[profile.profile]` inherits the overrides, so a benchmark build measures the shipping
-configuration. The global `opt-level` stays 3 because a whole-binary `"s"`/`"z"` never cleared the
-5% bar against a render-stack CPU-perf carve-out (`scripts/size-report.sh` below); the cold set is
-gated on that same bar and clears it on a OnePlus 9 for the frame's own spans (see
-[RESULTS.md](../benchmarks/RESULTS.md)'s cold-set
-note). `cargo test -p frust-cli --test profile_sync` keeps every mirror identical — three lists (dev
-overrides ×5, `[profile.release]` identity ×9, the Android cold set ×8) — and also asserts the
-template's `.cargo/config.toml` is byte-identical to the root's.
+**Release-profile hardening.** `[profile.release]` (`lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, the global `opt-level` left at its default 3) is hand-synced across **nine** manifests: root, `templates/app/Cargo.toml.tmpl`, `examples/{huddle,glyph-catalog,material3-demo,playground,shadertoy,web-gallery}` and `benchmarks/frust_bench`. The **eight** that build an Android artifact (the nine minus the wasm-only `web-gallery`) additionally carry an identical `[profile.release.package.<crate>] opt-level = "z"` **cold set**: `naga`, `wgpu-core`, `wgpu-types`, `codespan-reporting`, `ash`, `gpu-allocator`, `accesskit`, `accesskit_consumer`, `accesskit_android`, `serde_json`, `roxmltree`, `fontique`, `tokio`, `mio`, `image`, `png`. `frust-engine`, `frust-gpu`, `frust-render`, `frust-text`, `harfrust`, `skrifa`, `read-fonts`, `zune-jpeg` and `parley` stay at 3. `jni` stays at 3 too: its IME, clipboard-drain and system-UI polls (once per frame, from `FrustSurfaceView.kt`'s `doFrame`) run in separate JNI entries after `nativeOnFrame` returns, outside every span the benchmark's `total_us` sums, so the bar cannot measure it. `wgpu-hal` is excluded by measurement — on the submit path, it cost consistent per-frame CPU for 0.55% of the `.so`. Measured on the benchmark app's lean arm64 release with `jni` in the set (at 3 it adds 0.44% to the `.so`): stripped `.so` −9.2%, `.text` −17.9%, profile APK −7.4%; `[profile.profile]` inherits the overrides, so a benchmark build measures the shipping configuration. The global `opt-level` stays 3 because a whole-binary `"s"`/`"z"` never cleared the 5% bar against a render-stack CPU-perf carve-out (`scripts/size-report.sh` below); the cold set is gated on that same bar and clears it on a OnePlus 9 for the frame's own spans (see [RESULTS.md](../benchmarks/RESULTS.md)'s cold-set note). `cargo test -p frust-cli --test profile_sync` keeps every mirror identical — three lists (dev overrides ×5, `[profile.release]` identity ×9, the Android cold set ×8) — and asserts the template's `.cargo/config.toml` `[target.*]` tables match the root's structurally (its extra `[build]` table is covered in *Build Output Layout* below).
 
-**Android link flags.** The repo-root `.cargo/config.toml` adds two linker flags on all four Android
-targets: `-C link-arg=-Wl,--pack-dyn-relocs=android` (Bionic's packed relocation format, API 23+ —
-`.rela.dyn` 308 KB → 40 KB on the benchmark `.so`; the newer `android+relr` form would need API 28,
-above every Frust target's `minSdk 26`) and `-C link-arg=-Wl,--icf=all` (identical-code folding —
-`all` over the conservative `safe` for a further ~203 KB, accepting a risk class,
-function-pointer/vtable identity comparison, that this codebase does not rely on). Cargo merges
-config files from every ancestor directory of the build `cwd`, so that one file governs every nested
-workspace built inside the checkout; `templates/app/.cargo/config.toml` is a byte-identical copy (a
-verbatim `template_manifest.json` entry) so a scaffold keeps the flags once it leaves the checkout,
-and `profile_sync` holds the two together. A caller's `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` replaces
-the table entirely. **Unwind tables stay:** `-C force-unwind-tables=no` measures ~9% off the lean
-arm64 `.so` (`.eh_frame` −72%) but destroys native tombstone/`ndk-stack` frame resolution past the
-panic-abort entry, and `-C force-frame-pointers=yes` does not restore it.
+**Android link flags.** The repo-root `.cargo/config.toml` adds two linker flags on all four Android targets: `-C link-arg=-Wl,--pack-dyn-relocs=android` (Bionic's packed relocation format, API 23+ — `.rela.dyn` 308 KB → 40 KB on the benchmark `.so`; the newer `android+relr` form would need API 28, above every Frust target's `minSdk 26`) and `-C link-arg=-Wl,--icf=all` (identical-code folding — `all` over the conservative `safe` for a further ~203 KB, accepting a risk class, function-pointer/vtable identity comparison, that this codebase does not rely on). Cargo merges config files from every ancestor directory of the build `cwd`, so that one file governs every nested workspace built inside the checkout; `templates/app/.cargo/config.toml` carries the same `[target.*]` rustflags tables (a verbatim `template_manifest.json` entry, kept structurally identical by `profile_sync`) so a scaffold keeps the flags once it leaves the checkout — plus its own `[build]` table the root deliberately lacks (*Build Output Layout* below). A caller's `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` replaces the table entirely. **Unwind tables stay:** `-C force-unwind-tables=no` measures ~9% off the lean arm64 `.so` (`.eh_frame` −72%) but destroys native tombstone/`ndk-stack` frame resolution past the panic-abort entry, and `-C force-frame-pointers=yes` does not restore it.
 
 **No design-system cargo features.** `frust` carries `default = []` (only the tooling opt-ins
 `perf-trace`/`devtools`). The built-in design systems (`frust-glyph`/`frust-material`/
@@ -107,6 +72,23 @@ system faces through fontique (Roboto on Android). `frust-beui` and `frust-cuper
 unaffected. **Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
 compiles in GPU-free container-widget fixtures (`frust_widgets::test_support`) so an out-of-tree
 design system can test its own containers too; off by default in a normal app build.
+
+### Build Output Layout
+
+All generated/compiled output for a Frust app lands under one project-relative root, `build/` — never scattered under `android/`, a bare `dist/`, or a project-root `windows/icon.ico` (the pre-migration legacy layout *Migrating an already-scaffolded app to the build/ layout* below replaces):
+
+| Path | Contents |
+|---|---|
+| `build/rust` | Cargo's target dir (default only — see the `CARGO_TARGET_DIR` note below) |
+| `build/android/{app,frust-embedding,<plugin>}` | Each Gradle module's redirected output: `:app`, `:frust-embedding`, one `:frust-<plugin>` per installed plugin |
+| `build/android/jniLibs` | Native libs `cargo ndk` stages for Gradle to package |
+| `build/android/.gradle` | Project-local Gradle cache (`--project-cache-dir`) |
+| `build/ios` | `xcodebuild` derived-data/archive output |
+| `build/web` | Browser build output (`wasm-bindgen`/`wasm-opt`) |
+| `build/desktop/<macos\|windows\|linux>` | Per-OS bundle; Windows also writes `build/desktop/windows/icon.ico` |
+
+`CARGO_TARGET_DIR` (env) always wins over the scaffold's `.cargo/config.toml` `[build] target-dir = "build/rust"`.
+Under an override, `build/rust` stays empty by design — every Frust tool resolves the real directory via `cargo metadata` rather than assuming the default.
 
 ## Run
 
@@ -221,7 +203,7 @@ frust build ios
 frust build ios --no-codesign
 frust build ipa --export-method app-store-connect
 
-# Remove build output (cargo clean + the Android build/.gradle directories)
+# Remove build output (cargo clean + build/, see Build Output Layout above)
 frust clean
 ```
 
@@ -563,6 +545,20 @@ no other migration step. **Verifying a floor change:** `cargo` sees none of this
 `lintDebug` reports API-above-floor usage at **warning** severity, so a green exit code does **not**
 mean clean — read the SARIF/HTML report under `build/reports/`, or raise the severity, before
 concluding anything.
+
+### Migrating an already-scaffolded app to the build/ layout
+
+An app scaffolded before the `build/` root migration still writes Gradle/Xcode/desktop output into its own source tree; `frust build`/`frust run` keep working against that layout (Android falls back to it read-only, with a one-time warning), but migrating gets every artifact under the one root `frust clean` removes wholesale:
+
+1. Add `.cargo/config.toml` with `[build]` / `target-dir = "build/rust"`.
+2. `android/settings.gradle.kts`: replace the `:frust-embedding`-only `buildDirectory` redirect with the `when (path)` block redirecting root, `:app`, `:frust-embedding`, and every `:frust-<plugin>` module — copy the block from a fresh `frust create`.
+3. `android/app/build.gradle.kts`: point cargo-ndk's `-o` at `../../build/android/jniLibs`, and replace the main source set's `jniLibs` with `sourceSets.getByName("main").jniLibs.setSrcDirs(listOf("../../build/android/jniLibs"))`.
+4. `ios/Runner.xcodeproj/project.pbxproj`: replace the `cp "target/$TRIPLE/..."` line with the `TARGET_DIR` resolution (`CARGO_TARGET_DIR` or `cargo metadata --format-version 1 --no-deps`) from a fresh scaffold.
+5. `windows/build.rs`: read `build/desktop/windows/icon.ico`, not the project-root `windows/icon.ico`.
+6. `.gitignore`: track `/build` (keep `/target`).
+7. Run `frust clean` once — it also removes the legacy paths (`android/app/build`, `android/build`, `android/.gradle`, `android/app/src/main/jniLibs`, `dist/`).
+
+Until step 7 runs, `frust build`/`frust run` print the one-time legacy-layout warning, and a stale `android/app/src/main/jniLibs` would otherwise ship packaged alongside the migrated output.
 
 ## Known Issues
 

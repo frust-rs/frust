@@ -20,6 +20,17 @@ host-signal flow.
 [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)'s version pins), so the scaffold builds on any
 machine with no sibling checkout required.
 
+A generated app ships the `build/` root layout by construction — `.cargo/config.toml`'s
+`[build] target-dir = "build/rust"`, the Gradle build-directory redirect, the jniLibs source set,
+and the `.gitignore` entries all render pre-migrated; see [DEVELOPMENT.md](DEVELOPMENT.md)'s Build
+Output Layout for the shape and *Migrating an already-scaffolded app to the build/ layout* for a
+pre-existing app that predates it. `crates/frust-cli/tests/profile_sync.rs`'s
+`android_cargo_config_identical_between_root_and_template` test compares the template's
+`.cargo/config.toml` against the repo root's structurally, not byte-for-byte: their `[target.*]`
+rustflags tables must match, and the template's `[build]` table must be exactly `target-dir =
+"build/rust"` — the root's config deliberately carries no `[build]` table, since this checkout's
+own `target/` is referenced directly by docs and CI and must not move.
+
 **Platform embedding modules ship in-repo, not templated.**
 `platform/android/frust-embedding` and `platform/ios/FrustEmbedding` are consumed by a
 scaffolded project by path — edit the module in place and rebuild the consuming app

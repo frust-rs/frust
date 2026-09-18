@@ -11,12 +11,12 @@
 // platform-conditional), so this file must stay buildable everywhere even
 // though its body is a no-op off Windows.
 //
-// `windows/icon.ico` does NOT ship with this template — `frust build`'s icon
-// pipeline generates it from `[desktop] icon` (see `frust.toml`) ahead of a
-// Windows build. Building with plain `cargo build`/`cargo run` before that
-// pipeline has ever run is fine: the icon step degrades to a build-time
-// warning rather than a hard failure, so the binary still builds, just
-// without an embedded icon yet.
+// `build/desktop/windows/icon.ico` does NOT ship with this template —
+// `frust build`'s icon pipeline generates it from `[desktop] icon` (see
+// `frust.toml`) ahead of a Windows build. Building with plain `cargo
+// build`/`cargo run` before that pipeline has ever run is fine: the icon step
+// degrades to a build-time warning rather than a hard failure, so the binary
+// still builds, just without an embedded icon yet.
 
 fn main() {
     #[cfg(windows)]
@@ -25,17 +25,22 @@ fn main() {
 
 #[cfg(windows)]
 fn embed_resources() {
-    let icon_path = std::path::Path::new("windows/icon.ico");
+    let icon_path = std::path::Path::new("build/desktop/windows/icon.ico");
     if !icon_path.exists() {
         println!(
-            "cargo:warning=windows/icon.ico not found — run `frust build` to generate it from \
-             `[desktop] icon` before a Windows release; building without an embedded icon"
+            "cargo:warning=build/desktop/windows/icon.ico not found — run `frust build` to \
+             generate it from `[desktop] icon` before a Windows release; building without an \
+             embedded icon"
         );
         return;
     }
 
     let mut resource = winresource::WindowsResource::new();
-    resource.set_icon(icon_path.to_str().expect("windows/icon.ico is valid UTF-8"));
+    resource.set_icon(
+        icon_path
+            .to_str()
+            .expect("build/desktop/windows/icon.ico is valid UTF-8"),
+    );
     // These two lines are where the `.exe`'s FileVersion/ProductVersion come
     // from: they are compiled in here, at app-build time. `frust.toml`'s
     // `[windows] file-version`/`product-version` do NOT reach them — `frust
