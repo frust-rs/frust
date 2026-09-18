@@ -152,11 +152,10 @@ panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
 # Release cold-set `opt-level = "z"` — shrink crates that are cold on the
-# per-frame path (shader translation, platform glue, one-shot parsing/decode)
-# while every per-frame crate stays at 3. Hand-synced byte-for-byte with
-# Frust's own root `Cargo.toml`; see it for the full measured rationale and
-# the kept-at-3 list. `crates/frust-cli/tests/profile_sync.rs` is the
-# tripwire.
+# per-frame path (shader translation, one-shot parsing/decode) while every
+# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
+# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
+# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
 
 [profile.release.package.naga]
 opt-level = "z"
@@ -176,15 +175,6 @@ opt-level = "z"
 [profile.release.package.gpu-allocator]
 opt-level = "z"
 
-[profile.release.package.accesskit]
-opt-level = "z"
-
-[profile.release.package.accesskit_consumer]
-opt-level = "z"
-
-[profile.release.package.accesskit_android]
-opt-level = "z"
-
 [profile.release.package.serde_json]
 opt-level = "z"
 
@@ -192,9 +182,6 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.fontique]
-opt-level = "z"
-
-[profile.release.package.tokio]
 opt-level = "z"
 
 [profile.release.package.mio]
