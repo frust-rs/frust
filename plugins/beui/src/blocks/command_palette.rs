@@ -136,7 +136,7 @@ use crate::overlay::{
 };
 use crate::press::{Lane, inside, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -847,6 +847,7 @@ impl<State: 'static> PalettePanelView<State> {
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(
+            // Not themed: the baseline `text_input` has no themed-family opt-in.
             text_input(self.query.clone(), move |state: &mut State, text| {
                 on_change(state, text)
             })
@@ -945,30 +946,25 @@ impl<State: 'static> View<State> for PalettePanelView<State> {
 
 // ---- Text styles -----------------------------------------------------------
 
-/// A result row's label style (`text-sm`).
+/// A result row's label style (`text-sm`), in the theme's `label_large`
+/// family.
 fn row_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// A hint's / key cap's style (`text-[10px] font-medium`).
+/// A hint's / key cap's style (`text-[10px] font-medium`), in the theme's
+/// `label_small` family.
 fn small_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(PALETTE_SMALL_TEXT as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
-/// A group heading's style (`text-[10px] font-semibold`).
+/// A group heading's style (`text-[10px] font-semibold`), in
+/// [`small_style`]'s family.
 fn heading_style(theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         weight: FontWeight::SEMI_BOLD,
@@ -1922,5 +1918,46 @@ mod tests {
             "...and all at the same alpha: {:?}",
             flat.layers
         );
+    }
+
+    // ---- Typeface: headings, rows, hints and the key cap follow the theme ---
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The open palette with two headings, two rows (one with an ASCII hint),
+    /// and the key cap. The query and placeholder are empty: the wrapped baseline field has
+    /// no themed-family opt-in, so its own text would paint the system face and
+    /// is not what these tests pin.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        frust::Stack(vec![any(command_palette::<(), _, _>(
+            vec![
+                command_palette_item("Open File")
+                    .group("File")
+                    .hint("Ctrl O"),
+                command_palette_item("Zoom In").group("View"),
+            ],
+            "",
+            |_: &mut (), _| {},
+            |_: &mut (), _| {},
+        )
+        .placeholder(""))])
+    }
+
+    #[test]
+    fn palette_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the palette's text", probe_view, WINDOW);
+        let runs = Probe::new(probe_view, WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            6,
+            "two headings, two rows, a hint and the key cap"
+        );
+    }
+
+    #[test]
+    fn palette_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the palette's text", probe_view, WINDOW);
     }
 }

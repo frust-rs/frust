@@ -78,7 +78,7 @@ use crate::components::popover::{PanelChrome, paint_panel_hairline, resolve_pane
 use crate::motion::Ramp;
 use crate::press::{Lane, inside, is_activation_key, keyframes_at, press_scale, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_SWAP};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -1086,20 +1086,13 @@ fn format_amount_plain(value: f64) -> String {
     }
 }
 
-/// The label family: the theme's own scale, with the catalog's sans stack as
-/// the unthemed fallback.
-fn family_of(theme: Option<&Theme>) -> frust::authoring::text::FontFamily {
-    theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    })
-}
-
-/// One label style at `size`.
+/// One label style at `size`, in the theme's `label_large` family.
 fn market_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 impl Widget for PredictionMarketWidget {
@@ -2211,5 +2204,36 @@ mod tests {
             first.transforms.is_empty() && second.transforms.is_empty(),
             "a reduced-motion refusal displaced the ticket"
         );
+    }
+
+    // ---- Typeface: the ticket's runs follow the live theme ------------------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A two-outcome ticket: modes, order type, amount, chips, outcomes, the
+    /// quote line and the action, plus the payout ticker `number` paints.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        frust::Stack(vec![any(prediction_market::<()>(vec![
+            market_outcome("yes", "Yes", 0.55),
+            market_outcome("no", "No", 0.45),
+        ]))])
+    }
+
+    #[test]
+    fn ticket_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the ticket's text", probe_view, WINDOW);
+        let runs = Probe::new(probe_view, WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            17,
+            "every run of the ticket and its payout ticker"
+        );
+    }
+
+    #[test]
+    fn ticket_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the ticket's text", probe_view, WINDOW);
     }
 }

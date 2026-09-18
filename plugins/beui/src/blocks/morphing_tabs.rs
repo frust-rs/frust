@@ -127,7 +127,7 @@ use frust::{FrameTime, Theme};
 use crate::motion::{Presence, PresencePhase, Ramp};
 use crate::press::{Lane, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_GLIDE, SPRING_PRESS};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -482,15 +482,14 @@ fn resolve_colors(theme: Option<&Theme>) -> MorphingTabsColors {
     }
 }
 
-/// The tab-label style (`text-base font-medium`).
+/// The tab-label style (`text-base font-medium`), in the theme's
+/// `label_large` family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..crate::text::label_style(MORPHING_TABS_LABEL_SIZE)
-    }
+    themed_style(
+        crate::text::label_style(MORPHING_TABS_LABEL_SIZE),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 /// Move `from` to `to` in `order` (`moveItem`).
@@ -2169,5 +2168,38 @@ mod tests {
             3,
             "one close button per tab"
         );
+    }
+
+    // ---- Typeface: the tab labels follow the live theme ---------------------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(600.0, 400.0);
+
+    /// Two tabs with glyph-free rooms, the first open.
+    fn probe_view(_: &mut ()) -> MorphingTabsView<()> {
+        let room = || frust::SizedBox::<()>(Some(40.0), Some(40.0));
+        morphing_tabs::<(), _>(
+            Some("inbox".to_string()),
+            vec![
+                morphing_tabs_item("inbox", "Inbox", room()),
+                morphing_tabs_item("drafts", "Drafts", room()),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn the_tab_labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the tab labels", probe_view, PROBE_WINDOW);
+        let runs = Probe::new(probe_view, PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(runs.len(), 2, "one label per tab");
+    }
+
+    #[test]
+    fn the_tab_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the tab labels", probe_view, PROBE_WINDOW);
     }
 }

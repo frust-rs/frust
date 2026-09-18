@@ -103,7 +103,7 @@ use crate::components::switch;
 use crate::motion::{Presence, Ramp};
 use crate::press::{Lane, inside_inclusive, presses};
 use crate::style;
-use crate::text::Label;
+use crate::text::{Label, ThemeTextType};
 use crate::tokens::motion::EASE_OUT;
 use crate::tokens::{BeuiTokens, sans_family};
 
@@ -1098,7 +1098,23 @@ fn status_tone(status: FileUploadStatus, colors: &UploadColors) -> Color {
     }
 }
 
-/// `font-semibold` at `size`, in the catalog's sans family.
+/// The type-scale role the dropzone's headline takes its family from at
+/// layout.
+const HEADLINE_ROLE: ThemeTextType = ThemeTextType::TitleSmall;
+
+/// The type-scale role the dropzone's browse label takes its family from at
+/// layout.
+const BROWSE_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
+/// The type-scale role a queued file's name takes its family from at layout.
+const NAME_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the support line and a queued file's meta line take
+/// their family from at layout.
+const CAPTION_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// `font-semibold` at `size`. The family here is the unthemed base; `layout`
+/// shapes in the run's role family.
 fn semibold(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1109,7 +1125,8 @@ fn semibold(size: f64, color: Color) -> TextStyle {
     }
 }
 
-/// `font-medium` at `size`.
+/// `font-medium` at `size`. The family here is the unthemed base; `layout`
+/// shapes in the run's role family.
 fn medium(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1120,7 +1137,8 @@ fn medium(size: f64, color: Color) -> TextStyle {
     }
 }
 
-/// A plain run at `size`.
+/// A plain run at `size`. The family here is the unthemed base; `layout`
+/// shapes in the run's role family.
 fn plain(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1273,13 +1291,15 @@ impl Widget for FileUploadWidget {
             FileUploadVariant::Default => style::TEXT_SM,
             FileUploadVariant::Centered => style::TEXT_BASE,
         };
-        let headline = self
-            .headline
-            .layout(ctx, &semibold(headline_size, colors.ink));
-        let support = self
-            .support
-            .layout(ctx, &plain(style::TEXT_XS, colors.muted));
-        let browse = self.browse.layout(ctx, &medium(style::TEXT_XS, colors.ink));
+        let headline =
+            self.headline
+                .layout_themed(ctx, &semibold(headline_size, colors.ink), HEADLINE_ROLE);
+        let support =
+            self.support
+                .layout_themed(ctx, &plain(style::TEXT_XS, colors.muted), CAPTION_ROLE);
+        let browse =
+            self.browse
+                .layout_themed(ctx, &medium(style::TEXT_XS, colors.ink), BROWSE_ROLE);
 
         let padding = self.dropzone_padding();
         let gap = self.dropzone_gap();
@@ -1309,8 +1329,10 @@ impl Widget for FileUploadWidget {
             let (name, meta) = {
                 let row = &mut self.rows[index];
                 (
-                    row.name.layout(ctx, &medium(style::TEXT_SM, colors.ink)),
-                    row.meta.layout(ctx, &plain(style::TEXT_XS, colors.muted)),
+                    row.name
+                        .layout_themed(ctx, &medium(style::TEXT_SM, colors.ink), NAME_ROLE),
+                    row.meta
+                        .layout_themed(ctx, &plain(style::TEXT_XS, colors.muted), CAPTION_ROLE),
                 )
             };
             let row = &mut self.rows[index];
@@ -2660,5 +2682,37 @@ mod tests {
                 "at {ms}ms the widget rests"
             );
         }
+    }
+
+    // ---- Typeface: the dropzone and the queue rows follow the theme ---------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(600.0, 400.0);
+
+    /// The dropzone plus one queued file.
+    fn probe_view(_: &mut ()) -> FileUploadView<()> {
+        file_upload::<()>(
+            vec![file_upload_item("a", "report.pdf", 2_048)],
+            |_: &mut ()| {},
+        )
+    }
+
+    #[test]
+    fn upload_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the upload block's text", probe_view, PROBE_WINDOW);
+        let runs = Probe::new(probe_view, PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            5,
+            "the headline, support line and browse label, then the row's name and meta"
+        );
+    }
+
+    #[test]
+    fn upload_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the upload block's text", probe_view, PROBE_WINDOW);
     }
 }

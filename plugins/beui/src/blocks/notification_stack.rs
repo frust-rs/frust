@@ -125,7 +125,7 @@ use crate::components::animated_toast_stack::{toast_stack_inset, toast_stack_pee
 use crate::motion::Ramp;
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::BeuiTokens;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_SWAP};
 
@@ -394,18 +394,18 @@ fn resolve_colors(theme: Option<&Theme>) -> NotificationStackColors {
     }
 }
 
-/// The card title's style (`text-sm font-medium`).
+/// The card title's style (`text-sm font-medium`), in the theme's
+/// `label_large` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..crate::text::label_style(style::TEXT_SM)
-    }
+    themed_style(
+        crate::text::label_style(style::TEXT_SM),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
-/// The description/trailing style (`text-xs`, regular weight).
+/// The description/trailing style (`text-xs`, regular weight), in
+/// [`title_style`]'s family.
 fn body_style(theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         size: style::TEXT_XS as f32,
@@ -414,7 +414,8 @@ fn body_style(theme: Option<&Theme>) -> TextStyle {
     }
 }
 
-/// The count badge's style (`text-xs font-medium`).
+/// The count badge's style (`text-xs font-medium`), in [`title_style`]'s
+/// family.
 fn count_style(theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         size: style::TEXT_XS as f32,
@@ -1799,5 +1800,58 @@ mod tests {
             Some("4 notifications. Expand notifications.")
         );
         assert_eq!(buttons[0].1.is_expanded(), Some(false));
+    }
+
+    // ---- Typeface: cards, the header and the empty line follow the theme ---
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(480.0, 600.0);
+
+    /// Two cards — one with a description and a trailing stamp — collapsed or
+    /// `expanded`, or none at all.
+    fn probe_logic(
+        count: usize,
+        expanded: bool,
+    ) -> impl FnMut(&mut ()) -> NotificationStackView<()> {
+        move |_: &mut ()| {
+            let items = [
+                notification("a", "Sarah commented")
+                    .description("Left three notes")
+                    .trailing("2m"),
+                notification("b", "Build passed"),
+            ];
+            notification_stack::<(), _>(items[..count].to_vec(), expanded, |_: &mut (), _| {})
+                .on_view_all(|_: &mut ()| {})
+        }
+    }
+
+    /// Each probed state, described.
+    const STATES: [(usize, bool, &str); 3] = [
+        (2, true, "the expanded stack's text"),
+        (2, false, "the collapsed stack's text"),
+        (0, false, "the empty line"),
+    ];
+
+    #[test]
+    fn stack_text_paints_in_geist_under_the_beui_theme() {
+        for (count, expanded, what) in STATES {
+            assert_paints_only_in_geist(what, probe_logic(count, expanded), PROBE_WINDOW);
+        }
+        let expanded = Probe::new(probe_logic(2, true), PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(
+            expanded.len(),
+            6,
+            "two titles, a description, a stamp, the count and the header label"
+        );
+    }
+
+    #[test]
+    fn stack_text_follows_a_live_theme_family_swap() {
+        for (count, expanded, what) in STATES {
+            assert_follows_a_live_family_swap(what, probe_logic(count, expanded), PROBE_WINDOW);
+        }
     }
 }

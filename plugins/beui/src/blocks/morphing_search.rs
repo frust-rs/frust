@@ -125,7 +125,7 @@ use crate::overlay::{
 };
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -986,6 +986,7 @@ impl<State: 'static> SearchPanelView<State> {
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(
+            // Not themed: the baseline `text_input` has no themed-family opt-in.
             text_input(self.query.clone(), move |state: &mut State, text| {
                 on_change(state, text)
             })
@@ -1078,27 +1079,21 @@ impl<State: 'static> View<State> for SearchPanelView<State> {
 
 // ---- Shared chrome ---------------------------------------------------------
 
-/// A row title's / placeholder's style (`text-sm font-medium`).
+/// A row title's / placeholder's style (`text-sm font-medium`), in the
+/// theme's `label_large` family.
 fn row_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// A description's / key cap's style (`text-xs`).
+/// A description's / key cap's style (`text-xs`), in the theme's
+/// `label_small` family.
 fn small_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_XS as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(style::TEXT_XS as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// The key cap's box at the trailing edge of a `size`-shaped row.
@@ -2056,5 +2051,55 @@ mod tests {
             "every run was shaped and painted: {}",
             rec.inks.len()
         );
+    }
+
+    // ---- Typeface: the trigger and the panel's runs follow the theme --------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The trigger over the panel, both `open`. The panel's query and
+    /// placeholder are empty: the wrapped baseline field has no themed-family
+    /// opt-in, so its own text would paint the system face and is not what
+    /// these tests pin.
+    fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
+        let anchor = OverlayAnchor::new();
+        move |_: &mut ()| {
+            frust::Stack(vec![
+                any(frust::Padding(
+                    frust::EdgeInsets::all(INSET),
+                    morphing_search_trigger::<()>(&anchor).open(open),
+                )),
+                any(morphing_search::<(), _, _>(
+                    vec![
+                        morphing_search_item("Overview").description("Dashboard and metrics"),
+                        morphing_search_item("Members"),
+                    ],
+                    "",
+                    |_: &mut (), _| {},
+                    |_: &mut (), _| {},
+                )
+                .anchor(&anchor)
+                .open(open)
+                .placeholder("")),
+            ])
+        }
+    }
+
+    #[test]
+    fn search_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the trigger's text", probe_logic(false), WINDOW);
+        let closed = Probe::new(probe_logic(false), WINDOW, crate::theme()).frame();
+        assert_eq!(closed.len(), 2, "the trigger's placeholder and shortcut");
+        assert_paints_only_in_geist("the panel's text", probe_logic(true), WINDOW);
+        let open = Probe::new(probe_logic(true), WINDOW, crate::theme()).frame();
+        assert_eq!(open.len(), 4, "two titles, a description and the key cap");
+    }
+
+    #[test]
+    fn search_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the trigger's text", probe_logic(false), WINDOW);
+        assert_follows_a_live_family_swap("the panel's text", probe_logic(true), WINDOW);
     }
 }

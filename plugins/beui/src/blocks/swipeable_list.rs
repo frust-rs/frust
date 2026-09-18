@@ -105,7 +105,7 @@ use frust::{FrameTime, SpringDescription, Theme};
 use crate::motion::Ramp;
 use crate::press::{Lane, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::BeuiTokens;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -511,18 +511,17 @@ fn resolve_colors(theme: Option<&Theme>) -> SwipeableListColors {
     }
 }
 
-/// The row title's style (`text-sm font-medium`).
+/// The row title's style (`text-sm font-medium`), in the theme's
+/// `label_large` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..crate::text::label_style(style::TEXT_SM)
-    }
+    themed_style(
+        crate::text::label_style(style::TEXT_SM),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
-/// The description style (`text-xs`, regular).
+/// The description style (`text-xs`, regular), in [`title_style`]'s family.
 fn body_style(theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         size: style::TEXT_XS as f32,
@@ -531,7 +530,7 @@ fn body_style(theme: Option<&Theme>) -> TextStyle {
     }
 }
 
-/// The meta style (`text-xs font-medium`).
+/// The meta style (`text-xs font-medium`), in [`title_style`]'s family.
 fn meta_style(theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         size: style::TEXT_XS as f32,
@@ -2105,5 +2104,40 @@ mod tests {
                 .any(|(_, n)| n.label() == Some("Design review. Three files attached. 2m")),
             "a row is named by its whole content"
         );
+    }
+
+    // ---- Typeface: a row's title, description and meta follow the theme ---
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(480.0, 400.0);
+
+    /// A full row and a title-only one, at rest.
+    fn probe_view(_: &mut ()) -> SwipeableListView<()> {
+        swipeable_list::<(), _>(
+            vec![
+                swipeable_row("inbox")
+                    .title("Design review")
+                    .description("Three files attached")
+                    .meta("2m"),
+                swipeable_row("release").title("Release notes"),
+            ],
+            None,
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn row_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the rows' text", probe_view, PROBE_WINDOW);
+        let runs = Probe::new(probe_view, PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(runs.len(), 4, "two titles, a description and a meta stamp");
+    }
+
+    #[test]
+    fn row_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the rows' text", probe_view, PROBE_WINDOW);
     }
 }

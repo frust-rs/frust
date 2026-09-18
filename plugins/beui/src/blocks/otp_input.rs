@@ -101,7 +101,7 @@ use crate::components::switch;
 use crate::motion::Ramp;
 use crate::press::{Lane, inside_inclusive, keyframes_at, lerp_color, presses};
 use crate::style;
-use crate::text::{Label, LabelRun, SHAPING_INK};
+use crate::text::{Label, LabelRun, SHAPING_INK, ThemeTextType};
 use crate::tokens::motion::EASE_OUT;
 use crate::tokens::{BeuiTokens, sans_family};
 
@@ -736,8 +736,18 @@ fn slot_x(index: usize) -> f64 {
     index as f64 * (OTP_SLOT_WIDTH + OTP_SLOT_GAP)
 }
 
+/// The type-scale role a slot's digit takes its family from at layout.
+const DIGIT_ROLE: ThemeTextType = ThemeTextType::TitleLarge;
+
+/// The type-scale role the label takes its family from at layout.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the message takes its family from at layout.
+const MESSAGE_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
 /// The digit style: `text-xl font-semibold`, shaped with [`SHAPING_INK`] and
-/// re-brushed at paint so a status recolor costs no reshape.
+/// re-brushed at paint so a status recolor costs no reshape. The family here
+/// is the unthemed base; `layout` shapes in [`DIGIT_ROLE`]'s family.
 fn digit_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -746,7 +756,8 @@ fn digit_style() -> TextStyle {
     }
 }
 
-/// The label style: `text-sm font-medium text-foreground`.
+/// The label style: `text-sm font-medium text-foreground`. The family here is
+/// the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s family.
 fn label_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -757,7 +768,8 @@ fn label_style(color: Color) -> TextStyle {
     }
 }
 
-/// The message style: `text-sm` in the status's own ink.
+/// The message style: `text-sm` in the status's own ink. The family here is
+/// the unthemed base; `layout` shapes in [`MESSAGE_ROLE`]'s family.
 fn message_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -829,17 +841,17 @@ impl Widget for OtpInputWidget {
         let digit = digit_style();
         for cell in &mut self.cells {
             if !cell.run.content().is_empty() {
-                cell.run.layout(ctx, &digit);
+                cell.run.layout_themed(ctx, &digit, DIGIT_ROLE);
             }
         }
 
         let label_size = match &mut self.label {
-            Some(label) => label.layout(ctx, &label_style(tint(colors.ink))),
+            Some(label) => label.layout_themed(ctx, &label_style(tint(colors.ink)), LABEL_ROLE),
             None => Size::ZERO,
         };
         let message_ink = tint(colors.status_hue(self.status));
         let message_size = match &mut self.message {
-            Some(message) => message.layout(ctx, &message_style(message_ink)),
+            Some(message) => message.layout_themed(ctx, &message_style(message_ink), MESSAGE_ROLE),
             None => Size::ZERO,
         };
 
@@ -2421,5 +2433,45 @@ mod tests {
             .find(|(_, n)| n.role() == Role::PasswordInput)
             .expect("a Role::PasswordInput node");
         assert_eq!(node.value(), Some(OTP_MASK_CHAR.to_string().as_str()));
+    }
+
+    // ---- Typeface: digits, label and message follow the live theme ---------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(480.0, 240.0);
+
+    /// A labelled field holding four digits, idle with a hint or rejected with
+    /// an error message.
+    fn probe_logic(status: OtpStatus) -> impl FnMut(&mut ()) -> OtpInputView<()> {
+        move |_: &mut ()| {
+            otp_input::<(), _>("1234", |_: &mut (), _| {})
+                .label("Verification code")
+                .hint("Enter the code we sent")
+                .error_message("That code is wrong")
+                .status(status)
+        }
+    }
+
+    #[test]
+    fn otp_text_paints_in_geist_under_the_beui_theme() {
+        for status in [OtpStatus::Idle, OtpStatus::Error] {
+            assert_paints_only_in_geist(&format!("{status:?}"), probe_logic(status), PROBE_WINDOW);
+        }
+        let runs = Probe::new(probe_logic(OtpStatus::Idle), PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(runs.len(), 6, "the label, four digits and the hint");
+    }
+
+    #[test]
+    fn otp_text_follows_a_live_theme_family_swap() {
+        for status in [OtpStatus::Idle, OtpStatus::Error] {
+            assert_follows_a_live_family_swap(
+                &format!("{status:?}"),
+                probe_logic(status),
+                PROBE_WINDOW,
+            );
+        }
     }
 }
