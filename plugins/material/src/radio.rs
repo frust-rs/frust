@@ -120,8 +120,8 @@ use std::rc::Rc;
 use frust::authoring::{Action, Role};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextColor, TypedArgCallback,
-    View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextColor, ThemeTextType,
+    TypedArgCallback, View, Widget, any,
 };
 use frust::{AnimationController, FrameTime, Theme};
 use kurbo::{Circle, Point, Rect, Shape, Size};
@@ -232,10 +232,15 @@ fn inside(pos: Point, size: Size) -> bool {
 }
 
 /// Build the optional label's type-erased child view, themed `on_surface`
-/// (`frust::text`'s default body style) — see the module docs' Enabled/
-/// disabled section for why this doesn't dim when the radio is disabled.
+/// (`frust::text`'s default body style), its family following the live
+/// theme's `bodyLarge` role — see the module docs' Enabled/disabled section
+/// for why this doesn't dim when the radio is disabled.
 fn label_view<State: 'static>(label: String) -> AnyView<State> {
-    any::<State, _>(frust::text(label).themed_role(ThemeTextColor::OnSurface))
+    any::<State, _>(
+        frust::text(label)
+            .themed_role(ThemeTextColor::OnSurface)
+            .themed_family(ThemeTextType::BodyLarge),
+    )
 }
 
 /// Erase a view-held, generic `Fn(&mut State, T)` group handler into a plain

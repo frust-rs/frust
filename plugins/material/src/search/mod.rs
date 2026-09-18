@@ -224,8 +224,8 @@ pub const SEARCH_VIEW_COMPACT_MAX_WIDTH: f64 = 600.0;
 /// `type.bodyLarge`).
 ///
 /// Hardcoded rather than read from a live [`frust::Theme`]'s type scale for the
-/// reason [`crate::side_sheet`]'s title metrics are: `Text` resolves only a
-/// *color* role after `View::build`, never a size.
+/// reason [`crate::side_sheet`]'s title metrics are: `Text` resolves a *color*
+/// role, and an opt-in family role, after `View::build`, but never a size.
 pub(crate) const BODY_LARGE_SIZE: f32 = 16.0;
 
 /// Body-large line height, in logical px (M3 `bodyLarge`, 16/24).

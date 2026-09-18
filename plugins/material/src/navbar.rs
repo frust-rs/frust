@@ -101,7 +101,7 @@ use frust::{AnimationController, FrameTime, Spring, SpringDesc, Theme, text};
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 use peniko::Color;
 
-use frust::authoring::ThemeTextColor;
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 
 use super::press::presses;
 use crate::tokens::MaterialSpring;
@@ -130,8 +130,8 @@ const LABEL_GAP: f64 = 4.0;
 
 /// The label's M3 `labelMediumEmphasized` type-scale token (see
 /// [`super::appbar`]'s `TITLE_SIZE` doc comment for why this is a hardcoded
-/// constant rather than a live `Theme::type_scale` read — `Text` only defers
-/// *color* resolution past `View::build`, never size/weight). Matches
+/// constant rather than a live `Theme::type_scale` read — `Text` defers *color*
+/// and an opt-in family past `View::build`, never size/weight). Matches
 /// `frust-theme::typography`'s `LABEL_MEDIUM_EMPHASIZED` token: same
 /// size/line-height/letter-spacing as the baseline `LABEL_MEDIUM`, weight
 /// stepped up from Medium to Bold.
@@ -561,7 +561,8 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 }
 
 /// Build a label's type-erased child view at `labelMediumEmphasized`, tagged
-/// with the themed color `role` selection determines.
+/// with the themed color `role` selection determines, its font family
+/// following the live theme's `labelMediumEmphasized` role.
 fn label_view<State: 'static>(label: String, role: ThemeTextColor) -> AnyView<State> {
     frust::authoring::any::<State, _>(
         text(label)
@@ -569,7 +570,8 @@ fn label_view<State: 'static>(label: String, role: ThemeTextColor) -> AnyView<St
             .weight(LABEL_WEIGHT)
             .letter_spacing(LABEL_LETTER_SPACING)
             .line_height(LineHeight::Absolute(LABEL_LINE_HEIGHT))
-            .themed_role(role),
+            .themed_role(role)
+            .themed_family(ThemeTextType::LabelMediumEmphasized),
     )
 }
 
@@ -2031,6 +2033,30 @@ mod tests {
         assert_eq!(
             labelled, 3,
             "every tab keeps its label with no text painted"
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn every_label_paints_in_roboto_flex_under_the_material_theme() {
+        // Selected and unselected labels alike (they differ only in color
+        // role) — see `crate::appbar::top::typeface_probe`.
+        use crate::appbar::top::typeface_probe::{Face, assert_paints_only_in};
+        let flex = crate::tokens::font_data()[0];
+        let runs = assert_paints_only_in(
+            "the navigation bar's labels",
+            |_: &mut ()| navigation_bar(three_items(), 1, |_s: &mut (), _i| {}),
+            crate::baseline(),
+            &[flex],
+            Size::new(300.0, HEIGHT_SMALL),
+            Face {
+                bytes: flex,
+                name: "Roboto Flex",
+            },
+        );
+        assert!(
+            runs >= 3,
+            "fixture sanity: expected a run per label, got {runs}"
         );
     }
 }

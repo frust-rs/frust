@@ -39,10 +39,11 @@
 //! Every input is fixed: a 412x892 logical viewport at scale 2.0, the Material
 //! baseline theme with its type scale pinned to `frust-testing`'s bundled
 //! faces, fixed selection/progress values, and `FrameTime::ZERO`. Text this
-//! file authors is pinned to a bundled face; a string slot whose widget
-//! hardcodes its own text style (an app bar title, a nav item's label) is
-//! passed empty instead, because such a run would shape against a host font
-//! and make the baseline runner-local — `frust_testing::foreign_font_runs` is
+//! file authors is pinned to a bundled face. The app bar title and the nav
+//! items' labels resolve their family from that pinned type scale, so they
+//! would be portable too; they are passed empty only because the committed
+//! baselines were captured that way. A run that shaped against a host font
+//! would make the baseline runner-local — `frust_testing::foreign_font_runs` is
 //! the gate that enforces it, and [`no_page_shapes_against_a_host_font`] runs
 //! it here directly.
 
@@ -168,7 +169,7 @@ fn gallery_shell() -> CorpusCase {
 ///
 /// These labels are real. A Material button resolves its label style from
 /// `Theme::type_scale.label_*`, which `pin_type_scale` rewrites onto a bundled
-/// face — so unlike the app bar's title above, this text is portable.
+/// face, so this text is portable.
 fn buttons() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {
@@ -211,13 +212,13 @@ fn buttons() -> CorpusCase {
     }
 }
 
-/// The selection playground: switch, checkbox, radio and slider in both of
-/// their states.
+/// The selection playground: switch and checkbox in both of their states, and
+/// two slider positions.
 ///
-/// Every label is empty: these widgets build their label as a plain `text(..)`
-/// (i.e. `TextStyle::default()`, `FontFamily::SystemUi`) and take only its
-/// colour from the theme, so a labelled one would shape against a host font.
-/// The control geometry is what this page pins.
+/// None of these controls carries a label: a switch and a checkbox have no
+/// label API, and a slider's value-indicator label (whose style already comes
+/// from `Theme::type_scale.label_large`) paints only while the thumb is
+/// pressed. The control geometry is what this page pins.
 fn selection() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {

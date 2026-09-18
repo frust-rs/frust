@@ -143,14 +143,35 @@ fn resolve(show_dot: bool, count: Option<u32>, max_count: u32) -> ResolvedBadge 
     }
 }
 
+/// The numeric label's resolved style. Its 10px SemiBold is the badge
+/// theme's own `labelFontSize`, not a type-scale role, so size and weight stay
+/// literal; the family is borrowed from the live theme's `labelSmall` — the
+/// role nearest that size — at layout (unthemed: the platform system UI
+/// family), so a theme swap or a font picker restyles the label along with
+/// the rest of the catalog.
+fn label_style(theme: Option<&Theme>) -> TextStyle {
+    let mut style = TextStyle {
+        weight: FontWeight::SEMI_BOLD,
+        ..TextStyle::new(LABEL_FONT_SIZE, Color::BLACK)
+    };
+    if let Some(theme) = theme {
+        style.family = theme.type_scale.label_small.family.clone();
+    }
+    style
+}
+
 /// A small, paint-time-rebrushed text run for the numeric label — mirrors
 /// [`mod@crate::icon_button`]'s own `BadgeRun` (`pub(super)` to that module
 /// and out of reach here — see the [module docs](self)' Relationship
 /// section — so this is a parallel, badge-scoped copy of the same idiom:
 /// lazily shaped, re-brushed at paint time so the ink can change
-/// independently of the cached shaping).
+/// independently of the cached shaping). The cache is keyed on the content
+/// *and* the resolved style, so a theme swap that changes the family reshapes
+/// instead of serving the old face.
 struct LabelRun {
     content: String,
+    /// The style the cached layout was shaped with.
+    style: TextStyle,
     layout: Option<TextLayout>,
 }
 
@@ -158,6 +179,7 @@ impl LabelRun {
     fn new() -> Self {
         Self {
             content: String::new(),
+            style: label_style(None),
             layout: None,
         }
     }
@@ -169,17 +191,17 @@ impl LabelRun {
         }
     }
 
-    /// Shape (or reuse) the run, returning its measured size.
-    fn shape(&mut self, ctx: &mut LayoutCtx) -> Size {
+    /// Shape (or reuse) the run in `style`, returning its measured size.
+    fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        if self.style != *style {
+            self.style = style.clone();
+            self.layout = None;
+        }
         if let Some(layout) = &self.layout {
             return layout.size();
         }
-        let style = TextStyle {
-            weight: FontWeight::SEMI_BOLD,
-            ..TextStyle::new(LABEL_FONT_SIZE, Color::BLACK)
-        };
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, &style, None);
+        let laid = text_ctx.layout(&self.content, &self.style, None);
         let size = laid.size();
         self.layout = Some(laid);
         size
@@ -370,7 +392,8 @@ impl Widget for BadgeWidget {
                 ResolvedBadge::Dot => Size::new(DOT_SIZE, DOT_SIZE),
                 ResolvedBadge::Label(text) => {
                     self.label_run.set_content(text);
-                    let text_size = self.label_run.shape(ctx);
+                    let style = label_style(Theme::from_layout_ctx(ctx));
+                    let text_size = self.label_run.shape(ctx, &style);
                     Size::new(
                         (text_size.width + LABEL_H_PAD * 2.0).max(LABEL_MIN_SIZE),
                         (text_size.height + LABEL_V_PAD * 2.0).max(LABEL_MIN_SIZE),
@@ -500,6 +523,7 @@ fn resolve_label(theme: Option<&Theme>) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::FontFamily;
     use frust_widgets::test_support::leaf_any;
     use std::any::Any;
 
@@ -696,6 +720,120 @@ mod tests {
         assert_eq!(radius, DOT_SIZE / 2.0);
         assert_eq!(color, FALLBACK_CONTAINER);
         assert_eq!(origin, w.indicator_offset);
+    }
+
+    // ---- Typeface: the label's family follows the live theme ----------------
+
+    /// A baseline theme whose `labelSmall` role names `family`.
+    fn theme_with_label_small(family: FontFamily) -> Theme {
+        let mut theme = crate::baseline();
+        theme.type_scale.label_small.family = family;
+        theme
+    }
+
+    /// Lay `w` out against `tcx`, threading `theme` the way the render root
+    /// does.
+    fn layout_themed(w: &mut BadgeWidget, tcx: &mut TextContext, theme: Option<&Theme>) {
+        let mut ctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        w.layout(&mut ctx, &BoxConstraints::loose(Size::new(200.0, 200.0)));
+    }
+
+    #[test]
+    fn layout_takes_the_label_family_from_label_small() {
+        let view: BadgeView<()> = badge(leaf_any(40.0, 40.0)).count(3);
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let probe = FontFamily::named("Badge Role Probe");
+        layout_themed(
+            &mut w,
+            &mut tcx,
+            Some(&theme_with_label_small(probe.clone())),
+        );
+        assert_eq!(w.label_run.style.family, probe);
+        // Only the family is themed: the badge's own 10px SemiBold stays.
+        assert_eq!(w.label_run.style.size, LABEL_FONT_SIZE);
+        assert_eq!(w.label_run.style.weight, FontWeight::SEMI_BOLD);
+    }
+
+    #[test]
+    fn without_a_theme_the_label_keeps_the_unthemed_style() {
+        let unthemed = TextStyle {
+            weight: FontWeight::SEMI_BOLD,
+            ..TextStyle::new(LABEL_FONT_SIZE, Color::BLACK)
+        };
+        assert_eq!(label_style(None), unthemed);
+        assert_eq!(unthemed.family, FontFamily::SystemUi);
+
+        let view: BadgeView<()> = badge(leaf_any(40.0, 40.0)).count(3);
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        layout_themed(&mut w, &mut tcx, None);
+        assert_eq!(w.label_run.style, unthemed);
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_the_cached_label() {
+        let view: BadgeView<()> = badge(leaf_any(40.0, 40.0)).count(3);
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let first = theme_with_label_small(FontFamily::named("Badge Swap Probe A"));
+        layout_themed(&mut w, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses the cached run outright.
+        let settled = tcx.shape_cache_stats();
+        layout_themed(&mut w, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        let second = theme_with_label_small(FontFamily::named("Badge Swap Probe B"));
+        layout_themed(&mut w, &mut tcx, Some(&second));
+        assert!(
+            tcx.shape_cache_stats().shapes > settled.shapes,
+            "a family swap must reshape the label, not serve the old face"
+        );
+    }
+
+    /// The first glyph run's font bytes — the face the label actually shaped in.
+    #[cfg(feature = "bundled-fonts")]
+    fn shaped_font(w: &BadgeWidget) -> Vec<u8> {
+        let layout = w.label_run.layout.as_ref().expect("the label was shaped");
+        let runs = layout.to_scene_runs(Point::ZERO);
+        let run = runs.first().expect("the label shaped to at least one run");
+        run.font.font().data.as_ref().to_vec()
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn a_theme_swap_between_registered_families_changes_the_shaped_face() {
+        // `font_data()`'s documented order: Roboto Flex, then Roboto Mono.
+        let (flex, mono) = (crate::tokens::font_data()[0], crate::tokens::font_data()[1]);
+        let mut tcx = TextContext::new();
+        for bytes in [flex, mono] {
+            tcx.register_fonts(bytes.to_vec())
+                .expect("the bundled faces must register");
+        }
+        let view: BadgeView<()> = badge(leaf_any(40.0, 40.0)).count(3);
+        let mut w = build(&view);
+
+        let flex_theme =
+            theme_with_label_small(FontFamily::named(crate::tokens::ROBOTO_FLEX_FAMILY));
+        layout_themed(&mut w, &mut tcx, Some(&flex_theme));
+        assert!(
+            shaped_font(&w) == flex,
+            "labelSmall's family shapes the label"
+        );
+
+        let mono_theme =
+            theme_with_label_small(FontFamily::named(crate::tokens::ROBOTO_MONO_FAMILY));
+        layout_themed(&mut w, &mut tcx, Some(&mono_theme));
+        assert!(
+            shaped_font(&w) == mono,
+            "after a theme swap the label must shape in the new family"
+        );
     }
 
     #[test]

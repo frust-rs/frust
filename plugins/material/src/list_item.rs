@@ -141,7 +141,7 @@ use frust::authoring::{Action, Role};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx,
-    ThemeTextColor, View, Widget, any,
+    ThemeTextColor, ThemeTextType, View, Widget, any,
 };
 use frust::text;
 use kurbo::{Point, Size};
@@ -361,8 +361,8 @@ impl<State: 'static> ListItem<State> {
         self.contained || self.selected
     }
 
-    /// The overline text view (`on_surface_variant`, label-small), or `None`
-    /// when this row has no overline.
+    /// The overline text view (`on_surface_variant`, label-small, family from
+    /// the theme's `labelSmall` role), or `None` when this row has no overline.
     fn overline_view(&self) -> Option<AnyView<State>> {
         self.overline.as_ref().map(|s| {
             any(text(s.clone())
@@ -370,27 +370,31 @@ impl<State: 'static> ListItem<State> {
                 .letter_spacing(OVERLINE_TRACKING)
                 .max_lines(1)
                 .overflow(TextOverflow::Ellipsis)
-                .themed_role(ThemeTextColor::OnSurfaceVariant))
+                .themed_role(ThemeTextColor::OnSurfaceVariant)
+                .themed_family(ThemeTextType::LabelSmall))
         })
     }
 
-    /// The headline text view (`on_surface`, default body-large size, one
-    /// ellipsized line).
+    /// The headline text view (`on_surface`, default body-large size, family
+    /// from the theme's `bodyLarge` role, one ellipsized line).
     fn headline_view(&self) -> AnyView<State> {
         any(text(self.headline.clone())
             .max_lines(HEADLINE_MAX_LINES)
-            .overflow(TextOverflow::Ellipsis))
+            .overflow(TextOverflow::Ellipsis)
+            .themed_family(ThemeTextType::BodyLarge))
     }
 
-    /// The supporting text view (`on_surface_variant`, body-medium size, two
-    /// ellipsized lines), or `None` when this row has no supporting line.
+    /// The supporting text view (`on_surface_variant`, body-medium size,
+    /// family from the theme's `bodyMedium` role, two ellipsized lines), or
+    /// `None` when this row has no supporting line.
     fn supporting_view(&self) -> Option<AnyView<State>> {
         self.supporting.as_ref().map(|s| {
             any(text(s.clone())
                 .size(SUPPORTING_SIZE)
                 .max_lines(SUPPORTING_MAX_LINES)
                 .overflow(TextOverflow::Ellipsis)
-                .themed_role(ThemeTextColor::OnSurfaceVariant))
+                .themed_role(ThemeTextColor::OnSurfaceVariant)
+                .themed_family(ThemeTextType::BodyMedium))
         })
     }
 }
@@ -1675,5 +1679,34 @@ mod tests {
             .find(|(_, n)| n.role() == Role::ListItem)
             .expect("row node");
         assert_eq!(item.is_selected(), Some(true));
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn every_text_slot_paints_in_roboto_flex_under_the_material_theme() {
+        // Overline, headline and supporting line — all three text slots a
+        // row builds from plain `text(..)`. See
+        // `crate::appbar::top::typeface_probe`.
+        use crate::appbar::top::typeface_probe::{Face, assert_paints_only_in};
+        let flex = crate::tokens::font_data()[0];
+        let runs = assert_paints_only_in(
+            "the list item's text slots",
+            |_: &mut ()| {
+                list_item::<()>("Headline")
+                    .overline("Overline")
+                    .supporting("Supporting text")
+            },
+            crate::baseline(),
+            &[flex],
+            Size::new(300.0, 100.0),
+            Face {
+                bytes: flex,
+                name: "Roboto Flex",
+            },
+        );
+        assert!(
+            runs >= 3,
+            "fixture sanity: expected a run per text slot, got {runs}"
+        );
     }
 }

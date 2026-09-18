@@ -316,8 +316,9 @@ const BODY_PAD_X: f64 = 12.0;
 /// Title type token (Glyph display face, 15/700 — [`crate::dialog`]'s title
 /// token, since a side sheet's header title is the same class of surface
 /// title). Hardcoded rather than read from a live `Theme::type_scale`: `Text`
-/// resolves only a *color* role after `View::build` (`docs/CODE_STANDARDS.md`'s
-/// Theming conventions), the precedent every other titled Glyph surface takes.
+/// resolves a *color* role, and an opt-in family role, after `View::build`
+/// (see `crates/frust-widgets/src/text.rs`'s `effective_style`), the
+/// precedent every other titled Glyph surface takes.
 const TITLE_SIZE: f32 = 15.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::BOLD;
 const TITLE_LINE_HEIGHT: f32 = 20.0;

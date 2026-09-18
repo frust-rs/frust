@@ -264,32 +264,53 @@ const FALLBACK_ON_SURFACE: Color = Color::from_rgb8(0x1D, 0x1B, 0x20);
 
 // ---- Type styles (`bodySmall`/`titleSmall`/`bodyMedium`, `type_scale.rs`'s
 // own documented table) -------------------------------------------------------
+//
+// Size, weight, tracking and line height are the role's token literals; the
+// family is the live theme's own for that role, read at layout (unthemed: the
+// platform system UI family), so a theme swap or a font picker restyles the
+// panel text along with the rest of the catalog.
 
-fn plain_message_style() -> TextStyle {
-    TextStyle {
+/// `style` in `theme`'s family for the role `pick` selects, or `style`
+/// unchanged with no theme.
+fn in_role_family(
+    mut style: TextStyle,
+    theme: Option<&Theme>,
+    pick: fn(&frust::TypeScale) -> &TextStyle,
+) -> TextStyle {
+    if let Some(theme) = theme {
+        style.family = pick(&theme.type_scale).family.clone();
+    }
+    style
+}
+
+fn plain_message_style(theme: Option<&Theme>) -> TextStyle {
+    let style = TextStyle {
         weight: FontWeight::REGULAR,
         letter_spacing: 0.4,
         line_height: LineHeight::Absolute(16.0),
         ..TextStyle::new(12.0, Color::BLACK)
-    }
+    };
+    in_role_family(style, theme, |scale| &scale.body_small)
 }
 
-fn rich_title_style() -> TextStyle {
-    TextStyle {
+fn rich_title_style(theme: Option<&Theme>) -> TextStyle {
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         letter_spacing: 0.1,
         line_height: LineHeight::Absolute(20.0),
         ..TextStyle::new(14.0, Color::BLACK)
-    }
+    };
+    in_role_family(style, theme, |scale| &scale.title_small)
 }
 
-fn rich_body_style() -> TextStyle {
-    TextStyle {
+fn rich_body_style(theme: Option<&Theme>) -> TextStyle {
+    let style = TextStyle {
         weight: FontWeight::REGULAR,
         letter_spacing: 0.25,
         line_height: LineHeight::Absolute(20.0),
         ..TextStyle::new(14.0, Color::BLACK)
-    }
+    };
+    in_role_family(style, theme, |scale| &scale.body_medium)
 }
 
 // ---- The shared handle -------------------------------------------------------
@@ -544,9 +565,13 @@ fn inside(pos: Point, size: Size) -> bool {
 
 /// The same idiom [`crate::snackbar`]'s `TextRun`/[`crate::badge`]'s
 /// `LabelRun` use, generalized with a wrap width — upstream's plain `maxWidth`
-/// and rich title/body all wrap, unlike those single-line callers.
+/// and rich title/body all wrap, unlike those single-line callers. The cache is
+/// keyed on the content *and* the resolved style, so a theme swap that changes
+/// the family reshapes instead of serving the old face.
 struct TooltipTextRun {
     content: String,
+    /// The style the cached layout was shaped with.
+    style: TextStyle,
     layout: Option<TextLayout>,
 }
 
@@ -554,6 +579,7 @@ impl TooltipTextRun {
     fn new() -> Self {
         Self {
             content: String::new(),
+            style: TextStyle::default(),
             layout: None,
         }
     }
@@ -566,11 +592,15 @@ impl TooltipTextRun {
     }
 
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: f64) -> Size {
+        if self.style != *style {
+            self.style = style.clone();
+            self.layout = None;
+        }
         if let Some(layout) = &self.layout {
             return layout.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, Some(max_width as f32));
+        let laid = text_ctx.layout(&self.content, &self.style, Some(max_width as f32));
         let size = laid.size();
         self.layout = Some(laid);
         size
@@ -1038,7 +1068,8 @@ impl Widget for PlainPanelWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let width_cap = bc.max().width.min(PLAIN_MAX_WIDTH);
         let inner_w = (width_cap - 2.0 * PLAIN_PAD_X).max(0.0);
-        let msg = self.message.shape(ctx, &plain_message_style(), inner_w);
+        let style = plain_message_style(Theme::from_layout_ctx(ctx));
+        let msg = self.message.shape(ctx, &style, inner_w);
         let size = Size::new(
             msg.width + 2.0 * PLAIN_PAD_X,
             msg.height + 2.0 * PLAIN_PAD_Y,
@@ -1402,15 +1433,17 @@ impl Widget for RichPanelWidget {
         let inner_w = (width_cap - 2.0 * RICH_PAD).max(0.0);
         let mut content_w: f64 = 0.0;
         let mut y = RICH_PAD;
+        let theme = Theme::from_layout_ctx(ctx);
+        let (title_style, body_style) = (rich_title_style(theme), rich_body_style(theme));
 
         if let Some(title) = &mut self.title {
-            let sz = title.shape(ctx, &rich_title_style(), inner_w);
+            let sz = title.shape(ctx, &title_style, inner_w);
             self.title_origin = Point::new(RICH_PAD, y);
             content_w = content_w.max(sz.width);
             y += sz.height + RICH_TITLE_GAP;
         }
 
-        let body_sz = self.body.shape(ctx, &rich_body_style(), inner_w);
+        let body_sz = self.body.shape(ctx, &body_style, inner_w);
         self.body_origin = Point::new(RICH_PAD, y);
         content_w = content_w.max(body_sz.width);
         y += body_sz.height;
@@ -1504,6 +1537,7 @@ impl Widget for RichPanelWidget {
 mod tests {
     use super::*;
     use frust::Brightness;
+    use frust::authoring::text::FontFamily;
     use frust::authoring::{
         Point as AuthoringPoint, PointerButton, PointerEvent, Rect as AuthoringRect,
     };
@@ -1692,6 +1726,114 @@ mod tests {
         h.event(up(11.0, 11.0));
         h.pass();
         assert!(!h.hover.is_open());
+    }
+
+    // ---- Typeface: the panel runs' families follow the live theme ------------
+
+    /// A baseline theme whose `bodySmall`/`titleSmall`/`bodyMedium` roles name
+    /// `plain`/`title`/`body`.
+    fn theme_with(plain: FontFamily, title: FontFamily, body: FontFamily) -> Theme {
+        let mut theme = crate::baseline();
+        theme.type_scale.body_small.family = plain;
+        theme.type_scale.title_small.family = title;
+        theme.type_scale.body_medium.family = body;
+        theme
+    }
+
+    /// A rich panel with a title and no actions, built but not laid out.
+    fn rich_panel_widget() -> RichPanelWidget {
+        let view: RichPanel<AppState> = RichPanel {
+            title: Some("Compose".into()),
+            message: "Start a new draft.".into(),
+            actions: Vec::new(),
+        };
+        let mut counter = 0u64;
+        View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    /// Lay `w` out against `tcx`, threading `theme` the way the render root
+    /// does.
+    fn layout_themed(w: &mut dyn Widget, tcx: &mut TextContext, theme: Option<&Theme>) {
+        let mut ctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        w.layout(&mut ctx, &BoxConstraints::loose(Size::new(400.0, 400.0)));
+    }
+
+    #[test]
+    fn layout_takes_each_panel_run_s_family_from_its_role() {
+        let (plain, title, body) = (
+            FontFamily::named("Plain Role Probe"),
+            FontFamily::named("Title Role Probe"),
+            FontFamily::named("Body Role Probe"),
+        );
+        let theme = theme_with(plain.clone(), title.clone(), body.clone());
+        let mut tcx = TextContext::new();
+
+        let (mut plain_w, _hover) = plain_panel_widget(TooltipOpenVia::Hover);
+        layout_themed(&mut plain_w, &mut tcx, Some(&theme));
+        assert_eq!(plain_w.message.style.family, plain, "bodySmall");
+        assert_eq!(plain_w.message.style.size, 12.0, "the token size stays");
+
+        let mut rich_w = rich_panel_widget();
+        layout_themed(&mut rich_w, &mut tcx, Some(&theme));
+        let title_run = rich_w.title.as_ref().expect("a title is set");
+        assert_eq!(title_run.style.family, title, "titleSmall");
+        assert_eq!(rich_w.body.style.family, body, "bodyMedium");
+    }
+
+    #[test]
+    fn without_a_theme_the_panel_runs_keep_the_unthemed_styles() {
+        let plain_unthemed = TextStyle {
+            weight: FontWeight::REGULAR,
+            letter_spacing: 0.4,
+            line_height: LineHeight::Absolute(16.0),
+            ..TextStyle::new(12.0, Color::BLACK)
+        };
+        assert_eq!(plain_message_style(None), plain_unthemed);
+        assert_eq!(rich_title_style(None).family, FontFamily::SystemUi);
+        assert_eq!(rich_body_style(None).family, FontFamily::SystemUi);
+
+        let mut tcx = TextContext::new();
+        let (mut plain_w, _hover) = plain_panel_widget(TooltipOpenVia::Hover);
+        layout_themed(&mut plain_w, &mut tcx, None);
+        assert_eq!(plain_w.message.style, plain_unthemed);
+
+        let mut rich_w = rich_panel_widget();
+        layout_themed(&mut rich_w, &mut tcx, None);
+        let title_run = rich_w.title.as_ref().expect("a title is set");
+        assert_eq!(title_run.style, rich_title_style(None));
+        assert_eq!(rich_w.body.style, rich_body_style(None));
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_the_cached_panel_runs() {
+        let probe_a = || FontFamily::named("Tooltip Swap Probe A");
+        let probe_b = || FontFamily::named("Tooltip Swap Probe B");
+        let first = theme_with(probe_a(), probe_a(), probe_a());
+        let second = theme_with(probe_b(), probe_b(), probe_b());
+        let mut tcx = TextContext::new();
+        let (mut plain_w, _hover) = plain_panel_widget(TooltipOpenVia::Hover);
+        let mut rich_w = rich_panel_widget();
+        layout_themed(&mut plain_w, &mut tcx, Some(&first));
+        layout_themed(&mut rich_w, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses every cached run outright.
+        let settled = tcx.shape_cache_stats();
+        layout_themed(&mut plain_w, &mut tcx, Some(&first));
+        layout_themed(&mut rich_w, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        layout_themed(&mut plain_w, &mut tcx, Some(&second));
+        layout_themed(&mut rich_w, &mut tcx, Some(&second));
+        assert_eq!(
+            tcx.shape_cache_stats().shapes,
+            settled.shapes + 3,
+            "a family swap must reshape the plain message, rich title and rich body"
+        );
     }
 
     // ---- Plain: auto-dismiss timeline (frame clock) --------------------------
