@@ -27,6 +27,11 @@
 //! here (a per-widget dynamic color the four fixed `ThemeTextColor` roles
 //! don't cover), so `TagWidget` shapes and paints its own label/remove-glyph
 //! runs directly via `frust_text`.
+//!
+//! Both runs read their family at layout from the live theme's `labelMedium`
+//! type-scale role (IBM Plex Mono under Glyph's own scale), falling back to
+//! Glyph's IBM Plex Mono stack unthemed, so a theme swap reshapes them (see
+//! [`crate::badge`]'s Typeface section).
 
 use std::rc::Rc;
 
@@ -219,21 +224,26 @@ impl<State: 'static> View<State> for TagView<State> {
     }
 }
 
-/// The label's fixed style (fg-muted family/weight/size are Glyph-authored
-/// constants; only `color` varies).
-fn tag_label_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): both runs' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The label's style: weight/size are Glyph-authored constants, the family is
+/// the theme's `labelMedium` role; `color` varies.
+fn tag_label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(TAG_FONT_SIZE, color)
     }
 }
 
-/// The remove glyph's fixed style (`.tag button{font-family:var(--font-mono);
-/// font-size:11px}`).
-fn remove_glyph_style(color: Color) -> TextStyle {
+/// The remove glyph's style (`.tag button{font-family:var(--font-mono);
+/// font-size:11px}`), family from the same `labelMedium` role as the label.
+fn remove_glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(TAG_FONT_SIZE, color)
     }
@@ -273,10 +283,13 @@ fn inside(pos: Point, rect: Rect) -> bool {
 
 impl Widget for TagWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve both styles up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (_, label_fg, _, remove_fg) = resolve_tag_colors(theme);
+        let label_style = tag_label_style(theme, label_fg);
+        let remove_style = remove_glyph_style(theme, remove_fg);
 
-        let label_style = tag_label_style(label_fg);
         let label_size = self.label.layout(ctx, &label_style, None);
         self.label_size = label_size;
 
@@ -284,7 +297,6 @@ impl Widget for TagWidget {
         let mut content_height = label_size.height;
 
         if self.removable {
-            let remove_style = remove_glyph_style(remove_fg);
             let remove_size = self.remove_glyph.layout(ctx, &remove_style, None);
             self.remove_size = remove_size;
             width += TAG_GAP + remove_size.width;
@@ -570,5 +582,30 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Label)
             .expect("tag contributes a Role::Label node");
         assert_eq!(node.label(), Some("rust"));
+    }
+
+    // ---- Typeface: both runs follow their type-scale role -----------------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn removable(_: &mut ()) -> TagView<()> {
+        tag("rust").on_remove(|_s: &mut ()| {})
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(removable, crate::baseline(), Size::new(200.0, 100.0));
+        // Label, remove glyph.
+        assert_eq!(faces, [Face::PlexMono; 2]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(removable, Size::new(200.0, 100.0));
+        assert_eq!(before, [Face::PlexMono; 2]);
+        assert_eq!(after, [Face::SpaceMono; 2]);
     }
 }

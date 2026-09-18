@@ -21,7 +21,10 @@
 //! `colors.on_surface` — the same label-color simplification
 //! `material::chips` documents (not the more precise
 //! `on_surface_container_highest`, which `TextView` has no themed role for
-//! yet).
+//! yet). The message's family is the live theme's `bodyMedium` type-scale
+//! role (IBM Plex Mono under Glyph's own scale), resolved by the `Text` child
+//! at layout via `.themed_family(..)`, so a theme swap repaints it; unthemed,
+//! it keeps `Text`'s own system family.
 //!
 //! # ToastHost + queue policy
 //!
@@ -87,7 +90,7 @@ use std::time::Duration;
 use frust::authoring::Role;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, LayoutCtx, PaintCtx, PaintScene,
-    SemanticsCtx, View, Widget, WindowEdgeInsets, any,
+    SemanticsCtx, ThemeTextType, View, Widget, WindowEdgeInsets, any,
 };
 use frust::{Curve, FrameTime};
 use frust::{StatusPalette, Theme};
@@ -182,9 +185,10 @@ impl ToastView {
 
 /// Build the type-erased message-label view, shared by build/rebuild/
 /// teardown so it stays consistent (mirrors `material::chips`' analogous
-/// `assist_label_view` helper).
+/// `assist_label_view` helper). Its family comes from the theme's
+/// `bodyMedium` role.
 fn message_view<State: 'static>(message: String) -> AnyView<State> {
-    any::<State, _>(frust::text(message))
+    any::<State, _>(frust::text(message).themed_family(ThemeTextType::BodyMedium))
 }
 
 impl<State: 'static> View<State> for ToastView {
@@ -1439,5 +1443,32 @@ mod tests {
             top_dy < 0.0,
             "a top anchor drops from above (negative dy): {top_dy}"
         );
+    }
+
+    // ---- Typeface: the message's family follows its type-scale role -------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn saved(_: &mut ()) -> ToastView {
+        toast("Saved")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_message_paints_in_its_role_face_under_the_glyph_theme() {
+        // Before the message opted into a type-scale role it painted `Text`'s
+        // system family here — `Face::Other` — beside the catalog's own
+        // IBM Plex Mono.
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(saved, crate::baseline(), Size::new(400.0, 200.0));
+        assert_eq!(faces, [Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_message_follows_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(saved, Size::new(400.0, 200.0));
+        assert_eq!(before, [Face::PlexMono]);
+        assert_eq!(after, [Face::SpaceMono]);
     }
 }

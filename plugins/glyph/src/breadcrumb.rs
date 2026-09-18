@@ -13,6 +13,12 @@
 //! See [`crate::badge`]'s module docs — the per-crumb dynamic color
 //! (link vs current vs separator) isn't one of `TextView`'s four fixed roles,
 //! so this widget shapes/paints its own glyph runs directly via `frust_text`.
+//!
+//! Every run (crumbs and separators alike) reads its family at layout from
+//! the live theme's `labelMedium` type-scale role (IBM Plex Mono under
+//! Glyph's own scale), falling back to Glyph's IBM Plex Mono stack unthemed,
+//! so a theme swap reshapes the path (see [`crate::badge`]'s Typeface
+//! section).
 
 use std::rc::Rc;
 
@@ -155,10 +161,16 @@ struct CrumbEntry {
     on_tap: Option<frust::authoring::ErasedCallback>,
 }
 
-/// The crumb/separator style (fixed family/weight/size; only color varies).
-fn crumb_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the crumbs' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The crumb/separator style: fixed weight/size, family from the theme's
+/// `labelMedium` role; color varies per run.
+fn crumb_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(CRUMB_FONT_SIZE, color)
     }
@@ -265,10 +277,14 @@ impl BreadcrumbWidget {
 
 impl Widget for BreadcrumbWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve every style up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (link, current, separator) = resolve_crumb_colors(theme);
+        let link_style = crumb_style(theme, link);
+        let current_style = crumb_style(theme, current);
+        let sep_style = crumb_style(theme, separator);
 
-        let sep_style = crumb_style(separator);
         let sep_size = self.separator.layout(ctx, &sep_style, None);
         self.separator_size = sep_size;
 
@@ -276,9 +292,12 @@ impl Widget for BreadcrumbWidget {
         let mut x = 0.0;
         let mut content_height = sep_size.height;
         for (i, entry) in self.crumbs.iter_mut().enumerate() {
-            let color = if i == last { current } else { link };
-            let style = crumb_style(color);
-            let size = entry.label.layout(ctx, &style, None);
+            let style = if i == last {
+                &current_style
+            } else {
+                &link_style
+            };
+            let size = entry.label.layout(ctx, style, None);
             entry.size = size;
             entry.x = x;
             content_height = content_height.max(size.height);
@@ -551,5 +570,33 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Label && n.label() == Some("settings"))
             .expect("the current crumb");
         assert_eq!(current.1.is_selected(), Some(true));
+    }
+
+    // ---- Typeface: every run's family follows its type-scale role ---------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn two_crumbs(_: &mut ()) -> BreadcrumbView<()> {
+        breadcrumb(vec![
+            crumb::<()>("servers").on_tap(|_s: &mut ()| {}),
+            crumb::<()>("settings"),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(two_crumbs, crate::baseline(), Size::new(400.0, 40.0));
+        // Link crumb, separator, current crumb.
+        assert_eq!(faces, [Face::PlexMono; 3]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(two_crumbs, Size::new(400.0, 40.0));
+        assert_eq!(before, [Face::PlexMono; 3]);
+        assert_eq!(after, [Face::SpaceMono; 3]);
     }
 }

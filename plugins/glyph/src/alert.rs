@@ -33,6 +33,16 @@
 //! `on_surface_variant` color the four fixed `ThemeTextColor` roles don't
 //! cover), so `AlertWidget` shapes and paints its own runs directly via
 //! `frust_text`.
+//!
+//! # Typeface
+//!
+//! Each run reads its family at layout from a live type-scale role, the one
+//! whose Glyph family is the face that run has always painted: the icon from
+//! `headlineSmall` (Space Mono), the title from `titleSmall` and the body from
+//! `bodyMedium` (both IBM Plex Mono). Size, weight and line height stay this
+//! module's own; unthemed, each falls back to the matching Glyph stack. The
+//! family is part of each run's cached style, so a theme swap reshapes it
+//! (see `crate::badge`'s Typeface section).
 
 use frust::authoring::Role;
 use frust::authoring::text::{
@@ -260,27 +270,41 @@ impl<State: 'static> View<State> for AlertView {
     }
 }
 
-fn icon_style(color: Color) -> TextStyle {
+/// Glyph's display face stack (Space Mono): the icon's unthemed family.
+fn display_face() -> FontFamily {
+    FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
+}
+
+/// Glyph's UI face stack (IBM Plex Mono): the title's and body's unthemed
+/// family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The icon's style; family from the theme's `headlineSmall` role.
+fn icon_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone()),
         weight: FontWeight::BOLD,
         line_height: LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT),
         ..TextStyle::new(ALERT_FONT_SIZE, color)
     }
 }
 
-fn title_style(color: Color) -> TextStyle {
+/// The title's style; family from the theme's `titleSmall` role.
+fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
         weight: FontWeight::SEMI_BOLD,
         line_height: LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT),
         ..TextStyle::new(ALERT_FONT_SIZE, color)
     }
 }
 
-fn body_style(color: Color) -> TextStyle {
+/// The body's style; family from the theme's `bodyMedium` role.
+fn body_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.body_medium.family.clone()),
         weight: FontWeight::REGULAR,
         line_height: LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT),
         ..TextStyle::new(ALERT_FONT_SIZE, color)
@@ -345,11 +369,18 @@ fn resolve_alert_radius(theme: Option<&Theme>, size: Size) -> f64 {
 
 impl Widget for AlertWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve every style up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (accent, _) = resolve_alert_colors(theme, self.variant);
         let muted = resolve_body_color(theme);
+        let (icon_style, title_style, body_style) = (
+            icon_style(theme, accent),
+            title_style(theme, accent),
+            body_style(theme, muted),
+        );
 
-        self.icon_size = self.icon.layout(ctx, &icon_style(accent), None);
+        self.icon_size = self.icon.layout(ctx, &icon_style, None);
 
         let max_width = bc.max().width;
         let text_col_max_width = if max_width.is_finite() {
@@ -361,12 +392,8 @@ impl Widget for AlertWidget {
             None
         };
 
-        self.title_size = self
-            .title
-            .layout(ctx, &title_style(accent), text_col_max_width);
-        self.body_size = self
-            .body
-            .layout(ctx, &body_style(muted), text_col_max_width);
+        self.title_size = self.title.layout(ctx, &title_style, text_col_max_width);
+        self.body_size = self.body.layout(ctx, &body_style, text_col_max_width);
 
         let text_col_height = self.title_size.height + ALERT_TITLE_GAP + self.body_size.height;
         let content_height = text_col_height.max(self.icon_size.height);
@@ -558,5 +585,30 @@ mod tests {
             .expect("alert contributes a Role::Alert node");
         assert_eq!(node.label(), Some("Title"));
         assert_eq!(node.description(), Some("Body text"));
+    }
+
+    // ---- Typeface: each run's family follows its type-scale role ----------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn info_alert(_: &mut ()) -> AlertView {
+        alert(AlertVariant::Info, "Title", "Body text")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(info_alert, crate::baseline(), Size::new(400.0, 200.0));
+        // Icon, title, body.
+        assert_eq!(faces, [Face::SpaceMono, Face::PlexMono, Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(info_alert, Size::new(400.0, 200.0));
+        assert_eq!(before, [Face::SpaceMono, Face::PlexMono, Face::PlexMono]);
+        assert_eq!(after, [Face::PlexMono, Face::SpaceMono, Face::SpaceMono]);
     }
 }

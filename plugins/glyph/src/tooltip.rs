@@ -59,6 +59,12 @@
 //! run directly via `frust_text` (mirrors `crate::alert`/
 //! `crate::toast`).
 //!
+//! Only the ink is brightness-invariant: the bubble's family is read at
+//! layout from the live theme's `bodySmall` type-scale role (IBM Plex Mono
+//! under Glyph's own scale), falling back to Glyph's IBM Plex Mono stack
+//! unthemed, so a theme swap reshapes the bubble text (see `crate::badge`'s
+//! Typeface section).
+//!
 //! # Semantics
 //!
 //! A `Role::Group` container node wraps the child, its `description` set to
@@ -178,9 +184,15 @@ fn resolve_ink(theme: Option<&Theme>) -> GlyphInk {
         .unwrap_or_else(GlyphInk::default_ink)
 }
 
-fn bubble_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the bubble's unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The bubble text's style; family from the theme's `bodySmall` role.
+fn bubble_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()),
         weight: FontWeight::REGULAR,
         line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
         ..TextStyle::new(FONT_SIZE, color)
@@ -449,10 +461,10 @@ impl TooltipWidget {
 impl Widget for TooltipWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
-        let ink = resolve_ink(theme);
+        let bubble_style = bubble_style(theme, resolve_ink(theme).tooltip_fg);
         let size = self.child.layout_child(ctx, bc);
         self.child.set_origin(Point::ZERO);
-        self.bubble_size = self.bubble.layout(ctx, &bubble_style(ink.tooltip_fg), None);
+        self.bubble_size = self.bubble.layout(ctx, &bubble_style, None);
         bc.constrain(size)
     }
 
@@ -815,5 +827,50 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Group)
             .expect("tooltip contributes a Role::Group node");
         assert_eq!(node.description(), Some("Server settings"));
+    }
+
+    // ---- Typeface: the bubble's family follows its type-scale role --------
+
+    /// Lays one retained tooltip out under each of `themes` in turn — the
+    /// way a live theme swap re-lays it — forcing `Shown` (bypassing the
+    /// press timer) and painting after each layout. Returns each paint's run
+    /// faces.
+    #[cfg(feature = "bundled-fonts")]
+    fn shown_faces(themes: &[Theme]) -> Vec<Vec<crate::badge::typeface_probe::Face>> {
+        use crate::badge::typeface_probe::{FaceRecorder, text_context};
+        let mut w = build_tooltip("Server settings");
+        let mut tcx = text_context();
+        themes
+            .iter()
+            .map(|theme| {
+                let mut lctx = LayoutCtx::with_resources(
+                    Some(&mut tcx as &mut dyn Any),
+                    Some(theme as &dyn Any),
+                );
+                let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 60.0)));
+                w.phase = TooltipPhase::Shown;
+                let mut rec = FaceRecorder::new();
+                let mut pctx = PaintCtx::new(Point::new(0.0, 60.0), size).with_theme(theme);
+                w.paint(&mut pctx, &mut rec);
+                rec.faces
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_bubble_paints_in_its_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::Face;
+        assert_eq!(shown_faces(&[crate::baseline()]), [vec![Face::PlexMono]]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_bubble_follows_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, inverted_glyph_theme};
+        assert_eq!(
+            shown_faces(&[crate::baseline(), inverted_glyph_theme()]),
+            [vec![Face::PlexMono], vec![Face::SpaceMono]]
+        );
     }
 }

@@ -50,6 +50,16 @@
 //! swap (which forces `ChangeFlags::LAYOUT` — see
 //! `docs/ARCHITECTURE.md`'s Theme delivery) always re-shapes with the new
 //! color.
+//!
+//! # Typeface
+//!
+//! The label's family is read at layout from the live theme's `labelSmall`
+//! type-scale role — IBM Plex Mono under Glyph's own scale, the face it has
+//! always painted — falling back to Glyph's IBM Plex Mono stack unthemed.
+//! Size, weight and tracking stay this module's own constants. The family is
+//! part of the cached [`TextStyle`] too, so a theme swap (or a type scale an
+//! app rewrites) reshapes the label in the new face, exactly like the color.
+//! Every other self-shaping Glyph widget follows the same rule.
 
 use frust::authoring::Role;
 use frust::authoring::text::{
@@ -267,11 +277,19 @@ impl<State: 'static> View<State> for BadgeView {
     }
 }
 
-/// The label's fixed style (family/weight/tracking are Glyph-authored
-/// constants, not theme-resolved — see the module docs); only `color` varies.
-fn badge_label_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono, then the generic monospace): the
+/// label's unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The label's style: weight, size and tracking are Glyph-authored
+/// constants; the family is the theme's `labelSmall` role, or [`ui_face`]
+/// unthemed (see the module docs' Typeface section); `color` varies per
+/// variant.
+fn badge_label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()),
         weight: FontWeight::MEDIUM,
         letter_spacing: BADGE_LETTER_SPACING,
         ..TextStyle::new(BADGE_FONT_SIZE, color)
@@ -373,7 +391,7 @@ impl Widget for BadgeWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let (_, fg, _) = resolve_badge_colors(theme, self.variant);
-        let style = badge_label_style(fg);
+        let style = badge_label_style(theme, fg);
         let label_size = self.label.layout(ctx, &style, None);
         self.label_size = label_size;
 
@@ -706,5 +724,255 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Status)
             .expect("badge contributes a Role::Status node");
         assert_eq!(node.label(), Some("Connected"));
+    }
+
+    // ---- Typeface: the label's family follows the live theme ----------------
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_paints_in_its_role_face_under_the_glyph_theme() {
+        use super::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(
+            |_: &mut ()| badge("online", BadgeVariant::Success),
+            crate::baseline(),
+            Size::new(200.0, 60.0),
+        );
+        assert_eq!(faces, [Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_follows_a_live_theme_family_swap() {
+        use super::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(
+            |_: &mut ()| badge("online", BadgeVariant::Success),
+            Size::new(200.0, 60.0),
+        );
+        assert_eq!(before, [Face::PlexMono]);
+        assert_eq!(after, [Face::SpaceMono]);
+    }
+}
+
+/// A render-time typeface probe for the catalog's own text runs: paints a
+/// view through a real `RenderRoot` with every bundled Glyph face registered
+/// and reports, per painted glyph run in paint order, which bundled family
+/// that run's font bytes belong to.
+///
+/// Registering a face proves nothing about what paints — a run that never
+/// asks for the theme's family paints whatever it hardcodes right beside a
+/// registered face — so the tests built on this assert on the runs.
+///
+/// Glyph's scale carries two families: Space Mono in every display/headline
+/// role, IBM Plex Mono in every title/body/label role. A swap test therefore
+/// pushes [`inverted_glyph_theme`] (the same scale with those two families
+/// traded) into the live root: a run that takes its family from its role
+/// flips face, and a run with a fixed family stays where it was.
+///
+/// The first probe in a process also paints a control: a plain `text(..)`
+/// (the `SystemUi` request) must paint in neither bundled family, or an
+/// identity assertion could pass on a host that resolves the system face to
+/// one of them.
+#[cfg(all(test, feature = "bundled-fonts"))]
+pub(crate) mod typeface_probe {
+    use std::any::Any;
+    use std::sync::{Once, OnceLock};
+
+    use frust::Theme;
+    use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::{FontFamily, GenericSlot, TextContext};
+    use frust::authoring::{PaintScene, View};
+    use frust_core::{FrameTime, RenderRoot};
+    use kurbo::{Point, Size};
+    use peniko::Color;
+
+    /// The bundled family a painted glyph run shaped in.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Face {
+        /// A Space Mono face: Glyph's display/headline family.
+        SpaceMono,
+        /// An IBM Plex Mono face: Glyph's title/body/label family.
+        PlexMono,
+        /// Any other face (a system or fallback font).
+        Other,
+    }
+
+    /// Every bundled face's bytes, with the family its own `name` table
+    /// registers under. Registering is process-wide (`TextContext`'s app-font
+    /// record), so each face is registered once and every `TextContext` built
+    /// afterwards resolves it.
+    fn bundled_faces() -> &'static [(&'static [u8], Face)] {
+        static FACES: OnceLock<Vec<(&'static [u8], Face)>> = OnceLock::new();
+        FACES.get_or_init(|| {
+            let mut tcx = TextContext::new();
+            crate::font_data()
+                .iter()
+                .map(|&bytes| {
+                    let families = tcx
+                        .register_fonts(bytes.to_vec())
+                        .expect("a bundled Glyph face registers");
+                    let face = match families.first().map(|family| family.name.as_str()) {
+                        Some("Space Mono") => Face::SpaceMono,
+                        Some("IBM Plex Mono") => Face::PlexMono,
+                        other => panic!("unexpected bundled family {other:?}"),
+                    };
+                    (bytes, face)
+                })
+                .collect()
+        })
+    }
+
+    /// Records, per painted glyph run, the bundled family its bytes belong to.
+    pub(crate) struct FaceRecorder {
+        /// One entry per `draw_glyph_run` call, in paint order.
+        pub(crate) faces: Vec<Face>,
+    }
+
+    impl FaceRecorder {
+        pub(crate) fn new() -> Self {
+            Self { faces: Vec::new() }
+        }
+    }
+
+    impl PaintScene for FaceRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            let bytes = run.font.font().data.as_ref();
+            let face = bundled_faces()
+                .iter()
+                .find(|(face_bytes, _)| *face_bytes == bytes)
+                .map_or(Face::Other, |(_, face)| *face);
+            self.faces.push(face);
+        }
+    }
+
+    /// A fresh text context that resolves every bundled Glyph face by name.
+    fn registered_context() -> TextContext {
+        bundled_faces();
+        TextContext::new()
+    }
+
+    /// A text context that resolves every bundled Glyph face by name, for a
+    /// test driving a widget directly. Runs the control first (see the
+    /// [module docs](self)).
+    pub(crate) fn text_context() -> TextContext {
+        assert_control();
+        registered_context()
+    }
+
+    /// Glyph's baseline with its two families traded: every display/headline
+    /// role names IBM Plex Mono, every title/body/label role Space Mono.
+    pub(crate) fn inverted_glyph_theme() -> Theme {
+        let space = FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace);
+        let plex = FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace);
+        let mut theme = crate::baseline();
+        macro_rules! set_family {
+            ($family:ident => $($role:ident),+ $(,)?) => {
+                $( theme.type_scale.$role.family = $family.clone(); )+
+            };
+        }
+        set_family!(plex =>
+            display_large, display_medium, display_small,
+            headline_large, headline_medium, headline_small,
+            display_large_emphasized, display_medium_emphasized, display_small_emphasized,
+            headline_large_emphasized, headline_medium_emphasized, headline_small_emphasized,
+        );
+        set_family!(space =>
+            title_large, title_medium, title_small,
+            body_large, body_medium, body_small,
+            label_large, label_medium, label_small,
+            title_large_emphasized, title_medium_emphasized, title_small_emphasized,
+            body_large_emphasized, body_medium_emphasized, body_small_emphasized,
+            label_large_emphasized, label_medium_emphasized, label_small_emphasized,
+        );
+        theme
+    }
+
+    /// The simulated frame interval a settling paint pass advances by.
+    const FRAME_NS: u64 = 16_000_000;
+    /// How long a paint pass lets an enter animation run before it reports
+    /// the frame it has, settled or not.
+    const SETTLE_NS: u64 = 5_000_000_000;
+
+    /// Lays `root` out in `window` against `tcx`, then paints frames from
+    /// `*now` on — re-laying out whenever a paint asks — until the tree stops
+    /// asking for frames, so a component that animates in (a menu's item
+    /// stagger, a dialog's enter) is measured at rest. Returns the last
+    /// frame's run faces and leaves `*now` at that frame.
+    fn paint_pass<V: View<()>>(
+        root: &mut RenderRoot<(), V>,
+        window: Size,
+        tcx: &mut TextContext,
+        now: &mut u64,
+    ) -> Vec<Face> {
+        root.layout_with_text(window, tcx as &mut dyn Any);
+        let deadline = *now + SETTLE_NS;
+        loop {
+            let mut recorder = FaceRecorder::new();
+            let outcome = root.paint(&mut recorder, FrameTime::from_nanos(*now));
+            if !(outcome.needs_frame || outcome.needs_layout) || *now >= deadline {
+                return recorder.faces;
+            }
+            if outcome.needs_layout {
+                root.layout_with_text(window, tcx as &mut dyn Any);
+            }
+            *now += FRAME_NS;
+        }
+    }
+
+    /// Panics unless a plain `text(..)` paints in neither bundled family
+    /// (see the [module docs](self)). Runs once per process.
+    fn assert_control() {
+        static CONTROL: Once = Once::new();
+        CONTROL.call_once(|| {
+            let mut root: RenderRoot<(), _> = RenderRoot::new();
+            root.set_theme(Box::new(crate::baseline()));
+            root.rebuild(&mut |_: &mut ()| frust::text("Hello"), &mut ());
+            let faces = paint_pass(
+                &mut root,
+                Size::new(200.0, 60.0),
+                &mut registered_context(),
+                &mut 0,
+            );
+            assert!(
+                faces.iter().all(|face| *face == Face::Other),
+                "control: a plain text() that never asks for a Glyph family painted {faces:?} \
+                 — on this host an un-opted run is indistinguishable from a bundled face, \
+                 so the typeface assertions would prove nothing"
+            );
+        });
+    }
+
+    /// Paints `logic`'s view under `theme` in `window`, settled (see
+    /// `paint_pass`), and returns each painted run's face, in paint order.
+    pub(crate) fn painted_faces<V: View<()>>(
+        mut logic: impl FnMut(&mut ()) -> V,
+        theme: Theme,
+        window: Size,
+    ) -> Vec<Face> {
+        let mut tcx = text_context();
+        let mut root: RenderRoot<(), V> = RenderRoot::new();
+        root.set_theme(Box::new(theme));
+        root.rebuild(&mut logic, &mut ());
+        paint_pass(&mut root, window, &mut tcx, &mut 0)
+    }
+
+    /// Paints `logic`'s view under Glyph's own baseline, then pushes
+    /// [`inverted_glyph_theme`] into the same live root — no rebuild, the way
+    /// a shell delivers a theme change — and paints it again, each pass
+    /// settled (see `paint_pass`). Returns both passes' faces, in paint order.
+    pub(crate) fn faces_across_a_live_swap<V: View<()>>(
+        mut logic: impl FnMut(&mut ()) -> V,
+        window: Size,
+    ) -> (Vec<Face>, Vec<Face>) {
+        let mut tcx = text_context();
+        let mut root: RenderRoot<(), V> = RenderRoot::new();
+        root.set_theme(Box::new(crate::baseline()));
+        root.rebuild(&mut logic, &mut ());
+        let mut now = 0;
+        let before = paint_pass(&mut root, window, &mut tcx, &mut now);
+        root.set_theme(Box::new(inverted_glyph_theme()));
+        let after = paint_pass(&mut root, window, &mut tcx, &mut now);
+        (before, after)
     }
 }

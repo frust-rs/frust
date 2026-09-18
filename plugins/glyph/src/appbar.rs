@@ -56,6 +56,17 @@
 //! of scope — the animated cues are the tint, the title↔count morph, and the
 //! leading↔close swap).
 //!
+//! # Typeface
+//!
+//! Every run reads its family at layout from a live type-scale role — the one
+//! whose Glyph family is the face that run has always painted: the compact
+//! title and the selection count from `titleMedium`, the subtitle and the
+//! connection banner from `bodySmall` (all IBM Plex Mono), and the large
+//! variant's big title from `headlineSmall` (Space Mono). Sizes and weights
+//! stay this module's own. Unthemed, each falls back to the matching Glyph
+//! stack. The family is part of each run's cached style, so a theme swap
+//! reshapes the bar (see [`super::badge`]'s Typeface section).
+//!
 //! # Colors (accent-role split)
 //!
 //! Every color resolves from [`Theme::scheme`] with a Glyph **dark** constant
@@ -296,55 +307,94 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::new([c[0], c[1], c[2], alpha])
 }
 
-/// The Glyph `body` (IBM Plex Mono) font stack every run in this bar shapes
-/// against.
+/// The Glyph `body` (IBM Plex Mono) font stack: the unthemed family of every
+/// run in this bar but the big title.
 fn mono_family() -> FontFamily {
     FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
 }
 
-/// The Glyph `display` (Space Mono) font stack the large-variant big title
-/// shapes against (`.ab-big-title{font-family:var(--font-display)}`).
+/// The Glyph `display` (Space Mono) font stack: the large-variant big title's
+/// unthemed family (`.ab-big-title{font-family:var(--font-display)}`).
 fn display_family() -> FontFamily {
     FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
 }
 
-/// The big-title style at the collapse-interpolated `size` (display font, bold).
-fn big_title_style(size: f32, color: Color) -> TextStyle {
+/// Every run's family, resolved from the live type scale at layout (see the
+/// [module docs](self)' Typeface section).
+struct BarFamilies {
+    /// The compact title: `titleMedium`.
+    title: FontFamily,
+    /// The subtitle: `bodySmall`.
+    subtitle: FontFamily,
+    /// The selection count, which replaces the title: `titleMedium`.
+    count: FontFamily,
+    /// The large variant's big title: `headlineSmall`.
+    big_title: FontFamily,
+    /// The connection banner: `bodySmall`.
+    banner: FontFamily,
+}
+
+/// Resolve [`BarFamilies`] from the theme, falling back to the Glyph stacks
+/// with no theme threaded.
+fn resolve_families(theme: Option<&Theme>) -> BarFamilies {
+    match theme {
+        Some(theme) => {
+            let scale = &theme.type_scale;
+            BarFamilies {
+                title: scale.title_medium.family.clone(),
+                subtitle: scale.body_small.family.clone(),
+                count: scale.title_medium.family.clone(),
+                big_title: scale.headline_small.family.clone(),
+                banner: scale.body_small.family.clone(),
+            }
+        }
+        None => BarFamilies {
+            title: mono_family(),
+            subtitle: mono_family(),
+            count: mono_family(),
+            big_title: display_family(),
+            banner: mono_family(),
+        },
+    }
+}
+
+/// The big-title style at the collapse-interpolated `size` (bold).
+fn big_title_style(family: &FontFamily, size: f32, color: Color) -> TextStyle {
     TextStyle {
-        family: display_family(),
+        family: family.clone(),
         weight: FontWeight::BOLD,
         ..TextStyle::new(size, color)
     }
 }
 
-/// The connection-banner text style (body mono, 11px).
-fn banner_style(color: Color) -> TextStyle {
+/// The connection-banner text style (11px).
+fn banner_style(family: &FontFamily, color: Color) -> TextStyle {
     TextStyle {
-        family: mono_family(),
+        family: family.clone(),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(BANNER_FONT_SIZE, color)
     }
 }
 
-fn title_style(color: Color) -> TextStyle {
+fn title_style(family: &FontFamily, color: Color) -> TextStyle {
     TextStyle {
-        family: mono_family(),
+        family: family.clone(),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(TITLE_SIZE, color)
     }
 }
 
-fn subtitle_style(color: Color) -> TextStyle {
+fn subtitle_style(family: &FontFamily, color: Color) -> TextStyle {
     TextStyle {
-        family: mono_family(),
+        family: family.clone(),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(SUBTITLE_SIZE, color)
     }
 }
 
-fn count_style(color: Color) -> TextStyle {
+fn count_style(family: &FontFamily, color: Color) -> TextStyle {
     TextStyle {
-        family: mono_family(),
+        family: family.clone(),
         weight: FontWeight::SEMI_BOLD,
         ..TextStyle::new(COUNT_SIZE, color)
     }
@@ -1070,11 +1120,16 @@ impl AppBarWidget {
 
 impl Widget for AppBarWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        // Resolve every color to an owned value up front so the immutable theme
-        // borrow ends before the `&mut ctx` child-layout calls below.
+        // Resolve every color and family to an owned value up front so the
+        // immutable theme borrow ends before the `&mut ctx` child-layout calls
+        // below.
         let theme = Theme::from_layout_ctx(ctx);
         let colors = resolve_colors(theme);
-        let banner_ink = resolve_banner_colors(theme, self.banner_variant).2;
+        let families = resolve_families(theme);
+        let banner_style = banner_style(
+            &families.banner,
+            resolve_banner_colors(theme, self.banner_variant).2,
+        );
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -1089,16 +1144,16 @@ impl Widget for AppBarWidget {
         // takes precedence over `large`.
         let large_active = self.large_present && !self.selection_present;
         let bar_height = if large_active {
-            self.layout_large(ctx, &colors, width, top_inset)
+            self.layout_large(ctx, &colors, &families, width, top_inset)
         } else {
-            self.layout_compact(ctx, &colors, width, top_inset)
+            self.layout_compact(ctx, &colors, &families, width, top_inset)
         };
         self.bar_height = bar_height;
 
         // Connection banner strip beneath the bar. Its height tracks the
         // eased open/close progress — layout-bound, so paint requests relayout
         // while it animates.
-        let banner_height = self.layout_banner(ctx, banner_ink, width, bar_height);
+        let banner_height = self.layout_banner(ctx, &banner_style, width, bar_height);
 
         let total = bc.constrain(Size::new(width, bar_height + banner_height));
         self.total_size = total;
@@ -1128,6 +1183,7 @@ impl AppBarWidget {
         &mut self,
         ctx: &mut LayoutCtx,
         colors: &BarColors,
+        families: &BarFamilies,
         width: f64,
         top_inset: f64,
     ) -> f64 {
@@ -1181,23 +1237,21 @@ impl AppBarWidget {
         // `Self::resolve_title_x`).
         let zone_x = left;
         let zone_w = (right - left).max(0.0);
-        let title_size =
-            self.title
-                .layout(ctx, &title_style(colors.title_ink), Some(zone_w as f32));
+        let title_style = title_style(&families.title, colors.title_ink);
+        let title_size = self.title.layout(ctx, &title_style, Some(zone_w as f32));
         if let Some(stage) = &mut self.title_stage {
-            stage
-                .old
-                .layout(ctx, &title_style(colors.title_ink), Some(zone_w as f32));
+            stage.old.layout(ctx, &title_style, Some(zone_w as f32));
         }
-        let subtitle_size = self.subtitle.as_mut().map(|s| {
-            s.layout(
-                ctx,
-                &subtitle_style(colors.subtitle_ink),
-                Some(zone_w as f32),
-            )
-        });
-        self.count
-            .layout(ctx, &count_style(colors.accent), Some(zone_w as f32));
+        let subtitle_style = subtitle_style(&families.subtitle, colors.subtitle_ink);
+        let subtitle_size = self
+            .subtitle
+            .as_mut()
+            .map(|s| s.layout(ctx, &subtitle_style, Some(zone_w as f32)));
+        self.count.layout(
+            ctx,
+            &count_style(&families.count, colors.accent),
+            Some(zone_w as f32),
+        );
 
         // Vertically center the title (+subtitle) stack inside the content
         // band; horizontally, resolve the shared title/subtitle anchor per
@@ -1255,6 +1309,7 @@ impl AppBarWidget {
         &mut self,
         ctx: &mut LayoutCtx,
         colors: &BarColors,
+        families: &BarFamilies,
         width: f64,
         top_inset: f64,
     ) -> f64 {
@@ -1295,7 +1350,7 @@ impl AppBarWidget {
         let bt_max_w = (width - 2.0 * BIG_TITLE_PAD_X).max(0.0);
         let bt_size = self.big_title.layout(
             ctx,
-            &big_title_style(size_px, colors.title_ink),
+            &big_title_style(&families.big_title, size_px, colors.title_ink),
             Some(bt_max_w as f32),
         );
         let bt_top = row1_bottom + BIG_TITLE_PAD_TOP;
@@ -1326,7 +1381,7 @@ impl AppBarWidget {
     fn layout_banner(
         &mut self,
         ctx: &mut LayoutCtx,
-        ink: Color,
+        style: &TextStyle,
         width: f64,
         bar_bottom: f64,
     ) -> f64 {
@@ -1339,9 +1394,7 @@ impl AppBarWidget {
         self.banner_rect =
             Rect::from_origin_size(Point::new(0.0, bar_bottom), Size::new(width, banner_h));
         let max_w = (width - 2.0 * BANNER_PAD_X).max(0.0);
-        let tsize = self
-            .banner_run
-            .layout(ctx, &banner_style(ink), Some(max_w as f32));
+        let tsize = self.banner_run.layout(ctx, style, Some(max_w as f32));
         self.banner_text_pos =
             Point::new(BANNER_PAD_X, bar_bottom + (banner_h - tsize.height) / 2.0);
         banner_h
@@ -2517,6 +2570,72 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n.role() == Role::Label && n.label() == Some("connection lost")),
             "the banner text contributes a Label node"
+        );
+    }
+
+    // ---- Typeface: every run's family follows its type-scale role ---------
+
+    /// The compact face: title and subtitle.
+    #[cfg(feature = "bundled-fonts")]
+    fn compact(_: &mut ()) -> AppBarView<()> {
+        app_bar("shell").subtitle("dev")
+    }
+
+    /// The large variant with an open connection banner: big title, banner.
+    #[cfg(feature = "bundled-fonts")]
+    fn large_with_banner(_: &mut ()) -> AppBarView<()> {
+        app_bar("shell")
+            .large(large_config("dev host", leaf_any(120.0, 12.0)))
+            .banner(Some(banner_spec("connection lost", BannerVariant::Warning)))
+    }
+
+    /// Selection mode: the count face.
+    #[cfg(feature = "bundled-fonts")]
+    fn selecting(_: &mut ()) -> AppBarView<()> {
+        app_bar("shell").selection(Some(selection_bar(3, |_: &mut ()| {})))
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let window = Size::new(360.0, 200.0);
+        assert_eq!(
+            painted_faces(compact, crate::baseline(), window),
+            [Face::PlexMono, Face::PlexMono],
+            "title, subtitle"
+        );
+        assert_eq!(
+            painted_faces(large_with_banner, crate::baseline(), window),
+            [Face::SpaceMono, Face::PlexMono],
+            "big title, banner"
+        );
+        assert_eq!(
+            painted_faces(selecting, crate::baseline(), window),
+            [Face::PlexMono],
+            "selection count"
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let window = Size::new(360.0, 200.0);
+        assert_eq!(
+            faces_across_a_live_swap(compact, window).1,
+            [Face::SpaceMono, Face::SpaceMono],
+            "title, subtitle"
+        );
+        assert_eq!(
+            faces_across_a_live_swap(large_with_banner, window).1,
+            [Face::PlexMono, Face::SpaceMono],
+            "big title, banner"
+        );
+        assert_eq!(
+            faces_across_a_live_swap(selecting, window).1,
+            [Face::SpaceMono],
+            "selection count"
         );
     }
 }
