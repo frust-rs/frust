@@ -772,9 +772,11 @@ panic = "abort"
 # (`ReactiveRuntime::pump_local` -> `Handle::enter`, at least four times a
 # frame) and accesskit's semantics publish on every frame whose semantics
 # generation changed — so the bar cannot see their per-frame cost the way it
-# sees the render stack's. Both were re-measured directly instead: see
-# benchmarks/RESULTS.md's tokio/accesskit microbench note for the numbers
-# that keep them out of the cold set.
+# sees the render stack's. Both were measured directly instead (see
+# benchmarks/RESULTS.md's tokio/accesskit microbench note): at `z`,
+# accesskit's publish cost more per changed frame on a little core than the
+# cold set's CPU rule allows (at a 2,000-node tree), and `z` saved `tokio` no
+# size, so neither earns a place in the set.
 #
 # # `wgpu-hal` is deliberately NOT in the cold set, and that is a measured
 # exclusion rather than an oversight: it sits on the per-frame submit path,
