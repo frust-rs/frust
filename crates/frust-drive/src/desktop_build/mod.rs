@@ -477,9 +477,32 @@ pub fn build(
     target: DesktopBundleTarget,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BundleReport, DesktopBuildError> {
+    build_with_env(runner, &RealEnv, project_dir, info, target, on_line)
+}
+
+/// [`build`], with `env` injected so `CARGO_TARGET_DIR` resolution (the
+/// `cargo` submodule's `resolve_target_dir`, reached through
+/// `locate_binary`) can be driven without touching the real process
+/// environment.
+///
+/// `pub` — unlike the crate's other `*_with_env` seams (`web_build`,
+/// `android_build`, `android_run`, `ios_build`), which stay private because
+/// only this crate's own tests need them — because `frust-cli`'s
+/// `commands::build` test module needs to exercise the desktop lane
+/// hermetically too (a test asserting on a fixture binary under a tempdir
+/// must not have the assertion depend on whether `CARGO_TARGET_DIR` happens
+/// to be set in the process running the test).
+pub fn build_with_env(
+    runner: &dyn ProcessRunner,
+    env: &dyn EnvLookup,
+    project_dir: &Path,
+    info: &BuildInfo,
+    target: DesktopBundleTarget,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<BundleReport, DesktopBuildError> {
     build_with_host(
         runner,
-        &RealEnv,
+        env,
         project_dir,
         info,
         target,
@@ -488,7 +511,7 @@ pub fn build(
     )
 }
 
-/// The testable core of [`build`]: `host` is injected (rather than read from
+/// The testable core of [`build_with_env`]: `host` is injected (rather than read from
 /// `cfg!`/[`DesktopBundleTarget::host`]) so all three assemblies can be
 /// exercised from one machine, and `env` is injected so `CARGO_TARGET_DIR`
 /// resolution can be driven without touching the real process environment.

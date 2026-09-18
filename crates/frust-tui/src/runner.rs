@@ -174,6 +174,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         |name| std::env::var(name).ok(),
         io::stdout().is_terminal(),
         clipboard_mode,
+        clipboard::HOST_ALWAYS_HAS_DISPLAY,
     );
     if let ClipboardBackend::Disabled { reason } = clipboard_backend {
         let _ = msg_tx.send(Message::Notify {

@@ -97,14 +97,27 @@ pub enum Backend {
     },
 }
 
+/// Whether the build host itself always has a reachable system
+/// clipboard/display, independent of `DISPLAY`/`WAYLAND_DISPLAY`.
+///
+/// The only place this crate reads `cfg!(target_os = ...)` for clipboard
+/// purposes: [`detect`] must stay a pure function of its arguments (see its
+/// doc) so it is fully unit-testable on every host, so this OS fact is
+/// computed once here and threaded into `detect` as an explicit
+/// `host_always_has_display` argument instead of being read inside it.
+pub(crate) const HOST_ALWAYS_HAS_DISPLAY: bool =
+    cfg!(any(target_os = "macos", target_os = "windows"));
+
 /// Map the configured [`ClipboardMode`] and the detected environment to a
 /// concrete [`Backend`].
 ///
 /// `env` is an injectable lookup (tests use a fake map instead of mutating
-/// process env, which races with parallel tests) and `stdout_is_tty` is
-/// `crate::runner`'s own `io::stdout().is_terminal()` reading, taken once at
-/// startup — both are pure inputs, so this function touches nothing itself
-/// and is fully unit-testable.
+/// process env, which races with parallel tests), `stdout_is_tty` is
+/// `crate::runner`'s own `io::stdout().is_terminal()` reading taken once at
+/// startup, and `host_always_has_display` is
+/// [`HOST_ALWAYS_HAS_DISPLAY`] — all three are pure inputs, so this function
+/// touches nothing itself (not even `cfg!`) and is fully unit-testable for
+/// every OS from any host.
 ///
 /// Decision table (mirrors fdemon's `detect::choose_backend`):
 ///
@@ -119,7 +132,7 @@ pub enum Backend {
 ///     their local machine, which only OSC 52 (relayed by the terminal) can
 ///     reach, even when `DISPLAY` is set via X forwarding;
 ///   - a display server is reachable (`DISPLAY`/`WAYLAND_DISPLAY` on Linux;
-///     always true on macOS/Windows) → [`Backend::System`];
+///     `host_always_has_display` on macOS/Windows) → [`Backend::System`];
 ///   - no display server but stdout is a TTY (headless box, local console)
 ///     → [`Backend::Osc52`];
 ///   - neither → [`Backend::Disabled`].
@@ -127,6 +140,7 @@ pub fn detect(
     env: impl Fn(&str) -> Option<String>,
     stdout_is_tty: bool,
     mode: ClipboardMode,
+    host_always_has_display: bool,
 ) -> Backend {
     let set = |name: &str| env(name).map(|v| !v.is_empty()).unwrap_or(false);
     let ssh = set("SSH_TTY") || set("SSH_CONNECTION") || set("SSH_CLIENT");
@@ -136,9 +150,7 @@ pub fn detect(
         .map(|t| t.starts_with("screen"))
         .unwrap_or(false);
     let screen = (set("STY") || term_is_screen) && !set("TMUX");
-    let display = cfg!(any(target_os = "macos", target_os = "windows"))
-        || set("DISPLAY")
-        || set("WAYLAND_DISPLAY");
+    let display = host_always_has_display || set("DISPLAY") || set("WAYLAND_DISPLAY");
 
     match mode {
         ClipboardMode::Off => Backend::Disabled {
@@ -407,11 +419,22 @@ mod tests {
         move |name: &str| vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
     }
 
+    // Every case below is shaped for a host with no guaranteed display
+    // (Linux-like): `host_always_has_display: false`, so `DISPLAY`/
+    // `WAYLAND_DISPLAY` alone govern the `display` check. The
+    // "── always-has-display host ──" section below covers the
+    // macOS/Windows-shaped arm (`host_always_has_display: true`) explicitly.
+
     // ─── explicit modes ──────────────────────────────────────────────────
 
     #[test]
     fn mode_off_is_disabled_regardless_of_environment() {
-        let backend = detect(env_from(&[("DISPLAY", ":0")]), true, ClipboardMode::Off);
+        let backend = detect(
+            env_from(&[("DISPLAY", ":0")]),
+            true,
+            ClipboardMode::Off,
+            false,
+        );
         assert_eq!(
             backend,
             Backend::Disabled {
@@ -422,13 +445,13 @@ mod tests {
 
     #[test]
     fn mode_system_never_falls_back_at_detect_time() {
-        let backend = detect(env_from(&[]), false, ClipboardMode::System);
+        let backend = detect(env_from(&[]), false, ClipboardMode::System, false);
         assert_eq!(backend, Backend::System);
     }
 
     #[test]
     fn mode_osc52_forced_even_without_tty_or_display() {
-        let backend = detect(env_from(&[]), false, ClipboardMode::Osc52);
+        let backend = detect(env_from(&[]), false, ClipboardMode::Osc52, false);
         assert_eq!(backend, Backend::Osc52 { screen: false });
     }
 
@@ -438,6 +461,7 @@ mod tests {
             env_from(&[("STY", "1234.pts-0")]),
             true,
             ClipboardMode::Osc52,
+            false,
         );
         assert_eq!(backend, Backend::Osc52 { screen: true });
     }
@@ -450,6 +474,7 @@ mod tests {
             env_from(&[("SSH_TTY", "/dev/pts/3")]),
             true,
             ClipboardMode::Auto,
+            false,
         );
         assert_eq!(backend, Backend::Osc52 { screen: false });
     }
@@ -465,6 +490,7 @@ mod tests {
             ]),
             true,
             ClipboardMode::Auto,
+            false,
         );
         assert_eq!(backend, Backend::Osc52 { screen: false });
     }
@@ -475,6 +501,7 @@ mod tests {
             env_from(&[("SSH_CLIENT", "1.2.3.4 1 22"), ("STY", "1.pts-1")]),
             true,
             ClipboardMode::Auto,
+            false,
         );
         assert_eq!(backend, Backend::Osc52 { screen: true });
     }
@@ -486,13 +513,19 @@ mod tests {
             env_from(&[("SSH_TTY", "/dev/pts/3"), ("DISPLAY", ":0")]),
             false,
             ClipboardMode::Auto,
+            false,
         );
         assert_eq!(backend, Backend::System);
     }
 
     #[test]
     fn auto_desktop_session_uses_the_system_clipboard() {
-        let backend = detect(env_from(&[("DISPLAY", ":0")]), true, ClipboardMode::Auto);
+        let backend = detect(
+            env_from(&[("DISPLAY", ":0")]),
+            true,
+            ClipboardMode::Auto,
+            false,
+        );
         assert_eq!(backend, Backend::System);
     }
 
@@ -502,6 +535,7 @@ mod tests {
             env_from(&[("WAYLAND_DISPLAY", "wayland-0")]),
             true,
             ClipboardMode::Auto,
+            false,
         );
         assert_eq!(backend, Backend::System);
     }
@@ -509,13 +543,13 @@ mod tests {
     #[test]
     fn auto_headless_tty_uses_osc52() {
         // Local console / headless box: no display server, stdout is a tty.
-        let backend = detect(env_from(&[]), true, ClipboardMode::Auto);
+        let backend = detect(env_from(&[]), true, ClipboardMode::Auto, false);
         assert_eq!(backend, Backend::Osc52 { screen: false });
     }
 
     #[test]
     fn auto_no_display_no_tty_is_disabled() {
-        let backend = detect(env_from(&[]), false, ClipboardMode::Auto);
+        let backend = detect(env_from(&[]), false, ClipboardMode::Auto, false);
         assert_eq!(
             backend,
             Backend::Disabled {
@@ -537,8 +571,51 @@ mod tests {
             ]),
             true,
             ClipboardMode::Auto,
+            false,
         );
         assert_eq!(backend, Backend::Osc52 { screen: false });
+    }
+
+    // ─── always-has-display host (macOS/Windows-shaped) ──────────────────
+
+    #[test]
+    fn auto_always_has_display_with_tty_uses_the_system_clipboard() {
+        let backend = detect(env_from(&[]), true, ClipboardMode::Auto, true);
+        assert_eq!(backend, Backend::System);
+    }
+
+    #[test]
+    fn auto_always_has_display_without_tty_still_uses_the_system_clipboard() {
+        // Unlike the no-guaranteed-display host, an always-has-display host
+        // never falls through to `Disabled` here: the display check comes
+        // before the stdout-is-a-tty check regardless of TTY-ness.
+        let backend = detect(env_from(&[]), false, ClipboardMode::Auto, true);
+        assert_eq!(backend, Backend::System);
+    }
+
+    #[test]
+    fn auto_always_has_display_ssh_with_tty_still_prefers_osc52() {
+        // SSH wins over the display check even when the host always has a
+        // display — the user's clipboard is still on their local machine.
+        let backend = detect(
+            env_from(&[("SSH_TTY", "/dev/pts/3")]),
+            true,
+            ClipboardMode::Auto,
+            true,
+        );
+        assert_eq!(backend, Backend::Osc52 { screen: false });
+    }
+
+    #[test]
+    fn host_always_has_display_matches_the_macos_or_windows_cfg() {
+        // Tripwire: the production input `detect` receives from
+        // `crate::runner` must keep tracking exactly the macOS/Windows
+        // build-host check, even though `detect` itself no longer reads
+        // `cfg!` directly.
+        assert_eq!(
+            HOST_ALWAYS_HAS_DISPLAY,
+            cfg!(any(target_os = "macos", target_os = "windows"))
+        );
     }
 
     // ─── FRUST_TUI_CLIPBOARD parsing ─────────────────────────────────────
