@@ -89,6 +89,16 @@ impl BuildLayout {
         Self::android_root().join("jniLibs")
     }
 
+    /// The per-module Gradle `buildDirectory` redirect for a plugin's Android
+    /// library module (`:frust-<plugin>`, e.g. `frust-camera`) — the same
+    /// `<app>/build/android/<module>` root [`Self::android_embedding`] uses
+    /// for `:frust-embedding`, named generically so `plugin::apply`'s
+    /// `settings_include_block` can derive the literal from here instead of
+    /// duplicating it.
+    pub fn android_module(module: &str) -> PathBuf {
+        Self::android_root().join(module)
+    }
+
     /// The project-local Gradle cache.
     pub fn android_gradle_cache() -> PathBuf {
         Self::android_root().join(".gradle")
@@ -163,6 +173,10 @@ mod tests {
         assert_eq!(
             BuildLayout::android_jni_libs(),
             Path::new("build/android/jniLibs")
+        );
+        assert_eq!(
+            BuildLayout::android_module("frust-camera"),
+            Path::new("build/android/frust-camera")
         );
         assert_eq!(
             BuildLayout::android_gradle_cache(),

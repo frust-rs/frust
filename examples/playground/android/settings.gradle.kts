@@ -66,7 +66,7 @@ project(":frust-camera").projectDir = file("../../../plugins/camera/platform/and
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-camera") {
-        layout.buildDirectory.set(rootDir.resolve("build/frust-camera"))
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-camera"))
     }
 }
 
@@ -84,7 +84,7 @@ project(":frust-native-widgets").projectDir =
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-native-widgets") {
-        layout.buildDirectory.set(rootDir.resolve("build/frust-native-widgets"))
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-native-widgets"))
     }
 }
 
@@ -101,7 +101,7 @@ project(":frust-video-player").projectDir =
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-video-player") {
-        layout.buildDirectory.set(rootDir.resolve("build/frust-video-player"))
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-video-player"))
     }
 }
 
@@ -121,6 +121,6 @@ project(":frust-iap").projectDir = file("../../../plugins/iap/platform/android")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-iap") {
-        layout.buildDirectory.set(rootDir.resolve("build/frust-iap"))
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-iap"))
     }
 }

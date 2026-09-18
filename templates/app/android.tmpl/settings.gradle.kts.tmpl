@@ -55,3 +55,7 @@ gradle.lifecycle.beforeProject {
 }
 
 // frust:plugin-includes — plugin-contributed `include(...)` lines go below.
+// `frust plugin add` appends each plugin's Android library module here with
+// the same include/projectDir/build-dir-redirect trio as `:frust-embedding`
+// above, so every module this project ever gains — built-in or
+// plugin-contributed — stays under THIS app's `build/android/` root.

@@ -10,6 +10,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
 
 use super::registry::{find_plugin, known_plugins};
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
+use crate::build_dirs::BuildLayout;
 use crate::scaffold::context::frust_path_from_project_subdir;
 
 /// Project-relative paths of the files a contribution edits.
@@ -604,10 +605,15 @@ fn apply_gradle_module(
 /// The `settings.gradle.kts` block one [`Contribution::GradleModule`] adds —
 /// deliberately the same shape the scaffold emits for `:frust-embedding`,
 /// build-directory redirect included: a plugin module shares the embedding's
-/// "two apps, one shared frust checkout" collision problem exactly.
+/// "two apps, one shared frust checkout" collision problem exactly. The
+/// redirect literal is derived from [`BuildLayout::android_module`] (not
+/// duplicated here) so it cannot drift from the `<app>/build/android/<module>`
+/// root the scaffold's own `settings.gradle.kts.tmpl` redirects every module
+/// under.
 fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -> String {
     let build_dir = gradle_name.trim_start_matches(':');
     let module_dir = repo_relative_path(frust_path, rel_path);
+    let build_redirect = format!("../{}", BuildLayout::android_module(build_dir).display());
     format!(
         "\n\
          // Added by `frust` Add Plugin: a plugin's Android library module,\n\
@@ -618,7 +624,7 @@ fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -
          \n\
          gradle.lifecycle.beforeProject {{\n\
          \x20   if (path == \"{gradle_name}\") {{\n\
-         \x20       layout.buildDirectory.set(rootDir.resolve(\"build/{build_dir}\"))\n\
+         \x20       layout.buildDirectory.set(rootDir.resolve(\"{build_redirect}\"))\n\
          \x20   }}\n\
          }}\n"
     )
@@ -1230,7 +1236,7 @@ mod tests {
             "{settings}"
         );
         assert!(
-            settings.contains("rootDir.resolve(\"build/frust-secure-storage\")"),
+            settings.contains("rootDir.resolve(\"../build/android/frust-secure-storage\")"),
             "{settings}"
         );
         assert!(

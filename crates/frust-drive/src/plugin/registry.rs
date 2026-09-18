@@ -1125,7 +1125,7 @@ mod tests {
             "{settings}"
         );
         assert!(
-            settings.contains("rootDir.resolve(\"build/frust-native-widgets\")"),
+            settings.contains("rootDir.resolve(\"../build/android/frust-native-widgets\")"),
             "{settings}"
         );
         let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
@@ -1258,7 +1258,7 @@ mod tests {
         let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
         assert!(settings.contains("include(\":frust-iap\")"), "{settings}");
         assert!(
-            settings.contains("rootDir.resolve(\"build/frust-iap\")"),
+            settings.contains("rootDir.resolve(\"../build/android/frust-iap\")"),
             "{settings}"
         );
         let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
