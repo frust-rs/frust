@@ -246,12 +246,20 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
             //    continuously-ready branch starves every branch *after* it —
             //    so the potentially-busiest branch goes last, where it can
             //    only ever delay itself, never input, MCP commands, or the
-            //    tick. The one trade this accepts is the mirror case: a
-            //    burst of engine-channel traffic can delay `session_rx`
-            //    behind it. That's acceptable because `session_rx` is a
-            //    bounded channel — a delay here is backpressure on the
-            //    drain thread, not a lost or reordered event, unlike the
-            //    silent drop this ordering exists to prevent.
+            //    tick. The trade this accepts: a burst on the branches ahead
+            //    of it delays `session_rx`, but only for the burst's length —
+            //    every iteration where they're not ready still falls through
+            //    to `session_rx`, so this loop is never idle while the
+            //    receiver lives. If a burst is long enough to fill the
+            //    channel first, it's the supervisor's own overflow policy
+            //    that protects correctness, not this ordering (see
+            //    `crate::supervise::supervisor`'s module docs):
+            //    non-terminal events are dropped-newest and counted, a
+            //    terminal state gets a bounded blocking retry instead.
+            //    That's the same outcome this loop already lived with
+            //    before this change, and it takes a sustained flood to
+            //    reach — engine-channel traffic (MCP commands, internal
+            //    messages) is internal and bursty, not continuous.
             biased;
             _ = tick.tick() => {
                 // Only touch the model while something is animating (a live
