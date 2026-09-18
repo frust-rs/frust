@@ -45,6 +45,78 @@ use super::{BundleNote, DesktopBuildError, desktop_root};
 /// follow a symlinked directory, it unlinks it, so a link inside
 /// `build/desktop/` cannot be used to delete the tree it points at.
 pub(super) fn prepare_dir(dir: &Path, project_dir: &Path) -> Result<(), DesktopBuildError> {
+    check_bundle_dir_contained(dir, project_dir)?;
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|source| DesktopBuildError::Io {
+            action: "removing the previous bundle at",
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    }
+    create_dir(dir)
+}
+
+/// Like [`prepare_dir`], but preserves the entries in `keep` (paths directly
+/// inside `dir`, compared exactly) instead of clearing everything.
+///
+/// The Windows lane needs this: its icon lands inside this same directory
+/// *before* the compile that embeds it, so the directory can only safely be
+/// cleared of a previous run's stale content *after* that compile has
+/// actually succeeded — clearing unconditionally at that point would also
+/// delete the icon the compile just read (see `windows::generate_exe_icon`
+/// and the call site in `super::build_with_contributions`).
+///
+/// Shares [`prepare_dir`]'s containment guard — the same
+/// [`DesktopBuildError::UnsafeBundleDir`] refusal, before anything is
+/// touched, for a `dir` that isn't a strict descendant of the project's
+/// `build/desktop`.
+pub(super) fn prepare_dir_keeping(
+    dir: &Path,
+    project_dir: &Path,
+    keep: &[&Path],
+) -> Result<(), DesktopBuildError> {
+    check_bundle_dir_contained(dir, project_dir)?;
+    if !dir.exists() {
+        return create_dir(dir);
+    }
+    for entry in fs::read_dir(dir).map_err(|source| DesktopBuildError::Io {
+        action: "reading the previous bundle at",
+        path: dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| DesktopBuildError::Io {
+            action: "reading an entry of the previous bundle at",
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if keep.contains(&path.as_path()) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|source| DesktopBuildError::Io {
+            action: "reading the type of",
+            path: path.clone(),
+            source,
+        })?;
+        let removed = if file_type.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        removed.map_err(|source| DesktopBuildError::Io {
+            action: "removing a stale bundle entry at",
+            path: path.clone(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+/// The containment guard [`prepare_dir`] and [`prepare_dir_keeping`] share:
+/// `dir` must be a strict descendant of `<project_dir>/build/desktop`, or the
+/// call is a typed refusal and nothing is touched. See [`prepare_dir`]'s doc
+/// for why the check is lexical and runs in two parts.
+fn check_bundle_dir_contained(dir: &Path, project_dir: &Path) -> Result<(), DesktopBuildError> {
     let output_root = project_dir.join(desktop_root());
     let contained = !dir.components().any(|c| matches!(c, Component::ParentDir))
         && dir.starts_with(&output_root)
@@ -55,14 +127,7 @@ pub(super) fn prepare_dir(dir: &Path, project_dir: &Path) -> Result<(), DesktopB
             output_root,
         });
     }
-    if dir.exists() {
-        fs::remove_dir_all(dir).map_err(|source| DesktopBuildError::Io {
-            action: "removing the previous bundle at",
-            path: dir.to_path_buf(),
-            source,
-        })?;
-    }
-    create_dir(dir)
+    Ok(())
 }
 
 /// `mkdir -p`.
@@ -215,6 +280,61 @@ mod tests {
                 target.display()
             );
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_dir_keeping_clears_stale_entries_but_preserves_the_kept_ones() {
+        let dir = temp_dir("prepare-keeping");
+        let bundle = dir.join("build").join("desktop").join("windows");
+        fs::create_dir_all(&bundle).unwrap();
+        let icon = bundle.join("icon.ico");
+        fs::write(&icon, b"icon-bytes").unwrap();
+        let stale_file = bundle.join("stale.txt");
+        fs::write(&stale_file, b"stale").unwrap();
+        let stale_dir = bundle.join("stale-dir");
+        fs::create_dir_all(stale_dir.join("nested")).unwrap();
+        fs::write(stale_dir.join("nested/leaf"), b"x").unwrap();
+
+        prepare_dir_keeping(&bundle, &dir, &[icon.as_path()]).unwrap();
+
+        assert!(icon.is_file(), "the kept entry was removed");
+        assert_eq!(fs::read(&icon).unwrap(), b"icon-bytes");
+        assert!(!stale_file.exists(), "a stale file was not cleared");
+        assert!(!stale_dir.exists(), "a stale directory was not cleared");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_dir_keeping_creates_the_directory_when_it_does_not_exist() {
+        let dir = temp_dir("prepare-keeping-missing");
+        let bundle = dir.join("build").join("desktop").join("windows");
+        assert!(!bundle.exists());
+
+        prepare_dir_keeping(&bundle, &dir, &[]).unwrap();
+        assert!(bundle.is_dir());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same containment guard as [`prepare_dir`], and — the part that
+    /// matters — nothing is deleted on the way to the refusal.
+    #[test]
+    fn prepare_dir_keeping_refuses_a_target_outside_the_projects_build_desktop_directory() {
+        let dir = temp_dir("prepare-keeping-outside");
+        let project = dir.join("project");
+        let outside = dir.join("precious");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"x").unwrap();
+
+        let err = prepare_dir_keeping(&outside, &project, &[]).unwrap_err();
+        assert!(
+            matches!(err, DesktopBuildError::UnsafeBundleDir { .. }),
+            "{err}"
+        );
+        assert!(outside.join("keep.txt").is_file());
 
         let _ = fs::remove_dir_all(&dir);
     }

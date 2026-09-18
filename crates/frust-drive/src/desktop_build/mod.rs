@@ -228,6 +228,15 @@ pub enum BundleNote {
     /// `.exe` carries are compiled in by the project's own
     /// `windows/build.rs` — nothing this pipeline writes can override them.
     WindowsVersionOverridesNotApplied,
+    /// The project's own `windows/build.rs` predates the `build/` layout: it
+    /// still embeds the legacy `windows/icon.ico` path rather than
+    /// `build/desktop/windows/icon.ico` (there is no `frust upgrade` to
+    /// regenerate it, docs/CLI_ARCHITECTURE.md's `build macos|windows|linux`
+    /// section). Rather than rewrite the project's own file, the icon this
+    /// run generated was *also* copied to the legacy path — one release's
+    /// compatibility window, mirroring `android_build`'s read fallback for a
+    /// project scaffolded before a template change.
+    LegacyWindowsIconAlsoWritten,
     /// The project's own `macos/Info.plist` (copied verbatim) declares a
     /// `CFBundleIdentifier` other than the one `frust.toml` resolves to. Not
     /// fatal: the copied plist wins, so the `.app` is simply identified by the
@@ -314,6 +323,12 @@ impl fmt::Display for BundleNote {
                 f,
                 "`[windows] file-version`/`product-version` are compiled in by the project's own \
                  windows/build.rs — edit that file to change them"
+            ),
+            BundleNote::LegacyWindowsIconAlsoWritten => write!(
+                f,
+                "windows/build.rs predates the build/ layout; icon also written to \
+                 windows/icon.ico — see docs/DEVELOPMENT.md \"Migrating an already-scaffolded \
+                 app to the build/ layout\""
             ),
             BundleNote::IdentifierIdentityMismatch { plist, manifest } => write!(
                 f,
@@ -527,17 +542,18 @@ fn build_with_contributions(
     // Windows only: the project's own `windows/build.rs` embeds
     // `build/desktop/windows/icon.ico` into the `.exe`, so the icon has to
     // exist BEFORE the compile — every other target's icon work happens at
-    // assembly time. The icon now lands inside the same output directory
-    // `windows::assemble` later copies the `.exe` into (it used to sit outside
-    // `dist/`, at the project's own `windows/icon.ico`), so that directory is
-    // prepared fresh *here* rather than by `assemble`: `assemble` runs after
-    // the compile has already embedded this icon, and preparing the directory
-    // a second time would `remove_dir_all` the very file the compile just
-    // read.
+    // assembly time. `generate_exe_icon` writes straight into
+    // `build/desktop/windows` without clearing it first: that directory may
+    // still hold a previous, still-good bundle, and a compile failure below
+    // must leave it intact rather than emptied (the regression PROBLEM 2
+    // fixes — `prepare_dir` used to run here, before the compile, so a
+    // failing compile always lost the previous bundle). The directory is
+    // only cleared once the compile that reads this icon has actually
+    // succeeded — see the `bundle::prepare_dir_keeping` call beside
+    // `windows::assemble` below, which clears stale content while keeping
+    // the icon this run just generated (and the compile just read).
     let prebuilt = match target {
         DesktopBundleTarget::Windows => {
-            let windows_root = DesktopBundleTarget::Windows.output_dir(project_dir);
-            bundle::prepare_dir(&windows_root, project_dir)?;
             windows::generate_exe_icon(project_dir, &config, &mut notes)
         }
         _ => None,
@@ -564,6 +580,15 @@ fn build_with_contributions(
             macos::assemble(runner, project_dir, info, &config, &binary, &mut notes)?
         }
         DesktopBundleTarget::Windows => {
+            // The compile above already succeeded (its `?` would have
+            // returned otherwise) and has read this run's icon, so it is now
+            // safe to clear whatever the directory held from a previous run.
+            // `prepare_dir_keeping` preserves exactly the icon
+            // `generate_exe_icon` wrote, so `assemble` still finds it to
+            // report as an artifact.
+            let windows_root = DesktopBundleTarget::Windows.output_dir(project_dir);
+            let keep: Vec<&Path> = prebuilt.iter().map(PathBuf::as_path).collect();
+            bundle::prepare_dir_keeping(&windows_root, project_dir, &keep)?;
             windows::assemble(project_dir, &config, &binary, prebuilt, &mut notes)?
         }
         DesktopBundleTarget::Linux => linux::assemble(project_dir, &config, &binary, &mut notes)?,
@@ -1418,7 +1443,12 @@ mod tests {
     /// (`build/desktop/windows`), generated at two different pipeline stages
     /// (icon before the compile, `.exe` after it) — proving the second stage
     /// does not wipe the first stage's file, while a genuinely stale file
-    /// from an earlier run still gets cleared.
+    /// from an earlier run still gets cleared **once the compile that
+    /// produced this run's replacement has actually succeeded**. PROBLEM 2:
+    /// a *failing* compile must leave the previous, still-good bundle
+    /// untouched instead — before this fix, `prepare_dir` ran before the
+    /// compile and would already have emptied the directory by the time
+    /// `cargo build` failed.
     #[test]
     fn windows_reassembly_clears_stale_content_but_keeps_this_runs_icon() {
         let fixture = Fixture::new("windows-rebuild")
@@ -1429,10 +1459,113 @@ mod tests {
         let stale = fixture.path("build/desktop/windows/stale-from-a-previous-run");
         fs::write(&stale, b"x").unwrap();
 
+        // A failing compile must not touch the directory at all — the stale
+        // file (standing in for the previous, still-valid bundle) survives,
+        // and so does the previous run's own exe.
+        let failing = FakeProcessRunner::new().with(
+            RELEASE_BUILD,
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error[E0308]: mismatched types".to_string(),
+            },
+        );
+        let err = run(&failing, &fixture, DesktopBundleTarget::Windows).unwrap_err();
+        assert!(
+            matches!(err, DesktopBuildError::CargoFailed { .. }),
+            "{err}"
+        );
+        assert!(
+            stale.exists(),
+            "a failing compile emptied the previous bundle before it even ran"
+        );
+        assert!(fixture.path("build/desktop/windows/my_app.exe").is_file());
+        assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+
+        // A succeeding compile clears the stale content and keeps this run's
+        // icon.
         let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
         assert!(!stale.exists());
         assert!(report.executable.is_file());
         assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+    }
+
+    /// PROBLEM 1 fix: a project scaffolded before the `build/` layout still
+    /// carries a `windows/build.rs` rendered from the old template, which
+    /// embeds the legacy `windows/icon.ico` path verbatim rather than
+    /// `build/desktop/windows/icon.ico` — there is no `frust upgrade` to
+    /// regenerate it. Without a dual write the `.exe` would silently lose its
+    /// icon while the bundle report claims one was generated.
+    #[test]
+    fn a_legacy_windows_build_rs_also_gets_the_icon_at_the_old_path() {
+        let legacy_build_rs = "fn main() {\n    \
+             let icon_path = std::path::Path::new(\"windows/icon.ico\");\n}\n";
+        let fixture = Fixture::new("windows-legacy-build-rs")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe")
+            .file("windows/build.rs", legacy_build_rs);
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+        assert!(
+            fixture.path("windows/icon.ico").is_file(),
+            "legacy windows/icon.ico was not also written"
+        );
+        assert!(
+            report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// The inverse: a `windows/build.rs` already naming the new
+    /// `build/desktop/windows/icon.ico` path never gets a legacy copy or a
+    /// note — it isn't stale.
+    #[test]
+    fn a_new_windows_build_rs_gets_no_legacy_icon_copy() {
+        let new_build_rs = "fn main() {\n    \
+             let icon_path = std::path::Path::new(\"build/desktop/windows/icon.ico\");\n}\n";
+        let fixture = Fixture::new("windows-new-build-rs")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe")
+            .file("windows/build.rs", new_build_rs);
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert!(!fixture.path("windows/icon.ico").exists());
+        assert!(
+            !report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// A project with no `windows/build.rs` at all (still on defaults, or one
+    /// hand-deleted) is likewise left alone.
+    #[test]
+    fn a_project_with_no_windows_build_rs_gets_no_legacy_icon_copy() {
+        let fixture = Fixture::new("windows-no-build-rs")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe");
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert!(!fixture.path("windows/icon.ico").exists());
+        assert!(
+            !report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
     }
 
     #[test]
