@@ -666,7 +666,7 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 
 ---
 
-## App size (release) — Frust re-measured 2026-09-17, Flutter 2026-09-05
+## App size (release) — Frust Android re-measured 2026-09-17, iOS 2026-09-18, Flutter 2026-09-05
 
 Frust's rows are release builds of this checkout, rebuilt after the app-size
 plan's font/link-flag/opt-level/pin levers landed; the Flutter column is
@@ -678,8 +678,12 @@ Gradle `assembleRelease -x cargoNdkBuild` route directly (`frust build apk
 `--no-default-features` knob), so no keystore is configured and Gradle falls
 back to debug signing with a warning — signing does not change the size
 class either way. Sizes are MiB alongside the exact byte count, which is the
-authoritative figure. iOS rows are the 2026-09-06 figures, unchanged and
-dated — **not re-measured this pass (no macOS host available)**.
+authoritative figure. The iOS rows were **re-measured on a macOS host on
+2026-09-18** (Xcode 26.2 / 17C52, `frust build ios --release` — a signed
+`Release`/`iphoneos` build with the app's `lean` feature on — the route
+`app_size.sh`'s iOS half names), replacing the 2026-09-06 11,908 KB / 12,103,152 B
+with the rows below; the iOS column has no `db`-off axis because `frust build
+ios` has no `--no-default-features` knob either.
 
 | Axis | Frust, `db` on (default) | Frust, `db` off (`--no-default-features --features lean`) | Flutter (2026-09-05) |
 |---|---|---|---|
@@ -687,8 +691,8 @@ dated — **not re-measured this pass (no macOS host available)**.
 | Android arm64-v8a split APK | **8.57 MiB** (8,981,843 B) | **6.63 MiB** (6,953,291 B) | 17.45 MiB (18,295,458 B) |
 | in-APK `lib/arm64-v8a/libfrustbench.so` | 8.43 MiB (8,837,768 B) | 6.49 MiB (6,809,216 B) | 16.55 MiB (engine + app) |
 | on-disk arm64 `.so` (stripped) | 8.43 MiB (8,837,776 B) | 6.49 MiB (6,809,224 B) | n/a |
-| iOS release `.app` (`du -sk`), 2026-09-06 | 11.63 MiB (11,908 KB) | not built | 16.64 MiB |
-| iOS `Runner` binary, 2026-09-06 | 11.54 MiB (12,103,152 B) | not built | n/a |
+| iOS release `.app` (`du -sk`), 2026-09-18 | **11.44 MiB** (11,716 KB) | not built | 16.64 MiB |
+| iOS `Runner` binary, 2026-09-18 | **11.35 MiB** (11,903,616 B) | not built | n/a |
 
 **Per-lever contributions**, each measured on the lean arm64 release `.so` of
 its own base by the card that landed it — quoted as measured, never summed
@@ -696,15 +700,15 @@ into a total; the totals above come only from this pass's re-measurement:
 
 | Lever | Base → after (B) | Δ (B) | Note |
 |---|---|---|---|
-| Material Roboto Flex wght-only instance | 9,471,648 → 7,962,896 | −1,508,752 | font file 1,684,624 → 175,900 B; render parity device-verified 2026-09-18 (see the device-legs note below) |
+| Material Roboto Flex wght-only instance | 9,471,648 → 7,962,896 | −1,508,752 | font file 1,684,624 → 175,900 B. Render parity is **not device-verified** on either platform: the 2026-09-18 device legs below used material3-demo's landing screen, which shapes in the platform's system UI face and never requests Roboto Flex, so neither leg could test the font (a wght-only instance at default axis values rendering identically remains plausible from the instancing itself; it is unverified on a device). **iOS-relevant**: the face is linked into the Mach-O on iOS too (found verbatim in `__TEXT` in both trees' `frust_bench` binaries); it accounts for 1,508,724 B of that section's `__TEXT.__const` drop of 1,515,120 B (2,478,804 → 963,684) across the same two trees |
 | shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
 | Glyph italics | measured-keep | 0 | no italic subset landed |
-| `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B; `ANDROID_RELA` confirmed on the shipped `.so` and the artifact run on-device 2026-09-18 (see below) |
-| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below |
-| `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | |
+| `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B; `ANDROID_RELA` confirmed on the shipped `.so` and the artifact run on-device 2026-09-18 (see below). **Android-only**: `.cargo/config.toml` scopes both flags to the four `*-linux-android*` targets, so no iOS artifact is affected |
+| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below. **iOS-relevant**: `[profile.release.package.*]` is not target-scoped, so the cold set applies to `aarch64-apple-ios` as well — with a second-order cost there, see the iOS-delta note below |
+| `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | **iOS-relevant** (a workspace dependency, not target-scoped); its iOS share is folded into the `__TEXT.__text` figure in the note below and was not isolated |
 | `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
 | `android_logger` regex feature off | dependency hygiene | ~0 | |
-| bundled-fonts opt-out feature | default on | 0 in these artifacts | an app opting out saves its own bundled font bytes |
+| bundled-fonts opt-out feature | default on | 0 in these artifacts | an app opting out saves its own bundled font bytes. Measured once on iOS, on `material3-demo` (not this bench app): `Runner` 18,383,328 → 18,019,504 B, −363,824 with `default-features = false` on its `frust-material` row — the two faces (175,900 + 181,388 B) plus their table padding, and neither sfnt is left in the binary |
 
 **Cold-set 5 % CPU bar — adjudicated 2026-09-17 (OnePlus 9), cleared.** The bar the
 `opt-level = "z"` row above is gated on was re-measured under control and passes on every
@@ -738,19 +742,29 @@ comparable to battery-run passes. Both are recorded in
 **Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
 the font and link-flag levers above.
 
-*Material font parity.* material3-demo's landing screen, built from the merged tree, matches
-the same screen built from `dev` @ `f8fcd07b` (the full pre-instance Roboto Flex) at mean
-|ΔLuma| **0.000002** outside the status bar — max 1, five differing pixels out of 2,462,400 —
-comfortably inside the < 1/255 bar. The comparison is sound because each build's own
-two-capture noise floor is exactly **0.000000**: that screen is static, so the only thing the
-cross-build number can contain is the font change. `frust_bench` S6 cannot be adjudicated this
+*Material font parity — measured, but this screen could not test the font.* material3-demo's
+landing screen, built from the merged tree, matches the same screen built from `dev` @
+`f8fcd07b` (the full pre-instance Roboto Flex) at mean |ΔLuma| **0.000002** outside the status
+bar — max 1, five differing pixels out of 2,462,400 — against a two-capture noise floor of
+exactly **0.000000** per build. That is a true measurement of the screen, but not of the font:
+the landing screen's text never asks for Roboto Flex. The app bar title, the navigation-bar
+labels and the list-row text are plain `text(..)` views with no `.family(..)`, so they take
+`TextStyle::default()`'s `FontFamily::SystemUi`, and `TextWidget::effective_style` copies only
+the colour from the theme, never the family — the whole screen shapes in the platform's system UI
+face, whatever `frust-material` bundles. (Components that read `theme.type_scale` — buttons,
+tabs, text-field labels — do get Roboto Flex.) So this leg has **no power** over the font lever,
+and was first recorded here as a pass in error. Nothing measured shows the instance rendering
+*differently* either; a wght-only instance at default axis values rendering identically remains
+plausible from the instancing itself, but a real device check needs a screen built from
+type-scale components, and none was run on either platform (see the iPhone SE leg below, which
+proved the same blind spot with negative controls). `frust_bench` S6 cannot be adjudicated this
 way and is reported as such rather than scored: it animates a width-driven relayout, so two
 captures of the *same* build already differ by mean 21.42 (merged) / 21.55 (baseline), and the
 cross-build figure, 13.91, is **below either build's own floor** — no font-attributable
 difference is detectable above animation phase. A still-frame luma bar is simply the wrong
 instrument for a live scenario. (The owed leg named a material3-demo "typography screen"; the
-app has no such screen — its sections are Do/Pick/View/Nav/Find — so its landing screen, which
-renders the Material type scale, was used instead.)
+app has no such screen — its sections are Do/Pick/View/Nav/Find — so its landing screen was
+used instead; as above, that screen does not render the Material type scale's family.)
 
 *Packed relocations + ICF.* `llvm-readelf -d` on the shipped lean arm64 release `.so`
 (6,813,384 B, in a 6,957,455 B APK) reports `ANDROID_RELA` at `0x60000011` with
@@ -765,6 +779,109 @@ come from this leg**: a release build compiles in no `perf-trace`, so `frust-per
 nothing (verified: 0 lines), and SurfaceFlinger's `--latency` ring returns no frame rows for
 the app's BLAST layer on Android 15, so present cadence could not be sampled either. This leg
 evidences load-and-run correctness, not performance.
+
+**Device legs — iPhone SE (2nd gen), 2026-09-18.** iOS 26.7 (23H24), Xcode 26.2 / 17C52,
+`devicectl` 506.6, Developer Mode on. **Transport was wireless throughout — no cable** (the
+handset was `unavailable` to CoreDevice for the first few minutes of the session and
+re-appeared on its own once a tunnel was acquired), and every capture's status bar carries the
+charging glyph, so the device stayed on power: PROTOCOL §3's charger-off control is not met
+here either. Brightness, thermal and radio state remain uncontrolled — no iOS CLI exposes them.
+
+*A screenshot path on a physical iPhone now exists.* `devicectl` still has no screenshot
+subcommand and libimobiledevice's `screenshotr` is refused on iOS 17+ ("Invalid service"), so
+this leg drove `XCUIScreen.main.screenshot()` from a host-app-less XCUITest bundle built
+outside the repository, signed under the existing team's development profile, and pulled the
+PNGs out of the result bundle with `xcrun xcresulttool export attachments` — 750 × 1334, 8-bit
+RGB, one per capture. Comparisons crop the top 40 px (the 20 pt status bar) and score BT.709
+integer luma over the remaining 970,500 px. This supersedes the "no iOS screenshot CLI" clause
+in the 2026-09-06 pass's deviations for future passes; that pass had no such gate.
+
+*Capture protocol: uninstall before every install.* An in-place `devicectl device install app`
+over an existing install leaves the previous build's glyph rasterisation in effect. Two capture
+sets taken that way differ from clean-install captures by mean |ΔLuma| **0.48**, confined to
+the text rows, with ink-run boundaries agreeing to ±1 px — the same face rasterised differently,
+and enough on its own to swamp a < 1/255 bar. Only clean-install captures are reported below.
+
+*Material font parity — bar met, but the screen has no power to test it.* material3-demo's
+landing screen (the app has no "typography screen"; its sections are Do/Pick/View/Nav/Find —
+the same substitution the OnePlus 9 leg made) is **pixel-identical** between the merged tree
+and `dev` @ `f8fcd07b`: mean |ΔLuma| **0.000000**, max 0, 0 differing pixels of 970,500. Both
+floors are 0.000000 too — two captures of one running process, and two independent clean
+installs of the same build (byte-identical PNGs). But that same screen is *also* pixel-identical
+when `frust-material` is built `default-features = false` (no font bytes linked at all) and when
+its bundled Roboto Flex is byte-replaced by Space Mono (found byte-for-byte in that build's
+`Runner`, with Roboto Flex absent). The reason is the one given for the OnePlus 9 leg above:
+Roboto Flex *is* registered — `frust_material::install()` runs before the shell's
+construction-time font drain, and a per-frame drain follows — but this screen never asks for it.
+Its text is plain `text(..)` with the default `FontFamily::SystemUi`, and the themed text path
+copies only the colour, so every build shapes in the system UI face (San Francisco on iOS)
+through frust's own parley/fontique stack. The < 1/255 result is therefore recorded as **an
+instrument with no power**, not as evidence that the instanced face renders identically to the
+full one. (Supporting observation only: the handset carries no Roboto family — 86 CoreText
+families, and CoreText resolves `"Roboto Flex"` to Helvetica — but frust does not shape through
+CoreText, so that lookup is not the mechanism.) A device check of the font lever needs a screen
+built from type-scale components (buttons, tabs, text-field labels); none was run.
+
+*bundled-fonts opt-out on iOS.* The `default-features = false` build (temporary manifest patch,
+reverted; `Runner` 18,383,328 → 18,019,504 B, with neither sfnt left in the binary) launches and
+renders the whole screen with **no missing glyphs and no `.notdef` boxes**, in the system UI
+face. That face is not a fallback here: the bundled, fonts-off and Space-Mono builds all render
+this screen in San Francisco, which is exactly why the screen cannot test the bundled font. What
+the leg does show is that turning `bundled-fonts` off leaves nothing on this screen unrendered.
+
+*S6 (text-heavy) after the `harfrust` 0.10 → 0.12 / `parley` 0.11.0 → 0.11.1 move.* One full
+PROTOCOL §4 block from the merged tree (`--profile`, `FRUST_TRACE_RAW=1`, 12 × 30 s, first 2
+discarded, 18,201 frames) against this device's recorded 2026-09-06 S6 (18,505 frames). Its raw
+logs were kept outside the repository and are **not** committed under `raw/iphone_se/`. On the
+per-frame comparison row — `total − acquire` — the median is lower: p50 5.57 → 5.45 ms
+(−2.2 %), with the two per-run p50 bands not overlapping (recorded 5.55–5.60, new 5.43–5.47).
+p95 lands inside the recorded spread (6.28 → 6.32 ms; bands 6.21–6.32 vs 6.25–6.36), the 60 Hz
+miss rate on the work row is 0.00 % in both, GPU pass time is unchanged (p50/p95 1.64/1.86 →
+1.65/1.86 ms), and the shaping-side pass costs are flat — layout p50 0.16 → 0.16 ms, paint
+0.25 → 0.24 ms — while rebuild p50 rose 0.07 → 0.10 ms. **The tail is worse and unexplained**:
+p99 6.64 → 7.07 ms (+6.5 %), worst 13.80 → 14.52 ms, and frames over 8.33 ms 12 → 30. The block
+also crosses an OS change (26.6.1 → 26.7), a different transport and twelve days of unrelated
+tree movement, and those confounds could hide a regression as easily as they could produce the
+lower median. What this block supports is **no median regression and flat layout/paint p50**
+after the shaper move — not a gain, and not a clean tail.
+
+**iOS delta, and where it went — 2026-09-18.** The move from the 2026-09-06 iOS rows
+(11,908 KB / 12,103,152 B) is not attributable to the app-size levers: twelve days of
+unrelated work sit between those rows and these. So the same signed `Release`/`iphoneos`
+build was made twice on one host minutes apart, same Xcode and same pinned rustc, once from
+`dev` @ `f8fcd07b` — the last `dev` commit before the size-lever commits, and the same baseline
+the font-parity legs use — and once from the merged tree (that window also carries a few
+unrelated commits): `.app` 12,008 → 11,716 KB, `Runner`
+**12,203,888 → 11,903,616 B (−300,272 B, −2.46 %)**. That net is far smaller than the levers
+themselves, and the Mach-O says why (`otool -l` + `size -m`):
+
+| Segment / section | `f8fcd07b` | merged | Δ (B) |
+|---|---|---|---|
+| `__TEXT` | 9,469,952 | 7,094,272 | **−2,375,680** |
+| — `__TEXT.__const` | 2,478,804 | 963,684 | −1,515,120 |
+| — `__TEXT.__text` | 6,626,664 | 5,775,428 | −851,236 |
+| `__DATA_CONST` | 294,912 | 311,296 | +16,384 |
+| `__LINKEDIT` | 2,389,872 | 4,448,896 | **+2,059,024** |
+| file total | 12,203,888 | 11,903,616 | −300,272 |
+
+The levers did land — `__const` falls by almost exactly the font instance (1,684,624 →
+175,900 B, both blobs located verbatim in their binaries) and `__text` by 851,236 B — but
+**87 % of that is given back by `__LINKEDIT`**, which here is symbol material: the symbol
+string table 1,589,592 → 2,821,216 B (+1,231,624), the nlist table 20,696 → 33,778 symbols
+(+209,312 B) and the exports trie 317,576 → 927,960 B (+610,384). **The iOS `Runner` is not
+stripped.** Xcode links the Rust `staticlib` into it and `xcodebuild build` runs no strip
+phase, so `[profile.release]`'s `strip = "symbols"` governs cargo's own links and never
+reaches this artifact. Stripping copies of both binaries (`xcrun strip -x -S`, scratch copies —
+the measured artifacts were not modified) gives 10,894,880 → 10,235,120 B, **−659,760 B
+(−6.06 %)**, which is what a stripped/archived artifact would show. The symbol growth tracks
+the `opt-level = "z"` cold set: the largest per-crate symbol-count increases are `wgpu_core`
++554, `naga` +354, `tokio` +241, `wgpu_types` +120, `image` +60 and `png` +47 — cold-set
+members whose functions survive as distinct symbols under `z`. That is *consistent with* the
+cold set, not proven by it; no per-lever iOS isolation build was made.
+
+**Attribution stays Android-only.** `size_attribute.py` reads ELF (`llvm-readelf` sections,
+`llvm-nm` symbols) and does not parse Mach-O, so the iOS split above comes from
+`otool -l`/`size -m` and carries no per-crate byte attribution.
 
 **Size attribution (re-run, de-duplicated).** `size_attribute.py --nm-dir
 <ndk bin>` on this pass's unstripped lean arm64 `.so` (15,728,352 B
