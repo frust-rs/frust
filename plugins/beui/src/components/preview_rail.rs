@@ -74,7 +74,7 @@ use frust::{ChildKey, FrameTime, Theme};
 use crate::motion::Ramp;
 use crate::press::presses;
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 /// A tick's full length, in logical px (`w-12` / `h-12`).
@@ -239,16 +239,13 @@ fn resolve_colors(theme: Option<&Theme>) -> RailColors {
     }
 }
 
-/// The card title style (`font-medium`).
+/// The card title style (`font-medium`), in the theme's `label_large` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_BASE as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
 /// One retained entry.
@@ -1240,5 +1237,51 @@ mod tests {
         assert_eq!(w.entries[1].scale, 0.68);
         assert!(rec.rrects.is_empty(), "a highlight is not a card");
         assert_eq!(w.displayed(), None);
+    }
+
+    // ---- Typeface: the card title follows the live theme ---------------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap_on,
+    };
+
+    /// A rail whose previews are glyph-free boxes, with tick 2's card pinned
+    /// open by a press, so the card's title is the one painted run.
+    fn pinned_probe() -> Probe<PreviewRailView<()>, impl FnMut(&mut ()) -> PreviewRailView<()>> {
+        let logic = |_: &mut ()| {
+            let preview = || frust::SizedBox::<()>(Some(80.0), Some(40.0));
+            preview_rail::<(), _>(
+                vec![
+                    preview_rail_item("Intro", preview()),
+                    preview_rail_item("Install", preview()),
+                    preview_rail_item("Usage", preview()),
+                ],
+                0,
+                |_: &mut (), _: usize| {},
+            )
+        };
+        let mut probe = Probe::new(logic, WINDOW, crate::theme());
+        probe.frame();
+        probe.event(&pointer(PointerPhase::Down, vertical_target(2)));
+        probe.event(&pointer(PointerPhase::Up, vertical_target(2)));
+        probe
+    }
+
+    #[test]
+    fn the_card_title_paints_in_geist_under_the_beui_theme() {
+        assert_control("the card title", WINDOW);
+        let faces = pinned_probe().frame();
+        assert_eq!(faces.len(), 1, "exactly the pinned card's title paints");
+        assert_all(
+            "the card title",
+            "under the beUI theme",
+            &faces,
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn the_card_title_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on("the card title", &mut pinned_probe());
     }
 }
