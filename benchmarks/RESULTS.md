@@ -713,8 +713,11 @@ scenario. Two `--profile` APKs differing only in the cold set (arm64 `.so` 9,134
 block's own first 2 runs discarded — on a OnePlus 9 over USB adb with airplane mode on, refresh
 pinned to 120 Hz and brightness fixed. That order spreads session drift across both variants
 rather than cancelling it (an ABBA order would cancel it outright), and the figures below are
-the **uncorrected** ones — the conservative choice, since subtracting the measured drift moves
-every one toward zero. Cost-sum p50/p95 (cold set vs none, mean of each variant's two blocks):
+the **uncorrected** ones. That is still the conservative choice: the measured B1→B2 drift is
+positive in every scenario, so correcting for it shrinks exactly the deltas that could threaten
+the bar (S5 +3.4 → +2.9 %, S4 +1.0 → +0.9 %). It moves the two negative deltas the other way —
+S1 −1.0 → −2.0 %, S6 −0.3 → −0.3 % — which costs the cold set nothing, since a negative delta is
+the cold set running faster. Cost-sum p50/p95 (cold set vs none, mean of each variant's two blocks):
 S1 −1.0 %/+0.5 %, S4 +1.0 %/−0.4 %, S5 +3.4 %/+3.3 %, S6 −0.3 %/+0.0 %. CPU-work phases
 (rebuild+layout+paint+encode) p50: −0.3 %, −3.0 %, −0.1 %, +0.8 %. S1 `gpu_main` 6.31 ms both
 variants (+0.01 %); all sixteen blocks held ~120 fps. S5 is the one real signal — both cold-set
@@ -754,8 +757,9 @@ renders the Material type scale, was used instead.)
 `ANDROID_RELASZ` 42,104 B, and `.rela.dyn` carries section type `ANDROID_RELA` — the packed
 format, against the 310,680 B unpacked figure in the table above — with `BIND_NOW` set. The
 APK installs, launches and sustains a full S1 block (12 × 30 s) with **zero crashes and zero
-process-liveness failures**, mean TOTAL PSS 116.3 MB, and a launch screencap carrying 238
-distinct luma levels with 97.01 % of pixels above 8/255 — real content, so `--icf=all` has not
+process-liveness failures**, mean TOTAL PSS 113.6 MiB (`dumpsys meminfo` reports KiB; the
+12-run mean is 116,328.5 KiB), and a launch screencap carrying 238 distinct luma levels with
+97.01 % of pixels above 8/255 outside the status bar — real content, so `--icf=all` has not
 produced the blank-surface failure its accepted risk class would imply. **No frame percentiles
 come from this leg**: a release build compiles in no `perf-trace`, so `frust-perf raw` emits
 nothing (verified: 0 lines), and SurfaceFlinger's `--latency` ring returns no frame rows for

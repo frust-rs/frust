@@ -5911,8 +5911,11 @@ block's own first 2 runs discarded — which spreads any session drift across bo
 instead of loading it onto one. It does not cancel drift outright: that order leaves the B
 mean at block-position 2 and the V mean at position 3, so a monotone drift biases the raw
 difference by one block-interval (an ABBA order would have cancelled it). The deltas published
-here are the **uncorrected** ones, which is the conservative choice — subtracting the measured
-drift moves every figure toward zero (e.g. S5 +3.4% → +2.9%). Cost-sum p50/p95 (V vs B, mean
+here are the **uncorrected** ones, which is still the conservative choice: the measured B1→B2
+drift is positive in every scenario, so correcting for it shrinks exactly the figures that could
+threaten the bar (S5 +3.4% → +2.9%, S4 +1.0% → +0.9%). It pushes the two negative deltas further
+from zero instead (S1 −1.0% → −2.0%, S6 −0.3% → −0.3%), which costs the cold set nothing — a
+negative delta is the cold set running faster. Cost-sum p50/p95 (V vs B, mean
 of each variant's two blocks): S1 −1.0%/+0.5%, S4 +1.0%/−0.4%, S5 +3.4%/+3.3%, S6 −0.3%/+0.0%.
 The phases a CPU opt-level can actually move (rebuild+layout+paint+encode) are flat everywhere
 — −0.3% (S1), −3.0% (S4, whose phase sum is only 0.20 ms, so its percentages are the
