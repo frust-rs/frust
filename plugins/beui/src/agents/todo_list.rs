@@ -99,7 +99,7 @@ use kurbo::{Arc, Vec2};
 use crate::motion::{Presence, Ramp};
 use crate::press::{Lane, inside, presses};
 use crate::style::{self, scale_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_SWAP};
 use crate::tokens::{BEUI_LIGHT, BeuiPalette, sans_family};
 
@@ -449,7 +449,18 @@ impl TodoColors {
     }
 }
 
-/// A row's own text style: `text-sm leading-5`, regular weight.
+/// The type-scale role a row's title and detail (and the empty line) take
+/// their family from at layout.
+const ROW_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
+/// The type-scale role the header's title takes its family from at layout.
+const HEADER_ROLE: ThemeTextType = ThemeTextType::TitleSmall;
+
+/// The type-scale role the completion count takes its family from at layout.
+const COUNT_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
+/// A row's own text style: `text-sm leading-5`, regular weight. The family
+/// here is the unthemed base; `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -458,7 +469,8 @@ fn row_style() -> TextStyle {
     }
 }
 
-/// The header's title style: `text-sm font-medium`.
+/// The header's title style: `text-sm font-medium`. The family here is the
+/// unthemed base; `layout` shapes in [`HEADER_ROLE`]'s family.
 fn header_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -468,7 +480,8 @@ fn header_style() -> TextStyle {
     }
 }
 
-/// The count's style: `text-xs font-medium tabular-nums`.
+/// The count's style: `text-xs font-medium tabular-nums`. The family here is
+/// the unthemed base; `layout` shapes in [`COUNT_ROLE`]'s family.
 fn count_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -943,21 +956,22 @@ impl Widget for TodoListWidget {
 
         let header_style = header_style();
         let count_style = count_style();
-        self.header.layout(ctx, &header_style);
-        self.count.layout(ctx, &count_style);
-        self.previous_count.layout(ctx, &count_style);
-        self.total.layout(ctx, &count_style);
+        self.header.layout_themed(ctx, &header_style, HEADER_ROLE);
+        self.count.layout_themed(ctx, &count_style, COUNT_ROLE);
+        self.previous_count
+            .layout_themed(ctx, &count_style, COUNT_ROLE);
+        self.total.layout_themed(ctx, &count_style, COUNT_ROLE);
 
         let row_style = row_style();
         let inner_width = (width - TODO_LIST_PADDING * 2.0 - TODO_ROW_PADDING_X * 2.0).max(0.0);
         let mut content = 0.0;
         for row in &mut self.rows {
             let detail_width = match &mut row.detail {
-                Some(detail) => detail.layout(ctx, &row_style).width + TODO_GAP,
+                Some(detail) => detail.layout_themed(ctx, &row_style, ROW_ROLE).width + TODO_GAP,
                 None => 0.0,
             };
             let title_max = (inner_width - TODO_MARK_SIZE - TODO_GAP - detail_width).max(0.0);
-            let title = row.title.layout(ctx, &row_style);
+            let title = row.title.layout_themed(ctx, &row_style, ROW_ROLE);
             // `truncate`: the run is shaped on one line and clipped to the room
             // left over, never wrapped — the framework's shaper takes no wrap
             // width through the catalog's cached-run seam.
@@ -969,7 +983,7 @@ impl Widget for TodoListWidget {
             content += natural * row.shown.clamp(0.0, 1.0);
         }
         if self.rows.is_empty() {
-            self.empty.layout(ctx, &row_style);
+            self.empty.layout_themed(ctx, &row_style, ROW_ROLE);
             content = self.empty.size().height + TODO_ROW_PADDING_Y * 2.0;
         }
         self.content_height = content;
@@ -2206,5 +2220,33 @@ mod tests {
                 ms
             );
         }
+    }
+
+    // ---- Typeface: header, count and rows follow the live theme --------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The three-task plan: header, count, total, row titles and a detail.
+    fn plan_probe(_: &mut ()) -> TodoListView<()> {
+        todo_list::<()>(plan())
+    }
+
+    /// An empty list: header, count, total and the empty line.
+    fn empty_probe(_: &mut ()) -> TodoListView<()> {
+        todo_list::<()>(Vec::new())
+    }
+
+    #[test]
+    fn list_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the plan", plan_probe, BOX);
+        assert_paints_only_in_geist("the empty list", empty_probe, BOX);
+    }
+
+    #[test]
+    fn list_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the plan", plan_probe, BOX);
+        assert_follows_a_live_family_swap("the empty list", empty_probe, BOX);
     }
 }

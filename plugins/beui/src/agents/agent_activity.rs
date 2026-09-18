@@ -85,7 +85,7 @@ use crate::agents::loading_states::{LoadingStatesVariant, loading_states};
 use crate::motion::{Presence, PresencePhase, Ramp, Stagger};
 use crate::press::{Lane, presses};
 use crate::style::{self, scale_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 use crate::tokens::{BEUI_LIGHT, BeuiPalette, sans_family};
 
@@ -592,7 +592,15 @@ impl ActivityColors {
     }
 }
 
-/// A row's own text style: `text-sm leading-5`.
+/// The type-scale role a row's label and meta take their family from at
+/// layout.
+const ROW_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
+/// The type-scale role the summary line takes its family from at layout.
+const SUMMARY_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// A row's own text style: `text-sm leading-5`. The family here is the
+/// unthemed base; `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -601,7 +609,8 @@ fn row_style() -> TextStyle {
     }
 }
 
-/// The summary row's style: `text-sm font-medium`.
+/// The summary row's style: `text-sm font-medium`. The family here is the
+/// unthemed base; `layout` shapes in [`SUMMARY_ROLE`]'s family.
 fn summary_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -931,15 +940,16 @@ impl Widget for AgentActivityWidget {
             &BoxConstraints::new(Size::ZERO, Size::new(width, ACTIVITY_HEADER_HEIGHT)),
         );
         self.working.set_origin(Point::ORIGIN);
-        self.summary.layout(ctx, &summary_style());
+        self.summary
+            .layout_themed(ctx, &summary_style(), SUMMARY_ROLE);
 
         let row_style = row_style();
         let mut content = ACTIVITY_LIST_PADDING_Y * 2.0;
         for row in &mut self.rows {
             if let Some(meta) = &mut row.meta {
-                meta.layout(ctx, &row_style);
+                meta.layout_themed(ctx, &row_style, ROW_ROLE);
             }
-            let label = row.label.layout(ctx, &row_style);
+            let label = row.label.layout_themed(ctx, &row_style, ROW_ROLE);
             row.height = (label.height + ACTIVITY_ROW_PADDING_Y * 2.0).max(ACTIVITY_ROW_MIN_HEIGHT);
             content += (row.height + ACTIVITY_ROW_GAP) * row.shown.clamp(0.0, 1.0);
         }
@@ -2069,5 +2079,36 @@ mod tests {
                 ms
             );
         }
+    }
+
+    // ---- Typeface: rows, summary and working line follow the live theme -----
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A working stream: the composed shimmer line over the expanded rows.
+    fn working_probe(_: &mut ()) -> AgentActivityView<()> {
+        agent_activity::<()>(log())
+    }
+
+    /// A completed stream held open: the summary line over the rows.
+    fn completed_probe(_: &mut ()) -> AgentActivityView<()> {
+        agent_activity::<()>(log())
+            .status(AgentActivityStatus::Complete)
+            .duration(4.0)
+            .open(true)
+    }
+
+    #[test]
+    fn stream_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the working stream", working_probe, COLUMN);
+        assert_paints_only_in_geist("the completed stream", completed_probe, COLUMN);
+    }
+
+    #[test]
+    fn stream_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the working stream", working_probe, COLUMN);
+        assert_follows_a_live_family_swap("the completed stream", completed_probe, COLUMN);
     }
 }

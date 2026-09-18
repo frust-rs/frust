@@ -112,7 +112,7 @@ use crate::agents::code_block::{
 use crate::motion::Ramp;
 use crate::press::{Lane, draw_focus_ring, inside, is_activation_key, presses};
 use crate::style::{self, with_alpha};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL};
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -344,6 +344,20 @@ impl WrappedRun {
         size
     }
 
+    /// [`WrappedRun::layout`], with the family taken from the live theme's
+    /// `role` ([`themed_style`]). The cache compares the resolved style, so a
+    /// theme swap that changes the family reshapes the run.
+    pub(crate) fn layout_themed(
+        &mut self,
+        ctx: &mut LayoutCtx,
+        style: &TextStyle,
+        role: ThemeTextType,
+        max_width: f64,
+    ) -> Size {
+        let style = themed_style(style.clone(), role, Theme::from_layout_ctx(ctx));
+        self.layout(ctx, &style, max_width)
+    }
+
     /// Whether the last shaped layout overflowed its `max_width` — an
     /// unbreakable run with no space to wrap on. A caller that clips this run
     /// (the head column, the parameter panel) should paint a visible
@@ -369,7 +383,31 @@ impl WrappedRun {
     }
 }
 
-/// The prose style a description and a parameter label are shaped with.
+/// The type-scale role the card's title (and its truncation cue) takes its
+/// family from at layout.
+const TITLE_ROLE: ThemeTextType = ThemeTextType::TitleSmall;
+
+/// The type-scale role a status chip takes its family from at layout — shared
+/// with [`approval_card`](super::approval_card)'s chip.
+pub(crate) const CHIP_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
+/// The type-scale role a `text-xs` control label (a decision button,
+/// *View details*) takes its family from at layout — shared with
+/// [`approval_card`](super::approval_card)'s buttons.
+pub(crate) const CONTROL_ROLE: ThemeTextType = ThemeTextType::LabelMedium;
+
+/// The type-scale role a `text-sm` description takes its family from at
+/// layout — shared with [`approval_card`](super::approval_card)'s description
+/// and outcome.
+pub(crate) const PROSE_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
+/// The type-scale role a parameter label (and its truncation cue) takes its
+/// family from at layout.
+const PARAM_LABEL_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The prose style a description and a parameter label are shaped with. The
+/// family is the unthemed base; a `layout_themed` call replaces it with its
+/// role's.
 pub(crate) fn prose_style(size: f64) -> TextStyle {
     TextStyle {
         family: crate::tokens::sans_family(),
@@ -377,7 +415,8 @@ pub(crate) fn prose_style(size: f64) -> TextStyle {
     }
 }
 
-/// The style a title or a control label is shaped with.
+/// The style a title or a control label is shaped with. The family is the
+/// unthemed base; a `layout_themed` call replaces it with its role's.
 pub(crate) fn strong_style(size: f64) -> TextStyle {
     TextStyle {
         family: crate::tokens::sans_family(),
@@ -1105,25 +1144,33 @@ impl Widget for ToolApprovalWidget {
         // column: the head is bounded by what is left, so it cannot be laid
         // into the status indicator's space in the first place.
         self.chip
-            .layout(ctx, &strong_style(TOOL_APPROVAL_CHIP_SIZE));
+            .layout_themed(ctx, &strong_style(TOOL_APPROVAL_CHIP_SIZE), CHIP_ROLE);
         let head_column = self.head_column_width();
         let title_style = strong_style(TOOL_APPROVAL_TITLE_SIZE);
-        let title_size = self.title.layout(ctx, &title_style, head_column);
+        let title_size = self
+            .title
+            .layout_themed(ctx, &title_style, TITLE_ROLE, head_column);
         self.title_truncated = self.title.overflowed();
+        // The tool name and the parameter values keep the mono family
+        // `code_style` names explicitly.
         let tool_size = self
             .tool
             .layout(ctx, &code_style(CODE_TEXT_SIZE), head_column);
         self.tool_truncated = self.tool.overflowed();
         if self.title_truncated || self.tool_truncated {
-            self.head_marker.layout(ctx, &title_style);
+            self.head_marker
+                .layout_themed(ctx, &title_style, TITLE_ROLE);
         }
         self.title_height = (title_size.height + tool_size.height + style::spacing(0.5))
             .max(TOOL_APPROVAL_BADGE_BOX);
         self.details_label
-            .layout(ctx, &strong_style(style::TEXT_XS));
+            .layout_themed(ctx, &strong_style(style::TEXT_XS), CONTROL_ROLE);
 
         self.description_height = match &mut self.description {
-            Some(run) => run.layout(ctx, &prose_style(style::TEXT_SM), column).height,
+            Some(run) => {
+                run.layout_themed(ctx, &prose_style(style::TEXT_SM), PROSE_ROLE, column)
+                    .height
+            }
             None => 0.0,
         };
 
@@ -1135,12 +1182,16 @@ impl Widget for ToolApprovalWidget {
         let label_style = prose_style(style::TEXT_XS);
         let value_style = code_style(style::TEXT_XS);
         for row in &mut self.params {
-            let label = row
-                .label
-                .layout(ctx, &label_style, TOOL_APPROVAL_LABEL_COLUMN);
+            let label = row.label.layout_themed(
+                ctx,
+                &label_style,
+                PARAM_LABEL_ROLE,
+                TOOL_APPROVAL_LABEL_COLUMN,
+            );
             row.label_truncated = row.label.overflowed();
             if row.label_truncated {
-                row.label_marker.layout(ctx, &label_style);
+                row.label_marker
+                    .layout_themed(ctx, &label_style, PARAM_LABEL_ROLE);
             }
             let value = row.value.layout(ctx, &value_style, value_width);
             row.truncated = row.value.overflowed();
@@ -1151,8 +1202,9 @@ impl Widget for ToolApprovalWidget {
         }
         self.params_height = self.params_natural();
 
+        let button_style = strong_style(style::TEXT_XS);
         for (_, label) in &mut self.buttons {
-            label.layout(ctx, &strong_style(style::TEXT_XS));
+            label.layout_themed(ctx, &button_style, CONTROL_ROLE);
         }
 
         let mut body = self.title_height;
@@ -2497,5 +2549,52 @@ mod tests {
         let w = build(&view);
         assert!(!w.title_text.contains('\u{0007}'));
         assert!(!w.tool_text.contains('\u{202E}'));
+    }
+
+    // ---- Typeface: the sans runs follow the live theme, the code stays mono --
+
+    use crate::agents::code_block::mixed_face_probe::{
+        assert_mixed_follows_a_live_family_swap, assert_paints_geist_beside_mono,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(420.0, 900.0);
+
+    /// The explicit mono runs [`probe_view`] paints: the tool name and the two
+    /// parameter values.
+    const PROBE_MONO_RUNS: usize = 3;
+
+    /// A pending card, details open, carrying every themed run: title, chip,
+    /// description, *View details*, a parameter label, a label long enough to
+    /// paint its truncation cue, and the decision buttons.
+    fn probe_view(_: &mut ()) -> ToolApprovalView<()> {
+        tool_approval::<()>("shell.exec")
+            .title("Allow this tool to run?")
+            .description("The agent wants to rebuild.")
+            .parameters(vec![
+                tool_approval_parameter("command", "make build"),
+                tool_approval_parameter("working_directory_path", "/srv/app"),
+            ])
+            .status(ToolApprovalStatus::Pending)
+            .open(true)
+    }
+
+    #[test]
+    fn the_card_text_paints_in_geist_beside_mono_values() {
+        assert_paints_geist_beside_mono(
+            "the tool approval card",
+            probe_view,
+            PROBE_WINDOW,
+            PROBE_MONO_RUNS,
+        );
+    }
+
+    #[test]
+    fn the_card_text_follows_a_live_theme_family_swap() {
+        assert_mixed_follows_a_live_family_swap(
+            "the tool approval card",
+            probe_view,
+            PROBE_WINDOW,
+            PROBE_MONO_RUNS,
+        );
     }
 }

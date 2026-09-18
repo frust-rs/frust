@@ -99,7 +99,7 @@ use kurbo::{Arc, Vec2};
 use crate::motion::{PointerTracker, Ramp};
 use crate::press::{Lane, presses};
 use crate::style::{self, scale_alpha, with_alpha};
-use crate::text::{Label, LabelRun};
+use crate::text::{Label, LabelRun, ThemeTextType};
 use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT, SPRING_PRESS};
 use crate::tokens::{BEUI_LIGHT, BeuiPalette, mono_family, sans_family};
 
@@ -495,7 +495,16 @@ impl ImageColors {
     }
 }
 
-/// The status line's style: `text-sm font-medium`.
+/// The type-scale role the status line and the retry label take their family
+/// from at layout.
+const STATUS_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the prompt caption takes its family from at layout.
+const PROMPT_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The status line's style: `text-sm font-medium`, shared by the retry label.
+/// The family here is the unthemed base; `layout` shapes in
+/// [`STATUS_ROLE`]'s family.
 fn status_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -505,7 +514,8 @@ fn status_style() -> TextStyle {
     }
 }
 
-/// The prompt caption's style: `text-xs text-muted-foreground`.
+/// The prompt caption's style: `text-xs text-muted-foreground`. The family
+/// here is the unthemed base; `layout` shapes in [`PROMPT_ROLE`]'s family.
 fn prompt_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -518,6 +528,7 @@ fn prompt_style(color: Color) -> TextStyle {
 /// The badge's style: `font-mono text-[10px] tabular-nums`.
 fn badge_style(color: Color) -> TextStyle {
     TextStyle {
+        // Explicit: `TypeScale` has no monospace role to take this from.
         family: mono_family(),
         size: IMAGE_BADGE_TEXT as f32,
         color,
@@ -932,13 +943,15 @@ impl Widget for ImageGenerationWidget {
 
         let mut height = slot_height;
         let status_style = status_style();
-        self.status_run.layout(ctx, &status_style);
-        self.previous_status_run.layout(ctx, &status_style);
+        self.status_run
+            .layout_themed(ctx, &status_style, STATUS_ROLE);
+        self.previous_status_run
+            .layout_themed(ctx, &status_style, STATUS_ROLE);
         if self.show_status {
             height += IMAGE_STATUS_GAP + self.status_run.size().height.max(IMAGE_STATUS_HEIGHT);
         }
         if let Some(prompt) = &mut self.prompt {
-            let measured = prompt.layout(ctx, &prompt_style(Color::BLACK));
+            let measured = prompt.layout_themed(ctx, &prompt_style(Color::BLACK), PROMPT_ROLE);
             height += if self.show_status {
                 IMAGE_PROMPT_GAP
             } else {
@@ -949,7 +962,7 @@ impl Widget for ImageGenerationWidget {
             resolution.layout(ctx, &badge_style(Color::BLACK));
         }
 
-        self.retry.layout(ctx, &status_style);
+        self.retry.layout_themed(ctx, &status_style, STATUS_ROLE);
         self.retry_box = if self.offers_retry() {
             let button_width = self.retry.size().width
                 + IMAGE_RETRY_PADDING_X * 2.0
@@ -1744,5 +1757,55 @@ mod tests {
         let themed = ImageColors::resolve(Some(&theme));
         assert_eq!(themed.ink, theme.scheme().on_surface);
         assert_eq!(themed.danger, theme.scheme().error);
+    }
+
+    // ---- Typeface: status, prompt and retry follow the live theme -----------
+
+    use crate::agents::code_block::mixed_face_probe::{
+        assert_mixed_follows_a_live_family_swap, assert_paints_geist_beside_mono,
+    };
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The resolution badge, the one explicit mono run [`generating_probe`]
+    /// paints.
+    const GENERATING_MONO_RUNS: usize = 1;
+
+    /// A running card with no media: the status line and the prompt caption
+    /// beside the mono resolution badge.
+    fn generating_probe(_: &mut ()) -> ImageGenerationView<()> {
+        image_generation::<()>().prompt("A lighthouse at dusk")
+    }
+
+    /// A failed card with a retry and no badge: the status line and the retry
+    /// label.
+    fn failed_probe(_: &mut ()) -> ImageGenerationView<()> {
+        image_generation::<()>()
+            .status(ImageGenerationStatus::Error)
+            .no_resolution()
+            .on_retry(|_: &mut ()| {})
+    }
+
+    #[test]
+    fn card_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_geist_beside_mono(
+            "the generating card",
+            generating_probe,
+            ROW,
+            GENERATING_MONO_RUNS,
+        );
+        assert_paints_only_in_geist("the failed card", failed_probe, ROW);
+    }
+
+    #[test]
+    fn card_text_follows_a_live_theme_family_swap() {
+        assert_mixed_follows_a_live_family_swap(
+            "the generating card",
+            generating_probe,
+            ROW,
+            GENERATING_MONO_RUNS,
+        );
+        assert_follows_a_live_family_swap("the failed card", failed_probe, ROW);
     }
 }

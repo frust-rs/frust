@@ -80,7 +80,7 @@ use frust::authoring::{
 use crate::motion::Ramp;
 use crate::press::Lane;
 use crate::style::{self, scale_alpha};
-use crate::text::Label;
+use crate::text::{Label, ThemeTextType};
 use crate::tokens::motion::SPRING_PRESS;
 use crate::tokens::{BEUI_LIGHT, BeuiPalette, sans_family};
 
@@ -189,7 +189,19 @@ impl MessagePaint {
     }
 }
 
+/// The type-scale role the name, timestamp and footer take their family from
+/// at layout.
+const META_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
+/// The type-scale role the avatar's initials take their family from at layout.
+const AVATAR_ROLE: ThemeTextType = ThemeTextType::LabelMedium;
+
+/// The type-scale role a marker's label takes its family from at layout.
+const MARKER_ROLE: ThemeTextType = ThemeTextType::LabelMedium;
+
 /// The metadata text style: `text-[11px] leading-none text-muted-foreground`.
+/// The family here is the unthemed base; `layout` shapes in [`META_ROLE`]'s
+/// family.
 fn meta_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -200,6 +212,8 @@ fn meta_style(color: Color) -> TextStyle {
 }
 
 /// The avatar's initials style: `text-xs font-medium text-muted-foreground`.
+/// The family here is the unthemed base; `layout` shapes in [`AVATAR_ROLE`]'s
+/// family.
 fn avatar_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -459,11 +473,20 @@ impl Widget for MessageWidget {
 
         // Shape the metadata first: the column's height is the sum of the rows
         // it actually carries.
-        let name = self.name.as_mut().map(|run| run.layout(ctx, &meta));
-        let timestamp = self.timestamp.as_mut().map(|run| run.layout(ctx, &meta));
-        let footer = self.footer.as_mut().map(|run| run.layout(ctx, &meta));
+        let name = self
+            .name
+            .as_mut()
+            .map(|run| run.layout_themed(ctx, &meta, META_ROLE));
+        let timestamp = self
+            .timestamp
+            .as_mut()
+            .map(|run| run.layout_themed(ctx, &meta, META_ROLE));
+        let footer = self
+            .footer
+            .as_mut()
+            .map(|run| run.layout_themed(ctx, &meta, META_ROLE));
         if let Some(avatar) = self.avatar.as_mut() {
-            avatar.layout(ctx, &avatar_style(paint.meta));
+            avatar.layout_themed(ctx, &avatar_style(paint.meta), AVATAR_ROLE);
         }
 
         let column_x = if self.from.is_mirrored() {
@@ -735,12 +758,13 @@ impl Widget for MessageMarkerWidget {
             0.0
         };
         let ink = MessagePaint::resolve(Theme::from_layout_ctx(ctx)).meta;
-        let text = self.label.layout(
+        let text = self.label.layout_themed(
             ctx,
             &TextStyle {
                 size: style::TEXT_XS as f32,
                 ..meta_style(ink)
             },
+            MARKER_ROLE,
         );
         let cap = row_width * MESSAGE_MARKER_MAX_WIDTH_FRACTION;
         let pill_width = (text.width + MESSAGE_MARKER_PADDING_X * 2.0).min(cap.max(0.0));
@@ -1049,5 +1073,41 @@ mod tests {
             "capped: {}",
             widget.pill_size().width
         );
+    }
+
+    // ---- Typeface: the row's metadata and the marker follow the theme -------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A received row carrying every run of its own — avatar, name, timestamp,
+    /// footer — over glyph-free content.
+    fn row_probe(_: &mut ()) -> MessageView<()> {
+        message::<(), _>(
+            MessageFrom::Assistant,
+            frust::SizedBox::<()>(Some(120.0), Some(24.0)),
+        )
+        .avatar("AI")
+        .name("Assistant")
+        .timestamp("14:02")
+        .footer("Edited")
+    }
+
+    /// A day divider.
+    fn marker_probe(_: &mut ()) -> MessageMarkerView {
+        message_marker("Today")
+    }
+
+    #[test]
+    fn row_and_marker_text_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the message row", row_probe, ROW);
+        assert_paints_only_in_geist("the marker", marker_probe, ROW);
+    }
+
+    #[test]
+    fn row_and_marker_text_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the message row", row_probe, ROW);
+        assert_follows_a_live_family_swap("the marker", marker_probe, ROW);
     }
 }

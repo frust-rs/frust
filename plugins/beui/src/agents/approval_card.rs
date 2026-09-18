@@ -129,12 +129,13 @@ use crate::agents::code_block::{
     code_palette, draw_check, draw_cross, draw_spinner, spinner_angle,
 };
 use crate::agents::tool_approval::{
-    TRUNCATION_MARKER, WrappedRun, consent_text, prose_style, strong_style,
+    CHIP_ROLE, CONTROL_ROLE, PROSE_ROLE, TRUNCATION_MARKER, WrappedRun, consent_text, prose_style,
+    strong_style,
 };
 use crate::motion::Ramp;
 use crate::press::{Lane, draw_focus_ring, inside, is_activation_key, presses};
 use crate::style::{self, with_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType};
 use crate::tokens::motion::SPRING_PANEL;
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -156,6 +157,11 @@ pub const APPROVAL_CARD_TITLE_SIZE: f64 = style::TEXT_BASE;
 
 /// The title's line height, in logical px (`leading-5`).
 pub const APPROVAL_CARD_TITLE_LINE: f64 = 20.0;
+
+/// The type-scale role the title (and its truncation cue) takes its family
+/// from at layout. The chip, the buttons and the prose share
+/// [`tool_approval`](super::tool_approval)'s roles.
+const TITLE_ROLE: ThemeTextType = ThemeTextType::TitleMedium;
 
 /// The status chip's type size, in logical px (`text-[11px]`).
 pub const APPROVAL_CARD_CHIP_SIZE: f64 = 11.0;
@@ -954,30 +960,34 @@ impl Widget for ApprovalCardWidget {
         // head column: the title is bounded by what is left, so it cannot be
         // laid into the status indicator's space in the first place.
         self.chip
-            .layout(ctx, &strong_style(APPROVAL_CARD_CHIP_SIZE));
+            .layout_themed(ctx, &strong_style(APPROVAL_CARD_CHIP_SIZE), CHIP_ROLE);
         let title_style = strong_style(APPROVAL_CARD_TITLE_SIZE);
+        let head_column = self.head_column_width();
         let title = self
             .title
-            .layout(ctx, &title_style, self.head_column_width());
+            .layout_themed(ctx, &title_style, TITLE_ROLE, head_column);
         self.title_truncated = self.title.overflowed();
         if self.title_truncated {
-            self.head_marker.layout(ctx, &title_style);
+            self.head_marker
+                .layout_themed(ctx, &title_style, TITLE_ROLE);
         }
         self.head_height = title
             .height
             .max(APPROVAL_CARD_TITLE_LINE)
             .max(APPROVAL_CARD_CHIP_HEIGHT);
+        let button_style = strong_style(style::TEXT_XS);
         for (_, label) in &mut self.buttons {
-            label.layout(ctx, &strong_style(style::TEXT_XS));
+            label.layout_themed(ctx, &button_style, CONTROL_ROLE);
         }
 
+        let prose = prose_style(style::TEXT_SM);
         self.description_height = match &mut self.description {
-            Some(run) => run.layout(ctx, &prose_style(style::TEXT_SM), column).height,
+            Some(run) => run.layout_themed(ctx, &prose, PROSE_ROLE, column).height,
             None => 0.0,
         };
         self.result_height = self
             .result
-            .layout(ctx, &prose_style(style::TEXT_SM), column)
+            .layout_themed(ctx, &prose, PROSE_ROLE, column)
             .height
             .max(APPROVAL_CARD_RESULT_HEIGHT);
 
@@ -2284,5 +2294,42 @@ mod tests {
         let (rec, needs_frame, _) = paint_at(&mut w, size, None, 50.0);
         assert!(needs_frame, "the spinner asks for its next tick");
         assert_eq!(rec.transforms.len(), 1, "one rotated spinner");
+    }
+
+    // ---- Typeface: the card's text follows the live theme -------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(420.0, 600.0);
+
+    /// A pending card over glyph-free content, so every painted run is the
+    /// card's own: title, chip, description and the decision buttons.
+    fn pending_probe(_: &mut ()) -> ApprovalCardView<()> {
+        approval_card::<()>()
+            .title("Apply these changes?")
+            .description("The agent wants to commit them.")
+            .content_keyed("changeset", frust::SizedBox::<()>(Some(40.0), Some(20.0)))
+    }
+
+    /// An answered card: title, chip and the outcome line.
+    fn answered_probe(_: &mut ()) -> ApprovalCardView<()> {
+        approval_card::<()>()
+            .title("Apply these changes?")
+            .status(ApprovalCardStatus::Approved)
+            .result("Approved at 14:02")
+    }
+
+    #[test]
+    fn card_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the pending card", pending_probe, PROBE_WINDOW);
+        assert_paints_only_in_geist("the answered card", answered_probe, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn card_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the pending card", pending_probe, PROBE_WINDOW);
+        assert_follows_a_live_family_swap("the answered card", answered_probe, PROBE_WINDOW);
     }
 }

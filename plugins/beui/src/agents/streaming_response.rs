@@ -78,8 +78,9 @@ use peniko::{Brush, Color};
 use crate::motion::Ramp;
 use crate::press::Lane;
 use crate::style::{self, scale_alpha};
+use crate::text::{ThemeTextType, themed_style};
+use crate::tokens::BEUI_LIGHT;
 use crate::tokens::motion::EASE_OUT;
-use crate::tokens::{BEUI_LIGHT, sans_family};
 
 /// How long one appended run takes to fade in, in ms — the port's own ramp,
 /// matching [`message_bubble`](super::message_bubble)'s content reveal.
@@ -260,14 +261,15 @@ impl StreamingResponseWidget {
         self.reveal.value()
     }
 
-    /// The body's shaping style.
+    /// The body's shaping style, in the theme's `body_medium` family. `layout`
+    /// keys the shaped run on it, so a theme swap that changes the family
+    /// reshapes the body.
     fn body_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
-        let family = theme.map_or_else(sans_family, |t| t.type_scale.body_medium.family.clone());
-        TextStyle {
-            family,
+        let style = TextStyle {
             line_height: frust::authoring::text::LineHeight::Absolute(STREAM_LINE_HEIGHT as f32),
             ..TextStyle::new(self.size, ink)
-        }
+        };
+        themed_style(style, ThemeTextType::BodyMedium, theme)
     }
 
     /// The body's ink: the explicit override, else the error role for a failed
@@ -893,5 +895,27 @@ mod tests {
         assert_eq!(flags, ChangeFlags::NONE);
         assert_eq!(widget.settled_glyphs(), settled);
         assert_eq!(widget.reveal_progress(), 1.0);
+    }
+
+    // ---- Typeface: the body follows the live theme ---------------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A body long enough to wrap in [`BOX`], so more than one line paints.
+    fn probe_view(_: &mut ()) -> StreamingResponseView {
+        streaming_response("The build passed. Two warnings remain in the checkout module.")
+            .status(StreamingResponseStatus::Complete)
+    }
+
+    #[test]
+    fn the_body_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the response body", probe_view, BOX);
+    }
+
+    #[test]
+    fn the_body_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the response body", probe_view, BOX);
     }
 }

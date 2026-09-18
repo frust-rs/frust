@@ -85,9 +85,9 @@ use peniko::{Brush, Color, ColorStop, Gradient};
 
 use crate::press::keyframes_at;
 use crate::style::{self, scale_alpha};
-use crate::text::paint_glyph_run;
+use crate::text::{ThemeTextType, paint_glyph_run, themed_style};
 use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT};
-use crate::tokens::{BEUI_LIGHT, mono_family, sans_family};
+use crate::tokens::{BEUI_LIGHT, mono_family};
 
 /// The dot row's per-dot edge, in logical px (`size-1`).
 pub const DOT_SIZE: f64 = 4.0;
@@ -514,21 +514,21 @@ impl LoadingStatesWidget {
         })
     }
 
-    /// The status run's style: `text-sm font-medium` in the catalog's sans
-    /// family, shaped in `ink`.
+    /// The status run's style: `text-sm font-medium` in the theme's
+    /// `body_medium` family, shaped in `ink`.
     fn text_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
-        let family = theme.map_or_else(sans_family, |t| t.type_scale.body_medium.family.clone());
-        TextStyle {
-            family,
+        let style = TextStyle {
             weight: FontWeight::MEDIUM,
             ..TextStyle::new(style::TEXT_SM as f32, ink)
-        }
+        };
+        themed_style(style, ThemeTextType::BodyMedium, theme)
     }
 
     /// The timer's style: `font-mono tabular-nums`, one alpha step dimmer than
     /// the label (`text-muted-foreground/70`).
     fn timer_style(&self, ink: Color) -> TextStyle {
         TextStyle {
+            // Explicit: `TypeScale` has no monospace role to take this from.
             family: mono_family(),
             ..TextStyle::new(style::TEXT_SM as f32, scale_alpha(ink, 0.7))
         }
@@ -1351,5 +1351,61 @@ mod tests {
         // A degenerate array falls through to the linear read.
         assert_eq!(eased_keyframes(&[7.0], 0.5, EASE_IN_OUT), 7.0);
         assert_eq!(eased_keyframes(&[], 0.5, EASE_IN_OUT), 0.0);
+    }
+
+    // ---- Typeface: the status text follows the live theme, the timer is mono -
+
+    use crate::agents::code_block::mixed_face_probe::{
+        assert_mixed_follows_a_live_family_swap, assert_paints_geist_beside_mono,
+    };
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The shimmering status line.
+    fn shimmer_probe(_: &mut ()) -> LoadingStatesView {
+        loading_states().label("Thinking")
+    }
+
+    /// The reasoning phrase beside its dot row.
+    fn reasoning_probe(_: &mut ()) -> LoadingStatesView {
+        loading_states()
+            .variant(LoadingStatesVariant::Reasoning)
+            .phrases(["Reading the diff", "Checking the tests"])
+    }
+
+    /// The progress verb beside the elapsed timer.
+    fn progress_probe(_: &mut ()) -> LoadingStatesView {
+        loading_states()
+            .variant(LoadingStatesVariant::Progress)
+            .label("Building")
+            .elapsed_seconds(12.0)
+    }
+
+    /// The elapsed timer, the one explicit mono run [`progress_probe`] paints.
+    const PROGRESS_MONO_RUNS: usize = 1;
+
+    #[test]
+    fn status_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the shimmer", shimmer_probe, BOX);
+        assert_paints_only_in_geist("the reasoning line", reasoning_probe, BOX);
+        assert_paints_geist_beside_mono(
+            "the progress row",
+            progress_probe,
+            BOX,
+            PROGRESS_MONO_RUNS,
+        );
+    }
+
+    #[test]
+    fn status_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the shimmer", shimmer_probe, BOX);
+        assert_follows_a_live_family_swap("the reasoning line", reasoning_probe, BOX);
+        assert_mixed_follows_a_live_family_swap(
+            "the progress row",
+            progress_probe,
+            BOX,
+            PROGRESS_MONO_RUNS,
+        );
     }
 }
