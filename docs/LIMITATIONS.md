@@ -5894,43 +5894,62 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `release-opt-level-z-bar-unadjudicated` — the cold-set opt-level "z" CPU bar is cleared, except for the focused-IME leg
 
+(The id still says "unadjudicated" because this file's header makes entry ids stable citation
+targets — `docs/DEVELOPMENT.md`'s Release-profile hardening and the root `Cargo.toml`'s
+cold-set block both cite it — so it is kept verbatim rather than renamed; the heading, not the
+id, carries the current state.)
+
 **Observed**: the ≤5% render-CPU bar gating the per-crate release `opt-level = "z"` cold set
 (17 named crates, hand-synced across the eight Android manifests — see
 [DEVELOPMENT.md](DEVELOPMENT.md)'s Release-profile hardening) was re-measured under control on
 2026-09-17 and **cleared on every scenario**. Method: OnePlus 9 (LE2115, Snapdragon 888 /
 Adreno 660, Android 15) over USB adb, airplane mode on, radios off, refresh pinned to 120 Hz,
-brightness fixed; two `--profile` APKs differing only in the cold set (with it, arm64 `.so`
-9,134,208 B; without, 9,878,576 B); per scenario the blocks run B,V,B,V — 12 runs × 30 s each,
-each block's own first 2 runs discarded — so session drift cancels. Cost-sum p50/p95 (V vs B,
-mean of each variant's two blocks): S1 −1.0%/+0.5%, S4 +1.0%/−0.4%, S5 +3.4%/+3.3%, S6
-−0.3%/+0.0%. The phases a CPU opt-level can actually move (rebuild+layout+paint+encode) are
-flat everywhere — −0.3% (S1), −3.0% (S4, whose phase sum is only 0.20 ms, so its percentages
-are the noisiest), −0.1% (S5), +0.8% (S6) — S1 `gpu_main` is unchanged (6.31 ms both variants,
+brightness fixed; two `--profile` APKs differing only in the cold set — **V** = cold set
+present, as shipped (arm64 `.so` 9,134,208 B), **B** = cold set deleted from all eight
+manifests (9,878,576 B). Per scenario the blocks run B,V,B,V — 12 runs × 30 s each, each
+block's own first 2 runs discarded — which spreads any session drift across both variants
+instead of loading it onto one. It does not cancel drift outright: that order leaves the B
+mean at block-position 2 and the V mean at position 3, so a monotone drift biases the raw
+difference by one block-interval (an ABBA order would have cancelled it). The deltas published
+here are the **uncorrected** ones, which is the conservative choice — subtracting the measured
+drift moves every figure toward zero (e.g. S5 +3.4% → +2.9%). Cost-sum p50/p95 (V vs B, mean
+of each variant's two blocks): S1 −1.0%/+0.5%, S4 +1.0%/−0.4%, S5 +3.4%/+3.3%, S6 −0.3%/+0.0%.
+The phases a CPU opt-level can actually move (rebuild+layout+paint+encode) are flat everywhere
+— −0.3% (S1), −3.0% (S4, whose phase sum is only 0.20 ms, so its percentages are the
+noisiest), −0.1% (S5), +0.8% (S6) — S1 `gpu_main` is unchanged (6.31 ms both variants,
 +0.01%), and every block holds ~120 fps. S5 carries the one consistent signal: both V blocks
-put ~0.2 ms more in `submit` than both B blocks (5.58/5.59 → 5.78/5.80 ms), well inside the
-bar but a real effect on the image-upload path through `wgpu-core`. The rig that defeated the
-first attempt is demonstrably controlled here — re-running the *identical* B binary later in
-the session moved cost-sum p50 by 0.04–2.15% depending on scenario, against the Pixel 5
-session's +14%/+24%.
+put ~0.2 ms more in `submit` than both B blocks (5.58/5.59 → 5.78/5.80 ms). No per-crate
+isolation was run, so which cold-set member costs that is not established; `wgpu-core` is the
+plausible candidate, being a cold-set member on the image-upload path S5 exercises. The rig
+that defeated the first attempt is demonstrably controlled here — re-running the *identical* B
+binary later in the session moved cost-sum p50 by 0.04–2.15% depending on scenario, against
+the Pixel 5 session's +14%/+24%.
 
-**Applies to**: what that re-measure did *not* cover. (1) The focused-text-field S1 block the
-previous trigger demanded was not run: `benchmarks/frust_bench` contains no text field, and
-the fallback catalogs (`examples/material3-demo`, `examples/playground`) register no
-deep-link intent filter, so the harness cannot drive a focused field without new bench-app
-code. The concern is narrower than it was written, though — `FrustSurfaceView`'s `doFrame`
-calls `pollImeAfterDispatch`, which calls `nativeImeState` **unconditionally every frame**
-regardless of focus, so the per-frame `jni` path (guard, reactive pump, JSON build, `JString`
-allocation) already ran in all 16 blocks above; focusing a field grows the serialized payload
-rather than introducing the call. (2) The session ran on mains power: `dumpsys battery unplug`
-makes the framework report unpowered (which is what disables plugged-in DVFS boost policies)
-but does not physically cut charging, and the level sat pinned at 100% across all ~2 h, so
-PROTOCOL §3's "charger disconnected" was not literally met.
+**Applies to**: every Android release build using the shared `[profile.release.package.*]`
+cold-set block (root manifest, `templates/app/Cargo.toml.tmpl`, and the six other hand-synced
+Android manifests `profile_sync` covers) — the measurement above was taken on one device
+(Adreno 660, 120 Hz) under `[profile.profile]`, which inherits the same overrides.
 
-**Why accepted**: the bar the cold set was gated on is cleared with margin on exactly the
-metrics an opt-level can move, on a rig whose own drift is now smaller than the bar. The
-power caveat is common-mode — both variants ran interleaved under identical conditions — so
-it cancels in the V-vs-B ratio the bar is about; it does mean these absolute numbers are not
-protocol-comparable to battery-run passes on other devices.
+**Why accepted**: the bar the cold set was gated on is cleared on every scenario and on
+exactly the metrics an opt-level can move, on a rig whose own drift is now smaller than the
+bar. The headroom is real but not generous — the worst case, S5's +3.4%, leaves 1.6
+percentage points against an S1 block-order drift of 2.15% on the same rig — so this is a
+pass, not a wide margin. The power caveat below is common-mode (both variants ran interleaved
+under identical conditions), so it cancels in the V-vs-B ratio the bar is about; it does mean
+these absolute numbers are not protocol-comparable to battery-run passes on other devices.
+
+**Not covered by that re-measure**: (1) The focused-text-field S1 block the previous trigger
+demanded was not run: `benchmarks/frust_bench` contains no text field, and the fallback
+catalogs (`examples/material3-demo`, `examples/playground`) register no deep-link intent
+filter, so the harness cannot drive a focused field without new bench-app code. The concern is
+narrower than it was written, though — `FrustSurfaceView`'s `doFrame` calls
+`pollImeAfterDispatch`, which calls `nativeImeState` **unconditionally every frame** regardless
+of focus, so the per-frame `jni` path (guard, reactive pump, JSON build, `JString` allocation)
+already ran in all 16 blocks above; focusing a field grows the serialized payload rather than
+introducing the call. (2) The session ran on mains power: `dumpsys battery unplug` makes the
+framework report unpowered (which is what disables plugged-in DVFS boost policies) but does not
+physically cut charging, and the level sat pinned at 100% across all ~2 h, so PROTOCOL §3's
+"charger disconnected" was not literally met.
 
 **Trigger for removal**: delete this entry once the focused-IME leg is measured. That needs a
 focusable text field the harness can actually reach (a bench-app scenario, or a deep-linkable

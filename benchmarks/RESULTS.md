@@ -696,10 +696,10 @@ into a total; the totals above come only from this pass's re-measurement:
 
 | Lever | Base → after (B) | Δ (B) | Note |
 |---|---|---|---|
-| Material Roboto Flex wght-only instance | 9,471,648 → 7,962,896 | −1,508,752 | font file 1,684,624 → 175,900 B |
+| Material Roboto Flex wght-only instance | 9,471,648 → 7,962,896 | −1,508,752 | font file 1,684,624 → 175,900 B; render parity device-verified 2026-09-18 (see the device-legs note below) |
 | shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
 | Glyph italics | measured-keep | 0 | no italic subset landed |
-| `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B |
+| `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B; `ANDROID_RELA` confirmed on the shipped `.so` and the artifact run on-device 2026-09-18 (see below) |
 | Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below |
 | `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | |
 | `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
@@ -711,20 +711,56 @@ into a total; the totals above come only from this pass's re-measurement:
 scenario. Two `--profile` APKs differing only in the cold set (arm64 `.so` 9,134,208 B with it,
 9,878,576 B without) were interleaved B,V,B,V per scenario — 12 runs × 30 s per block, each
 block's own first 2 runs discarded — on a OnePlus 9 over USB adb with airplane mode on, refresh
-pinned to 120 Hz and brightness fixed. Cost-sum p50/p95 (cold set vs none, mean of each
-variant's two blocks): S1 −1.0 %/+0.5 %, S4 +1.0 %/−0.4 %, S5 +3.4 %/+3.3 %, S6 −0.3 %/+0.0 %.
-CPU-work phases (rebuild+layout+paint+encode) p50: −0.3 %, −3.0 %, −0.1 %, +0.8 %. S1 `gpu_main`
-6.31 ms both variants (+0.01 %); all sixteen blocks held ~120 fps. S5 is the one real signal —
-both cold-set blocks put ~0.2 ms more in `submit` (5.58/5.59 → 5.78/5.80 ms) on the image-upload
-path — inside the bar, worth naming. Unlike the Pixel 5 attempt, this rig's own drift is smaller
-than the bar: re-running the *identical* no-cold-set binary later in the session moved cost-sum
-p50 by 0.04–2.15 % per scenario, against that session's +14 %/+24 %. Two caveats ride with it:
+pinned to 120 Hz and brightness fixed. That order spreads session drift across both variants
+rather than cancelling it (an ABBA order would cancel it outright), and the figures below are
+the **uncorrected** ones — the conservative choice, since subtracting the measured drift moves
+every one toward zero. Cost-sum p50/p95 (cold set vs none, mean of each variant's two blocks):
+S1 −1.0 %/+0.5 %, S4 +1.0 %/−0.4 %, S5 +3.4 %/+3.3 %, S6 −0.3 %/+0.0 %. CPU-work phases
+(rebuild+layout+paint+encode) p50: −0.3 %, −3.0 %, −0.1 %, +0.8 %. S1 `gpu_main` 6.31 ms both
+variants (+0.01 %); all sixteen blocks held ~120 fps. S5 is the one real signal — both cold-set
+blocks put ~0.2 ms more in `submit` (5.58/5.59 → 5.78/5.80 ms) on the image-upload path; no
+per-crate isolation was run, so the responsible member is not established (`wgpu-core` is the
+plausible candidate). It passes, but the headroom is not wide: S5's +3.4 % leaves 1.6
+percentage points against an S1 block-order drift of 2.15 % on the same rig. Unlike the Pixel 5
+attempt, this rig's own drift is smaller than the bar: re-running the *identical* no-cold-set
+binary later in the session moved cost-sum p50 by 0.04–2.15 % per scenario, against that
+session's +14 %/+24 %. Two caveats ride with it:
 the focused-text-field S1 leg was not run (no text field exists in the bench app and the
 fallback catalogs carry no deep-link filter), and `dumpsys battery unplug` only made the
 framework report unpowered — the phone stayed on USB power with its level pinned at 100 %, so
 PROTOCOL §3's charger-off control was not literally met and these absolute numbers are not
 comparable to battery-run passes. Both are recorded in
 [LIMITATIONS.md](../docs/LIMITATIONS.md)'s `release-opt-level-z-bar-unadjudicated`.
+
+**Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
+the font and link-flag levers above.
+
+*Material font parity.* material3-demo's landing screen, built from the merged tree, matches
+the same screen built from `dev` @ `f8fcd07b` (the full pre-instance Roboto Flex) at mean
+|ΔLuma| **0.000002** outside the status bar — max 1, five differing pixels out of 2,462,400 —
+comfortably inside the < 1/255 bar. The comparison is sound because each build's own
+two-capture noise floor is exactly **0.000000**: that screen is static, so the only thing the
+cross-build number can contain is the font change. `frust_bench` S6 cannot be adjudicated this
+way and is reported as such rather than scored: it animates a width-driven relayout, so two
+captures of the *same* build already differ by mean 21.42 (merged) / 21.55 (baseline), and the
+cross-build figure, 13.91, is **below either build's own floor** — no font-attributable
+difference is detectable above animation phase. A still-frame luma bar is simply the wrong
+instrument for a live scenario. (The owed leg named a material3-demo "typography screen"; the
+app has no such screen — its sections are Do/Pick/View/Nav/Find — so its landing screen, which
+renders the Material type scale, was used instead.)
+
+*Packed relocations + ICF.* `llvm-readelf -d` on the shipped lean arm64 release `.so`
+(6,813,384 B, in a 6,957,455 B APK) reports `ANDROID_RELA` at `0x60000011` with
+`ANDROID_RELASZ` 42,104 B, and `.rela.dyn` carries section type `ANDROID_RELA` — the packed
+format, against the 310,680 B unpacked figure in the table above — with `BIND_NOW` set. The
+APK installs, launches and sustains a full S1 block (12 × 30 s) with **zero crashes and zero
+process-liveness failures**, mean TOTAL PSS 116.3 MB, and a launch screencap carrying 238
+distinct luma levels with 97.01 % of pixels above 8/255 — real content, so `--icf=all` has not
+produced the blank-surface failure its accepted risk class would imply. **No frame percentiles
+come from this leg**: a release build compiles in no `perf-trace`, so `frust-perf raw` emits
+nothing (verified: 0 lines), and SurfaceFlinger's `--latency` ring returns no frame rows for
+the app's BLAST layer on Android 15, so present cadence could not be sampled either. This leg
+evidences load-and-run correctness, not performance.
 
 **Size attribution (re-run, de-duplicated).** `size_attribute.py --nm-dir
 <ndk bin>` on this pass's unstripped lean arm64 `.so` (15,728,352 B
