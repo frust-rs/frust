@@ -583,28 +583,91 @@ fn render_dashboard(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Th
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow: bool) {
-    let running = state
-        .sessions
+/// Line-selection mode's status-row hint, widest form first, each dropping
+/// one segment of the previous — the same graduated degrade the log status
+/// row's own keyhint uses, and for the same reason: this row shares its cells
+/// with the right-aligned mouse indicator, so a fixed string would paint over
+/// it on a narrow terminal and garble both. `{n}` is the selected line count.
+/// Kept longest: the mode name and the two keys that end it.
+const SELECT_HINT_LEVELS: [&str; 4] = [
+    "SELECT · {n} lines · ↑↓/jk extend · click sets anchor/range · y copy · Esc exit",
+    "SELECT · {n} lines · ↑↓/jk extend · y copy · Esc exit",
+    "SELECT · {n} lines · y copy · Esc exit",
+    "SELECT · {n} lines",
+];
+
+/// The widest [`SELECT_HINT_LEVELS`] form for `lines` selected that fits
+/// `budget` columns — pure, so the fit decision is unit-testable without a
+/// terminal. The narrowest level is returned even when it does not fit:
+/// a crowded mode indicator is recoverable, an invisible one is not.
+fn select_hint(lines: u64, budget: usize) -> String {
+    SELECT_HINT_LEVELS
         .iter()
-        .filter(|s| !s.state.is_terminal())
-        .count();
+        .map(|level| level.replace("{n}", &lines.to_string()))
+        .find(|hint| hint.chars().count() <= budget)
+        .unwrap_or_else(|| {
+            SELECT_HINT_LEVELS[SELECT_HINT_LEVELS.len() - 1].replace("{n}", &lines.to_string())
+        })
+}
+
+fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow: bool) {
+    let running = state.live_session_count();
     let (dot, dot_color, label) = if running > 0 {
         ("●", theme.success(), format!("{running} running"))
     } else {
         ("●", theme.success(), "ready".to_string())
     };
-    let mut hint = "r run · b build · d doctor · ⌘ palette · ? help".to_string();
-    if narrow {
-        // The narrow-breakpoint sidebar-overlay toggle only matters (and
-        // only shows) once the sidebar has actually collapsed out of the
-        // inline layout — a zero-noise hint otherwise.
-        hint.push_str(" · s sidebar");
-    }
+    // Line-selection mode takes the hint row over for as long as it is
+    // engaged on the *active* session (the mode is per session), the same way
+    // the DevTools pane swaps the log view's own hints: while a range is
+    // being picked, the global `r`/`b`/`d` hints name keys the mode swallows,
+    // so showing them would be a lie. Accent-styled, so the row also reads as
+    // a mode indicator and not just a different list of keys.
+    //
+    // Keyed on `select_mode` alone: the mode always ends the moment its
+    // selection would otherwise become empty (`SessionView::push_line_at`'s
+    // eviction clamp), so `select_mode && selection.is_none()` never reaches
+    // here. The count is the selected range's **visible** entries, not its
+    // raw `hi - lo + 1` span — the same rule `y` copies under (see
+    // `LineSelection`'s doc).
+    let select = state
+        .active_session()
+        .filter(|s| s.select_mode)
+        .map(|s| s.selected_visible_count(state.search.filter.as_deref()));
+    let used_left = format!("{dot} {label}").chars().count() + "  │  ".chars().count();
+    let indicator = crate::ui::mouse_indicator(state).chars().count();
+    let budget = (area.width as usize).saturating_sub(used_left + indicator + 2);
+    let (hint, hint_style) = match select {
+        Some(lines) => (
+            select_hint(lines, budget),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        None => {
+            // `d` is DevTools with a session active and Doctor otherwise — the
+            // same `has_active_session` predicate `runner::translate_key`
+            // gates the two contexts on, so the hint never claims a key the
+            // keyboard doesn't currently honor.
+            let d_hint = if state.active_session().is_some() {
+                "d devtools"
+            } else {
+                "d doctor"
+            };
+            let mut hint = format!("r run · b build · {d_hint} · ⌘ palette · ? help");
+            if narrow {
+                // The narrow-breakpoint sidebar-overlay toggle only matters
+                // (and only shows) once the sidebar has actually collapsed
+                // out of the inline layout — a zero-noise hint otherwise.
+                hint.push_str(" · s sidebar");
+            }
+            (hint, Style::default().fg(theme.muted()))
+        }
+    };
     let left = Line::from(vec![
         Span::styled(format!("{dot} {label}"), Style::default().fg(dot_color)),
         Span::styled("  │  ", Style::default().fg(theme.border())),
-        Span::styled(hint, Style::default().fg(theme.muted())),
+        Span::styled(hint, hint_style),
     ]);
     frame.render_widget(
         Paragraph::new(left).style(Style::default().bg(theme.surface())),
@@ -624,6 +687,28 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mode indicator degrades one segment at a time instead of
+    /// overwriting the right-aligned mouse indicator beside it — and never
+    /// degrades to nothing.
+    #[test]
+    fn the_select_hint_picks_the_widest_form_that_fits() {
+        assert_eq!(
+            select_hint(3, 80),
+            "SELECT · 3 lines · ↑↓/jk extend · click sets anchor/range · y copy · Esc exit"
+        );
+        assert_eq!(
+            select_hint(3, 60),
+            "SELECT · 3 lines · ↑↓/jk extend · y copy · Esc exit"
+        );
+        assert_eq!(select_hint(3, 40), "SELECT · 3 lines · y copy · Esc exit");
+        assert_eq!(select_hint(12, 20), "SELECT · 12 lines");
+        assert_eq!(
+            select_hint(12, 0),
+            "SELECT · 12 lines",
+            "the count is the floor, never an empty indicator"
+        );
+    }
 
     /// The sidebar ACTIONS "MCP" row is the switch *and* the readout
     /// (workbook §B13), so its four states must each read differently — and

@@ -77,6 +77,9 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();
     let has_session = state.active_session().is_some();
+    let has_selection = state
+        .active_session()
+        .is_some_and(|s| s.selection.is_some());
     let running = state
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
@@ -131,6 +134,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no running session",
         ),
         gated(
+            "Close tab",
+            "X",
+            Message::CloseActiveTab,
+            has_session,
+            "no active session",
+        ),
+        gated(
             "Build…",
             "b",
             Message::OpenBuildLauncher,
@@ -183,11 +193,45 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no active session",
         ),
         gated(
+            "Toggle line wrap",
+            "w",
+            Message::ToggleWrap,
+            has_session,
+            "no active session",
+        ),
+        gated(
             "Search logs…",
             "/",
             Message::SearchOpen,
             has_session,
             "no active session",
+        ),
+        // The line-selection pair. "Copy selection" is gated on there being a
+        // selection at all rather than on a session, because `y` outside the
+        // mode has nothing to copy — the palette says so instead of running a
+        // command that would silently do nothing.
+        //
+        // "Select lines…" is *not* additionally gated on the DevTools pane
+        // being closed, even though that pane owns `v`'s own key and refuses
+        // the mode: the palette stays reachable over DevTools (global
+        // `Ctrl+P`), and disabling this row there would hide the row's own
+        // "why" from a keyboard-only user. `update`'s `Message::SelectEnter`
+        // arm is the single choke point instead — it silently refuses (no
+        // toast) while the active session's DevTools pane is open, so
+        // executing this row there is a no-op rather than a lie.
+        gated(
+            "Select lines…",
+            "v",
+            Message::SelectEnter,
+            has_session,
+            "no active session",
+        ),
+        gated(
+            "Copy selection",
+            "y",
+            Message::CopySelection,
+            has_selection,
+            "no lines selected",
         ),
         gated(
             "Cycle log level filter",
@@ -226,7 +270,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             inspector_live,
             "open DevTools' Inspector tab first",
         ),
-        always("Quit", "q", Message::Quit),
+        always("Quit", "q", Message::RequestQuit),
     ]
 }
 

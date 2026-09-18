@@ -254,6 +254,19 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::clean_confirm::render(frame, area, project_root, theme, mouse);
         }
+        // Quit is reachable from either top-level screen (`q` on the welcome
+        // splash included), like the wizards/panels above — unlike them it
+        // needs no open project.
+        ActiveModal::QuitConfirm => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::quit_confirm::render(frame, area, state.live_session_count(), theme, mouse);
+        }
         // The help overlay can appear over either top-level screen, like the
         // wizards above (both status bars carry the `? help` hint).
         ActiveModal::HelpOverlay => {

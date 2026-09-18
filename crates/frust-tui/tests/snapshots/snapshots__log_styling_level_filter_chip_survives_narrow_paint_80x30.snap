@@ -31,4 +31,4 @@ expression: text
                          │                                                      
                          │                                                      
                          │● follow  ·  wrap:off ⏷warn+ ·4      x stop · / search
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help        [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help      [mouse ✓]

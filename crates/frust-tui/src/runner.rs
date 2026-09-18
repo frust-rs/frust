@@ -7,7 +7,7 @@
 //! skip (only `terminal.draw` when the state changed or something is
 //! animating).
 
-use std::io::{self, IsTerminal, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,10 +30,11 @@ use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::clipboard::{self, Backend as ClipboardBackend, ClipboardMode};
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
     BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
-    Engine, Message, Outcome, RegionId, RunFocus, Screen, WizardStep,
+    Engine, Message, Outcome, RegionId, RunFocus, Screen, SessionTarget, ToastKind, WizardStep,
 };
 use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
@@ -163,6 +164,23 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         msg_tx.clone(),
         Arc::new(RealProcessRunner),
     ));
+    // The clipboard backend (`crate::clipboard`): picked once here, since
+    // stdout's TTY-ness is fixed for the process's life, and kept for the
+    // whole run through `EffectCtx` rather than re-detected on every copy.
+    // `FRUST_TUI_CLIPBOARD` (system|osc52|off; anything else/unset is auto)
+    // overrides the environment-detected choice.
+    let clipboard_mode = ClipboardMode::parse(std::env::var("FRUST_TUI_CLIPBOARD").ok().as_deref());
+    let clipboard_backend = clipboard::detect(
+        |name| std::env::var(name).ok(),
+        io::stdout().is_terminal(),
+        clipboard_mode,
+    );
+    if let ClipboardBackend::Disabled { reason } = clipboard_backend {
+        let _ = msg_tx.send(Message::Notify {
+            level: ToastKind::Warn,
+            text: format!("Clipboard unavailable: {reason}"),
+        });
+    }
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
     // populate on open (the doctor run is the titlebar chip's cached
@@ -221,6 +239,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                     next_adhoc_id: &mut next_adhoc_id,
                                     records: &mut mcp_records,
                                     backend: &backend,
+                                    clipboard: clipboard_backend,
                                 },
                             );
                         }
@@ -266,6 +285,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
                             backend: &backend,
+                            clipboard: clipboard_backend,
                         },
                     );
                 }
@@ -288,6 +308,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         next_adhoc_id: &mut next_adhoc_id,
                         records: &mut mcp_records,
                         backend: &backend,
+                        clipboard: clipboard_backend,
                     },
                 );
             }
@@ -310,6 +331,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
                             backend: &backend,
+                            clipboard: clipboard_backend,
                         },
                     );
                 }
@@ -419,6 +441,10 @@ struct EffectCtx<'a> {
     /// built once per run, so an MCP agent and a DAP client drive the same
     /// session world rather than two backends over the same supervisor.
     backend: &'a SharedBackend,
+    /// The clipboard backend `run_loop` picked once at startup (see
+    /// `crate::clipboard`'s module doc) — kept for the whole run rather than
+    /// re-detected on every copy.
+    clipboard: ClipboardBackend,
 }
 
 /// Enact an engine-requested [`Effect`] — the runner owns the side effects the
@@ -435,10 +461,25 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         next_adhoc_id,
         records,
         backend,
+        clipboard: clipboard_backend,
     } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
-        Some(Effect::Copy(text)) => copy_to_clipboard(&text),
+        Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
+            Ok(clipboard::CopyOutcome::Complete) => {}
+            Ok(clipboard::CopyOutcome::Truncated { kept_bytes }) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Info,
+                    text: format!("Copied (shortened to {} KB)", kept_bytes / 1024),
+                });
+            }
+            Err(reason) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: format!("Copy failed: {reason}"),
+                });
+            }
+        },
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
         Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
@@ -537,6 +578,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                         next_adhoc_id,
                         records,
                         backend,
+                        clipboard: *clipboard_backend,
                     },
                 );
             }
@@ -702,6 +744,9 @@ fn launch_bootstrap_fix_session(
         // A toolchain fix runs `rustup`/`cargo`, not the app — there is no
         // devtools service to reach.
         devtools: DevtoolsLaunch::unavailable(),
+        // …and it occupies no run target, so it neither blocks nor is
+        // blocked by a launch.
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -744,8 +789,10 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
         id,
         project_root: spec.project_root.clone(),
         target_label: format!("build {}", build_target_label(&spec.target)),
-        // A build session produces an artifact; nothing is running to inspect.
+        // A build session produces an artifact; nothing is running to inspect,
+        // and nothing occupies a run target.
         devtools: DevtoolsLaunch::unavailable(),
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -901,8 +948,10 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
         id,
         project_root: project_root.clone(),
         target_label: "clean".to_string(),
-        // A clean session removes build output; nothing is running to inspect.
+        // A clean session removes build output; nothing is running to inspect,
+        // and nothing occupies a run target.
         devtools: DevtoolsLaunch::unavailable(),
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -1109,6 +1158,10 @@ fn launch_sessions(
                     project_root: spec.project_root.clone(),
                     target_label: target_label(&spec.target),
                     devtools: devtools_launch(&spec),
+                    // An app launch owns its target until it goes terminal —
+                    // what `AppState::live_session_for` reads to refuse a
+                    // second launch of this project onto the same place.
+                    target: Some(SessionTarget::of(&spec.target)),
                 });
                 // Record the launch even with no MCP server running: an agent
                 // that connects later must see the sessions the *user*
@@ -1141,41 +1194,6 @@ fn target_label(target: &DeviceTarget) -> String {
         DeviceTarget::Desktop => "desktop".to_string(),
         DeviceTarget::Device(device) => device.name.clone(),
     }
-}
-
-/// Copy `text` to the terminal's clipboard via an OSC 52 escape (broadly
-/// supported, no clipboard-crate dependency). Best-effort: a terminal that
-/// ignores OSC 52 simply drops it.
-fn copy_to_clipboard(text: &str) {
-    let payload = base64_encode(text.as_bytes());
-    let seq = format!("\u{1b}]52;c;{payload}\u{07}");
-    let mut out = stdout();
-    let _ = out.write_all(seq.as_bytes());
-    let _ = out.flush();
-}
-
-/// Minimal standard base64 (no dependency) for the OSC 52 clipboard payload.
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = *chunk.get(1).unwrap_or(&0);
-        let b2 = *chunk.get(2).unwrap_or(&0);
-        out.push(TABLE[(b0 >> 2) as usize] as char);
-        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(b2 & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// Translate one crossterm event into zero or more engine messages, using the
@@ -1255,7 +1273,6 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
 /// keyboard-parity policy).
 fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Message> {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
-    let shift = mods.contains(KeyModifiers::SHIFT);
     let alt = mods.contains(KeyModifiers::ALT);
 
     // Ctrl+Q always quits, even while typing a search or in a modal.
@@ -1300,6 +1317,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             ActiveModal::DapSettings(settings) => translate_dap_settings_key(code, settings.focus),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
+            ActiveModal::QuitConfirm => translate_quit_confirm_key(code),
             ActiveModal::HelpOverlay => translate_help_key(code),
         };
     }
@@ -1315,6 +1333,15 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         };
     }
 
+    // Line-selection mode owns the whole key namespace for the active
+    // session while it is engaged (see `translate_select_key`) — checked
+    // after the blocks above, which are the surfaces that sit *over* the log
+    // pane (an open context menu, a modal, the search overlay), and before
+    // every other key below.
+    if state.active_session().is_some_and(|s| s.select_mode) {
+        return translate_select_key(code);
+    }
+
     // `?` opens the keyboard/help overlay from either top-level screen —
     // checked here, after the modal/search-capture blocks above (so it
     // never fires while typing `?` into a text field) and before every other
@@ -1328,12 +1355,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
 
-    // Ctrl+C stops the active running session, else falls through to quit.
+    // Ctrl+C stops the active running session, else asks to quit (like `q`,
+    // not the `Ctrl+Q` bypass — no running session here doesn't mean no live
+    // session elsewhere, e.g. a background build tab).
     if ctrl && matches!(code, KeyCode::Char('c')) {
         return if active_running {
             vec![Message::StopSession]
         } else {
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         };
     }
 
@@ -1374,8 +1403,9 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     let devices_focused = workbench && !has_active_session;
 
     match code {
-        // Global quit.
-        KeyCode::Char('q') => vec![Message::Quit],
+        // Global quit — asks first with a live session (see `RequestQuit`);
+        // `Ctrl+Q` above is the only unconditional bypass.
+        KeyCode::Char('q') => vec![Message::RequestQuit],
 
         // `i` opens the toolchain bootstrap wizard from either screen (mouse
         // parity: the titlebar toolchain chip) — the fresh-machine flow.
@@ -1453,6 +1483,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
 
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
+        // `X` closes the active tab (`Message::CloseActiveTab`): a live
+        // session is stopped and removed once it lands terminal, an already
+        // terminal one is removed on the spot (mouse parity: the session
+        // tab's context-menu "Close tab" / "Stop & close" entry).
+        KeyCode::Char('X') if has_active_session => vec![Message::CloseActiveTab],
         // `t` toggles the active session's perf sparkline panel.
         KeyCode::Char('t') if has_active_session => vec![Message::TogglePerfPanel],
         KeyCode::Tab if has_active_session => vec![Message::NextTab],
@@ -1471,23 +1506,56 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('l') if has_active_session => vec![Message::CycleLevelFilter(1)],
         KeyCode::Char('L') if has_active_session => vec![Message::CycleLevelFilter(-1)],
         KeyCode::Char('z') if has_active_session => vec![Message::ToggleNearestFold],
-        KeyCode::Char('v') if has_active_session => vec![Message::SelectionBegin],
+        // `v` enters line-selection mode (`translate_select_key` owns every
+        // key from there until it is left); `y` copies whatever is selected.
+        KeyCode::Char('v') if has_active_session => vec![Message::SelectEnter],
         KeyCode::Char('y') if has_active_session => vec![Message::CopySelection],
-        KeyCode::Up if has_active_session && shift => vec![Message::SelectionExtendUp(1)],
-        KeyCode::Down if has_active_session && shift => vec![Message::SelectionExtendDown(1)],
         KeyCode::Up if has_active_session => vec![Message::LogScrollUp(1)],
         KeyCode::Down if has_active_session => vec![Message::LogScrollDown(1)],
         KeyCode::PageUp if has_active_session => vec![Message::LogScrollUp(PAGE_LINES)],
         KeyCode::PageDown if has_active_session => vec![Message::LogScrollDown(PAGE_LINES)],
         KeyCode::Home if has_active_session => vec![Message::LogScrollToTop],
         KeyCode::End if has_active_session => vec![Message::LogScrollToBottom],
-        KeyCode::Esc
-            if state
-                .active_session()
-                .is_some_and(|s| s.selection.is_some()) =>
-        {
-            vec![Message::SelectionClear]
-        }
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the active session's log view is in
+/// **line-selection mode** (`v`): the cursor keys move the selection's end
+/// instead of scrolling the pane, `y` copies the range (and leaves the mode),
+/// and `Esc` — or `v` again — leaves it.
+///
+/// | Key | Message |
+/// |-----|---------|
+/// | `↑` / `k` / `Shift+↑` | [`Message::SelectMove`]`(-1)` |
+/// | `↓` / `j` / `Shift+↓` | [`Message::SelectMove`]`(1)` |
+/// | `PageUp` / `PageDown` | [`Message::SelectPage`]`(∓1)` |
+/// | `Home` / `End` | [`Message::SelectHome`] / [`Message::SelectEnd`] |
+/// | `y` | [`Message::CopySelection`] |
+/// | `Esc` / `v` | [`Message::SelectExit`] |
+///
+/// **Every other key is swallowed** (an empty `Vec`), the same full-namespace
+/// takeover [`translate_devtools_key`] performs for the DevTools pane: a
+/// modal-opening or session-mutating key pressed by reflex mid-selection must
+/// not fire behind the highlight. The exceptions are the global chords
+/// matched above this table — `Ctrl+Q` (quit) and `Alt+m` (mouse capture) —
+/// plus an already-open context menu / modal / search overlay, all of which
+/// `translate_key` routes before it reaches here.
+///
+/// `Shift+↑`/`Shift+↓` need no arm of their own: the modifier is not part of
+/// the match, so they land on the plain arrow arms as aliases (the shifted
+/// pair is what extended a selection before the mode existed, so the muscle
+/// memory keeps working).
+fn translate_select_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => vec![Message::SelectMove(-1)],
+        KeyCode::Down | KeyCode::Char('j') => vec![Message::SelectMove(1)],
+        KeyCode::PageUp => vec![Message::SelectPage(-1)],
+        KeyCode::PageDown => vec![Message::SelectPage(1)],
+        KeyCode::Home => vec![Message::SelectHome],
+        KeyCode::End => vec![Message::SelectEnd],
+        KeyCode::Char('y') => vec![Message::CopySelection],
+        KeyCode::Esc | KeyCode::Char('v') => vec![Message::SelectExit],
         _ => vec![],
     }
 }
@@ -1536,7 +1604,7 @@ fn translate_devtools_key(
     let connected = matches!(devtools.phase(), DevtoolsPhase::Connected);
 
     match code {
-        KeyCode::Char('q') => return vec![Message::Quit],
+        KeyCode::Char('q') => return vec![Message::RequestQuit],
         KeyCode::Char('d') => return vec![Message::DevtoolsClose],
         KeyCode::Esc => {
             if on_performance && devtools.performance.has_selection() {
@@ -1851,6 +1919,19 @@ fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
     }
 }
 
+/// Translate one key press while the quit-confirm dialog is open. `Esc`/`n`
+/// cancels, `Enter`/`y` confirms (mouse parity: the dialog's Quit/Cancel
+/// buttons); everything else is swallowed. `Ctrl+Q` still wins over this —
+/// it is matched at the very top of `translate_key`, before modal routing —
+/// so the deliberate bypass works even with this dialog already open.
+fn translate_quit_confirm_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('n') => vec![Message::CloseQuitConfirm],
+        KeyCode::Enter | KeyCode::Char('y') => vec![Message::ConfirmQuit],
+        _ => vec![],
+    }
+}
+
 /// Translate one key press while the keyboard/help overlay is open —
 /// read-only reference content, so `Esc` or `?` again are its only
 /// bindings.
@@ -1945,6 +2026,7 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp/frust-tui-dispatch"),
             target_label: "desktop".to_string(),
             devtools: DevtoolsLaunch::unavailable(),
+            target: Some(SessionTarget::Desktop),
         });
         let view = engine
             .state
@@ -2013,21 +2095,78 @@ mod tests {
     }
 
     #[test]
-    fn q_quits() {
+    fn q_requests_quit() {
         let state = AppState::default();
         let regions = MouseRegions::new();
         assert_eq!(
             translate_event(key(KeyCode::Char('q')), &state, &regions),
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         );
     }
 
     #[test]
-    fn ctrl_q_quits() {
+    fn ctrl_q_quits_unconditionally() {
         let state = AppState::default();
         let regions = MouseRegions::new();
         let ev = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert_eq!(translate_event(ev, &state, &regions), vec![Message::Quit]);
+    }
+
+    /// `Ctrl+Q` is the deliberate bypass: it still quits unconditionally even
+    /// with the quit-confirm dialog already open, where every other key is
+    /// routed to `translate_quit_confirm_key` instead.
+    #[test]
+    fn ctrl_q_bypasses_the_quit_confirm_dialog() {
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(translate_event(ev, &state, &regions), vec![Message::Quit]);
+    }
+
+    #[test]
+    fn quit_confirm_dialog_keys() {
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Enter), &state, &regions),
+            vec![Message::ConfirmQuit]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('y')), &state, &regions),
+            vec![Message::ConfirmQuit]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::CloseQuitConfirm]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('n')), &state, &regions),
+            vec![Message::CloseQuitConfirm]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('z')), &state, &regions),
+            Vec::<Message>::new(),
+            "everything else is swallowed"
+        );
+    }
+
+    /// `Ctrl+C` with no running session asks to quit exactly like `q`,
+    /// rather than the old unconditional `Quit`.
+    #[test]
+    fn ctrl_c_with_no_running_session_requests_quit() {
+        let state = AppState::default();
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::RequestQuit]
+        );
     }
 
     #[test]
@@ -2202,7 +2341,7 @@ mod tests {
             context_menu: Some(ContextMenu {
                 x: 0,
                 y: 0,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
                 entries: vec![MenuEntry {
                     label: "Search logs…",
                     hint: "/",
@@ -2534,6 +2673,202 @@ mod tests {
         );
     }
 
+    // ── Line-selection mode key routing ───────────────────────────────────────
+
+    /// A workbench with one running desktop session holding `n` seeded lines.
+    fn log_state(n: u64) -> AppState {
+        use crate::engine::SessionView;
+        let mut session = SessionView::new(SessionId(0), PathBuf::from("/tmp/huddle"), "desktop");
+        session.state = SessionState::Running;
+        for i in 0..n {
+            session.push_line_at(format!("line {i}"), "12:00:00");
+        }
+        AppState {
+            screen: Screen::Workbench,
+            project_root: Some(PathBuf::from("/tmp/huddle")),
+            projects: vec![PathBuf::from("/tmp/huddle")],
+            sessions: vec![session],
+            active_session: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// `v` enters the mode through the real translate → `update` path, after
+    /// which the cursor keys move the selection instead of scrolling.
+    #[test]
+    fn v_enters_the_mode_and_the_cursor_keys_then_move_the_selection() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(20);
+
+        let msgs = translate_event(key(KeyCode::Char('v')), &state, &regions);
+        assert_eq!(msgs, vec![Message::SelectEnter]);
+        update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().select_mode);
+
+        for (code, expected) in [
+            (KeyCode::Up, Message::SelectMove(-1)),
+            (KeyCode::Char('k'), Message::SelectMove(-1)),
+            (KeyCode::Down, Message::SelectMove(1)),
+            (KeyCode::Char('j'), Message::SelectMove(1)),
+            (KeyCode::PageUp, Message::SelectPage(-1)),
+            (KeyCode::PageDown, Message::SelectPage(1)),
+            (KeyCode::Home, Message::SelectHome),
+            (KeyCode::End, Message::SelectEnd),
+            (KeyCode::Char('y'), Message::CopySelection),
+            (KeyCode::Esc, Message::SelectExit),
+            (KeyCode::Char('v'), Message::SelectExit),
+        ] {
+            assert_eq!(
+                translate_event(key(code), &state, &regions),
+                vec![expected],
+                "{code:?} in line-selection mode"
+            );
+        }
+
+        // Shift+Up/Down are aliases of the plain arrows (the pre-mode
+        // extend-selection chord keeps working).
+        for (code, expected) in [
+            (KeyCode::Up, Message::SelectMove(-1)),
+            (KeyCode::Down, Message::SelectMove(1)),
+        ] {
+            let ev = Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT));
+            assert_eq!(translate_event(ev, &state, &regions), vec![expected]);
+        }
+    }
+
+    /// The mode owns the whole namespace: every other key is swallowed rather
+    /// than firing a workbench command behind the highlight. Only the global
+    /// chords still get through.
+    #[test]
+    fn the_mode_swallows_every_other_key_but_the_global_chords() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(20);
+        update(&mut state, Message::SelectEnter);
+
+        for swallowed in [
+            'q', 'r', 'b', 'd', 'x', 'X', 'f', 'w', 'z', 'l', '/', '?', 'i', '1',
+        ] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char(swallowed)), &state, &regions),
+                Vec::<Message>::new(),
+                "`{swallowed}` belongs to the log view, not the selection mode"
+            );
+        }
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            Vec::<Message>::new(),
+            "even tab switching waits until the selection is done"
+        );
+
+        let ctrl_q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate_event(ctrl_q, &state, &regions),
+            vec![Message::Quit],
+            "Ctrl+Q keeps its global precedence"
+        );
+        let alt_m = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            translate_event(alt_m, &state, &regions),
+            vec![Message::ToggleMouseCapture],
+            "⌥m keeps its global precedence"
+        );
+
+        // Leaving the mode hands the namespace straight back.
+        update(&mut state, Message::SelectExit);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('f')), &state, &regions),
+            vec![Message::ToggleFollow]
+        );
+    }
+
+    /// `v` itself never reaches `Message::SelectEnter` while DevTools is
+    /// open — `translate_key` returns out of the DevTools branch before its
+    /// `v` arm — but the palette's "Select lines…" row re-dispatches the same
+    /// message through `Ctrl+P`, which stays reachable as a global chord even
+    /// with DevTools open. That round trip must not put the session in the
+    /// mode either: `update`'s `SelectEnter` arm is the single choke point.
+    #[test]
+    fn palette_select_lines_is_refused_while_devtools_owns_the_pane() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(5);
+        state.active_session_mut().unwrap().devtools.open = true;
+
+        let ctrl_p = Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let msgs = translate_event(ctrl_p, &state, &regions);
+        assert_eq!(
+            msgs,
+            vec![Message::OpenPalette],
+            "the palette is a global chord, reachable over DevTools"
+        );
+        update(&mut state, msgs[0].clone());
+
+        for c in "select lines".chars() {
+            update(&mut state, Message::PaletteInput(c));
+        }
+        update(&mut state, Message::PaletteExecute);
+
+        assert!(
+            !state.active_session().unwrap().select_mode,
+            "DevTools owns the key namespace; the palette entry must not enter the mode"
+        );
+    }
+
+    /// Every drawn log row registers a click region carrying the absolute
+    /// line it draws — re-registered each frame, so a *scrolled* viewport
+    /// maps rows to the lines actually under them rather than to the tail.
+    #[test]
+    fn a_log_row_click_carries_the_absolute_line_under_a_scrolled_viewport() {
+        use crate::engine::{ContextTarget, Scroll};
+        use crate::ui::mouse::MouseCtx;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = log_state(80);
+        // Freeze the view with line 39 on the bottom row.
+        state.sessions[0].scroll = Scroll::Anchored(39);
+
+        let mut regions = MouseRegions::new();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::frust_dark();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                crate::ui::render(frame, &state, &theme, &mut ctx);
+            })
+            .expect("draw");
+
+        // Hit-test straight down the log pane and collect what each row says
+        // it draws.
+        let hits: Vec<u64> = (0..30)
+            .filter_map(|y| match regions.click_at(40, y) {
+                Some(Message::LogRowClicked(abs)) => Some(abs),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!hits.is_empty(), "the log pane registered row regions");
+        assert_eq!(
+            *hits.last().unwrap(),
+            39,
+            "the bottom row is the anchored line, not the tail"
+        );
+        let expected: Vec<u64> = (40 - hits.len() as u64..=39).collect();
+        assert_eq!(hits, expected, "rows map to consecutive absolute lines");
+
+        // And a right-click on the same row targets that line's context menu.
+        let row_y = (0..30)
+            .find(|y| matches!(regions.click_at(40, *y), Some(Message::LogRowClicked(_))))
+            .expect("a log row");
+        assert_eq!(
+            regions.context_at(40, row_y),
+            Some(ContextTarget::LogView { row: Some(hits[0]) })
+        );
+    }
+
     // ── DevTools mode key routing (workbook §B12) ─────────────────────────────
 
     /// A workbench with one running, devtools-capable desktop session that
@@ -2545,6 +2880,7 @@ mod tests {
             PathBuf::from("/tmp/huddle"),
             "desktop",
             DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+            Some(SessionTarget::Desktop),
         );
         session.state = SessionState::Running;
         session.push_line_at(
@@ -2627,7 +2963,7 @@ mod tests {
         );
         assert_eq!(
             translate_event(key(KeyCode::Char('q')), &state, &regions),
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         );
 
         let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
@@ -3056,5 +3392,161 @@ mod tests {
             translate_event(key(KeyCode::Esc), &state, &regions),
             vec![Message::CloseDapSettings]
         );
+    }
+
+    // ── Palette-vs-runner hint drift tripwire ─────────────────────────────────
+
+    /// One fixture per palette gate shape (`has_project`, `has_devices`,
+    /// `has_session`, `running`, `has_projects`, `inspector_live` —
+    /// `crate::engine::palette::commands`'s own local predicate names): builds
+    /// the minimal `AppState` satisfying exactly the requested combination.
+    /// Always `Screen::Workbench`, so a workbench-scoped unconditional command
+    /// (`n`, `R`, `m`, …) still routes the way the real workbench would.
+    fn gate_state(
+        has_project: bool,
+        has_devices: bool,
+        has_session: bool,
+        running: bool,
+        has_projects: bool,
+        inspector_live: bool,
+    ) -> AppState {
+        use crate::engine::{ConnState, DeviceRow, DevtoolsTab, SessionView};
+
+        let root = PathBuf::from("/tmp/huddle");
+        let mut state = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        if has_project {
+            state.project_root = Some(root.clone());
+        }
+        if has_projects {
+            state.projects.push(root.clone());
+        }
+        if has_devices {
+            state.devices.push(DeviceRow {
+                device: frust_drive::devices::Device {
+                    id: "d".into(),
+                    name: "Pixel".into(),
+                    platform: Platform::Android,
+                    kind: frust_drive::devices::Kind::Emulator,
+                    os_version: None,
+                    connection_state: None,
+                },
+                selected: false,
+            });
+        }
+        if has_session || running || inspector_live {
+            let mut session = if inspector_live {
+                SessionView::with_devtools(
+                    SessionId(0),
+                    root.clone(),
+                    "desktop",
+                    DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+                    Some(SessionTarget::Desktop),
+                )
+            } else {
+                SessionView::new(SessionId(0), root.clone(), "desktop")
+            };
+            session.state = if running {
+                SessionState::Running
+            } else {
+                SessionState::Configuring
+            };
+            if inspector_live {
+                session.devtools.open = true;
+                session.devtools.active_tab = DevtoolsTab::Inspector;
+                session.devtools.conn = ConnState::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                };
+            }
+            state.sessions.push(session);
+            state.active_session = Some(0);
+        }
+        state
+    }
+
+    /// Every single-key palette hint really produces the message the registry
+    /// claims: for each `commands(&state)` entry whose hint is exactly one
+    /// printable character (letter, digit, `/`, `:`), build a state
+    /// satisfying that entry's own gate via [`gate_state`], translate the
+    /// matching key event (uppercase hints get `SHIFT`) and assert the result
+    /// is exactly `vec![entry.message]`. A mismatch means the registry's hint
+    /// drifted from the binding it advertises — fix the hint, never the key.
+    ///
+    /// Deliberately excluded (not every single-char hint enters this sweep):
+    /// - multi-key hints (`^O`, `⌥m`) — filtered out by the one-char check
+    ///   itself, not a hand-picked skip.
+    /// - the `d` pair ("Doctor" / "DevTools") — both hint `d`, one binding
+    ///   per context (workbook §B12's full-namespace swap); asserted
+    ///   separately in `d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log`
+    ///   and would need its own has-session-vs-not distinction this sweep's
+    ///   six gate shapes don't carry.
+    /// - `y` ("Copy selection") — gated on `has_selection`, not one of the
+    ///   six shapes above; asserted inside the selection mode's own key table
+    ///   in `v_enters_the_mode_and_the_cursor_keys_then_move_the_selection`.
+    #[test]
+    fn every_single_key_palette_hint_matches_its_runner_binding() {
+        use crate::engine::palette;
+
+        let regions = MouseRegions::new();
+        let excluded_hints = ["d", "y"];
+
+        for cmd in palette::commands(&AppState::default()) {
+            let mut chars = cmd.hint.chars();
+            let Some(c) = chars.next() else { continue };
+            if chars.next().is_some() || !c.is_ascii_graphic() {
+                continue; // multi-char hint (e.g. `^O`, `⌥m`) — not a candidate.
+            }
+            if excluded_hints.contains(&cmd.hint) {
+                continue;
+            }
+
+            let state = match cmd.title {
+                "Run on device(s)…" | "Build…" | "Clean…" | "Add plugin…" => {
+                    gate_state(true, false, false, false, false, false)
+                }
+                "Stop session" => gate_state(false, false, false, true, false, false),
+                "Close tab"
+                | "Toggle follow-tail"
+                | "Toggle line wrap"
+                | "Search logs…"
+                | "Select lines…"
+                | "Cycle log level filter"
+                | "Toggle nearest backtrace fold" => {
+                    gate_state(false, false, true, false, false, false)
+                }
+                "Refresh widget tree" => gate_state(false, false, false, false, false, true),
+                // "always enabled" commands: no gate flag needed, just the
+                // workbench screen `gate_state`'s all-false shape provides.
+                "Toolchain setup…"
+                | "New project…"
+                | "Refresh devices"
+                | "MCP server…"
+                | "Start/stop MCP server"
+                | "DAP server…"
+                | "Quit" => gate_state(false, false, false, false, false, false),
+                other => panic!(
+                    "single-char hint `{}` on {other:?} has no fixture wired in this tripwire — \
+                     add one rather than skipping it",
+                    cmd.hint
+                ),
+            };
+
+            let mods = if c.is_ascii_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            let ev = Event::Key(KeyEvent::new(KeyCode::Char(c), mods));
+            assert_eq!(
+                translate_event(ev, &state, &regions),
+                vec![cmd.message.clone()],
+                "palette hint `{}` (\"{}\") does not match its runner binding",
+                cmd.hint,
+                cmd.title
+            );
+        }
     }
 }

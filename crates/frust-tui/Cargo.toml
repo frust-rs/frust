@@ -72,6 +72,20 @@ tokio = { workspace = true, features = [
 tokio-util.workspace = true
 # `StreamExt::next` for the crossterm `EventStream` in the `select!` loop.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# `crate::clipboard`'s `system`/`auto` `FRUST_TUI_CLIPBOARD` backend — the
+# third `arboard` consumer alongside `plugins/clipboard`'s desktop backend and
+# `frust-shell-desktop`'s clipboard worker (root `Cargo.toml`'s Version-Pin
+# Policy comment covers the pin and the `default-features = false` rationale;
+# workspace inheritance carries both here unchanged). Those two consumers
+# carry a documented COEXISTENCE CONSTRAINT: their `arboard::Clipboard`
+# instances can be live concurrently on different threads of the SAME
+# process, which is recorded as observed to crash arboard's macOS backend.
+# That hazard does not apply here — `frust-tui` is the terminal workbench, a
+# separate OS process from whatever app process a plugin or
+# `frust-shell-desktop` runs inside, so this crate's `arboard::Clipboard`
+# instance can never share an address space with either of theirs. No version
+# change from any consumer; the tripwire is `cargo check -p frust-tui`.
+arboard = { workspace = true }
 
 [dev-dependencies]
 # TestBackend + insta snapshot harness for the render suite.

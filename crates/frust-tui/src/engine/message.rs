@@ -19,6 +19,8 @@ use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
+use super::session_view::SessionTarget;
+use super::toast::ToastKind;
 use crate::supervise::mcp_backend::McpCommand;
 use crate::supervise::{SessionEvent, SessionId};
 
@@ -148,6 +150,10 @@ pub enum RegionId {
     CleanConfirmYes,
     /// The clean-confirm dialog's cancel button.
     CleanConfirmNo,
+    /// The quit-confirm dialog's confirm button.
+    QuitConfirmYes,
+    /// The quit-confirm dialog's cancel button.
+    QuitConfirmNo,
     /// The log status row's "copy built artifact path(s)" affordance.
     CopyArtifactsAction,
     /// A command row in the open command palette (0-based index into the
@@ -161,6 +167,11 @@ pub enum RegionId {
     /// The keyboard/help overlay — a click anywhere in the panel
     /// closes it (mouse parity for `Esc`).
     HelpClose,
+    /// A drawn log row, carrying the absolute index of the line it draws;
+    /// click sets the line-selection mode's anchor / range end (outside the
+    /// mode the click is idle — the region is registered every frame either
+    /// way, so a scrolled viewport always maps rows to current lines).
+    LogRow(u64),
     /// A panic/backtrace block's `▶ n frames…` fold affordance row (the
     /// block's identity: the absolute index of its panic-header line); click
     /// toggles its collapsed state.
@@ -266,8 +277,15 @@ pub enum ContextTarget {
     DeviceRow(usize),
     /// A project row (index into `AppState::projects`).
     ProjectRow(usize),
-    /// The log view pane.
-    LogView,
+    /// The log view pane. `row` is the absolute log-line index of the row
+    /// under the cursor — `None` for the pane-wide region (empty space below
+    /// the last line), which is why the row-specific entries are gated on it
+    /// rather than assuming a row was hit.
+    LogView {
+        /// The absolute log-line index under the cursor, if a drawn row was
+        /// hit.
+        row: Option<u64>,
+    },
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -278,7 +296,11 @@ pub enum ContextTarget {
 /// `==`/`assert_eq!`, which `PartialEq` alone satisfies.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    /// Quit requested (`q` / `Ctrl+Q`). Sets `should_quit`; the loop exits.
+    /// The deliberate quit bypass — `Ctrl+Q` only. Sets `should_quit`
+    /// directly, skipping the quit-confirm dialog even with live sessions.
+    /// Every other former `Quit` producer (`q` from the welcome/workbench
+    /// screen or the DevTools pane, `Ctrl+C` with no running session, and the
+    /// palette's Quit entry) now emits [`Self::RequestQuit`] instead.
     Quit,
     /// A tick from the frame interval — ages the toast stack (the app's only
     /// animated state) and is otherwise a no-op (dirty-frame skip keeps it
@@ -356,6 +378,12 @@ pub enum Message {
         /// ad-hoc build/clean/toolchain session passes
         /// [`DevtoolsLaunch::unavailable`].
         devtools: DevtoolsLaunch,
+        /// *Where* the session runs, as the identity the one-live-session
+        /// guard compares ([`SessionTarget`]) — `Some` for every app launch
+        /// (the run-config modal, run-on-all-devices, and MCP/DAP's
+        /// `run_app`), `None` for an ad-hoc build/clean/toolchain-fix
+        /// session, which occupies no target.
+        target: Option<SessionTarget>,
     },
     /// Select the next / previous session tab (`Tab` / `Shift+Tab`).
     NextTab,
@@ -366,6 +394,14 @@ pub enum Message {
     /// Stop the active session (`Ctrl+C` / `x`) — routed to the supervisor as
     /// an [`super::Effect::StopSession`].
     StopSession,
+    /// Close a tab by index into `sessions` (the context menu's "Close tab" /
+    /// "Stop & close" entries, and the palette's "Close tab" command). A
+    /// session already in a terminal state is removed immediately; a live
+    /// one is stopped exactly like [`Self::StopSession`] and removed once its
+    /// terminal event lands (see `super::update::on_session_event`).
+    CloseTab(usize),
+    /// [`Self::CloseTab`] for the active tab (`X`).
+    CloseActiveTab,
     /// Toggle follow-tail on the active session's log view (`f`).
     ToggleFollow,
     /// Toggle soft-wrap on the log view (`w`).
@@ -391,17 +427,41 @@ pub enum Message {
     SearchCommit,
     /// Close the search overlay without changing the committed filter (`Esc`).
     SearchCancel,
-    /// Begin a copy-while-scrolling selection at the newest line (`v`).
-    SelectionBegin,
-    /// Extend the selection toward older lines (`Shift+Up`).
-    SelectionExtendUp(u64),
-    /// Extend the selection toward newer lines (`Shift+Down`).
-    SelectionExtendDown(u64),
-    /// Clear the current selection (`Esc`).
-    SelectionClear,
+    /// Enter the active session's **line-selection mode** (`v`, the log
+    /// view's context menu, the palette's "Select lines…"): anchor a
+    /// one-line selection on the newest visible line and pause follow-tail.
+    /// A no-op on an empty (or wholly filtered-out) log — see
+    /// [`super::SessionView::enter_select_mode`].
+    SelectEnter,
+    /// Step the selection cursor `n` **visible** entries while in the mode
+    /// (negative = toward older lines): `↑`/`k`/`Shift+↑` and
+    /// `↓`/`j`/`Shift+↓`.
+    SelectMove(i64),
+    /// Move the selection cursor one page (sign only: `-1` = `PageUp`,
+    /// `1` = `PageDown`).
+    SelectPage(i8),
+    /// Jump the selection cursor to the oldest visible line (`Home`).
+    SelectHome,
+    /// Jump the selection cursor to the newest visible line (`End`).
+    SelectEnd,
+    /// Leave line-selection mode, dropping the selection (`Esc`, or `v`
+    /// again) — restores follow-tail only under
+    /// [`super::SessionView::exit_select_mode`]'s rule.
+    SelectExit,
+    /// A left click landed on the log row drawing absolute line index `n`
+    /// (every rendered row registers one; see `crate::ui::views::sessions`).
+    /// The runner stays dumb about the mode: outside it this is idle, inside
+    /// it the first click re-anchors the selection and every later one moves
+    /// its range end.
+    LogRowClicked(u64),
     /// Copy the current selection to the clipboard (`y`) — routed to the runner
-    /// as an [`super::Effect::Copy`].
+    /// as an [`super::Effect::Copy`]. In line-selection mode this also leaves
+    /// the mode, so `v`…`y` is a complete copy gesture.
     CopySelection,
+    /// Copy the single log line at absolute index `n` (the log view's
+    /// right-click "Copy line") — routed as an [`super::Effect::Copy`], or a
+    /// warning when the ring has already evicted it.
+    CopyLine(u64),
     /// Toggle a panic/backtrace block's fold state by its id (the block's
     /// panic-header absolute line index) — a click on its `▶ n frames…`
     /// affordance row.
@@ -601,6 +661,20 @@ pub enum Message {
     /// Confirm the clean (`Enter`/`y`) — routed to the runner as
     /// [`super::Effect::RunClean`].
     ConfirmClean,
+
+    // ── Quit confirm dialog ─────────────────────────────────────────────────────
+    /// Ask to quit (`q` from the welcome/workbench screen or the DevTools
+    /// pane, `Ctrl+C` with no running session, or the palette's Quit entry —
+    /// every former [`Self::Quit`] producer except `Ctrl+Q`). With no live
+    /// session ([`super::AppState::live_session_count`] `== 0`) this behaves
+    /// exactly like [`Self::Quit`]; otherwise it opens the quit-confirm
+    /// dialog (`state.quit_confirm = true`) instead of quitting outright.
+    RequestQuit,
+    /// Confirm the quit from the dialog (`Enter`/`y`) — the old unconditional
+    /// `Quit` behaviour: sets `should_quit` and clears the dialog.
+    ConfirmQuit,
+    /// Close the quit-confirm dialog without quitting (`Esc`/`n`).
+    CloseQuitConfirm,
 
     // ── Build artifact copy-path ──────────────────────────────────────────────
     /// Copy the active (build) session's reported artifact path(s) to the
@@ -884,4 +958,18 @@ pub enum Message {
     /// An IDE-config generation finished (or was refused before it started):
     /// its outcome, retained for the dialog's status area.
     DapIdeConfig(DapIdeReport),
+
+    /// Show a toast from the runner — the seam an impure side effect the
+    /// pure core cannot see into (e.g. `crate::clipboard::write`'s outcome)
+    /// uses to reach `AppState::toasts`, since the runner has no direct
+    /// access to the model. `update`'s handling is pure (just a
+    /// `Toasts::push`); the runner decides the `level`/`text` and the
+    /// moment to send it (a startup clipboard-unavailable warning, or a
+    /// failed copy).
+    Notify {
+        /// The toast's severity.
+        level: ToastKind,
+        /// The toast's text.
+        text: String,
+    },
 }

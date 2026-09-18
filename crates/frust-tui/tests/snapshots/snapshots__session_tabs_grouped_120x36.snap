@@ -37,4 +37,4 @@ expression: "render_to_string(120, 36, &multi_session_state())"
                          │                                                                                              
                          │                                                                                              
                          │● follow  ·  wrap:off                         x stop · f follow · w wrap · / search · l filter
-● 2 running  │  r run · b build · d doctor · ⌘ palette · ? help                                                [mouse ✓]
+● 2 running  │  r run · b build · d devtools · ⌘ palette · ? help                                              [mouse ✓]

@@ -12,14 +12,14 @@ expression: "render_to_string(100, 30, &state)"
    none found            │   12:00:03 [app]    app: booting up                                      
                          │ W 12:00:04 [app]    warning: unused variable `x`                         
  SESSIONS                │   12:00:05 [app]    app: frame 1 rendered                                
-   huddle                │ E 12:00:06 [app]    error: texture upload failed                         
-   ▸ ▶ desktop           │   12:00:07 [app]    app: recovering                                      
-                         │                                                                          
- ACTIONS                 │                                                                          
-   New project · n       │                                                                          
-   Add plugin · a        │                                                                          
-   Doctor · d            │                                                                          
-   Build · b             │                                                                          
+   huddle           ╭────────────────────────╮ error: texture upload failed                         
+   ▸ ▶ desktop      │▸ Copy line             │▓app: recovering                                      
+                    │  Copy selection      y │▓                                                     
+ ACTIONS            │  Select lines…       v │▓                                                     
+   New project · n  │  Toggle follow-tail  f │▓                                                     
+   Add plugin · a   │  Search logs…        / │▓                                                     
+   Doctor · d       ╰────────────────────────╯▓                                                     
+   Build · b         ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                                                     
    Clean · c             │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
@@ -29,6 +29,6 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
+                         │                                                                          
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-                         │ /  err█                                                                  
 ● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

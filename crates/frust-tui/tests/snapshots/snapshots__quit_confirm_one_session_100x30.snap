@@ -13,15 +13,15 @@ expression: "render_to_string(100, 30, &state)"
                          │ W 12:00:04 [app]    warning: unused variable `x`                         
  SESSIONS                │   12:00:05 [app]    app: frame 1 rendered                                
    huddle                │ E 12:00:06 [app]    error: texture upload failed                         
-   ▸ ▶ desktop           │   12:00:07 [app]    app: recovering                                      
-                         │                                                                          
- ACTIONS                 │                                                                          
-   New project · n       │                                                                          
-   Add plugin · a        │                                                                          
-   Doctor · d            │                                                                          
-   Build · b             │                                                                          
-   Clean · c             │                                                                          
-   MCP off · M           │                                                                          
+   ▸ ▶ desktop        ╭ Quit frust? ─────────────────────────────────────────╮                      
+                      │                                                      │▓▓                    
+ ACTIONS              │  1 running session will be stopped.                  │▓▓                    
+   New project · n    │  Device apps are force-stopped on quit.              │▓▓                    
+   Add plugin · a     │                                                      │▓▓                    
+   Doctor · d         │   Quit     Cancel                                    │▓▓                    
+   Build · b          │  Enter/y quit · Esc/n cancel                         │▓▓                    
+   Clean · c          ╰──────────────────────────────────────────────────────╯▓▓                    
+   MCP off · M          ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                    
    DAP off · D           │                                                                          
                          │                                                                          
                          │                                                                          
@@ -29,6 +29,6 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
+                         │                                                                          
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-                         │ /  err█                                                                  
 ● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

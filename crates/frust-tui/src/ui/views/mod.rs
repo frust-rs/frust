@@ -14,6 +14,7 @@ pub mod help;
 pub mod mcp;
 pub mod palette;
 pub mod project_switcher;
+pub mod quit_confirm;
 pub mod run_config;
 pub mod sessions;
 pub mod too_small;

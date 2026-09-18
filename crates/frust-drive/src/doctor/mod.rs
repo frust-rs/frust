@@ -8,6 +8,14 @@ mod cargo_packager;
 mod mobile_targets;
 pub mod report;
 mod rust_toolchain;
+// `pub(crate)`: the browser pipeline's own preflight
+// (`crate::web_build::preflight`) reads these modules' probe helpers so its
+// rows and the flat doctor rows can never disagree about the same host — the
+// severity each surface attaches to a probe result still differs, and stays
+// with the caller.
+pub(crate) mod wasm_bindgen_cli;
+pub(crate) mod wasm_opt;
+pub(crate) mod wasm_target;
 mod xcode;
 
 pub use android_sdk::AndroidSdkValidator;
@@ -16,6 +24,9 @@ pub use cargo_packager::CargoPackagerValidator;
 pub use mobile_targets::MobileTargetsValidator;
 pub use report::{Area, Component, ComponentStatus, DoctorReport, FixCommand, build_report};
 pub use rust_toolchain::RustToolchainValidator;
+pub use wasm_bindgen_cli::WasmBindgenCliValidator;
+pub use wasm_opt::WasmOptValidator;
+pub use wasm_target::WasmTargetValidator;
 pub use xcode::XcodeValidator;
 
 use crate::process::ProcessRunner;
@@ -69,6 +80,9 @@ pub fn default_validators() -> Vec<Box<dyn Validator>> {
         Box::new(AndroidSdkValidator),
         Box::new(XcodeValidator),
         Box::new(CargoPackagerValidator),
+        Box::new(WasmTargetValidator),
+        Box::new(WasmBindgenCliValidator),
+        Box::new(WasmOptValidator),
     ]
 }
 
