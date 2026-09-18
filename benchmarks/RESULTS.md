@@ -756,6 +756,144 @@ the framework report unpowered — the phone stayed on USB power with its level 
 so PROTOCOL §3's charger-off control was not literally met and these absolute numbers are not
 comparable to battery-run passes.
 
+**`tokio`/accesskit per-frame cost, settled by microbench — OnePlus 9, 2026-09-18.** The bar
+above sums only the frame's own spans and cannot resolve either crate's per-frame work (previous
+paragraph): on this rig the bar's own block-order drift is 0.04–2.15 % of S1's 8.55 ms cost-sum
+p50 (≈3–180 µs), while a `tokio` runtime-context entry or an accesskit publish is expected to cost
+well under that — a frame-level A/B would "pass" with no power to detect either. This pass uses a
+sub-microsecond instrument instead, against the **pre-registered rule fixed before measuring**: a
+crate stays in the cold set iff its measured per-frame extra cost at `z` vs `3` is < 0.5 % of
+S1's cost-sum p50 (42.75 µs = 213.75 ns), on the worse of a big core and a little core.
+
+*Method.* Two standalone `aarch64-linux-android` bench crates, outside this repo's workspace
+(own `[workspace]`, `[profile.release]` hand-copied from this checkout's
+`lto`/`codegen-units`/`strip`/`panic`, `Cargo.lock` copied from this checkout so every shared
+dependency resolves identically — confirmed on build: `tokio` 1.53.1, `any_spawner` 0.3.0,
+`reactive_graph` 0.2.14, `accesskit` 0.24.1), each built twice, byte-identical except the one
+crate's own `opt-level` override under test (`z` vs `3`; the four resulting binaries were
+confirmed to differ pairwise by `md5`). Sources and raw per-block logs are attached to the task
+that produced this pass. The `tokio` bench path-depends on `frust-reactive` and calls
+`ReactiveRuntime::pump_local()` directly — idle queue, and with one task (spawned via
+`any_spawner::Executor::spawn_local`) parked on `tokio::time::sleep(1h)`, registered once outside
+the timed region so the pump has a live registered timer in scope without being re-polled each
+call. The accesskit
+bench depends on `accesskit` alone — matching `frust-core`'s own dependency; `accesskit_consumer`/
+`accesskit_android` never entered either build's graph, so only `accesskit`'s own override was
+exercised (the card allows this: "only accesskit matters for the TalkBack-off path") — and times
+one "publish": build N `accesskit::Node`s the way `frust-widgets/src/button.rs`'s `semantics()`
+does (`Role::Button`, bounds from a synthetic per-row layout, a text label, `Action::Click` or the
+disabled state — a representative mix, every 5th node disabled), clone the `Vec` (mirroring
+`tree_update_from_semantics`'s `update.nodes.clone()`), clone again (mirroring
+`publish_semantics`'s `tree_update.clone()` into the late-activation snapshot slot), drop all
+three — the TalkBack-off cost `frust-shell-android`'s frame path pays on every changed-generation
+frame regardless of whether a screen reader is listening. Timing is `std::time::Instant`-batched
+(several batches of many iterations each; the median batch ns/iter is reported, with min/max as
+the spread). Cores are `taskset`-pinned: little = cpu0 (A55). Big was meant to be one fixed index
+in cpu4-6 (A78), but this rig's Qualcomm `core_ctl` dynamically isolates individual big cores
+under low load (`/sys/devices/system/cpu/cpuN/isolate` flips a single core's `sched_setaffinity`
+to `EINVAL` for anywhere from seconds to ~2 minutes, confirmed via the `isolate` sysfs file, not a
+thermal effect — `dumpsys thermalservice` read Thermal Status 0/NONE throughout), so the big-core
+mask actually used is the cpu4-6 **union**, letting the scheduler place each run on whichever of
+the three is currently de-isolated — still "a big core" per the card, not a fixed one. ABBA order
+`z,3,3,z` × 2 rounds per (workload, core) combination. Battery temperature was flat across every
+round (`dumpsys battery`, ≤0.8 °C drift observed, always on USB power — PROTOCOL §3's charger-off
+control is not met here either, the same caveat as the rest of this device's rows).
+
+*Positive control.* A ~1 µs `Instant`-based busy-wait (accurate independent of CPU frequency)
+injected into the same timed loop, baseline vs injected: `tokio` bench (idle workload, big core)
+51.2 ns/iter → 1179.6 ns/iter, **delta 1128 ns**; accesskit bench (N=1 — at N=500 the loop's own
+~2 µs batch-to-batch band swamps a 1 µs signal against a 344 µs baseline, so the control was
+re-run at N=1 to get a clean baseline) 752.7 ns/iter → 1881.0 ns/iter, **delta 1128 ns**. Both
+resolve the ~1 µs injected signal to within ~13 %, well inside the range either bench's real
+deltas below occupy.
+
+*A/A noise floor* (same binary run twice back to back, no ABBA): `tokio` idle, little core
+**1.07 ns**/pump, big core **1.45 ns**/pump — both far below the real deltas the little core shows
+below. accesskit N=2000, little core **16.8 µs**/publish (0.29 % of its own 5.88 ms baseline), big
+core **7.2 µs**/publish (0.51 % of its own 1.43 ms baseline) — the big-core accesskit delta below
+sits *inside* this noise floor and is flagged low-confidence on its own; the little-core delta is
+~5.5× this floor and clearly resolved.
+
+**`tokio` result** (ns/pump, ABBA-cancelled `z − 3`):
+
+| Workload | Core | `z` median | `3` median | Δ (`z − 3`) |
+|---|---|---|---|---|
+| idle (empty queue) | little (cpu0) | 232.4 ns | 220.3 ns | **+12.11 ns** |
+| idle (empty queue) | big (cpu4-6) | 52.10 ns | 52.09 ns | +0.01 ns (noise) |
+| timer (one parked task) | little (cpu0) | 259.4 ns | 244.6 ns | **+14.75 ns** |
+| timer (one parked task) | big (cpu4-6) | 54.35 ns | 52.95 ns | +1.40 ns (≈ its own A/A floor) |
+
+Worst case is the little core's timer workload. Per-frame extrapolation (≥4 pumps/frame, per the
+card): 14.75 ns × 4 = **59.0 ns/frame = 0.138 % of 42.75 µs** — under the 0.5 % (213.75 ns) bar
+by a wide margin (27.6 % of the threshold). **`tokio` meets the rule.**
+
+**accesskit result** (ns/publish, `z − 3`):
+
+| N | Core | `z` median | `3` median | Δ (`z − 3`) | Method |
+|---|---|---|---|---|---|
+| 2000 | little (cpu0) | 5.870 ms | 5.778 ms | **+91,847 ns** | full ABBA, 2 rounds |
+| 2000 | big (cpu4-6) | 1.414 ms | 1.413 ms | +1,075 ns | full ABBA, 2 rounds — below the big-core A/A floor, low confidence alone |
+| 500 | big (cpu4-6) | 344.4 µs | 338.9 µs | +5,494 ns | single order (`z` then `3`), informative only, no ABBA |
+| 100 | big (cpu4-6) | 58.72 µs | 60.29 µs | −1,572 ns | single order, informative only; opposite sign — at very small N the direction is not established |
+
+The N=500/N=100 rows are supplementary (single-order, not ABBA-controlled — see *Largest tree*
+below for why N=2000 is the number the rule actually uses). Worst case is the little core:
+**91,847 ns = 91.85 µs/publish = 214.85 % of the 42.75 µs bar**, ~430× the 213.75 ns threshold —
+clearly resolved (~5.5× the little-core A/A floor). Even the noisier big-core point alone
+(1,075 ns = 2.51 % of the bar) is still over 0.5 %. **accesskit fails the rule**, by a margin no
+plausible noise correction closes.
+
+**Largest `frust_bench` scenario tree — not established by a host run; N=2000 used as the
+conservative stand-in per the card's own fallback.** Building a headless host harness that
+constructs a scenario's `View`/`Widget` tree and calls `RenderRoot::semantics().nodes.len()` was
+out of scope for this pass's time budget. Code inspection of the two list-shaped scenarios is
+informative, though: S2 (`s2_list.rs`) materializes only the visible viewport plus
+`BUFFER_ROWS = 3` above/below (`ITEM_EXTENT = 72.0`, so a ~2400 px-tall device viewport holds
+~33 rows, +3+3 buffer ≈ 39 materialized rows — `CACHE_MARGIN_ROWS = 12` extends the *shaped-text*
+cache, not the semantics tree); S3 (`s3_table.rs`, `ROW_EXTENT = 40.0`) is a similarly virtualized
+grid. Neither scenario's live tree is likely within an order of magnitude of 2000 nodes, so
+N=2000 is very likely a substantial over-estimate of this bench suite's real worst case — the
+conservative direction the fallback is supposed to take, not a number that understates the rule.
+
+**Size give-back (`tokio`).** Measured the same way as the `jni` row above: the lean arm64
+release `libfrustbench.so` (`benchmarks/frust_bench`, `cargo ndk -t arm64-v8a build --release
+--no-default-features --features lean`) and the `db`-on default build, each built twice —
+`[profile.release.package.tokio]` present (`z`, the current committed state) vs a temporary local
+removal of that block from `benchmarks/frust_bench/Cargo.toml` (falls back to the profile's `3`
+default), reverted after each measurement and confirmed by `git status`/`git diff` showing no
+change to that file. `cargo ndk` reused every unaffected cached object both times (only `tokio`
+and its dependents recompiled), so the two `.so`s in each pair differ only in that one override.
+
+| Build | with override (`z`, present) | without (`3`, removed) | Δ (removed − present) |
+|---|---|---|---|
+| lean (`--no-default-features --features lean`) | 6,844,248 B | 6,843,000 B | **−1,248 B** |
+| `db` on (default) | 8,873,264 B | 8,873,568 B | **+304 B** |
+
+The lean pair's db-on cross-check landed within 1,184 B of the committed reference rows above
+(6,843,064 B / 8,872,080 B), the expected gap from toolchain/date drift since that pass. Unlike
+`jni`'s row (a consistent +30 KB in both builds when removed), `tokio`'s sign **flips between the
+two builds** — a section breakdown of the lean pair (`llvm-size -A`) shows why: under `z`, `tokio`'s
+own `.text` genuinely shrinks (−12,296 B), but `.eh_frame`/`.eh_frame_hdr` grow by almost exactly
+as much (+12,220 B — more, smaller functions under `z` means less inlining and more per-function
+unwind-table entries), and `.rodata`/`.data.rel.ro`/`.rela.dyn` add a further ~1,394 B, netting
+`z` **larger** in the lean build and the db-on build's own ±304 B is inside that same noise band.
+**`opt-level = "z"` buys `tokio` no reliable size reduction in this binary** — the size axis gives
+no reason to keep it in the cold set even though the CPU rule above says it may stay.
+
+*accesskit's give-back, measured the same way (optional per the card, all three of its cold-set
+overrides removed together, lean build only):* 6,844,248 B (present) → 6,867,728 B (removed),
+**Δ +23,480 B** — a real, one-directional cost, the same shape as `jni`'s row (unlike `tokio`'s
+above). Removing accesskit from the cold set, which its CPU result above recommends, is not free
+on size; that tension is a conductor-level call, not one this pre-registered CPU-only rule
+resolves.
+
+**Outcome under the pre-registered rule.** `tokio`: **meets the rule** (0.138 % ≪ 0.5 %) — stays.
+accesskit: **fails the rule** (214.85 % of the bar on the little core, the worse core and the one
+clearly resolved above its own A/A floor; still 2.51 % — over the bar — on the noisier big-core
+point alone) — recommended out, on the same unmeasured-per-frame-work grounds `jni` already left
+on, though unlike `jni`'s size story, removing accesskit would cost size rather than give it back.
+Nothing above changes what is actually in `Cargo.toml` — the conductor applies the outcome.
+
 **Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
 the font and link-flag levers above.
 
