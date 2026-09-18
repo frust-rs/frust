@@ -390,6 +390,19 @@ fn accept_loop(
 /// One request, one response, then close — the `Connection: close` contract
 /// this server advertises on every reply.
 fn handle_connection(stream: TcpStream, root: &Path, log: Option<&(dyn Fn(&str) + Send + Sync)>) {
+    // The listener is non-blocking (see `serve`, so `accept_loop` can poll the
+    // shutdown flag), and on macOS/BSD an accepted socket INHERITS its
+    // listener's O_NONBLOCK (unlike Linux, where `accept` always returns a
+    // blocking socket). Left non-blocking here, the read timeout set below
+    // would do nothing: the first `read_line` in `read_request` returns
+    // `WouldBlock` immediately whenever the request bytes have not arrived
+    // yet, and that reads as a dead connection to close rather than a slow
+    // one to wait on. Clear it before the timeouts are set so they actually
+    // apply; a stream that refuses is dropped the same way a failed
+    // `try_clone` below is.
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let mut reader = BufReader::new(match stream.try_clone() {
@@ -1038,6 +1051,29 @@ mod tests {
         String::from_utf8_lossy(&response).to_string()
     }
 
+    /// Like [`request`], but the client connects and then sleeps before
+    /// writing a byte of the request — the macOS tripwire for the
+    /// inherited-non-blocking bug: on this platform, `handle_connection`'s
+    /// first read hit `WouldBlock` immediately whenever no bytes had arrived
+    /// yet, closing the connection with no response instead of waiting out
+    /// the read timeout the way `set_read_timeout` promises. The delay is far
+    /// past that immediate failure and far under [`READ_TIMEOUT`]'s 5 s, so a
+    /// fixed server reads it as an ordinary slow client. On Linux, where
+    /// `accept` never hands out a non-blocking socket, this passes either
+    /// way; it is a control against this one platform's inherited flag, not
+    /// a portable timing assertion.
+    fn request_after_delay(addr: SocketAddr, delay: Duration, raw: &str) -> String {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        thread::sleep(delay);
+        stream.write_all(raw.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        String::from_utf8_lossy(&response).to_string()
+    }
+
     fn test_server(root: &Path) -> DevServer {
         serve(
             root,
@@ -1124,6 +1160,24 @@ mod tests {
         let server = test_server(&root);
         let response = request(server.local_addr(), "GET / HTTP/1.1\r\nHost: [::1]\r\n\r\n");
         assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        server.shutdown();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The macOS tripwire: a client that waits before sending its request
+    /// still gets a real response, not a silently closed connection. See
+    /// [`request_after_delay`] for why the delay is chosen the way it is.
+    #[test]
+    fn a_request_sent_after_a_delay_still_gets_the_response() {
+        let root = artifact_root("e2e-delayed-write");
+        let server = test_server(&root);
+        let response = request_after_delay(
+            server.local_addr(),
+            Duration::from_millis(200),
+            "GET /pkg/app_bg.wasm HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("\0asm\u{1}\0\0\0"), "{response:?}");
         server.shutdown();
         let _ = fs::remove_dir_all(&root);
     }
