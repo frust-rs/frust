@@ -160,12 +160,14 @@ android {
     // else. Paths in this file resolve against the module directory
     // (`android/app/`), so `../../` is the app root.
     //
-    // `srcDir` ADDS a directory; AGP's own `src/main/jniLibs` default stays in
-    // the set, so a project migrated from the old layout still packages any
-    // stale `.so`s sitting there until `frust clean` removes them. The ABI
-    // split/versionCode block below is unaffected either way — it reads the
-    // variant's ABI filters, not the library files.
-    sourceSets.getByName("main").jniLibs.srcDir("../../build/android/jniLibs")
+    // `setSrcDirs` REPLACES AGP's default `src/main/jniLibs` with our build
+    // directory exclusively — the source tree is never a packaging input. A
+    // project migrated from the old layout may have stale `.so`s in
+    // `src/main/jniLibs` left over; those are not packaged (only our build
+    // directory is), but they linger until `frust clean` removes them. The ABI
+    // split/versionCode block below is unaffected — it reads the variant's ABI
+    // filters and the staged `.so` files, not the source set.
+    sourceSets.getByName("main").jniLibs.setSrcDirs(listOf("../../build/android/jniLibs"))
 
     // Example flavor scaffold — uncomment and mirror frust.toml's [flavors].
     // flavorDimensions += "env"
