@@ -9,7 +9,7 @@
 //! [`crate::glass`] instead (a separate module — see that module's own docs
 //! for why).
 
-use frust::authoring::text::{FontFamily, FontWeight, LineHeight, TextStyle};
+use frust::authoring::text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
 use frust::{
     Brightness, ColorScheme, CosmeticLoopRate, Curve, DesignLanguage, EasingSet, Elevation,
     ElevationLevel, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale,
@@ -296,22 +296,15 @@ pub fn status_palette() -> StatusPalette {
 ///   Title/Title 1/Title 2/Title 3 are Regular by default, not Bold/Semibold
 ///   as an earlier community table claimed; Bold/Semibold variants of those
 ///   styles exist only as an opt-in "emphasized" style, not the default.
-/// - **Family (correction):** SF Pro automatically switches between the
-///   "Text" optical size (more open spacing, ≤19pt) and "Display" optical
-///   size (tighter spacing, ≥20pt) — driven purely by the requested point
-///   size, with **no dpi/density component** (an earlier community claim of
-///   a "144dpi" cutoff is not supported by any Apple documentation). This
-///   module encodes the cutoff by choosing a `FontFamily::stack(["SF Pro
-///   Display", …])`/`stack(["SF Pro Text", …])` per slot, keyed on that
-///   slot's own point size. **SF Pro's family-name resolution is
-///   compile-verified only here** — parley/fontique resolves a named
-///   family against the *current platform's* installed fonts, so "SF Pro
-///   Text"/"SF Pro Display" only actually resolve on iOS (SF Pro's license
-///   forbids cross-platform bundling, mirroring Flutter's Cupertino
-///   precedent of a system-font proxy that falls back off-Apple-platforms);
-///   on every other platform this stack falls back to **parley's own
-///   fallback font resolution**, not a "system UI font" per se — actual
-///   on-device resolution is a future runtime concern, not this module's.
+/// - **Family (correction):** SF Pro switches between the "Text" optical
+///   size (≤19pt, more open spacing) and "Display" optical size (≥20pt,
+///   tighter spacing) purely by point size, with **no dpi/density
+///   component** (an earlier community "144dpi" cutoff claim is unsupported
+///   by Apple documentation). Each slot names its SF Pro style first, then
+///   falls back to the platform's system UI font — SF Pro's license keeps
+///   it iOS-only, so an unresolved name lands on the system UI face, never
+///   on whatever font parley's own unmatched-name resolution would
+///   otherwise pick (Helvetica, on macOS).
 /// - **Letter spacing:** left at `0.0` for every Cupertino token — SF Pro's
 ///   per-size optical tracking is baked into the font's own metrics tables
 ///   (applied by CoreText/parley from the font itself), not an
@@ -391,15 +384,16 @@ const LABEL_LARGE: TypeToken = (13.0, 18.0, FontWeight::REGULAR); // Footnote
 const LABEL_MEDIUM: TypeToken = (12.0, 16.0, FontWeight::REGULAR); // Caption 1
 const LABEL_SMALL: TypeToken = (11.0, 13.0, FontWeight::REGULAR); // Caption 2
 
-/// The named SF Pro family stack for `size_pt`, switching at
-/// [`TEXT_DISPLAY_CUTOFF_PT`] (see doc comment above). Resolution is
-/// compile-verified only here — actual on-device font resolution is a
-/// future concern.
+/// The SF Pro family stack for `size_pt`, switching at
+/// [`TEXT_DISPLAY_CUTOFF_PT`] (see the module doc's Family bullet). Ends in
+/// [`GenericSlot::SystemUi`], so an unresolved SF Pro name falls back to
+/// the platform's system UI font rather than parley's own arbitrary
+/// unmatched-name resolution.
 fn sf_family_for_size(size_pt: f32) -> FontFamily {
     if size_pt >= TEXT_DISPLAY_CUTOFF_PT {
-        FontFamily::stack(["SF Pro Display", "SF Pro"])
+        FontFamily::stack_with_generic(["SF Pro Display", "SF Pro"], GenericSlot::SystemUi)
     } else {
-        FontFamily::stack(["SF Pro Text", "SF Pro"])
+        FontFamily::stack_with_generic(["SF Pro Text", "SF Pro"], GenericSlot::SystemUi)
     }
 }
 
@@ -618,6 +612,7 @@ pub const fn motion_scheme() -> MotionScheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::FamilyName;
 
     #[test]
     fn type_scale_display_large_matches_large_title() {
@@ -645,15 +640,88 @@ mod tests {
     #[test]
     fn type_scale_family_switches_at_the_text_display_cutoff() {
         // The Text/Display switch is size-driven — >= 20pt uses Display,
-        // < 20pt uses Text — with no dpi component.
+        // < 20pt uses Text — with no dpi component. Both stacks carry the
+        // SystemUi generic tail (see `sf_family_for_size`'s doc comment).
         let scale = type_scale(&TextStyle::new(16.0, Color::BLACK));
-        let display_stack = FontFamily::stack(["SF Pro Display", "SF Pro"]);
-        let text_stack = FontFamily::stack(["SF Pro Text", "SF Pro"]);
+        let display_stack =
+            FontFamily::stack_with_generic(["SF Pro Display", "SF Pro"], GenericSlot::SystemUi);
+        let text_stack =
+            FontFamily::stack_with_generic(["SF Pro Text", "SF Pro"], GenericSlot::SystemUi);
 
         assert_eq!(scale.display_large.family, display_stack); // 34pt
         assert_eq!(scale.headline_small.family, display_stack); // 20pt: boundary, Display
         assert_eq!(scale.title_large.family, text_stack); // 17pt
         assert_eq!(scale.label_small.family, text_stack); // 11pt
+    }
+
+    /// Guards every [`TypeScale`] role's family against losing its
+    /// [`GenericSlot::SystemUi`] tail, the fallback that keeps an unresolved
+    /// SF Pro name on the platform's system UI font.
+    #[test]
+    fn every_type_scale_slot_ends_in_the_system_ui_generic_tail() {
+        fn ends_in_system_ui(family: &FontFamily) -> bool {
+            matches!(
+                family,
+                FontFamily::NamedWithGeneric(names)
+                    if matches!(names.last(), Some(FamilyName::Generic(GenericSlot::SystemUi)))
+            )
+        }
+
+        let scale = type_scale(&TextStyle::new(16.0, Color::BLACK));
+        let slots: [(&str, &TextStyle); 30] = [
+            ("display_large", &scale.display_large),
+            ("display_medium", &scale.display_medium),
+            ("display_small", &scale.display_small),
+            ("headline_large", &scale.headline_large),
+            ("headline_medium", &scale.headline_medium),
+            ("headline_small", &scale.headline_small),
+            ("title_large", &scale.title_large),
+            ("title_medium", &scale.title_medium),
+            ("title_small", &scale.title_small),
+            ("body_large", &scale.body_large),
+            ("body_medium", &scale.body_medium),
+            ("body_small", &scale.body_small),
+            ("label_large", &scale.label_large),
+            ("label_medium", &scale.label_medium),
+            ("label_small", &scale.label_small),
+            ("display_large_emphasized", &scale.display_large_emphasized),
+            (
+                "display_medium_emphasized",
+                &scale.display_medium_emphasized,
+            ),
+            ("display_small_emphasized", &scale.display_small_emphasized),
+            (
+                "headline_large_emphasized",
+                &scale.headline_large_emphasized,
+            ),
+            (
+                "headline_medium_emphasized",
+                &scale.headline_medium_emphasized,
+            ),
+            (
+                "headline_small_emphasized",
+                &scale.headline_small_emphasized,
+            ),
+            ("title_large_emphasized", &scale.title_large_emphasized),
+            ("title_medium_emphasized", &scale.title_medium_emphasized),
+            ("title_small_emphasized", &scale.title_small_emphasized),
+            ("body_large_emphasized", &scale.body_large_emphasized),
+            ("body_medium_emphasized", &scale.body_medium_emphasized),
+            ("body_small_emphasized", &scale.body_small_emphasized),
+            ("label_large_emphasized", &scale.label_large_emphasized),
+            ("label_medium_emphasized", &scale.label_medium_emphasized),
+            ("label_small_emphasized", &scale.label_small_emphasized),
+        ];
+
+        for (name, style) in slots {
+            assert!(
+                ends_in_system_ui(&style.family),
+                "type_scale.{name}.family does not end in GenericSlot::SystemUi: {:?} — \
+                 an unresolved SF Pro name would fall back to parley's own arbitrary \
+                 resolution instead of the platform system UI font",
+                style.family
+            );
+        }
     }
 
     #[test]
@@ -767,5 +835,154 @@ mod tests {
         assert_eq!(theme.shape, shape_scale());
         assert_eq!(theme.elevation, elevation());
         assert_eq!(theme.motion, motion_scheme());
+    }
+}
+
+/// Render-time typeface probe shared by every Cupertino text site's
+/// render-time font-bytes tests (`action_sheet`, `alert_dialog`, `button`,
+/// `navbar`, `tabbar`): paints a view through a real
+/// [`frust_core::RenderRoot`] under a given [`Theme`] and reports every
+/// painted glyph run's exact font bytes, so a site test can prove its
+/// opted-in [`frust::authoring::ThemeTextType`] role — not
+/// `TextStyle::default()`'s `SystemUi` — decided what shaped, the same way
+/// `frust-material`'s own `typeface_probe`
+/// (`plugins/material/src/appbar/top.rs`) does for its bundled Roboto Flex.
+///
+/// Cupertino's own scale resolves every role to a NAMED "SF Pro
+/// Text"/"SF Pro Display" family stack ([`type_scale`]'s doc comment): that
+/// name only actually resolves on iOS (SF Pro's license forbids
+/// cross-platform bundling), so a render-time identity test here cannot
+/// compare against real SF Pro bytes the way Material's bundled Roboto Flex
+/// can. Instead a caller overrides the ONE role its site opts into
+/// ([`baseline_with_family`]) to a [`FontFamily::named`] pointing at a
+/// registered test face — [`TUFFY`]/[`TUFFY_AS_HELVETICA`], the same
+/// public-domain cross-crate fixture `frust-widgets`' own themed-family
+/// tests use (`crates/frust-text/tests/fonts/`, included the same
+/// cross-crate way `crates/frust-widgets/src/text.rs`'s tests do) — leaving
+/// every other Cupertino baseline token (color, shape, motion, glass)
+/// untouched, and this probe proves every painted glyph run shaped against
+/// it.
+#[cfg(test)]
+pub(crate) mod typeface_probe {
+    use super::baseline;
+    use frust::Theme;
+    use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::{FontFamily, TextContext};
+    use frust::authoring::{PaintScene, View};
+    use frust::text;
+    use frust_core::{FrameTime, RenderRoot};
+    use kurbo::{Point, Size};
+    use peniko::Color;
+    use std::any::Any;
+
+    /// The public-domain subsetted test face `frust-text`'s own registration
+    /// tests use, included cross-crate like `crates/frust-widgets/src/text.rs`'s
+    /// identical fixture — registers as family name `"Tuffy"`.
+    pub(crate) const TUFFY: &[u8] =
+        include_bytes!("../../../crates/frust-text/tests/fonts/Tuffy-Subset.ttf");
+    /// The same face with its internal name table renamed — distinct bytes
+    /// from [`TUFFY`], registering as family name `"Helvetica"`, so a
+    /// theme-swap test can tell which face a run shaped against.
+    pub(crate) const TUFFY_AS_HELVETICA: &[u8] =
+        include_bytes!("../../../crates/frust-text/tests/fonts/Tuffy-As-Helvetica.ttf");
+
+    /// [`baseline`] with one [`frust::TypeScale`] slot's family swapped, via
+    /// `set_family`, to a [`FontFamily::named`] pointing at `family_name`
+    /// (usually [`TUFFY`]'s `"Tuffy"` or [`TUFFY_AS_HELVETICA`]'s
+    /// `"Helvetica"` — register the matching bytes into the `TextContext` a
+    /// caller lays out with). Every other Cupertino baseline token stays
+    /// exactly [`baseline`]'s own.
+    pub(crate) fn baseline_with_family(
+        set_family: impl FnOnce(&mut frust::TypeScale, FontFamily),
+        family_name: &str,
+    ) -> Theme {
+        let mut theme = baseline();
+        set_family(&mut theme.type_scale, FontFamily::named(family_name));
+        theme
+    }
+
+    /// Records each painted glyph run's exact font bytes, in paint order.
+    #[derive(Default)]
+    struct FaceRecorder {
+        runs: Vec<Vec<u8>>,
+    }
+
+    impl PaintScene for FaceRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.runs.push(run.font.font().data.as_ref().to_vec());
+        }
+    }
+
+    /// Rebuilds `logic`'s view under `theme`, lays it out in `window` with
+    /// `faces` registered, paints it through a real `RenderRoot`, and
+    /// returns every painted glyph run's font bytes, in paint order.
+    pub(crate) fn painted_run_faces<V: View<()>>(
+        mut logic: impl FnMut(&mut ()) -> V,
+        theme: Theme,
+        faces: &[&'static [u8]],
+        window: Size,
+    ) -> Vec<Vec<u8>> {
+        let mut tcx = TextContext::new();
+        for face in faces {
+            tcx.register_fonts(face.to_vec())
+                .expect("a Cupertino typeface-probe test face must register");
+        }
+        let mut root: RenderRoot<(), V> = RenderRoot::new();
+        root.set_theme(Box::new(theme));
+        root.rebuild(&mut logic, &mut ());
+        root.layout_with_text(window, &mut tcx as &mut dyn Any);
+        let mut recorder = FaceRecorder::default();
+        root.paint(&mut recorder, FrameTime::ZERO);
+        recorder.runs
+    }
+
+    /// Asserts `logic`'s component, painted under `theme` with `faces`
+    /// registered, painted at least one glyph run and every run shaped
+    /// against `expected`'s exact bytes — after first asserting the control
+    /// (mirroring `frust-material`'s `typeface_probe::assert_paints_only_in`):
+    /// a plain `text(..)` (the `SystemUi` request an un-opted Cupertino text
+    /// makes) painted the same way under `theme`/`faces` must have no run in
+    /// `expected`, or the identity assertion below would prove nothing (a host
+    /// whose `SystemUi` happened to resolve to the probe face).
+    #[track_caller]
+    pub(crate) fn assert_paints_only_in<V: View<()>>(
+        what: &str,
+        logic: impl FnMut(&mut ()) -> V,
+        theme: Theme,
+        faces: &[&'static [u8]],
+        window: Size,
+        expected: &'static [u8],
+    ) {
+        let control = painted_run_faces(|_: &mut ()| text("Hello"), theme.clone(), faces, window);
+        let leaked = control
+            .iter()
+            .filter(|bytes| bytes.as_slice() == expected)
+            .count();
+        assert_eq!(
+            leaked,
+            0,
+            "control: {leaked} of {} run(s) of a plain text() that never opts in \
+             shaped in the probe's registered face — on this host an un-opted run \
+             is indistinguishable from the expected face, so the identity \
+             assertion for {what} would prove nothing",
+            control.len()
+        );
+
+        let runs = painted_run_faces(logic, theme, faces, window);
+        assert!(!runs.is_empty(), "{what} painted no glyph run at all");
+        let foreign = runs
+            .iter()
+            .filter(|bytes| bytes.as_slice() != expected)
+            .count();
+        assert_eq!(
+            foreign,
+            0,
+            "{foreign} of {} glyph run(s) in {what} shaped against a face other \
+             than the probe's registered face — the text is not asking for the \
+             theme's type-scale family",
+            runs.len()
+        );
     }
 }
