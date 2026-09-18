@@ -167,7 +167,7 @@
 //! (Vendored Components)" section and its Module Attribution Header Convention.
 
 use frust::authoring::text::{FontWeight, LineHeight, TextOverflow};
-use frust::authoring::{AnyView, ChildPod, Role};
+use frust::authoring::{AnyView, ChildPod, Role, ThemeTextType};
 use frust::{ShapeScale, Theme, text};
 use peniko::Color;
 
@@ -223,11 +223,13 @@ const HEADLINE_INSET: f64 = 16.0;
 
 /// The collapsed title's M3 `titleLargeEmphasized` type-scale token, hardcoded
 /// here rather than read from a live `Theme::type_scale`: unlike a themed
-/// *color*, `Text` has no layout-time-deferred *size/weight* resolution seam
-/// (see `docs/CODE_STANDARDS.md`'s Theming conventions — only a color role can
-/// be resolved after `View::build`). Matches `frust-theme::typography`'s
-/// `TITLE_LARGE_EMPHASIZED`: the baseline `TITLE_LARGE` size/line-height
-/// (m3.material.io) with the weight stepped Regular → Medium.
+/// *color* or font *family*, `Text` has no layout-time-deferred *size/weight*
+/// resolution seam (see `docs/CODE_STANDARDS.md`'s Theming conventions — only
+/// a color role and an opted-in family role are resolved after `View::build`;
+/// the title opts into the family, see `title_text_view`). Matches
+/// `frust-theme::typography`'s `TITLE_LARGE_EMPHASIZED`: the baseline
+/// `TITLE_LARGE` size/line-height (m3.material.io) with the weight stepped
+/// Regular → Medium.
 const TITLE_SIZE: f32 = 22.0;
 /// Line height of [`TITLE_SIZE`]'s type token, in logical px.
 const TITLE_LINE_HEIGHT: f32 = 28.0;
@@ -502,6 +504,17 @@ impl<State: 'static> TitleSlot<State> {
 /// title/headline text defaulting to the `Text` widget's own `OnSurface` themed
 /// role (an app bar title reads as ordinary on-surface content), ellipsized to
 /// one line like upstream's own `titleText`.
+///
+/// Its font family follows the live theme's `titleLargeEmphasized` role — the
+/// collapsed, resting role — and by design that one family governs a sliver
+/// bar's whole collapse. The sliver interpolates the title's size AND line
+/// height between `headlineSmallEmphasized` (expanded) and
+/// `titleLargeEmphasized` (collapsed) at build time, but a family cannot
+/// interpolate, and switching faces mid-collapse would make the title visibly
+/// jump. Under a type scale whose headline and title families differ — Glyph's
+/// (Space Mono headline, IBM Plex Mono title) or Cupertino's (SF Pro Display
+/// at 20pt and up, SF Pro Text below) — the expanded headline therefore
+/// renders in the title face. The Material scale gives both roles Roboto Flex.
 fn title_text_view<State: 'static>(title: &str, size: f32, line_height: f32) -> AnyView<State> {
     frust::authoring::any::<State, _>(
         text(title.to_string())
@@ -509,7 +522,8 @@ fn title_text_view<State: 'static>(title: &str, size: f32, line_height: f32) -> 
             .weight(TITLE_WEIGHT)
             .line_height(LineHeight::Absolute(line_height))
             .max_lines(1)
-            .overflow(TextOverflow::Ellipsis),
+            .overflow(TextOverflow::Ellipsis)
+            .themed_family(ThemeTextType::TitleLargeEmphasized),
     )
 }
 

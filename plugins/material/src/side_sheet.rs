@@ -115,7 +115,7 @@ use std::rc::Rc;
 use frust::authoring::text::{FontWeight, LineHeight};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextType, View, Widget, any,
 };
 use frust::text;
 use kurbo::{Point, Size};
@@ -173,10 +173,11 @@ const ACTIONS_PADDING: f64 = MaterialSpacing::LG;
 /// Title type-scale token (M3 `titleLarge`, *not* the emphasized sibling —
 /// the reference's own `titleStyle` reads `type.titleLarge` unmodified).
 /// Hardcoded rather than read from a live `Theme::type_scale`: `Text` has no
-/// layout-time-deferred size/weight resolution seam (only a *color* role can
-/// be resolved after `View::build` — see `docs/CODE_STANDARDS.md`'s Theming
-/// conventions), the same precedent [`mod@crate::dialog`]/[`mod@crate::appbar`]
-/// follow.
+/// layout-time-deferred size/weight resolution seam (only a *color* role and
+/// an opted-in *family* role can be resolved after `View::build` — see
+/// `docs/CODE_STANDARDS.md`'s Theming conventions), the same precedent
+/// [`mod@crate::dialog`]/[`mod@crate::appbar`] follow. The title does opt its
+/// family into the `titleLarge` role.
 const TITLE_SIZE: f32 = 22.0;
 const TITLE_LINE_HEIGHT: f32 = 28.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::REGULAR;
@@ -195,13 +196,15 @@ fn side_sheet_config() -> OverlayModalConfig {
 
 /// Build the title's type-erased child view: `titleLarge`-styled text,
 /// defaulting to the `Text` widget's own `OnSurface` themed role (matches
-/// `M3ESideSheetTheme::titleStyle`'s `onSurface` ink).
+/// `M3ESideSheetTheme::titleStyle`'s `onSurface` ink), its family following
+/// the live theme's `titleLarge` role.
 fn title_view<State: 'static>(title: &str) -> AnyView<State> {
     any::<State, _>(
         text(title.to_string())
             .size(TITLE_SIZE)
             .weight(TITLE_WEIGHT)
-            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT))
+            .themed_family(ThemeTextType::TitleLarge),
     )
 }
 

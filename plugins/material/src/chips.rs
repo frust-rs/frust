@@ -101,12 +101,12 @@
 
 use std::rc::Rc;
 
-use frust::authoring::ThemeTextColor;
 use frust::authoring::{Action, Role, Toggled};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
     PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 use frust::{IconData, ShapeScale, Theme};
 use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
@@ -264,9 +264,10 @@ fn resolve_chip_shadow(theme: Option<&Theme>) -> (f64, f64, Color) {
 }
 
 /// Build the type-erased label/leading-glyph view, themed per `selected`
-/// (see the module docs' label-color simplification). Shared by every chip
-/// type's build/rebuild/teardown, for both the label and an optional
-/// leading glyph, so the role stays consistent between them.
+/// (see the module docs' label-color simplification), its family following
+/// the live theme's `labelLarge` role (the M3 chip label token). Shared by
+/// every chip type's build/rebuild/teardown, for both the label and an
+/// optional leading glyph, so the role stays consistent between them.
 fn chip_label_view<State: 'static>(
     text: String,
     selected: bool,
@@ -276,7 +277,11 @@ fn chip_label_view<State: 'static>(
     } else {
         ThemeTextColor::OnSurfaceVariant
     };
-    any::<State, _>(frust::text(text).themed_role(role))
+    any::<State, _>(
+        frust::text(text)
+            .themed_role(role)
+            .themed_family(ThemeTextType::LabelLarge),
+    )
 }
 
 /// Paint the full M3 chip surface: an optional level-1 elevation shadow

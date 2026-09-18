@@ -115,8 +115,9 @@ use std::rc::Rc;
 use frust::authoring::text::{FontWeight, LineHeight};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextColor, View, Widget, any, build_child,
-    rebuild_child, route_event, route_event_single, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextColor, ThemeTextType, View, Widget,
+    any, build_child, rebuild_child, route_event, route_event_single, teardown_child,
+    visit_children,
 };
 use frust::{NavigatorController, PopResult, text};
 use kurbo::{Point, Size};
@@ -525,26 +526,35 @@ struct TimePickerPanelWidget {
     input_mode: bool,
 }
 
+/// The help line: `labelLarge` metrics and family, `on_surface_variant`.
 fn help_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
             .size(HELP_SIZE)
             .weight(HELP_WEIGHT)
             .line_height(LineHeight::Absolute(HELP_LINE_HEIGHT))
-            .themed_role(ThemeTextColor::OnSurfaceVariant),
+            .themed_role(ThemeTextColor::OnSurfaceVariant)
+            .themed_family(ThemeTextType::LabelLarge),
     )
 }
 
+/// The formatted-time headline: `headlineLarge` metrics and family, or
+/// `headlineSmall`'s for the `short` landscape-input variant.
 fn title_view<State: 'static>(s: &str, short: bool) -> AnyView<State> {
-    let (size, line_height) = if short {
-        (TITLE_SHORT_SIZE, TITLE_SHORT_LINE_HEIGHT)
+    let (size, line_height, family) = if short {
+        (
+            TITLE_SHORT_SIZE,
+            TITLE_SHORT_LINE_HEIGHT,
+            ThemeTextType::HeadlineSmall,
+        )
     } else {
-        (TITLE_SIZE, TITLE_LINE_HEIGHT)
+        (TITLE_SIZE, TITLE_LINE_HEIGHT, ThemeTextType::HeadlineLarge)
     };
     any::<State, _>(
         text(s.to_string())
             .size(size)
-            .line_height(LineHeight::Absolute(line_height)),
+            .line_height(LineHeight::Absolute(line_height))
+            .themed_family(family),
     )
 }
 

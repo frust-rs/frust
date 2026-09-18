@@ -34,21 +34,28 @@
 //! ([`crate::frame::foreign_font_runs`]): every glyph in a committed baseline
 //! must come from a bundled face.
 //!
-//! The catalogs split cleanly on whether a caller can achieve that. Material's
-//! buttons resolve their label style from `Theme::type_scale.label_*`, so
+//! Whether a caller can achieve that depends on the widget. Material's buttons
+//! resolve their label style from a `Theme::type_scale` role (`label_medium`
+//! at the default size these pages use), so
 //! [`crate::frame::pin_type_scale`] reaches them and they carry real labels
-//! here. Most other catalog chrome — a Material app bar's title, a Cupertino
-//! nav bar's title, a shadcn `card_title`, a Glyph tag's label — hardcodes its
-//! size/weight and takes only its COLOR from the theme, leaving its FAMILY at
-//! `TextStyle::default()` (`frust_text::FontFamily::SystemUi`). Those slots
-//! are passed an EMPTY string, and the page's real text is supplied as a child
-//! VIEW with a pinned style through the slots that take one
-//! (`glyph_card().title(..)`, `card_content(..)`, a card's child, a dialog's
-//! actions). What the baselines then pin is the chrome's geometry and the
-//! catalog's own tokens, which is a page case's subject anyway; the
-//! framework-side fix — a label style/child seam on the string-slot widgets —
-//! is a catalog/`frust-widgets` change, not something a corpus can work
-//! around.
+//! here. Material's app bar title, navigation-bar labels and dialog
+//! title/body keep hardcoded sizes but resolve their FAMILY from a
+//! `Theme::type_scale` role at layout, so `pin_type_scale` reaches them too;
+//! they are still passed an EMPTY string below only because their committed
+//! baselines were captured that way, and real text would change the pixels.
+//! Chrome that fixes its family where the theme cannot redirect it —
+//! `TextStyle::default()`'s `frust_text::FontFamily::SystemUi`, or a hardcoded
+//! named stack — cannot be pinned. The cases below pass such slots an
+//! EMPTY string (a Cupertino nav bar's title, tab items and button, and shadcn
+//! buttons) or avoid the widget altogether (a shadcn `card_title`, and a Glyph
+//! tag, whose label hardcodes an IBM Plex Mono stack), and supply the page's
+//! real text as a child VIEW with a pinned style, through the slots that take
+//! one (`glyph_card().title(..)`, `card_content(..)`, a card's child) or as
+//! plain page content. What the
+//! baselines then pin is the chrome's geometry and the catalog's own tokens,
+//! which is a page case's subject anyway; the fix for those slots — a
+//! theme-resolved family, as the Material slots above carry — is a catalog
+//! change, not something a corpus can work around.
 
 use frust_core::{AnyView, RenderRoot, any};
 use frust_scene::Scene;

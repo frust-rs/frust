@@ -157,7 +157,7 @@ use peniko::Color;
 
 use super::press::presses;
 use super::state_layer::StateLayer;
-use frust::authoring::ThemeTextColor;
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 
 // ---- Sizes (M3EFabTheme defaults: small/medium/large) ---------------------
 
@@ -435,11 +435,15 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// A view-held, typed press callback (erased on build).
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
 
-/// Build the extended FAB's visible label view, themed `OnPrimaryContainer`.
-/// Shared by build/rebuild/teardown so the role stays consistent.
+/// Build the extended FAB's visible label view, themed `OnPrimaryContainer`,
+/// its family following the live theme's `labelLarge` role (the M3 extended
+/// FAB label token). Shared by build/rebuild/teardown so the role stays
+/// consistent.
 fn label_view<State: 'static>(label: String) -> AnyView<State> {
     frust::authoring::any::<State, _>(
-        frust::text(label).themed_role(ThemeTextColor::OnPrimaryContainer),
+        frust::text(label)
+            .themed_role(ThemeTextColor::OnPrimaryContainer)
+            .themed_family(ThemeTextType::LabelLarge),
     )
 }
 

@@ -60,7 +60,7 @@ build from.
   `frust-core` stays theme-agnostic, while app code reads a cloned `Theme` via reactive context.
 - Widget resolution precedence: explicit builder value > theme token > unthemed-fallback constant,
   generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color at layout
-  time.
+  time, and `Text` also bakes the font family of an opted-in type-scale role (`.themed_family`).
 - Container plumbing: every container and interactive widget is built through the shared public
   authoring toolkit rather than touching `frust-core` primitives directly.
 - Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
