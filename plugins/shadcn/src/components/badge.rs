@@ -25,7 +25,7 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, RoundedRect,
-    SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
+    SemanticsCtx, Shape, Size, ThemeTextType, Vec2, View, Widget, erase_callback,
 };
 
 use crate::hit::{inside, presses};
@@ -33,7 +33,7 @@ use crate::style::{
     ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SOLID_ALPHA, PATH_TOLERANCE, TEXT_XS, draw_focus_ring,
     focus_border, ring_color, with_alpha,
 };
-use crate::text::Label;
+use crate::text::{Label, themed_family};
 
 /// Horizontal padding inside the pill (`px-2` = `spacing(2)`), in logical px.
 const PAD_X: f64 = 8.0;
@@ -224,10 +224,14 @@ impl Widget for BadgeWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let paint = self.variant.resolve(theme);
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(TEXT_XS as f32, paint.ink)
-        };
+        let style = themed_family(
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(TEXT_XS as f32, paint.ink)
+            },
+            theme,
+            ThemeTextType::LabelMedium,
+        );
         let label_size = self.label.layout(ctx, &style);
         let width = label_size.width + PAD_X * 2.0;
         let height = label_size.height + PAD_Y * 2.0;
@@ -586,6 +590,26 @@ mod tests {
         assert_eq!(
             rec.rrects[0].3,
             with_alpha(theme.scheme().primary, HOVER_SOLID_ALPHA)
+        );
+    }
+
+    // ---- Typeface: the label follows the live theme ----------------------
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a badge's label",
+            |_: &mut ()| badge::<()>("New"),
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a badge's label",
+            |_: &mut ()| badge::<()>("New"),
         );
     }
 }

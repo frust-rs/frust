@@ -91,7 +91,7 @@ use super::select::{panel_colors, stroke_frame};
 use crate::motion::Ramp;
 use crate::press::{Lane, inside_inclusive, press_scale, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType};
 use crate::tokens::motion::{EASE_OUT, SPRING_PRESS};
 use crate::tokens::sans_family;
 
@@ -426,7 +426,11 @@ fn liquid_lane(value: f64) -> Lane {
     )
 }
 
-/// The value's text style: `text-lg font-semibold`.
+/// The type-scale role the value's family resolves from at layout.
+const VALUE_ROLE: ThemeTextType = ThemeTextType::TitleMedium;
+
+/// The value's text style: `text-lg font-semibold`. The family here is the
+/// unthemed base; `layout` shapes in [`VALUE_ROLE`]'s family.
 fn value_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -639,9 +643,9 @@ impl<State: 'static> View<State> for AdaptiveStepperView<State> {
 impl Widget for AdaptiveStepperWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let style = value_style();
-        self.text.layout(ctx, &style);
+        self.text.layout_themed(ctx, &style, VALUE_ROLE);
         if let Some(roll) = &mut self.roll {
-            roll.previous.layout(ctx, &style);
+            roll.previous.layout_themed(ctx, &style, VALUE_ROLE);
         }
         // `inline-block h-12 w-[13.5rem]`: the footprint never changes — the
         // whole point of the component.
@@ -1438,5 +1442,29 @@ mod tests {
         assert!(w.roll.is_none(), "no roll to play");
         assert_eq!(w.value_rect().width(), VALUE_WIDTH_WIDE);
         assert_eq!(w.button_rect(Side::Decrement).x0, DECREMENT_X_HIDDEN);
+    }
+
+    // ---- Typeface: the value's family follows the live theme ---------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A stepper mid-range, so its value paints between both buttons.
+    fn probe_view(_: &mut ()) -> AdaptiveStepperView<()> {
+        adaptive_stepper::<(), _>(3.0, |_: &mut (), _| {})
+            .min(0.0)
+            .max(10.0)
+            .label("Quantity")
+    }
+
+    #[test]
+    fn the_value_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the stepper's value", probe_view, BOX);
+    }
+
+    #[test]
+    fn the_value_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the stepper's value", probe_view, BOX);
     }
 }

@@ -36,6 +36,11 @@
 //! See [`crate::badge`]'s module docs — the per-segment dynamic color
 //! (accent vs muted) isn't one of `TextView`'s four fixed roles, so this widget
 //! shapes/paints its own label glyph runs directly via `frust_text`.
+//!
+//! Each label reads its family at layout from the live theme's `labelLarge`
+//! type-scale role (IBM Plex Mono under Glyph's own scale), falling back to
+//! Glyph's IBM Plex Mono stack unthemed, so a theme swap reshapes the labels
+//! (see [`crate::badge`]'s Typeface section).
 
 use std::rc::Rc;
 
@@ -241,10 +246,16 @@ struct Segment {
     label_size: Size,
 }
 
-/// The label's fixed style.
-fn seg_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the labels' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// A label's style: fixed size/weight, family from the theme's `labelLarge`
+/// role.
+fn seg_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(SEG_FONT_SIZE, color)
     }
@@ -335,19 +346,22 @@ impl SegmentedControlWidget {
 
 impl Widget for SegmentedControlWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve both styles up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let colors = resolve_seg_colors(theme);
+        let active_style = seg_style(theme, colors.active_text);
+        let inactive_style = seg_style(theme, colors.inactive_text);
 
         let mut x = SEG_PAD;
         let mut content_height = 0.0_f64;
         for (i, seg) in self.segments.iter_mut().enumerate() {
-            let color = if i == self.selected {
-                colors.active_text
+            let style = if i == self.selected {
+                &active_style
             } else {
-                colors.inactive_text
+                &inactive_style
             };
-            let style = seg_style(color);
-            let label_size = seg.label.layout(ctx, &style, None);
+            let label_size = seg.label.layout(ctx, style, None);
             seg.label_size = label_size;
             seg.x = x;
             seg.width = label_size.width + SEG_BTN_PAD_X * 2.0;
@@ -633,5 +647,33 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Tab && n.label() == Some("zoom"))
             .expect("the selected segment");
         assert_eq!(selected.1.is_selected(), Some(true));
+    }
+
+    // ---- Typeface: labels follow their type-scale role --------------------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn three_segments(_: &mut ()) -> SegmentedControlView<()> {
+        segmented_control(
+            vec!["grid".into(), "stack".into(), "zoom".into()],
+            2,
+            |_s: &mut (), _i| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn labels_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(three_segments, crate::baseline(), Size::new(400.0, 60.0));
+        assert_eq!(faces, [Face::PlexMono; 3]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn labels_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(three_segments, Size::new(400.0, 60.0));
+        assert_eq!(before, [Face::PlexMono; 3]);
+        assert_eq!(after, [Face::SpaceMono; 3]);
     }
 }

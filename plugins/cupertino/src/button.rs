@@ -95,7 +95,8 @@ use std::time::Duration;
 use frust::authoring::{Action, Role};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextColor, View, Widget, any,
+    PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextColor, ThemeTextType, View, Widget,
+    any,
 };
 use frust::{
     AnimationController, Brightness, GlassMaterial, ShadowSpec, ShapeScale, SpringDesc, Theme,
@@ -293,13 +294,21 @@ fn inside(pos: Point, size: Size) -> bool {
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
 
 /// Build the type-erased label view, tagged with the style's themed color
-/// role (see [`label_role`]). Shared by build/rebuild/teardown so the child's
-/// role stays consistent across the child's whole lifecycle.
+/// role (see [`label_role`]) and the theme's `bodyMedium` role family — this
+/// label's own size stays the unthemed `Text` default (16px, matching
+/// `crate::tokens::type_scale`'s `body_medium` slot exactly), so only the
+/// family needs a role; live-swaps with the theme like the color already
+/// did. Shared by build/rebuild/teardown so the child's role stays
+/// consistent across the child's whole lifecycle.
 fn label_view<State: 'static>(
     label: String,
     style: CupertinoButtonStyle,
 ) -> frust::authoring::AnyView<State> {
-    any::<State, _>(text(label).themed_role(label_role(style)))
+    any::<State, _>(
+        text(label)
+            .themed_role(label_role(style))
+            .themed_family(ThemeTextType::BodyMedium),
+    )
 }
 
 /// A declarative iOS capsule/glass button. See the [module docs](self).
@@ -978,5 +987,54 @@ mod tests {
             .expect("button contributes a Role::Button node");
         assert_eq!(node.label(), Some("Continue"));
         assert!(node.supports_action(Action::Click));
+    }
+
+    // --- Render-time typeface identity: the label's family follows the theme ---
+
+    #[test]
+    fn the_label_paints_in_the_themes_body_medium_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme =
+            baseline_with_family(|scale, family| scale.body_medium.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the button label",
+            |_: &mut ()| cupertino_button::<(), _>("Hello", |_: &mut ()| {}),
+            theme,
+            &[TUFFY],
+            Size::new(200.0, 200.0),
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn the_label_follows_a_live_theme_family_change() {
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.body_medium.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the button label",
+            |_: &mut ()| cupertino_button::<(), _>("Hello", |_: &mut ()| {}),
+            tuffy_theme,
+            &faces,
+            Size::new(200.0, 200.0),
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.body_medium.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the button label",
+            |_: &mut ()| cupertino_button::<(), _>("Hello", |_: &mut ()| {}),
+            helvetica_theme,
+            &faces,
+            Size::new(200.0, 200.0),
+            TUFFY_AS_HELVETICA,
+        );
     }
 }

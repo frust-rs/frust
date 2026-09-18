@@ -29,7 +29,7 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, View, Widget, any,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any,
 };
 use frust::{Theme, text};
 use peniko::Color;
@@ -598,6 +598,7 @@ pub fn item_title(label: impl Into<String>) -> frust::TextView {
     text(label)
         .size(style::TEXT_SM as f32)
         .weight(FontWeight::MEDIUM)
+        .themed_family(ThemeTextType::TitleSmall)
         .themed_role(ThemeTextColor::OnSurface)
 }
 
@@ -606,6 +607,7 @@ pub fn item_title(label: impl Into<String>) -> frust::TextView {
 pub fn item_description(label: impl Into<String>) -> frust::TextView {
     text(label)
         .size(style::TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurfaceVariant)
 }
 
@@ -857,5 +859,33 @@ mod tests {
         layout(&mut w, Size::new(200.0, 200.0));
         assert_eq!(w.children[0].origin().y, 0.0);
         assert!(w.children[1].origin().y > w.children[0].origin().y);
+    }
+
+    // ---- Typeface: the title and description follow the live theme ------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn titled(_: &mut ()) -> ItemView<()> {
+        item(vec![any(item_content(vec![
+            any(item_title("Two-factor authentication")),
+            any(item_description("Verify with a code on every sign-in.")),
+        ]))])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "an item's title and description",
+            titled,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "an item's title and description",
+            titled,
+        );
     }
 }

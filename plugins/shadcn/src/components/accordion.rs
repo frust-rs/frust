@@ -47,8 +47,9 @@ use std::time::Duration;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedArgCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, View, Widget, any, build_child, erase_callback_arg,
-    rebuild_child, route_event, teardown_child, text::FontWeight, visit_children,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any, build_child,
+    erase_callback_arg, rebuild_child, route_event, teardown_child, text::FontWeight,
+    visit_children,
 };
 use frust::{AnimationController, Curve, TextView, Theme, text};
 
@@ -160,7 +161,7 @@ impl<State: 'static> AccordionView<State> {
 fn trigger_text(title: &str) -> TextView {
     text(title.to_string())
         .size(style::TEXT_SM as f32)
-        .family(crate::tokens::sans_family())
+        .themed_family(ThemeTextType::LabelLarge)
         .weight(FontWeight::MEDIUM)
         .themed_role(ThemeTextColor::OnSurface)
 }
@@ -1161,6 +1162,40 @@ mod tests {
             triggers
                 .iter()
                 .all(|(_, n)| n.supports_action(Action::Click))
+        );
+    }
+
+    // ---- Typeface: the trigger labels follow the live theme --------------
+
+    /// Two closed items over text-free content, so every painted glyph run is a
+    /// trigger label.
+    #[cfg(feature = "bundled-fonts")]
+    fn two_closed_items(_: &mut ()) -> AccordionView<()> {
+        accordion(
+            [
+                accordion_item("Shipping", Block(Size::new(10.0, 10.0))),
+                accordion_item("Returns", Block(Size::new(10.0, 10.0))),
+            ],
+            Vec::new(),
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_trigger_labels_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the accordion's trigger labels",
+            two_closed_items,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_trigger_labels_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the accordion's trigger labels",
+            two_closed_items,
         );
     }
 }

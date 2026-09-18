@@ -116,7 +116,7 @@ use crate::motion::pointer::PointerTracker;
 use crate::motion::{Presence, Ramp};
 use crate::press::presses;
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{SPRING_LAYOUT, SPRING_MOUSE};
 
 /// One dock icon's box, in logical px — upstream's `size` prop default (`44`).
@@ -311,16 +311,14 @@ fn resolve_colors(theme: Option<&Theme>) -> DockColors {
     }
 }
 
-/// The caption style: the theme's Geist stack at `text-xs`/`font-medium`.
+/// The caption style: `text-xs`/`font-medium` in the theme's `label_small`
+/// family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_XS as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// Linear interpolation between two rects, `t` unclamped.
@@ -1323,5 +1321,55 @@ mod tests {
             &mut state,
         );
         assert_eq!(state.count, 1, "the disabled entry reported nothing");
+    }
+
+    // ---- Typeface: the hovered caption follows the live theme ---------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap_on,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(800.0, 300.0);
+
+    /// Two labelled entries with glyph-free icons, hovered over the second so
+    /// its caption is the one painted run.
+    fn hovered_probe() -> Probe<DockView<()>, impl FnMut(&mut ()) -> DockView<()>> {
+        let icon = || frust::SizedBox::<()>(Some(24.0), Some(24.0));
+        let logic = move |_: &mut ()| {
+            dock::<(), _>(
+                vec![
+                    dock_item(icon()).label("Finder"),
+                    dock_item(icon()).label("Mail"),
+                ],
+                |_: &mut (), _| {},
+            )
+        };
+        let mut probe = Probe::new(logic, PROBE_WINDOW, crate::theme());
+        probe.frame();
+        let mut rec = Recorder::default();
+        probe.paint_into(&mut rec);
+        probe.event(&pointer(
+            PointerPhase::Move,
+            item_centre(1, bar_top_of(&rec)),
+        ));
+        probe
+    }
+
+    #[test]
+    fn the_caption_paints_in_geist_under_the_beui_theme() {
+        assert_control("the dock caption", PROBE_WINDOW);
+        let faces = hovered_probe().frame();
+        assert_eq!(faces.len(), 1, "exactly the hovered caption paints");
+        assert_all(
+            "the dock caption",
+            "under the beUI theme",
+            &faces,
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn the_caption_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on("the dock caption", &mut hovered_probe());
     }
 }

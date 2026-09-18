@@ -107,7 +107,7 @@ use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 use crate::motion::Ramp;
 use crate::press::{is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 /// A header row's height, in logical px (`min-h-[54px]`).
@@ -275,16 +275,14 @@ fn resolve_colors(theme: Option<&Theme>) -> AccordionColors {
     }
 }
 
-/// The header title style (`text-[15px] font-medium`).
+/// The header title style (`text-[15px] font-medium`), in the theme's
+/// `title_small` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.title_small.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(ACCORDION_TITLE_SIZE as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::TitleSmall, theme)
 }
 
 /// One row's reveal: where it is, where it is going, and the ramp between.
@@ -1271,5 +1269,37 @@ mod tests {
         assert_eq!(w.focused, 1);
         dispatch(&mut w, size, &key_event(NamedKey::Enter), &mut state);
         assert_eq!(state.last, Some(Some("returns".to_owned())));
+    }
+
+    // ---- Typeface: the header titles follow the live theme -------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// Two collapsed rows over glyph-free panels, so every painted run is a
+    /// header title.
+    fn probe_view(_: &mut ()) -> BouncyAccordionView<()> {
+        let panel = || frust::SizedBox::<()>(Some(40.0), Some(40.0));
+        bouncy_accordion::<(), _>(
+            None,
+            vec![
+                bouncy_accordion_item("shipping", "Shipping", panel()),
+                bouncy_accordion_item("returns", "Returns", panel()),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn header_titles_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the accordion's titles", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn header_titles_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the accordion's titles", probe_view, PROBE_WINDOW);
     }
 }

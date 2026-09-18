@@ -62,8 +62,8 @@ use frust::authoring::{
     AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Role, ScrollDelta, SemanticsCtx, Size,
-    ThemeTextColor, View, Widget, any, build_child, erase_callback_arg, rebuild_children,
-    route_event_single, teardown_child, text::FontWeight, visit_children,
+    ThemeTextColor, ThemeTextType, View, Widget, any, build_child, erase_callback_arg,
+    rebuild_children, route_event_single, teardown_child, text::FontWeight, visit_children,
 };
 use frust::input::WHEEL_LINE_PX;
 use frust::{
@@ -439,14 +439,16 @@ fn label_view<State: 'static>(label: &str, insets: EdgeInsets, muted: bool) -> A
     let view = if muted {
         text(label.to_string())
             .size(style::TEXT_XS as f32)
+            .themed_family(ThemeTextType::BodySmall)
             .themed_role(ThemeTextColor::OnSurfaceVariant)
     } else {
         text(label.to_string())
             .size(style::TEXT_SM as f32)
             .weight(FontWeight::MEDIUM)
+            .themed_family(ThemeTextType::LabelLarge)
             .themed_role(ThemeTextColor::OnSurface)
     };
-    any(Padding(insets, view.family(crate::tokens::sans_family())))
+    any(Padding(insets, view))
 }
 
 /// An item row: the label, then the shortcut (or a sub-trigger's chevron gutter)
@@ -462,7 +464,7 @@ fn item_view<State: 'static>(
 ) -> AnyView<State> {
     let label = text(item.label.clone())
         .size(style::TEXT_SM as f32)
-        .family(crate::tokens::sans_family());
+        .themed_family(ThemeTextType::BodyMedium);
     let label = if item.disabled {
         label.themed_role(ThemeTextColor::OnSurfaceVariant)
     } else {
@@ -473,7 +475,7 @@ fn item_view<State: 'static>(
         children.push(inflexible(
             text(shortcut.clone())
                 .size(style::TEXT_XS as f32)
-                .family(crate::tokens::sans_family())
+                .themed_family(ThemeTextType::BodySmall)
                 .themed_role(ThemeTextColor::OnSurfaceVariant),
         ));
     }
@@ -1823,5 +1825,36 @@ mod tests {
 
         root.event(&mut state, &pointer(PointerPhase::Down, 380.0, 580.0));
         assert_eq!(state.opens, vec![false], "the light dismiss");
+    }
+
+    // ---- Typeface: the rows follow the live theme -------------------------
+
+    /// Every text row the menu builds: both group-label treatments, an item
+    /// with a shortcut, and a disabled item.
+    #[cfg(feature = "bundled-fonts")]
+    fn menu_rows(_: &mut ()) -> frust::FlexView<()> {
+        let insets = EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y);
+        frust::Column(vec![
+            label_view("My Account", insets, false),
+            label_view("Theme", insets, true),
+            item_view(
+                &dropdown_menu_item("Profile").shortcut("Ctrl+P"),
+                insets,
+                false,
+            ),
+            item_view(&dropdown_menu_item("Billing").disabled(true), insets, true),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_rows_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face("the menu's rows", menu_rows);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_rows_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap("the menu's rows", menu_rows);
     }
 }

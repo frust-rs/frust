@@ -87,7 +87,10 @@
 //! # Header / body / footer
 //!
 //! * **Header** — a fixed-height row (`HEADER_HEIGHT`), never scrolls: `title`
-//!   (Glyph display face, single-line, ellipsized) plus the close affordance
+//!   (single-line, ellipsized, its family the live theme's `headlineSmall`
+//!   role — Glyph's display face, Space Mono, under Glyph's own scale — via
+//!   `Text`'s `.themed_family(..)`, so a theme swap repaints it; unthemed,
+//!   `Text`'s own system family) plus the close affordance
 //!   below, closed by a bottom `--border` hairline. The row's *content*
 //!   (title, close chip, divider) sits below the window's top safe-area inset
 //!   — the header band grows to `top_inset + HEADER_HEIGHT` — while the
@@ -208,10 +211,11 @@ use std::time::Duration;
 
 use frust::Theme;
 use frust::authoring::Role;
-use frust::authoring::text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextOverflow};
+use frust::authoring::text::{FontWeight, LineHeight, TextOverflow};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
+    Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextType,
+    View, Widget, any,
 };
 use frust::text;
 use frust::{Curve, FrameTime};
@@ -313,12 +317,13 @@ const FOOTER_PAD: f64 = HEADER_PAD_LEADING;
 /// (see the [module docs](self)).
 const BODY_PAD_X: f64 = 12.0;
 
-/// Title type token (Glyph display face, 15/700 — [`crate::dialog`]'s title
-/// token, since a side sheet's header title is the same class of surface
-/// title). Hardcoded rather than read from a live `Theme::type_scale`: `Text`
-/// resolves a *color* role, and an opt-in family role, after `View::build`
-/// (see `crates/frust-widgets/src/text.rs`'s `effective_style`), the
-/// precedent every other titled Glyph surface takes.
+/// Title type token (15/700 — [`crate::dialog`]'s title token, since a side
+/// sheet's header title is the same class of surface title). Size, weight and
+/// line height are hardcoded rather than read from a live
+/// `Theme::type_scale`: `Text` resolves only a *color* role and an opt-in
+/// family role after `View::build` (see `crates/frust-widgets/src/text.rs`'s
+/// `effective_style`), the precedent every other titled Glyph surface takes.
+/// The family is that opt-in role: `headlineSmall`.
 const TITLE_SIZE: f32 = 15.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::BOLD;
 const TITLE_LINE_HEIGHT: f32 = 20.0;
@@ -461,18 +466,16 @@ fn panel_width(width: f64) -> f64 {
 
 /// The header title's child view: single-line, ellipsized — the header's
 /// height is fixed, so a long title must shorten rather than wrap out of it.
+/// Its family is the theme's `headlineSmall` role, resolved at layout.
 fn title_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
-            .family(FontFamily::stack_with_generic(
-                ["Space Mono"],
-                GenericSlot::Monospace,
-            ))
             .size(TITLE_SIZE)
             .weight(TITLE_WEIGHT)
             .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT))
             .max_lines(1)
-            .overflow(TextOverflow::Ellipsis),
+            .overflow(TextOverflow::Ellipsis)
+            .themed_family(ThemeTextType::HeadlineSmall),
     )
 }
 
@@ -2779,5 +2782,30 @@ mod tests {
 
         assert_eq!(controller.depth(), 1, "the sheet closed itself out");
         assert_eq!(h.state.results, 1);
+    }
+
+    // -- Typeface: the title follows its type-scale role ------------------
+
+    /// A sheet whose body paints no text, so its only glyph run is the title.
+    #[cfg(feature = "bundled-fonts")]
+    fn filters(_: &mut ()) -> GlyphSideSheetView<()> {
+        glyph_side_sheet("Filters", frust::SizedBox::<()>(Some(200.0), Some(100.0)))
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_paints_in_its_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(filters, crate::baseline(), area());
+        assert_eq!(faces, [Face::SpaceMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_follows_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(filters, area());
+        assert_eq!(before, [Face::SpaceMono]);
+        assert_eq!(after, [Face::PlexMono]);
     }
 }

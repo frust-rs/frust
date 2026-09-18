@@ -105,6 +105,7 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 /// family — the cap shapes its own run instead (see [`crate::text`]).
 fn label_style(ink: Color) -> TextStyle {
     TextStyle {
+        // Explicit, not themed: `TypeScale` has no monospace role to resolve from.
         family: mono_family(),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(TEXT_XS as f32, ink)

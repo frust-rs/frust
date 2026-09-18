@@ -19,8 +19,14 @@
 //!   glyph char is `primary` (the accent).
 //! - **title** = `on_surface`; **sub/meta/chevron** = `on_surface_variant`.
 //! - **pressed wash** = `on_surface` at [`PRESS_WASH_ALPHA`].
+//! - **families**, read at layout from the live type scale: the glyph char
+//!   from `headlineSmall` (Space Mono under Glyph's own scale), the title from
+//!   `titleSmall`, the sub and meta from `bodySmall` (all IBM Plex Mono), so
+//!   a theme swap reshapes every row (see [`super::badge`]'s Typeface
+//!   section).
 //!
-//! Unthemed, each falls back to the literal Glyph **dark** constant.
+//! Unthemed, each falls back to the literal Glyph **dark** constant (each
+//! family to the matching Glyph stack).
 
 use std::rc::Rc;
 
@@ -309,33 +315,48 @@ fn items_equal(a: &GlyphListItem, b: &GlyphListItem) -> bool {
         && a.chevron == b.chevron
 }
 
-fn title_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the title's, sub's and meta's
+/// unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// Glyph's display face stack (Space Mono): the glyph char's unthemed family.
+fn display_face() -> FontFamily {
+    FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
+}
+
+/// The title's style; family from the theme's `titleSmall` role.
+fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(TITLE_SIZE, color)
     }
 }
 
-fn sub_style(color: Color) -> TextStyle {
+/// The sub line's style; family from the theme's `bodySmall` role.
+fn sub_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(SUB_SIZE, color)
     }
 }
 
-fn meta_style(color: Color) -> TextStyle {
+/// The meta's style; family from the theme's `bodySmall` role.
+fn meta_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(META_SIZE, color)
     }
 }
 
-fn glyph_style(color: Color) -> TextStyle {
+/// The glyph char's style; family from the theme's `headlineSmall` role.
+fn glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone()),
         weight: FontWeight::BOLD,
         ..TextStyle::new(GLYPH_SIZE, color)
     }
@@ -394,8 +415,14 @@ impl GlyphListWidget {
 
 impl Widget for GlyphListWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve every style up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (_, _, _, _, glyph_c, title_c, muted_c) = resolve_colors(theme);
+        let glyph_style = glyph_style(theme, glyph_c);
+        let title_style = title_style(theme, title_c);
+        let sub_style = sub_style(theme, muted_c);
+        let meta_style = meta_style(theme, muted_c);
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -406,9 +433,9 @@ impl Widget for GlyphListWidget {
 
         let mut y = 0.0f64;
         for row in self.rows.iter_mut() {
-            row.glyph_size = row.glyph.layout(ctx, &glyph_style(glyph_c), None);
+            row.glyph_size = row.glyph.layout(ctx, &glyph_style, None);
             let meta_w = if let Some(meta) = row.meta.as_mut() {
-                row.meta_size = meta.layout(ctx, &meta_style(muted_c), None);
+                row.meta_size = meta.layout(ctx, &meta_style, None);
                 row.meta_size.width + CHEVRON_GAP
             } else {
                 0.0
@@ -420,11 +447,9 @@ impl Widget for GlyphListWidget {
             };
             let text_col_max =
                 ((width - text_col_x - ROW_PAD_X - meta_w - chevron_w).max(20.0)) as f32;
-            row.title_size = row
-                .title
-                .layout(ctx, &title_style(title_c), Some(text_col_max));
+            row.title_size = row.title.layout(ctx, &title_style, Some(text_col_max));
             let text_col_h = if let Some(sub) = row.sub.as_mut() {
-                row.sub_size = sub.layout(ctx, &sub_style(muted_c), Some(text_col_max));
+                row.sub_size = sub.layout(ctx, &sub_style, Some(text_col_max));
                 row.title_size.height + TITLE_SUB_GAP + row.sub_size.height
             } else {
                 row.sub_size = Size::ZERO;
@@ -817,5 +842,57 @@ mod tests {
             .collect();
         assert!(labels.contains(&"deploy"));
         assert!(labels.contains(&"rollback"));
+    }
+
+    // ---- Typeface: every run's family follows its type-scale role ---------
+
+    /// One row carrying every text run: glyph char, title, sub, meta.
+    #[cfg(feature = "bundled-fonts")]
+    fn full_row(_: &mut ()) -> GlyphListView<()> {
+        glyph_list(vec![
+            glyph_list_item("$", "deploy").sub("staging").meta("2m"),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(full_row, crate::baseline(), Size::new(320.0, 400.0));
+        // Glyph char, title, sub, meta.
+        assert_eq!(
+            faces,
+            [
+                Face::SpaceMono,
+                Face::PlexMono,
+                Face::PlexMono,
+                Face::PlexMono
+            ]
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(full_row, Size::new(320.0, 400.0));
+        assert_eq!(
+            before,
+            [
+                Face::SpaceMono,
+                Face::PlexMono,
+                Face::PlexMono,
+                Face::PlexMono
+            ]
+        );
+        assert_eq!(
+            after,
+            [
+                Face::PlexMono,
+                Face::SpaceMono,
+                Face::SpaceMono,
+                Face::SpaceMono
+            ]
+        );
     }
 }

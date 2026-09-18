@@ -93,7 +93,7 @@ use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 use crate::motion::{Ramp, Stagger};
 use crate::press::presses;
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 /// The expanded rail's width, in logical px (`--sidebar-width: 16rem`).
@@ -261,27 +261,20 @@ fn resolve_colors(theme: Option<&Theme>) -> SidebarColors {
     }
 }
 
-/// The item label style (`text-sm font-medium`).
+/// The item label style (`text-sm font-medium`), in the theme's
+/// `label_large` family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// The badge style (`text-xs`).
+/// The badge style (`text-xs`), in the theme's `label_small` family.
 fn badge_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_XS as f32, Color::BLACK)
-    }
+    let style = TextStyle::new(style::TEXT_XS as f32, Color::BLACK);
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// Linear interpolation between two rects, `t` unclamped.
@@ -1107,5 +1100,37 @@ mod tests {
         dispatch(&mut w, size, &pointer(PointerPhase::Down, at), &mut state);
         dispatch(&mut w, size, &pointer(PointerPhase::Up, at), &mut state);
         assert_eq!(state.last, Some(2));
+    }
+
+    // ---- Typeface: labels and badges follow the live theme -----------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// An open rail with a badge; the icons are glyph-free boxes so every
+    /// painted run is the component's own.
+    fn probe_view(_: &mut ()) -> AnimatedSidebarView<()> {
+        let icon = || frust::SizedBox::<()>(Some(16.0), Some(16.0));
+        animated_sidebar::<(), _>(
+            true,
+            vec![
+                sidebar_item(icon(), "Home").active(true),
+                sidebar_item(icon(), "Inbox").badge("12"),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn labels_and_badges_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the sidebar's labels", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn labels_and_badges_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the sidebar's labels", probe_view, PROBE_WINDOW);
     }
 }

@@ -16,8 +16,8 @@
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor, View, Widget,
-    any,
+    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor,
+    ThemeTextType, View, Widget, any,
 };
 use frust::{Image, ImageFit, ImageSource, Theme, text};
 use peniko::Color;
@@ -157,6 +157,7 @@ impl<State: 'static> AvatarView<State> {
             AvatarContent::Image(source) => any(Image(source.clone()).fit(ImageFit::Cover)),
             AvatarContent::Fallback(label) => any(text(label.clone())
                 .size(self.size.fallback_text_size() as f32)
+                .themed_family(ThemeTextType::BodyMedium)
                 .themed_role(ThemeTextColor::OnSurfaceVariant)),
         }
     }
@@ -617,5 +618,39 @@ mod tests {
         let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(100.0, 100.0)));
         assert_eq!(size, Size::new(32.0, 32.0));
+    }
+
+    // ---- Typeface: the fallback initials follow the live theme -----------
+
+    /// The fallback at both text sizes (`Sm` is `text-xs`), and the group
+    /// count that reuses it.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_fallback_paints_in_the_theme_face() {
+        use crate::text::typeface_probe::assert_paints_in_the_theme_face;
+        for size in [AvatarSize::Sm, AvatarSize::Default] {
+            assert_paints_in_the_theme_face(
+                &format!("a {size:?} avatar's fallback"),
+                |_: &mut ()| avatar::<()>().size(size).fallback("ED"),
+            );
+        }
+        assert_paints_in_the_theme_face("an avatar group's count", |_: &mut ()| {
+            avatar_group_count::<()>("+3")
+        });
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_fallback_follows_a_live_theme_swap() {
+        use crate::text::typeface_probe::assert_follows_a_live_theme_swap;
+        for size in [AvatarSize::Sm, AvatarSize::Default] {
+            assert_follows_a_live_theme_swap(
+                &format!("a {size:?} avatar's fallback"),
+                |_: &mut ()| avatar::<()>().size(size).fallback("ED"),
+            );
+        }
+        assert_follows_a_live_theme_swap("an avatar group's count", |_: &mut ()| {
+            avatar_group_count::<()>("+3")
+        });
     }
 }

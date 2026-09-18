@@ -85,14 +85,14 @@ use std::time::Duration;
 use frust::authoring::{
     Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EditCommand,
     EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
     erase_callback_arg, text::TextStyle,
 };
 use frust::{FrameTime, Theme};
 
 use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::ShadcnTokens;
 
 /// Slot edge, in logical px (`h-9 w-9`).
@@ -286,16 +286,18 @@ fn resolve_colors(theme: Option<&Theme>) -> OtpColors {
     }
 }
 
-/// The style each slot's single glyph is shaped in (`text-sm`, the theme's own
-/// sans stack), shaped with [`SHAPING_INK`] and re-brushed at paint.
+/// The style each slot's single glyph is shaped in: `text-sm` in the live
+/// theme's `BodyMedium` family (unthemed, the catalog's own sans stack), shaped
+/// with [`SHAPING_INK`] and re-brushed at paint.
 fn slot_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.body_medium.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-    }
+    themed_family(
+        TextStyle {
+            family: crate::tokens::sans_family(),
+            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::BodyMedium,
+    )
 }
 
 /// Lucide's `MinusIcon` (`M5 12h14`), scaled to a `size`-square box at
@@ -1802,6 +1804,31 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|(_, n)| n.role() == Role::PasswordInput)
+        );
+    }
+
+    // ---- Typeface: the slot glyphs follow the live theme -----------------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn partly_filled(_: &mut ()) -> InputOtpView<()> {
+        input_otp::<(), _>("1234", 6, |_: &mut (), _| {})
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_slot_glyphs_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a one-time-code field's slot glyphs",
+            partly_filled,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_slot_glyphs_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a one-time-code field's slot glyphs",
+            partly_filled,
         );
     }
 }

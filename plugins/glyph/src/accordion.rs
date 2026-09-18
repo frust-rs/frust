@@ -40,8 +40,12 @@
 //! - **container** = `surface_container` fill + `outline` border,
 //!   `shape.medium` corner; header/body split by an `outline_variant` hairline.
 //! - **title** = `on_surface`; **chevron** = `on_surface_variant`.
+//! - **title family** = the `titleSmall` type-scale role, read at layout (IBM
+//!   Plex Mono under Glyph's own scale), so a theme swap reshapes the title
+//!   (see `crate::badge`'s Typeface section).
 //!
-//! Unthemed, each falls back to the literal Glyph **dark** constant.
+//! Unthemed, each falls back to the literal Glyph **dark** constant (the
+//! family to Glyph's IBM Plex Mono stack).
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -308,9 +312,15 @@ impl<State: 'static> View<State> for AccordionView<State> {
     }
 }
 
-fn title_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the title's unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The title's style; family from the theme's `titleSmall` role.
+fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(TITLE_SIZE, color)
     }
@@ -344,6 +354,7 @@ impl Widget for AccordionWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let (_, _, _, title_c, _) = resolve_colors(theme);
+        let title_style = title_style(theme, title_c);
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -353,9 +364,7 @@ impl Widget for AccordionWidget {
 
         // Header height from the title run.
         let title_max = (width - HEADER_PAD_X * 2.0 - CHEVRON_ARM * 2.0 - 12.0).max(20.0) as f32;
-        self.title_size = self
-            .title
-            .layout(ctx, &title_style(title_c), Some(title_max));
+        self.title_size = self.title.layout(ctx, &title_style, Some(title_max));
         self.header_height = self.title_size.height + HEADER_PAD_Y * 2.0;
 
         // The body is always laid out at its full natural height.
@@ -870,9 +879,16 @@ mod tests {
         // height, matching a freshly-built already-open instance (which starts
         // revealed with no animation at all, per the module docs) — never a
         // hair short of it. See docs/REVIEW_FOCUS.md's layout-skip section.
+        // Shaped against the root's own text context: a context built later
+        // can resolve the title's family to a different face once any test
+        // in this process has registered the bundled faces, which
+        // `TextContext::register_fonts` records process-wide.
         let open_ref: AccordionView<()> = accordion("Details", body()).open(true);
         let mut w_ref = build(&open_ref);
-        let target = layout(&mut w_ref, None);
+        let target = w_ref.layout(
+            &mut LayoutCtx::with_text_context(&mut tcx as &mut dyn Any),
+            &BoxConstraints::new(Size::new(320.0, 0.0), Size::new(320.0, f64::INFINITY)),
+        );
         assert_eq!(
             last_size.height, target.height,
             "the last layout a shell-honest driver runs lands exactly on the target height"
@@ -981,5 +997,31 @@ mod tests {
             .expect("accordion contributes a Role::Button node");
         assert_eq!(node.label(), Some("Details"));
         assert!(!node.children().is_empty(), "the body is a semantics child");
+    }
+
+    // ---- Typeface: the title's family follows its type-scale role ---------
+
+    /// A closed accordion: its body is not revealed, so the only painted run
+    /// is the widget's own title.
+    #[cfg(feature = "bundled-fonts")]
+    fn closed(_: &mut ()) -> AccordionView<()> {
+        accordion("Details", frust::text("body content"))
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_paints_in_its_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(closed, crate::baseline(), Size::new(320.0, 400.0));
+        assert_eq!(faces, [Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_follows_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(closed, Size::new(320.0, 400.0));
+        assert_eq!(before, [Face::PlexMono]);
+        assert_eq!(after, [Face::SpaceMono]);
     }
 }

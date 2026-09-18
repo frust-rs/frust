@@ -47,8 +47,9 @@
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor, View, Widget,
-    any, build_child, rebuild_child, route_event, teardown_child, text::FontWeight, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor,
+    ThemeTextType, View, Widget, any, build_child, rebuild_child, route_event, teardown_child,
+    text::FontWeight, visit_children,
 };
 use frust::{TextView, text};
 
@@ -165,6 +166,7 @@ impl<State: 'static> FieldView<State> {
         self.label.as_ref().map(|label| {
             any(field_text(label)
                 .weight(FontWeight::MEDIUM)
+                .themed_family(ThemeTextType::LabelLarge)
                 .themed_role(role))
         })
     }
@@ -193,11 +195,12 @@ impl<State: 'static> FieldView<State> {
     }
 }
 
-/// A field slot's base text style: `text-sm` in the theme's sans family.
+/// A field slot's base text style: `text-sm`, in the live theme's
+/// `BodyMedium` family (the label names its own role over it).
 fn field_text(label: &str) -> TextView {
     text(label.to_string())
         .size(style::TEXT_SM as f32)
-        .family(crate::tokens::sans_family())
+        .themed_family(ThemeTextType::BodyMedium)
 }
 
 /// The retained widget for a [`FieldView`].
@@ -754,5 +757,37 @@ mod tests {
         let mut seen = 0usize;
         Widget::visit_children(&w, &mut |_pod| seen += 1);
         assert_eq!(seen, 3, "label + control + description");
+    }
+
+    // ---- Typeface: the label, description and error follow the live theme
+
+    /// The label and description, and the invalid field's label and error.
+    /// The control is a text-free leaf, since it is the caller's own view.
+    #[cfg(feature = "bundled-fonts")]
+    fn slots(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            any(full_field(FieldOrientation::Vertical)),
+            any(field(leaf(120.0, 36.0))
+                .label("Password")
+                .error("Too short.")),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_description_and_error_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a field's label, description and error",
+            slots,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_description_and_error_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a field's label, description and error",
+            slots,
+        );
     }
 }

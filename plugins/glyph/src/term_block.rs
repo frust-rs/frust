@@ -24,6 +24,11 @@
 //! token-resolution convention, just applied to a token table that happens to
 //! never vary by brightness.
 //!
+//! The body's family is likewise fixed — IBM Plex Mono, never a type-scale
+//! role: terminal output needs a fixed-width face under any theme, and
+//! `TypeScale` has no monospace slot to name
+//! (`docs/WIDGETS_CODE_STANDARDS.md`), so a theme swap does not re-face it.
+//!
 //! # Header dots and border
 //!
 //! The `border-bright` hairline (`rgba(242,234,217,.18)`) is pre-flattened
@@ -281,6 +286,7 @@ pub struct TermBlockWidget {
 
 fn mono_style(color: Color) -> TextStyle {
     TextStyle {
+        // Kept explicit: terminal output needs a fixed-width face; no type-scale role is one.
         family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
         weight: FontWeight::REGULAR,
         line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),

@@ -111,7 +111,7 @@ use crate::overlay::{
 };
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 /// `min-w-56` — the panel's minimum width, in logical px.
@@ -279,27 +279,21 @@ impl ContextMenuItem {
     }
 }
 
-/// An item's label style (`text-[13px]`).
+/// An item's label style (`text-[13px]`), in the theme's `label_large`
+/// family.
 fn item_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(CONTEXT_MENU_TEXT as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(CONTEXT_MENU_TEXT as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// A shortcut's style (`text-[10px] font-medium`).
+/// A shortcut's style (`text-[10px] font-medium`), in the theme's
+/// `label_small` family.
 fn shortcut_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(CONTEXT_MENU_SMALL_TEXT as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// A section label's style (`text-[10px] font-semibold`).
@@ -1776,5 +1770,60 @@ mod tests {
             modifiers: frust::authoring::Modifiers::default(),
             repeat: false,
         })
+    }
+
+    // ---- Typeface: rows, shortcuts and section labels follow the theme -------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap_on,
+    };
+
+    /// A trigger plus an open menu carrying all three kinds of text run. The
+    /// shortcut is ASCII so every glyph is one Geist carries.
+    fn probe_logic(anchor: OverlayAnchor) -> impl FnMut(&mut ()) -> frust::StackView<()> {
+        move |_: &mut ()| {
+            frust::Stack(vec![
+                any(frust::Padding(
+                    frust::EdgeInsets::all(INSET),
+                    context_menu_trigger(
+                        &anchor,
+                        SizedBox(Some(REGION.width), Some(REGION.height)),
+                    ),
+                )),
+                any(context_menu(
+                    vec![
+                        context_menu_label("Actions"),
+                        context_menu_item("Reload").shortcut("Ctrl R"),
+                    ],
+                    |_: &mut (), _| {},
+                )
+                .anchor(&anchor)
+                .open(true)),
+            ])
+        }
+    }
+
+    /// A probe with the menu opened by a secondary press on its trigger.
+    fn opened_probe() -> Probe<frust::StackView<()>, impl FnMut(&mut ()) -> frust::StackView<()>> {
+        let mut probe = Probe::new(probe_logic(OverlayAnchor::new()), WINDOW, crate::theme());
+        probe.frame();
+        probe.event(&secondary(PointerPhase::Down, INSET + 40.0, INSET + 30.0));
+        probe
+    }
+
+    #[test]
+    fn menu_text_paints_in_geist_under_the_beui_theme() {
+        assert_control("the menu's text", WINDOW);
+        assert_all(
+            "the menu's text",
+            "under the beUI theme",
+            &opened_probe().frame(),
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn menu_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on("the menu's text", &mut opened_probe());
     }
 }

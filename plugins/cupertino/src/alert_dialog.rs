@@ -15,10 +15,15 @@
 //! The panel corner radius is ~14pt (**community-approximate** — Apple
 //! publishes no alert corner-radius spec). The title
 //! is themed `on_surface` (iOS `label`) and the message `on_surface_variant`
-//! (secondaryLabel), so both live-swap with the theme. Action labels are tinted
-//! by [`CupertinoActionStyle`] from *community-measured* systemBlue/systemRed
-//! (baked explicit — see [`crate::tabbar`]'s Label color note for why
-//! these accent colors don't live-swap).
+//! (secondaryLabel), so both live-swap with the theme. Every text run here
+//! also opts its FAMILY into the theme's type scale (title → `titleLarge`,
+//! message → `labelLarge`, actions → `bodyLarge` — each matching this
+//! module's own hardcoded size/line-height exactly), so a theme swap or a
+//! font picker restyles the whole alert, not just its color. Action labels
+//! are tinted by [`CupertinoActionStyle`] from *community-measured*
+//! systemBlue/systemRed (baked explicit — see [`crate::tabbar`]'s Label
+//! color note for why these accent colors don't live-swap; the FAMILY still
+//! does, independently of that baked color).
 //!
 //! # Keyboard operability
 //!
@@ -75,7 +80,7 @@ use frust::authoring::text::{FontWeight, LineHeight};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextColor,
-    View, Widget,
+    ThemeTextType, View, Widget,
 };
 use frust::{
     Brightness, GlassFill, GlassMaterial, NavigatorController, PopResult, ShapeScale, Theme, text,
@@ -123,12 +128,20 @@ const TITLE_MESSAGE_GAP: f64 = 4.0;
 const ACTION_H: f64 = 44.0;
 
 /// Title type-role: SF *Headline*, 17pt Semibold (see [`super::navbar`]).
+/// Size/weight stay hardcoded (see [`super::navbar`]'s `TITLE_SIZE` doc
+/// comment for why); [`title_view`] opts the FAMILY into
+/// `ThemeTextType::TitleLarge` (`titleLarge` matches 17pt/Semibold exactly).
 const TITLE_SIZE: f32 = 17.0;
 const TITLE_LINE_HEIGHT: f32 = 22.0;
-/// Message type-role: SF *Footnote*, 13pt Regular.
+/// Message type-role: SF *Footnote*, 13pt Regular — [`message_view`] opts
+/// the FAMILY into `ThemeTextType::LabelLarge` (`labelLarge` matches
+/// 13pt/Regular exactly).
 const MESSAGE_SIZE: f32 = 13.0;
 const MESSAGE_LINE_HEIGHT: f32 = 18.0;
-/// Action label type-role: SF *Body*, 17pt.
+/// Action label type-role: SF *Body*, 17pt — [`action_label_view`] opts the
+/// FAMILY into `ThemeTextType::BodyLarge` (`bodyLarge` matches 17pt exactly;
+/// the action's own weight/color stay this module's explicit
+/// [`CupertinoActionStyle`] values, unaffected by the themed family).
 const ACTION_SIZE: f32 = 17.0;
 const ACTION_LINE_HEIGHT: f32 = 22.0;
 
@@ -222,14 +235,16 @@ impl CupertinoDialogAction {
 }
 
 /// Build an action label's type-erased child view (explicit accent color +
-/// weight, centered).
+/// weight, centered; family opted into the theme's `bodyLarge` role — the
+/// explicit color does not block it, the two resolve independently).
 pub(crate) fn action_label_view<State: 'static>(a: &CupertinoDialogAction) -> AnyView<State> {
     frust::authoring::any::<State, _>(
         text(a.label.clone())
             .size(ACTION_SIZE)
             .weight(a.style.weight())
             .color(a.style.color())
-            .line_height(LineHeight::Absolute(ACTION_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(ACTION_LINE_HEIGHT))
+            .themed_family(ThemeTextType::BodyLarge),
     )
 }
 
@@ -324,7 +339,8 @@ fn title_view<State: 'static>(title: String) -> AnyView<State> {
             .size(TITLE_SIZE)
             .weight(FontWeight::SEMI_BOLD)
             .themed_role(ThemeTextColor::OnSurface)
-            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT))
+            .themed_family(ThemeTextType::TitleLarge),
     )
 }
 
@@ -333,7 +349,8 @@ fn message_view<State: 'static>(message: String) -> AnyView<State> {
         text(message)
             .size(MESSAGE_SIZE)
             .themed_role(ThemeTextColor::OnSurfaceVariant)
-            .line_height(LineHeight::Absolute(MESSAGE_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(MESSAGE_LINE_HEIGHT))
+            .themed_family(ThemeTextType::LabelLarge),
     )
 }
 
@@ -1198,6 +1215,181 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n.role() == Role::AlertDialog),
             "an AlertDialog container node is contributed"
+        );
+    }
+
+    // --- Render-time typeface identity: title/message/action families follow
+    //     the theme. Each fixture isolates its one slot under test — the
+    //     others are absent or empty (`text("")` shapes zero glyph runs, the
+    //     same idiom `crates/frust-testing/src/corpus/page.rs` uses), so
+    //     `assert_paints_only_in`'s every-run check stays meaningful.
+
+    const DIALOG_WINDOW: Size = Size::new(400.0, 800.0);
+
+    fn title_only_view() -> CupertinoAlertDialogView<()> {
+        CupertinoAlertDialogView {
+            title: "Hello".into(),
+            message: None,
+            actions: vec![],
+            controller: NavigatorController::new(),
+        }
+    }
+
+    fn message_only_view() -> CupertinoAlertDialogView<()> {
+        CupertinoAlertDialogView {
+            title: String::new(),
+            message: Some("Hello".into()),
+            actions: vec![],
+            controller: NavigatorController::new(),
+        }
+    }
+
+    fn action_only_view() -> CupertinoAlertDialogView<()> {
+        CupertinoAlertDialogView {
+            title: String::new(),
+            message: None,
+            actions: vec![action("Hello")],
+            controller: NavigatorController::new(),
+        }
+    }
+
+    #[test]
+    fn the_title_paints_in_the_themes_title_large_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme =
+            baseline_with_family(|scale, family| scale.title_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the alert title",
+            |_: &mut ()| title_only_view(),
+            theme,
+            &[TUFFY],
+            DIALOG_WINDOW,
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn the_title_follows_a_live_theme_family_change() {
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.title_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the alert title",
+            |_: &mut ()| title_only_view(),
+            tuffy_theme,
+            &faces,
+            DIALOG_WINDOW,
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.title_large.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the alert title",
+            |_: &mut ()| title_only_view(),
+            helvetica_theme,
+            &faces,
+            DIALOG_WINDOW,
+            TUFFY_AS_HELVETICA,
+        );
+    }
+
+    #[test]
+    fn the_message_paints_in_the_themes_label_large_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme =
+            baseline_with_family(|scale, family| scale.label_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the alert message",
+            |_: &mut ()| message_only_view(),
+            theme,
+            &[TUFFY],
+            DIALOG_WINDOW,
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn the_message_follows_a_live_theme_family_change() {
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.label_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the alert message",
+            |_: &mut ()| message_only_view(),
+            tuffy_theme,
+            &faces,
+            DIALOG_WINDOW,
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.label_large.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the alert message",
+            |_: &mut ()| message_only_view(),
+            helvetica_theme,
+            &faces,
+            DIALOG_WINDOW,
+            TUFFY_AS_HELVETICA,
+        );
+    }
+
+    #[test]
+    fn the_action_label_paints_in_the_themes_body_large_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme = baseline_with_family(|scale, family| scale.body_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the alert action label",
+            |_: &mut ()| action_only_view(),
+            theme,
+            &[TUFFY],
+            DIALOG_WINDOW,
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn the_action_label_follows_a_live_theme_family_change() {
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.body_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the alert action label",
+            |_: &mut ()| action_only_view(),
+            tuffy_theme,
+            &faces,
+            DIALOG_WINDOW,
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.body_large.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the alert action label",
+            |_: &mut ()| action_only_view(),
+            helvetica_theme,
+            &faces,
+            DIALOG_WINDOW,
+            TUFFY_AS_HELVETICA,
         );
     }
 }

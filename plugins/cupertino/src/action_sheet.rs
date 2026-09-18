@@ -1010,4 +1010,56 @@ mod tests {
             "a Menu container node is contributed"
         );
     }
+
+    // --- Render-time typeface identity: action/cancel rows follow the theme.
+    //     Every row here shares `super::alert_dialog::action_label_view`'s
+    //     single `bodyLarge` role (the cancel row reuses it too — see
+    //     `cancel_view`), so the sheet's full fixture (2 actions + cancel)
+    //     needs no isolation: every run must resolve the same probe face.
+
+    #[test]
+    fn action_and_cancel_rows_paint_in_the_themes_body_large_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme = baseline_with_family(|scale, family| scale.body_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the action sheet's action/cancel rows",
+            |_: &mut ()| sheet_view(),
+            theme,
+            &[TUFFY],
+            WINDOW,
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn action_and_cancel_rows_follow_a_live_theme_family_change() {
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.body_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the action sheet's action/cancel rows",
+            |_: &mut ()| sheet_view(),
+            tuffy_theme,
+            &faces,
+            WINDOW,
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.body_large.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the action sheet's action/cancel rows",
+            |_: &mut ()| sheet_view(),
+            helvetica_theme,
+            &faces,
+            WINDOW,
+            TUFFY_AS_HELVETICA,
+        );
+    }
 }

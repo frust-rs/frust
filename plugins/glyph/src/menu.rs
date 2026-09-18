@@ -98,6 +98,13 @@
 //! `label` and `icon` are independent slots that always render *together* when
 //! both are set, so the icon never replaces or hides the label.
 //!
+//! # Typeface
+//!
+//! Every item label reads its family at layout from the live theme's
+//! `labelLarge` type-scale role (IBM Plex Mono under Glyph's own scale),
+//! falling back to Glyph's IBM Plex Mono stack unthemed, so a theme swap
+//! reshapes the labels (see [`crate::badge`]'s Typeface section).
+//!
 //! # Semantics
 //!
 //! The whole menu contributes one [`Role::Menu`] container node with the accesskit
@@ -358,9 +365,15 @@ fn clamp_axis(pref: f64, size: f64, area: f64) -> f64 {
     pref.clamp(WINDOW_MARGIN, max)
 }
 
-fn item_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the item labels' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// An item label's style; family from the theme's `labelLarge` role.
+fn item_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()),
         weight: FontWeight::REGULAR,
         line_height: LineHeight::FontSizeRelative(ITEM_LINE_HEIGHT),
         ..TextStyle::new(ITEM_FONT_SIZE, color)
@@ -832,19 +845,22 @@ impl Widget for GlyphMenuWidget {
         let area_w = finite_or_zero(bc.max().width);
         let area_h = finite_or_zero(bc.max().height);
 
-        let (label_c, danger_c) = {
+        let (label_style, danger_style) = {
             let theme = Theme::from_layout_ctx(ctx);
-            (resolve_label(theme), resolve_danger(theme))
+            (
+                item_style(theme, resolve_label(theme)),
+                item_style(theme, resolve_danger(theme)),
+            )
         };
 
         let mut content_w: f64 = 0.0;
         for row in &mut self.rows {
             if let (Some(label), MenuEntry::Item(item)) = (&mut row.label, &row.entry) {
-                let color = match item.variant {
-                    MenuItemVariant::Normal => label_c,
-                    MenuItemVariant::Danger => danger_c,
+                let style = match item.variant {
+                    MenuItemVariant::Normal => &label_style,
+                    MenuItemVariant::Danger => &danger_style,
                 };
-                row.label_size = label.layout(ctx, &item_style(color));
+                row.label_size = label.layout(ctx, style);
                 content_w = content_w.max(icon_reserve(item) + row.label_size.width);
             }
         }
@@ -1758,5 +1774,30 @@ mod tests {
             .filter(|(_, n)| n.role() == Role::Button)
             .count();
         assert_eq!(button_count, 3, "one Button node per MenuEntry::Item");
+    }
+
+    // -- Typeface: item labels follow their type-scale role ---------------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn menu_of_three(_: &mut ()) -> GlyphMenuView {
+        glyph_menu(Rect::new(360.0, 10.0, 392.0, 42.0), three_items())
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn labels_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(menu_of_three, crate::baseline(), Size::new(400.0, 600.0));
+        // Two normal items and the danger item (the separator shapes no text).
+        assert_eq!(faces, [Face::PlexMono; 3]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn labels_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(menu_of_three, Size::new(400.0, 600.0));
+        assert_eq!(before, [Face::PlexMono; 3]);
+        assert_eq!(after, [Face::SpaceMono; 3]);
     }
 }
