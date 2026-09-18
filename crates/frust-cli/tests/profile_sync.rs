@@ -208,11 +208,41 @@ fn android_cargo_config_identical_between_root_and_template() {
     let template_toml: toml::Table = toml::from_str(&template_config)
         .expect("templates/app/.cargo/config.toml must be valid TOML");
 
+    // Compare the FULL top-level key sets first, not just the one key
+    // ("target") the equality checks below happen to read — a new
+    // top-level table ([source]/[registries]/[env]/[net]/...) appended to
+    // either file would otherwise pass both checks unnoticed.
+    let root_keys: BTreeSet<&str> = root_toml.keys().map(String::as_str).collect();
+    assert_eq!(
+        root_keys,
+        BTreeSet::from(["target"]),
+        "the repo root .cargo/config.toml's top-level table set must be \
+         exactly {{\"target\"}} — a new top-level table \
+         ([source]/[registries]/[env]/[net]/...) must not silently appear"
+    );
+    let template_keys: BTreeSet<&str> = template_toml.keys().map(String::as_str).collect();
+    assert_eq!(
+        template_keys,
+        BTreeSet::from(["build", "target"]),
+        "templates/app/.cargo/config.toml's top-level table set must be \
+         exactly {{\"build\", \"target\"}} — a new top-level table \
+         ([source]/[registries]/[env]/[net]/...) must not silently appear"
+    );
+    // `root_toml.get("target")` must actually resolve to something —
+    // otherwise the equality check right below it would pass vacuously
+    // (`None == None`) the moment the root file's `[target.*]` tables went
+    // missing, rather than catching the loss.
+    assert!(
+        root_toml.get("target").is_some(),
+        "the repo root .cargo/config.toml has no [target.*] table to \
+         compare the template config against"
+    );
     assert_eq!(
         root_toml.get("target"),
         template_toml.get("target"),
-        "templates/app/.cargo/config.toml's [target.*] tables have drifted \
-         from the repo root's — the two must stay byte-identical"
+        "templates/app/.cargo/config.toml's [target.*] rustflags tables have \
+         structurally drifted from the repo root's — the two must stay \
+         identical"
     );
     assert!(
         root_toml.get("build").is_none(),

@@ -1,11 +1,23 @@
 # All generated/compiled build output for a Frust app lands under this one
 # project-relative root (kept in sync with `crates/frust-drive`'s
-# `build_dirs::BuildLayout`/`build_dirs::CLEAN_DIRS`, and with `frust
-# clean`'s REMOVED_DIRS) — Rust artifacts (`build/rust`, the `[build]
-# target-dir` set in this project's `.cargo/config.toml`), Android's Gradle
-# output (`build/android`), iOS's `xcodebuild` output (`build/ios`), the
-# default web build (`build/web`), and desktop bundles (`build/desktop`).
+# `build_dirs::BuildLayout`, and with `frust clean`'s
+# `build_dirs::{CLEAN_DIRS, LEGACY_CLEAN_DIRS}`) — Rust artifacts
+# (`build/rust`, the `[build] target-dir` set in this project's
+# `.cargo/config.toml`), Android's Gradle output (`build/android`), iOS's
+# `xcodebuild` output (`build/ios`), the default web build (`build/web`), and
+# desktop bundles (`build/desktop`).
 /build
+
+# Cargo's own compiled-artifact cache. Deliberately NOT part of
+# `build_dirs::BuildLayout`/`CLEAN_DIRS` (see that module's doc) — it is
+# never removed by path, only by `cargo clean`/CARGO_TARGET_DIR override —
+# but it still needs to be gitignored here: a `cargo build`/`cargo run`
+# invoked with `--manifest-path` from outside this project directory, or an
+# explicit `--target-dir target`, never reads this project's own
+# `.cargo/config.toml` (config discovery walks up from the CURRENT
+# directory, not the manifest), so it falls back to cargo's plain `target/`
+# default instead of `build/rust`.
+/target
 
 # Android release signing material — never commit (see frust.toml [signing]).
 android/key.properties

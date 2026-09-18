@@ -531,6 +531,7 @@ fn check_destination(dest: &Path, overwrite: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_dirs::BuildLayout;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
@@ -644,7 +645,8 @@ mod tests {
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
         let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();
-        // Verify build-output patterns are present (kept in sync with clean.rs REMOVED_DIRS).
+        // Verify build-output patterns are present (kept in sync with
+        // `build_dirs::{CLEAN_DIRS, LEGACY_CLEAN_DIRS}`).
         assert!(gitignore.contains("android/app/build/"), "{gitignore}");
         // The `:frust-embedding` module's redirected Gradle output.
         assert!(gitignore.contains("android/build/"), "{gitignore}");
@@ -670,18 +672,50 @@ mod tests {
         // have (this checkout's own `target/` is referenced directly by
         // docs and CI and must not move), so the two files are no longer
         // byte-identical as a whole. What must still match is every
-        // `[target.*]` rustflags table, byte-for-byte — parse both (typed
+        // `[target.*]` rustflags table, structurally — parse both (typed
         // `toml::Table`, not `toml::Value::from_str`, mirroring this test
         // module's existing precedent above) and compare structurally.
         let scaffold_toml: toml::Table = toml::from_str(&cargo_config)
             .expect("scaffolded .cargo/config.toml must be valid TOML");
         let root_toml: toml::Table = toml::from_str(&root_cargo_config)
             .expect("repo root .cargo/config.toml must be valid TOML");
+        // Compare the FULL top-level key sets first, not just the one key
+        // ("target") the equality checks below happen to read — a new
+        // top-level table ([source]/[registries]/[env]/[net]/...) appended
+        // to either file would otherwise pass both checks unnoticed.
+        let root_keys: std::collections::BTreeSet<&str> =
+            root_toml.keys().map(String::as_str).collect();
+        assert_eq!(
+            root_keys,
+            std::collections::BTreeSet::from(["target"]),
+            "the repo root .cargo/config.toml's top-level table set must be \
+             exactly {{\"target\"}} — a new top-level table \
+             ([source]/[registries]/[env]/[net]/...) must not silently appear"
+        );
+        let scaffold_keys: std::collections::BTreeSet<&str> =
+            scaffold_toml.keys().map(String::as_str).collect();
+        assert_eq!(
+            scaffold_keys,
+            std::collections::BTreeSet::from(["build", "target"]),
+            "the scaffolded .cargo/config.toml's top-level table set must be \
+             exactly {{\"build\", \"target\"}} — a new top-level table \
+             ([source]/[registries]/[env]/[net]/...) must not silently appear"
+        );
+        // `root_toml.get("target")` must actually resolve to something —
+        // otherwise the equality check right below it would pass vacuously
+        // (`None == None`) the moment the root file's `[target.*]` tables
+        // went missing, rather than catching the loss.
+        assert!(
+            root_toml.get("target").is_some(),
+            "the repo root .cargo/config.toml has no [target.*] table to \
+             compare the scaffolded config against"
+        );
         assert_eq!(
             scaffold_toml.get("target"),
             root_toml.get("target"),
-            "the scaffolded .cargo/config.toml's [target.*] tables have \
-             drifted from the repo root's — the two must stay byte-identical"
+            "the scaffolded .cargo/config.toml's [target.*] rustflags tables \
+             have structurally drifted from the repo root's — the two must \
+             stay identical"
         );
         assert!(
             root_toml.get("build").is_none(),
@@ -1845,7 +1879,18 @@ mod tests {
             build_rs.contains("winresource::WindowsResource::new()"),
             "{build_rs}"
         );
-        assert!(build_rs.contains("windows/icon.ico"), "{build_rs}");
+        // Pinned to the full BuildLayout-derived path — a bare
+        // `.contains("windows/icon.ico")` would also match a stale
+        // pre-migration literal (e.g. a wrongly reintroduced root-level
+        // `windows/icon.ico`), silently passing on the wrong path.
+        let icon_path = BuildLayout::windows_icon();
+        let icon_path = icon_path.to_str().expect("utf8 path");
+        assert_eq!(icon_path, "build/desktop/windows/icon.ico");
+        assert!(
+            build_rs.contains(icon_path),
+            "windows/build.rs must reference `{icon_path}` \
+             (BuildLayout::windows_icon()):\n{build_rs}"
+        );
         assert!(build_rs.contains(&ctx.title_case_name), "{build_rs}");
         assert!(!build_rs.contains("{{"), "{build_rs}");
 
