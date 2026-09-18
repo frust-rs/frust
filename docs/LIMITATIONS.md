@@ -6018,3 +6018,41 @@ repeat would additionally retire the power caveat.
 **Evidence**: the 2026-09-17 OnePlus 9 controlled A/B described above — 16 blocks, 4 scenarios
 × B,V,B,V, ~43,200 raw frame lines per block; `benchmarks/RESULTS.md`'s App-size per-lever
 table records the same result.
+
+---
+
+### `android-legacy-gradle-cache-recreated` — `android/.gradle` can still be recreated by a Gradle run Frust did not launch
+
+**Observed**: `frust build apk`/`frust run` always pass `--project-cache-dir <project>/build/android/.gradle` to `./gradlew`, so their own invocations never write Gradle's per-project cache under `android/`. A hand-run `./gradlew` from the `android/` directory — Android Studio's own build, or a developer invoking Gradle directly — gets Gradle's own default cache location instead and recreates `android/.gradle`.
+
+**Applies to**: any project opened in Android Studio, or any manual `./gradlew` invocation from `android/`.
+
+**Why accepted**: Frust cannot intercept a build it did not launch; `--project-cache-dir` only affects an invocation Frust itself constructs. `android/.gradle` is one of `build_dirs::LEGACY_CLEAN_DIRS`, so `frust clean` removes it wherever it reappears — the fix is cleanup, not prevention.
+
+**Evidence**: `crates/frust-drive/src/build_dirs.rs` (`LEGACY_CLEAN_DIRS`); `crates/frust-drive/src/android_run/gradle.rs` and `android_build/mod.rs` (`--project-cache-dir`).
+
+---
+
+### `android-build-legacy-fallback-one-release` — a pre-migration Android layout keeps building via a read-only fallback, for one release
+
+**Observed**: `android_build::artifacts::discover` resolves a build's Gradle output new-first (`build/android/app/outputs`), then falls back read-only to the pre-migration AGP default (`android/app/build/outputs`) when only that path exists, printing a one-time warning naming the migration recipe. The fallback is a compatibility bridge, not a second permanent layout.
+
+**Applies to**: any project scaffolded before the `build/` root migration whose `settings.gradle.kts` still lacks the `buildDirectory` redirect.
+
+**Why accepted**: it lets a pre-migration app keep building and running without forcing an immediate migration, at the cost of one extra directory probe per artifact lookup — accepted for one release cycle only, per the module's own doc comment, after which an unmigrated project is expected to have followed the recipe.
+
+**Trigger for removal**: the release after the one this shipped in; delete `legacy_output_dir` and the fallback branch in `resolve_output_dir` together with this entry.
+
+**Evidence**: `crates/frust-drive/src/android_build/artifacts.rs` (`legacy_output_dir`, `resolve_output_dir`, `MIGRATION_RECIPE_DOC`).
+
+---
+
+### `ios-build-phase-cargo-metadata-per-build` — the iOS build phase shells out to `cargo metadata` on every Xcode build
+
+**Observed**: the generated Xcode build-phase script resolves the Rust target directory via `${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | ...)}` — when `CARGO_TARGET_DIR` is unset (the common case), every Simulator or device build shells out to `cargo metadata` before it can copy the compiled static library into `$BUILT_PRODUCTS_DIR`.
+
+**Applies to**: every iOS build of a scaffolded app.
+
+**Why accepted**: `cargo metadata` is what lets the phase resolve the real target directory correctly under a `.cargo/config.toml` `[build] target-dir` override or a `CARGO_TARGET_DIR` env var, instead of assuming the default; its cost (a workspace manifest walk, no compilation) is negligible next to the `cargo build` step the same script already runs first.
+
+**Evidence**: `templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s build-phase `shellScript`.

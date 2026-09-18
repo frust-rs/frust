@@ -547,7 +547,7 @@ wait for a deterministic ready signal:
 ```bash
 cd examples/huddle
 frust build apk --debug --target-platform android-x64
-adb -s emulator-5554 install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5554 install -r build/android/app/outputs/apk/debug/app-debug.apk
 adb -s emulator-5554 shell am force-stop it.f0x.huddle
 adb -s emulator-5554 shell am start -W -n it.f0x.huddle/.MainActivity
 adb -s emulator-5554 exec-out screencap -p > actual-android.png
