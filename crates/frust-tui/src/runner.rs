@@ -219,6 +219,64 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         }
 
         tokio::select! {
+            // `biased` makes the branches below poll in the order written,
+            // never a random pick — so that order is a correctness decision,
+            // not cosmetics. Each branch is placed deliberately:
+            //
+            // 1. `tick` first. It is ready at most once per `TICK` interval,
+            //    so putting it ahead of everything else costs nothing (it is
+            //    essentially never the reason another branch waits) while
+            //    guaranteeing the reverse can't happen: a busier branch can
+            //    never starve the tick into never firing, which would stall
+            //    toast expiry for as long as that branch stays busy.
+            // 2. `reader.next()` (terminal input) next, ahead of both
+            //    internal channels, so keystrokes stay responsive even while
+            //    an MCP client or a launched session is generating traffic.
+            // 3. `rx` (the engine channel) before `session_rx`: a launch
+            //    posts its `RegisterSession` on `rx`, but the session's own
+            //    drain thread starts sending on `session_rx` immediately, so
+            //    by the time this `select!` next runs, both can already be
+            //    queued together. `update` drops a session event for an id
+            //    it hasn't registered yet, so if `session_rx` ever won that
+            //    race, the tab would sit in `Configuring` forever. Polling
+            //    `rx` first makes registration win every time, not just on
+            //    average.
+            // 4. `session_rx` last. A chatty child process is the branch
+            //    most likely to stay continuously ready, and with `biased` a
+            //    continuously-ready branch starves every branch *after* it —
+            //    so the potentially-busiest branch goes last, where it can
+            //    only ever delay itself, never input, MCP commands, or the
+            //    tick. The one trade this accepts is the mirror case: a
+            //    burst of engine-channel traffic can delay `session_rx`
+            //    behind it. That's acceptable because `session_rx` is a
+            //    bounded channel — a delay here is backpressure on the
+            //    drain thread, not a lost or reordered event, unlike the
+            //    silent drop this ordering exists to prevent.
+            biased;
+            _ = tick.tick() => {
+                // Only touch the model while something is animating (a live
+                // toast) — the dirty-frame skip keeps an idle workbench from
+                // aging/redrawing anything. The Tick transition drops expired
+                // toasts and reports whether the visible set changed.
+                if engine.state.animating() {
+                    let out = engine.handle(Message::Tick);
+                    needs_redraw |= out.redraw;
+                    apply_effect(
+                        out.effect,
+                        &mut EffectCtx {
+                            engine: &mut engine,
+                            supervisor: &mut supervisor,
+                            devtools: &mut devtools,
+                            metrics: &mut metrics,
+                            tx: &msg_tx,
+                            next_adhoc_id: &mut next_adhoc_id,
+                            records: &mut mcp_records,
+                            backend: &backend,
+                            clipboard: clipboard_backend,
+                        },
+                    );
+                }
+            }
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
@@ -312,30 +370,6 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         clipboard: clipboard_backend,
                     },
                 );
-            }
-            _ = tick.tick() => {
-                // Only touch the model while something is animating (a live
-                // toast) — the dirty-frame skip keeps an idle workbench from
-                // aging/redrawing anything. The Tick transition drops expired
-                // toasts and reports whether the visible set changed.
-                if engine.state.animating() {
-                    let out = engine.handle(Message::Tick);
-                    needs_redraw |= out.redraw;
-                    apply_effect(
-                        out.effect,
-                        &mut EffectCtx {
-                            engine: &mut engine,
-                            supervisor: &mut supervisor,
-                            devtools: &mut devtools,
-                            metrics: &mut metrics,
-                            tx: &msg_tx,
-                            next_adhoc_id: &mut next_adhoc_id,
-                            records: &mut mcp_records,
-                            backend: &backend,
-                            clipboard: clipboard_backend,
-                        },
-                    );
-                }
             }
         }
     }
@@ -3543,5 +3577,145 @@ mod tests {
                 cmd.title
             );
         }
+    }
+
+    /// Whether `source` — `run_loop`'s own text, or a mutated copy for the
+    /// negative control below — still keeps the ordering guarantee its
+    /// `tokio::select!` depends on: `biased;` present, with the `rx` branch
+    /// (where a launch's `RegisterSession` lands) written before the
+    /// `session_rx` branch (where that same session's drain-thread events
+    /// land). Losing either one reopens the race the long comment atop
+    /// `run_loop`'s `select!` exists to prevent: an event for a session not
+    /// yet registered is silently dropped by `update`, leaving the tab stuck
+    /// in `Configuring` forever. Factored out of the test so both the real
+    /// source and a deliberately broken copy can be checked against it.
+    fn run_loop_registers_sessions_before_their_events(source: &str) -> bool {
+        let Some(fn_start) = source.find("async fn run_loop(") else {
+            return false;
+        };
+        let Some(select_kw) = source[fn_start..].find("tokio::select!") else {
+            return false;
+        };
+        let select_kw = fn_start + select_kw;
+        let Some(open_rel) = source[select_kw..].find('{') else {
+            return false;
+        };
+        let open = select_kw + open_rel;
+
+        // Bound the search to the macro's own `{ … }`, tracked by a plain
+        // brace count from the opening brace. This file is `include_str!`-ed
+        // whole (see the test below), so an *unbounded* search from `open`
+        // to end-of-file would happily match text far past `run_loop` —
+        // including this very test module's own `"biased;"` / `"rx.recv()"`
+        // / `"session_rx.recv()"` string literals a few hundred lines down,
+        // which would mask a real mutation instead of catching it. Every
+        // brace inside `run_loop`'s select arms is either structural or (as
+        // in a `format!("... {e}")` interpolation) already balanced within
+        // its own literal, so a naive count still lands on the true close.
+        let bytes = source.as_bytes();
+        let mut depth: i32 = 0;
+        let mut close = None;
+        for (i, &b) in bytes[open..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            return false;
+        };
+        let select_body = &source[open..=close];
+
+        if !select_body.contains("biased;") {
+            return false;
+        }
+
+        // `"rx.recv()"` is itself a substring of `"session_rx.recv()"`, so a
+        // plain `find` for it still resolves correctly either way: when the
+        // bare `rx` branch truly comes first, that occurrence is the
+        // earliest match; when the branches are swapped, the earliest match
+        // is the one embedded inside `session_rx.recv()` — at an offset
+        // *after* `session_rx.recv()`'s own start — so the comparison below
+        // still comes out false, as it should.
+        let (Some(rx_idx), Some(session_rx_idx)) = (
+            select_body.find("rx.recv()"),
+            select_body.find("session_rx.recv()"),
+        ) else {
+            return false;
+        };
+        rx_idx < session_rx_idx
+    }
+
+    /// The regression this guards: a future edit to `run_loop` that drops
+    /// `biased` or reorders its branches would compile fine and pass every
+    /// other test, yet reopen the exact silent-drop race
+    /// `a_launchs_registration_is_applied_before_its_already_queued_events`
+    /// (`tests/mcp_embedded.rs`) exercises only for the *test harness's* copy
+    /// of this loop. This tripwire reads `run_loop`'s real source instead, so
+    /// the production loop is covered too.
+    #[test]
+    fn run_loop_select_polls_registration_before_session_events() {
+        assert!(
+            run_loop_registers_sessions_before_their_events(include_str!("runner.rs")),
+            "run_loop's `tokio::select!` must be `biased` with its `rx` branch \
+             (RegisterSession) written before its `session_rx` branch (session events), \
+             or a launch's own events can be dropped before it is registered"
+        );
+    }
+
+    /// Negative control for the tripwire above: it must actually be able to
+    /// fail. Mutated copies of a minimal `run_loop` shape are checked instead
+    /// of the real file so this test is not sensitive to unrelated edits
+    /// elsewhere in `run_loop`.
+    #[test]
+    fn run_loop_select_check_fails_on_a_broken_copy() {
+        let biased_rx_first = "async fn run_loop() { tokio::select! { \
+             biased; \
+             Some(msg) = rx.recv() => {} \
+             Some(ev) = session_rx.recv() => {} \
+         } }";
+        assert!(run_loop_registers_sessions_before_their_events(
+            biased_rx_first
+        ));
+
+        let missing_biased = "async fn run_loop() { tokio::select! { \
+             Some(msg) = rx.recv() => {} \
+             Some(ev) = session_rx.recv() => {} \
+         } }";
+        assert!(!run_loop_registers_sessions_before_their_events(
+            missing_biased
+        ));
+
+        let swapped_branches = "async fn run_loop() { tokio::select! { \
+             biased; \
+             Some(ev) = session_rx.recv() => {} \
+             Some(msg) = rx.recv() => {} \
+         } }";
+        assert!(!run_loop_registers_sessions_before_their_events(
+            swapped_branches
+        ));
+
+        // The shape that actually bit an earlier, unbounded version of the
+        // checker: `run_loop.rs` is read whole via `include_str!`, so a
+        // mutated-but-missing-`biased;` select block followed by *other*
+        // code that happens to mention `biased;`/`rx.recv()`/
+        // `session_rx.recv()` (exactly what this very test module's string
+        // literals do) must not let the checker wander past the select
+        // block's closing `}` and pass on those unrelated matches instead.
+        let biased_missing_but_words_appear_later = "async fn run_loop() { tokio::select! { \
+             Some(msg) = rx.recv() => {} \
+             Some(ev) = session_rx.recv() => {} \
+         } } \
+         fn unrelated() { /* biased; rx.recv() session_rx.recv() */ }";
+        assert!(!run_loop_registers_sessions_before_their_events(
+            biased_missing_but_words_appear_later
+        ));
     }
 }
