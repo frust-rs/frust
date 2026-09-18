@@ -63,7 +63,7 @@ use crate::tokens::color_scheme_light;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_PRESS};
 
 use crate::press::{SpringScalar, inside, presses, stroke_outline};
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 
 /// The expandable button's height: `h-11`, which is also its collapsed width
 /// (`min-w-11`).
@@ -71,6 +71,11 @@ const BUTTON_HEIGHT: f64 = HEIGHT_INPUT;
 
 /// The chip's height: `h-10`.
 const CHIP_HEIGHT: f64 = HEIGHT_MD;
+
+/// The type-scale role both controls' runs — the labels and the short icon
+/// strings — take their family from at layout: a control label, as on
+/// [`button`](super::button).
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 /// The button's inner padding: `p-1`.
 const BUTTON_PAD: f64 = 4.0;
@@ -264,8 +269,8 @@ impl<State: 'static> View<State> for ExpandableButtonView<State> {
 impl Widget for ExpandableButtonWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let style = label_style(TEXT_SM);
-        self.icon_size = self.icon.layout(ctx, &style);
-        self.label_size = self.label.layout(ctx, &style);
+        self.icon_size = self.icon.layout_themed(ctx, &style, LABEL_ROLE);
+        self.label_size = self.label.layout_themed(ctx, &style, LABEL_ROLE);
         // The first layout lands on the resting width rather than animating out
         // of an arbitrary starting value.
         if self.width.value().is_nan() {
@@ -642,8 +647,8 @@ impl<State: 'static> View<State> for ExpandableChipView<State> {
 impl Widget for ExpandableChipWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let style = label_style(TEXT_SM);
-        self.label_size = self.label.layout(ctx, &style);
-        self.icon_size = self.action_icon.layout(ctx, &style);
+        self.label_size = self.label.layout_themed(ctx, &style, LABEL_ROLE);
+        self.icon_size = self.action_icon.layout_themed(ctx, &style, LABEL_ROLE);
         if self.width.value().is_nan() {
             self.width.jump_to(self.width_for(self.expanded));
         }
@@ -1298,5 +1303,33 @@ mod tests {
         assert_eq!(CHIP_ACTION_SLOT, spacing(8.0), "w-8");
         assert_eq!(BUTTON_HEIGHT, HEIGHT_INPUT, "h-11");
         assert_eq!(CHIP_HEIGHT, HEIGHT_MD, "h-10");
+    }
+
+    // ---- Typeface: labels and icon strings follow the live theme -----------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 200.0);
+
+    /// Both controls expanded, so every run paints: the button's icon and
+    /// label, the chip's label and action icon. The icon strings are ASCII so
+    /// every glyph is one Geist carries.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(expandable_button::<()>("+", "Add item", |_, _| {}).expanded(true)),
+            frust::any(expandable_chip::<()>("Draft", "x", "Discard draft").expanded(true)),
+        ])
+    }
+
+    #[test]
+    fn runs_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the expandable controls", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the expandable controls", probe_view, PROBE_WINDOW);
     }
 }

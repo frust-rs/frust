@@ -103,7 +103,7 @@ use crate::overlay::anchored::{
 };
 use crate::press::{Lane, inside_inclusive, presses};
 use crate::style;
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 use crate::tokens::motion::SPRING_LAYOUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -139,6 +139,11 @@ pub const COMBOBOX_MAX_HEIGHT: f64 = 256.0;
 
 /// The text an empty result set shows (`"No options found."`).
 pub const EMPTY_LABEL: &str = "No options found.";
+
+/// The type-scale role the empty-state message takes its family from at
+/// layout — a line of body text, where the rows are
+/// [`select::LABEL_ROLE`] control labels. The multi-select panel shares it.
+pub(crate) const EMPTY_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 
 /// Opacity of a disabled row: `disabled:opacity-45`.
 const ROW_DISABLED_OPACITY: f32 = 0.45;
@@ -367,6 +372,8 @@ impl<State: 'static> ComboboxTriggerView<State> {
     /// are assembled.
     fn field_view(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
+        // The query and placeholder keep the wrapped baseline `text_input`'s own
+        // family: that field has no themed-family seam.
         any(
             input::<State, _>(self.field_text(), move |state: &mut State, text| {
                 on_change(state, text);
@@ -772,9 +779,13 @@ impl Widget for ComboboxPanelWidget {
         let style = label_style(style::TEXT_SM);
         let mut widest: f64 = 0.0;
         for row in &mut self.rows {
-            widest = widest.max(row.text.layout(ctx, &style).width);
+            widest = widest.max(
+                row.text
+                    .layout_themed(ctx, &style, select::LABEL_ROLE)
+                    .width,
+            );
         }
-        widest = widest.max(self.empty.layout(ctx, &style).width);
+        widest = widest.max(self.empty.layout_themed(ctx, &style, EMPTY_ROLE).width);
 
         let anchor_width = self
             .config
@@ -1495,5 +1506,49 @@ mod tests {
             &pointer(PointerPhase::Down, inside.x, inside.y),
         );
         assert_eq!(app.opens, vec![false]);
+    }
+
+    // ---- Typeface: the rows and the empty state follow the live theme ------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// An open panel filtered by `query`, mounted directly. The wrapped
+    /// trigger field is left out: its baseline text has no themed-family
+    /// opt-in, so it would paint the system face and is not what these tests
+    /// pin.
+    fn probe_panel(query: &str) -> ComboboxPanelView<()> {
+        ComboboxPanelView {
+            options: options(),
+            selected: Some(0),
+            query: query.to_string(),
+            config: Rc::new(RefCell::new(PanelConfig {
+                open: true,
+                anchor: None,
+            })),
+            on_select: Rc::new(|_: &mut (), _| {}),
+        }
+    }
+
+    /// An unfiltered panel, which paints its rows, over one whose query keeps
+    /// nothing, which paints the empty state.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(probe_panel("")),
+            frust::any(probe_panel("zzz")),
+        ])
+    }
+
+    #[test]
+    fn panel_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the combobox panel's text", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn panel_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the combobox panel's text", probe_view, PROBE_WINDOW);
     }
 }

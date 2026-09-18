@@ -116,7 +116,7 @@ use crate::overlay::anchored::{
 };
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_PANEL};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -217,6 +217,11 @@ pub const SELECT_MAX_HEIGHT: f64 = 300.0;
 
 /// Opacity of a disabled control: `disabled:opacity-50`.
 const DISABLED_OPACITY: f32 = style::DISABLED_OPACITY;
+
+/// The type-scale role the trigger's text, the morph header and every row take
+/// their family from at layout — a control label. The combobox and
+/// multi-select panels' rows share it.
+pub(crate) const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 /// Unthemed fallback surface — the light table's `--background`.
 const FALLBACK_SURFACE: Color = crate::BEUI_LIGHT.background;
@@ -622,7 +627,9 @@ impl<State: 'static> View<State> for SelectTriggerView<State> {
 
 impl Widget for SelectTriggerWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let text = self.text.layout(ctx, &label_style(style::TEXT_SM));
+        let text = self
+            .text
+            .layout_themed(ctx, &label_style(style::TEXT_SM), LABEL_ROLE);
         // `w-full` upstream: the trigger takes the width it is offered, and
         // falls back to its own content when that is unbounded.
         let natural = text.width + TRIGGER_PADDING_X * 2.0 + TRIGGER_GAP + CHEVRON_BOX;
@@ -1177,10 +1184,10 @@ impl Widget for SelectPanelWidget {
         let style = label_style(style::TEXT_SM);
         let mut widest: f64 = 0.0;
         for row in &mut self.rows {
-            widest = widest.max(row.text.layout(ctx, &style).width);
+            widest = widest.max(row.text.layout_themed(ctx, &style, LABEL_ROLE).width);
         }
         if self.variant() == SelectVariant::Morph {
-            widest = widest.max(self.header.layout(ctx, &style).width);
+            widest = widest.max(self.header.layout_themed(ctx, &style, LABEL_ROLE).width);
         }
         // `min-w-[trigger width]`: a list never comes up narrower than the
         // control it dropped out of.
@@ -2073,5 +2080,53 @@ mod tests {
             vec![false],
             "a press on the panel is not a dismissal"
         );
+    }
+
+    // ---- Typeface: trigger, rows and morph header follow the live theme ----
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// An open panel of `variant`, mounted directly so its rows (and, under
+    /// `Morph`, its header) paint at rest.
+    fn probe_panel(variant: SelectVariant) -> SelectPanelView<()> {
+        SelectPanelView {
+            options: options(),
+            selected: Some(0),
+            config: Rc::new(RefCell::new(PanelConfig {
+                open: true,
+                variant,
+                anchor: None,
+                header: String::from("Apple"),
+                header_selected: true,
+            })),
+            on_select: Rc::new(|_: &mut (), _| {}),
+        }
+    }
+
+    /// A trigger showing a selection, a default panel and a morph panel —
+    /// every run this module shapes.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(select_trigger::<()>(
+                &OverlayAnchor::new(),
+                Some(String::from("Apple")),
+            )),
+            frust::any(probe_panel(SelectVariant::Default)),
+            frust::any(probe_panel(SelectVariant::Morph)),
+        ])
+    }
+
+    #[test]
+    fn select_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the select's text", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn select_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the select's text", probe_view, PROBE_WINDOW);
     }
 }
