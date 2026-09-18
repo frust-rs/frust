@@ -26,9 +26,15 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   family resolves; size, weight, line height and tracking stay the view's own. A widget shaping
   its own text runs reads `Theme::from_layout_ctx(ctx)` in `layout` and keys its shaped-run
   cache on the resolved style, so a theme swap reshapes it (`frust-material`'s `dialog` and
-  `badge` show one of each). A build-time `.family(..)` or a hardcoded font stack is a
-  legitimate choice too — `TypeScale` has no monospace slot, so mono text has no role to name —
-  but neither a live theme swap nor `frust_testing::frame::pin_type_scale` can redirect it.
+  `badge` show one of each; shadcn's `crate::text::themed_family(style, theme, role)` and
+  beUI's `crate::text::{themed_style, role_family}`, consumed through `Label`/`LabelRun`/
+  `WrappedRun::layout_themed`, are the same opt-in for a catalog's self-shaped runs). A
+  build-time `.family(..)` or a hardcoded font stack is a legitimate choice too — `TypeScale`
+  has no monospace slot, so mono text has no role to name — but neither a live theme swap nor
+  `frust_testing::frame::pin_type_scale` can redirect it. A baseline `TextInput` has no
+  themed-family seam at all — its `effective_style` resolves only color from the theme, never
+  family — so a field keeps whatever explicit or system family it was built with
+  (`textinput-no-themed-family` in [LIMITATIONS.md](LIMITATIONS.md)).
 - **Token-not-hardcode: a widget authors against a `Theme` field first; a bare local
   constant is the documented fallback, not the default.** A hardcoded metric/color is a
   defect once a matching `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme`
