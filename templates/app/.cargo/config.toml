@@ -1,3 +1,23 @@
+# Rust build-output location for a scaffolded Frust app.
+# `crates/frust-drive::build_dirs::BuildLayout::rust_dir()` names `build/rust`
+# as the DEFAULT location cargo's own compiled artifacts land under; this
+# `[build]` table is what makes a bare `cargo build`/`cargo run` inside a
+# scaffolded project actually write there. The path is resolved relative to
+# THIS file's directory (the project root), per Cargo's own `[build]
+# target-dir` semantics — it is not present in the repo root's own
+# `.cargo/config.toml` on purpose, since this checkout's own `target/` is
+# referenced directly by docs and CI and must not move.
+#
+# A `CARGO_TARGET_DIR` environment variable or a `--target-dir` CLI flag both
+# still take precedence over this key and override it entirely, so pointing a
+# scaffolded app at a shared build cache keeps working unchanged. Every frust
+# tool that needs the REAL directory a build wrote to resolves it via `cargo
+# metadata`'s `target_directory` field rather than assuming `build/rust` —
+# so under an override, `build/rust` itself stays empty, which is expected,
+# not a bug.
+[build]
+target-dir = "build/rust"
+
 # Android link flags, applied at every Android target so `cargo`/`cargo ndk`
 # and Gradle's `cargoNdkBuild` task (which shells out to `cargo ndk` with this
 # checkout as its working directory) all pick them up without a Gradle-side

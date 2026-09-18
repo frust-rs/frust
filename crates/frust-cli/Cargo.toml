@@ -41,3 +41,8 @@ ctrlc.workspace = true
 # `frust_drive::process::FakeProcessRunner`, exposed behind frust-drive's
 # `test-util` feature (off in the shipped binary).
 frust-drive = { path = "../frust-drive", features = ["test-util"] }
+# `tests/profile_sync.rs` parses `.cargo/config.toml` (root and template)
+# structurally to compare their `[target.*]`/`[build]` tables — frust-cli
+# itself has no runtime need for TOML (all non-clap deps live in
+# frust-drive, see the comment above), so this is test-only, workspace-pinned.
+toml.workspace = true

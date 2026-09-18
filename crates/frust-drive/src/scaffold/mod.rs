@@ -665,9 +665,39 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cargo/config.toml"),
         )
         .unwrap();
+        // The scaffolded config carries its own `[build] target-dir =
+        // "build/rust"` table the repo root's config deliberately does NOT
+        // have (this checkout's own `target/` is referenced directly by
+        // docs and CI and must not move), so the two files are no longer
+        // byte-identical as a whole. What must still match is every
+        // `[target.*]` rustflags table, byte-for-byte — parse both (typed
+        // `toml::Table`, not `toml::Value::from_str`, mirroring this test
+        // module's existing precedent above) and compare structurally.
+        let scaffold_toml: toml::Table = toml::from_str(&cargo_config)
+            .expect("scaffolded .cargo/config.toml must be valid TOML");
+        let root_toml: toml::Table = toml::from_str(&root_cargo_config)
+            .expect("repo root .cargo/config.toml must be valid TOML");
         assert_eq!(
-            cargo_config, root_cargo_config,
-            "the scaffolded .cargo/config.toml must be byte-identical to the repo root's"
+            scaffold_toml.get("target"),
+            root_toml.get("target"),
+            "the scaffolded .cargo/config.toml's [target.*] tables have \
+             drifted from the repo root's — the two must stay byte-identical"
+        );
+        assert!(
+            root_toml.get("build").is_none(),
+            "the repo root .cargo/config.toml must not gain a [build] table \
+             — its target/ is referenced directly by docs and CI"
+        );
+        let mut expected_build = toml::Table::new();
+        expected_build.insert(
+            "target-dir".to_string(),
+            toml::Value::String("build/rust".to_string()),
+        );
+        assert_eq!(
+            scaffold_toml.get("build"),
+            Some(&toml::Value::Table(expected_build)),
+            "the scaffolded .cargo/config.toml's [build] table must contain \
+             exactly `target-dir = \"build/rust\"` and nothing else"
         );
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());

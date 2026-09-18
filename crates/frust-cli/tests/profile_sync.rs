@@ -181,8 +181,19 @@ fn assert_section_identical(
 /// workspace built in-tree (Cargo's config discovery walks ancestor
 /// directories and merges what it finds), so there is exactly one canonical
 /// copy plus the app template's own copy (which a scaffolded project takes
-/// with it once it leaves this checkout and needs its own file). Those two
-/// must stay byte-identical the same way the hand-synced profile blocks do.
+/// with it once it leaves this checkout and needs its own file). The
+/// `[target.*]` rustflags tables in those two must stay byte-identical the
+/// same way the hand-synced profile blocks do.
+///
+/// The two files are no longer byte-identical as a *whole*: the template
+/// additionally carries a `[build] target-dir = "build/rust"` table (see
+/// `crates/frust-drive/src/build_dirs.rs`) that the repo root's config
+/// deliberately does NOT have — this checkout's own `target/` is referenced
+/// directly by docs and CI and must not move. This test narrows to what
+/// must actually agree: the `[target.*]` tables structurally, plus a check
+/// that the template's `[build]` table contains exactly `target-dir` and
+/// nothing else, and that the root file has gained no `[build]` table at
+/// all.
 #[test]
 fn android_cargo_config_identical_between_root_and_template() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -191,10 +202,33 @@ fn android_cargo_config_identical_between_root_and_template() {
     let template_config =
         std::fs::read_to_string(repo_root.join("templates/app/.cargo/config.toml"))
             .expect("failed to read templates/app/.cargo/config.toml");
+
+    let root_toml: toml::Table =
+        toml::from_str(&root_config).expect("root .cargo/config.toml must be valid TOML");
+    let template_toml: toml::Table = toml::from_str(&template_config)
+        .expect("templates/app/.cargo/config.toml must be valid TOML");
+
     assert_eq!(
-        root_config, template_config,
-        "templates/app/.cargo/config.toml has drifted from the repo root's \
-         .cargo/config.toml — the two must stay byte-identical"
+        root_toml.get("target"),
+        template_toml.get("target"),
+        "templates/app/.cargo/config.toml's [target.*] tables have drifted \
+         from the repo root's — the two must stay byte-identical"
+    );
+    assert!(
+        root_toml.get("build").is_none(),
+        "the repo root .cargo/config.toml must not gain a [build] table — \
+         its target/ is referenced directly by docs and CI"
+    );
+    let mut expected_build = toml::Table::new();
+    expected_build.insert(
+        "target-dir".to_string(),
+        toml::Value::String("build/rust".to_string()),
+    );
+    assert_eq!(
+        template_toml.get("build"),
+        Some(&toml::Value::Table(expected_build)),
+        "templates/app/.cargo/config.toml's [build] table must contain \
+         exactly `target-dir = \"build/rust\"` and nothing else"
     );
 }
 
