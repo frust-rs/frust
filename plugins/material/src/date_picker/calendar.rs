@@ -103,9 +103,9 @@ use crate::state_layer::StateLayer;
 use crate::tokens::MaterialMotion;
 
 /// The day number's type role (M3 `bodyMedium`, `M3EDatePickerTheme.dayStyle`).
-/// Hardcoded rather than read off a live [`Theme`]'s type scale for the reason
-/// every catalog-owned run in this crate is: text is shaped in the *layout*
-/// pass, which is handed no theme.
+/// This size and the three below are the roles' token literals; each run's
+/// *family* is read off the live [`Theme`]'s type scale in the layout pass
+/// ([`Theme::from_layout_ctx`] — see [`RunStyles::resolve`]).
 const DAY_TEXT_SIZE: f32 = 14.0;
 /// The weekday initial's type role (M3 `bodySmall`, `weekdayStyle`).
 const WEEKDAY_TEXT_SIZE: f32 = 12.0;
@@ -374,9 +374,58 @@ impl<State: 'static> View<State> for CalendarDatePicker<State> {
     fn teardown(&self, _element: &mut CalendarDatePickerWidget, _ctx: &mut BuildCtx<'_>) {}
 }
 
+/// The four run styles one layout pass resolves. Size and weight are each
+/// role's token literal; the family is the live theme's own for that role, so
+/// a theme swap or a font picker restyles the calendar along with the rest of
+/// the catalog.
+#[derive(Clone, Debug, PartialEq)]
+struct RunStyles {
+    /// Day numbers — `bodyMedium`.
+    day: TextStyle,
+    /// Weekday initials — `bodySmall`.
+    weekday: TextStyle,
+    /// The sub-header label — `titleSmall`.
+    header: TextStyle,
+    /// Year labels — `titleMedium`.
+    year: TextStyle,
+}
+
+impl RunStyles {
+    /// The styles for `theme`; unthemed, every run keeps the platform system
+    /// UI family.
+    fn resolve(theme: Option<&Theme>) -> Self {
+        let mut styles = Self {
+            day: TextStyle::new(DAY_TEXT_SIZE, SHAPING_INK),
+            weekday: TextStyle::new(WEEKDAY_TEXT_SIZE, SHAPING_INK),
+            header: TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
+            },
+            year: TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK)
+            },
+        };
+        if let Some(theme) = theme {
+            let scale = &theme.type_scale;
+            styles.day.family = scale.body_medium.family.clone();
+            styles.weekday.family = scale.body_small.family.clone();
+            styles.header.family = scale.title_small.family.clone();
+            styles.year.family = scale.title_medium.family.clone();
+        }
+        styles
+    }
+}
+
 /// The retained text runs a calendar re-brushes each paint. See the
 /// [module docs](self)' no-child-pods note.
+///
+/// Every cache is keyed on its text *and* on [`Self::styles`]: a style change
+/// ([`Self::set_styles`]) drops the runs it shaped, so a theme swap reshapes
+/// instead of serving the old face.
 struct Runs {
+    /// The styles every cached run below was shaped with.
+    styles: RunStyles,
     /// `"1"`..`"31"`, indexed by `day - 1`; shared by both months during a slide.
     days: Vec<Option<TextLayout>>,
     /// The seven weekday initials, in *column* order (already rotated by
@@ -392,6 +441,7 @@ struct Runs {
 impl Runs {
     fn new() -> Self {
         Self {
+            styles: RunStyles::resolve(None),
             days: (0..31).map(|_| None).collect(),
             weekdays: Vec::new(),
             header: None,
@@ -406,14 +456,31 @@ impl Runs {
         self.years.clear();
     }
 
+    /// Adopt this layout pass's `styles`, dropping only the runs shaped in a
+    /// style that changed.
+    fn set_styles(&mut self, styles: RunStyles) {
+        if self.styles.day != styles.day {
+            self.days.iter_mut().for_each(|day| *day = None);
+        }
+        if self.styles.weekday != styles.weekday {
+            self.weekdays.clear();
+        }
+        if self.styles.header != styles.header {
+            self.header = None;
+        }
+        if self.styles.year != styles.year {
+            self.years.clear();
+        }
+        self.styles = styles;
+    }
+
     fn day(&mut self, ctx: &mut LayoutCtx, day: u32) -> &TextLayout {
         let index = (day.clamp(1, 31) - 1) as usize;
         if self.days[index].is_none() {
-            let style = TextStyle::new(DAY_TEXT_SIZE, SHAPING_INK);
             let text = (index + 1).to_string();
             let laid = ctx
                 .text_context::<TextContext>()
-                .layout(&text, &style, None);
+                .layout(&text, &self.styles.day, None);
             self.days[index] = Some(laid);
         }
         self.days[index].as_ref().expect("just shaped")
@@ -423,11 +490,10 @@ impl Runs {
         if !self.weekdays.is_empty() {
             return;
         }
-        let style = TextStyle::new(WEEKDAY_TEXT_SIZE, SHAPING_INK);
         for column in 0..DAYS_PER_WEEK {
             let laid = ctx.text_context::<TextContext>().layout(
                 strings.weekday_initial(column),
-                &style,
+                &self.styles.weekday,
                 None,
             );
             self.weekdays.push(laid);
@@ -440,24 +506,19 @@ impl Runs {
             .as_ref()
             .is_none_or(|(cached, _)| cached != text);
         if stale {
-            let style = TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
-            };
-            let laid = ctx.text_context::<TextContext>().layout(text, &style, None);
+            let laid = ctx
+                .text_context::<TextContext>()
+                .layout(text, &self.styles.header, None);
             self.header = Some((text.to_string(), laid));
         }
         &self.header.as_ref().expect("just shaped").1
     }
 
     fn year(&mut self, ctx: &mut LayoutCtx, year: i32) -> &TextLayout {
+        let style = &self.styles.year;
         self.years.entry(year).or_insert_with(|| {
-            let style = TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK)
-            };
             ctx.text_context::<TextContext>()
-                .layout(&year.to_string(), &style, None)
+                .layout(&year.to_string(), style, None)
         })
     }
 }
@@ -726,8 +787,11 @@ impl Widget for CalendarDatePickerWidget {
         }
         .max(1.0);
 
-        // Shape everything this pass may paint. The day digits are shared by
-        // both months during a slide, so one pass over 1..=31 covers both.
+        // Shape everything this pass may paint, in the live theme's families.
+        // The day digits are shared by both months during a slide, so one pass
+        // over 1..=31 covers both.
+        self.runs
+            .set_styles(RunStyles::resolve(Theme::from_layout_ctx(ctx)));
         self.runs.weekdays(ctx, &self.strings);
         let header_text = match self.state.mode {
             DatePickerMode::Day => self.strings.month_year(self.state.displayed_month),
@@ -1339,6 +1403,7 @@ mod tests {
     use super::*;
     use frust::FrameTime;
     use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::FontFamily;
     use frust::authoring::{PointerButton, PointerEvent};
     use std::any::Any;
     use std::cell::RefCell;
@@ -1487,6 +1552,123 @@ mod tests {
     fn day_center(widget: &CalendarDatePickerWidget, day: u32) -> Point {
         let index = widget.grid().index_of(day).expect("a real day");
         widget.day_cell_rect(index).center()
+    }
+
+    // ---- typeface: each run's family follows its role on the live theme ----
+
+    /// A baseline theme whose `bodyMedium`/`bodySmall`/`titleSmall`/
+    /// `titleMedium` roles name `day`/`weekday`/`header`/`year`.
+    fn theme_with(day: &str, weekday: &str, header: &str, year: &str) -> Theme {
+        let mut theme = crate::baseline();
+        let scale = &mut theme.type_scale;
+        scale.body_medium.family = FontFamily::named(day);
+        scale.body_small.family = FontFamily::named(weekday);
+        scale.title_small.family = FontFamily::named(header);
+        scale.title_medium.family = FontFamily::named(year);
+        theme
+    }
+
+    /// Lay `widget` out at 328dp against `tcx`, threading `theme` the way the
+    /// render root does.
+    fn layout_themed(
+        widget: &mut CalendarDatePickerWidget,
+        tcx: &mut TextContext,
+        theme: Option<&Theme>,
+    ) {
+        let mut lctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        widget.layout(
+            &mut lctx,
+            &BoxConstraints::new(Size::new(328.0, 0.0), Size::new(328.0, f64::INFINITY)),
+        );
+    }
+
+    #[test]
+    fn layout_takes_each_run_s_family_from_its_role() {
+        let mut widget = build(&view(DatePickerState::new(None, d(2026, 8, 20))));
+        let mut tcx = TextContext::new();
+        let theme = theme_with("Day Probe", "Weekday Probe", "Header Probe", "Year Probe");
+        layout_themed(&mut widget, &mut tcx, Some(&theme));
+        let styles = &widget.runs.styles;
+        assert_eq!(
+            styles.day.family,
+            FontFamily::named("Day Probe"),
+            "bodyMedium"
+        );
+        assert_eq!(
+            styles.weekday.family,
+            FontFamily::named("Weekday Probe"),
+            "bodySmall"
+        );
+        assert_eq!(
+            styles.header.family,
+            FontFamily::named("Header Probe"),
+            "titleSmall"
+        );
+        assert_eq!(
+            styles.year.family,
+            FontFamily::named("Year Probe"),
+            "titleMedium"
+        );
+        // Only the family is themed: the token sizes stay.
+        assert_eq!(styles.day.size, DAY_TEXT_SIZE);
+        assert_eq!(styles.weekday.size, WEEKDAY_TEXT_SIZE);
+        assert_eq!(styles.header.size, SUB_HEADER_TEXT_SIZE);
+        assert_eq!(styles.year.size, YEAR_TEXT_SIZE);
+    }
+
+    #[test]
+    fn without_a_theme_the_runs_keep_the_unthemed_styles() {
+        let unthemed = RunStyles {
+            day: TextStyle::new(DAY_TEXT_SIZE, SHAPING_INK),
+            weekday: TextStyle::new(WEEKDAY_TEXT_SIZE, SHAPING_INK),
+            header: TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
+            },
+            year: TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK)
+            },
+        };
+        assert_eq!(RunStyles::resolve(None), unthemed);
+
+        let mut widget = build(&view(DatePickerState::new(None, d(2026, 8, 20))));
+        let mut tcx = TextContext::new();
+        layout_themed(&mut widget, &mut tcx, None);
+        assert_eq!(widget.runs.styles, unthemed);
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_exactly_the_runs_whose_role_changed() {
+        let mut widget = build(&view(DatePickerState::new(None, d(2026, 8, 20))));
+        let mut tcx = TextContext::new();
+        let first = theme_with("Swap A", "Swap A", "Swap A", "Swap A");
+        layout_themed(&mut widget, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses every cached run outright.
+        let settled = tcx.shape_cache_stats();
+        layout_themed(&mut widget, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        // Only `bodyMedium` moves: the 31 day digits reshape, nothing else.
+        let days_only = theme_with("Swap B", "Swap A", "Swap A", "Swap A");
+        layout_themed(&mut widget, &mut tcx, Some(&days_only));
+        let after_days = tcx.shape_cache_stats();
+        assert_eq!(after_days.shapes, settled.shapes + 31);
+
+        // Every role moves: the weekday initials and the sub-header follow.
+        let all = theme_with("Swap B", "Swap B", "Swap B", "Swap B");
+        layout_themed(&mut widget, &mut tcx, Some(&all));
+        assert!(
+            tcx.shape_cache_stats().shapes > after_days.shapes,
+            "the weekday initials and sub-header must reshape in the new family"
+        );
+        assert_eq!(widget.runs.styles, RunStyles::resolve(Some(&all)));
     }
 
     // ---- geometry --------------------------------------------------------

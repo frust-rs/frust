@@ -181,7 +181,7 @@ use frust::authoring::{Action, Role};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedArgCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx,
-    ThemeTextColor, View, Widget, any,
+    ThemeTextColor, ThemeTextType, View, Widget, any,
 };
 use frust::input::TOUCH_SLOP;
 use frust::{FrameTime, Theme, icon, text};
@@ -742,14 +742,16 @@ fn close_view<State: 'static>(on_clear: OnClear<State>) -> AnyView<State> {
 }
 
 /// Build the selected-count label's view (`titleLargeEmphasized`,
-/// `on_primary_container`).
+/// `on_primary_container`, family from the theme's `titleLargeEmphasized`
+/// role).
 fn count_view<State: 'static>(count: usize) -> AnyView<State> {
     any::<State, _>(
         text(count.to_string())
             .size(COUNT_SIZE)
             .weight(COUNT_WEIGHT)
             .line_height(LineHeight::Absolute(COUNT_LINE_HEIGHT))
-            .themed_role(ThemeTextColor::OnPrimaryContainer),
+            .themed_role(ThemeTextColor::OnPrimaryContainer)
+            .themed_family(ThemeTextType::TitleLargeEmphasized),
     )
 }
 
@@ -774,9 +776,13 @@ fn select_all_checkbox_view<State: 'static>(
 }
 
 /// Build the select-all row's label view (`bodyLarge` — `text`'s own
-/// default size — `on_primary_container`).
+/// default size, and the theme's `bodyLarge` family — `on_primary_container`).
 fn select_all_label_view<State: 'static>(label: String) -> AnyView<State> {
-    any::<State, _>(text(label).themed_role(ThemeTextColor::OnPrimaryContainer))
+    any::<State, _>(
+        text(label)
+            .themed_role(ThemeTextColor::OnPrimaryContainer)
+            .themed_family(ThemeTextType::BodyLarge),
+    )
 }
 
 /// The resolved contextual bar container fill. Themed: `colors.

@@ -70,7 +70,7 @@
 use std::f64::consts::PI;
 use std::rc::Rc;
 
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontFamily, FontWeight, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ErasedArgCallback, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, SemanticsCtx, TypedArgCallback, View,
@@ -115,9 +115,10 @@ const SMALL_RADIUS: f64 = 8.0;
 const PERIOD_BORDER_WIDTH: f64 = 1.0;
 
 /// The header field/colon type-scale token (M3 `displayMedium`, 45/52 w400 —
-/// `crate::tokens::type_scale`'s `display_medium`). Hardcoded for the same
-/// reason `crate::dialog`'s title metrics are: shaped text inside a widget's
-/// own `layout` has no theme-deferred size seam.
+/// `crate::tokens::type_scale`'s `display_medium`). This size and the period
+/// token below are the roles' literals; each run's *family* is read off the
+/// live [`Theme`]'s type scale in the layout pass ([`Theme::from_layout_ctx`] —
+/// see [`RunFamilies::resolve`]).
 const HEADER_FONT_SIZE: f32 = 45.0;
 /// The AM/PM cell's type-scale token (M3 `titleMedium`, 16/24 w500).
 const PERIOD_FONT_SIZE: f32 = 16.0;
@@ -332,13 +333,50 @@ enum DialRegion {
 // Shaped text runs
 // ============================================================================
 
+/// The families one layout pass resolves for the dial's runs: the live
+/// theme's own for each run's role, or the platform system UI family unthemed.
+struct RunFamilies {
+    /// The hour/colon/minute header fields — `displayMedium`.
+    header: FontFamily,
+    /// The AM/PM cells — `titleMedium`.
+    period: FontFamily,
+    /// The ring labels. `dialLabelFontSize` is not a type-scale role; its
+    /// 16px Medium is exactly `titleMedium`'s, so it borrows that role's
+    /// family.
+    ring: FontFamily,
+}
+
+impl RunFamilies {
+    fn resolve(theme: Option<&Theme>) -> Self {
+        match theme {
+            Some(theme) => {
+                let scale = &theme.type_scale;
+                RunFamilies {
+                    header: scale.display_medium.family.clone(),
+                    period: scale.title_medium.family.clone(),
+                    ring: scale.title_medium.family.clone(),
+                }
+            }
+            None => RunFamilies {
+                header: FontFamily::default(),
+                period: FontFamily::default(),
+                ring: FontFamily::default(),
+            },
+        }
+    }
+}
+
 /// A lazily-shaped, paint-time-rebrushed text run — the same idiom
 /// `crate::badge`'s `LabelRun` uses, so the ink under the hand can flip
-/// without reshaping.
+/// without reshaping. Size and weight are the run's token literals; the cache
+/// is keyed on the content *and* the family, so a theme swap that changes the
+/// family reshapes instead of serving the old face.
 struct Run {
     content: String,
     size: f32,
     weight: FontWeight,
+    /// The family the cached layout was shaped in.
+    family: FontFamily,
     layout: Option<TextLayout>,
 }
 
@@ -348,6 +386,7 @@ impl Run {
             content: String::new(),
             size,
             weight,
+            family: FontFamily::default(),
             layout: None,
         }
     }
@@ -359,14 +398,25 @@ impl Run {
         }
     }
 
-    fn shape(&mut self, ctx: &mut LayoutCtx) -> Size {
+    /// The style the run shapes with.
+    fn style(&self) -> TextStyle {
+        TextStyle {
+            family: self.family.clone(),
+            weight: self.weight,
+            ..TextStyle::new(self.size, Color::BLACK)
+        }
+    }
+
+    /// Shape (or reuse) the run in `family`, returning its measured size.
+    fn shape(&mut self, ctx: &mut LayoutCtx, family: &FontFamily) -> Size {
+        if self.family != *family {
+            self.family = family.clone();
+            self.layout = None;
+        }
         if let Some(layout) = &self.layout {
             return layout.size();
         }
-        let style = TextStyle {
-            weight: self.weight,
-            ..TextStyle::new(self.size, Color::BLACK)
-        };
+        let style = self.style();
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, &style, None);
         let size = laid.size();
@@ -674,17 +724,18 @@ impl<State: 'static> View<State> for TimeDialView<State> {
 
 impl Widget for TimeDialWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        self.hour_run.shape(ctx);
-        let colon = self.colon_run.shape(ctx);
-        self.minute_run.shape(ctx);
-        self.am_run.shape(ctx);
-        self.pm_run.shape(ctx);
+        let families = RunFamilies::resolve(Theme::from_layout_ctx(ctx));
+        self.hour_run.shape(ctx, &families.header);
+        let colon = self.colon_run.shape(ctx, &families.header);
+        self.minute_run.shape(ctx, &families.header);
+        self.am_run.shape(ctx, &families.period);
+        self.pm_run.shape(ctx, &families.period);
         for run in self
             .hour_label_runs
             .iter_mut()
             .chain(self.minute_label_runs.iter_mut())
         {
-            run.shape(ctx);
+            run.shape(ctx, &families.ring);
         }
         let size = bc.constrain(DialLayout::content_size(colon.width, self.use_24_hour));
         self.layout = DialLayout::resolve(size, colon.width, self.use_24_hour);
@@ -1135,6 +1186,111 @@ mod tests {
             );
         }
         (widget, tcx)
+    }
+
+    // ---- typeface: each run's family follows its role on the live theme ----
+
+    /// A baseline theme whose `displayMedium`/`titleMedium` roles name
+    /// `header`/`title`.
+    fn theme_with(header: &str, title: &str) -> Theme {
+        let mut theme = crate::baseline();
+        let scale = &mut theme.type_scale;
+        scale.display_medium.family = FontFamily::named(header);
+        scale.title_medium.family = FontFamily::named(title);
+        theme
+    }
+
+    /// Re-lay `widget` out against `tcx`, threading `theme` the way the render
+    /// root does.
+    fn layout_themed(widget: &mut TimeDialWidget, tcx: &mut TextContext, theme: Option<&Theme>) {
+        let mut ctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        widget.layout(&mut ctx, &BoxConstraints::loose(Size::new(400.0, 800.0)));
+    }
+
+    /// Every ring-label run, both rings.
+    fn ring_runs(widget: &TimeDialWidget) -> impl Iterator<Item = &Run> {
+        widget
+            .hour_label_runs
+            .iter()
+            .chain(widget.minute_label_runs.iter())
+    }
+
+    #[test]
+    fn layout_takes_each_run_s_family_from_its_role() {
+        let (mut widget, mut tcx) = mount(TimeOfDay::new(10, 30), false);
+        let mut theme = theme_with("Header Probe", "Title Probe");
+        // A decoy on a role the dial must not read: the ring labels borrow
+        // `titleMedium` (the role whose 16px Medium they match), not this one.
+        theme.type_scale.label_small.family = FontFamily::named("Label Small Decoy");
+        layout_themed(&mut widget, &mut tcx, Some(&theme));
+        let header = FontFamily::named("Header Probe");
+        for run in [&widget.hour_run, &widget.colon_run, &widget.minute_run] {
+            assert_eq!(run.family, header, "displayMedium");
+            assert_eq!(run.size, HEADER_FONT_SIZE, "the token size stays");
+        }
+        let title = FontFamily::named("Title Probe");
+        for run in [&widget.am_run, &widget.pm_run] {
+            assert_eq!(run.family, title, "titleMedium");
+        }
+        assert_eq!(ring_runs(&widget).count(), 2 * DIAL_SLOTS);
+        for run in ring_runs(&widget) {
+            assert_eq!(run.family, title, "the ring labels borrow titleMedium");
+            assert_eq!(run.size, DIAL_LABEL_FONT_SIZE, "the literal size stays");
+        }
+    }
+
+    #[test]
+    fn without_a_theme_the_runs_keep_the_unthemed_styles() {
+        let (widget, _tcx) = mount(TimeOfDay::new(10, 30), false);
+        let header = TextStyle {
+            weight: FontWeight::REGULAR,
+            ..TextStyle::new(HEADER_FONT_SIZE, Color::BLACK)
+        };
+        assert_eq!(widget.hour_run.style(), header);
+        assert_eq!(widget.colon_run.style(), header);
+        assert_eq!(widget.minute_run.style(), header);
+        assert_eq!(
+            widget.am_run.style(),
+            TextStyle {
+                weight: PERIOD_FONT_WEIGHT,
+                ..TextStyle::new(PERIOD_FONT_SIZE, Color::BLACK)
+            }
+        );
+        for run in ring_runs(&widget) {
+            assert_eq!(
+                run.style(),
+                TextStyle {
+                    weight: FontWeight::MEDIUM,
+                    ..TextStyle::new(DIAL_LABEL_FONT_SIZE, Color::BLACK)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_the_cached_runs() {
+        let (mut widget, mut tcx) = mount(TimeOfDay::new(10, 30), false);
+        let first = theme_with("Swap A", "Swap A");
+        layout_themed(&mut widget, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses every cached run outright.
+        let settled = tcx.shape_cache_stats();
+        layout_themed(&mut widget, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        let second = theme_with("Swap B", "Swap B");
+        layout_themed(&mut widget, &mut tcx, Some(&second));
+        assert!(
+            tcx.shape_cache_stats().shapes > settled.shapes,
+            "a family swap must reshape the dial's runs, not serve the old face"
+        );
+        assert_eq!(widget.hour_run.family, FontFamily::named("Swap B"));
+        assert_eq!(widget.am_run.family, FontFamily::named("Swap B"));
     }
 
     fn ev(phase: PointerPhase, at: Point, button: PointerButton) -> InputEvent {

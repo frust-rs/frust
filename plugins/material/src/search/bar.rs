@@ -81,7 +81,7 @@ use frust::authoring::text::TextOverflow;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, SemanticsCtx,
-    ThemeTextColor, View, Widget, any, build_child, erase_callback, rebuild_child,
+    ThemeTextColor, ThemeTextType, View, Widget, any, build_child, erase_callback, rebuild_child,
     rebuild_children, route_event, route_event_single, teardown_child, visit_children,
 };
 use frust::{AnimationController, Color, FrameTime, SpringDesc, Theme, icon, text};
@@ -317,7 +317,8 @@ impl<State: 'static> SearchBarView<State> {
         }
     }
 
-    /// The label run: the query, or the hint while it is empty.
+    /// The label run: the query, or the hint while it is empty — `bodyLarge`
+    /// metrics, its family following the live theme's `bodyLarge` role.
     fn label_view(&self) -> AnyView<State> {
         let (content, role) = if self.query.is_empty() {
             (
@@ -332,6 +333,7 @@ impl<State: 'static> SearchBarView<State> {
                 .size(BODY_LARGE_SIZE)
                 .line_height(BODY_LARGE_LINE_HEIGHT)
                 .themed_role(role)
+                .themed_family(ThemeTextType::BodyLarge)
                 .max_lines(1)
                 .overflow(TextOverflow::Ellipsis),
         )

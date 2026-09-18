@@ -271,31 +271,48 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::new([c[0], c[1], c[2], alpha])
 }
 
-fn message_style() -> TextStyle {
-    TextStyle {
+/// The message's resolved style: the `bodyMedium` token literals above, in
+/// the live theme's `bodyMedium` family when a theme reaches layout (unthemed:
+/// the platform system UI family).
+fn message_style(theme: Option<&Theme>) -> TextStyle {
+    let mut style = TextStyle {
         weight: FontWeight::REGULAR,
         letter_spacing: MESSAGE_LETTER_SPACING,
         line_height: LineHeight::Absolute(MESSAGE_LINE_HEIGHT),
         ..TextStyle::new(MESSAGE_SIZE, Color::BLACK)
+    };
+    if let Some(theme) = theme {
+        style.family = theme.type_scale.body_medium.family.clone();
     }
+    style
 }
 
-fn action_style() -> TextStyle {
-    TextStyle {
+/// The action label's resolved style: the `labelLarge` token literals above,
+/// in the live theme's `labelLarge` family when a theme reaches layout.
+fn action_style(theme: Option<&Theme>) -> TextStyle {
+    let mut style = TextStyle {
         weight: FontWeight::MEDIUM,
         letter_spacing: ACTION_LETTER_SPACING,
         line_height: LineHeight::Absolute(ACTION_LINE_HEIGHT),
         ..TextStyle::new(ACTION_SIZE, Color::BLACK)
+    };
+    if let Some(theme) = theme {
+        style.family = theme.type_scale.label_large.family.clone();
     }
+    style
 }
 
 // ---- Text shaping helper -------------------------------------------------
 
 /// A lazily-shaped, paint-time-rebrushed text run — the same idiom
-/// [`mod@crate::badge`]'s `LabelRun` uses, generalized over an explicit
-/// [`TextStyle`] rather than one hardcoded per call site.
+/// [`mod@crate::badge`]'s `LabelRun` uses, shared here by the message and the
+/// action, each shaped in the [`TextStyle`] its caller resolves. The cache is
+/// keyed on the content *and* that style, so a theme swap that changes the
+/// family reshapes instead of serving the old face.
 struct TextRun {
     content: String,
+    /// The style the cached layout was shaped with.
+    style: TextStyle,
     layout: Option<TextLayout>,
 }
 
@@ -303,6 +320,7 @@ impl TextRun {
     fn new() -> Self {
         Self {
             content: String::new(),
+            style: TextStyle::default(),
             layout: None,
         }
     }
@@ -317,11 +335,15 @@ impl TextRun {
     /// Shape (or reuse) the run, returning its measured (unwrapped,
     /// single-line — see the module docs' v1 simplifications) size.
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        if self.style != *style {
+            self.style = style.clone();
+            self.layout = None;
+        }
         if let Some(layout) = &self.layout {
             return layout.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
+        let laid = text_ctx.layout(&self.content, &self.style, None);
         let size = laid.size();
         self.layout = Some(laid);
         size
@@ -721,9 +743,11 @@ impl Widget for SnackbarHostWidget {
         self.app.set_origin(Point::ZERO);
 
         if let Some(active) = &mut self.current {
-            let message_size = active.message_run.shape(ctx, &message_style());
+            let theme = Theme::from_layout_ctx(ctx);
+            let (message_style, action_style) = (message_style(theme), action_style(theme));
+            let message_size = active.message_run.shape(ctx, &message_style);
             let action_content = active.action_run.as_mut().map(|run| {
-                let size = run.shape(ctx, &action_style());
+                let size = run.shape(ctx, &action_style);
                 Size::new(
                     size.width + ACTION_PAD_H * 2.0,
                     size.height + ACTION_PAD_V * 2.0,
@@ -1053,6 +1077,7 @@ mod tests {
     use std::any::Any;
 
     use frust::FrameTime;
+    use frust::authoring::text::FontFamily;
     use frust::authoring::{Key, NamedKey, PointerButton};
     use frust_widgets::test_support::{RecordingScene, probe};
 
@@ -1552,6 +1577,110 @@ mod tests {
         assert_eq!(
             w.current.as_ref().unwrap().bar_rect.width(),
             360.0 - 2.0 * H_INSET
+        );
+    }
+
+    // ---- Typeface: the runs' families follow the live theme ------------------
+
+    /// A host showing a message with an action, built but not yet laid out.
+    fn host_with_action() -> SnackbarHostWidget {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("Saved").action("Undo", |s: &mut Vec<u32>| s.push(99)));
+        build(&snackbar_host(&controller, probe(0).into_any()))
+    }
+
+    /// A baseline theme whose `bodyMedium`/`labelLarge` roles name `message`/
+    /// `action`.
+    fn theme_with(message: FontFamily, action: FontFamily) -> Theme {
+        let mut theme = crate::baseline();
+        theme.type_scale.body_medium.family = message;
+        theme.type_scale.label_large.family = action;
+        theme
+    }
+
+    /// Lay `w` out against `tcx`, threading `theme` the way the render root
+    /// does.
+    fn layout_themed(w: &mut SnackbarHostWidget, tcx: &mut TextContext, theme: Option<&Theme>) {
+        let mut ctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        w.layout(&mut ctx, &BoxConstraints::tight(WINDOW));
+    }
+
+    #[test]
+    fn layout_takes_the_message_and_action_families_from_their_roles() {
+        let mut w = host_with_action();
+        let mut tcx = TextContext::new();
+        let (message, action) = (
+            FontFamily::named("Message Role Probe"),
+            FontFamily::named("Action Role Probe"),
+        );
+        layout_themed(
+            &mut w,
+            &mut tcx,
+            Some(&theme_with(message.clone(), action.clone())),
+        );
+        let active = w.current.as_ref().expect("a message is showing");
+        assert_eq!(active.message_run.style.family, message, "bodyMedium");
+        let action_run = active.action_run.as_ref().expect("an action is set");
+        assert_eq!(action_run.style.family, action, "labelLarge");
+        // Only the family is themed: the token literals stay.
+        assert_eq!(active.message_run.style.size, MESSAGE_SIZE);
+        assert_eq!(action_run.style.size, ACTION_SIZE);
+    }
+
+    #[test]
+    fn without_a_theme_the_runs_keep_the_unthemed_styles() {
+        assert_eq!(
+            message_style(None),
+            TextStyle {
+                weight: FontWeight::REGULAR,
+                letter_spacing: MESSAGE_LETTER_SPACING,
+                line_height: LineHeight::Absolute(MESSAGE_LINE_HEIGHT),
+                ..TextStyle::new(MESSAGE_SIZE, Color::BLACK)
+            }
+        );
+        assert_eq!(
+            action_style(None),
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                letter_spacing: ACTION_LETTER_SPACING,
+                line_height: LineHeight::Absolute(ACTION_LINE_HEIGHT),
+                ..TextStyle::new(ACTION_SIZE, Color::BLACK)
+            }
+        );
+
+        let mut w = host_with_action();
+        let mut tcx = TextContext::new();
+        layout_themed(&mut w, &mut tcx, None);
+        let active = w.current.as_ref().expect("a message is showing");
+        assert_eq!(active.message_run.style, message_style(None));
+        let action_run = active.action_run.as_ref().expect("an action is set");
+        assert_eq!(action_run.style, action_style(None));
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_the_cached_runs() {
+        let mut w = host_with_action();
+        let mut tcx = TextContext::new();
+        let probe_a = || FontFamily::named("Snackbar Swap Probe A");
+        let probe_b = || FontFamily::named("Snackbar Swap Probe B");
+        let first = theme_with(probe_a(), probe_a());
+        layout_themed(&mut w, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses both cached runs outright.
+        let settled = tcx.shape_cache_stats();
+        layout_themed(&mut w, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        layout_themed(&mut w, &mut tcx, Some(&theme_with(probe_b(), probe_b())));
+        assert_eq!(
+            tcx.shape_cache_stats().shapes,
+            settled.shapes + 2,
+            "a family swap must reshape the message and the action"
         );
     }
 

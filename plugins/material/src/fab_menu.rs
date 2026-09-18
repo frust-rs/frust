@@ -227,7 +227,7 @@ use frust::{AnimationController, FrameTime, SpringDesc, Theme};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 
-use frust::authoring::ThemeTextColor;
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 
 use super::press::presses;
 use crate::shapes::{Morph, ShapeKind};
@@ -517,9 +517,15 @@ fn item_radius() -> f64 {
 }
 
 /// Build a menu item's visible label view, themed [`ThemeTextColor::OnSurface`]
-/// — see the [module docs](self) for why every item uses this role uniformly.
+/// — see the [module docs](self) for why every item uses this role uniformly —
+/// its family following the live theme's `titleMedium` role (the M3 FAB menu
+/// item label token).
 fn label_view<State: 'static>(label: String) -> AnyView<State> {
-    frust::authoring::any::<State, _>(frust::text(label).themed_role(ThemeTextColor::OnSurface))
+    frust::authoring::any::<State, _>(
+        frust::text(label)
+            .themed_role(ThemeTextColor::OnSurface)
+            .themed_family(ThemeTextType::TitleMedium),
+    )
 }
 
 /// Which interactive region an in-flight press targets.

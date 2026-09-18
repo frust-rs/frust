@@ -26,7 +26,12 @@
 //! - **Themed text roles**: [`ThemeTextColor`] (re-exported here) and
 //!   [`TextView::themed_role`](crate::TextView::themed_role) — how a widget labels
 //!   a child [`text`](crate::text) run with the themed color role it should
-//!   default to, instead of hardcoding a color.
+//!   default to, instead of hardcoding a color; and [`ThemeTextType`]
+//!   (re-exported here) with
+//!   [`TextView::themed_family`](crate::TextView::themed_family) — how it opts
+//!   the run's font family into the active theme's type-scale role, resolved
+//!   at layout so a live theme swap re-shapes it, instead of shaping in
+//!   `TextStyle::default()`'s system UI font.
 //!
 //! # Hover: claim it, latch it, then correct it at paint time
 //!
@@ -187,7 +192,7 @@ use kurbo::Point;
 use crate::ChildKey;
 
 pub use crate::image::ImageSource;
-pub use crate::text::ThemeTextColor;
+pub use crate::text::{ThemeTextColor, ThemeTextType};
 
 /// The overlay-portal authoring surface: the slot a widget that floats its own
 /// surface holds, what that surface is anchored to, and the placement geometry
@@ -1135,10 +1140,16 @@ mod authoring_surface_tests {
         let _route_single: fn(&mut ChildPod, &mut EventCtx<'_>, &InputEvent) -> EventResult =
             crate::authoring::route_event_single;
 
-        // Themed text roles: the enum here, the builder method on `TextView`.
+        // Themed text roles (color and family): each enum here, each builder
+        // method on `TextView`.
         let _role: crate::authoring::ThemeTextColor = crate::authoring::ThemeTextColor::OnSurface;
         let _themed_role: fn(crate::TextView, crate::authoring::ThemeTextColor) -> crate::TextView =
             crate::TextView::themed_role;
+        let _type: crate::authoring::ThemeTextType = crate::authoring::ThemeTextType::BodyLarge;
+        let _themed_family: fn(
+            crate::TextView,
+            crate::authoring::ThemeTextType,
+        ) -> crate::TextView = crate::TextView::themed_family;
 
         // The shared press-overlay opacity.
         let _pressed: f32 = crate::authoring::PRESSED_OPACITY;

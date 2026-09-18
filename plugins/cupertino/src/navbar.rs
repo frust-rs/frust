@@ -66,8 +66,8 @@ const PAD_X: f64 = 16.0;
 /// `crate::tokens::type_scale` — Headline maps to SF 17pt Semibold).
 /// Hardcoded here rather than read from a live
 /// `Theme::type_scale` for the same reason a Material `appbar`'s title
-/// tokens are: `Text` defers only *color* resolution past `View::build`, never
-/// size/weight.
+/// tokens are: `Text` defers *color* resolution, and an opt-in family
+/// resolution, past `View::build`, never size/weight.
 const TITLE_SIZE: f32 = 17.0;
 const TITLE_LINE_HEIGHT: f32 = 22.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::SEMI_BOLD;

@@ -104,9 +104,9 @@ use std::rc::Rc;
 use frust::authoring::text::{FontWeight, LineHeight, TextOverflow};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextColor, View, Widget, any, build_child,
-    rebuild_child, rebuild_children, route_event, route_event_single, teardown_child,
-    visit_children,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextColor, ThemeTextType, View, Widget,
+    any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
+    teardown_child, visit_children,
 };
 use frust::{Color, NavigatorController, PopResult, Theme, icon, text};
 use kurbo::{Point, Size};
@@ -156,9 +156,10 @@ const CLOSE_SEMANTIC_LABEL: &str = "Close";
 /// Title type-scale token (M3 `headlineSmallEmphasized` — matches
 /// `frust-theme::typography`'s `HEADLINE_SMALL_EMPHASIZED`). Hardcoded rather
 /// than read from a live `Theme::type_scale`: `Text` has no layout-deferred
-/// size/weight resolution seam (only a color role resolves post-`build` — see
-/// `docs/CODE_STANDARDS.md`'s Theming conventions), the precedent this
-/// module's pre-merge version already established.
+/// size/weight resolution seam (only a color role and an opted-in family role
+/// resolve post-`build` — see `docs/CODE_STANDARDS.md`'s Theming conventions),
+/// the precedent this module's pre-merge version already established. Every
+/// text this module builds does opt its family into the matching role.
 const TITLE_SIZE: f32 = 24.0;
 const TITLE_LINE_HEIGHT: f32 = 32.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::MEDIUM;
@@ -177,24 +178,27 @@ const HEADER_TITLE_LINE_HEIGHT: f32 = 28.0;
 const FALLBACK_SURFACE: Color = Color::from_rgb8(0xFE, 0xF7, 0xFF);
 
 /// Build the title's type-erased child view (`headlineSmallEmphasized`,
-/// themed `onSurface`).
+/// themed `onSurface`, family from the theme's `headlineSmallEmphasized`
+/// role).
 fn title_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
             .size(TITLE_SIZE)
             .weight(TITLE_WEIGHT)
-            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT))
+            .themed_family(ThemeTextType::HeadlineSmallEmphasized),
     )
 }
 
 /// Build the body text's type-erased child view (`bodyMedium`, themed
-/// `onSurfaceVariant`).
+/// `onSurfaceVariant`, family from the theme's `bodyMedium` role).
 fn body_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
             .size(BODY_SIZE)
             .line_height(LineHeight::Absolute(BODY_LINE_HEIGHT))
-            .themed_role(ThemeTextColor::OnSurfaceVariant),
+            .themed_role(ThemeTextColor::OnSurfaceVariant)
+            .themed_family(ThemeTextType::BodyMedium),
     )
 }
 
@@ -976,7 +980,9 @@ fn selection_row_views<State: 'static>(
         let control = any(checkbox(checked, move |state: &mut State, _next: bool| {
             toggle(state, value.clone())
         }));
-        let label = any(text(option.to_string()).themed_role(ThemeTextColor::OnSurface));
+        let label = any(text(option.to_string())
+            .themed_role(ThemeTextColor::OnSurface)
+            .themed_family(ThemeTextType::BodyLarge));
         (control, Some(label))
     } else {
         let group_value = selected.first().cloned();
@@ -1348,14 +1354,16 @@ fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> AnyView<S
     )
 }
 
-/// Build the header title's view (`titleLarge`, single line, ellipsized).
+/// Build the header title's view (`titleLarge`, family from the theme's
+/// `titleLarge` role, single line, ellipsized).
 fn header_title_view<State: 'static>(title: &str) -> AnyView<State> {
     any::<State, _>(
         text(title.to_string())
             .size(HEADER_TITLE_SIZE)
             .line_height(LineHeight::Absolute(HEADER_TITLE_LINE_HEIGHT))
             .max_lines(1)
-            .overflow(TextOverflow::Ellipsis),
+            .overflow(TextOverflow::Ellipsis)
+            .themed_family(ThemeTextType::TitleLarge),
     )
 }
 
