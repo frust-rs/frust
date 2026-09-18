@@ -959,15 +959,33 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
 /// See [`frust_drive::build_dirs`] for the directory list. The streaming
 /// path's `on_line` sink is forwarded straight into the session's log tab:
 /// `cargo clean`'s own stdout now streams live into the log.
+///
+/// `CleanReport` contract: [`launch_clean_session`] maps `Ok`/`Err` from this
+/// function straight onto `SessionState::Exited(true)`/`Exited(false)`, so a
+/// [`frust_drive::clean::CleanReport::Cleaned`]`{ cargo_clean_succeeded:
+/// false }` must come back as an `Err` here — a bare `let _ =` discarding the
+/// report would silently land a failed `cargo clean` at `Exited(true)`. The
+/// failure line itself (`` `cargo clean` failed:\n... ``) is already pushed
+/// into the log by `frust_drive::clean::run`'s own `on_line` sink above,
+/// before this function ever returns, so nothing here re-prints it — the
+/// `Err` this returns exists purely to drive the session-state mapping.
+/// [`frust_drive::clean::CleanReport::NotAFrustProject`] and a successful
+/// clean both stay `Ok(())`.
 fn run_clean(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     tx: &UnboundedSender<Message>,
     id: SessionId,
 ) -> Result<()> {
-    let _ = frust_drive::clean::run(runner, project_dir, &mut |line: &str| {
+    let report = frust_drive::clean::run(runner, project_dir, &mut |line: &str| {
         let _ = tx.send(session_line(id, line.to_string()));
     })?;
+    if let frust_drive::clean::CleanReport::Cleaned {
+        cargo_clean_succeeded: false,
+    } = report
+    {
+        anyhow::bail!("`cargo clean` failed");
+    }
     Ok(())
 }
 
@@ -2466,6 +2484,78 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("cargo build --release"), "{message}");
         assert!(message.contains("E0425"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Clean session ──────────────────────────────────────────────────────────
+
+    /// `run_clean` forwards `project_dir` to `frust_drive::clean::run` (not
+    /// the process's own `cwd`) and relays at least one session line onto
+    /// the channel — the CLI's own
+    /// `runs_cargo_clean_in_the_project_dir_not_the_process_cwd`-shaped
+    /// regression test, at this call site.
+    #[test]
+    fn run_clean_forwards_project_dir_and_lines_to_the_session() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+
+        let dir =
+            std::env::temp_dir().join(format!("frust-tui-run-clean-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
+        assert_ne!(dir, std::env::current_dir().unwrap());
+
+        let runner = FakeProcessRunner::new().with(
+            "cargo clean",
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        run_clean(&runner, &dir, &tx, SessionId(0)).unwrap();
+
+        assert_eq!(runner.recorded_cwd(), Some(dir.clone()));
+        assert!(
+            rx.try_recv().is_ok(),
+            "at least one session line reaches the channel"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed `cargo clean` — [`frust_drive::clean::CleanReport::Cleaned`]
+    /// `{ cargo_clean_succeeded: false }` — must come back from `run_clean`
+    /// as an `Err`, the documented contract `launch_clean_session` relies on
+    /// to land the session at `SessionState::Exited(false)`.
+    #[test]
+    fn run_clean_errors_when_cargo_clean_fails() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+
+        let dir = std::env::temp_dir().join(format!(
+            "frust-tui-run-clean-failed-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
+
+        let runner = FakeProcessRunner::new().with(
+            "cargo clean",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "boom".to_string(),
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(run_clean(&runner, &dir, &tx, SessionId(0)).is_err());
+        // The failure line from `frust_drive::clean::run`'s own `on_line`
+        // sink still reached the channel before `run_clean` returned `Err`.
+        assert!(
+            rx.try_recv().is_ok(),
+            "the `cargo clean` failure line still reaches the channel"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

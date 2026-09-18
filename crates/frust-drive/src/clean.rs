@@ -5,6 +5,14 @@
 //! `frust-tui`'s clean session both call [`run`] and route its lines into
 //! their own front end (stdout, a session log tab) instead of duplicating
 //! this logic.
+//!
+//! Every entry is removed relative to a canonicalized `project_dir`: an
+//! entry whose parent resolves (after following symlinks) outside that
+//! canonical root is skipped rather than removed — guarding against an
+//! intermediate path component that is itself a symlink escaping the
+//! project — and an entry that is itself a symlink is unlinked rather than
+//! recursively removed, so a symlinked `build/` never causes its target tree
+//! to be deleted. See [`remove_path`].
 
 use std::fs;
 use std::io::ErrorKind;
@@ -30,6 +38,13 @@ pub enum CleanReport {
         /// exit does not stop the directory removal that follows it, the
         /// same tolerant behavior the CLI/TUI implementations this unifies
         /// both had.
+        ///
+        /// A caller surfaces `false` as failure rather than discarding it:
+        /// `frust-cli`'s `commands::clean::run_in` maps it to exit code 1
+        /// (`true`/[`CleanReport::NotAFrustProject`] both map to 0), and
+        /// `frust-tui`'s `runner::run_clean` turns it into an `Err` so
+        /// `launch_clean_session` lands the session at
+        /// `SessionState::Exited(false)` instead of `Exited(true)`.
         cargo_clean_succeeded: bool,
     },
 }
@@ -51,11 +66,11 @@ pub enum CleanReport {
 ///
 /// Every entry in [`build_dirs::CLEAN_DIRS`] and
 /// [`build_dirs::LEGACY_CLEAN_DIRS`] is removed whether it names a directory
-/// or a file (`windows/icon.ico` is a file); a missing entry is not an error,
-/// reported through `on_line` with the wording `` Removed `<path>`. `` on
-/// success. A removal failure other than "not found" (permissions, a path
-/// that changed kind under us, ...) is returned as an `Err` with context
-/// naming the path.
+/// or a file; a missing entry is not an error, reported through `on_line`
+/// with the wording `` Removed `<path>`. `` on success. See [`remove_path`]
+/// for the symlink/containment semantics an entry can also hit. A removal
+/// failure other than "not found" (permissions, a path that changed kind
+/// under us, ...) is returned as an `Err` with context naming the path.
 pub fn run(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
@@ -78,8 +93,13 @@ pub fn run(
         on_line(&format!("`cargo clean` failed:\n{}", out.stderr.trim()));
     }
 
+    // Canonicalized once so every entry's containment check resolves
+    // symlinks against the same root rather than re-walking it per entry.
+    let canonical_project_dir = project_dir
+        .canonicalize()
+        .with_context(|| format!("resolving `{}`", project_dir.display()))?;
     for rel in CLEAN_DIRS.iter().chain(LEGACY_CLEAN_DIRS) {
-        remove_path(project_dir, rel, on_line)?;
+        remove_path(&canonical_project_dir, project_dir, rel, on_line)?;
     }
 
     Ok(CleanReport::Cleaned {
@@ -87,16 +107,71 @@ pub fn run(
     })
 }
 
-/// Removes `project_dir.join(rel)`, whether it is currently a directory or a
-/// file, tolerating "not found" and reporting a successful removal through
-/// `on_line`. Any other error (permissions, ...) is returned with context.
-fn remove_path(project_dir: &Path, rel: &str, on_line: &mut dyn FnMut(&str)) -> Result<()> {
+/// Removes `project_dir.join(rel)`, tolerating "not found" and reporting a
+/// successful removal through `on_line`. Any other I/O error (permissions,
+/// ...) is returned with context.
+///
+/// Containment: `rel`'s *parent* directory is canonicalized and must resolve
+/// inside `canonical_project_dir` (the caller's already-canonicalized
+/// `project_dir`) — an intermediate path component that is itself a symlink
+/// escaping the project resolves the parent elsewhere, and the entry is
+/// skipped entirely (`` Skipped `<path>`: resolves outside the project. ``)
+/// rather than walked into.
+///
+/// Kind: an entry that is itself a symlink (`symlink_metadata` reports
+/// [`std::fs::Metadata::is_symlink`]) is unlinked, never recursively
+/// removed — `fs::remove_file` on Unix (a symlink, even to a directory, is
+/// never a directory to `symlink_metadata`), `fs::remove_dir` on Windows for
+/// a directory reparse point (which `symlink_metadata`'s own `is_dir` does
+/// report correctly there) — reported as `` Unlinked `<path>` (symlink). ``
+/// rather than `` Removed ``, so a symlinked `build/` is detached without
+/// deleting whatever tree it points at. A non-symlink directory or file is
+/// removed and reported exactly as before (`fs::remove_dir_all`/
+/// `fs::remove_file`, `` Removed `<path>`. ``).
+fn remove_path(
+    canonical_project_dir: &Path,
+    project_dir: &Path,
+    rel: &str,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<()> {
     let path = project_dir.join(rel);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err).with_context(|| format!("reading `{}`", path.display())),
     };
+
+    let parent = path.parent().unwrap_or(&path);
+    let canonical_parent = match parent.canonicalize() {
+        // The parent vanished between the `symlink_metadata` above and this
+        // call (a concurrent removal) — treat the entry as already gone.
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        other => other.with_context(|| format!("resolving `{}`", parent.display()))?,
+    };
+    if !canonical_parent.starts_with(canonical_project_dir) {
+        on_line(&format!(
+            "Skipped `{}`: resolves outside the project.",
+            path.display()
+        ));
+        return Ok(());
+    }
+
+    if metadata.is_symlink() {
+        let result = if metadata.is_dir() {
+            fs::remove_dir(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        return match result {
+            Ok(()) => {
+                on_line(&format!("Unlinked `{}` (symlink).", path.display()));
+                Ok(())
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("removing `{}`", path.display())),
+        };
+    }
+
     let result = if metadata.is_dir() {
         fs::remove_dir_all(&path)
     } else {
@@ -238,22 +313,44 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// `windows/icon.ico` is a *file*, not a directory — the one legacy
-    /// entry `remove_path`'s dir-vs-file branch has to get right.
+    /// `windows/icon.ico` at the project root is no longer a Frust output
+    /// (b2-04 moved the generated icon under `build/desktop/windows/`), so
+    /// `clean` must leave a file still sitting there alone — it belongs to
+    /// the project owner, not to Frust.
     #[test]
-    fn removes_the_legacy_windows_icon_file() {
-        let dir = unique_project_dir("removes-legacy-icon-file");
+    fn a_hand_placed_windows_icon_is_not_touched_by_clean() {
+        let dir = unique_project_dir("hand-placed-icon");
         write_manifest(&dir);
         fs::create_dir_all(dir.join("windows")).unwrap();
         fs::write(dir.join("windows/icon.ico"), [0u8; 4]).unwrap();
 
         let runner = FakeProcessRunner::new().with("cargo clean", ok());
+        run(&runner, &dir, &mut noop_sink).unwrap();
+
+        assert!(dir.join("windows/icon.ico").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `remove_path`'s plain-file removal branch, exercised directly since
+    /// no production `CLEAN_DIRS`/`LEGACY_CLEAN_DIRS` entry is a bare file
+    /// anymore.
+    #[test]
+    fn regular_file_entries_are_removed_and_reported() {
+        let dir = unique_project_dir("regular-file-entry");
+        write_manifest(&dir);
+        fs::create_dir_all(dir.join("windows")).unwrap();
+        fs::write(dir.join("windows/icon.ico"), [0u8; 4]).unwrap();
+
+        let canonical = dir.canonicalize().unwrap();
         let mut lines = Vec::new();
-        run(&runner, &dir, &mut |line| lines.push(line.to_string())).unwrap();
+        remove_path(&canonical, &dir, "windows/icon.ico", &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
 
         assert!(!dir.join("windows/icon.ico").exists());
-        // The containing directory itself is untouched — only the file is a
-        // legacy entry.
+        // The containing directory itself is untouched — only the file was
+        // targeted.
         assert!(dir.join("windows").exists());
         assert!(
             lines
@@ -261,6 +358,67 @@ mod tests {
                 .any(|l| l == &format!("Removed `{}`.", dir.join("windows/icon.ico").display()))
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A symlinked `build/` is unlinked, not traversed — the target tree it
+    /// points at is untouched.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_build_dir_is_unlinked_not_traversed() {
+        let dir = unique_project_dir("symlinked-build");
+        write_manifest(&dir);
+        let target = unique_project_dir("symlinked-build-target");
+        fs::write(target.join("marker"), "x").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("build")).unwrap();
+
+        let canonical = dir.canonicalize().unwrap();
+        let mut lines = Vec::new();
+        remove_path(&canonical, &dir, "build", &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+
+        // The symlink itself is gone; its target tree is untouched.
+        assert!(!dir.join("build").exists());
+        assert!(target.join("marker").exists());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == &format!("Unlinked `{}` (symlink).", dir.join("build").display()))
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    /// An intermediate path component that is itself a symlink escaping the
+    /// project is skipped, not walked into — nothing outside the project is
+    /// deleted.
+    #[test]
+    #[cfg(unix)]
+    fn intermediate_symlink_component_is_skipped() {
+        let dir = unique_project_dir("intermediate-symlink");
+        write_manifest(&dir);
+        let outside = unique_project_dir("intermediate-symlink-outside");
+        fs::create_dir_all(outside.join("app_target/build")).unwrap();
+        fs::write(outside.join("app_target/build/marker"), "x").unwrap();
+        fs::create_dir_all(dir.join("android")).unwrap();
+        std::os::unix::fs::symlink(outside.join("app_target"), dir.join("android/app")).unwrap();
+
+        let canonical = dir.canonicalize().unwrap();
+        let mut lines = Vec::new();
+        remove_path(&canonical, &dir, "android/app/build", &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+
+        assert!(outside.join("app_target/build/marker").exists());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Skipped") && l.contains("resolves outside the project"))
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
