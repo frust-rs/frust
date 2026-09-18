@@ -1111,12 +1111,30 @@ better is published in `RESULTS.md`, not omitted.
 `benchmarks/harness/app_size.sh` measures release-artifact sizes for both
 apps: the Android release APK (universal + arm64-v8a split, with a per-ABI
 `.so`/dex breakdown for Frust's APK via `unzip -l` — the
-`scripts/size-report.sh` technique) and the iOS release `.app` bundle size
-(`du -sk`). It never builds anything — a missing artifact degrades to a
-printed "not built" note naming the command that would produce it. Frust is
-measured on both axes of its `db` feature (on by default; off via
-`--no-default-features --features lean`), since that axis is a real size
-lever and both columns belong in `RESULTS.md`'s App-size table.
+`scripts/size-report.sh` technique), the iOS release `.app` bundle size
+(`du -sk`), and the iOS Runner executable's byte size both unstripped (as
+`xcodebuild build`/`frust build ios --release` actually produces it — this
+project's Release Xcode configuration runs no strip phase there) and fully
+stripped (a scratch copy of the same file run through plain `xcrun strip`;
+the measured artifact itself is never modified). A plain `xcrun strip`
+applies Xcode's own default `STRIP_STYLE=all` for an app executable, which
+`RESULTS.md`'s App-size section shows matches a real `xcodebuild
+archive`/App Store build's Runner within 0.29% and the same symbol count —
+`-x -S` (kept only local symbols and debug info dropped, every global one
+retained) was tried first and rejected for regularly reading ~1.6 MB above
+both the full strip and a real archive. `app_size.sh` never runs
+`xcodebuild archive` itself, nor anything else — it only measures whatever
+release artifacts already exist on disk. A missing Runner degrades to a
+printed "not built" note naming the command that would produce it; a
+missing `xcrun` (Xcode command line tools) degrades only the stripped
+Runner line to a note that its size is unavailable, leaving the unstripped
+line intact. Frust is measured on both axes of
+its `db` feature (on by default; off via `--no-default-features --features
+lean`), since that axis is a real size lever and both columns belong in
+`RESULTS.md`'s App-size table; the iOS column has no `db`-off axis because
+`frust build ios` has no `--no-default-features` knob. All whole-artifact
+byte counts in this section are reported alongside MiB (mebibytes, /1024
+or /1048576), never decimal MB.
 
 **Per-crate / per-section attribution.** `app_size.sh`'s whole-artifact
 numbers say *how big*; `benchmarks/harness/size_attribute.py` says *where the

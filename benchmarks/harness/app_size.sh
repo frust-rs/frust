@@ -4,8 +4,14 @@
 # Measures release-config app sizes for the paired Frust-vs-Flutter benchmark
 # suite (see benchmarks/RESULTS.md's "App size (release)" section): the
 # Android release APK (universal + arm64-v8a split, with a per-ABI .so/dex
-# breakdown for Frust's APK — the scripts/size-report.sh technique) and the
-# iOS release .app bundle size, for both benchmarks/frust_bench and
+# breakdown for Frust's APK — the scripts/size-report.sh technique), the
+# iOS release .app bundle size, and the iOS Runner binary's byte size both
+# unstripped (as `xcodebuild build`/`frust build ios` actually produces it —
+# this project's Release configuration runs no strip phase there) and fully
+# stripped (a scratch copy run through plain `xcrun strip` — measured within
+# 0.29% of a real `xcodebuild archive`/App Store build's Runner, with the
+# same symbol count; see benchmarks/RESULTS.md's iOS section for the
+# measured comparison), for both benchmarks/frust_bench and
 # benchmarks/flutter_bench.
 #
 # Usage: benchmarks/harness/app_size.sh [--attribute <unstripped.so> [size_attribute.py args...]]
@@ -59,11 +65,11 @@ echo
 # --- Helpers -----------------------------------------------------------
 
 to_mb() {
-  awk -v b="$1" 'BEGIN { printf "%.2f MB", b / 1048576 }'
+  awk -v b="$1" 'BEGIN { printf "%.2f MiB", b / 1048576 }'
 }
 
 kb_to_mb() {
-  awk -v k="$1" 'BEGIN { printf "%.2f MB", k / 1024 }'
+  awk -v k="$1" 'BEGIN { printf "%.2f MiB", k / 1024 }'
 }
 
 file_size_bytes() {
@@ -102,6 +108,51 @@ report_app_bundle() {
   fi
 }
 
+# strip_binary_copy <path> — copies a Mach-O binary to a scratch temp file,
+# fully strips the copy with plain `xcrun strip` (Xcode's own default
+# `STRIP_STYLE=all` for an app executable — the same style `xcodebuild
+# archive`'s deployment-postprocessing pass applies) and prints its byte
+# size, then removes the copy. Never touches the original: neither
+# `xcodebuild build` nor `frust build ios` runs a strip phase on this
+# project's Release configuration (see benchmarks/RESULTS.md's iOS
+# section), so this is the cheap way to see the shape a `.ipa`/App Store
+# archive ships — measured within 0.29% of a real `xcodebuild archive`
+# Runner on the same commit, with the same symbol count (RESULTS.md).
+strip_binary_copy() {
+  local src="$1"
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/frust_app_size_strip.XXXXXX")"
+  cp "${src}" "${tmp}"
+  xcrun strip "${tmp}" >/dev/null 2>&1
+  local bytes
+  bytes="$(file_size_bytes "${tmp}")"
+  rm -f "${tmp}"
+  echo "${bytes}"
+}
+
+# report_ios_runner_binary <label> <path to Runner executable> — prints the
+# unstripped byte size (the artifact as actually produced) plus a fully
+# stripped byte size computed on a scratch copy (see strip_binary_copy
+# above), or "not built" when the path is missing.
+report_ios_runner_binary() {
+  local label="$1"
+  local path="$2"
+  if [ ! -f "${path}" ]; then
+    printf '  %-34s not built\n' "${label}"
+    return 0
+  fi
+  local unstripped_bytes
+  unstripped_bytes="$(file_size_bytes "${path}")"
+  printf '  %-34s %s (%d bytes) unstripped\n' "${label}" "$(to_mb "${unstripped_bytes}")" "${unstripped_bytes}"
+  if command -v xcrun >/dev/null 2>&1; then
+    local stripped_bytes
+    stripped_bytes="$(strip_binary_copy "${path}")"
+    printf '  %-34s %s (%d bytes) stripped (xcrun strip, as archive does; scratch copy)\n' "${label}" "$(to_mb "${stripped_bytes}")" "${stripped_bytes}"
+  else
+    printf '  %-34s xcrun not found - stripped size unavailable\n' "${label}"
+  fi
+}
+
 # report_apk_breakdown <path> — per-ABI .so + dex sizes inside an APK,
 # via `unzip -l` (the scripts/size-report.sh technique); a no-op if the
 # path doesn't exist.
@@ -116,8 +167,8 @@ report_apk_breakdown() {
     }
     $NF ~ /^classes.*\.dex$/ { dex_sum += $1 }
     END {
-      for (abi in so_sum) printf "    lib/%-14s %.2f MB (%d bytes)\n", abi, so_sum[abi] / 1048576, so_sum[abi]
-      if (dex_sum > 0) printf "    %-18s %.2f MB (%d bytes)\n", "dex (total)", dex_sum / 1048576, dex_sum
+      for (abi in so_sum) printf "    lib/%-14s %.2f MiB (%d bytes)\n", abi, so_sum[abi] / 1048576, so_sum[abi]
+      if (dex_sum > 0) printf "    %-18s %.2f MiB (%d bytes)\n", "dex (total)", dex_sum / 1048576, dex_sum
     }
   '
 }
@@ -159,13 +210,23 @@ echo
 
 # --- iOS release .app bundle --------------------------------------------
 
-echo "-- iOS release .app bundle (du -sk) --"
+echo "-- iOS release .app bundle (du -sk) + Runner binary (unstripped/stripped) --"
+echo
+echo "\`xcodebuild build\` (the route \`frust build ios\` uses) never strips this project's"
+echo "Release Runner (COPY_PHASE_STRIP = NO, no DEPLOYMENT_POSTPROCESSING override) — the"
+echo "unstripped row below is exactly what that build produces. \`xcodebuild archive\` (the"
+echo "App Store route) DOES strip it regardless of those settings, via its own deployment"
+echo "postprocessing pass; the stripped row below is a scratch-copy plain \`xcrun strip\`"
+echo "proxy for that shape (measured within 0.29% of a real archive build, same symbol"
+echo "count — see benchmarks/RESULTS.md's iOS section), so it is the figure comparable to"
+echo "Android's stripped-.so rows."
 echo
 
 FRUST_IOS_RELEASE="${FRUST_DIR}/build/ios/Build/Products/Release-iphoneos/Runner.app"
 
 echo "Frust (benchmarks/frust_bench):"
 report_app_bundle "release Runner.app" "${FRUST_IOS_RELEASE}"
+report_ios_runner_binary "Runner binary" "${FRUST_IOS_RELEASE}/Runner"
 if [ ! -d "${FRUST_IOS_RELEASE}" ]; then
   echo "  note: run \`(cd benchmarks/frust_bench && frust build ios --release)\` (needs a codesigning identity — see docs/DEVELOPMENT.md's Prerequisites)"
 fi
@@ -176,6 +237,7 @@ FLUTTER_IOS_PROFILE="${FLUTTER_DIR}/build/ios/Profile-iphoneos/Runner.app"
 
 echo "Flutter (benchmarks/flutter_bench):"
 report_app_bundle "release Runner.app" "${FLUTTER_IOS_RELEASE}"
+report_ios_runner_binary "Runner binary" "${FLUTTER_IOS_RELEASE}/Runner"
 if [ ! -d "${FLUTTER_IOS_RELEASE}" ]; then
   echo "  note: run \`(cd benchmarks/flutter_bench && flutter build ios --release)\` (needs a codesigning identity — see docs/DEVELOPMENT.md's Prerequisites)"
   report_app_bundle "profile Runner.app (config differs — not release)" "${FLUTTER_IOS_PROFILE}"

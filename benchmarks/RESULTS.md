@@ -669,7 +669,7 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 
 ---
 
-## App size (release) — Frust Android re-measured 2026-09-17, iOS 2026-09-18, Flutter 2026-09-05
+## App size (release) — Frust Android re-measured 2026-09-17, iOS 2026-09-19, Flutter 2026-09-05
 
 Frust's rows are release builds of this checkout, rebuilt after the app-size
 plan's font/link-flag/opt-level/pin levers landed; the Flutter column is
@@ -682,11 +682,20 @@ Gradle `assembleRelease -x cargoNdkBuild` route directly (`frust build apk
 back to debug signing with a warning — signing does not change the size
 class either way. Sizes are MiB alongside the exact byte count, which is the
 authoritative figure. The iOS rows were **re-measured on a macOS host on
-2026-09-18** (Xcode 26.2 / 17C52, `frust build ios --release` — a signed
+2026-09-19** (Xcode 26.2 / 17C52, `frust build ios --release` — a signed
 `Release`/`iphoneos` build with the app's `lean` feature on — the route
-`app_size.sh`'s iOS half names), replacing the 2026-09-06 11,908 KB / 12,103,152 B
-with the rows below; the iOS column has no `db`-off axis because `frust build
-ios` has no `--no-default-features` knob either.
+`app_size.sh`'s iOS half names), replacing the 2026-09-18 11,716 KB /
+11,903,616 B with the rows below; the iOS column has no `db`-off axis
+because `frust build ios` has no `--no-default-features` knob either.
+
+**iOS Runner rows.** `frust build ios --release` (a plain `xcodebuild build`) ships this
+project's Release Runner **unstripped** — `COPY_PHASE_STRIP = NO`, no
+`DEPLOYMENT_POSTPROCESSING` override, so `[profile.release]`'s `strip = "symbols"` never
+reaches it (Xcode links the Rust staticlib in, untouched by cargo's own strip). The
+stripped row below is a scratch-copy full `xcrun strip` (`app_size.sh`; the artifact
+itself is never modified) — measured within 0.29 % of a real `xcodebuild archive` Runner
+with the same symbol count (dated note below), so **it, not the unstripped row, is the
+figure comparable to Android's stripped-`.so` rows above.**
 
 | Axis | Frust, `db` on (default) | Frust, `db` off (`--no-default-features --features lean`) | Flutter (2026-09-05) |
 |---|---|---|---|
@@ -694,8 +703,9 @@ ios` has no `--no-default-features` knob either.
 | Android arm64-v8a split APK | **8.57 MiB** (8,981,843 B) | **6.63 MiB** (6,953,291 B) | 17.45 MiB (18,295,458 B) |
 | in-APK `lib/arm64-v8a/libfrustbench.so` | 8.43 MiB (8,837,768 B) | 6.49 MiB (6,809,216 B) | 16.55 MiB (engine + app) |
 | on-disk arm64 `.so` (stripped), 2026-09-19 | 8.50 MiB (8,912,136 B) | 6.55 MiB (6,865,680 B) | n/a |
-| iOS release `.app` (`du -sk`), 2026-09-18 | **11.44 MiB** (11,716 KB) | not built | 16.64 MiB |
-| iOS `Runner` binary, 2026-09-18 | **11.35 MiB** (11,903,616 B) | not built | n/a |
+| iOS release `.app` (`du -sk`), 2026-09-19 | 11.30 MiB (11,568 KB) | not built | 16.64 MiB |
+| iOS `Runner` binary (unstripped), 2026-09-19 | 11.21 MiB (11,755,184 B) | not built | n/a |
+| iOS `Runner` binary (**stripped**, plain `xcrun strip` scratch copy), 2026-09-19 | **8.16 MiB** (8,559,536 B; real `xcodebuild archive` Runner measures 8,534,544 B, −0.29 %) | not built | n/a |
 
 The on-disk `.so` row was re-measured on 2026-09-19, after `jni` and then `tokio` and the three
 accesskit crates left the cold set (per-lever table below); the other Android rows were not, and
@@ -1067,16 +1077,51 @@ The levers did land — `__const` falls by almost exactly the font instance (1,6
 175,900 B, both blobs located verbatim in their binaries) and `__text` by 851,236 B — but
 **87 % of that is given back by `__LINKEDIT`**, which here is symbol material: the symbol
 string table 1,589,592 → 2,821,216 B (+1,231,624), the nlist table 20,696 → 33,778 symbols
-(+209,312 B) and the exports trie 317,576 → 927,960 B (+610,384). **The iOS `Runner` is not
-stripped.** Xcode links the Rust `staticlib` into it and `xcodebuild build` runs no strip
-phase, so `[profile.release]`'s `strip = "symbols"` governs cargo's own links and never
-reaches this artifact. Stripping copies of both binaries (`xcrun strip -x -S`, scratch copies —
-the measured artifacts were not modified) gives 10,894,880 → 10,235,120 B, **−659,760 B
-(−6.06 %)**, which is what a stripped/archived artifact would show. The symbol growth tracks
-the `opt-level = "z"` cold set: the largest per-crate symbol-count increases are `wgpu_core`
-+554, `naga` +354, `tokio` +241, `wgpu_types` +120, `image` +60 and `png` +47 — members of
-the cold set at the time (`tokio` has since left it) whose functions survive as distinct symbols under `z`. That is *consistent with* the
-cold set, not proven by it; no per-lever iOS isolation build was made.
+(+209,312 B) and the exports trie 317,576 → 927,960 B (+610,384). **The iOS `Runner` from a
+plain `xcodebuild build`/`frust build ios --release` is not stripped.** Xcode links the Rust
+`staticlib` into it and `xcodebuild build` runs no strip phase, so `[profile.release]`'s
+`strip = "symbols"` governs cargo's own links and never reaches this artifact. Stripping
+copies of both binaries (`xcrun strip -x -S`, scratch copies — the measured artifacts were
+not modified) gives 10,894,880 → 10,235,120 B, **−659,760 B (−6.06 %)** — measured with
+`-x -S`, which keeps every global symbol, so it undercounts what an archive actually strips
+(dated note below). The symbol growth tracks the `opt-level = "z"` cold set: the largest
+per-crate symbol-count
+increases are `wgpu_core` +554, `naga` +354, `tokio` +241, `wgpu_types` +120, `image` +60 and
+`png` +47 — members of the cold set at the time (`tokio` has since left it) whose functions
+survive as distinct symbols under `z`. That is *consistent with* the cold set, not proven by
+it; no per-lever iOS isolation build was made.
+
+**`xcodebuild archive` measured directly, settling the open archive question — 2026-09-19.**
+`(cd benchmarks/frust_bench/ios && xcodebuild -project Runner.xcodeproj -scheme Runner
+-configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -archivePath
+<path> archive)`, with the same `FRUST_FEATURES=bGVhbg==` (`lean`, base64)/`DEVELOPMENT_TEAM`/
+codesigning environment `frust build ios --release` passes, succeeds (`** ARCHIVE
+SUCCEEDED **`) and produces an archived Runner of **8,534,544 B**, against the same
+commit's plain `xcodebuild build` Runner (**11,755,184 B** — this pass's App-size table
+unstripped row above): **−3,220,640 B (−27.40 %)**. `size -m` shows `__TEXT` (7,143,424 B),
+`__DATA_CONST` (311,296 B) and `__DATA` (65,536 B) byte-identical between the plain build and
+the archive — the compiled code does not change — and only `__LINKEDIT` differs: 4,259,840 →
+1,032,192 B. `otool -l`'s `LC_SYMTAB` explains why: `nsyms` 32,451 → 522 (`nm` count
+27,379 → 521); the `LC_DYLD_EXPORTS_TRIE` is untouched at 877,000 B both times.
+
+A **plain (no-flags) `xcrun strip`** on a scratch copy of the same plain-build Runner
+matches the archive almost exactly: **8,559,536 B**, `nm` **521**, `__LINKEDIT`
+**1,064,960 B** — within **24,992 B (0.29 %)** of the archive's 8,534,544 B, with the same
+symbol count. That is because Xcode's own default `STRIP_STYLE=all` for an app executable
+is what a plain `xcrun strip` applies too, so `app_size.sh`'s stripped-Runner row now uses a
+full strip, not `-x -S`: `-x -S` only removes local symbols and debug info, keeping every
+global/exported one, so it understates the savings (10,141,104 B on this same plain build —
+~1.6 MB above both the full strip and the real archive).
+
+**`xcodebuild archive` does strip the Runner**, via its own deployment-postprocessing pass,
+regardless of this project's `COPY_PHASE_STRIP = NO` and absent `DEPLOYMENT_POSTPROCESSING`
+override — that project setting only governs a plain `xcodebuild build`/`frust build ios
+--release`, which really does ship unstripped if used directly (e.g. sideloading via
+`devicectl`), not the App Store archive route. **No Xcode template/product change follows
+from this**: the artifact that actually reaches users (an App Store or ad-hoc `.ipa` built
+via `archive` + export) was never the unstripped one this investigation worried about — a
+plain `xcodebuild build`/`frust build ios --release` output (e.g. a `devicectl`-sideloaded
+development build) was, and it remains genuinely unstripped.
 
 **Attribution stays Android-only.** `size_attribute.py` reads ELF (`llvm-readelf` sections,
 `llvm-nm` symbols) and does not parse Mach-O, so the iOS split above comes from
