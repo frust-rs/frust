@@ -79,9 +79,9 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, PaintCtx, PaintScene,
-    Point, PointerEvent, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View,
-    Widget, any, build_child, erase_callback_arg, rebuild_child, route_event, route_event_single,
-    teardown_child, visit_children,
+    Point, PointerEvent, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType,
+    Vec2, View, Widget, any, build_child, erase_callback_arg, rebuild_child, route_event,
+    route_event_single, teardown_child, visit_children,
 };
 use frust::{
     AnimationController, Axis, Column, CrossAxisAlignment, CursorIcon, Curve, EdgeInsets, FlexView,
@@ -95,7 +95,7 @@ use crate::style::{
     ACTIVE_CURSOR, BORDER_WIDTH, DISABLED_CURSOR, PATH_TOLERANCE, SHADOW_SM, TEXT_SM, TEXT_XS,
     disabled_tint, draw_focus_ring, draw_shadow, ring_color, scale_alpha,
 };
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::{ShadcnSidebar, ShadcnTokens};
 
 // ---- Metrics --------------------------------------------------------------
@@ -1405,10 +1405,14 @@ impl Widget for SidebarGroupLabelWidget {
         if self.hidden {
             return Size::ZERO;
         }
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(TEXT_XS as f32, SHAPING_INK)
-        };
+        let style = themed_family(
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(TEXT_XS as f32, SHAPING_INK)
+            },
+            Theme::from_layout_ctx(ctx),
+            ThemeTextType::LabelMedium,
+        );
         self.label.layout(ctx, &style);
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -1491,10 +1495,14 @@ impl Widget for SidebarMenuBadgeWidget {
         if self.hidden {
             return Size::ZERO;
         }
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(TEXT_XS as f32, SHAPING_INK)
-        };
+        let style = themed_family(
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(TEXT_XS as f32, SHAPING_INK)
+            },
+            Theme::from_layout_ctx(ctx),
+            ThemeTextType::LabelMedium,
+        );
         let text = self.label.layout(ctx, &style);
         let width = (text.width + BADGE_PAD_X * 2.0).max(BADGE_HEIGHT);
         bc.constrain(Size::new(width, BADGE_HEIGHT))
@@ -2174,10 +2182,14 @@ impl Widget for SidebarMenuButtonWidget {
         } else {
             FontWeight::REGULAR
         };
-        let style = TextStyle {
-            weight,
-            ..TextStyle::new(self.metrics.text as f32, SHAPING_INK)
-        };
+        let style = themed_family(
+            TextStyle {
+                weight,
+                ..TextStyle::new(self.metrics.text as f32, SHAPING_INK)
+            },
+            Theme::from_layout_ctx(ctx),
+            ThemeTextType::LabelLarge,
+        );
         let label = self.label.layout(ctx, &style);
         let icon_span = if self.has_icon {
             icon.width + MENU_BUTTON_GAP
@@ -3679,5 +3691,48 @@ mod tests {
             ShadcnTokens::shadcn().sidebar(Brightness::Dark)
         );
         assert_ne!(sidebar_tokens(Some(&dark)), sidebar_tokens(None));
+    }
+
+    // ---- Typeface: the labels follow the live theme -----------------------
+
+    /// A group label over a menu holding an active button with a badge, a
+    /// plain button, and a sub-menu with one sub-button: every run the sidebar
+    /// shapes itself.
+    #[cfg(feature = "bundled-fonts")]
+    fn nav(_: &mut ()) -> FlexView<()> {
+        Column(vec![sidebar_group(vec![
+            any(sidebar_group_label("Platform")),
+            sidebar_menu(vec![
+                any(sidebar_menu_item(vec![
+                    any(sidebar_menu_button("Inbox", |_: &mut ()| {}).active(true)),
+                    any(sidebar_menu_badge("24")),
+                ])),
+                any(sidebar_menu_item(vec![any(sidebar_menu_button(
+                    "Drafts",
+                    |_: &mut ()| {},
+                ))])),
+                any(sidebar_menu_sub(vec![any(sidebar_menu_sub_item(vec![
+                    any(sidebar_menu_sub_button("Starred", |_: &mut ()| {})),
+                ]))])),
+            ]),
+        ])])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_labels_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the sidebar's group label, menu buttons and badge",
+            nav,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_labels_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the sidebar's group label, menu buttons and badge",
+            nav,
+        );
     }
 }

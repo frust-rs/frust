@@ -50,14 +50,14 @@ use frust::Theme;
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, Vec2, View,
-    Widget, any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
-    teardown_child, visit_children,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextType,
+    Vec2, View, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
+    route_event_single, teardown_child, visit_children,
 };
 
 use crate::components::input::FALLBACK;
 use crate::style;
-use crate::text::Label;
+use crate::text::{Label, themed_family};
 
 /// Which side of the thread a message sits on: `Start` is shadcn's `default`
 /// (the other party), `End` is `data-[align=end]` (the local user).
@@ -644,11 +644,15 @@ impl<State: 'static> View<State> for MessageFooterView {
 
 impl Widget for MessageMetaWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let ink = muted_foreground(Theme::from_layout_ctx(ctx));
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(style::TEXT_XS as f32, ink)
-        };
+        let theme = Theme::from_layout_ctx(ctx);
+        let style = themed_family(
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(style::TEXT_XS as f32, muted_foreground(theme))
+            },
+            theme,
+            ThemeTextType::LabelMedium,
+        );
         let label = self.label.layout(ctx, &style);
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -960,6 +964,36 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n.role() == Role::GenericContainer),
             "the containers contribute their own nodes"
+        );
+    }
+
+    // ---- Typeface: the header and footer follow the live theme ------------
+
+    /// A row whose content column holds only a header and a footer line, so
+    /// every painted glyph run is one this module shapes.
+    #[cfg(feature = "bundled-fonts")]
+    fn meta_lines(_: &mut ()) -> MessageGroupView<()> {
+        message_group(vec![any(message(vec![any(message_content(vec![
+            any(message_header("Ed")),
+            any(message_footer("just now")),
+        ]))]))])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_header_and_footer_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a message's header and footer",
+            meta_lines,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_header_and_footer_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a message's header and footer",
+            meta_lines,
         );
     }
 }

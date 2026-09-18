@@ -55,8 +55,8 @@ use std::rc::Rc;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedArgCallback,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
-    Role, SemanticsCtx, Size, ThemeTextColor, View, Widget, any, build_child, erase_callback_arg,
-    rebuild_child, route_event_single, teardown_child, visit_children,
+    Role, SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any, build_child,
+    erase_callback_arg, rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text};
 
@@ -388,7 +388,8 @@ impl<State: 'static> SelectTriggerView<State> {
         }
     }
 
-    /// The label's text child.
+    /// The label's text child: `text-sm` in the live theme's `BodyMedium`
+    /// family, the role the list's own option rows take.
     fn label_view(&self) -> AnyView<State> {
         let (label, is_placeholder) = self.label();
         let role = if is_placeholder {
@@ -398,7 +399,7 @@ impl<State: 'static> SelectTriggerView<State> {
         };
         any(text(label)
             .size(style::TEXT_SM as f32)
-            .family(crate::tokens::sans_family())
+            .themed_family(ThemeTextType::BodyMedium)
             .themed_role(role))
     }
 }
@@ -1003,5 +1004,39 @@ mod tests {
             .expect("a ComboBox node");
         assert_eq!(node.value(), Some("Banana"));
         assert!(node.supports_action(Action::Click));
+    }
+
+    // ---- Typeface: the trigger label follows the live theme ---------------
+
+    /// One trigger showing a selected option and one showing its placeholder.
+    /// The open list is the shared dropdown-menu list, which carries its own
+    /// typeface checks.
+    #[cfg(feature = "bundled-fonts")]
+    fn both_labels() -> impl FnMut(&mut ()) -> frust::FlexView<()> {
+        let (selected, empty) = (OverlayAnchor::new(), OverlayAnchor::new());
+        move |_: &mut ()| {
+            frust::Column(vec![
+                any(select_trigger::<()>(&selected, options(), Some(1))),
+                any(select_trigger::<()>(&empty, options(), None).placeholder("Select a fruit")),
+            ])
+        }
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_trigger_label_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a select trigger's option and placeholder labels",
+            both_labels(),
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_trigger_label_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a select trigger's option and placeholder labels",
+            both_labels(),
+        );
     }
 }

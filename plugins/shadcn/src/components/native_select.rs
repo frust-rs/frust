@@ -32,8 +32,9 @@ use std::rc::Rc;
 use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
-    PaintScene, Point, PointerPhase, Role, SemanticsCtx, Size, ThemeTextColor, View, Widget, any,
-    build_child, erase_callback, rebuild_child, route_event_single, teardown_child, visit_children,
+    PaintScene, Point, PointerPhase, Role, SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View,
+    Widget, any, build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
+    visit_children,
 };
 use frust::{Theme, text};
 
@@ -183,8 +184,9 @@ impl<State: 'static> NativeSelectView<State> {
         }
     }
 
-    /// The label's text child: `text-sm`, `foreground` for a selected option and
-    /// `muted-foreground` for the placeholder.
+    /// The label's text child: `text-sm` in the live theme's `BodyMedium`
+    /// family, `foreground` for a selected option and `muted-foreground` for the
+    /// placeholder.
     fn label_view(&self) -> AnyView<State> {
         let (label, is_placeholder) = self.label();
         let role = if is_placeholder {
@@ -194,7 +196,7 @@ impl<State: 'static> NativeSelectView<State> {
         };
         any(text(label)
             .size(style::TEXT_SM as f32)
-            .family(crate::tokens::sans_family())
+            .themed_family(ThemeTextType::BodyMedium)
             .themed_role(role))
     }
 }
@@ -781,5 +783,41 @@ mod tests {
         assert_eq!(node.value(), Some("Dark"));
         assert!(node.supports_action(Action::Click));
         assert!(!node.children().is_empty(), "the label is a child node");
+    }
+
+    // ---- Typeface: the label follows the live theme -----------------------
+
+    /// One trigger showing a selected option and one showing its placeholder.
+    #[cfg(feature = "bundled-fonts")]
+    fn both_labels(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            any(native_select::<(), _>(
+                ["Light", "Dark"],
+                Some(1),
+                |_: &mut ()| {},
+            )),
+            any(
+                native_select::<(), _>(["Light", "Dark"], None, |_: &mut ()| {})
+                    .placeholder("Theme"),
+            ),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a native select's option and placeholder labels",
+            both_labels,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a native select's option and placeholder labels",
+            both_labels,
+        );
     }
 }

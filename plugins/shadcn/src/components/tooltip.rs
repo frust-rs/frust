@@ -127,9 +127,9 @@ use frust::authoring::{
     Affine, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, OutsideTap, OverlayAlign,
     OverlayAnchor, OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, OverlaySlot, PaintCtx,
-    PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size, ThemeTextColor, View, Widget, any,
-    build_child, erase_callback_arg, rebuild_child, route_event_single, teardown_child,
-    visit_children,
+    PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View,
+    Widget, any, build_child, erase_callback_arg, rebuild_child, route_event_single,
+    teardown_child, visit_children,
 };
 use frust::{AnimationController, Curve, FrameTime, Theme, text};
 
@@ -1022,11 +1022,11 @@ struct TooltipPanelWidget {
 }
 
 impl TooltipPanel {
-    /// The label child.
+    /// The label child: `text-xs` in the live theme's `BodySmall` family.
     fn label_view<State: 'static>(&self) -> AnyView<State> {
         any(text(self.label.clone())
             .size(style::TEXT_XS as f32)
-            .family(crate::tokens::sans_family())
+            .themed_family(ThemeTextType::BodySmall)
             .themed_role(ThemeTextColor::OnPrimary))
     }
 }
@@ -1655,6 +1655,34 @@ mod tests {
             h.hover.anchor(),
             Rect::from_origin_size(Point::ORIGIN, TRIGGER),
             "the trigger publishes its own window rect at paint"
+        );
+    }
+
+    // ---- Typeface: the panel label follows the live theme -----------------
+
+    /// The panel on its own, so the probe needs no hover or anchor to show it.
+    #[cfg(feature = "bundled-fonts")]
+    fn panel(_: &mut ()) -> TooltipPanel {
+        TooltipPanel {
+            label: "Add to library".to_string(),
+        }
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_panel_label_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a tooltip's panel label",
+            panel,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_panel_label_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a tooltip's panel label",
+            panel,
         );
     }
 }

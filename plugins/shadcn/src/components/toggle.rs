@@ -57,13 +57,14 @@ use frust::Theme;
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
     Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, Toggled, View, Widget, erase_callback_arg,
+    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, Toggled, View, Widget,
+    erase_callback_arg,
     text::{FontWeight, TextStyle},
 };
 
 use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE, precedence_fill, precedence_ink};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::ShadcnTokens;
 
 /// Unthemed fallback resting ink — the `neutral` preset's light `--foreground`.
@@ -176,21 +177,23 @@ impl<State: 'static> ToggleView<State> {
     }
 }
 
-/// The label's text style: the theme's own (Inter) family at the catalog's
-/// `text-sm`/`font-medium`, or the bundled sans stack when no theme is threaded.
+/// The label's text style: the catalog's `text-sm`/`font-medium` in the live
+/// theme's `LabelLarge` family, or the bundled sans stack when no theme is
+/// threaded.
 ///
 /// The size comes from [`style::TEXT_SM`] rather than a type-scale slot, per the
 /// catalog's type rule (the scale carries the family; a shadcn component sizes its
 /// own text from the Tailwind step its class list names).
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-    }
+    themed_family(
+        TextStyle {
+            family: crate::tokens::sans_family(),
+            weight: FontWeight::MEDIUM,
+            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::LabelLarge,
+    )
 }
 
 /// The resolved fill/ink pair for the toggle's current state, plus the outline
@@ -1046,5 +1049,28 @@ mod tests {
         assert_eq!(node.label(), Some("Bold"));
         assert_eq!(node.toggled(), Some(Toggled::True));
         assert!(node.supports_action(Action::Click));
+    }
+
+    // ---- Typeface: the label follows the live theme -----------------------
+
+    /// A pressed and a released toggle.
+    #[cfg(feature = "bundled-fonts")]
+    fn pair(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::authoring::any(toggle::<(), _>("Bold", true, |_: &mut (), _| {})),
+            frust::authoring::any(toggle::<(), _>("Italic", false, |_: &mut (), _| {})),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face("a toggle's label", pair);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap("a toggle's label", pair);
     }
 }

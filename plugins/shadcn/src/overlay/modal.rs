@@ -133,7 +133,7 @@ use frust::authoring::{
     Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     CursorIcon, ErasedCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
-    ThemeTextColor, View, Widget, any, build_child, erase_callback, rebuild_child,
+    ThemeTextColor, ThemeTextType, View, Widget, any, build_child, erase_callback, rebuild_child,
     route_event_single, teardown_child, text::FontWeight, visit_children,
 };
 use frust::input::{TOUCH_SLOP, VelocityTracker};
@@ -773,19 +773,22 @@ pub fn trailing_row<State: 'static>(
     ))
 }
 
-/// A panel title: `font-semibold` at `size`, in the panel's own ink
-/// (`text-foreground`).
+/// A panel title: `font-semibold` at `size` in the live theme's `TitleMedium`
+/// family, in the panel's own ink (`text-foreground`).
 pub fn panel_title<State: 'static>(title: impl Into<String>, size: f64) -> AnyView<State> {
     any(text(title)
         .size(size as f32)
         .weight(FontWeight::SEMI_BOLD)
+        .themed_family(ThemeTextType::TitleMedium)
         .themed_role(ThemeTextColor::OnSurface))
 }
 
-/// A panel description: `text-sm text-muted-foreground`.
+/// A panel description: `text-sm text-muted-foreground` in the live theme's
+/// `BodyMedium` family.
 pub fn panel_description<State: 'static>(description: impl Into<String>) -> AnyView<State> {
     any(text(description)
         .size(style::TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurfaceVariant))
 }
 
@@ -2932,5 +2935,35 @@ pub(crate) mod tests {
         let mut seen = 0usize;
         Widget::visit_children(&w, &mut |_pod| seen += 1);
         assert_eq!(seen, 1);
+    }
+
+    // ---- Typeface: the panel title and description follow the live theme --
+
+    /// The title and description every dialog, alert dialog, sheet and drawer
+    /// header is built from, at the dialog family's `text-lg` title size.
+    #[cfg(feature = "bundled-fonts")]
+    fn header(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            panel_title("Edit profile", 18.0),
+            panel_description("Make changes to your profile here."),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a panel's title and description",
+            header,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a panel's title and description",
+            header,
+        );
     }
 }
