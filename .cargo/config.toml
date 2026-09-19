@@ -32,13 +32,13 @@
 # workspace built in-tree — `benchmarks/frust_bench`, every `examples/*`
 # standalone workspace, and a `frust new` scaffold built from inside this
 # checkout — with no per-crate copy needed under `benchmarks/` or
-# `examples/`. The rule is about IN-TREE builds only: `templates/app/`
+# `examples/`. The rule is about IN-TREE builds only: `crates/frust-drive/templates/app/`
 # carries its own copy of this file on purpose. The two files are no
 # longer byte-identical as a *whole*: the template additionally carries a
 # `[build] target-dir = "build/rust"` table (see `crates/frust-drive/src/build_dirs.rs`)
 # that this root file must NEVER gain — this checkout's own `target/` is
 # referenced directly by docs and CI and must not move. The tripwire
-# (`crates/frust-cli/tests/profile_sync.rs`, `crates/frust-drive/src/scaffold/mod.rs`)
+# (`crates/frust-cli/tests/profile_sync.rs`)
 # narrows to what must actually agree: the `[target.*]` rustflags tables structurally.
 # A `frust new` scaffold copies the template tree out of this checkout
 # entirely — once it leaves, this root file no longer governs it, so the

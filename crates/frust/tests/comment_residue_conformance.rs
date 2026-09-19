@@ -238,8 +238,9 @@ fn self_path() -> PathBuf {
 }
 
 /// The four workspace-root directories this scan walks, matching the task
-/// charter exactly (not, e.g., `templates/`, `docs/`, or the workspace
-/// root's own loose files).
+/// charter exactly (not, e.g., `docs/`, `editors/`, or the workspace root's
+/// own loose files — `crates/frust-drive/templates/` is scanned as part of
+/// `crates/`, it is no longer a workspace-root directory of its own).
 const SCAN_ROOTS: &[&str] = &["crates", "plugins", "benchmarks", "examples"];
 
 /// True if `name` (a single path component) is a directory this scan must

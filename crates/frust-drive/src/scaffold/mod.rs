@@ -19,19 +19,79 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, include_dir};
 
-/// The `templates/app/` tree, embedded into the `frust` binary at
-/// compile time so `frust create` works standalone without a repo
+/// The `crates/frust-drive/templates/app/` tree, embedded into the `frust`
+/// binary at compile time so `frust create` works standalone without a repo
 /// checkout at runtime.
-static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../templates/app");
+static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates/app");
 
-/// The `templates/design-system/` tree — the second template root
-/// [`generate_design_system`] selects, alongside [`EMBEDDED_APP_TEMPLATE`]
-/// above (the root [`generate`] renders). A design-system crate is a plain
-/// library with no platform project, so it ships as its own tree rather than
-/// an `--arch` variant of the app template (which the [`KNOWN_ARCHES`]
-/// convention below is scoped to).
+/// The `crates/frust-drive/templates/design-system/` tree — the second
+/// template root [`generate_design_system`] selects, alongside
+/// [`EMBEDDED_APP_TEMPLATE`] above (the root [`generate`] renders). A
+/// design-system crate is a plain library with no platform project, so it
+/// ships as its own tree rather than an `--arch` variant of the app template
+/// (which the [`KNOWN_ARCHES`] convention below is scoped to).
 static EMBEDDED_DESIGN_SYSTEM_TEMPLATE: Dir<'_> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../templates/design-system");
+    include_dir!("$CARGO_MANIFEST_DIR/templates/design-system");
+
+/// Every file path embedded across [`EMBEDDED_APP_TEMPLATE`] and
+/// [`EMBEDDED_DESIGN_SYSTEM_TEMPLATE`], each prefixed `app/` or
+/// `design-system/` to match what `git ls-files templates` reports relative
+/// to this crate's manifest directory. `crates/frust-drive/tests/templates_packaged.rs`
+/// diffs this set against the git-tracked set to catch the packaging
+/// hazard: a template file `include_dir!` embeds from the working tree that
+/// `cargo package` would silently drop because it is untracked or
+/// git-ignored (so a published `frust-drive` would embed a file the
+/// tarball never shipped).
+///
+/// Test support only, reached through the `test-util` feature —
+/// `crates/frust-drive/tests/templates_packaged.rs` links against the plain
+/// library build `cargo test` produces (the same build every downstream
+/// binary/test crate links), which carries neither `cfg(test)` (compiled
+/// only into the separate unit-test harness build) nor a non-default Cargo
+/// feature on its own; this crate's own `Cargo.toml` opts its `tests/`
+/// directory in with a self-referencing `frust-drive = { path = ".",
+/// features = ["test-util"] }` dev-dependency, the same idiom `frust-cli`'s
+/// `Cargo.toml` uses to reach `process::FakeProcessRunner`. Gated
+/// `#[cfg(any(test, feature = "test-util"))]` to match that same
+/// `FakeProcessRunner` precedent (`crate::process`) — never compiled into a
+/// release build, since nothing outside a test binary calls it.
+///
+/// Note this reflects the directory listing `include_dir!` saw the last
+/// time this module was actually recompiled: without the crate's
+/// nightly-only `track_path` feature, a file added to `templates/`
+/// afterward is invisible to Cargo's freshness check (and thus to this
+/// function) until something forces this module to rebuild. That makes
+/// this the *fresh-build* guard in `templates_packaged.rs` (the one a
+/// clean build, `cargo package --verify`, or CI catches drift with); the
+/// test's always-on guard instead walks `templates/` on disk at test time,
+/// which needs no recompile to see a newly added file.
+#[cfg(any(test, feature = "test-util"))]
+pub fn embedded_template_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_embedded_paths(&EMBEDDED_APP_TEMPLATE, "app", &mut paths);
+    collect_embedded_paths(
+        &EMBEDDED_DESIGN_SYSTEM_TEMPLATE,
+        "design-system",
+        &mut paths,
+    );
+    paths
+}
+
+/// Recursively collects every file path under `dir` into `out`, each
+/// prefixed `prefix/`. [`Dir::files`] only yields the current level's
+/// files, so this walks [`Dir::dirs`] itself; [`include_dir::File::path`]
+/// is already the full path relative to the embedded root (forward-slash
+/// normalized regardless of host OS), so no manual join is needed beyond
+/// the `app`/`design-system` root prefix.
+#[cfg(any(test, feature = "test-util"))]
+fn collect_embedded_paths(dir: &Dir<'_>, prefix: &str, out: &mut Vec<String>) {
+    for file in dir.files() {
+        out.push(format!("{prefix}/{}", file.path().to_string_lossy()));
+    }
+    for sub in dir.dirs() {
+        collect_embedded_paths(sub, prefix, out);
+    }
+}
 
 /// Name of the manifest file (relative to the template root) that
 /// whitelists every file the template ships. Never itself copied into a
@@ -241,7 +301,7 @@ impl Source<'_> {
     }
 }
 
-/// Generates a new app at `dest` from the embedded `templates/app` tree (or
+/// Generates a new app at `dest` from the embedded `crates/frust-drive/templates/app` tree (or
 /// `template_dir_override`, for development), emitting
 /// [`ScaffoldPlatform::DEFAULT`]'s platform trees. Returns the relative
 /// paths written, in manifest order. Refuses a non-empty `dest` unless
@@ -384,7 +444,7 @@ pub fn generate_with_platforms(
 }
 
 /// Generates a new out-of-tree **design-system** crate at `dest` from the
-/// embedded `templates/design-system` tree (or `template_dir_override`, for
+/// embedded `crates/frust-drive/templates/design-system` tree (or `template_dir_override`, for
 /// development). Returns the relative paths written, in manifest order.
 /// Refuses a non-empty `dest` unless `overwrite` is set — the same contract
 /// [`generate`] carries for an app scaffold.
@@ -659,79 +719,23 @@ mod tests {
         assert!(dest.join("assets/.gitkeep").exists());
         // The Android link-flags file: a dot-directory manifest entry
         // (`.cargo/config.toml`), carried verbatim so a scaffolded app
-        // inherits `--pack-dyn-relocs=android`/`--icf=all` the same way this
-        // checkout's own root file does.
+        // inherits `--pack-dyn-relocs=android`/`--icf=all` unchanged from the
+        // embedded template this crate owns. Structural agreement between
+        // the template and this checkout's own root `.cargo/config.toml` is
+        // a separate concern this crate has no reach into — it is
+        // `crates/frust-cli/tests/profile_sync.rs`'s
+        // `android_cargo_config_identical_between_root_and_template`.
         assert!(dest.join(".cargo/config.toml").exists());
         let cargo_config = fs::read_to_string(dest.join(".cargo/config.toml")).unwrap();
-        let root_cargo_config = fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cargo/config.toml"),
-        )
-        .unwrap();
-        // The scaffolded config carries its own `[build] target-dir =
-        // "build/rust"` table the repo root's config deliberately does NOT
-        // have (this checkout's own `target/` is referenced directly by
-        // docs and CI and must not move), so the two files are no longer
-        // byte-identical as a whole. What must still match is every
-        // `[target.*]` rustflags table, structurally — parse both (typed
-        // `toml::Table`, not `toml::Value::from_str`, mirroring this test
-        // module's existing precedent above) and compare structurally.
-        let scaffold_toml: toml::Table = toml::from_str(&cargo_config)
-            .expect("scaffolded .cargo/config.toml must be valid TOML");
-        let root_toml: toml::Table = toml::from_str(&root_cargo_config)
-            .expect("repo root .cargo/config.toml must be valid TOML");
-        // Compare the FULL top-level key sets first, not just the one key
-        // ("target") the equality checks below happen to read — a new
-        // top-level table ([source]/[registries]/[env]/[net]/...) appended
-        // to either file would otherwise pass both checks unnoticed.
-        let root_keys: std::collections::BTreeSet<&str> =
-            root_toml.keys().map(String::as_str).collect();
+        let embedded_cargo_config = EMBEDDED_APP_TEMPLATE
+            .get_file(".cargo/config.toml")
+            .expect("embedded template must carry .cargo/config.toml")
+            .contents_utf8()
+            .expect(".cargo/config.toml must be valid UTF-8");
         assert_eq!(
-            root_keys,
-            std::collections::BTreeSet::from(["target"]),
-            "the repo root .cargo/config.toml's top-level table set must be \
-             exactly {{\"target\"}} — a new top-level table \
-             ([source]/[registries]/[env]/[net]/...) must not silently appear"
-        );
-        let scaffold_keys: std::collections::BTreeSet<&str> =
-            scaffold_toml.keys().map(String::as_str).collect();
-        assert_eq!(
-            scaffold_keys,
-            std::collections::BTreeSet::from(["build", "target"]),
-            "the scaffolded .cargo/config.toml's top-level table set must be \
-             exactly {{\"build\", \"target\"}} — a new top-level table \
-             ([source]/[registries]/[env]/[net]/...) must not silently appear"
-        );
-        // `root_toml.get("target")` must actually resolve to something —
-        // otherwise the equality check right below it would pass vacuously
-        // (`None == None`) the moment the root file's `[target.*]` tables
-        // went missing, rather than catching the loss.
-        assert!(
-            root_toml.get("target").is_some(),
-            "the repo root .cargo/config.toml has no [target.*] table to \
-             compare the scaffolded config against"
-        );
-        assert_eq!(
-            scaffold_toml.get("target"),
-            root_toml.get("target"),
-            "the scaffolded .cargo/config.toml's [target.*] rustflags tables \
-             have structurally drifted from the repo root's — the two must \
-             stay identical"
-        );
-        assert!(
-            root_toml.get("build").is_none(),
-            "the repo root .cargo/config.toml must not gain a [build] table \
-             — its target/ is referenced directly by docs and CI"
-        );
-        let mut expected_build = toml::Table::new();
-        expected_build.insert(
-            "target-dir".to_string(),
-            toml::Value::String("build/rust".to_string()),
-        );
-        assert_eq!(
-            scaffold_toml.get("build"),
-            Some(&toml::Value::Table(expected_build)),
-            "the scaffolded .cargo/config.toml's [build] table must contain \
-             exactly `target-dir = \"build/rust\"` and nothing else"
+            cargo_config, embedded_cargo_config,
+            "the scaffolded .cargo/config.toml must be byte-identical to the \
+             embedded `crates/frust-drive/templates/app/.cargo/config.toml`"
         );
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());
@@ -1559,7 +1563,7 @@ mod tests {
 
         generate(&dest, &ctx, None, false, None).unwrap();
 
-        let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/app");
+        let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/app");
         let mut render_vars = ctx.render_vars();
         render_vars.extend(context::platform_render_vars(ScaffoldPlatform::DEFAULT));
         for (raw_name, out_name) in [
@@ -2174,10 +2178,9 @@ mod tests {
 
     // ---- platform-inclusion axis -------------------------------------
 
-    /// The repository root, resolved the same `CARGO_MANIFEST_DIR`-relative
-    /// way `generate_with_no_arch_renders_default_template_files_byte_identically`
-    /// resolves `templates/app` — used by the drift tests below to read the
-    /// `platform/web` embedder these templates are derived from.
+    /// The repository root, resolved `CARGO_MANIFEST_DIR`-relative — used by
+    /// the drift tests below to read the `platform/web` embedder these
+    /// templates are derived from.
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
@@ -2653,7 +2656,7 @@ mod tests {
         assert_eq!(
             scaffolded,
             as_rendered(&embedder),
-            "templates/app/web.tmpl/frust_web.js.tmpl has drifted from \
+            "crates/frust-drive/templates/app/web.tmpl/frust_web.js.tmpl has drifted from \
              platform/web/frust_web.js — re-copy it verbatim rather than \
              editing either copy alone"
         );
@@ -2692,7 +2695,7 @@ mod tests {
         assert_eq!(
             body(&scaffolded),
             as_rendered(&expected),
-            "templates/app/web.tmpl/index.html.tmpl has drifted from \
+            "crates/frust-drive/templates/app/web.tmpl/index.html.tmpl has drifted from \
              platform/web/index.html beyond its title and `?module=` default"
         );
 

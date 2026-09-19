@@ -15,7 +15,7 @@
 //! A build stages one of two host pages, decided by [`resolve_embedder`]:
 //!
 //! 1. **The app's own page**, at `<project>/<host-dir>` (`[web] host-dir`,
-//!    default `web` — the exact directory `templates/app/web.tmpl/` renders
+//!    default `web` — the exact directory `crates/frust-drive/templates/app/web.tmpl/` renders
 //!    to). Used when both [`EMBEDDER_FILES`] exist there.
 //! 2. **The framework's `platform/web`**, otherwise — reached through the
 //!    project's own `frust` path dependency, the same way
@@ -41,7 +41,7 @@
 //! Both embedder files are copied **verbatim**, from whichever directory
 //! [`resolve_embedder`] picked. Each host page resolves its app module from
 //! `?module=`, defaulting to `./pkg/<name>.js` for its own `<name>` — the
-//! app's page defaults to its project name (`templates/app/web.tmpl/`'s
+//! app's page defaults to its project name (`crates/frust-drive/templates/app/web.tmpl/`'s
 //! `web_module_name`), the framework's to `app`
 //! ([`super::BINDGEN_OUT_NAME`]). Nothing in either page is rewritten; the
 //! pipeline instead names its `wasm-bindgen` output to match whichever page
@@ -210,7 +210,7 @@ pub(super) fn package_name(project_dir: &Path) -> Result<String, WebBuildError> 
 /// `None` when `html` does not carry that literal shape.
 ///
 /// Deliberately lenient rather than a full HTML/JS parse: both shipped pages
-/// (`templates/app/web.tmpl/index.html.tmpl`'s render and
+/// (`crates/frust-drive/templates/app/web.tmpl/index.html.tmpl`'s render and
 /// `platform/web/index.html`) write the default as a plain JS string literal
 /// (`|| "./pkg/<name>.js";`) this substring search finds directly, and a
 /// hand-authored page that restructures the script is a page
@@ -696,7 +696,7 @@ mod tests {
     /// quoted default in file order. A bare `./pkg/` substring search finds
     /// that placeholder text first and misreads its literal `<name>` as the
     /// page's actual default, refusing every build of a freshly scaffolded
-    /// app outright — this is the real shape `templates/app/web.tmpl/`
+    /// app outright — this is the real shape `crates/frust-drive/templates/app/web.tmpl/`
     /// renders, reproduced verbatim.
     #[test]
     fn page_module_default_skips_backtick_quoted_prose_ahead_of_the_real_default() {

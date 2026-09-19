@@ -23,7 +23,7 @@ const PBXPROJ_REL: &str = "ios/Runner.xcodeproj/project.pbxproj";
 const LIB_RS_REL: &str = "src/lib.rs";
 
 /// The marker comments the Android app template ships for plugin-contributed
-/// Gradle wiring (`templates/app/android.tmpl/settings.gradle.kts.tmpl` and
+/// Gradle wiring (`crates/frust-drive/templates/app/android.tmpl/settings.gradle.kts.tmpl` and
 /// `app/build.gradle.kts.tmpl`). An insert goes on the line *after* the
 /// marker; a project missing either marker is
 /// [`PluginAddError::MalformedProjectFile`] and is never rewritten — guessing
@@ -636,7 +636,7 @@ fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -
 
 /// The generated iOS project's object-id scheme: a 24-character uppercase-hex
 /// id, hand-allocated as this fixed prefix plus a two-hex-digit counter
-/// (`templates/app/ios.tmpl/.../project.pbxproj.tmpl` uses `…0001`–`…0033`;
+/// (`crates/frust-drive/templates/app/ios.tmpl/.../project.pbxproj.tmpl` uses `…0001`–`…0033`;
 /// `examples/glyph-catalog` re-allocated its embedding wiring at `…0034`–
 /// `…0036`). A minted id continues the *target file's* own numbering, which is
 /// what lets those two allocations coexist.
@@ -2813,7 +2813,7 @@ mod tests {
                          `add_plugin` requires `{SETTINGS_ANCHOR}` in \
                          `{SETTINGS_GRADLE_REL}` and `{APP_DEPS_ANCHOR}` in \
                          `{APP_BUILD_GRADLE_REL}` (see \
-                         `templates/app/android.tmpl` for the canonical \
+                         `crates/frust-drive/templates/app/android.tmpl` for the canonical \
                          placement, or `examples/huddle`'s android/ for a \
                          working in-repo example)"
                     );

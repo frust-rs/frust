@@ -5982,7 +5982,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Why accepted**: `cargo metadata` is what lets the phase resolve the real target directory correctly under a `.cargo/config.toml` `[build] target-dir` override or a `CARGO_TARGET_DIR` env var, instead of assuming the default; its cost (a workspace manifest walk, no compilation) is negligible next to the `cargo build` step the same script already runs first.
 
-**Evidence**: `templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s build-phase `shellScript`.
+**Evidence**: `crates/frust-drive/templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s build-phase `shellScript`.
 
 ---
 

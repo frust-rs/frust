@@ -52,7 +52,7 @@ target-dir = "build/rust"
 # workspace built in-tree — `benchmarks/frust_bench`, every `examples/*`
 # standalone workspace, and a `frust new` scaffold built from inside this
 # checkout — with no per-crate copy needed under `benchmarks/` or
-# `examples/`. The rule is about IN-TREE builds only: `templates/app/`
+# `examples/`. The rule is about IN-TREE builds only: `crates/frust-drive/templates/app/`
 # carries its own byte-identical copy of this file on purpose, because a
 # `frust new` scaffold copies that directory tree out of this checkout
 # entirely — once it leaves, this root file no longer governs it, so the

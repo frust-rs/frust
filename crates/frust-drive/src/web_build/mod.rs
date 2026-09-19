@@ -62,7 +62,7 @@
 //! play, one per [`bundle::EmbedderSource`]:
 //!
 //! - **The app's own page** defaults to the project's own name
-//!   (`templates/app/web.tmpl/`'s `web_module_name`), so this build's
+//!   (`crates/frust-drive/templates/app/web.tmpl/`'s `web_module_name`), so this build's
 //!   `--out-name` is `WebSection::out_name_or(&app_name)` — `[web] out-name`
 //!   when set, else `[app] name` (or, with no `frust.toml` at all, the
 //!   `Cargo.toml` package name — see [`bundle::package_name`]).

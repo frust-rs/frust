@@ -418,7 +418,7 @@ measures if it differs):
    zero out the very delta being measured.
 2. Match this crate's `[profile.release]` shape (`lto = "fat"`,
    `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"` — the same
-   profile `templates/app`'s generated `Cargo.toml` ships) in the probe app's
+   profile `crates/frust-drive/templates/app`'s generated `Cargo.toml` ships) in the probe app's
    own manifest, so the measurement reflects the ship floor rather than an
    unoptimized default release build.
 3. `export CARGO_TARGET_DIR=<probe-app-dir>/target` before building, so the

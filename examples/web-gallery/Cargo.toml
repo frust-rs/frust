@@ -163,7 +163,7 @@ panic = "abort"
 
 # NO `[profile.release.package.*]` overrides here, deliberately. The eight
 # manifests that build an ANDROID artifact (Frust's root `Cargo.toml`,
-# `templates/app/Cargo.toml.tmpl`, `examples/huddle`, `examples/glyph-catalog`,
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl`, `examples/huddle`, `examples/glyph-catalog`,
 # `examples/material3-demo`, `examples/playground`, `examples/shadertoy` and
 # `benchmarks/frust_bench`) additionally carry a hand-synced cold-set
 # `opt-level = "z"` block — crates that do no per-frame work, shrunk for

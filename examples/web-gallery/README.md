@@ -283,7 +283,7 @@ put this crate's own page on that contract, both inside this task's
    hand-rolled canvas-binding/resize script (the "Milestone 6" fix below) —
    the general version of the identical technique, plus the height-report
    calls that script never made. Chosen over copying `frust_web.js` into
-   this directory (the shape `templates/app/web.tmpl/` uses for a *real*
+   this directory (the shape `crates/frust-drive/templates/app/web.tmpl/` uses for a *real*
    scaffolded app's own `<host-dir>`) because a copy is a second identity to
    keep in sync by hand the moment the framework's contract changes, and
    this task's `write_files` has no `web/` subdirectory to put one in

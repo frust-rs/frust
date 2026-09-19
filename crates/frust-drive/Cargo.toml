@@ -57,3 +57,20 @@ icns = { version = "0.4", default-features = false, features = ["pngio"] }
 # workspace-wide, so `frust-widgets`' own `image` build (png+jpeg only) is
 # unaffected by this crate enabling `ico` too.
 image = { workspace = true, features = ["ico"] }
+
+[dev-dependencies]
+# Self-referencing path dependency, `test-util` on: `tests/templates_packaged.rs`
+# links against the plain library build `cargo test` produces (no `cfg(test)`,
+# no non-default feature) unless this crate's own `Cargo.toml` opts its own
+# `tests/` directory in — this line is that opt-in, so
+# `scaffold::embedded_template_paths`/`collect_embedded_paths` (gated
+# `#[cfg(any(test, feature = "test-util"))]`) link into the integration-test
+# binary the same way `frust-cli`'s own `frust-drive` dev-dependency does.
+frust-drive = { path = ".", features = ["test-util"] }
+
+[[test]]
+name = "templates_packaged"
+# The self dev-dependency above is a path-only dependency, stripped from the
+# published manifest — so in the packaged tarball `test-util` is off and this
+# target is skipped at `cargo test` time instead of failing to compile.
+required-features = ["test-util"]

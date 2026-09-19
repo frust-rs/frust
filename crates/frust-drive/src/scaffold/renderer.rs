@@ -52,9 +52,10 @@ pub fn expand_path(relative: &Path, vars: &BTreeMap<&str, String>) -> PathBuf {
 /// handled by [`crate::scaffold::classify`] before this runs).
 ///
 /// This lets an entire template source tree carry a `.tmpl` suffix on its
-/// root directory as a purely organizational marker in `templates/app/`
+/// root directory as a purely organizational marker in
+/// `crates/frust-drive/templates/app/`
 /// (`android.tmpl/`, `ios.tmpl/`, `macos.tmpl/`, `windows.tmpl/`,
-/// `linux.tmpl/`, `web.tmpl/` — mirrored by `templates/app/` itself not
+/// `linux.tmpl/`, `web.tmpl/` — mirrored by `crates/frust-drive/templates/app/` itself not
 /// needing the suffix since it's the manifest root) without that suffix
 /// leaking into the generated project's directory name (`android.tmpl/` →
 /// `android/`). Those marker directories are also exactly what
