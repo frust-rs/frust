@@ -26,11 +26,14 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   family resolves; size, weight, line height and tracking stay the view's own. A widget shaping
   its own text runs reads `Theme::from_layout_ctx(ctx)` in `layout` and keys its shaped-run
   cache on the resolved style, so a theme swap reshapes it (`frust-material`'s `dialog` and
-  `badge` show one of each; shadcn's `crate::text::themed_family(style, theme, role)` and
-  beUI's `crate::text::{themed_style, role_family}`, consumed through `Label`/`LabelRun`/
-  `WrappedRun::layout_themed`, are the same opt-in for a catalog's self-shaped runs). A
-  build-time `.family(..)` or a hardcoded font stack is a legitimate choice too — `TypeScale`
-  has no monospace slot, so mono text has no role to name — but neither a live theme swap nor
+  `badge` show one of each; shadcn's `crate::text::themed_family(style, theme, role)` and beUI's
+  `crate::text::{themed_style, role_family}`, consumed through
+  `Label`/`LabelRun`/`WrappedRun::layout_themed`, are the same opt-in for a catalog's
+  self-shaped runs, each resolving the role's slot with
+  `ThemeTextType::style_in(&theme.type_scale)` — the same lookup `.themed_family(..)` makes —
+  instead of keeping its own copy of the role-to-slot table). A build-time `.family(..)` or a
+  hardcoded font stack is a legitimate choice too — `TypeScale` has no monospace slot, so mono
+  text has no role to name — but neither a live theme swap nor
   `frust_testing::frame::pin_type_scale` can redirect it. A baseline `TextInput` has no
   themed-family seam at all — its `effective_style` resolves only color from the theme, never
   family — so a field keeps whatever explicit or system family it was built with
