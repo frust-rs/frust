@@ -7,7 +7,7 @@ design lives in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 ## Template development
 
-`frust create` embeds `templates/app/` into the binary at compile time; the hidden,
+`frust create` embeds `crates/frust-drive/templates/app/` into the binary at compile time; the hidden,
 development-only `--template-dir <path>` flag iterates on template files without
 rebuilding the embedded copy. Every scaffold also gets a default launcher icon set and
 the platform-specific edge-to-edge/safe-area/keyboard-inset and back-navigation glue
@@ -68,7 +68,7 @@ pin RENDER already owns exactly (see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.
 | Pin | Why | Tripwire |
 |---|---|---|
 | `cargo-packager 0.11.8` exact (external tool, shelled out to by `desktop_build::installer`) | Builds `.dmg`/NSIS/WiX/`.deb`/`.AppImage` installers over an assembled bundle; `frust doctor`'s `CargoPackagerValidator` gates on an exact version match (non-fatal — only `frust build --installer` needs it) and reports the install hint `cargo install cargo-packager --version 0.11.8 --locked` on a mismatch or absence | `cargo install cargo-packager --version 0.11.8 --locked` smoke + `cargo test -p frust-drive` |
-| `winresource 0.1` (generated app's own build-dependency, `templates/app/Cargo.toml.tmpl` — not a workspace pin) | Embeds `windows/icon.ico` plus file/product version into the compiled `.exe`; the actively-maintained fork of `winres`, unmaintained since 2021 | scaffold e2e (`create_e2e`) |
+| `winresource 0.1` (generated app's own build-dependency, `crates/frust-drive/templates/app/Cargo.toml.tmpl` — not a workspace pin) | Embeds `windows/icon.ico` plus file/product version into the compiled `.exe`; the actively-maintained fork of `winres`, unmaintained since 2021 | scaffold e2e (`create_e2e`) |
 
 ## `frust-mcp`
 

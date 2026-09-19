@@ -261,7 +261,7 @@ for any future value crossing this boundary.
 
 ### Reaching into a design-system plugin's internals from a design-system crate
 
-**BAD:** a `templates/design-system/`-derived crate's `Cargo.toml` declaring a dependency on
+**BAD:** a `crates/frust-drive/templates/design-system/`-derived crate's `Cargo.toml` declaring a dependency on
 `frust-glyph`/`frust-material`/`frust-cupertino` to reach one convenience symbol, or depending on
 `frust-widgets`/`frust-core` directly instead of the facade.
 

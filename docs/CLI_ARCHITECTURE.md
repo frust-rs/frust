@@ -43,7 +43,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::icons` | PNG → `.icns`/`.ico`/hicolor-tree pipeline for `[desktop] icon`; a rejected or missing source degrades to a typed note, never a build failure (`desktop_build` consumes it) |
 | `frust-drive::desktop_build` | macOS/Windows/Linux bundle assembly (`DesktopBundleTarget`, host-locked) via `cargo build` + `ProcessRunner`, and its `installer` submodule (`cargo-packager` shell-out for `.dmg`/NSIS/WiX/`.deb`/`.AppImage`; `.rpm` is a typed refusal, not a supported format) |
 | `frust-drive::desktop_build::contributions` | Merges installed plugins' desktop-lane `Contribution`s into the just-assembled bundle (`Info.plist`, `<identifier>.desktop`, a generated entitlements file), between assembly and codesign — see Data Flow below |
-| `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree — an app from `templates/app/` (`TemplateContext`), or, under `--design-system`, a design-system crate from `templates/design-system/` (`DesignSystemContext`, a strict field subset) |
+| `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree; the template tree lives in-crate and is embedded into the published crate with `include_dir!` — an app from `crates/frust-drive/templates/app/` (`TemplateContext`), or, under `--design-system`, a design-system crate from `crates/frust-drive/templates/design-system/` (`DesignSystemContext`, a strict field subset) |
 | `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report; `CargoPackagerValidator` checks the pinned `cargo-packager` version and is non-fatal (`Partial` at worst — only `frust build --installer` needs it). `WasmTargetValidator` ("wasm32 target"), `WasmBindgenCliValidator` ("wasm-bindgen CLI"), and `WasmOptValidator` ("wasm-opt") check the browser toolchain the same non-fatal way — never worse than `Partial`, since a host that will never build for the browser is not a broken host. The component-level `build_report` groups these into a non-core "Web" area alongside Prerequisites/Android/iOS/Desktop, with runnable fixes for the target (`rustup target add`) and the CLI (`cargo install -f wasm-bindgen-cli`) and install guidance for `wasm-opt` (binaryen ships as a platform package, not one invocation) |
 | `frust-drive::devices` | Pluggable per-platform device discovery, aggregated non-fatally |
 | `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build; `BuildMode::cargo_features()` also selects the `frust/perf-trace`+`frust/devtools` cargo-feature pair for Debug/Profile (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) |
@@ -118,7 +118,7 @@ stdout of its own at all to fall back on (see [REVIEW_FOCUS.md](REVIEW_FOCUS.md)
 Within `frust-drive`, `anyhow` sits at the CLI/pipeline-core boundary while library-contract errors
 use `thiserror` enums; `serde`/`serde_json`/`toml`/`toml_edit` handle manifest and build-report
 serialization plus format-preserving `Cargo.toml` edits; `minijinja` and `include_dir` embed and
-render the `templates/app/` tree at compile time. `notify` is `frust-cli`-only — `run --watch`'s
+render the `crates/frust-drive/templates/app/` tree at compile time. `notify` is `frust-cli`-only — `run --watch`'s
 filesystem watcher has no reason to live in the shared library. `ctrlc` is a `frust-drive`
 dependency (`frust-cli` also links it directly for its own `--watch` group-kill handler);
 `frust-drive::interrupt` is the process's single SIGINT/SIGTERM/SIGHUP owner (see Data Flow below),
@@ -147,13 +147,13 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `dispatch` then builds the one `RealProcessRunner` and injects it into every handler — no handler
   ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
-  `templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
+  `crates/frust-drive/templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
   involved. The rendered app depends on `frust-glyph` and calls `frust_glyph::install()` from
   `app!(setup = { .. })`, so a freshly scaffolded app is Glyph-themed by default — swapping to
   Material/Cupertino, or dropping a built-in design system entirely, is a manifest+setup-call edit
   the template's own comments walk through (see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
   Design-System Plugins). `create --design-system` takes a separate path (`generate_design_system` /
-  `DesignSystemContext`) rendering `templates/design-system/` instead — a plain library crate with
+  `DesignSystemContext`) rendering `crates/frust-drive/templates/design-system/` instead — a plain library crate with
   no platform manifest, so `--deeplink-scheme`/`--deeplink-host`/`--arch` are rejected outright
   rather than silently ignored; its README documents that the three built-ins are sibling plugin
   crates, not `frust` cargo features, so there is no "never re-enable a catalog feature" rule left
@@ -246,7 +246,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   directory (`web_build::serve`), best-effort opens it in the host's default browser through the
   same `ProcessRunner` seam (spawned, never waited on), then blocks until Ctrl-C; `--features` is
   refused outright, mirroring `build macos|windows|linux`'s `reject_unplumbed_features` above. `frust
-  create --platforms web` renders `templates/app/web.tmpl`, opt-in and absent from the default
+  create --platforms web` renders `crates/frust-drive/templates/app/web.tmpl`, opt-in and absent from the default
   platform set. `frust doctor`'s Web heading now prints only `WebPreflight::project_rows()` — the
   project-dependent checks (manifest, host page, host-page module name, and the blocking artifact-
   directory-safety row), plus the `wasm-bindgen CLI` row when it survives that filter — since the

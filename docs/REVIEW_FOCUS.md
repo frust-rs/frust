@@ -19,7 +19,7 @@
 3. **Version-pin and hand-sync discipline in manifests.** `wgpu` is a frust-owned pin (no `vello`
    constraint above it) — a bump still needs the full engine gate suite (device smokes across
    backends), not a casual `cargo update`. The `[profile.*]` blocks are hand-synced across five manifests (root
-   `Cargo.toml`, `templates/app/Cargo.toml.tmpl`, `examples/huddle/Cargo.toml`,
+   `Cargo.toml`, `crates/frust-drive/templates/app/Cargo.toml.tmpl`, `examples/huddle/Cargo.toml`,
    `examples/glyph-catalog/Cargo.toml`, `examples/material3-demo/Cargo.toml`) — there is no single
    source of truth, only the tripwire test `cargo test -p frust-cli --test profile_sync`. Flag any
    manifest edit that touches one copy without the others.
