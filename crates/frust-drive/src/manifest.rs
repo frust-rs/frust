@@ -199,7 +199,7 @@ pub struct LinuxSection {
 /// The default `[web] host-dir` — where a scaffolded project keeps the
 /// host-page sources (`index.html` + `frust_web.js`) a browser build
 /// assembles around its wasm output. Matches the directory
-/// `templates/app/web.tmpl/` renders to, so a freshly scaffolded project
+/// `crates/frust-drive/templates/app/web.tmpl/` renders to, so a freshly scaffolded project
 /// needs no `[web]` section at all to build.
 const DEFAULT_WEB_HOST_DIR: &str = "web";
 
@@ -220,7 +220,7 @@ const DEFAULT_WEB_PORT: u16 = 8000;
 ///
 /// Every field is optional with a documented default, so the whole section
 /// may be absent (what `frust create` scaffolds): the defaults describe
-/// exactly the layout `templates/app/web.tmpl/` produces and the recipe
+/// exactly the layout `crates/frust-drive/templates/app/web.tmpl/` produces and the recipe
 /// `platform/web/README.md` documents (`cargo build --target
 /// wasm32-unknown-unknown` + `wasm-bindgen --target web --out-dir
 /// <out-dir>/pkg --out-name <out-name>`). Read each one through its
@@ -502,7 +502,7 @@ mod tests {
 
     /// The `[web]` section is optional in full: an absent section behaves
     /// exactly like an empty one, and every default is the layout
-    /// `templates/app/web.tmpl/` scaffolds.
+    /// `crates/frust-drive/templates/app/web.tmpl/` scaffolds.
     #[test]
     fn web_section_is_optional_and_its_defaults_describe_the_scaffolded_layout() {
         let m = parse("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n").unwrap();

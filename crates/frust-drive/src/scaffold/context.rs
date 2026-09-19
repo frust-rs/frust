@@ -358,7 +358,7 @@ pub fn platform_render_vars(
 }
 
 /// Values substituted into a **design-system** template's `.tmpl` file
-/// contents (`templates/design-system/`) — deliberately a strict subset of
+/// contents (`crates/frust-drive/templates/design-system/`) — deliberately a strict subset of
 /// [`TemplateContext`]'s vars, not that struct reused with dummy values. A
 /// design-system crate is a plain library with no platform project, so it
 /// carries no `org`, no android/ios identifiers, and no deeplink config;
