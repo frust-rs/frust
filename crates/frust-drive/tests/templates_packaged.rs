@@ -25,7 +25,27 @@
 //! published crate itself, which ships without a `.git` directory at all).
 //! Both `git` subprocess calls below return early with an `eprintln!` note
 //! instead of failing when `git` is absent or `crates/frust-drive` isn't
-//! inside a git work tree.
+//! inside a git work tree. A third off-repo shape is a `cargo vendor` copy
+//! landed *inside* a consumer's own git work tree: `is_inside_git_work_tree`
+//! reports true (the consumer's repo) and `git ls-files templates` runs
+//! cleanly but reports nothing, since the vendored `templates/` tree was
+//! never `git add`ed to that outer repo. An empty tracked set alongside a
+//! non-empty on-disk one is that shape, not drift, so it is also an
+//! `eprintln!` skip rather than a failure.
+//!
+//! # Ignored strays never reach a scaffold
+//!
+//! The on-disk walk below filters out anything `git check-ignore` reports —
+//! a `.DS_Store`, an editor backup, a `cargo vendor` marker — before
+//! diffing against the tracked set. `scaffold::generate`/
+//! `generate_design_system` only ever copy the files
+//! `template_manifest.json` whitelists, so a stray ignored file sitting
+//! next to the template tree can never reach a scaffolded project even
+//! though it is physically present on disk; asserting against it here
+//! would just make the tripwire noisy for local editor/OS litter it can't
+//! actually cause harm from. An untracked file that is *not* ignored (a
+//! forgotten `git add`) is left in the diff — that is exactly the failure
+//! this test exists to catch.
 //!
 //! # Two guards, two failure windows
 //!
@@ -39,17 +59,19 @@
 //! `frust_drive::scaffold::embedded_template_paths`'s doc comment.
 //!
 //! That is why this test compares `on_disk` (a fresh `std::fs::read_dir`
-//! walk performed at test time, every run) against `tracked` *first*: that
-//! comparison needs no recompile, so it is the always-on guard — it catches
-//! an untracked or newly ignored file on a bare re-run, which is exactly
-//! what the compiled-embed comparison alone can miss. The `embedded ==
-//! tracked` comparison remains too, as the fresh-build guard that catches
-//! embed drift whenever the crate is actually rebuilt (a clean build,
-//! `cargo package --verify`, or CI).
+//! walk performed at test time, every run, filtered through `git
+//! check-ignore` as above) against `tracked` *first*: that comparison needs
+//! no recompile, so it is the always-on guard — it catches an untracked
+//! (and non-ignored) file on a bare re-run, which is exactly what the
+//! compiled-embed comparison alone can miss. The `embedded == tracked`
+//! comparison remains too, as the fresh-build guard that catches embed
+//! drift whenever the crate is actually rebuilt (a clean build, `cargo
+//! package --verify`, or CI).
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// `crates/frust-drive`, resolved from this test binary's own manifest dir
 /// so the git subprocess calls below are working-directory-independent.
@@ -113,6 +135,53 @@ fn walk_on_disk_paths(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Runs `git -C <manifest_dir> check-ignore --no-index --stdin`, feeding
+/// `paths` one per line, and returns the subset of `paths` git reports as
+/// ignored. `--no-index` matches purely against `.gitignore` patterns
+/// (never the index), which is the right question here regardless of
+/// whether a path happens to be tracked. Exit code 0 (some lines matched)
+/// and 1 (none matched — no output, not an error) are both success; `Ok`
+/// wraps the ignored subset either way. Any other exit code, or a failure
+/// to spawn `git` at all, is `Err`, and the caller falls back to an
+/// `eprintln!` skip rather than treating it as "nothing is ignored".
+fn ignored_paths(paths: &BTreeSet<String>) -> Result<BTreeSet<String>, String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(manifest_dir())
+        .arg("check-ignore")
+        .arg("--no-index")
+        .arg("--stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn `git check-ignore`: {err}"))?;
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin was requested as piped");
+        for path in paths {
+            writeln!(stdin, "{path}")
+                .map_err(|err| format!("failed to write to `git check-ignore` stdin: {err}"))?;
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait on `git check-ignore`: {err}"))?;
+
+    match output.status.code() {
+        Some(0) | Some(1) => {
+            let text = String::from_utf8(output.stdout)
+                .map_err(|err| format!("`git check-ignore` produced non-UTF-8 output: {err}"))?;
+            Ok(text.lines().map(str::to_owned).collect())
+        }
+        other => Err(format!(
+            "`git check-ignore` exited unexpectedly ({other:?}); stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
+    }
+}
+
 /// The set of files actually present on disk under `templates/` right now,
 /// `git ls-files templates` and `embedded_template_paths()` must all agree
 /// — see the module doc for why the on-disk comparison runs first and needs
@@ -137,15 +206,41 @@ fn embedded_template_set_matches_git_tracked_files() {
     };
     let tracked: BTreeSet<String> = tracked_lines.into_iter().collect();
 
-    // Always-on guard: what is literally on disk right now, walked fresh at
-    // test time — no recompile needed, so this alone already catches an
-    // untracked file added since the last build.
-    let mut on_disk = BTreeSet::new();
+    // Fresh walk at test time — no recompile needed.
+    let mut on_disk_raw = BTreeSet::new();
     walk_on_disk_paths(
         &manifest_dir(),
         &manifest_dir().join("templates"),
-        &mut on_disk,
+        &mut on_disk_raw,
     );
+
+    // Foreign-checkout skip: an empty tracked set alongside a non-empty
+    // on-disk one is a `cargo vendor` copy inside a consumer's own work
+    // tree (see the module doc's off-repo section), not drift in this repo.
+    if tracked.is_empty() && !on_disk_raw.is_empty() {
+        eprintln!(
+            "skipping templates_packaged: `git ls-files templates` reported no \
+             tracked files while {} on-disk file(s) exist under `templates/` — \
+             this looks like a vendored copy inside a foreign work tree, not \
+             this repo",
+            on_disk_raw.len()
+        );
+        return;
+    }
+
+    // Always-on guard: what is literally on disk right now, filtered
+    // through `git check-ignore` so an ignored stray (`.DS_Store`, an
+    // editor backup, …) never fails the test — see the module doc's
+    // "Ignored strays never reach a scaffold" section. An untracked file
+    // that is *not* ignored stays in `on_disk` and is exactly the failure
+    // this test exists to catch.
+    let on_disk: BTreeSet<String> = match ignored_paths(&on_disk_raw) {
+        Ok(ignored) => on_disk_raw.difference(&ignored).cloned().collect(),
+        Err(reason) => {
+            eprintln!("skipping the git-ignore filter on the on-disk set: {reason}");
+            on_disk_raw.clone()
+        }
+    };
 
     let tracked_not_on_disk: Vec<&String> = tracked.difference(&on_disk).collect();
     let on_disk_not_tracked: Vec<&String> = on_disk.difference(&tracked).collect();
@@ -180,38 +275,4 @@ fn embedded_template_set_matches_git_tracked_files() {
          \x20\x20tracked but NOT embedded (missing from the binary): {tracked_not_embedded:?}\n\
          \x20\x20embedded but NOT tracked (would be dropped by `cargo package`): {embedded_not_tracked:?}"
     );
-
-    // No embedded path may be matched by `git check-ignore`: a file could
-    // still `ls-files`-track today while a `.gitignore` pattern added later
-    // would silently exclude it from a fresh clone. `check-ignore` exits 0
-    // when at least one argument matches an ignore pattern, 1 when none do.
-    if embedded.is_empty() {
-        return;
-    }
-    let Ok(check_ignore) = Command::new("git")
-        .arg("-C")
-        .arg(manifest_dir())
-        .arg("check-ignore")
-        .args(&embedded)
-        .output()
-    else {
-        eprintln!("skipping the git-ignore check: `git check-ignore` failed to run");
-        return;
-    };
-    match check_ignore.status.code() {
-        Some(1) => {} // none of the embedded paths are ignored — good
-        Some(0) => {
-            let ignored = String::from_utf8_lossy(&check_ignore.stdout);
-            panic!(
-                "embedded template path(s) are git-ignored (would be dropped by \
-                 `cargo package`):\n{ignored}"
-            );
-        }
-        _ => eprintln!(
-            "skipping the git-ignore check: `git check-ignore` exited unexpectedly \
-             ({:?}); stderr: {}",
-            check_ignore.status.code(),
-            String::from_utf8_lossy(&check_ignore.stderr)
-        ),
-    }
 }

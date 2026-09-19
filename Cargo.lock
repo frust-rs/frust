@@ -2257,6 +2257,7 @@ dependencies = [
  "anyhow",
  "ctrlc",
  "frust-devtools-protocol",
+ "frust-drive",
  "icns",
  "image",
  "include_dir",

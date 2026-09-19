@@ -43,15 +43,18 @@ static EMBEDDED_DESIGN_SYSTEM_TEMPLATE: Dir<'_> =
 /// git-ignored (so a published `frust-drive` would embed a file the
 /// tarball never shipped).
 ///
-/// `#[doc(hidden)] pub` rather than gated behind the `test-util` feature or
-/// `cfg(test)`: an integration test under `tests/` links against the plain
-/// library build `cargo test` produces — the same build every downstream
-/// binary/test crate links — which carries neither `cfg(test)` (compiled
+/// Test support only, reached through the `test-util` feature —
+/// `crates/frust-drive/tests/templates_packaged.rs` links against the plain
+/// library build `cargo test` produces (the same build every downstream
+/// binary/test crate links), which carries neither `cfg(test)` (compiled
 /// only into the separate unit-test harness build) nor a non-default Cargo
-/// feature unless this crate's own `Cargo.toml` opts it in for its own
-/// `tests/` directory, which is outside this change's scope. A doc-hidden,
-/// unconditionally compiled `pub fn` is the smallest surface that reaches
-/// `templates_packaged.rs` without either edit.
+/// feature on its own; this crate's own `Cargo.toml` opts its `tests/`
+/// directory in with a self-referencing `frust-drive = { path = ".",
+/// features = ["test-util"] }` dev-dependency, the same idiom `frust-cli`'s
+/// `Cargo.toml` uses to reach `process::FakeProcessRunner`. Gated
+/// `#[cfg(any(test, feature = "test-util"))]` to match that same
+/// `FakeProcessRunner` precedent (`crate::process`) — never compiled into a
+/// release build, since nothing outside a test binary calls it.
 ///
 /// Note this reflects the directory listing `include_dir!` saw the last
 /// time this module was actually recompiled: without the crate's
@@ -62,7 +65,7 @@ static EMBEDDED_DESIGN_SYSTEM_TEMPLATE: Dir<'_> =
 /// clean build, `cargo package --verify`, or CI catches drift with); the
 /// test's always-on guard instead walks `templates/` on disk at test time,
 /// which needs no recompile to see a newly added file.
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-util"))]
 pub fn embedded_template_paths() -> Vec<String> {
     let mut paths = Vec::new();
     collect_embedded_paths(&EMBEDDED_APP_TEMPLATE, "app", &mut paths);
@@ -80,6 +83,7 @@ pub fn embedded_template_paths() -> Vec<String> {
 /// is already the full path relative to the embedded root (forward-slash
 /// normalized regardless of host OS), so no manual join is needed beyond
 /// the `app`/`design-system` root prefix.
+#[cfg(any(test, feature = "test-util"))]
 fn collect_embedded_paths(dir: &Dir<'_>, prefix: &str, out: &mut Vec<String>) {
     for file in dir.files() {
         out.push(format!("{prefix}/{}", file.path().to_string_lossy()));
