@@ -751,11 +751,15 @@ panic = "abort"
 #
 # "Cold" here means the crate does no measurable work inside the steady-state
 # frame loop, so its code size is pure footprint:
-#   * shader translation / GPU object setup — `naga`, `wgpu-core`,
-#     `wgpu-types`, `codespan-reporting` (naga's diagnostics), `ash`,
+#   * shader translation / GPU object setup — `naga`,
+#     `codespan-reporting` (naga's diagnostics), `ash`,
 #     `gpu-allocator`: these run at pipeline-creation and
 #     resource-allocation time, not per frame (the per-frame GPU cost is
-#     queue submission and the driver's own work).
+#     queue submission and the driver's own work). `wgpu-core` and
+#     `wgpu-types` have since left the set: `wgpu-core` carries the
+#     per-frame upload/submit path and its `z` build cost about 0.2 ms of
+#     S5's `submit` p50 (see benchmarks/RESULTS.md's dated S5 attribution
+#     note), and `z` made `wgpu-types` larger, not smaller.
 #   * one-shot parsing / asset decode / async plumbing — `serde_json`,
 #     `roxmltree`, `fontique` (font enumeration at startup), `mio`,
 #     `image`, `png`.
@@ -803,12 +807,6 @@ panic = "abort"
 # package overrides (wasm perf is unmeasured) — see its own manifest.
 
 [profile.release.package.naga]
-opt-level = "z"
-
-[profile.release.package.wgpu-core]
-opt-level = "z"
-
-[profile.release.package.wgpu-types]
 opt-level = "z"
 
 [profile.release.package.codespan-reporting]

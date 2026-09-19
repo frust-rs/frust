@@ -157,12 +157,6 @@ panic = "abort"
 [profile.release.package.naga]
 opt-level = "z"
 
-[profile.release.package.wgpu-core]
-opt-level = "z"
-
-[profile.release.package.wgpu-types]
-opt-level = "z"
-
 [profile.release.package.codespan-reporting]
 opt-level = "z"
 
