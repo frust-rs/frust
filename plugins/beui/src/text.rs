@@ -66,7 +66,6 @@
 //! stays explicit). A site that keeps an explicit family says why in a comment.
 
 use frust::Theme;
-use frust::TypeScale;
 use frust::authoring::text::{FontFamily, FontWeight, TextContext, TextLayout, TextStyle};
 use frust::authoring::{Brush, Color, LayoutCtx, PaintScene, Point, Size};
 
@@ -75,50 +74,12 @@ use frust::authoring::{Brush, Color, LayoutCtx, PaintScene, Point, Size};
 /// component names it beside the runs it opts in.
 pub(crate) use frust::authoring::ThemeTextType;
 
-/// `role`'s slot in `scale`. `frust-widgets` keeps its own copy of this
-/// mapping private, so the catalog restates it; the test
-/// `every_role_reads_its_own_slot` pins every arm.
-fn role_slot(scale: &TypeScale, role: ThemeTextType) -> &TextStyle {
-    match role {
-        ThemeTextType::DisplayLarge => &scale.display_large,
-        ThemeTextType::DisplayMedium => &scale.display_medium,
-        ThemeTextType::DisplaySmall => &scale.display_small,
-        ThemeTextType::HeadlineLarge => &scale.headline_large,
-        ThemeTextType::HeadlineMedium => &scale.headline_medium,
-        ThemeTextType::HeadlineSmall => &scale.headline_small,
-        ThemeTextType::TitleLarge => &scale.title_large,
-        ThemeTextType::TitleMedium => &scale.title_medium,
-        ThemeTextType::TitleSmall => &scale.title_small,
-        ThemeTextType::BodyLarge => &scale.body_large,
-        ThemeTextType::BodyMedium => &scale.body_medium,
-        ThemeTextType::BodySmall => &scale.body_small,
-        ThemeTextType::LabelLarge => &scale.label_large,
-        ThemeTextType::LabelMedium => &scale.label_medium,
-        ThemeTextType::LabelSmall => &scale.label_small,
-        ThemeTextType::DisplayLargeEmphasized => &scale.display_large_emphasized,
-        ThemeTextType::DisplayMediumEmphasized => &scale.display_medium_emphasized,
-        ThemeTextType::DisplaySmallEmphasized => &scale.display_small_emphasized,
-        ThemeTextType::HeadlineLargeEmphasized => &scale.headline_large_emphasized,
-        ThemeTextType::HeadlineMediumEmphasized => &scale.headline_medium_emphasized,
-        ThemeTextType::HeadlineSmallEmphasized => &scale.headline_small_emphasized,
-        ThemeTextType::TitleLargeEmphasized => &scale.title_large_emphasized,
-        ThemeTextType::TitleMediumEmphasized => &scale.title_medium_emphasized,
-        ThemeTextType::TitleSmallEmphasized => &scale.title_small_emphasized,
-        ThemeTextType::BodyLargeEmphasized => &scale.body_large_emphasized,
-        ThemeTextType::BodyMediumEmphasized => &scale.body_medium_emphasized,
-        ThemeTextType::BodySmallEmphasized => &scale.body_small_emphasized,
-        ThemeTextType::LabelLargeEmphasized => &scale.label_large_emphasized,
-        ThemeTextType::LabelMediumEmphasized => &scale.label_medium_emphasized,
-        ThemeTextType::LabelSmallEmphasized => &scale.label_small_emphasized,
-    }
-}
-
 /// The family text in `role` paints in: the live theme's `role` family, or
 /// [`crate::tokens::sans_family`] with no theme (see the
 /// [module docs](self)).
 pub(crate) fn role_family(role: ThemeTextType, theme: Option<&Theme>) -> FontFamily {
     theme.map_or_else(crate::tokens::sans_family, |theme| {
-        role_slot(&theme.type_scale, role).family.clone()
+        role.style_in(&theme.type_scale).family.clone()
     })
 }
 
@@ -446,22 +407,6 @@ mod tests {
         let mut rec = typeface_probe::FaceRecorder::default();
         run.paint(Point::ZERO, Color::BLACK, &mut rec);
         rec.faces
-    }
-
-    #[test]
-    fn every_role_reads_its_own_slot() {
-        // One distinct family per slot, so a mis-wired arm resolves a
-        // neighbour's name instead of its own.
-        let mut theme = crate::theme();
-        let mut names = Vec::new();
-        for (index, role) in ALL_ROLES.into_iter().enumerate() {
-            let family = FontFamily::named(format!("Role Probe {index}"));
-            typeface_probe::set_role_family(&mut theme, role, family.clone());
-            names.push(family);
-        }
-        for (role, family) in ALL_ROLES.into_iter().zip(names) {
-            assert_eq!(role_family(role, Some(&theme)), family, "{role:?}");
-        }
     }
 
     #[test]

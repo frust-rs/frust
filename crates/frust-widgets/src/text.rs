@@ -139,8 +139,12 @@ pub enum ThemeTextType {
 }
 
 impl ThemeTextType {
-    /// The `scale` slot this role names.
-    fn slot(self, scale: &TypeScale) -> &TextStyle {
+    /// The full [`TextStyle`] this role names in `scale` — what
+    /// [`TextView::themed_family`] reads at layout to resolve an opted-in
+    /// text's family, and the one mapping a design-system crate outside this
+    /// one calls into directly instead of restating its own copy of the
+    /// 30-arm role-to-slot table.
+    pub fn style_in(self, scale: &TypeScale) -> &TextStyle {
         match self {
             Self::DisplayLarge => &scale.display_large,
             Self::DisplayMedium => &scale.display_medium,
@@ -473,7 +477,7 @@ impl TextWidget {
         if !self.family_explicit
             && let Some(role) = self.family_role
         {
-            style.family = role.slot(&theme.type_scale).family.clone();
+            style.family = role.style_in(&theme.type_scale).family.clone();
         }
         style
     }
@@ -587,6 +591,60 @@ mod tests {
         };
         let view = text("x").style(custom.clone());
         assert_eq!(view.style, custom);
+    }
+
+    // --- Role-to-slot mapping ---
+
+    /// Guards [`ThemeTextType::style_in`]'s 30-arm match against a
+    /// copy-paste slip: each role, and no other, reads the slot it names.
+    #[test]
+    fn every_role_reads_its_own_type_scale_slot() {
+        macro_rules! each_role {
+            ($($role:ident => $slot:ident),+ $(,)?) => {$({
+                let mut scale = TypeScale::neutral(&TextStyle::default());
+                let probe = FontFamily::named(stringify!($slot));
+                scale.$slot.family = probe.clone();
+                assert_eq!(
+                    ThemeTextType::$role.style_in(&scale).family,
+                    probe,
+                    "`{}` must read `{}`",
+                    stringify!($role),
+                    stringify!($slot)
+                );
+            })+};
+        }
+        each_role!(
+            DisplayLarge => display_large,
+            DisplayMedium => display_medium,
+            DisplaySmall => display_small,
+            HeadlineLarge => headline_large,
+            HeadlineMedium => headline_medium,
+            HeadlineSmall => headline_small,
+            TitleLarge => title_large,
+            TitleMedium => title_medium,
+            TitleSmall => title_small,
+            BodyLarge => body_large,
+            BodyMedium => body_medium,
+            BodySmall => body_small,
+            LabelLarge => label_large,
+            LabelMedium => label_medium,
+            LabelSmall => label_small,
+            DisplayLargeEmphasized => display_large_emphasized,
+            DisplayMediumEmphasized => display_medium_emphasized,
+            DisplaySmallEmphasized => display_small_emphasized,
+            HeadlineLargeEmphasized => headline_large_emphasized,
+            HeadlineMediumEmphasized => headline_medium_emphasized,
+            HeadlineSmallEmphasized => headline_small_emphasized,
+            TitleLargeEmphasized => title_large_emphasized,
+            TitleMediumEmphasized => title_medium_emphasized,
+            TitleSmallEmphasized => title_small_emphasized,
+            BodyLargeEmphasized => body_large_emphasized,
+            BodyMediumEmphasized => body_medium_emphasized,
+            BodySmallEmphasized => body_small_emphasized,
+            LabelLargeEmphasized => label_large_emphasized,
+            LabelMediumEmphasized => label_medium_emphasized,
+            LabelSmallEmphasized => label_small_emphasized,
+        );
     }
 
     // --- Themed color resolution ---

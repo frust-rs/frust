@@ -40,11 +40,11 @@
 //! Mono text has no role, because `TypeScale` has no monospace slot. It keeps
 //! [`mono_family`](crate::tokens::mono_family) explicitly and follows no theme.
 
+use frust::Theme;
 use frust::authoring::{
     Brush, Color, LayoutCtx, PaintScene, Point, Size, ThemeTextType,
     text::{TextContext, TextLayout, TextStyle},
 };
-use frust::{Theme, TypeScale};
 
 /// `style` with its font family replaced by the live theme's `role` family,
 /// the opt-in for a run a component shapes itself. This is the counterpart of a
@@ -62,46 +62,9 @@ pub(crate) fn themed_family(
     role: ThemeTextType,
 ) -> TextStyle {
     if let Some(theme) = theme {
-        style.family = role_style(&theme.type_scale, role).family.clone();
+        style.family = role.style_in(&theme.type_scale).family.clone();
     }
     style
-}
-
-/// The `scale` slot `role` names — the same lookup `frust::text`'s
-/// `.themed_family(role)` makes, which `frust-widgets` keeps private.
-fn role_style(scale: &TypeScale, role: ThemeTextType) -> &TextStyle {
-    match role {
-        ThemeTextType::DisplayLarge => &scale.display_large,
-        ThemeTextType::DisplayMedium => &scale.display_medium,
-        ThemeTextType::DisplaySmall => &scale.display_small,
-        ThemeTextType::HeadlineLarge => &scale.headline_large,
-        ThemeTextType::HeadlineMedium => &scale.headline_medium,
-        ThemeTextType::HeadlineSmall => &scale.headline_small,
-        ThemeTextType::TitleLarge => &scale.title_large,
-        ThemeTextType::TitleMedium => &scale.title_medium,
-        ThemeTextType::TitleSmall => &scale.title_small,
-        ThemeTextType::BodyLarge => &scale.body_large,
-        ThemeTextType::BodyMedium => &scale.body_medium,
-        ThemeTextType::BodySmall => &scale.body_small,
-        ThemeTextType::LabelLarge => &scale.label_large,
-        ThemeTextType::LabelMedium => &scale.label_medium,
-        ThemeTextType::LabelSmall => &scale.label_small,
-        ThemeTextType::DisplayLargeEmphasized => &scale.display_large_emphasized,
-        ThemeTextType::DisplayMediumEmphasized => &scale.display_medium_emphasized,
-        ThemeTextType::DisplaySmallEmphasized => &scale.display_small_emphasized,
-        ThemeTextType::HeadlineLargeEmphasized => &scale.headline_large_emphasized,
-        ThemeTextType::HeadlineMediumEmphasized => &scale.headline_medium_emphasized,
-        ThemeTextType::HeadlineSmallEmphasized => &scale.headline_small_emphasized,
-        ThemeTextType::TitleLargeEmphasized => &scale.title_large_emphasized,
-        ThemeTextType::TitleMediumEmphasized => &scale.title_medium_emphasized,
-        ThemeTextType::TitleSmallEmphasized => &scale.title_small_emphasized,
-        ThemeTextType::BodyLargeEmphasized => &scale.body_large_emphasized,
-        ThemeTextType::BodyMediumEmphasized => &scale.body_medium_emphasized,
-        ThemeTextType::BodySmallEmphasized => &scale.body_small_emphasized,
-        ThemeTextType::LabelLargeEmphasized => &scale.label_large_emphasized,
-        ThemeTextType::LabelMediumEmphasized => &scale.label_medium_emphasized,
-        ThemeTextType::LabelSmallEmphasized => &scale.label_small_emphasized,
-    }
 }
 
 /// The ink a [`LabelRun`] is *shaped* with. Never painted: every run is
@@ -274,58 +237,6 @@ mod tests {
                 ..base
             },
             "themed, only the family changes: size, weight and color stay the style's own"
-        );
-    }
-
-    /// Guards the 30-arm lookup against a copy-paste slip: each role, and no
-    /// other, reads the slot it names.
-    #[test]
-    fn every_role_reads_its_own_type_scale_slot() {
-        macro_rules! each_role {
-            ($($role:ident => $slot:ident),+ $(,)?) => {$({
-                let mut scale = TypeScale::neutral(&TextStyle::default());
-                let probe = FontFamily::named(stringify!($slot));
-                scale.$slot.family = probe.clone();
-                assert_eq!(
-                    role_style(&scale, ThemeTextType::$role).family,
-                    probe,
-                    "`{}` must read `{}`",
-                    stringify!($role),
-                    stringify!($slot)
-                );
-            })+};
-        }
-        each_role!(
-            DisplayLarge => display_large,
-            DisplayMedium => display_medium,
-            DisplaySmall => display_small,
-            HeadlineLarge => headline_large,
-            HeadlineMedium => headline_medium,
-            HeadlineSmall => headline_small,
-            TitleLarge => title_large,
-            TitleMedium => title_medium,
-            TitleSmall => title_small,
-            BodyLarge => body_large,
-            BodyMedium => body_medium,
-            BodySmall => body_small,
-            LabelLarge => label_large,
-            LabelMedium => label_medium,
-            LabelSmall => label_small,
-            DisplayLargeEmphasized => display_large_emphasized,
-            DisplayMediumEmphasized => display_medium_emphasized,
-            DisplaySmallEmphasized => display_small_emphasized,
-            HeadlineLargeEmphasized => headline_large_emphasized,
-            HeadlineMediumEmphasized => headline_medium_emphasized,
-            HeadlineSmallEmphasized => headline_small_emphasized,
-            TitleLargeEmphasized => title_large_emphasized,
-            TitleMediumEmphasized => title_medium_emphasized,
-            TitleSmallEmphasized => title_small_emphasized,
-            BodyLargeEmphasized => body_large_emphasized,
-            BodyMediumEmphasized => body_medium_emphasized,
-            BodySmallEmphasized => body_small_emphasized,
-            LabelLargeEmphasized => label_large_emphasized,
-            LabelMediumEmphasized => label_medium_emphasized,
-            LabelSmallEmphasized => label_small_emphasized,
         );
     }
 
