@@ -895,7 +895,7 @@ fn composer_bar(
 
     // Rides above the on-screen keyboard: the
     // composer sits at the window bottom under edge-to-edge + `adjustResize`
-    // (see `templates/app/android.tmpl` / `examples/huddle/android`'s
+    // (see `crates/frust-drive/templates/app/android.tmpl` / `examples/huddle/android`'s
     // wiring), so it must consume the raw IME occlusion itself rather than
     // relying on a window resize. `avoid_keyboard` pads by the live
     // `WindowInsets::view_insets.bottom` — the same raw inset `ui::sheet`'s

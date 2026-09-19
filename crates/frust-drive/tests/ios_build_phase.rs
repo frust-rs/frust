@@ -1,5 +1,5 @@
 //! Host-side tripwire for the iOS "Build Rust staticlib" shell-script build
-//! phase (`templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`):
+//! phase (`crates/frust-drive/templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`):
 //! the phase must resolve the directory `cargo build` actually wrote to
 //! through `cargo metadata` (mirroring
 //! `desktop_build::cargo::resolve_target_dir`'s own precedence) rather than

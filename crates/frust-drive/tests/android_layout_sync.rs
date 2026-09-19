@@ -1,5 +1,5 @@
 //! Host-side tripwire for the Android Gradle build-directory redirect: every
-//! hand-written path literal in the rendered `templates/app/android.tmpl/`
+//! hand-written path literal in the rendered `crates/frust-drive/templates/app/android.tmpl/`
 //! tree (`settings.gradle.kts`'s `beforeProject` redirects and the plugin
 //! include block, `app/build.gradle.kts`'s `jniLibs` staging directory) must
 //! agree with [`frust_drive::build_dirs::BuildLayout`] — the single source of

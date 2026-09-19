@@ -1,5 +1,5 @@
 # Rust build-output location for this in-tree example — mirrors
-# `templates/app/.cargo/config.toml`'s `[build]` table (a `frust create`
+# `crates/frust-drive/templates/app/.cargo/config.toml`'s `[build]` table (a `frust create`
 # scaffold's own copy), which names `build/rust` as the location
 # `crates/frust-drive::build_dirs::BuildLayout::rust_dir()` expects a bare
 # `cargo build`/`cargo run` from this directory to write to. Resolved

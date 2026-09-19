@@ -460,7 +460,7 @@ impl AppState {
 }
 ```
 
-This is the same "degrade to unavailable rather than panic" shape `templates/app/src/lib.rs`'s
+This is the same "degrade to unavailable rather than panic" shape `crates/frust-drive/templates/app/src/lib.rs`'s
 own notes/draft persistence uses — a `None` preferences handle (an old scaffold, or a backend
 that hasn't landed on this target yet) just means the choice doesn't survive this run, never a
 crash. `SharedPreferences`'s calls are plain synchronous reads/writes (no `spawn_blocking`

@@ -49,7 +49,7 @@ frust-material = { path = "../../plugins/material" }
 # builds only (riding the same features plumbing that turns on
 # `frust/perf-trace` for debug/profile), so release strips stray info/debug
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
+# `frust-perf` output. Mirrors `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
 # Headless integration-test harness only (`tests/showcase.rs`):
@@ -80,7 +80,7 @@ reactive_graph = "0.2"
 # release-only opt-in rather than an unconditional manifest feature. The CLI
 # passes `--features lean` for `--release` builds; debug/profile builds omit
 # it (and enable `frust/perf-trace` instead). Mirrors
-# `templates/app/Cargo.toml.tmpl`'s block verbatim.
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for

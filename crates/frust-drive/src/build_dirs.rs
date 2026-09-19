@@ -19,7 +19,7 @@
 //! a path relative to the project root — join it onto the project directory
 //! at the call site.
 //!
-//! A scaffolded project's own `templates/app/.gitignore` must stay
+//! A scaffolded project's own `crates/frust-drive/templates/app/.gitignore` must stay
 //! hand-synced with [`CLEAN_DIRS`]/[`LEGACY_CLEAN_DIRS`] — a rendered
 //! template this crate has no build-time hook to check automatically.
 //!
