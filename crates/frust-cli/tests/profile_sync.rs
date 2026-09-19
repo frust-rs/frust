@@ -100,7 +100,7 @@ fn synced_manifests() -> Vec<std::path::PathBuf> {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     vec![
         repo_root.join("Cargo.toml"),
-        repo_root.join("templates/app/Cargo.toml.tmpl"),
+        repo_root.join("crates/frust-drive/templates/app/Cargo.toml.tmpl"),
         repo_root.join("examples/huddle/Cargo.toml"),
         repo_root.join("examples/glyph-catalog/Cargo.toml"),
         repo_root.join("examples/material3-demo/Cargo.toml"),
@@ -199,14 +199,15 @@ fn android_cargo_config_identical_between_root_and_template() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let root_config = std::fs::read_to_string(repo_root.join(".cargo/config.toml"))
         .expect("failed to read root .cargo/config.toml");
-    let template_config =
-        std::fs::read_to_string(repo_root.join("templates/app/.cargo/config.toml"))
-            .expect("failed to read templates/app/.cargo/config.toml");
+    let template_config = std::fs::read_to_string(
+        repo_root.join("crates/frust-drive/templates/app/.cargo/config.toml"),
+    )
+    .expect("failed to read crates/frust-drive/templates/app/.cargo/config.toml");
 
     let root_toml: toml::Table =
         toml::from_str(&root_config).expect("root .cargo/config.toml must be valid TOML");
     let template_toml: toml::Table = toml::from_str(&template_config)
-        .expect("templates/app/.cargo/config.toml must be valid TOML");
+        .expect("crates/frust-drive/templates/app/.cargo/config.toml must be valid TOML");
 
     // Compare the FULL top-level key sets first, not just the one key
     // ("target") the equality checks below happen to read — a new
@@ -224,7 +225,7 @@ fn android_cargo_config_identical_between_root_and_template() {
     assert_eq!(
         template_keys,
         BTreeSet::from(["build", "target"]),
-        "templates/app/.cargo/config.toml's top-level table set must be \
+        "crates/frust-drive/templates/app/.cargo/config.toml's top-level table set must be \
          exactly {{\"build\", \"target\"}} — a new top-level table \
          ([source]/[registries]/[env]/[net]/...) must not silently appear"
     );
@@ -240,7 +241,7 @@ fn android_cargo_config_identical_between_root_and_template() {
     assert_eq!(
         root_toml.get("target"),
         template_toml.get("target"),
-        "templates/app/.cargo/config.toml's [target.*] rustflags tables have \
+        "crates/frust-drive/templates/app/.cargo/config.toml's [target.*] rustflags tables have \
          structurally drifted from the repo root's — the two must stay \
          identical"
     );
@@ -257,7 +258,7 @@ fn android_cargo_config_identical_between_root_and_template() {
     assert_eq!(
         template_toml.get("build"),
         Some(&toml::Value::Table(expected_build)),
-        "templates/app/.cargo/config.toml's [build] table must contain \
+        "crates/frust-drive/templates/app/.cargo/config.toml's [build] table must contain \
          exactly `target-dir = \"build/rust\"` and nothing else"
     );
 }

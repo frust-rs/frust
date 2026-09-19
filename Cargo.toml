@@ -669,7 +669,7 @@ frust = { path = "crates/frust" }
 # 3`'s further gain over 2 is marginal for straight-line shader-translation
 # code and not worth its added compile-time cost). This is frust's own
 # workspace dev workflow (building/testing the crates in this workspace
-# directly); the same override lands in `templates/app/Cargo.toml.tmpl`
+# directly); the same override lands in `crates/frust-drive/templates/app/Cargo.toml.tmpl`
 # (every generated app) and `examples/huddle/Cargo.toml`.
 [profile.dev.package.wgpu]
 opt-level = 2
@@ -700,7 +700,7 @@ opt-level = 2
 # (opt-level 2) still win over this wildcard since a named package override
 # takes precedence over `"*"`. Targets emulator/debug first-frame cost —
 # parley/swash/image/kurbo compiled at `opt-level = 0` are part of that cost.
-# Hand-synced across `templates/app/Cargo.toml.tmpl` and `examples/huddle/
+# Hand-synced across `crates/frust-drive/templates/app/Cargo.toml.tmpl` and `examples/huddle/
 # Cargo.toml` (examples-convergence dropped the other two
 # manifests this used to be hand-synced against — the now-deleted `catalog`
 # and `inbox` examples' own `Cargo.toml`s — along with the examples
@@ -730,7 +730,7 @@ opt-level = 1
 # inverse — per-package `"z"` for named crates that do no per-frame work,
 # which is a different (and measured-larger) win. This
 # block and the wildcard dev override above are hand-synced across
-# `templates/app/Cargo.toml.tmpl` and `examples/huddle/Cargo.toml`
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl` and `examples/huddle/Cargo.toml`
 # (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
 # examples-convergence dropped the other two manifests this used to be
 # hand-synced against — the now-deleted `catalog` and `inbox` examples' own
@@ -799,7 +799,7 @@ panic = "abort"
 # shipping configuration.
 #
 # Hand-synced, byte-for-byte, across the EIGHT manifests that build an Android
-# artifact: this root manifest, `templates/app/Cargo.toml.tmpl`,
+# artifact: this root manifest, `crates/frust-drive/templates/app/Cargo.toml.tmpl`,
 # `examples/huddle`, `examples/glyph-catalog`, `examples/material3-demo`,
 # `examples/playground`, `examples/shadertoy` and
 # `benchmarks/frust_bench`. `crates/frust-cli/tests/profile_sync.rs` is the

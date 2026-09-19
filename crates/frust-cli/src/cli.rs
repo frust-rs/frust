@@ -336,7 +336,7 @@ impl BuildFlags {
 /// shell metacharacter) is rejected: a validated CSV of these tokens is
 /// still base64-decoded and re-spliced, **unquoted**, into a shell command
 /// by the iOS release lane's own build phase
-/// (`templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s `cargo
+/// (`crates/frust-drive/templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s `cargo
 /// build ... $CARGO_FEATURES`), so a token carrying a shell metacharacter
 /// that reached that far would be a shell-injection primitive, not merely
 /// an odd cargo argument.
