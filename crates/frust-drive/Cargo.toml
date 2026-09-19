@@ -67,3 +67,10 @@ image = { workspace = true, features = ["ico"] }
 # `#[cfg(any(test, feature = "test-util"))]`) link into the integration-test
 # binary the same way `frust-cli`'s own `frust-drive` dev-dependency does.
 frust-drive = { path = ".", features = ["test-util"] }
+
+[[test]]
+name = "templates_packaged"
+# The self dev-dependency above is a path-only dependency, stripped from the
+# published manifest — so in the packaged tarball `test-util` is off and this
+# target is skipped at `cargo test` time instead of failing to compile.
+required-features = ["test-util"]
