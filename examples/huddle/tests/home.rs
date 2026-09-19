@@ -4,6 +4,8 @@
 //! uses). Every test takes the [`support::serial`] lock first, since the roster
 //! load runs on the shared background reactive runtime (its timer is a
 //! process-global the parallel `cargo test` default would otherwise race).
+//! Every frame paints on an advancing [`PaintClock`] — see its docs for why a
+//! pinned clock can never show the loaded roster.
 
 use std::any::Any;
 use std::time::{Duration, Instant};
@@ -17,14 +19,65 @@ use kurbo::{Point, Size};
 use huddle::{HuddleApp, HuddleState};
 
 mod support;
-use support::{frame, pointer, serial, setup};
+use support::{pointer, serial, setup};
 
 type Root = RenderRoot<HuddleState, AnyView<HuddleState>>;
+
+/// The paint clock's step per frame (one 60 Hz frame).
+const FRAME_MS: u64 = 16;
+
+/// How many frames an animation gets to settle before a test gives up: ~4.8 s
+/// of paint clock, an order of magnitude past the boot entrance transition.
+const SETTLE_FRAMES: usize = 300;
+
+/// A monotonic paint clock: [`frame`](Self::frame) paints at the current time
+/// and then advances it by [`FRAME_MS`], the way a real shell's clock moves.
+///
+/// The app boots mid-transition: the router's start location replaces the
+/// navigator's seeded Home page under an `M3FadeThrough` cross-fade. Until that
+/// cross-fade settles, the replaced page is the one on screen — and the
+/// navigator does not rebuild a replaced page, so it keeps its loading
+/// skeleton. The live Home page the roster loads into sits at alpha 0 on the
+/// cross-fade's first stretch, and the navigator paints an alpha-0 page into a
+/// discard sink, so none of its text reaches the recorded scene. A clock pinned
+/// at [`FrameTime::ZERO`] — the time [`support::frame`] paints at — holds the
+/// cross-fade at progress 0 forever, so no frame could ever show the loaded
+/// roster.
+struct PaintClock {
+    t_ms: u64,
+}
+
+impl PaintClock {
+    fn new() -> Self {
+        Self { t_ms: 0 }
+    }
+
+    /// Rebuild, lay out and paint one frame at the current time, then advance
+    /// the clock. Returns the recorded scene together with whether the paint
+    /// asked for another frame (an animation — such as a page transition — is
+    /// still running).
+    fn frame(
+        &mut self,
+        root: &mut Root,
+        logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
+        state: &mut HuddleState,
+        tcx: &mut TextContext,
+    ) -> (support::RecScene, bool) {
+        root.rebuild(logic, state);
+        let tcx_any: &mut dyn Any = tcx;
+        root.layout_with_text(Size::new(support::W, support::H), tcx_any);
+        let mut scene = support::RecScene::default();
+        let outcome = root.paint(&mut scene, FrameTime::from_nanos(self.t_ms * 1_000_000));
+        self.t_ms += FRAME_MS;
+        (scene, outcome.needs_frame)
+    }
+}
 
 /// Render frames (letting the background loader's ~600ms timer fire) until the
 /// roster's text glyph count jumps well past the loading skeleton's, or a
 /// deadline trips. Returns the loaded scene.
 fn render_until_loaded(
+    clock: &mut PaintClock,
     root: &mut Root,
     logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
     state: &mut HuddleState,
@@ -37,68 +90,40 @@ fn render_until_loaded(
         // Drain the UI-thread task queue (the loader is a `spawn_local` task) and
         // let its ~600ms background timer advance, then re-render.
         runtime.pump_local();
-        let scene = frame(root, logic, state, tcx);
+        let (scene, _) = clock.frame(root, logic, state, tcx);
         if scene.glyph_runs > loading_glyphs + 10 {
             return scene;
         }
+        let transition = state.nav.router().controller().transition();
         assert!(
             Instant::now() < deadline,
-            "the roster did not load within the deadline"
+            "the roster did not load within the deadline (entrance transition \
+             active: {}, progress {:.3})",
+            transition.active,
+            transition.progress
         );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
 
-/// Rebuild + layout + paint like [`support::frame`], but painting at `t_ms` on a
-/// caller-advanced clock instead of the shared harness's pinned
-/// [`FrameTime::ZERO`]. Returns the recorded scene together with whether the
-/// paint asked for another frame (i.e. an animation — such as a page transition —
-/// is still running).
-fn frame_at(
-    root: &mut Root,
-    logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
-    state: &mut HuddleState,
-    tcx: &mut TextContext,
-    t_ms: u64,
-) -> (support::RecScene, bool) {
-    root.rebuild(logic, state);
-    let tcx_any: &mut dyn Any = tcx;
-    root.layout_with_text(Size::new(support::W, support::H), tcx_any);
-    let mut scene = support::RecScene::default();
-    let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
-    (scene, outcome.needs_frame)
-}
-
-/// Drive the paint clock forward until no animation asks for another frame,
-/// settling the app's boot-time entrance transition, and return the settled
-/// scene.
-///
-/// The app mounts *two* Home pages at boot — the navigator's seeded root page and
-/// the router's pushed `"/"` route — so an `M3FadeThrough` cross-fade is in flight
-/// on the first frames. The shared [`support::frame`] helper paints at
-/// [`FrameTime::ZERO`], which freezes that transition forever; and while a
-/// transition runs the navigator suppresses ALL page input (its input-blocking
-/// contract), so a gesture dispatched mid-transition never reaches the roster.
-/// Advancing the clock lets the entrance settle (the leaving page is torn down)
-/// exactly as a real shell's monotonic clock does within ~300ms.
+/// Paint frames until no animation asks for another, and return the settled
+/// scene. While a page transition runs the navigator suppresses ALL page input
+/// (its input-blocking contract), so a gesture dispatched mid-transition never
+/// reaches the roster.
 fn settle_transitions(
+    clock: &mut PaintClock,
     root: &mut Root,
     logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
     state: &mut HuddleState,
     tcx: &mut TextContext,
 ) -> support::RecScene {
-    let mut t_ms = 50u64;
-    loop {
-        t_ms += 16;
-        let (scene, needs_frame) = frame_at(root, logic, state, tcx, t_ms);
+    for _ in 0..SETTLE_FRAMES {
+        let (scene, needs_frame) = clock.frame(root, logic, state, tcx);
         if !needs_frame {
             return scene;
         }
-        assert!(
-            t_ms < 50 + 16 * 300,
-            "the boot-time entrance transition never settled"
-        );
     }
+    panic!("the app was still animating after {SETTLE_FRAMES} frames");
 }
 
 /// Find the first ~40×40 rounded rect in the list region (a roster row's leading
@@ -118,6 +143,44 @@ fn first_row_center(scene: &support::RecScene) -> Point {
     Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0)
 }
 
+/// The paint clock carries the app out of its boot entrance cross-fade within a
+/// bounded number of frames, independently of the roster loader's timer. Until
+/// the cross-fade settles, the page the roster loads into is painted into a
+/// discard sink (see [`PaintClock`]), so a clock that cannot settle it makes
+/// every roster assertion in this file unreachable.
+#[test]
+fn boot_entrance_transition_settles_on_the_paint_clock() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = HuddleApp.init();
+    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut tcx = TextContext::new();
+    let mut clock = PaintClock::new();
+    let nav = state.nav.router().controller().clone();
+
+    clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
+    assert!(
+        nav.transition().active,
+        "the app boots mid-way through its entrance cross-fade"
+    );
+
+    for _ in 0..SETTLE_FRAMES {
+        if !nav.transition().active {
+            break;
+        }
+        clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
+    }
+    let transition = nav.transition();
+    assert!(
+        !transition.active,
+        "the entrance cross-fade never settled on the paint clock (still at \
+         progress {:.3} after {SETTLE_FRAMES} frames)",
+        transition.progress
+    );
+}
+
 #[test]
 fn loading_transitions_to_a_loaded_roster() {
     let _g = serial();
@@ -127,14 +190,22 @@ fn loading_transitions_to_a_loaded_roster() {
     let mut state = HuddleApp.init();
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
+    let mut clock = PaintClock::new();
 
     // First frame: the loading skeleton (plus the shell chrome text).
-    let loading = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    let (loading, _) = clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
     let loading_glyphs = loading.glyph_runs;
 
     // The roster loads and renders many more text rows (channel/DM names,
     // previews, section headers, unread badge counts).
-    let loaded = render_until_loaded(&mut root, &mut logic, &mut state, &mut tcx, loading_glyphs);
+    let loaded = render_until_loaded(
+        &mut clock,
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        loading_glyphs,
+    );
     assert!(
         loaded.glyph_runs > loading_glyphs,
         "the loaded roster renders more text than the loading skeleton"
@@ -156,9 +227,11 @@ fn swipe_right_archives_with_an_undo_toast() {
     let mut state = HuddleApp.init();
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
+    let mut clock = PaintClock::new();
 
-    let loading = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    let (loading, _) = clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
     render_until_loaded(
+        &mut clock,
         &mut root,
         &mut logic,
         &mut state,
@@ -166,12 +239,12 @@ fn swipe_right_archives_with_an_undo_toast() {
         loading.glyph_runs,
     );
 
-    // Settle the boot-time entrance cross-fade before driving the gesture: while a
+    // Settle every in-flight animation before driving the gesture: while a
     // transition is in flight the navigator blocks all page input, so a swipe
     // dispatched now would be swallowed (see `settle_transitions`). The settled
     // scene paints only the live roster, so its first row circle is a real
     // swipeable row (not a frozen leaving-page skeleton).
-    let loaded = settle_transitions(&mut root, &mut logic, &mut state, &mut tcx);
+    let loaded = settle_transitions(&mut clock, &mut root, &mut logic, &mut state, &mut tcx);
 
     let center = first_row_center(&loaded);
     let y = center.y;
@@ -208,7 +281,7 @@ fn swipe_right_archives_with_an_undo_toast() {
     // Undo restores (runs the restore state-patch) without panicking, and the
     // app keeps rendering.
     (action.callback)();
-    let after = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    let (after, _) = clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert!(after.glyph_runs > 0, "the app still renders after undo");
 }
 
@@ -221,9 +294,11 @@ fn pull_to_refresh_reloads_without_disrupting_the_roster() {
     let mut state = HuddleApp.init();
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
+    let mut clock = PaintClock::new();
 
-    let loading = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    let (loading, _) = clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
     let loaded = render_until_loaded(
+        &mut clock,
         &mut root,
         &mut logic,
         &mut state,
@@ -252,13 +327,13 @@ fn pull_to_refresh_reloads_without_disrupting_the_roster() {
 
     // The stale roster stays visible during the reload (Reloading), so the app
     // keeps rendering rows.
-    let after = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    let (after, _) = clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert!(
         after.glyph_runs > loaded_glyphs / 2,
         "the roster stays visible while refreshing"
     );
 
     // Let the reload complete; the roster is still there.
-    let reloaded = render_until_loaded(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    let reloaded = render_until_loaded(&mut clock, &mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(reloaded.glyph_runs > 10, "the reloaded roster renders");
 }
