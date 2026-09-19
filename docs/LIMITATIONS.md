@@ -5983,3 +5983,17 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Why accepted**: `cargo metadata` is what lets the phase resolve the real target directory correctly under a `.cargo/config.toml` `[build] target-dir` override or a `CARGO_TARGET_DIR` env var, instead of assuming the default; its cost (a workspace manifest walk, no compilation) is negligible next to the `cargo build` step the same script already runs first.
 
 **Evidence**: `templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s build-phase `shellScript`.
+
+---
+
+### `textinput-no-themed-family` — a baseline `TextInput` field never takes its font family from the theme
+
+**Observed**: `TextInputWidget::effective_style` (`crates/frust-widgets/src/textinput.rs` ~1230) resolves only the field's ink COLOR from the theme (`Theme::scheme().on_surface`, further dimmed while disabled) — it never touches `style.family`. A field's family is therefore whatever it was built with: the caller's own explicit `.text_style(..)`, or, absent that, `TextStyle::default()`'s `FontFamily::SystemUi`. Neither a runtime theme swap nor `frust_testing::frame::pin_type_scale` can redirect it, unlike the design-system catalogs' own label/button/title text, which resolves FAMILY from a `Theme::type_scale` role (see [TESTING.md](TESTING.md)'s Deterministic Inputs section).
+
+**Applies to**: every baseline `TextInput` field, and every catalog control built on it that does not itself override the family — shadcn's `input`/`textarea` and the `command` palette's search field; Glyph's `command_palette` query field; and beUI's `input`, `combobox`, `multi_select` and `prompt_input` fields, plus the `command_palette`, `feedback_widget`, `morphing_search` and `signup_form` blocks' fields, all of which are built on beUI's own `input`.
+
+**Why accepted**: closing the gap means giving `TextInput` a themed-family seam mirroring `Text`'s `.themed_family(..)` opt-in (a new branch in `effective_style`, plus each affected catalog field wiring into it) — a `frust-widgets` API change not yet built, so an app that swaps themes or a font scale at runtime sees every field's chrome and ink follow the theme while its typed text keeps the system font.
+
+**Trigger for removal**: `TextInput` grows a themed-family option (an opt-in analogous to `Text::themed_family`) and the fields listed above are wired through it.
+
+**Evidence**: `crates/frust-widgets/src/textinput.rs` (`effective_style`); [TESTING.md](TESTING.md)'s pinnable-text paragraph; `crates/frust-testing/src/corpus/page.rs` module docs.

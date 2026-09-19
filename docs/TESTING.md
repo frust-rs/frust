@@ -386,9 +386,17 @@ taken from the theme (`TextStyle::default()`'s `FontFamily::SystemUi`, or a
 hardcoded stack). Golden cases empty or avoid the string slots of the second
 kind and supply real text through view slots or as plain page content
 instead; the corpus modules' docs (`crates/frust-testing/src/corpus/page.rs`,
-`widget.rs`) record which slots, and why. Material's app bar, navigation-bar labels and dialog title/body opt
-in but are still passed empty, because their baselines were captured that
-way (tracked as an open action item).
+`widget.rs`) record which slots, and why. Every catalog's own chrome and
+controls opt in this way too — Material's app bar, navigation-bar labels and
+dialog title/body; Cupertino's nav bar title, tab items and button; shadcn's
+buttons and card title; and Glyph's tag label — and are still passed empty
+(or the widget avoided) only because their committed baselines were
+captured that way, not because the family can't be pinned (tracked as an
+open action item). Separately, font registration lands in a process-global
+list (`frust_text`'s `TextContext::register_fonts`/`APP_FONTS`), so two
+`TextContext`s built at different points in the same test process can drift
+once another test has registered fonts in between — lay both sides of a
+layout comparison out through the same context.
 
 ### Comparison
 
