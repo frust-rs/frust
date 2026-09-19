@@ -751,8 +751,9 @@ S1 −1.0 %/+0.5 %, S4 +1.0 %/−0.4 %, S5 +3.4 %/+3.3 %, S6 −0.3 %/+0.0 %. CP
 (rebuild+layout+paint+encode) p50: −0.3 %, −3.0 %, −0.1 %, +0.8 %. S1 `gpu_main` 6.31 ms both
 variants (+0.01 %); all sixteen blocks held ~120 fps. S5 is the one real signal — both cold-set
 blocks put ~0.2 ms more in `submit` (5.58/5.59 → 5.78/5.80 ms) on the image-upload path; no
-per-crate isolation was run, so the responsible member is not established (`wgpu-core` is the
-plausible candidate). It passes, but the headroom is not wide: S5's +3.4 % leaves 1.6
+per-crate isolation was run in this pass (`wgpu-core` was the plausible candidate; the dated S5
+attribution note below isolated it on 2026-09-19 and confirms `wgpu-core`). It passes, but the
+headroom is not wide: S5's +3.4 % leaves 1.6
 percentage points against an S1 block-order drift of 2.15 % on the same rig. Unlike the Pixel 5
 attempt, this rig's own drift is smaller than the bar: re-running the *identical* no-cold-set
 binary later in the session moved cost-sum p50 by 0.04–2.15 % per scenario, against that
@@ -947,6 +948,135 @@ unmeasured-per-frame-work grounds `jni` already left on, though unlike `jni`'s s
 removing accesskit would cost size rather than give it back. Applied on 2026-09-19:
 on the owner's decision, `tokio` and all three accesskit crates left the cold set (per-lever
 table above) — accesskit on this rule's outcome, `tokio` because `z` saved it no size.
+
+**S5's `submit` cost attributed to `wgpu-core` — OnePlus 9, 2026-09-19.** The cold-set bar note
+above left one real signal unattributed: both cold-set S5 blocks put ~0.2 ms more into `submit`.
+This pass re-confirms that cost against the current 12-crate cold set, then removes one override
+at a time. **The cost comes from `wgpu-core`'s `opt-level = "z"`.** Removing that one block takes
+209.0 / 193.5 µs off S5's `submit` p50 in the two rounds, which is 94 % / 87 % of the whole cold
+set's gap. Removing `gpu-allocator`, `ash` or `wgpu-types` moves it by no more than the
+same-binary drift.
+
+*Method.* The pass used `--profile` arm64 APKs of `benchmarks/frust_bench`, built with
+`frust build apk --profile --define FRUST_TRACE_RAW=1 --target-platform android-arm64`. The APKs
+differ only in which `[profile.release.package.*]` blocks `benchmarks/frust_bench/Cargo.toml`
+carried. Each variant was a temporary edit, reverted after its build. A second full-set build
+reproduced the first APK byte for byte (same md5), so each variant differs from the full set by
+its override alone. Every block drove S5 only, through one `run.sh` call: 12 runs × 30 s, the
+first 2 discarded, leaving 35,980–36,011 kept frames. Each block ran behind `device_state.sh`'s
+fixed brightness and 38 °C cooldown gate. Every block reinstalled its APK and checked the
+installed copy's md5 on the device. The per-block tables and a manifest of the raw per-run logs
+are attached to the task that produced this pass.
+
+The rig was the OnePlus 9 on USB adb, with airplane mode on and `min_refresh_rate` and
+`peak_refresh_rate` pinned to 120. `dumpsys battery unplug` was issued before each block. As
+before, that is a framework-level override only: the phone stayed on USB power and read 100 % at
+every block boundary, so these numbers are not battery-run numbers. All 34 blocks held
+119.9–120.0 fps, and battery temperature ran 27.1–38.1 °C. In six step-2 blocks the cooldown
+gate timed out at 38.1 °C and the block proceeded: three full-set blocks and one each of the
+`ash`, `wgpu-types` and `gpu-allocator` variants, none of them a `wgpu-core` variant block.
+
+*Arithmetic.* Each per-block figure is `stats.py`'s nearest-rank percentile over the pooled kept
+frames. A quad's Δ is the mean of its two variant blocks minus the mean of its two full-set
+blocks. Its A/A drift is the gap between the two blocks of one binary inside it. **The A/A floor
+is the largest such gap on `submit` p50 in the session, 61 µs.** The 20 within-quad pairs span
+0–61 µs, and the two back-to-back full-set pairs at round boundaries are 25 and 32 µs. A removal
+counts as responsible only if its Δ exceeds that floor in both rounds.
+
+*Step 1: the cost is still there.* Full set (Z) vs no overrides (N), order Z,N,N,Z × 2. Δ is
+N − Z, the effect of removing the set.
+
+| Round | `submit` p50, Z → N (ms) | Δ `submit` p50 | Δ `submit` p95 | Δ cost-sum p50 | A/A `submit` p50 (Z / N pair) |
+|---|---|---|---|---|---|
+| 1 | 5.870, 5.813 → 5.600, 5.601 | **−241.0 µs** | −158.5 µs | −160.0 µs | 57 / 1 µs |
+| 2 | 5.788, 5.785 → 5.577, 5.593 | **−201.5 µs** | −140.5 µs | −426.5 µs | 3 / 16 µs |
+
+The cold set costs S5 +4.30 % / +3.61 % on `submit` p50 (Z over N). That is the same size as on
+2026-09-17 (5.58/5.59 → 5.78/5.80 ms). Every Z block (5.785–5.870 ms) sits above every N block
+(5.577–5.601 ms). The CPU-work phases and GPU time do not move: rebuild+layout+paint+encode
+differs by 6.0 / 6.5 µs at p50, and `gpu_main` p50 by 3.5 / 4.5 µs.
+
+Cost-sum p50 reads +2.04 % / **+5.54 %** (Z over N), a mean of +3.8 %. The second round crosses
+the 5 % bar. `acquire` accounts for 149 µs of that round's 426.5 µs; the Z pair's `acquire` gap
+alone is 90 µs, and within-quad `acquire` p50 gaps reach 224 µs across the session. Cost-sum p50
+gaps reach 294 µs. Cost-sum therefore cannot resolve a 0.2 ms effect one quad at a time;
+`submit`, whose floor is 61 µs, can.
+
+S5 was the one scenario in which the 2026-09-17 bar found this signal, and its workload explains
+why. It streams 240 distinct 256×256 images through the mobile-tier atlas
+(`budget=1024x1024x4`), which holds about 60 of them. So the engine evicts and re-uploads about
+1.5 images every frame: `frust-perf img … evicted=` sums to 1.53 per kept frame in a Z block and
+1.54 in an N block. Each re-upload is one `queue.write_texture`, added to the frame's own queue
+writes and submits. All of it runs inside `submit_us`, and all of it goes through `wgpu-core`.
+
+*Step 2: isolation.* Each variant removes one override from the full set. Each variant ran as
+Z,V,V,Z, with neighbouring quads sharing a Z block. Round 1 took the variants in the order
+`wgpu-core`, `gpu-allocator`, `ash`, `wgpu-types`, and round 2 reversed it. `image` and `png`
+were not candidates. S5 decodes each of its 240 images once per process, one cached decode task
+per image id, not once per frame. Its per-frame image work is the atlas re-upload, and that path
+does not call either crate. Δ is V − Z.
+
+| Override removed | Round | `submit` p50, Z → V (ms) | Δ `submit` p50 | A/A (Z / V pair) | Δ cost-sum p50 |
+|---|---|---|---|---|---|
+| `wgpu-core` | 1 | 5.836, 5.812 → 5.614, 5.616 | **−209.0 µs** | 24 / 2 µs | −255.0 µs |
+| `wgpu-core` | 2 | 5.762, 5.781 → 5.589, 5.567 | **−193.5 µs** | 19 / 22 µs | −325.5 µs |
+| `gpu-allocator` | 1 | 5.812, 5.812 → 5.790, 5.835 | +0.5 µs | 0 / 45 µs | −71.0 µs |
+| `gpu-allocator` | 2 | 5.802, 5.762 → 5.785, 5.827 | +24.0 µs | 40 / 42 µs | −133.5 µs |
+| `ash` | 1 | 5.812, 5.806 → 5.849, 5.820 | +25.5 µs | 6 / 29 µs | −193.5 µs |
+| `ash` | 2 | 5.805, 5.802 → 5.792, 5.755 | −30.0 µs | 3 / 37 µs | +31.5 µs |
+| `wgpu-types` | 1 | 5.806, 5.818 → 5.824, 5.763 | −18.5 µs | 12 / 61 µs | +122.0 µs |
+| `wgpu-types` | 2 | 5.850, 5.805 → 5.814, 5.824 | −8.5 µs | 45 / 10 µs | +10.0 µs |
+
+**Attribution: `wgpu-core`.** Removing it exceeds the 61 µs floor in both rounds, by 3.4× and
+3.2×. It closes 94 % and 87 % of step 1's mean 221 µs gap. Its four variant blocks (5.567–5.616
+ms) are indistinguishable from the four no-cold-set blocks (5.577–5.601 ms). So the other eleven
+overrides combined leave no residual that can be resolved across the session; that is a
+cross-step comparison, not an ABBA. `gpu-allocator`, `ash` and `wgpu-types` stay inside the
+floor in both rounds and show no consistent sign (`ash` +25.5 µs then −30.0 µs). Where inside
+`wgpu-core` the time goes was not isolated. The cost-sum column is noisier than `submit` in every
+quad, for the `acquire` reason above. Read it as not contradicting the attribution, not as a
+second measurement of it. This was not measured on iOS, where the same override applies because
+`[profile.release.package.*]` is not target-scoped.
+
+*Size give-back.* Each size is the stripped arm64 release `libfrustbench.so`, measured with
+`wc -c`. The builds are `cargo ndk -t arm64-v8a build --release`, with `--no-default-features
+--features lean` for the lean build, run from `benchmarks/frust_bench`. Each removed one override
+from the full set as a temporary edit, reverted after it.
+
+| Override removed | lean (B) | Δ lean (B) | `db` on (B) | Δ `db` on (B) |
+|---|---|---|---|---|
+| none (full set) | 6,866,192 | — | 8,912,648 | — |
+| `wgpu-core` | 7,112,424 | **+246,232** | 9,175,752 | **+263,104** |
+| `wgpu-types` | 6,859,304 | −6,888 | 8,905,384 | −7,264 |
+| `gpu-allocator` | 6,870,168 | +3,976 | 8,916,776 | +4,128 |
+| `ash` | 6,877,624 | +11,432 | 8,924,216 | +11,568 |
+| all twelve | 7,503,560 | +637,368 | 9,576,784 | +664,136 |
+
+Two full-set builds, one before the variants and one after, were byte-identical. Both come out
+512 B above the committed on-disk row (6,865,680 / 8,912,136 B). That offset is common to every
+build here and was not decomposed, so it cancels in each Δ. `wgpu-core`'s give-back is 38.6 % of
+the whole cold set's lean saving and 39.6 % of its `db`-on saving. Each removal was measured
+alone; removing `wgpu-core` and `wgpu-types` together was not measured.
+
+**Finding and recommendation (the owner decides; no manifest was changed).** `wgpu-core` is not
+cold. Every frame's queue writes and submits run through it. On S5's upload-heavy frames its `z`
+build costs about 0.2 ms of `submit`, 3.35–3.59 % of the full-set p50, and that is nearly all of
+the cold set's S5 cost. The manifests' rationale comment groups it with crates that "run at
+pipeline-creation and resource-allocation time, not per frame". That description is wrong for
+`wgpu-core` whichever way this is decided. Its override buys 246,232 B lean and 263,104 B
+`db`-on, so this is a real trade, not a free fix.
+
+**Recommended: take `wgpu-core` out of the cold set.** Its cost sits on the per-frame upload and
+submit path. S5 is the only scenario measured with per-frame uploads, so how large the cost gets
+under heavier upload traffic is unknown. In one of this pass's two step-1 rounds, the cold set's
+S5 cost-sum p50 already reached +5.54 % against the 5 % bar. The same manifests keep `wgpu-hal`,
+which is also on the submit path, out of the set: its gain was 37 KB and its cost stayed inside
+the noise. `wgpu-core`'s gain is larger, but its cost is resolved. Keeping it is defensible only
+as a named exception, with the comment corrected.
+
+Separately, **`wgpu-types` can leave at no cost**. At `z` it is larger (removing its block saves
+6,888 B lean / 7,264 B `db`-on), and it moved S5 by nothing resolvable. `gpu-allocator` and `ash`
+save 3,976 and 11,432 B lean with no resolvable S5 cost, so nothing here argues for moving them.
 
 **Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
 the font and link-flag levers above.
