@@ -702,19 +702,20 @@ figure comparable to Android's stripped-`.so` rows above.**
 | Android universal release APK (3 ABIs) | **24.58 MiB** (25,775,054 B) | not built as universal | 49.36 MiB (51,762,140 B) |
 | Android arm64-v8a split APK | **8.57 MiB** (8,981,843 B) | **6.63 MiB** (6,953,291 B) | 17.45 MiB (18,295,458 B) |
 | in-APK `lib/arm64-v8a/libfrustbench.so` | 8.43 MiB (8,837,768 B) | 6.49 MiB (6,809,216 B) | 16.55 MiB (engine + app) |
-| on-disk arm64 `.so` (stripped), 2026-09-19 | 8.50 MiB (8,912,136 B) | 6.55 MiB (6,865,680 B) | n/a |
+| on-disk arm64 `.so` (stripped), 2026-09-19 | 8.74 MiB (9,167,552 B) | 6.77 MiB (7,103,296 B) | n/a |
 | iOS release `.app` (`du -sk`), 2026-09-19 | 11.30 MiB (11,568 KB) | not built | 16.64 MiB |
 | iOS `Runner` binary (unstripped), 2026-09-19 | 11.21 MiB (11,755,184 B) | not built | n/a |
 | iOS `Runner` binary (**stripped**, plain `xcrun strip` scratch copy), 2026-09-19 | **8.16 MiB** (8,559,536 B; real `xcodebuild archive` Runner measures 8,534,544 B, −0.29 %) | not built | n/a |
 
-The on-disk `.so` row was re-measured on 2026-09-19, after `jni` and then `tokio` and the three
-accesskit crates left the cold set (per-lever table below); the other Android rows were not, and
-predate both changes. Against it, the arm64 split-APK and in-APK `.so` rows read low by at least
-those two per-lever deltas (`jni` +30,184 B lean / +30,576 B db-on; `tokio` + accesskit
-+21,944 B lean / +39,384 B db-on, each measured on its own base). The universal APK carries one
-`.so` per ABI, so it likely reads low by more than that — not measured. The in-APK and on-disk
-`.so` rows are also not directly comparable: beyond those two changes, their lean gap includes
-~4.3 KB of unrelated work that landed between the measurements.
+The on-disk `.so` row was re-measured on 2026-09-19, after `jni`, then `tokio` and the three
+accesskit crates, and then `wgpu-core` and `wgpu-types` left the cold set (per-lever table
+below); the other Android rows were not, and predate all three changes. Against it, the arm64
+split-APK and in-APK `.so` rows read low by at least those three per-lever deltas (`jni`
++30,184 B lean / +30,576 B db-on; `tokio` + accesskit +21,944 B lean / +39,384 B db-on;
+`wgpu-core` + `wgpu-types` +237,104 B lean / +254,904 B db-on, each measured on its own base).
+The universal APK carries one `.so` per ABI, so it likely reads low by more than that — not
+measured. The in-APK and on-disk `.so` rows are also not directly comparable: beyond those three
+changes, their lean gap includes ~4.3 KB of unrelated work that landed between the measurements.
 
 **Per-lever contributions**, each measured on the lean arm64 release `.so` of
 its own base by the card that landed it — quoted as measured, never summed
@@ -727,9 +728,10 @@ into a total; Frust's totals above come only from re-measurement (the 2026-09-17
 | shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
 | Glyph italics | measured-keep | 0 | no italic subset landed |
 | `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B; `ANDROID_RELA` confirmed on the shipped `.so` and the artifact run on-device 2026-09-18 (see below). **Android-only**: `.cargo/config.toml` scopes both flags to the four `*-linux-android*` targets, so no iOS artifact is affected |
-| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below. **iOS-relevant**: `[profile.release.package.*]` is not target-scoped, so the cold set applies to `aarch64-apple-ios` as well — with a second-order cost there, see the iOS-delta note below. `jni`, `tokio` and the three accesskit crates have since left this set (rows below) |
+| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below. **iOS-relevant**: `[profile.release.package.*]` is not target-scoped, so the cold set applies to `aarch64-apple-ios` as well — with a second-order cost there, see the iOS-delta note below. `jni`, `tokio`, the three accesskit crates, `wgpu-core` and `wgpu-types` have since left this set (rows below) |
 | `jni` removed from the cold set, 2026-09-18 | 6,812,880 → 6,843,064 | +30,184 | db-on +30,576 B (8,841,504 → 8,872,080). The render-CPU bar could not see `jni`'s per-frame work: Android's per-frame JNI polls run in separate JNI entries after `nativeOnFrame` returns, outside every span `total_us` sums. Removed rather than kept on an unmeasured exception. The bar does see per-frame cost inside the frame's own spans — the submit-path cost S5 shows below comes from the cold set |
 | `tokio` and the three accesskit crates removed from the cold set, 2026-09-19 | 6,843,736 → 6,865,680 | +21,944 | db-on +39,384 B (8,872,752 → 8,912,136). The render-CPU bar could not see either one's per-frame work (the reactive pump; the semantics publish on every frame whose semantics changed), so both were measured directly instead — see the microbench note below: at `z`, accesskit's publish failed the cold set's CPU rule on a little core (at a 2,000-node tree), and `z` saved `tokio` no size. Removed on the owner's decision after that pass |
+| `wgpu-core` and `wgpu-types` removed together from the cold set, 2026-09-19 | 6,866,192 → 7,103,296 | +237,104 | db-on +254,904 B (8,912,648 → 9,167,552). Neither is cold: `wgpu-core` sits on the per-frame queue-write/submit path (the dated S5 attribution note below isolated ~0.2 ms of `submit` p50 to its `z` build) and `wgpu-types` was larger at `z`, not smaller. That note measured each alone (`wgpu-core` +246,232 lean / +263,104 db-on; `wgpu-types` −6,888 lean / −7,264 db-on); removing them together was not measured there, hence this row. This pass's own full-set build reads 512 B above the previously committed on-disk row (6,865,680 / 8,912,136) — the same build-to-build offset the S5 attribution note recorded and did not decompose, so it cancels in this row's own Δ. Removed on the owner's decision after that pass |
 | `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | **iOS-relevant** (a workspace dependency, not target-scoped); its iOS share is folded into the `__TEXT.__text` figure in the note below and was not isolated |
 | `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
 | `android_logger` regex feature off | dependency hygiene | ~0 | |
@@ -1078,6 +1080,10 @@ Separately, **`wgpu-types` can leave at no cost**. At `z` it is larger (removing
 6,888 B lean / 7,264 B `db`-on), and it moved S5 by nothing resolvable. `gpu-allocator` and `ash`
 save 3,976 and 11,432 B lean with no resolvable S5 cost, so nothing here argues for moving them.
 
+**Applied on 2026-09-19:** on the owner's decision, both `wgpu-core` and `wgpu-types` left the
+cold set (per-lever table above, combined-removal row), and the manifests' rationale comment was
+corrected to match.
+
 **Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
 the font and link-flag levers above.
 
@@ -1217,7 +1223,8 @@ not modified) gives 10,894,880 → 10,235,120 B, **−659,760 B (−6.06 %)** �
 (dated note below). The symbol growth tracks the `opt-level = "z"` cold set: the largest
 per-crate symbol-count
 increases are `wgpu_core` +554, `naga` +354, `tokio` +241, `wgpu_types` +120, `image` +60 and
-`png` +47 — members of the cold set at the time (`tokio` has since left it) whose functions
+`png` +47 — members of the cold set at the time (`tokio`, `wgpu_core` and `wgpu_types` have
+since left it) whose functions
 survive as distinct symbols under `z`. That is *consistent with* the cold set, not proven by
 it; no per-lever iOS isolation build was made.
 
