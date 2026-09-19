@@ -33,6 +33,62 @@ static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templa
 static EMBEDDED_DESIGN_SYSTEM_TEMPLATE: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/templates/design-system");
 
+/// Every file path embedded across [`EMBEDDED_APP_TEMPLATE`] and
+/// [`EMBEDDED_DESIGN_SYSTEM_TEMPLATE`], each prefixed `app/` or
+/// `design-system/` to match what `git ls-files templates` reports relative
+/// to this crate's manifest directory. `crates/frust-drive/tests/templates_packaged.rs`
+/// diffs this set against the git-tracked set to catch the packaging
+/// hazard: a template file `include_dir!` embeds from the working tree that
+/// `cargo package` would silently drop because it is untracked or
+/// git-ignored (so a published `frust-drive` would embed a file the
+/// tarball never shipped).
+///
+/// `#[doc(hidden)] pub` rather than gated behind the `test-util` feature or
+/// `cfg(test)`: an integration test under `tests/` links against the plain
+/// library build `cargo test` produces — the same build every downstream
+/// binary/test crate links — which carries neither `cfg(test)` (compiled
+/// only into the separate unit-test harness build) nor a non-default Cargo
+/// feature unless this crate's own `Cargo.toml` opts it in for its own
+/// `tests/` directory, which is outside this change's scope. A doc-hidden,
+/// unconditionally compiled `pub fn` is the smallest surface that reaches
+/// `templates_packaged.rs` without either edit.
+///
+/// Note this reflects the directory listing `include_dir!` saw the last
+/// time this module was actually recompiled: without the crate's
+/// nightly-only `track_path` feature, a file added to `templates/`
+/// afterward is invisible to Cargo's freshness check (and thus to this
+/// function) until something forces this module to rebuild. That makes
+/// this the *fresh-build* guard in `templates_packaged.rs` (the one a
+/// clean build, `cargo package --verify`, or CI catches drift with); the
+/// test's always-on guard instead walks `templates/` on disk at test time,
+/// which needs no recompile to see a newly added file.
+#[doc(hidden)]
+pub fn embedded_template_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_embedded_paths(&EMBEDDED_APP_TEMPLATE, "app", &mut paths);
+    collect_embedded_paths(
+        &EMBEDDED_DESIGN_SYSTEM_TEMPLATE,
+        "design-system",
+        &mut paths,
+    );
+    paths
+}
+
+/// Recursively collects every file path under `dir` into `out`, each
+/// prefixed `prefix/`. [`Dir::files`] only yields the current level's
+/// files, so this walks [`Dir::dirs`] itself; [`include_dir::File::path`]
+/// is already the full path relative to the embedded root (forward-slash
+/// normalized regardless of host OS), so no manual join is needed beyond
+/// the `app`/`design-system` root prefix.
+fn collect_embedded_paths(dir: &Dir<'_>, prefix: &str, out: &mut Vec<String>) {
+    for file in dir.files() {
+        out.push(format!("{prefix}/{}", file.path().to_string_lossy()));
+    }
+    for sub in dir.dirs() {
+        collect_embedded_paths(sub, prefix, out);
+    }
+}
+
 /// Name of the manifest file (relative to the template root) that
 /// whitelists every file the template ships. Never itself copied into a
 /// generated project.
