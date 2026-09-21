@@ -1,7 +1,7 @@
 //! URL launcher section: the `frust-url-launcher` plugin's device-gate page —
 //! `plugins/url-launcher`'s whole vertical slice exercised from a real button
 //! press, plus the `frustplay` custom-scheme return leg the round-trip device
-//! gate (u2-03) drives back in.
+//! gate drives back in.
 //!
 //! # Round trip
 //!
@@ -19,7 +19,7 @@
 //! `frustplay://…` link back into this app's `nativeOnDeepLink` handler,
 //! which lands in [`frust::deep_links`]'s process-wide `latest` signal — this
 //! page just reads it. The caption at the bottom of the page carries the two
-//! commands (`adb`/`simctl`) the human-run device gate (u2-03) drives, so a
+//! commands (`adb`/`simctl`) the human-run device gate drives, so a
 //! runner doesn't have to go find them in `docs/SHELLS_DEVELOPMENT.md`.
 
 use frust::{
@@ -157,13 +157,11 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
         any(SizedBox(None, Some(12.0))),
         any(text(latest_line).size(12.0).color(accent())),
         any(SizedBox(None, Some(12.0))),
+        any(text(format!("Return leg (Android): {ADB_RETURN_COMMAND}"))
+            .size(10.0)
+            .color(muted())),
         any(text(format!(
-            "Return leg (device gate u2-03), Android: {ADB_RETURN_COMMAND}"
-        ))
-        .size(10.0)
-        .color(muted())),
-        any(text(format!(
-            "Return leg (device gate u2-03), iOS Simulator: {SIMCTL_RETURN_COMMAND}"
+            "Return leg (iOS Simulator): {SIMCTL_RETURN_COMMAND}"
         ))
         .size(10.0)
         .color(muted())),
