@@ -1,7 +1,7 @@
-//! The eight playground sections, one module per section: `platform_views`,
-//! `camera`, `native_widgets`, `responsive`, `terminal`, `keys`, `i18n`, and
-//! `video_player` — each one an OS-facing capability exercised end to end
-//! rather than a widget gallery.
+//! The nine playground sections, one module per section: `platform_views`,
+//! `camera`, `native_widgets`, `responsive`, `terminal`, `keys`, `i18n`,
+//! `video_player`, and `url_launcher` — each one an OS-facing capability
+//! exercised end to end rather than a widget gallery.
 //!
 //! # Page-fn contract (fixed across every section)
 //!
@@ -41,19 +41,20 @@ pub mod native_widgets;
 pub mod platform_views;
 pub mod responsive;
 pub mod terminal;
+pub mod url_launcher;
 pub mod video_player;
 
 use frust::AnyView;
 
 use crate::PlaygroundState;
 
-/// The eight section labels, in order. Indexed by `PlaygroundState::section`
+/// The nine section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`], and used verbatim as the shell's bottom
 /// navigation-bar destinations.
 ///
 /// Kept short on purpose: [`NavigationBarWidget`](frust_material::navigation_bar)
-/// divides the bar's width evenly across all eight destinations, so at phone
-/// width (390px logical) each slot is only ~48.75px wide. The longer human
+/// divides the bar's width evenly across all nine destinations, so at phone
+/// width (390px logical) each slot is only ~43.3px wide. The longer human
 /// names ("Platform Views", "Native Widgets") wrapped to two lines there and
 /// overflowed the bar's declared 64dp height — every
 /// label here is verified (see `tests/smoke.rs`'s
@@ -61,11 +62,11 @@ use crate::PlaygroundState;
 /// single line at this slot width. A page wanting a longer heading for
 /// itself (e.g. `native_widgets`'s own on-page title) uses its own string
 /// literal rather than this array — see `pages/native_widgets.rs`.
-pub const SECTION_LABELS: [&str; 8] = [
-    "Platform", "Camera", "Native", "Layout", "Terminal", "Keys", "i18n", "Video",
+pub const SECTION_LABELS: [&str; 9] = [
+    "Platform", "Camera", "Native", "Layout", "Terminal", "Keys", "i18n", "Video", "URL",
 ];
 
-/// Dispatch to the section page for `section` (0..8), falling back to
+/// Dispatch to the section page for `section` (0..9), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// only ever yields a valid index).
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
@@ -78,6 +79,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         5 => keys::page(state),
         6 => i18n::page(state),
         7 => video_player::page(state),
+        8 => url_launcher::page(state),
         _ => platform_views::page(state),
     }
 }
