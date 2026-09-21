@@ -192,14 +192,32 @@ foreground activity stayed `it.f0x.playground/.MainActivity`, confirming the
 Rust validator rejects the URL *before* any `Intent` is constructed rather
 than relying on the OS to refuse it.
 
-### iOS — NOT RUN
+### iOS — browser-out and validator legs PASSED, 2026-09-22; return leg not yet run
 
-Owed to a macOS session with a device. Nothing on the iOS path has been
-executed, and `src/apple.rs` has never been compiled on any host used so
-far (no iOS SDK on the Linux build host), so its main-thread dispatch and
-`openURL:options:completionHandler:` delivery remain unverified in every
-sense. That run also settles whether `objc2-ui-kit`'s `UIApplication`
-feature implies `UIResponder`.
+Run by the maintainer on a physical iPhone from a macOS session, building
+the `examples/playground` iOS app. Device model and iOS version were not
+recorded.
+
+- **Browser-out leg — PASSED.** Tapping `Open example.com` opened the
+  browser on `example.com`, so the main-queue dispatch and the
+  `openURL:options:completionHandler:` call deliver on real hardware.
+- **Negative control — PASSED.** Tapping `Open invalid (javascript:)`
+  showed `Err(InvalidUrl)`, so the Rust validator rejects before the
+  platform call on this backend too.
+- **`src/apple.rs` compiles for a real iOS target.** This is implied rather
+  than separately measured: the playground app cannot build and run on a
+  device without compiling `frust-url-launcher`'s iOS backend, and the page
+  that drove the test calls `UrlLauncher::open_external` directly. This
+  settles the crate's `objc2-ui-kit` feature closure in practice — the
+  declared `["std", "UIResponder", "UIApplication", "block2"]` set is
+  sufficient. A standalone
+  `cargo clippy --target aarch64-apple-ios-sim -p frust-url-launcher
+  --all-targets -- -D warnings` has still not been recorded, so the
+  crate's lint-clean status on that target remains unproven.
+- **Deep-link-back leg — NOT YET RUN.** The `frustplay://back?ok=1` return
+  into `frust::deep_links().latest` has not been exercised on iOS. The
+  Android run covers the equivalent path, but the iOS `frust_on_deep_link`
+  route is a different implementation and is not proven by it.
 
 ### Desktop — partially covered
 
