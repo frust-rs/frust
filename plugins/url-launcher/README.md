@@ -110,9 +110,102 @@ target origin.
 
 ## 6. Device gate
 
-Not yet run — owed to a follow-up device-gate card (Android JNI
-`ActivityNotFoundException` path, iOS main-thread dispatch + `openURL:`
-delivery, desktop `open`/`xdg-open`/`ShellExecuteW` on real hardware for
-each OS).
+### Android — PASSED, 2026-09-21
+
+Device: Xiaomi 12 (`2201123G`, codename `cupid`), LineageOS, Android 16
+(`ro.build.version.sdk` = 36), connected over network `adb`. App: the
+`examples/playground` debug APK (`applicationId` `it.f0x.playground`) built
+with `frust build apk --debug` against SDK platform `android-36`,
+build-tools `36.0.0`, NDK `28.2.13676358`. Device default `http`/`https`
+handler: `org.lineageos.jelly`.
+
+**Merged manifest** — `aapt2 dump xmltree --file AndroidManifest.xml
+app-debug.apk`, confirming the `frustplay` filter survives manifest merging
+(not just the source file):
+
+```
+E: intent-filter (line=59)
+    E: action (line=60)
+      A: android:name="android.intent.action.VIEW"
+    E: category (line=62)
+      A: android:name="android.intent.category.DEFAULT"
+    E: category (line=63)
+      A: android:name="android.intent.category.BROWSABLE"
+    E: data (line=65)
+      A: android:scheme="frustplay"
+...
+A: package="it.f0x.playground"
+A: android:launchMode(0x0101001d)=1
+```
+
+**Browser-out leg** — tapped `Open example.com` on the playground's
+`URL launcher` page. `adb logcat -v time ActivityTaskManager:I *:S`:
+
+```
+09-21 22:50:40.216 I/ActivityTaskManager( 2253): START u0 {act=android.intent.action.VIEW dat=https://example.com/... flg=0x10000000 xflg=0x4 cmp=org.lineageos.jelly/.MainActivity} with LAUNCH_SINGLE_TASK from uid 10587 (it.f0x.playground) (BAL_ALLOW_VISIBLE_WINDOW) result code=0
+```
+
+`flg=0x10000000` is `FLAG_ACTIVITY_NEW_TASK` — the flag this backend must
+set because the shell hands out the *application* `Context`. The browser
+foregrounded on the Example Domain page (screenshot taken), and
+`dumpsys activity activities` reported:
+
+```
+topResumedActivity=ActivityRecord{40948244 u0 org.lineageos.jelly/.MainActivity t43}
+```
+
+On-page status line, verbatim:
+
+```
+status: open_external("https://example.com") -> Ok(())
+```
+
+**Deep-link-back leg** — `adb shell am start -a android.intent.action.VIEW
+-d 'frustplay://back?ok=1' it.f0x.playground`:
+
+```
+Starting: Intent { act=android.intent.action.VIEW dat=frustplay://back/... pkg=it.f0x.playground }
+Warning: Activity not started, its current task has been brought to the front
+topResumedActivity=ActivityRecord{142060989 u0 it.f0x.playground/.MainActivity t42}
+```
+
+The app returned to the foreground and the page's deep-link label
+repainted, verbatim:
+
+```
+latest: frustplay://back?ok=1
+```
+
+(The `singleTop` launch mode is why this is a `onNewIntent` delivery into
+the running task rather than a fresh activity — the "Activity not started"
+warning above is the expected shape, not a failure.)
+
+**Negative control** — tapped `Open invalid (javascript:)`. On-page status,
+verbatim:
+
+```
+status: open_external("javascript:alert(1)") -> Err(InvalidUrl)
+```
+
+`ActivityTaskManager` logged **zero** `START` lines for that tap and the
+foreground activity stayed `it.f0x.playground/.MainActivity`, confirming the
+Rust validator rejects the URL *before* any `Intent` is constructed rather
+than relying on the OS to refuse it.
+
+### iOS — NOT RUN
+
+Owed to a macOS session with a device. Nothing on the iOS path has been
+executed, and `src/apple.rs` has never been compiled on any host used so
+far (no iOS SDK on the Linux build host), so its main-thread dispatch and
+`openURL:options:completionHandler:` delivery remain unverified in every
+sense. That run also settles whether `objc2-ui-kit`'s `UIApplication`
+feature implies `UIResponder`.
+
+### Desktop — partially covered
+
+Linux/macOS spawn-and-reap behaviour is covered by this crate's own unit
+tests (including a fake-`PATH` `NoHandler` case and a successful-spawn
+case). The Windows `ShellExecuteW` arm has never been compiled or run —
+see `url-launcher-windows-leg-unrun` in `docs/LIMITATIONS.md`.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
