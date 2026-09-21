@@ -3,26 +3,39 @@
 //! [`crate::detect::apple`], which is iOS-only, per this crate's `Cargo.toml`
 //! design note).
 //!
-//! `sys_locale::get_locales()` is already BCP-47-normalized on every arm it
-//! supports — it converts POSIX-style tags (`en_US.UTF-8`) itself, so this
-//! backend doesn't re-implement that. Its own crate doc still allows for a
-//! completely empty result on a platform/environment it has no reader for
-//! (a minimal container with no locale subsystem, for instance), so this
-//! backend falls back, in order: `sys_locale::get_locales()` (the full
-//! preference list) → `sys_locale::get_locale()` (its own single-value
-//! convenience, kept as an explicit fallback per this crate's design even
-//! though it is `get_locales().next()` under the hood) → a last-resort
-//! `LANG`-style POSIX env-var read.
+//! `sys_locale::get_locales()` is BCP-47-normalized on every arm it
+//! supports for a real language preference — it converts POSIX-style tags
+//! (`en_US.UTF-8`) itself — but on a POSIX host whose only configured
+//! locale is `C`/`POSIX` (no language to report at all, e.g. a bare
+//! `LANG=C.UTF-8` container) it hands that sentinel back verbatim instead
+//! of an empty list, so this backend runs every raw tag through
+//! [`posix_to_bcp47`] itself before returning it — the same "`C`/`POSIX`
+//! carries no usable language" rule the env-var fallback below has always
+//! applied, now held for every source, not just that last one. Its own
+//! crate doc still allows for a completely empty result on a
+//! platform/environment it has no reader for (a minimal container with no
+//! locale subsystem, for instance), so this backend falls back, in order:
+//! `sys_locale::get_locales()` (the full preference list) →
+//! `sys_locale::get_locale()` (its own single-value convenience, kept as
+//! an explicit fallback per this crate's design even though it is
+//! `get_locales().next()` under the hood) → a last-resort `LANG`-style
+//! POSIX env-var read. A `C`/`POSIX`-only host legitimately falls through
+//! all three and yields an empty `Vec` — that is not a bug; see
+//! [`super::system_locales`]'s documented [`crate::I18nError::Detection`].
 
 /// `sys_locale::get_locales()`, falling back to `sys_locale::get_locale()`
 /// then a `LANG`-style env read only when the list comes back empty (see
-/// the module doc).
+/// the module doc). Every candidate tag, from every source, is run through
+/// [`posix_to_bcp47`] so a `C`/`POSIX` sentinel never survives to the
+/// caller.
 pub(crate) fn raw_locale_tags() -> Vec<String> {
-    let locales: Vec<String> = sys_locale::get_locales().collect();
+    let locales: Vec<String> = sys_locale::get_locales()
+        .filter_map(|tag| posix_to_bcp47(&tag))
+        .collect();
     if !locales.is_empty() {
         return locales;
     }
-    if let Some(locale) = sys_locale::get_locale() {
+    if let Some(locale) = sys_locale::get_locale().and_then(|tag| posix_to_bcp47(&tag)) {
         return vec![locale];
     }
     env_locale_fallback().into_iter().collect()
@@ -61,10 +74,18 @@ fn posix_to_bcp47(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Every tag `raw_locale_tags()` returns must parse as BCP-47 — this is
+    /// the property that actually matters (a `C`/`POSIX`-only host, e.g.
+    /// `LANG=C.UTF-8` with every other locale variable unset, legitimately
+    /// yields an *empty* list per the module doc, so non-emptiness is not
+    /// asserted here). This still catches a real regression: if
+    /// `posix_to_bcp47` — or the filtering this function now runs every
+    /// raw tag through — ever let a `C`/`POSIX` sentinel or other garbage
+    /// through unfiltered, the loop below would find it and fail to parse
+    /// it as a [`crate::Locale`], exactly as it did before this fix.
     #[test]
-    fn desktop_locales_are_non_empty_and_parseable() {
+    fn desktop_locales_are_parseable_when_any_are_reported() {
         let tags = raw_locale_tags();
-        assert!(!tags.is_empty(), "no locales were returned");
         for tag in &tags {
             tag.parse::<crate::Locale>()
                 .unwrap_or_else(|err| panic!("'{tag}' did not parse as a BCP-47 tag: {err}"));
