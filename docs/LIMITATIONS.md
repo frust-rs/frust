@@ -6028,6 +6028,22 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
+### `url-launcher-desktop-no-association-unobservable` — a macOS/Linux opener that runs but finds no handler reports nothing back
+
+**Observed**: `UrlLauncher::open_external` on macOS/Linux spawns `open`/`xdg-open` and returns as soon as the spawn itself succeeds. The only failure it can classify is spawn-time: `io::ErrorKind::NotFound` (the opener **binary** is absent from `PATH`) maps to `NoHandler`, other spawn errors to `Platform`. The opener's own verdict — `xdg-open` exits nonzero, e.g. `EXIT_FAILURE_OPERATION_IMPOSSIBLE`, when nothing is registered for the URL — arrives only as an exit status on the detached reaper thread, strictly after `open_external` has already returned `Ok(())`. A host with `xdg-open` present but no registered `http`/`https` handler therefore receives `Ok(())` while nothing opened.
+
+**Applies to**: macOS and Linux only. Windows is unaffected (`ShellExecuteW` is synchronous and its return code encodes `SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`); Android is unaffected (`ActivityNotFoundException` is caught and mapped to `NoHandler`).
+
+**Why accepted**: reading that exit status means waiting for the opener to exit, and `open_external` must not block its caller — the crate's fire-and-forget contract. There is no channel back into a call that has already returned; adding one (callback, channel, polled flag) would change the crate's synchronous shape for one platform alone. `UrlLauncherError::NoHandler`'s doc comment is narrowed to state exactly what each platform detects rather than promising a detection this backend cannot deliver. Directly parallel to `url-launcher-ios-open-failure-unobservable`.
+
+**Related, same code path**: the reaper is a plain `std::thread::spawn`, which panics if the OS cannot create a thread. Under extreme thread exhaustion `open_external` can therefore panic where the pre-fix spawn-and-drop code could not. Judged acceptable (a desktop URL-open path is not a plausible thread-exhaustion site) and recorded rather than hidden; `std::thread::Builder::spawn` would degrade instead of panicking if this ever matters.
+
+**Trigger for removal**: the crate grows an asynchronous completion shape (a callback or awaitable outcome) that can carry a post-return verdict to the caller — for example if the sibling `auth-session` work introduces one that this crate can share.
+
+**Evidence**: `plugins/url-launcher/src/desktop.rs` (the `#[cfg(not(target_os = "windows"))]` arm and its module doc's *Why a reaped exit status can't sharpen `NoHandler` here* section); `plugins/url-launcher/src/lib.rs`'s `NoHandler` doc comment.
+
+---
+
 ### `url-launcher-windows-leg-unrun` — the `ShellExecuteW` backend has never been compiled or run in this repo
 
 **Observed**: `desktop::open_external`'s `#[cfg(target_os = "windows")]` arm (`ShellExecuteW("open", url)`) has never been cross-compile-checked on the Linux dev host this crate was built on (`rustup target list --installed` there shows no `x86_64-pc-windows-gnu`), so the arm has never been compiled, let alone run against a real Windows shell association.
