@@ -120,6 +120,14 @@ frust-i18n = { path = "../../plugins/i18n" }
 # not just the bare platform plugin.
 frust-video-player = { path = "../../plugins/video-player" }
 
+# frust-url-launcher: playground is the device-gate vehicle for the "URL"
+# section — `src/pages/url_launcher.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-native-widgets`/`frust-i18n`/`frust-video-player`
+# above (not yet a `frust tui` Add Plugin contribution). Carries no features
+# of its own — `UrlLauncher::open_external` is the crate's whole public
+# surface.
+frust-url-launcher = { path = "../../plugins/url-launcher" }
+
 # Test-harness-only, NOT an escape hatch: the headless smoke test
 # (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
 # shell's own rebuild/layout/paint seam, no GPU, no window — the same harness
