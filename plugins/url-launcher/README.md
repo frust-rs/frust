@@ -219,11 +219,213 @@ recorded.
   Android run covers the equivalent path, but the iOS `frust_on_deep_link`
   route is a different implementation and is not proven by it.
 
+### Linux — child-reap and no-handler legs PASSED, 2026-09-22; browser-out leg FAILED (environmental — no live desktop session on this gate host)
+
+Host: Manjaro Linux (rolling, `BUILD_ID=rolling`), kernel `6.18.49-1-MANJARO`
+(`x86_64`). `xdg-utils` provides `/usr/bin/xdg-open`, `/usr/bin/xdg-settings`,
+`/usr/bin/xdg-mime`. Driven from a tiny scratch binary outside this
+repository that calls `frust_url_launcher::UrlLauncher::open_external`
+directly and prints the returned `Result` (`frust-url-launcher` depends only
+on `thiserror` + `frust-plugin`, so this compiled without `libfontconfig1-dev`
+or a full frust app, as expected).
+
+**Desktop environment at gate time: none active.** Before running leg 1 this
+was checked and recorded, because it changes what leg 1 can prove:
+
+```
+$ echo "XDG_CURRENT_DESKTOP=[$XDG_CURRENT_DESKTOP] XDG_SESSION_TYPE=[$XDG_SESSION_TYPE] DISPLAY=[$DISPLAY] WAYLAND_DISPLAY=[$WAYLAND_DISPLAY]"
+XDG_CURRENT_DESKTOP=[] XDG_SESSION_TYPE=[tty] DISPLAY=[] WAYLAND_DISPLAY=[]
+$ systemctl is-active sddm
+inactive
+```
+
+No `Xorg`/`Xwayland`/`kwin`/`gnome-shell`/`mutter`/`sway` process was found
+in the process table either. This host's only active sessions at gate time
+were remote terminal logins — there was no compositor, no display manager
+session, and nothing for a browser to render into. This is a fact about the
+gate host at run time, not about the crate.
+
+**Leg 1 — success path — FAILED (environmental).** The default `http`/
+`https` handler *is* registered:
+
+```
+$ xdg-settings get default-web-browser
+zen.desktop
+$ xdg-mime query default x-scheme-handler/https
+zen.desktop
+```
+
+The real call returns `Ok(())`:
+
+```
+open_external("https://example.com") -> Ok(())
+```
+
+but independent proof that anything actually opened is absent — no opener
+or browser process existed a second later:
+
+```
+$ ps -eo pid,ppid,stat,cmd | grep -iE "xdg-open|zen-browser|zen-bin|firefox"
+(no output)
+```
+
+Running the same URL through `xdg-open` directly, with debug tracing on,
+explains why:
+
+```
+$ XDG_UTILS_DEBUG_LEVEL=2 xdg-open https://example.com
+Selected DE generic
+/usr/bin/xdg-open: line 1045: www-browser: command not found
+/usr/bin/xdg-open: line 1045: links2: command not found
+/usr/bin/xdg-open: line 1045: elinks: command not found
+/usr/bin/xdg-open: line 1045: links: command not found
+/usr/bin/xdg-open: line 1045: lynx: command not found
+/usr/bin/xdg-open: line 1045: w3m: command not found
+xdg-open: no method available for opening 'https://example.com'
+$ echo $?
+3
+```
+
+With `XDG_CURRENT_DESKTOP` empty, `xdg-open` selects its "generic" fallback
+branch, which for an `http`/`https` URL never consults the registered
+`zen.desktop` association at all — it only tries a fixed list of terminal
+browsers, all absent, and gives up. **Verdict: FAILED as a live-foreground
+demonstration** — this is a gate-host environment gap (no active graphical
+session to foreground into), not a defect introduced by this crate; a rerun
+once a live Linux desktop session is available on this host is still owed.
+It does, however, reproduce a live instance of the same blind spot Leg 2
+targets on purpose: `open_external` returned `Ok(())` while nothing opened.
+
+**Leg 2 — no-handler contract (`act_000001a0c493b0f0VxxVfDAE`) — the
+predicted gap CONFIRMED.**
+
+*Sub-case A — opener binary genuinely missing.* `PATH` pointed at an empty
+directory:
+
+```
+$ PATH=<empty-dir> ./call_once https://example.com
+open_external("https://example.com") -> Err(NoHandler)
+```
+
+Spawn itself fails with `NotFound`, mapped to `NoHandler` exactly as
+`desktop.rs` documents. **Verdict: PASSED** — this sub-case matches the
+contract precisely.
+
+*Sub-case B — opener present, nothing registered to handle the URL.*
+`XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_DATA_DIRS` redirected to fresh, empty
+scratch directories (no `mimeapps.list`, no `applications/` entries), while
+the real `xdg-open` stayed on `PATH`. The real `xdg-open` exit status and
+the real `open_external` return value, side by side, in the identical
+environment:
+
+```
+$ XDG_CONFIG_HOME=<empty-scratch>/.config XDG_DATA_HOME=<empty-scratch>/data XDG_DATA_DIRS=<empty-scratch>/data xdg-open https://example.com
+Selected DE generic
+/usr/bin/xdg-open: line 1045: www-browser: command not found
+/usr/bin/xdg-open: line 1045: links2: command not found
+/usr/bin/xdg-open: line 1045: elinks: command not found
+/usr/bin/xdg-open: line 1045: links: command not found
+/usr/bin/xdg-open: line 1045: lynx: command not found
+/usr/bin/xdg-open: line 1045: w3m: command not found
+xdg-open: no method available for opening 'https://example.com'
+$ echo $?
+3
+
+$ XDG_CONFIG_HOME=<empty-scratch>/.config XDG_DATA_HOME=<empty-scratch>/data XDG_DATA_DIRS=<empty-scratch>/data ./call_once https://example.com
+open_external("https://example.com") -> Ok(())
+```
+
+Real `xdg-open` exit status `3` (`EXIT_FAILURE_OPERATION_IMPOSSIBLE` per its
+own man page) side by side with `open_external`'s real return value
+`Ok(())` — the predicted silent-`Ok(())` gap reproduces exactly as the
+module doc in `src/desktop.rs` and `docs/LIMITATIONS.md`'s
+`url-launcher-desktop-no-association-unobservable` entry already describe;
+this card does not change that documented, deliberate contract, only
+confirms it with a real, unfaked `xdg-open`. **Caveat**: on this specific host,
+`xdg-open`'s "generic" DE branch (see Leg 1) does not consult the
+`mimeapps.list` association at all for `http`/`https` before falling back to
+terminal browsers, so this sub-case cannot cleanly isolate "association
+missing" from "no display" as two independent causes here — both this test
+and the ambient Leg-1 environment hit the same fallback path. A host running
+a live KDE/GNOME session (routing through `kde-open5`/`gio` instead) would
+be needed to isolate a true "opener present, real desktop session, still no
+association" case; that rerun is still owed. **Verdict: PASSED as a
+verification** — the return-value/exit-status mismatch this leg exists to
+confirm was reproduced with real binaries, not simulated.
+
+**Leg 3 — child reap (`act_000001a0c493b0e4l4qTbnrM`) — PASSED, with a
+negative control.** A single long-lived process called the real, fixed
+`UrlLauncher::open_external` 24 times in a loop against the real system
+`xdg-open`, then inspected its own child table:
+
+```
+pid = 850603
+call #0 -> Ok(())
+[... calls #1-#22 identical ...]
+call #23 -> Ok(())
+--- ps -o pid,ppid,stat,cmd --ppid 850603 ---
+    PID    PPID STAT CMD
+ 851429  850603 R    ps -o pid,ppid,stat,cmd --ppid 850603
+ZOMBIE COUNT: 0
+```
+
+Zero `Z`/`<defunct>` entries after 24 real calls. A negative control ran the
+literal pre-fix shape (`spawn`, then `drop(child)` with no `wait()` — the
+exact code `desktop.rs`'s module doc says used to ship) in the same process
+structure, same real `xdg-open`, same 24 iterations:
+
+```
+pid = 851907
+spawned #0
+[... spawned #1-#22 identical ...]
+spawned #23
+--- ps -o pid,ppid,stat,cmd --ppid 851907 ---
+    PID    PPID STAT CMD
+ 851908  851907 Z    [xdg-open] <defunct>
+ 851909  851907 Z    [xdg-open] <defunct>
+ 851910  851907 Z    [xdg-open] <defunct>
+ 851914  851907 Z    [xdg-open] <defunct>
+ 851923  851907 Z    [xdg-open] <defunct>
+ 851924  851907 Z    [xdg-open] <defunct>
+ 851925  851907 Z    [xdg-open] <defunct>
+ 851928  851907 Z    [xdg-open] <defunct>
+ 851929  851907 Z    [xdg-open] <defunct>
+ 851930  851907 Z    [xdg-open] <defunct>
+ 851933  851907 Z    [xdg-open] <defunct>
+ 851934  851907 Z    [xdg-open] <defunct>
+ 851939  851907 Z    [xdg-open] <defunct>
+ 851940  851907 Z    [xdg-open] <defunct>
+ 851944  851907 Z    [xdg-open] <defunct>
+ 851946  851907 Z    [xdg-open] <defunct>
+ 851949  851907 Z    [xdg-open] <defunct>
+ 851950  851907 Z    [xdg-open] <defunct>
+ 851976  851907 Z    [xdg-open] <defunct>
+ 851993  851907 Z    [xdg-open] <defunct>
+ 852007  851907 Z    [xdg-open] <defunct>
+ 852008  851907 Z    [xdg-open] <defunct>
+ 852009  851907 Z    [xdg-open] <defunct>
+ 852014  851907 Z    [xdg-open] <defunct>
+    PID    PPID STAT CMD
+ 852704  851907 R    ps -o pid,ppid,stat,cmd --ppid 851907
+ZOMBIE COUNT: 24
+```
+
+24 dropped `Child`s, 24 `<defunct>` zombies — with everything else held
+identical (same opener, same URL shape, same iteration count, same process),
+only the reap-vs-drop difference distinguishes the two runs. **Verdict:
+PASSED** — the reap fix is confirmed on the exact platform that found the
+leak, with a passing negative control, not just a passing observation.
+
+**`cargo test -p frust-url-launcher`** on this host: 10 passed, 0 failed,
+0 ignored (`url::tests::*` × 7, `desktop::tests::*` × 3, the latter only
+compiled `#[cfg(all(test, target_os = "linux"))]`).
+
 ### Desktop — partially covered
 
-Linux/macOS spawn-and-reap behaviour is covered by this crate's own unit
-tests (including a fake-`PATH` `NoHandler` case and a successful-spawn
-case). The Windows `ShellExecuteW` arm has never been compiled or run —
-see `url-launcher-windows-leg-unrun` in `docs/LIMITATIONS.md`.
+Linux spawn-and-reap and no-handler behaviour is now covered by both this
+crate's own unit tests and the on-host device gate above. The macOS `open`
+arm and the Windows `ShellExecuteW` arm have never been compiled or run —
+see `url-launcher-windows-leg-unrun` in `docs/LIMITATIONS.md` (Windows) and
+file a matching entry for macOS if one does not already exist.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
