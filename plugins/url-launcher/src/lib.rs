@@ -94,9 +94,19 @@ pub enum UrlLauncherError {
     PlatformNotInitialized,
 
     /// No installed app can handle an `http`/`https` `ACTION_VIEW` intent
-    /// (Android `ActivityNotFoundException`) or the platform's own opener
-    /// reports no association for the URL (desktop `NotFound`/
-    /// `SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`).
+    /// (Android `ActivityNotFoundException`), or, on Windows,
+    /// `ShellExecuteW` reports no association for the URL
+    /// (`SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`). On macOS/Linux this
+    /// variant means only that the opener binary itself (`open`/`xdg-open`)
+    /// is missing from `PATH` (a spawn-time `NotFound`) — a spawn that
+    /// succeeds but whose opener then runs and reports no association of
+    /// its own (e.g. `xdg-open`'s nonzero exit code when nothing is
+    /// registered) is unobservable to the caller on those two platforms:
+    /// `open_external` has already returned `Ok(())` by the time that exit
+    /// status is available, on a detached thread with no channel back into
+    /// the finished call (see the `desktop` module's own doc). This mirrors
+    /// this crate doc's already-documented iOS post-dispatch
+    /// unobservability.
     #[error("url launcher: no handler for http/https URLs on this device")]
     NoHandler,
 
