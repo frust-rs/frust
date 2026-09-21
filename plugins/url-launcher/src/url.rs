@@ -212,6 +212,16 @@ mod tests {
         assert!(validate(&url).is_err());
     }
 
+    /// The doc says "at most [`MAX_LEN`] bytes" — pins the accept side of
+    /// that boundary, not just the 8193-byte rejection above.
+    #[test]
+    fn accepts_url_at_exact_max_len_boundary() {
+        let mut url = "https://host/".to_string();
+        url.push_str(&"a".repeat(MAX_LEN - url.len()));
+        assert_eq!(url.len(), MAX_LEN);
+        assert!(validate(&url).is_ok());
+    }
+
     #[test]
     fn accepts_well_formed_http_and_https_urls() {
         for url in [
