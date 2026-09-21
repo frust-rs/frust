@@ -1,0 +1,118 @@
+# frust-url-launcher
+
+A minimal **external URL launcher** plugin for frust apps — Android
+`Intent(ACTION_VIEW)`/`startActivity` over plain JNI, iOS
+`UIApplication.openURL(_:options:completionHandler:)` via `objc2-ui-kit`,
+desktop (macOS/Linux/Windows) the platform's own opener (`open`/`xdg-open`/
+`ShellExecuteW`).
+
+Like every frust **platform plugin**, this crate is added to your app's own
+`Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
+not re-export it.
+
+---
+
+## 1. Add the dependency
+
+```toml
+# app Cargo.toml — [dependencies]
+frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # crates.io later
+```
+
+`<frust>` is the path to your frust checkout — derive it from the `frust = {
+path = "…" }` line the scaffold already wrote.
+
+```rust
+use frust_url_launcher::UrlLauncher;
+
+// Fire-and-forget: ignore the Result in the common case (there is nothing
+// actionable to do differently on this platform once a launch is dispatched).
+let _ = UrlLauncher::open_external("https://example.com/pricing");
+```
+
+No manifest permission, no Info.plist key, no Gradle module — the `frust`
+TUI's **Add Plugin** dialog only adds the Cargo dependency above for this
+plugin.
+
+---
+
+## 2. The validator's rule table
+
+Every call to [`open_external`] runs the same validator before touching any
+platform API, regardless of target. A URL is rejected unless:
+
+| Rule | Closes |
+|---|---|
+| Non-empty, at most 8192 bytes | pathological/empty input |
+| ASCII only, no control byte, no literal whitespace (a `%20` escape is fine) | raw IRIs, injected control sequences |
+| Scheme (before the first `:`) is `http`/`https`, case-insensitively, followed by `//` | `javascript:`, `intent:`, `tel:`, `file:`, and similar deep-link/script-injection schemes |
+| Authority (up to the first `/`, `?` or `#`) is non-empty and contains no `@` | userinfo phishing (`https://trusted.example@evil.test/`) |
+| Every byte is RFC 3986 `unreserved` (`A-Za-z0-9-._~`), `reserved` (`` :/?#[]@!$&'()*+,;= ``), or a valid `%XX` escape | malformed/ambiguous percent-encoding |
+
+A rejected URL never reaches a backend — [`UrlLauncher::open_external`]
+returns `Err(UrlLauncherError::InvalidUrl)` before any platform call.
+
+---
+
+## 3. Platform caveats
+
+- **Android sets `FLAG_ACTIVITY_NEW_TASK` unconditionally.** The host shell
+  hands this plugin the process-lifetime *application* `Context`, not an
+  `Activity` one, and `Context.startActivity` on a non-`Activity` context
+  throws without that flag. No `<queries>` manifest entry, no
+  `resolveActivity` probe: this backend just calls `startActivity` and maps
+  the resulting `ActivityNotFoundException` (if nothing can handle the
+  intent) to `UrlLauncherError::NoHandler`.
+- **iOS dispatches asynchronously to the main thread and never reports a
+  post-dispatch failure.** `UIApplication` is UIKit's `MainThreadOnly`;
+  `open_external` returns `Ok(())` immediately after handing the
+  lookup-and-open sequence to `dispatch_get_main_queue()` — a background
+  caller is never blocked, but a subsequent "no handler" or "app suspended"
+  failure on that platform has nothing left to report back to. This crate
+  does not call `canOpenURL:` (it would need an `Info.plist`
+  `LSApplicationQueriesSchemes` entry for no discriminating value, since
+  every URL here is already `http`/`https`).
+- **Desktop has no deep-link callback.** `open`/`xdg-open`/`ShellExecuteW`
+  hand the URL to the OS and return; there is no way for the launched
+  browser to hand a result (an OAuth authorization code, say) back to this
+  process. An app that needs a full OAuth round trip on desktop needs a
+  typed code delivered through some other channel (a local loopback
+  listener, a manually pasted code, …) — this plugin only opens the URL.
+- **Windows uses `ShellExecuteW`, not `cmd /C start`.** `cmd.exe`'s
+  command-line parser treats `&` as a command separator and expands `%VAR%`
+  references, both of which a legitimate URL can contain; `ShellExecuteW`
+  resolves the registered protocol handler directly, with no shell parsing
+  in between.
+
+---
+
+## 4. Fire-and-forget contract
+
+`UrlLauncher::open_external` returns a `Result<(), UrlLauncherError>` for the
+caller that wants to distinguish *why* nothing opened (an invalid URL, an old
+Android scaffold predating `nativeInitPlatform`, no installed handler, a
+genuine backend failure) — but the overwhelmingly common call site (a "view
+in browser" button, an in-app link) ignores it entirely (`let _ =
+UrlLauncher::open_external(...)`). None of `UrlLauncherError`'s `Display`
+messages echo the URL back, so logging the error directly never leaks the
+target origin.
+
+---
+
+## 5. Caveats
+
+- **This plugin only opens `http`/`https` URLs.** The validator rejects
+  every other scheme outright (see §2) — there is no escape hatch for a
+  custom URL scheme or deep link in v1.
+- **`frust create --overwrite` is a non-issue here.** There is no manifest,
+  plist, or Gradle mutation for Add Plugin to re-apply — the Cargo
+  dependency line is the entire integration surface.
+
+## 6. Device gate
+
+Not yet run — owed to a follow-up device-gate card (Android JNI
+`ActivityNotFoundException` path, iOS main-thread dispatch + `openURL:`
+delivery, desktop `open`/`xdg-open`/`ShellExecuteW` on real hardware for
+each OS).
+
+[`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
