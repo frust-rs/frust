@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — fifteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — sixteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -18,7 +18,13 @@
 //! registry entry to use [`Contribution::ManifestPermission`] rather than a
 //! Gradle module for its Android addition, since the plugin's Android
 //! backend is plain JNI with no Kotlin helper class to carry the permission
-//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `iap`
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `url-launcher`
+//! (dependency only — the launch half of an RFC 8252 OAuth round trip over a
+//! platform's external browser; the second registry entry, after `haptics`,
+//! whose Android side needs no `<uses-permission>` at all — `startActivity`
+//! with `ACTION_VIEW` needs none on API 30+, and no `<queries>` element
+//! either, since it targets an implicit intent the OS itself resolves — see
+//! `URL_LAUNCHER_BASE`'s doc comment), `iap`
 //! (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
 //! comment for why), `database` (dependency only — pure-Rust plugin, no
@@ -273,6 +279,42 @@ const HAPTICS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `url-launcher`'s single base contribution — a Cargo dependency and
+/// nothing else, the first platform plugin (one with real Android/iOS/desktop
+/// backends, unlike the pure-Rust `database`/`i18n`/design-system entries) to
+/// need a **bare** `CargoDep` with no accompanying permission, plist key,
+/// Gradle module, or Swift package.
+///
+/// Opening an absolute `http`/`https` URL in the platform's external browser
+/// needs none of those: Android's `startActivity` with an implicit
+/// `ACTION_VIEW` intent needs no `<uses-permission>` (unlike `haptics`'
+/// `VIBRATE`, itself a *normal*, install-time-granted permission) and no
+/// `<queries>` element either, because targeting an implicit intent the OS
+/// itself resolves is exempt from the package-visibility filter added in API
+/// 30 — see `plugins/url-launcher/src/android.rs`'s module doc. iOS's
+/// `UIApplication.shared.open(_:)` needs no `Info.plist` key for an
+/// `http`/`https` URL (only `LSApplicationQueriesSchemes` gates
+/// `canOpenURL:` on a *custom* scheme, and this plugin never calls that).
+/// Desktop's `xdg-open`/`open`/`ShellExecuteW` shell out to the OS URL
+/// handler directly, no linked library or bundle entry required. Like
+/// `haptics`, there is no Kotlin helper class or Swift package: both mobile
+/// backends are plain JNI/objc2 against framework APIs.
+const URL_LAUNCHER_BASE: &[Contribution] = &[Contribution::CargoDep {
+    name: "frust-url-launcher",
+}];
+
+const URL_LAUNCHER: PluginSpec = PluginSpec {
+    id: "url-launcher",
+    summary: "Open an absolute http/https URL in the platform's default external browser \
+              (Android ACTION_VIEW, iOS openURL:, desktop xdg-open/open/ShellExecuteW) — \
+              the launch half of an RFC 8252 OAuth round trip; completion returns through \
+              deep links.",
+    crate_dir: "url-launcher",
+    base: URL_LAUNCHER_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// `iap`'s base contributions — a Cargo dependency plus its own Android
 /// library module and its own iOS Swift package, the `camera`/`native-widgets`
 /// shape (a plugin's Kotlin/Swift never copied into the app).
@@ -504,6 +546,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         NATIVE_WIDGETS,
         CLIPBOARD,
         HAPTICS,
+        URL_LAUNCHER,
         IAP,
         VIDEO_PLAYER,
         DATABASE,
@@ -531,7 +574,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_fifteen_v1_plugins() {
+    fn registry_lists_the_sixteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -543,6 +586,7 @@ mod tests {
                 "native-widgets",
                 "clipboard",
                 "haptics",
+                "url-launcher",
                 "iap",
                 "video-player",
                 "database",
@@ -561,13 +605,21 @@ mod tests {
     /// systems built on `frust::authoring` alone (see `GLYPH`'s doc
     /// comment) — `shadcn` included, despite being the tier's first
     /// external-origin catalog: its registry shape is identical.
+    ///
+    /// `url-launcher` joins the same assertion despite being a real platform
+    /// plugin, not a design system: it is the first such plugin whose base
+    /// is a bare `CargoDep` with no permission, plist key, Gradle module, or
+    /// Swift package at all (see `URL_LAUNCHER_BASE`'s doc comment) — the
+    /// same single-contribution shape this test already checks, so it is
+    /// grouped here rather than duplicated into its own test.
     #[test]
-    fn design_system_plugins_are_each_a_cargo_dep_and_nothing_else() {
+    fn design_systems_and_url_launcher_are_each_a_cargo_dep_and_nothing_else() {
         for (id, crate_name) in [
             ("glyph", "frust-glyph"),
             ("material", "frust-material"),
             ("cupertino", "frust-cupertino"),
             ("shadcn", "frust-shadcn"),
+            ("url-launcher", "frust-url-launcher"),
         ] {
             let spec = find_plugin(id).unwrap();
             assert_eq!(spec.crate_dir, id);
