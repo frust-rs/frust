@@ -7,7 +7,7 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (1-9 of 15)         │▓▓                
+                  │  Choose a plugin to add to this project  (1-9 of 16)         │▓▓                
  DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
    none found     │        Synchronous, thread-safe key-value store              │▓▓                
                   │    ( ) secure-storage                                        │▓▓                
@@ -22,10 +22,10 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
    Clean · c      │        Synchronous plain-text clipboard access               │▓▓                
    MCP off · M    │    ( ) haptics                                               │▓▓                
    DAP off · D    │        Minimal haptic feedback (selection tick, impact,      │▓▓                
+                  │    ( ) url-launcher                                          │▓▓                
+                  │        Open an absolute http/https URL in the platform's     │▓▓                
                   │    ( ) iap                                                   │▓▓                
                   │        In-app purchases and subscriptions over Play Billing  │▓▓                
-                  │    ( ) video-player                                          │▓▓                
-                  │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
