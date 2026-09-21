@@ -11,7 +11,7 @@ resolver = "2"
 # plugins/video-player is a platform plugin like the ones before it (one Rust
 # video API over a per-OS player backend), listed explicitly for the same
 # reason.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
 # plugins/{beui,cupertino,glyph,material,shadcn} are the design-system plugin
 # tier (listed alphabetically): the three catalogs that used to live in-tree
 # behind `frust-widgets` cargo features, plus two external-origin catalogs,
