@@ -5997,3 +5997,45 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: `TextInput` grows a themed-family option (an opt-in analogous to `Text::themed_family`) and the fields listed above are wired through it.
 
 **Evidence**: `crates/frust-widgets/src/textinput.rs` (`effective_style`); [TESTING.md](TESTING.md)'s pinnable-text paragraph; `crates/frust-testing/src/corpus/page.rs` module docs.
+
+---
+
+### `url-launcher-ios-open-failure-unobservable` — an iOS launch failure has nothing left to report back to
+
+**Observed**: `UrlLauncher::open_external` on iOS dispatches the lookup-and-open sequence onto `dispatch_get_main_queue()` asynchronously (`DispatchQueue::exec_async`) and returns `Ok(())` immediately, before that closure has run. The closure's own call, `UIApplication::openURL_options_completionHandler`, passes `None` for the completion handler, so even a successful dispatch reports nothing back into Rust once it runs. A "no handler for this URL" or "app suspended" failure on this path is therefore unobservable to the caller — `open_external` always returns `Ok(())` on iOS regardless of what actually happens.
+
+**Applies to**: iOS only; every call to `UrlLauncher::open_external` on that platform.
+
+**Why accepted**: a synchronous main-thread bounce (blocking until the dispatched closure completes) would violate this crate's fire-and-forget, never-block-the-caller contract if `open_external` is ever called from a background thread — `exec_async` is the only shape that holds that contract regardless of caller thread, and there is no result channel back into an already-returned stack frame from a `dispatch_get_main_queue()` closure.
+
+**Trigger for removal**: none anticipated without a callback-based `open_external` API (the crate currently returns before dispatch completes) — a redesign this crate's originating task did not call for.
+
+**Evidence**: `plugins/url-launcher/src/apple.rs`'s module doc (*Main-thread dispatch*, *`unsafe`*) and its `open_on_main`/`open_external` functions.
+
+---
+
+### `url-launcher-desktop-no-deep-link-return` — desktop has no channel for a launched browser to hand a result back
+
+**Observed**: `desktop::open_external` spawns `open`/`xdg-open` (macOS/Linux) or calls `ShellExecuteW` (Windows) and returns as soon as the OS accepts the launch; none of the three has any way for the resulting browser tab to hand a result — an OAuth authorization code, say — back to the launching process.
+
+**Applies to**: macOS, Linux, and Windows alike; any app using this plugin to start a browser-mediated round trip (e.g. an RFC 8252 OAuth authorization request) on desktop.
+
+**Why accepted**: this plugin's charter is opening a URL, nothing more — a full desktop OAuth round trip needs a return channel this crate does not provide (a local loopback listener, a manually pasted code, or similar), left to the app. Mobile's equivalent return leg goes through `frust::deep_links()` instead, which has no desktop analogue.
+
+**Trigger for removal**: a desktop deep-link/callback channel ships elsewhere in the framework and this plugin (or its caller) wires a completion path into it.
+
+**Evidence**: `plugins/url-launcher/src/desktop.rs`'s module doc; `plugins/url-launcher/README.md` §3 (*Desktop has no deep-link callback*).
+
+---
+
+### `url-launcher-windows-leg-unrun` — the `ShellExecuteW` backend has never been compiled or run in this repo
+
+**Observed**: `desktop::open_external`'s `#[cfg(target_os = "windows")]` arm (`ShellExecuteW("open", url)`) has never been cross-compile-checked on the Linux dev host this crate was built on (`rustup target list --installed` there shows no `x86_64-pc-windows-gnu`), so the arm has never been compiled, let alone run against a real Windows shell association.
+
+**Applies to**: Windows only — the `SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`/generic-failure mapping in that arm is unverified in any form.
+
+**Why accepted**: the crate's device gate as a whole has not run yet (`plugins/url-launcher/README.md` §6); the Windows leg specifically is behind even that bar, since it lacks the cross-target compile check the sibling `windows-sys`-pinned shells get (see `windows-sys 0.61`'s tripwire in [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)).
+
+**Trigger for removal**: `cargo check --target x86_64-pc-windows-gnu -p frust-url-launcher` passes once the target is installed, and a Windows rig runs the plugin's device gate against a real registered `http`/`https` handler.
+
+**Evidence**: `plugins/url-launcher/src/desktop.rs` (the `#[cfg(target_os = "windows")]` arm); `plugins/url-launcher/README.md` §6 (*Device gate*).
