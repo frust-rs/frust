@@ -142,6 +142,7 @@ fn apply_contribution(
             package_name,
             rel_path,
         } => apply_swift_package_ref(project_root, frust_path, package_name, rel_path),
+        Contribution::IosFramework { name } => apply_ios_framework(project_root, name),
         Contribution::AppCrateMacro {
             invocation,
             cfg,
@@ -821,6 +822,84 @@ fn apply_swift_package_ref(
     Ok(AddOutcome::Applied)
 }
 
+/// Append `"-framework", <name>,` to every `OTHER_LDFLAGS` list of the
+/// `XCBuildConfiguration` section that does not already link `name` — one
+/// list per build configuration. Lists are edited back to front so the
+/// ranges scanned from the original stay valid, the whole edit is built in
+/// memory, re-scanned, and written once; a project with no `OTHER_LDFLAGS`
+/// list at all is [`PluginAddError::MalformedProjectFile`].
+fn apply_ios_framework(project_root: &Path, name: &str) -> Result<AddOutcome, PluginAddError> {
+    const SECTION: &str = "XCBuildConfiguration";
+    const KEY: &str = "OTHER_LDFLAGS";
+    let path = project_root.join(PBXPROJ_REL);
+    let src = read_required(&path, PBXPROJ_REL)?;
+
+    let lists = pbx_list_ranges(&src, SECTION, KEY)?;
+    if lists.is_empty() {
+        return Err(PluginAddError::MalformedProjectFile(
+            PBXPROJ_REL.to_string(),
+        ));
+    }
+
+    let mut out = src.clone();
+    let mut changed = false;
+    for range in lists.into_iter().rev() {
+        let body = &src[range.clone()];
+        if ldflags_link_framework(body, name) {
+            continue;
+        }
+        // Indent like the list's own entries (five tabs in the scaffold),
+        // falling back to the scaffold's indentation for an empty list.
+        let indent = body
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map_or("\t\t\t\t\t", |line| {
+                &line[..line.len() - line.trim_start().len()]
+            });
+        out.insert_str(
+            range.end,
+            &format!("{indent}\"-framework\",\n{indent}{name},\n"),
+        );
+        changed = true;
+    }
+    if !changed {
+        return Ok(AddOutcome::AlreadyPresent);
+    }
+
+    // All-or-nothing: every list must link the framework before a byte is
+    // written.
+    for range in pbx_list_ranges(&out, SECTION, KEY)? {
+        if !ldflags_link_framework(&out[range], name) {
+            return Err(PluginAddError::PbxWiringNotVerified {
+                file: PBXPROJ_REL.to_string(),
+                package: name.to_string(),
+                site: KEY.to_string(),
+            });
+        }
+    }
+
+    write_file(&path, PBXPROJ_REL, &out)?;
+    Ok(AddOutcome::Applied)
+}
+
+/// Whether an `OTHER_LDFLAGS` entry region already links `name`: a
+/// `"-framework",` entry immediately followed by `name,` (or its quoted
+/// form), matched on trimmed lines so a pbxproj Xcode has since reformatted
+/// still reads as present.
+fn ldflags_link_framework(body: &str, name: &str) -> bool {
+    let entries: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let bare = format!("{name},");
+    let quoted = format!("\"{name}\",");
+    entries
+        .windows(2)
+        .any(|pair| pair[0] == "\"-framework\"," && (pair[1] == bare || pair[1] == quoted))
+}
+
 /// Splice one site into `src`, returning the whole edited file. A list entry
 /// is appended after the last existing entry (immediately before the list's
 /// own `);`); an object is appended to its section, before the `/* End … */`
@@ -898,16 +977,33 @@ fn pbx_section_range(src: &str, name: &str) -> Result<Range<usize>, PluginAddErr
     Ok(start..stop)
 }
 
-/// The entry region of a `key = ( … );` list inside `section` — from the byte
-/// after the opening line to the byte before the closing `);` line. Matched on
-/// trimmed line content rather than exact indentation, so a project whose
-/// pbxproj Xcode has since rewritten still wires up.
+/// The entry region of the first `key = ( … );` list inside `section` — from
+/// the byte after the opening line to the byte before the closing `);` line
+/// (see [`pbx_list_ranges`] for the matching rule); a section with no such
+/// list is [`PluginAddError::MalformedProjectFile`].
 fn pbx_list_range(src: &str, section: &str, key: &str) -> Result<Range<usize>, PluginAddError> {
+    pbx_list_ranges(src, section, key)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| PluginAddError::MalformedProjectFile(PBXPROJ_REL.to_string()))
+}
+
+/// The entry regions of every `key = ( … );` list inside `section`, in file
+/// order — one per build configuration for a key such as `OTHER_LDFLAGS`.
+/// Matched on trimmed line content rather than exact indentation, so a
+/// project whose pbxproj Xcode has since rewritten still wires up; an
+/// unterminated list is [`PluginAddError::MalformedProjectFile`].
+fn pbx_list_ranges(
+    src: &str,
+    section: &str,
+    key: &str,
+) -> Result<Vec<Range<usize>>, PluginAddError> {
     let malformed = || PluginAddError::MalformedProjectFile(PBXPROJ_REL.to_string());
     let section = pbx_section_range(src, section)?;
     let open = format!("{key} = (");
     let body = &src[section.clone()];
 
+    let mut ranges = Vec::new();
     let mut cursor = 0usize;
     let mut start: Option<usize> = None;
     for line in body.split_inclusive('\n') {
@@ -916,13 +1012,17 @@ fn pbx_list_range(src: &str, section: &str, key: &str) -> Result<Range<usize>, P
         let trimmed = line.trim();
         match start {
             None if trimmed == open => start = Some(cursor),
-            Some(start) if trimmed == ");" => {
-                return Ok(section.start + start..section.start + line_start);
+            Some(open_end) if trimmed == ");" => {
+                ranges.push(section.start + open_end..section.start + line_start);
+                start = None;
             }
             _ => {}
         }
     }
-    Err(malformed())
+    if start.is_some() {
+        return Err(malformed());
+    }
+    Ok(ranges)
 }
 
 /// This package's three object ids: reused wherever the target file already

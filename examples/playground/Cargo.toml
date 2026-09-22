@@ -128,6 +128,14 @@ frust-video-player = { path = "../../plugins/video-player" }
 # surface.
 frust-url-launcher = { path = "../../plugins/url-launcher" }
 
+# frust-auth-session: playground is the device-gate vehicle for the "Auth"
+# section — `src/pages/auth_session.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-native-widgets`/`frust-i18n`/`frust-video-player`/
+# `frust-url-launcher` above (not yet a `frust tui` Add Plugin contribution).
+# Carries no features of its own — `AuthSession::start` is the crate's whole
+# public surface.
+frust-auth-session = { path = "../../plugins/auth-session" }
+
 # Test-harness-only, NOT an escape hatch: the headless smoke test
 # (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
 # shell's own rebuild/layout/paint seam, no GPU, no window — the same harness

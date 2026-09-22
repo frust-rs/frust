@@ -154,6 +154,32 @@ pub enum Contribution {
         /// the project root a relative `frust` path dep is written against.
         rel_path: &'static str,
     },
+    /// A system framework linked into the generated app's Runner target by
+    /// name: `"-framework", <name>,` appended to every `OTHER_LDFLAGS` list
+    /// in `ios/Runner.xcodeproj/project.pbxproj` (one per build
+    /// configuration).
+    ///
+    /// For a plugin whose Apple arm is pure Rust (`objc2`) rather than a
+    /// Swift package. A crate's `#[link(name = "…", kind = "framework")]`
+    /// reaches the linker only when rustc links the binary itself (macOS);
+    /// the iOS app is an Xcode-linked staticlib, and a staticlib carries no
+    /// framework link into that step — so a framework whose symbols the Rust
+    /// code references by name (an `extern static` such as
+    /// `ASWebAuthenticationSessionErrorDomain`) must be named here or the
+    /// app fails to link (`auth-session`'s device gate found exactly that).
+    /// A framework the scaffold already links (Metal, QuartzCore, CoreText,
+    /// CoreGraphics, CoreFoundation, UIKit) needs no contribution.
+    ///
+    /// One contribution, one file, one [`AddItem`]: a half-applied state
+    /// (the flag in some configurations but not all) completes the rest and
+    /// reports [`AddOutcome::Applied`]; only a project whose every
+    /// `OTHER_LDFLAGS` list already carries the flag reports
+    /// [`AddOutcome::AlreadyPresent`].
+    IosFramework {
+        /// The framework's name as `-framework` takes it, e.g.
+        /// `"AuthenticationServices"` — no `.framework` suffix.
+        name: &'static str,
+    },
     /// A macro invocation appended to the app crate's `src/lib.rs`.
     ///
     /// The escape hatch for a plugin whose platform side needs something the
@@ -293,6 +319,9 @@ impl Contribution {
             Contribution::SwiftPackageRef { package_name, .. } => {
                 format!("Xcode Swift package `{package_name}`")
             }
+            Contribution::IosFramework { name } => {
+                format!("Xcode framework `{name}` (`OTHER_LDFLAGS`)")
+            }
             Contribution::AppCrateMacro { invocation, .. } => {
                 format!("app crate `src/lib.rs` invocation `{invocation}`")
             }
@@ -430,11 +459,13 @@ pub enum PluginAddError {
     /// two hex digits, so 256 ids) — nothing is written.
     #[error("project file `{file}` has no free `…00NN` pbxproj object id left")]
     PbxIdSpaceExhausted { file: String },
-    /// A [`Contribution::SwiftPackageRef`]'s in-memory edit failed its own
-    /// re-scan: one of the six sites is missing or carries a mismatched id, so
-    /// the file is left untouched rather than written half-wired.
+    /// A [`Contribution::SwiftPackageRef`]'s or [`Contribution::IosFramework`]'s
+    /// in-memory edit failed its own re-scan: one of the package's six sites
+    /// is missing or carries a mismatched id, or one `OTHER_LDFLAGS` list
+    /// still lacks the framework, so the file is left untouched rather than
+    /// written half-wired.
     #[error(
-        "Swift package `{package}` wiring for `{file}` failed verification (site `{site}`); \
+        "pbxproj wiring for `{package}` in `{file}` failed verification (site `{site}`); \
          nothing was written"
     )]
     PbxWiringNotVerified {

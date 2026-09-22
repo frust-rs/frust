@@ -115,6 +115,7 @@ fn applies_to(contribution: &Contribution, target: DesktopBundleTarget) -> bool 
         | Contribution::PlistEntry { .. }
         | Contribution::GradleModule { .. }
         | Contribution::SwiftPackageRef { .. }
+        | Contribution::IosFramework { .. }
         | Contribution::AppCrateMacro { .. }
         | Contribution::CargoFeature { .. }
         | Contribution::ScaffoldFile { .. } => false,

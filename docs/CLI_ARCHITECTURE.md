@@ -263,9 +263,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes). The
-  registry holds sixteen top-level entries, including the four design-system plugins (`glyph`/
+  registry holds seventeen top-level entries, including the four design-system plugins (`glyph`/
   `material`/`cupertino`/`shadcn` — `beui` is still absent by design) — the TUI's Add Plugin dialog
-  lists all sixteen; each design-system entry's
+  lists all seventeen; each design-system entry's
   base contribution is a single `CargoDep` (installing it is still a manual `<crate>::install()`
   call in `app!`, since a plugin add cannot know where an app wants theme setup to run).
   `Contribution::ScaffoldFile` is the registry's first file-*creating* contribution, rather than
@@ -274,7 +274,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   never a content comparison), and refuses an absolute or `..`-containing `rel_path`. `i18n`'s
   entry is the first to use it — seeding a starter locale file — and its registry ordering puts
   that `ScaffoldFile` before the plugin's `AppCrateMacro` invocation, since the macro's generated
-  code depends on the file it creates. A plugin's three desktop-lane `Contribution`s
+  code depends on the file it creates. `Contribution::IosFramework` (first used by `auth-session`)
+  appends `-framework <name>` to every `OTHER_LDFLAGS` list of the Runner's pbxproj: a pure-`objc2`
+  Apple arm's own `#[link(kind = "framework")]` never reaches Xcode's link of the iOS staticlib, so
+  a framework symbol it references must be linked by the app. A plugin's three desktop-lane `Contribution`s
   (`MacosPlistEntry`/`MacosEntitlement`/`LinuxDesktopEntry`) are the one family `add_plugin` never
   writes into a project file at all — `macos/Info.plist`, `macos/app.entitlements`, and
   `linux/app.desktop` are user-owned, hand-editable files a pre-desktop-shells project may not even

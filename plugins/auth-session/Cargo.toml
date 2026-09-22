@@ -1,0 +1,156 @@
+[package]
+name = "frust-auth-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# AuthSessionError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The Android platform-handle substrate this crate's Android backend calls
+# through (`frust_plugin::android::with_jni_env`); the only `frust-*`
+# dependency this crate is allowed (platform-plugin charter — see
+# `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
+# Plugin Conventions). Unconditional like `frust-clipboard`'s/
+# `frust-haptics`'s/`frust-url-launcher`'s own copy: the crate is inert off
+# Android, so declaring it target-gated would buy nothing.
+frust-plugin = { path = "../../crates/frust-plugin" }
+
+# Android: the plugin's own JNI exports the Android backend card defines
+# need `jni` directly — matching `frust-camera`'s/`frust-haptics`'s own
+# Android arm (their own JNI signature calls don't go through
+# `frust-plugin`'s re-export alone), so this crate depends on `jni` directly
+# too.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# Apple (iOS + macOS): `ASWebAuthenticationSession` needs an Objective-C
+# object graph on both platforms (the session object itself, its completion
+# block, and a `NSWindow`/`UIWindow`-backed presentation-context provider),
+# so these four are `target_vendor = "apple"`-gated rather than split further
+# by `target_os` the way `frust-haptics`'s iOS-only feedback generators are —
+# `frust-camera`'s own `target_vendor = "apple"` split (`src/lib.rs:137-142`)
+# is the precedent this crate follows instead.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# `MainThreadMarker`/object construction for
+# `ASWebAuthenticationSession`/the presentation-context anchor. Not
+# `default-features = false` here (unlike the narrower crates below):
+# matches `frust-haptics`'s/`frust-iap`'s own `{ workspace = true }` edge —
+# this crate needs nothing narrower than `objc2`'s own default feature set.
+objc2 = { workspace = true }
+# The Foundation types the Apple backend names directly: `NSString` (the
+# callback-scheme/URL strings marshalled into the
+# `ASWebAuthenticationSession` initializer), `NSURL` (`URLWithString:` in,
+# the redirect's `absoluteString` out), `NSError` (the completion handler's
+# failure arm, read as domain + code), `NSSet` + `NSEnumerator` (iterating
+# `UIApplication.connectedScenes`, whose `iter()` is `NSEnumerator`-gated)
+# and `NSArray` (a window scene's/`NSApplication`'s `windows`). Every one of
+# these is also reached transitively — `objc2-authentication-services`'s
+# `ASWebAuthenticationSession` feature enables the first three, and
+# `objc2-ui-kit`'s `UIApplication`/`UIWindowScene` the rest — so this list
+# changes no resolve; it is named explicitly so that a future narrowing of
+# any of those upstream feature sets fails loudly here instead of silently
+# deleting a type this crate uses (the same rationale
+# `docs/PLUGINS_DEVELOPMENT.md`'s version-pin table records for
+# `frust-shell-macos`'s explicit `objc2-core-foundation` edge).
+# Not `{ workspace = true, ... }`:
+# the root `objc2-foundation = "0.3"` row is a plain version string with no
+# `default-features` set, and Cargo's workspace-dependency inheritance
+# forbids a member from overriding `default-features` unless the
+# workspace-level entry already sets it explicitly (see
+# `plugins/secure-storage/Cargo.toml`'s and `plugins/iap/Cargo.toml`'s own
+# `objc2-foundation` edges for the same restriction), so this repeats the
+# version literal instead of inheriting.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSURL",
+    "NSError",
+    "NSSet",
+    "NSEnumerator",
+    "NSArray",
+] }
+# Constructing the completion handler `ASWebAuthenticationSession`'s
+# initializer takes (`^(NSURL * _Nullable, NSError * _Nullable)`) — a block
+# has to be *constructed* here, not just named, `frust-camera`'s/
+# `frust-iap`'s own rationale for depending on `block2` directly. Not
+# `{ workspace = true }`: the root `Cargo.toml` has no `[workspace.
+# dependencies] block2` row (`plugins/iap/Cargo.toml:72-79`'s comment
+# explains why — camera/iap/video-player each repeat this exact per-crate
+# literal instead of adding one), so this crate repeats it too.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# `DispatchQueue::main()`/`exec_async`: presenting/resolving an
+# `ASWebAuthenticationSession` must happen on the main thread — the same
+# async main-queue bounce `frust-haptics`'s iOS backend and `frust-camera`'s
+# capture queue already use this crate for. Feature list repeated rather
+# than inherited for the same `default-features` reason as
+# `objc2-foundation` above (the root `dispatch2 = "0.3"` row is a plain
+# string, so it cannot narrow a member's feature set on its own).
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2",
+] }
+# `ASWebAuthenticationSession`/`ASWebAuthenticationSessionCompletionHandler`:
+# the RFC 8252 in-app browser tab this crate's Apple backend presents.
+# `ASFoundation` is the generated-module split `objc2-authentication-services`
+# uses for its non-`AuthenticationServices.framework`-header-boundary types
+# (matches `objc2-ui-kit`'s own per-class feature split that
+# `frust-haptics`'s Cargo.toml documents). Not `{ workspace = true, ... }`:
+# same restriction as `objc2-foundation` above — the root
+# `objc2-authentication-services = "0.3"` row (see `Cargo.toml`) is a plain
+# version string with no `default-features` set, so a member cannot narrow
+# it via `{ workspace = true, default-features = false }`; this repeats the
+# version literal instead, exactly as `frust-haptics`'s `Cargo.toml` does for
+# `objc2-ui-kit`.
+objc2-authentication-services = { version = "0.3", default-features = false, features = [
+    "std",
+    "ASWebAuthenticationSession",
+    "ASFoundation",
+    "block2",
+] }
+
+# iOS only — the `UIWindow`-backed presentation-context anchor
+# `ASWebAuthenticationSession`'s `presentationAnchor(for:)` returns on this
+# platform. **Not** `target_vendor = "apple"`: matches `frust-haptics`'s own
+# `target_os = "ios"` split (macOS shares the `apple` module's session setup
+# but anchors on `NSWindow` instead — see the `target_os = "macos"` stanza
+# below).
+[target.'cfg(target_os = "ios")'.dependencies]
+# `UIResponder`/`UIApplication`/`UIScene`/`UIWindowScene`/`UIView`/`UIWindow`:
+# the chain this crate's Apple backend walks from the running app to the key
+# window to hand back as the session's presentation anchor. `default-features
+# = false` + a minimal feature list, matching `frust-haptics`'s own
+# `objc2-ui-kit` edge. `UISceneDefinitions` carries `UIScene.activationState`
+# alone: the backend prefers a foreground-active scene's key window, because
+# an anchor in a background scene is what
+# `ASWebAuthenticationSessionErrorCodePresentationContextInvalid` reports.
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIResponder",
+    "UIApplication",
+    "UIScene",
+    "UISceneDefinitions",
+    "UIWindowScene",
+    "UIView",
+    "UIWindow",
+] }
+
+# macOS only — the `NSWindow`-backed presentation-context anchor
+# `ASWebAuthenticationSession`'s `presentationAnchor(for:)` returns on this
+# platform (see the `target_os = "ios"` stanza above for why this is split
+# by `target_os` rather than shared under `target_vendor = "apple"`).
+[target.'cfg(target_os = "macos")'.dependencies]
+# `NSResponder`/`NSApplication`/`NSWindow`: the chain this crate's Apple
+# backend walks from the running app to the key window to hand back as the
+# session's presentation anchor — the macOS mirror of the `objc2-ui-kit` edge
+# above. `default-features = false` + a minimal feature list, matching this
+# crate's own `objc2-ui-kit` edge and the root `objc2-app-kit`
+# row's own precedent (`frust-shell-macos`).
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSResponder",
+    "NSApplication",
+    "NSWindow",
+] }

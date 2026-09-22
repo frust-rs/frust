@@ -85,6 +85,16 @@ off this index — read this plus the one that covers what you are touching:
     glue's own contract establishes; each site is `# Safety`/`SAFETY`-noted and wraps its body
     in `catch_unwind` per the no-unwind rule below. Its `android` backend holds no `unsafe`
     block at all — only its two JNI exports' `#[unsafe(no_mangle)]` attributes.
+  - `frust-auth-session`'s `apple` backend — every `objc2-authentication-services` call is
+    `unsafe` in the binding: the deprecated `ASWebAuthenticationSession` initializer, its
+    presentation-context/ephemeral-session setters, and `-start`; the completion handler's raw
+    `NSURL`/`NSError` derefs plus one `extern` static read (`ASWebAuthenticationSessionErrorDomain`);
+    the `define_class!` presentation-anchor class (`#[unsafe(super(NSObject))]`/
+    `#[unsafe(method_id(…))]` plus two `unsafe impl` conformances, counted as one zone, and its
+    `msg_send![super(this), init]`); and one `MainThreadMarker::new_unchecked()` proving the
+    main-queue bounce. Each site is `# Safety`/`SAFETY`-noted and the completion body runs under
+    `catch_unwind`. Its `android` backend holds no `unsafe` block at all — only its one JNI
+    export's `#[unsafe(no_mangle)]` attribute, mirroring `frust-iap`'s Android backend above.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
