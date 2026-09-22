@@ -11,7 +11,7 @@ resolver = "2"
 # plugins/video-player is a platform plugin like the ones before it (one Rust
 # video API over a per-OS player backend), listed explicitly for the same
 # reason.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
 # plugins/{beui,cupertino,glyph,material,shadcn} are the design-system plugin
 # tier (listed alphabetically): the three catalogs that used to live in-tree
 # behind `frust-widgets` cargo features, plus two external-origin catalogs,
@@ -334,6 +334,19 @@ vello_cpu_oracle = { package = "vello_cpu", version = "=0.2.0", default-features
 # 0.3.2, objc2-local-authentication 0.3.2, both actively maintained).
 objc2-security = "0.3"
 objc2-local-authentication = "0.3"
+# frust-auth-session's Apple backend — `ASWebAuthenticationSession`
+# (`ASFoundation`/`objc2-authentication-services`), the RFC 8252 in-app
+# browser tab both iOS and macOS route an OAuth/OIDC flow through. Same plain
+# version-string shape as `objc2-security`/`objc2-local-authentication`
+# above, for the same `default-features = false`-without-a-member-override
+# reason. Pinned to minor per the Version-Pin Policy: 0.3.2 resolves and
+# requires `objc2 >=0.6.2` (satisfied by this file's own `objc2 = "0.6"` row
+# above); it pulls in `objc2-app-kit` only on macOS (the
+# `ASWebAuthenticationPresentationContextProviding` anchor is `NSWindow`
+# there, `UIWindow` on iOS — see `plugins/auth-session/Cargo.toml`'s own
+# per-target rows). The tripwire is `cargo check --target
+# aarch64-apple-ios-sim -p frust-auth-session`.
+objc2-authentication-services = "0.3"
 # frust-secure-storage's desktop (Linux/Windows) secret-store backend —
 # `keyring` 4.x's re-architecture fronts `keyring-core`
 # + separate opt-in per-platform store crates.
