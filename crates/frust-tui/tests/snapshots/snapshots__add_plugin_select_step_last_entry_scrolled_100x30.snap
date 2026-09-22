@@ -1,5 +1,6 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 709
 expression: rendered
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -7,9 +8,9 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (8-16 of 16)        │▓▓                
- DEVICES ↻ r      │    ( ) url-launcher                                          │▓▓                
-   none found     │        Open an absolute http/https URL in the platform's     │▓▓                
+                  │  Choose a plugin to add to this project  (9-17 of 17)        │▓▓                
+ DEVICES ↻ r      │    ( ) auth-session                                          │▓▓                
+   none found     │        OAuth round trip in the platform auth user agent —    │▓▓                
                   │    ( ) iap                                                   │▓▓                
  SESSIONS         │        In-app purchases and subscriptions over Play Billing  │▓▓                
    none running   │    ( ) video-player                                          │▓▓                

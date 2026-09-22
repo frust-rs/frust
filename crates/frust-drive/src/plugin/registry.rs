@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — sixteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — seventeen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -24,7 +24,16 @@
 //! whose Android side needs no `<uses-permission>` at all — `startActivity`
 //! with `ACTION_VIEW` needs none on API 30+, and no `<queries>` element
 //! either, since it targets an implicit intent the OS itself resolves — see
-//! `URL_LAUNCHER_BASE`'s doc comment), `iap`
+//! `URL_LAUNCHER_BASE`'s doc comment), `auth-session`
+//! (dependency plus the plugin's own Android library module — OAuth round trip
+//! completion half, mirroring `url-launcher`'s launch half; Chrome Custom Tabs
+//! on Android / ASWebAuthenticationSession on iOS — the second registry entry
+//! to pair a bare CargoDep with just a GradleModule on Android, like
+//! `native-widgets` and `video-player` — no manifest permission or plist key,
+//! since Custom Tabs carry no permission, the `<queries>` element comes from
+//! the module's own manifest via the manifest merger, and ASWebAuthenticationSession
+//! needs no plist key; desktop reports NoHandler — see `AUTH_SESSION_BASE`'s doc
+//! comment), `iap`
 //! (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
 //! comment for why), `database` (dependency only — pure-Rust plugin, no
@@ -315,6 +324,43 @@ const URL_LAUNCHER: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `auth-session`'s base contributions — a Cargo dependency plus the plugin's own
+/// Android library module, the `native-widgets`/`video-player` two-contribution
+/// shape (dependency + one Gradle module).
+///
+/// No [`Contribution::ManifestPermission`]: Chrome Custom Tabs carries no permission —
+/// the Android `startActivity` implied by the API needs none (unlike `haptics`'
+/// `VIBRATE`, itself a *normal* permission). No [`Contribution::PlistEntry`]: Apple's
+/// `ASWebAuthenticationSession` needs no plist key for `http`/`https` callbacks
+/// (unlike `camera`'s usage-description string, which the app's `Info.plist` must
+/// carry). No [`Contribution::SwiftPackageRef`] and no [`Contribution::AppCrateMacro`]:
+/// the iOS factory is a Rust `objc2` `define_class!` type (like `native-widgets` and
+/// `video-player`'s Apple arms), so there is nothing to link from Swift and nothing
+/// for release LTO to strip. The `<queries>` element for the CustomTabsService comes
+/// from the module's own manifest via the manifest merger — the app's manifest is
+/// never touched. Desktop backends report `NoHandler` (no platform API available).
+const AUTH_SESSION_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-auth-session",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-auth-session",
+        rel_path: "plugins/auth-session/platform/android",
+    },
+];
+
+const AUTH_SESSION: PluginSpec = PluginSpec {
+    id: "auth-session",
+    summary: "OAuth round trip in the platform auth user agent — ASWebAuthenticationSession \
+              (iOS/macOS, in-process callback) or Chrome Custom Tabs (Android, Gradle module) — \
+              resolving Callback(url)/Cancelled with an ephemeral mode; Linux/Windows report \
+              NoHandler.",
+    crate_dir: "auth-session",
+    base: AUTH_SESSION_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// `iap`'s base contributions — a Cargo dependency plus its own Android
 /// library module and its own iOS Swift package, the `camera`/`native-widgets`
 /// shape (a plugin's Kotlin/Swift never copied into the app).
@@ -547,6 +593,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CLIPBOARD,
         HAPTICS,
         URL_LAUNCHER,
+        AUTH_SESSION,
         IAP,
         VIDEO_PLAYER,
         DATABASE,
@@ -574,7 +621,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_sixteen_v1_plugins() {
+    fn registry_lists_the_seventeen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -587,6 +634,7 @@ mod tests {
                 "clipboard",
                 "haptics",
                 "url-launcher",
+                "auth-session",
                 "iap",
                 "video-player",
                 "database",
