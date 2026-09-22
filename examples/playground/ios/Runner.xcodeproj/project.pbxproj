@@ -270,6 +270,8 @@
 					CoreFoundation,
 					"-framework",
 					UIKit,
+					"-framework",
+					AuthenticationServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -308,6 +310,8 @@
 					CoreFoundation,
 					"-framework",
 					UIKit,
+					"-framework",
+					AuthenticationServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -347,6 +351,8 @@
 					CoreFoundation,
 					"-framework",
 					UIKit,
+					"-framework",
+					AuthenticationServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";

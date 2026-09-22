@@ -36,6 +36,19 @@ own header comment (a `settings.gradle.kts` module include plus an
 `implementation(project(":frust-auth-session"))` line in `android/app/`,
 the same shape `plugins/secure-storage/platform/android` uses).
 
+On **iOS** the app target must additionally link
+`AuthenticationServices.framework` — `-framework AuthenticationServices` in
+the Runner's `OTHER_LDFLAGS` (or the framework in Xcode's *Frameworks*
+phase). This crate's Rust code references the framework's
+`ASWebAuthenticationSessionErrorDomain` symbol, and a Rust staticlib cannot
+carry a framework link into Xcode's link step, so without the flag the app
+fails to link with `Undefined symbols for architecture arm64:
+"_ASWebAuthenticationSessionErrorDomain"`. `frust plugin add auth-session`
+does not add it yet (`auth-session-ios-framework-link-manual-v1` in
+[LIMITATIONS.md](../../docs/LIMITATIONS.md)); `examples/playground/ios`
+carries it. A macOS binary linked by cargo needs nothing extra — the objc2
+binding's own link attribute applies there.
+
 ---
 
 ## 2. API and awaiting the future
@@ -82,6 +95,7 @@ before touching any platform API — a rejected request resolves
 ## 3. Platform caveats
 
 - **iOS / macOS** (`ASWebAuthenticationSession`):
+  - iOS apps must link `AuthenticationServices.framework` by hand (§ 1).
   - Your app's `Info.plist` must register `req.callback_scheme` under
     `CFBundleURLTypes` — the same scheme registration any custom-scheme deep
     link needs.
@@ -351,8 +365,130 @@ steps were re-run with the rebuilt APK.
   `auth-session-android-ephemeral-browser-dependent` limitation is exactly
   that: honoured by Chrome, ignored by Fennec F-Droid.
 
-### iOS + macOS — owed
+### iOS — iPhone 17 simulator PASSED (machine-driven), 2026-09-23
 
-Not run here; see [PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md)'s
-Auth-session manual test for the script the Mac gate records, plus the
-Apple-target compile gates.
+Rig: iPhone 17 simulator, iOS 26.2 (`xcrun simctl`; the `iPhoneSimulator26.2.sdk`
+Xcode toolchain) on a macOS 26.6.2 host. App: the `examples/playground` debug
+simulator build (`frust build ios --debug --simulator`, bundle
+`it.f0x.playground`, `CFBundleName` = `Runner`). Gate pages served from this
+checkout's `plugins/auth-session/gate/` over a scratch https origin on the Mac
+(`https://192.168.8.140:8443/`, a throwaway CA trusted on the simulator with
+`xcrun simctl keychain add-root-cert`, `Cache-Control: no-store` from the
+second cookie visit on). Every tap was scripted: `idb ui tap` reaches the
+page's frust buttons and the system consent alert's `Cancel`/`Continue` by
+their accessibility labels. Read two independent ways — the app's own console
+(`xcrun simctl launch --console-pty`, with a scratch, uncommitted `eprintln!`
+of every status write) and screenshots — plus the server's request log, which
+records each request's `Cookie` header. The base URL, the start section and
+the `Drop` button below were scratch playground edits, reverted before commit.
+
+**Link fix first — the Apple backend had never been linked by Xcode.** The
+first build failed:
+
+```
+Undefined symbols for architecture arm64:
+  "_ASWebAuthenticationSessionErrorDomain", referenced from:
+      frust_auth_session::apple::outcome_from in libplayground.a
+```
+
+`objc2-authentication-services` declares `#[link(name =
+"AuthenticationServices", kind = "framework")]`, which rustc honours when it
+links (macOS) but which does not travel through the iOS staticlib into
+Xcode's link; the scaffold Runner links Metal/QuartzCore/CoreText/
+CoreGraphics/CoreFoundation/UIKit only. `-framework AuthenticationServices`
+was added to the playground's `project.pbxproj` (all three configurations);
+§ 1 documents the requirement and `auth-session-ios-framework-link-manual-v1`
+tracks the missing `frust plugin add` contribution.
+
+**(1) Callback** — tap `Callback` (Ephemeral off). Apple's consent alert
+appeared — `“Runner” Wants to Use “192.168.8.140” to Sign In` / `This allows
+the app and website to share information about you.` with `Cancel` /
+`Continue` — then the sheet loaded `callback.html?scheme=frustplay` (server:
+`GET /callback.html?scheme=frustplay 200`), redirected and dismissed itself.
+Console and labels, verbatim:
+
+```
+GATE Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+status: Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+latest deep link: none
+is_supported: true
+```
+
+`latest deep link` stayed `none`: the redirect was intercepted in-process, so
+no deep link was delivered (§ 3).
+
+**(2) Cancel** — (a) with Ephemeral **on**, `Cancel test` presented the sheet
+directly, with **no consent alert** (Apple skips it for an ephemeral
+session), showing `cookie.html`; closed with the sheet's top-left **X**
+(iOS 26 shows a close glyph, not a `Cancel` button) →
+`Cancel test -> Ok(Cancelled)`. (b) With Ephemeral **off**, `Cancel test` →
+consent alert → **Cancel** → `Cancel test -> Ok(Cancelled)` (`CanceledLogin`;
+no sheet was ever shown).
+
+**(3) Busy** — `Busy -> Err(Busy)` was written the instant the button was
+tapped; the first session's consent alert → `Continue` → `callback.html`
+(server `304`) → `Busy(first) -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`.
+
+**(4) Ephemeral — strict, as Apple documents.** Two instruments agree: the
+`Cookie` header on each request the sheet made, and the page's own text.
+
+| Visit | Ephemeral | Request `Cookie` header | Page text |
+|---|---|---|---|
+| 1 | off | none | `no cookie (set now)` |
+| 2 | off | (served from the sheet's cache, no request) | `frustauth=1 (persisted from an earlier session)` |
+| 3 | on | none | `no cookie (set now)` |
+| 4 | on | none | `no cookie (set now)` |
+| 5 | off | (cache) | `frustauth=1 (persisted from an earlier session)` |
+
+The ephemeral sessions saw neither the persisted jar's cookie nor their own
+previous run's, and the persisted cookie survived them. Each sheet was closed
+with **X** → `Cookie check -> Ok(Cancelled)`. Neither ephemeral visit showed a
+consent alert.
+
+**(5) Cancel-before-replace** (the round-1 cap remediation, `68561399`) — a
+scratch `Drop` button starts a session against `cookie.html`, drops its future
+at once, and 5 s later starts a second session against `callback.html` from a
+background thread, while the first is still on screen. (a) Ephemeral: the
+first sheet was showing `cookie.html` (server `GET /cookie.html` at
+17:59:33Z) when the second start `-cancel`led it and presented its own →
+`Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`
+(server `GET /callback.html?scheme=frustplay` at 17:59:37Z); no crash, the
+page usable afterwards. (b) Non-ephemeral, so the first session's **consent
+alert** was still up when the second start landed: the alert was dismissed but
+the second `-start` failed —
+`Drop+restart -> Err(Platform("com.apple.AuthenticationServices.WebAuthenticationSession 3"))`
+(`ASWebAuthenticationSessionErrorCodePresentationContextInvalid`); the Busy
+slot was free and the page usable afterwards. Filed as a follow-up: the new
+`-start` races the stale alert's dismissal.
+
+**Observations** — the consent alert names the app by `CFBundleName`
+(`Runner`, the scaffold's product name), not `CFBundleDisplayName`
+(`Playground`); the frust widgets' iOS accessibility frames come back divided
+by the 3× scale (a known AccessKit-bounds finding, not this plugin's).
+
+### iOS — iPhone SE (physical) — NOT RUN
+
+Blocked in the 2026-09-23 session: the device build stopped at
+`Error: no codesigning identity found` — the login keychain's signing identity
+was unreadable while the Mac was screen-locked (`security find-identity -v -p
+codesigning` → `0 valid identities found`, the Apple Development certificate
+itself present). The physical-device legs are otherwise human-driven (the
+iPhone SE is network-paired: no touch injection, no screen capture); the
+script is the simulator one above, read through `devicectl device process
+launch --console`.
+
+### macOS — NOT RUN
+
+Blocked in the same session by the Mac's screen lock. What did run: the
+`examples/playground` desktop debug binary (`cargo build`) wrapped in a
+hand-made `Playground.app` whose `Info.plist` registers `frustplay` under
+`CFBundleURLTypes` (the playground has no `macos/` directory and `frust build
+macos` would need one — option (b) of the gate card; nothing committed),
+ad-hoc signed and registered with `lsregister` (`claimed schemes: frustplay:`).
+`Callback` presented the AppKit consent alert — `“Playground” Wants to Use
+“192.168.8.140” to Sign In` — and `Continue` opened the sheet, which stopped
+at Safari's `This Connection Is Not Private` page: unlike the simulator, the
+host's trust store cannot be extended without the user's password, so the
+scratch https origin needs the CA trusted on the Mac (or a publicly trusted
+origin) before the four steps can complete. `is_supported: true`,
+`latest deep link: none` on the desktop page.
