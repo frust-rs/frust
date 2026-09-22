@@ -4,7 +4,7 @@
 //! [`crate::AuthSessionError::Platform`]`("backend not implemented")` — this
 //! crate's originating task builds only the host-testable core (the public
 //! API, the `oneshot` future, the Busy guard, the URL/scheme validators) so
-//! every real target compiles from day one; the Apple backend card (a1-02)
+//! every real target compiles from day one; the real Apple backend
 //! replaces this module with a real `ASWebAuthenticationSession`
 //! (`objc2-authentication-services`) implementation — presenting on a
 //! `UIWindow` anchor on iOS, an `NSWindow` anchor on macOS — without
