@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 
 /**
@@ -226,6 +227,14 @@ object FrustAuthSessionHost {
                 builder.setEphemeralBrowsingEnabled(true)
             }
             val intent = builder.build()
+            // `launchUrl` alone resolves to the default `VIEW` handler, which
+            // need not implement Custom Tabs at all (LineageOS's Jelly, seen on
+            // the gate device, opened a plain browser window instead). Pin the
+            // Intent to a browser that answers `CustomTabsService` when one is
+            // installed — the `<queries>` element in this module's manifest
+            // exists so this lookup can see them; with no provider the plain
+            // `VIEW` fallback stands.
+            CustomTabsClient.getPackageName(act, null)?.let { intent.intent.setPackage(it) }
             pending = Pending(callbackScheme, act.intent)
             intent.launchUrl(act, Uri.parse(url))
             0
