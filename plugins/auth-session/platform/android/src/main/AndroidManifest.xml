@@ -5,15 +5,16 @@
   needed to launch another app's Activity — and this module never binds to a
   Custom Tabs service directly.
 
-  The `<queries>` block below is needed only for provider *discovery*:
-  `CustomTabsClient.getPackageName` (used to pick a preferred/warm-up browser)
-  enumerates packages that answer the `CustomTabsService` action, and Android
-  11+'s package-visibility filtering hides that enumeration without a
-  `<queries>` declaration. `launchUrl` itself does not need this — it resolves
-  to any installed browser via a normal `ACTION_VIEW` implicit intent — so its
-  absence would not break the happy path, only a future warm-up/preferred-
-  package optimization. Declared now so that door stays open without a manifest
-  change later.
+  The `<queries>` block below is on `FrustAuthSessionHost`'s launch path, not
+  an optional optimization: every `start()` call probes for a Custom Tabs
+  provider — the resolved default `VIEW` handler first, then the installed
+  `http`/`https` handlers intersected with a well-known-browser allow-list —
+  before pinning the Custom Tab `Intent` (see `FrustAuthSessionHost.kt`'s
+  `pinCustomTabsProvider`). Android 11+'s package-visibility filtering hides
+  both that resolution and that enumeration without the `<queries>`
+  declarations below, so without them every launch would silently fall back
+  to an unpinned `Intent`, never reaching an installed Custom Tabs provider
+  even when one exists.
 
   The provider below is how `FrustAuthSessionHost` obtains an application
   `Context` BEFORE any Activity exists, mirroring `plugins/iap/platform/android`'s
@@ -40,16 +41,22 @@
         <intent>
             <action android:name="android.support.customtabs.action.CustomTabsService" />
         </intent>
-        <!-- `CustomTabsClient.getPackageName` enumerates the installed https
-             handlers before asking each one for its CustomTabsService; under
-             Android 11+ package visibility that enumeration is empty without
-             this second query, so no provider is ever found and the launch
-             silently falls back to the default browser (observed on the gate
-             device, whose default browser has no Custom Tabs support). -->
+        <!-- `pinCustomTabsProvider` resolves the default no-host `http://` VIEW
+             handler and enumerates every installed https handler as
+             full-browser candidates; under Android 11+ package visibility
+             both resolutions are empty without these two queries, so no
+             provider is ever found and every launch falls back to an
+             unpinned Intent (observed on the gate device, whose default
+             browser has no Custom Tabs support). -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
         </intent>
     </queries>
 
