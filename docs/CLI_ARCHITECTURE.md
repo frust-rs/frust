@@ -263,9 +263,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes). The
-  registry holds sixteen top-level entries, including the four design-system plugins (`glyph`/
+  registry holds seventeen top-level entries, including the four design-system plugins (`glyph`/
   `material`/`cupertino`/`shadcn` — `beui` is still absent by design) — the TUI's Add Plugin dialog
-  lists all sixteen; each design-system entry's
+  lists all seventeen; each design-system entry's
   base contribution is a single `CargoDep` (installing it is still a manual `<crate>::install()`
   call in `app!`, since a plugin add cannot know where an app wants theme setup to run).
   `Contribution::ScaffoldFile` is the registry's first file-*creating* contribution, rather than

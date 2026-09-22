@@ -6055,3 +6055,59 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: `cargo check --target x86_64-pc-windows-gnu -p frust-url-launcher` passes once the target is installed, and a Windows rig runs the plugin's device gate against a real registered `http`/`https` handler.
 
 **Evidence**: `plugins/url-launcher/src/desktop.rs` (the `#[cfg(target_os = "windows")]` arm); `plugins/url-launcher/README.md` §6 (*Device gate*).
+
+---
+
+### `auth-session-android-callback-rides-intent-filter` — Android cannot prove the OAuth callback scheme is bound to this app
+
+**Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept the redirect before this host ever sees it.
+
+**Applies to**: Android only; any app using this plugin whose callback scheme collides with another installed app's registered scheme.
+
+**Why accepted**: this is RFC 8252's own documented risk for a custom-scheme redirect (its §8.1 recommends reverse-domain-unique scheme naming, which narrows but does not eliminate the window), not a defect this plugin introduces — HTTPS App Links (domain-verified) or Android's newer Auth Tab API would close the gap, but neither is in this plugin's v1 scope.
+
+**Trigger for removal**: a follow-on card adds an HTTPS App Links or Auth Tab callback path and `AuthSessionRequest` grows a way to select it.
+
+**Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt`'s class doc (*Why the outcome is read from `activity.intent`*, *The double-delivery note*); `examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` intent filter.
+
+---
+
+### `auth-session-linux-windows-unavailable-v1` — no in-app auth user agent on desktop Linux/Windows
+
+**Observed**: `AuthSession::start` reports `AuthSessionError::NoHandler` immediately on every target that is not Android, iOS, or macOS — Linux and Windows desktop included; `unsupported::start` never presents a session at all.
+
+**Applies to**: Linux and Windows desktop.
+
+**Why accepted**: neither platform ships a first-class in-app browser-tab primitive the way Android's Custom Tabs or Apple's `ASWebAuthenticationSession` do, and this crate has no plan to build one — the documented fallback is driving the same RFC 8252 flow through `frust-url-launcher`'s ordinary system-browser launch plus a local loopback HTTP listener (or an equivalent out-of-band step), RFC 8252's own "loopback IP redirection" pattern for platforms with no in-app browser-tab primitive.
+
+**Trigger for removal**: none anticipated — this is a permanent platform gap, not a deferral.
+
+**Evidence**: `plugins/auth-session/src/unsupported.rs`'s module doc; `plugins/auth-session/README.md` §3 (*Desktop (Linux, Windows)*).
+
+---
+
+### `auth-session-no-cancel-v1` — no way to cancel a live session from Rust
+
+**Observed**: `AuthSession` exposes no `cancel` method — once `start` returns a pending future, it only resolves when the identity provider redirects, the user dismisses the platform tab themselves, or a platform-level failure occurs; there is no programmatic way for an app to dismiss a live session (e.g. on its own timeout or navigation-away).
+
+**Applies to**: every platform with a real backend (Android, iOS, macOS).
+
+**Why accepted**: v1 scope — the one-session `Busy` guard (this crate's *Exactly one live session* doc section) means a stuck session still cannot wedge a later one forever once it eventually resolves, even with no cancel path, and neither this crate's originating task nor its gate script called for one.
+
+**Trigger for removal**: a follow-on task adds `AuthSession::cancel` (dismissing `ASWebAuthenticationSession` via `-cancel`, finishing the Android Custom Tab activity) and resolves the live session with `AuthSessionOutcome::Cancelled`.
+
+**Evidence**: `plugins/auth-session/src/lib.rs`'s public API (`AuthSession::start`/`is_supported` only); `plugins/auth-session/README.md` §2.
+
+---
+
+### `auth-session-ios-https-callback-not-supported-v1` — iOS 17.4's HTTPS App-Link callback form is unavailable
+
+**Observed**: the Apple backend calls the deprecated `-initWithURL:callbackURLScheme:completionHandler:` initializer exclusively (`apple.rs`'s `make_session`), never iOS 17.4's `-initWithURL:callback:completionHandler:`, which can express an HTTPS App-Link callback (`ASWebAuthenticationSessionCallback`) as well as a custom scheme — only a custom `callback_scheme` redirect is supported, never an HTTPS callback URL.
+
+**Applies to**: iOS and macOS alike (both route through the same `apple.rs` module).
+
+**Why accepted**: this crate's deployment floor is iOS 15, where the newer initializer does not exist at all — supporting the HTTPS-callback form would need a second, floor-gated code path for a callback shape this crate's originating task did not ask for.
+
+**Trigger for removal**: raising the crate's deployment floor to iOS 17.4, or adding a floor-gated second path that uses the newer initializer when available.
+
+**Evidence**: `plugins/auth-session/src/apple.rs`'s module doc (*The iOS 15 floor and the deprecated initializer*) and its `make_session` function.

@@ -1,20 +1,20 @@
 # frust-auth-session
 
 An **RFC 8252 "OAuth for native apps"** in-app browser authentication-session
-plugin for frust apps — Android Custom Tabs (owed to a follow-on backend
-card) / Apple `ASWebAuthenticationSession` (owed to a follow-on backend
-card), presented over the request's `https` authorization URL and resolving
-to the identity provider's `callback_scheme://…` redirect.
+plugin for frust apps — Android Custom Tabs / Apple
+`ASWebAuthenticationSession` — presented over the request's `https`
+authorization URL and resolving to the identity provider's
+`callback_scheme://…` redirect.
 
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
 
-**Status:** this crate currently ships its host-testable core only — the
-public API, the `oneshot` awaitable future, the one-live-session ("Busy")
-guard, and the URL/callback-scheme validators. Its Android and Apple
-backends are stubs that reject every session with
-`AuthSessionError::Platform("backend not implemented")`; see § 3 below.
+**Status:** this crate ships real Android (Chrome Custom Tabs) and Apple
+(`ASWebAuthenticationSession`) backends alongside its host-testable core —
+the public API, the `oneshot` awaitable future, the one-live-session
+("Busy") guard, and the URL/callback-scheme validators. See § 3 below for
+each platform's caveats.
 
 ---
 
@@ -26,12 +26,15 @@ frust-auth-session = { path = "<frust>/plugins/auth-session" }  # crates.io late
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
-path = "…" }` line the scaffold already wrote. No Gradle module of its own is
-needed for the Android backend this crate will eventually ship (Custom Tabs
-is reached through `androidx.browser.customtabs`, added the same way any
-other Android dependency is — the future Android backend card documents the
-exact wiring); until then, the Gradle module row `frust plugin add
-auth-session` would add is a no-op placeholder.
+path = "…" }` line the scaffold already wrote. The Android backend needs
+this plugin's own Gradle library module linked too (Chrome Custom Tabs,
+reached through `androidx.browser.customtabs`) — run
+`frust plugin add auth-session` to wire the Cargo dependency above and the
+Gradle module include together, or add the module by hand per
+[`platform/android/build.gradle.kts`](platform/android/build.gradle.kts)'s
+own header comment (a `settings.gradle.kts` module include plus an
+`implementation(project(":frust-auth-session"))` line in `android/app/`,
+the same shape `plugins/secure-storage/platform/android` uses).
 
 ---
 
@@ -71,26 +74,53 @@ before touching any platform API — a rejected request resolves
 
 ## 3. Platform caveats
 
-*(to be completed by the Android and Apple backend cards — both backends are
-currently stubs; every session on every target rejects immediately with
-`AuthSessionError::Platform("backend not implemented")`.)*
-
-- **Android:** owed — Custom Tabs (`androidx.browser.customtabs`)
-  presentation, the redirect-intent contract, and the double-delivery
-  interaction with `frust::deep_links()` (§ 5 below) all land with that
-  card.
-- **iOS / macOS:** owed — `ASWebAuthenticationSession` presentation (a
-  `UIWindow` anchor on iOS, an `NSWindow` anchor on macOS),
-  `prefersEphemeralWebBrowserSession` wiring for
-  [`AuthSessionRequest::ephemeral`], and the completion-block → this crate's
-  `oneshot` channel hookup all land with that card.
+- **iOS / macOS** (`ASWebAuthenticationSession`):
+  - Your app's `Info.plist` must register `req.callback_scheme` under
+    `CFBundleURLTypes` — the same scheme registration any custom-scheme deep
+    link needs.
+  - The session intercepts the redirect **in-process**: it never reaches the
+    app as a URL open, so `frust_on_deep_link` is **not** invoked for it
+    (unlike Android — see § 5). An app's ordinary deep-link handling can
+    leave that scheme untouched.
+  - This crate's deployment floor is iOS 15 (the workspace floor —
+    [DEVELOPMENT.md](../../docs/DEVELOPMENT.md)'s Version-Pin Policy table);
+    the deprecated `-initWithURL:callbackURLScheme:completionHandler:`
+    initializer is used rather than iOS 17.4's HTTPS-App-Link-capable one
+    (`auth-session-ios-https-callback-not-supported-v1` in
+    [LIMITATIONS.md](../../docs/LIMITATIONS.md)).
+  - Starting a session before any window exists resolves
+    `AuthSessionError::Platform("no window to present the authentication
+    session over")` rather than presenting nothing.
+  - `AuthSessionRequest::ephemeral` maps straight onto
+    `prefersEphemeralWebBrowserSession` and is honoured strictly (not
+    best-effort, unlike Android below).
+- **Android** (Chrome Custom Tabs):
+  - Needs this plugin's own Gradle module linked (§ 1) — a session on an app
+    that skips it resolves `AuthSessionError::Platform` naming `frust plugin
+    add auth-session`.
+  - The Custom Tab launches from the currently resumed `Activity`; with none
+    resumed the session resolves `AuthSessionError::Platform("no resumed
+    Activity …")` rather than queuing.
+  - The redirect is observed through the app's own `VIEW`/`BROWSABLE`
+    custom-scheme `<intent-filter>` on resume — the same intent-filter shape
+    (and same lack of domain verification) an ordinary deep link uses
+    (`auth-session-android-callback-rides-intent-filter` in
+    [LIMITATIONS.md](../../docs/LIMITATIONS.md)). The callback URL therefore
+    reaches the app **twice** — see § 5.
+  - `ephemeral` maps to `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled`,
+    advisory to the browser (a browser that doesn't support it opens a normal
+    tab instead of refusing).
+  - No installed browser capable of a Custom Tab resolves
+    `AuthSessionError::NoHandler`.
 - **Desktop (Linux, Windows):** permanent — no platform authentication user
-  agent exists; every session rejects with `AuthSessionError::NoHandler`.
-  Drive the same OAuth flow through
-  [`frust-url-launcher`](../url-launcher/README.md)'s ordinary system-browser
-  launch instead, with a local loopback HTTP listener (or an equivalent
-  out-of-band step) receiving the redirect — RFC 8252's own "loopback IP
-  redirection" pattern for platforms with no in-app browser-tab primitive.
+  agent exists; every session rejects with `AuthSessionError::NoHandler`
+  (`auth-session-linux-windows-unavailable-v1` in
+  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). Drive the same OAuth flow
+  through [`frust-url-launcher`](../url-launcher/README.md)'s ordinary
+  system-browser launch instead, with a local loopback HTTP listener (or an
+  equivalent out-of-band step) receiving the redirect — RFC 8252's own
+  "loopback IP redirection" pattern for platforms with no in-app
+  browser-tab primitive.
 
 ---
 
@@ -109,19 +139,20 @@ stuck session can never wedge every later one behind it.
 ## 5. Deep links vs the future
 
 On Android, the callback URL Custom Tabs redirects back into the app reaches
-the platform **twice** once the real Android backend lands: once as the
-redirect this crate resolves `AuthSession::start`'s future with, and once
-more as an ordinary deep link `frust::deep_links()` also observes (the OS has
-no way to know only this crate wants that intent). Treat the future as the
-single authoritative source for an auth-session callback, and ignore
-`callback_scheme` in your app's own deep-link handling — acting on both
-delivers the same authorization code twice.
+the platform **twice**: once as the redirect this crate resolves
+`AuthSession::start`'s future with, and once more as an ordinary deep link
+`frust::deep_links()` also observes (the OS has no way to know only this
+crate wants that intent). Treat the future as the single authoritative
+source for an auth-session callback, and ignore `callback_scheme` in your
+app's own deep-link handling — acting on both delivers the same
+authorization code twice. iOS/macOS has no such double delivery — see § 3.
 
 ---
 
 ## 6. Device gate
 
-Owed — no device or simulator run has exercised either backend yet (both are
-stubs; see § 3). A follow-on task records the Android Custom Tabs and Apple
-`ASWebAuthenticationSession` device-gate transcripts once their backend cards
-land.
+Owed — no device or simulator run has exercised either backend yet (see § 3
+for what each does). A follow-on task records the Android Custom Tabs and
+Apple `ASWebAuthenticationSession` device-gate transcripts; see
+[PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md)'s Auth-session
+manual test for the script it will run.
