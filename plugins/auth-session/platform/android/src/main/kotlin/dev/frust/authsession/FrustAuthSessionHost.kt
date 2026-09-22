@@ -170,9 +170,10 @@ object FrustAuthSessionHost {
      * via [mainHandler] and this call returns `0` immediately — the eventual
      * outcome then arrives either through [nativeOnAuthSessionResult] (a
      * successful launch's redirect, delivered later by [onActivityResumed]),
-     * or — for the two failure cases a deferred launch can still hit — through
-     * an immediate call to [nativeOnAuthSessionResult] with kind `2` or `3`
-     * from the posted runnable itself.
+     * or — for the failure cases a deferred launch can still hit — through
+     * an immediate call to [nativeOnAuthSessionResult] with kind `2`, `3` or
+     * `4` from the posted runnable itself (`4` stands in for return code `1`,
+     * because kind `1` means "cancelled" on the native side).
      *
      * Return / result codes:
      * - `0` — accepted (Custom Tab launch started; the redirect, if any,
@@ -182,6 +183,8 @@ object FrustAuthSessionHost {
      * - `3` — any other exception launching the tab (only the exception's
      *   class name is ever recorded — never [Throwable.message], which would
      *   contain the URL)
+     * - `4` — posted-path only: the deferred launch found no resumed Activity
+     *   (return code `1` re-coded so it cannot be mistaken for kind `1`)
      */
     @JvmStatic
     fun start(url: String, callbackScheme: String, ephemeral: Boolean): Int {
@@ -190,8 +193,14 @@ object FrustAuthSessionHost {
         }
         mainHandler.post {
             val result = launch(url, callbackScheme, ephemeral)
-            if (result == 2 || result == 3) {
-                nativeOnAuthSessionResult(result, null)
+            // A deferred launch that fails must still resolve the Rust future:
+            // `1` (no resumed Activity) is a synchronous return code, so on the
+            // posted path it is reported as kind `4` — `1` as a *kind* means
+            // "cancelled" and must never be sent here.
+            when (result) {
+                0 -> Unit
+                1 -> nativeOnAuthSessionResult(4, null)
+                else -> nativeOnAuthSessionResult(result, null)
             }
         }
         return 0
@@ -221,7 +230,9 @@ object FrustAuthSessionHost {
             intent.launchUrl(act, Uri.parse(url))
             0
         } catch (e: ActivityNotFoundException) {
-            Log.e(TAG, "frust-auth-session: no browser available to launch the Custom Tab", e)
+            // Never log the exception itself: its message carries the launch
+            // Intent, i.e. the authorization URL.
+            Log.e(TAG, "frust-auth-session: no browser available to launch the Custom Tab (${e.javaClass.name})")
             2
         } catch (e: Exception) {
             Log.e(TAG, "frust-auth-session: Custom Tab launch failed (${e.javaClass.name})")
