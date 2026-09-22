@@ -53,7 +53,13 @@
 //! UI): the previous session is `-cancel`led before its entry is dropped, so
 //! the presented sheet is dismissed rather than having its last strong
 //! reference released from under it, and its `CanceledLogin` completion is
-//! discarded by [`crate::resolve`] as a stale generation.
+//! discarded by [`crate::resolve`] as a stale generation. The replacing
+//! session's own `-start` is then deferred by [`REPLACE_START_DELAY`]
+//! ([`defer_start`]) rather than issued in the same turn: a `-start` while the
+//! cancelled session's UI is still animating out fails with
+//! `ASWebAuthenticationSessionErrorCodePresentationContextInvalid` (observed
+//! on the iOS 26.2 simulator with the stale session's consent alert up), and
+//! nothing in the framework signals when that dismissal has finished.
 //!
 //! # The iOS 15 floor and the deprecated initializer
 //!
@@ -91,8 +97,8 @@
 //!   (`frust-haptics`'s apple backend's identical claim).
 //! - [`make_session`]'s initializer call, whose whole caller contract is
 //!   the completion-block lifetime — stated on that function.
-//! - [`start_on_main`]'s two property setters and its `-start` call, each
-//!   a plain message send to a live session on the main thread.
+//! - [`start_on_main`]'s two property setters and [`present`]'s `-start`
+//!   call, each a plain message send to a live session on the main thread.
 //! - [`outcome_from`]'s two raw-pointer derefs plus the one `extern static`
 //!   read (`ASWebAuthenticationSessionErrorDomain`), all stated there.
 //! - [`Anchor`]'s `define_class!` block: its `#[unsafe(super(NSObject))]`,
@@ -113,9 +119,10 @@ compile_error!(
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::Duration;
 
 use block2::RcBlock;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -348,14 +355,65 @@ fn start_on_main(mtm: MainThreadMarker, req: AuthSessionRequest, token: SessionT
         // the main thread; documented as a no-op on an already-cancelled
         // session, so repeat calls cannot double-complete it.
         unsafe { stale_session.cancel() };
+        drop(previous);
+        // Not `present` here: the cancelled session's UI is still being
+        // dismissed, and a `-start` issued in the same turn fails with
+        // `PresentationContextInvalid` (module doc's *Retained until
+        // completion*).
+        defer_start(generation);
+        return;
     }
     drop(previous);
 
+    present(generation, &session);
+}
+
+/// How long a replacing session waits after `-cancel`ling the stale one
+/// before its own `-start` — long enough for a consent alert or sheet to
+/// finish animating out (UIKit's standard dismissal is ~0.35 s), short
+/// enough to read as immediate. The framework signals nothing at that
+/// moment, so a delay is the only handle (module doc's *Retained until
+/// completion*).
+const REPLACE_START_DELAY: Duration = Duration::from_millis(500);
+
+/// Schedule [`present_pending`] for `generation` on the main queue after
+/// [`REPLACE_START_DELAY`], presenting at once instead if the timer cannot be
+/// armed — a failed deferral must never leave a session unpresented.
+fn defer_start(generation: u64) {
+    let armed = DispatchTime::try_from(REPLACE_START_DELAY).is_ok_and(|when| {
+        DispatchQueue::main()
+            .after(when, move || present_pending(generation))
+            .is_ok()
+    });
+    if !armed {
+        present_pending(generation);
+    }
+}
+
+/// `-start` the session [`LIVE`] still holds for `generation`, if any — a
+/// newer start may have replaced (and cancelled) it during the deferral, in
+/// which case its caller has already dropped it and there is nothing left to
+/// present. Runs on the main queue.
+fn present_pending(generation: u64) {
+    let session = LIVE.with(|live| {
+        live.borrow()
+            .as_ref()
+            .filter(|entry| entry.0 == generation)
+            .map(|entry| entry.1.clone())
+    });
+    if let Some(session) = session {
+        present(generation, &session);
+    }
+}
+
+/// `-start` `session`, resolving `generation` with a platform error if the
+/// framework refuses synchronously (its entry is released first, so the
+/// refusal leaves nothing retained).
+fn present(generation: u64, session: &ASWebAuthenticationSession) {
     // SAFETY: `-start` on a fully configured session, on the main thread,
     // called exactly once for this instance.
     if !unsafe { session.start() } {
-        let previous = take_live(generation);
-        drop(previous);
+        drop(take_live(generation));
         crate::resolve(
             generation,
             Err(AuthSessionError::Platform(
