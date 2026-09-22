@@ -7,7 +7,7 @@ drives an [`AuthSession`](../src/lib.rs) round trip against:
   the playground app registers), validates it against a custom-scheme allow-list (see the page's own
   script for the rule), and redirects to `<scheme>://auth/callback?code=x&state=gate`, simulating
   an identity provider's successful authorization redirect. Unsupported schemes render a visible
-  error without any link. A fallback link covers a browser that refuses the automatic redirect.
+  error without any link. A fallback link covers a browser that refuses the automatic redirect — Chrome, for one, will not follow a script-initiated custom-scheme navigation without a user gesture and shows a *Continue to <app>?* prompt instead; if that prompt is dismissed, tap the link.
 - **`cookie.html`** — sets a `frustauth=1` cookie if none is present yet, then prints the full
   `document.cookie` string (or `no cookie`) in a large `<pre>` block. Useful two ways: as a page a tester
   manually dismisses the in-app browser tab from (any page works for that), and as a way to confirm

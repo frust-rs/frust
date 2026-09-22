@@ -290,6 +290,47 @@ ephemeral browsing under Chrome remains unobserved. Recorded in
 fallback path was not exercised on it. `is_supported()` = `true` on the
 Xiaomi (label above).
 
+### Android — round-1 re-check, 2026-09-22 (same device)
+
+After the review round-1 fixes (generation-carrying JNI contract, `pending`
+cleared on failure, allow-listed provider selection) the Callback and cookie
+steps were re-run with the rebuilt APK.
+
+- **Provider selection regression, fixed before the run.** The first
+  round-1 build launched the default browser again: enumerating the `https`
+  handlers with `MATCH_DEFAULT_ONLY` returns only the user's default browser
+  once one is set, so the allow-list intersection was empty. The query now
+  uses `MATCH_ALL` (the allow-list, not the flag, is the trust boundary), after
+  which Chrome — first on the allow-list — was pinned:
+
+  ```
+  START u0 {act=android.intent.action.VIEW dat=https://192.168.1.109:8443/... pkg=com.android.chrome cmp=com.android.chrome/org.chromium.chrome.browser.customtabs.CustomTabActivity}
+  ```
+
+- **Callback (Chrome 153).** After Chrome's own certificate interstitial
+  (self-signed LAN origin) the page loaded; Chrome does not follow a
+  script-initiated custom-scheme navigation without a gesture and instead
+  showed *Continue to Playground?* — tapping the page's visible fallback link
+  delivered `frustplay://auth/...` to the app:
+
+  ```
+  START u0 {act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=frustplay://auth/... cmp=it.f0x.playground/.MainActivity}
+  status: Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+  latest deep link: frustplay://auth/callback?code=x&state=gate
+  ```
+
+  (The playground now prints the URL through the outcome value; the plugin's
+  `Debug` output is `Callback { url_len: 43 }`.)
+
+- **Ephemeral (Chrome 153) — honoured.** Ephemeral OFF, `Cookie check` →
+  `no cookie (set now)` (Chrome's normal jar had no cookie yet). Ephemeral
+  ON, `Cookie check` → `no cookie (set now)` — the ephemeral session did not
+  see the cookie the normal jar had just stored. Ephemeral OFF again →
+  `frustauth=1 (persisted from an earlier session)`. Each session closed with
+  the tab's **X** → `status: Cookie check -> Ok(Cancelled)`. So the
+  `auth-session-android-ephemeral-browser-dependent` limitation is exactly
+  that: honoured by Chrome, ignored by Fennec F-Droid.
+
 ### iOS + macOS — owed
 
 Not run here; see [PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md)'s

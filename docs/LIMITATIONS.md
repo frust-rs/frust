@@ -6074,7 +6074,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `auth-session-android-ephemeral-browser-dependent` — `ephemeral` on Android is advisory to the Custom Tabs provider
 
-**Observed**: `FrustAuthSessionHost` calls `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled(true)` (present in the pinned `androidx.browser:browser 1.10.0`), but the flag is a request the provider may ignore: on the gate device (Xiaomi 12, LineageOS 23.2) the provider selected was Fennec F-Droid 129.0.0 and two consecutive ephemeral sessions both saw the `frustauth=1` cookie set by an earlier session (`plugins/auth-session/README.md` § 6). Chrome 153 was installed but not selected, so its behaviour is unobserved. Dropping the awaited future releases the session Busy slot immediately.
+**Observed**: `FrustAuthSessionHost` calls `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled(true)` (present in the pinned `androidx.browser:browser 1.10.0`), but the flag is a request the provider may ignore: on the gate device (Xiaomi 12, LineageOS 23.2) the provider selected was Fennec F-Droid 129.0.0 and two consecutive ephemeral sessions both saw the `frustauth=1` cookie set by an earlier session (`plugins/auth-session/README.md` § 6). In the round-1 re-check the allow-listed provider was Chrome 153, which honoured the flag (an ephemeral session did not see the normal jar's cookie; a later non-ephemeral session did) — the behaviour is per provider, not per platform. Dropping the awaited future releases the session Busy slot immediately.
 
 **Applies to**: Android only; apps relying on `ephemeral: true` for cookie isolation must not assume it holds on every browser.
 
