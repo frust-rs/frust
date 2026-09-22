@@ -466,29 +466,128 @@ slot was free and the page usable afterwards. Filed as a follow-up: the new
 (`Playground`); the frust widgets' iOS accessibility frames come back divided
 by the 3× scale (a known AccessKit-bounds finding, not this plugin's).
 
-### iOS — iPhone SE (physical) — NOT RUN
+### iOS — iPhone SE (physical) PASSED, 2026-09-23
 
-Blocked in the 2026-09-23 session: the device build stopped at
-`Error: no codesigning identity found` — the login keychain's signing identity
-was unreadable while the Mac was screen-locked (`security find-identity -v -p
-codesigning` → `0 valid identities found`, the Apple Development certificate
-itself present). The physical-device legs are otherwise human-driven (the
-iPhone SE is network-paired: no touch injection, no screen capture); the
-script is the simulator one above, read through `devicectl device process
-launch --console`.
+Device: iPhone SE (2nd generation, `iPhone12,8`), iOS 26.7, network-paired
+(no touch injection, no screen capture — every tap was Ed's). App: the
+`examples/playground` **release** build (`frust build ios --release -d
+<udid>`, same scratch page edits as the simulator leg, same httpbin-hosted
+combined page as the macOS leg below), installed and launched with `xcrun
+devicectl device process launch --console`, which is the transcript: the
+outcome lines below are the app's own console output, not a reading of the
+screen; only the cookie page texts are human-observed.
 
-### macOS — NOT RUN
+Two rig notes first. The signing identity had expired that morning; after a
+new *Apple Development* certificate was issued, the CLI's auto-detected
+`DEVELOPMENT_TEAM` was the developer id in the certificate's parentheses
+rather than the team in its `OU`, and xcodebuild failed with `No Account for
+Team`; `FRUST_IOS_TEAM=<team>` fixed the build (filed against `frust-drive`).
+And a console attached to a launch made while the phone was locked recorded
+nothing at all — the first pass through the script left no transcript and was
+repeated after relaunching with the phone unlocked.
 
-Blocked in the same session by the Mac's screen lock. What did run: the
-`examples/playground` desktop debug binary (`cargo build`) wrapped in a
+Console, verbatim, in script order:
+
+```
+GATE Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+GATE Cancel test -> Ok(Cancelled)                 (sheet closed with X)
+GATE Cancel test -> Ok(Cancelled)                 (consent alert Cancel)
+GATE Busy -> Err(Busy)
+GATE Busy(first) -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+GATE Cookie check -> Ok(Cancelled)                (×4: off, off, on, on)
+GATE Drop -> first future dropped (slot released; its sheet still pending on the main queue)
+GATE Drop+restart -> starting the second session while the first is still presented
+GATE Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+GATE Drop -> first future dropped (slot released; its sheet still pending on the main queue)
+GATE Drop+restart -> starting the second session while the first is still presented
+GATE Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+GATE page: status: Drop -> first dropped; second start in 5 s | latest deep link: none | is_supported: true
+```
+
+**Ephemeral** (four visits, texts read by Ed): with Ephemeral off both visits
+showed `frustauth=1 (persisted from an earlier session)` — the persisted jar
+already held the cookie from the first, untranscribed pass — and with
+Ephemeral on both showed `no cookie (set now)`. Strict on the device as well.
+
+**Cancel-before-replace**: both variants resolved to the callback. In the
+non-ephemeral variant the first session's consent alert was on screen when
+the restart landed, the alert was replaced by the second session's, and
+`Continue` on it completed the second session — **the
+`PresentationContextInvalid` race seen on the iOS 26.2 simulator did not
+reproduce on the iOS 26.7 device.** `latest deep link` stayed `none`
+throughout.
+
+### macOS — PASSED (machine-driven, httpbin-hosted page), 2026-09-23
+
+Host: macOS 26.6.2 (Apple M4), Safari 26. App: the `examples/playground`
+desktop debug binary (`cargo build --features frust/devtools`) wrapped in a
 hand-made `Playground.app` whose `Info.plist` registers `frustplay` under
-`CFBundleURLTypes` (the playground has no `macos/` directory and `frust build
-macos` would need one — option (b) of the gate card; nothing committed),
-ad-hoc signed and registered with `lsregister` (`claimed schemes: frustplay:`).
-`Callback` presented the AppKit consent alert — `“Playground” Wants to Use
-“192.168.8.140” to Sign In` — and `Continue` opened the sheet, which stopped
-at Safari's `This Connection Is Not Private` page: unlike the simulator, the
-host's trust store cannot be extended without the user's password, so the
-scratch https origin needs the CA trusted on the Mac (or a publicly trusted
-origin) before the four steps can complete. `is_supported: true`,
-`latest deep link: none` on the desktop page.
+`CFBundleURLTypes` — option (b) of the gate card: the playground has no
+`macos/` directory and nothing was committed for this — ad-hoc signed and
+registered with `lsregister` (`claimed schemes: frustplay:`), run from inside
+the bundle so its console stays attached. Driven by devtools `input_tap` for
+the page's buttons and System Events clicks for the system UI; read from the
+console (`GATE` lines) and, for page text, from Safari's own AppleScript
+`text of document`.
+
+**Hosting deviation, recorded as such.** The Mac does not trust the scratch
+CA the simulator leg used, and the sheet stops at Safari's `This Connection
+Is Not Private` page for that origin (trusting the CA in the login keychain
+needs the user's password). The four steps were therefore run against a
+scratch **combined** page — `callback.html`'s redirect and `cookie.html`'s
+cookie logic in one file, dispatching on the `?p=` value the playground
+appends — served from `https://httpbin.org/base64/<urlsafe-b64>?p=` (the
+gate README's zero-infra httpbin option; a publicly trusted origin, cookies
+on `httpbin.org`). The page's base-URL default was a scratch edit, reverted.
+
+**Presentation.** On macOS the consent alert is a `UserNotificationCenter`
+window — `“Playground” Wants to Use “httpbin.org” to Sign In` / `This allows
+the app and website to share information about you.` (`Cancel` / `Continue`;
+the app name is the bundle's `CFBundleName`) — and the authentication UI is a
+**Safari window** (titled after the page, traffic-light close button, no
+`Cancel` button of its own), not a sheet over the app window. `is_supported:
+true`, `latest deep link: none` throughout (in-process callback, and the
+desktop shell delivers no URL-scheme opens anyway).
+
+**(1) Callback** — alert → `Continue` → the Safari window loaded the page,
+redirected and closed itself:
+
+```
+GATE Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+```
+
+**(2) Cancel** — (a) `Cancel test` → `Continue` → the Safari window showed the
+cookie page (`no cookie (set now)`); closing that window (its close button)
+→ `Cancel test -> Ok(Cancelled)`. (b) `Cancel test` → alert `Cancel` →
+`Cancel test -> Ok(Cancelled)`.
+
+**(3) Busy** — `Busy -> Err(Busy)` at once; the first session's alert →
+`Continue` → `Busy(first) -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`;
+its window closed itself.
+
+**(4) Ephemeral — strict.** Page text per visit (each window closed by its
+close button → `Cookie check -> Ok(Cancelled)`):
+
+| Visit | Ephemeral | Consent alert | Page text |
+|---|---|---|---|
+| 1 | off | shown | `no cookie (set now)` |
+| 2 | off | shown | `frustauth=1 (persisted from an earlier session)` |
+| 3 | on | **none** | `no cookie (set now)` |
+| 4 | on | **none** | `no cookie (set now)` |
+| 5 | off | shown | `frustauth=1 (persisted from an earlier session)` |
+
+Ephemeral sessions show no consent alert on macOS either. One observation:
+the cookie the Cancel-test window (2a) had set was *not* seen by visit 1 —
+that window was closed about three seconds after loading — while every later
+persisted-jar visit saw the cookie visit 1 set.
+
+**(5) Cancel-before-replace** — same scratch `Drop` button as the simulator
+leg. (a) Ephemeral: the first Safari window was showing `no cookie (set now)`
+when the restart landed; it closed and the second session resolved →
+`Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`.
+(b) Non-ephemeral, the first session's consent alert still up when the
+restart landed: the alert was replaced by the second session's own alert
+(same text); `Continue` on it →
+`Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`.
+**The `PresentationContextInvalid` race seen on the iOS simulator did not
+reproduce on macOS.**
