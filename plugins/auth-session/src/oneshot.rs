@@ -18,6 +18,17 @@
 //! backend bailing out before it ever reaches a resolution point — resolves
 //! the channel to [`crate::AuthSessionError::Platform`] rather than leaving
 //! the [`Receiver`] pending forever.
+//!
+//! # The generation the receiver carries
+//!
+//! A [`Receiver`] is created for exactly one session and carries that
+//! session's generation, so its [`Drop`] can tell [`crate`] which session
+//! the caller just abandoned — [`crate::release_if_live`], the one seam
+//! between this module and the live-session slot. That keeps this module
+//! `std`-only and independently testable (a channel built with a
+//! generation nothing is live under simply drops with no effect) while
+//! making "the caller dropped the future" a real release path rather than
+//! a wedged slot; see [`crate`]'s crate doc's *Exactly one live session*.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -114,6 +125,22 @@ impl Drop for Sender {
 /// [`crate::AuthSession::start`] returns.
 pub(crate) struct Receiver {
     inner: Arc<Inner>,
+    /// The generation of the session this receiver belongs to, so
+    /// [`Self::drop`] can release that session's slot (this module doc's
+    /// *The generation the receiver carries*).
+    generation: u64,
+}
+
+impl Drop for Receiver {
+    /// The caller dropped the future — release the live-session slot if it
+    /// is still this session's, so the next
+    /// [`crate::AuthSession::start`] is accepted rather than rejected as
+    /// [`crate::AuthSessionError::Busy`]. A no-op when the session already
+    /// resolved (the usual case) or when a newer session now holds the
+    /// slot.
+    fn drop(&mut self) {
+        crate::release_if_live(self.generation);
+    }
 }
 
 impl Future for Receiver {
@@ -129,8 +156,10 @@ impl Future for Receiver {
     }
 }
 
-/// Create a fresh [`Sender`]/[`Receiver`] pair sharing one [`Inner`].
-pub(crate) fn channel() -> (Sender, Receiver) {
+/// Create a fresh [`Sender`]/[`Receiver`] pair sharing one [`Inner`], for
+/// the session identified by `generation` (this module doc's *The
+/// generation the receiver carries*).
+pub(crate) fn channel(generation: u64) -> (Sender, Receiver) {
     let inner = Arc::new(Inner {
         state: Mutex::new(State {
             value: None,
@@ -142,7 +171,7 @@ pub(crate) fn channel() -> (Sender, Receiver) {
             inner: Arc::clone(&inner),
             sent: false,
         },
-        Receiver { inner },
+        Receiver { inner, generation },
     )
 }
 
@@ -153,6 +182,14 @@ mod tests {
     use std::task::{RawWaker, RawWakerVTable, Waker};
 
     use super::*;
+
+    /// The generation these tests build their channels with. Deliberately
+    /// at the top of the range `crate::next_generation` counts up from, so
+    /// a [`Receiver`] dropped here can never match a live session another
+    /// test in the same binary is holding — [`Receiver::drop`]'s
+    /// `crate::release_if_live` then has nothing to take, which is the
+    /// point: this module's own tests exercise the channel, not the slot.
+    const UNCLAIMED_GENERATION: u64 = u64::MAX;
 
     /// A `Waker` that only counts how many times it was woken — enough to
     /// assert `Sender::send` actually wakes a previously-registered waker,
@@ -187,7 +224,7 @@ mod tests {
 
     #[test]
     fn send_before_poll_is_observed_on_first_poll() {
-        let (sender, mut receiver) = channel();
+        let (sender, mut receiver) = channel(UNCLAIMED_GENERATION);
         sender.send(Ok(AuthSessionOutcome::Cancelled));
 
         let (waker, counter) = counting_waker();
@@ -202,7 +239,7 @@ mod tests {
 
     #[test]
     fn poll_then_send_wakes_the_registered_waker() {
-        let (sender, mut receiver) = channel();
+        let (sender, mut receiver) = channel(UNCLAIMED_GENERATION);
 
         let (waker, counter) = counting_waker();
         assert!(matches!(poll_once(&mut receiver, &waker), Poll::Pending));
@@ -219,7 +256,7 @@ mod tests {
 
     #[test]
     fn drop_without_send_resolves_platform_error() {
-        let (sender, mut receiver) = channel();
+        let (sender, mut receiver) = channel(UNCLAIMED_GENERATION);
         drop(sender);
 
         let (waker, _counter) = counting_waker();

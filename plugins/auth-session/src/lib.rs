@@ -47,24 +47,45 @@
 //! second [`AuthSession::start`] call while one is still live resolves
 //! immediately to [`AuthSessionError::Busy`] rather than queuing or
 //! replacing the first (an in-app browser tab is a modal, single-instance
-//! UI surface on every backend platform). The slot releases the moment the
-//! live session resolves — by outcome, by error, or by the backend module
-//! dropping its resolution handle without ever calling back (this crate's
-//! `oneshot` module's own drop-without-send fallback) — so a stuck session
-//! can never wedge every future one behind it forever.
+//! UI surface on every backend platform). Each accepted `start` is stamped
+//! with a fresh, process-wide **generation**, and only a platform result
+//! carrying the live generation can complete it — a late result from an
+//! already-finished session is discarded rather than resolving whatever
+//! session happens to be live now.
+//!
+//! The slot releases when the live session resolves (by outcome or by
+//! error), when the backend drops its resolution handle without ever
+//! calling back (this crate's `oneshot` module's own drop-without-send
+//! fallback), **or** when the caller drops the future
+//! [`AuthSession::start`] returned. That last one is the only bound on a
+//! wedged session: this crate runs no timeout of its own, so a platform
+//! that presents a session and then never calls back keeps the slot claimed
+//! for exactly as long as the caller holds that future alive — dropping it
+//! (or the task awaiting it) frees the slot for the next `start`.
+//!
+//! # Security
+//!
+//! **Callers MUST use PKCE (RFC 7636, `S256`) and MUST verify the `state`
+//! parameter they generated before exchanging the authorization code.** No
+//! platform can prove a callback came from the session it launched: on
+//! Android the redirect arrives as an ordinary `Intent` that any app
+//! registering the same custom scheme can deliver, and while iOS/macOS
+//! intercept the redirect in-process inside the session's own browser tab,
+//! the redirect itself is still an unauthenticated HTTP response. An
+//! [`AuthSessionOutcome::Callback`] is therefore evidence that *a* redirect
+//! to the requested scheme arrived — never that the identity provider this
+//! session presented is the party that sent it. PKCE binds the code to the
+//! code verifier this app generated, and the `state` check binds the
+//! callback to the request this app made; without both, a callback that
+//! reaches this future is enough to complete someone else's flow.
 //!
 //! # Platform notes
 //!
-//! Android and Apple (iOS + macOS) both ship a real backend module
-//! (`android`, `apple`) — as of this crate's originating task, both are
-//! stubs that resolve every session to
-//! [`AuthSessionError::Platform`]`("backend not implemented")` immediately,
-//! so the crate compiles and this host-testable core is usable on every
-//! target from day one; the platform backend cards replace them with a real
-//! `CustomTabsIntent`/`ASWebAuthenticationSession` implementation without
-//! touching this file's public API. Every other target (desktop Linux,
-//! Windows, macOS-without-`ASWebAuthenticationSession`… — see `unsupported`)
-//! has no platform authentication user agent at all and always resolves
+//! Android (Chrome Custom Tabs) and Apple — iOS + macOS, both on
+//! `ASWebAuthenticationSession` — each ship a backend module (`android`,
+//! `apple`) presenting a real in-app browser tab. Every other target
+//! (desktop Linux, Windows, … — see `unsupported`) has no platform
+//! authentication user agent at all and always resolves
 //! [`AuthSessionError::NoHandler`]; see that module's own doc for the
 //! recommended fallback.
 //!
@@ -81,9 +102,10 @@
 //!
 //! # The URL never appears in a `Display`/`Debug` string
 //!
-//! Neither [`AuthSessionRequest`]'s hand-written [`core::fmt::Debug`] impl
-//! nor any [`AuthSessionError`] variant's `Display` message ever echoes
-//! `req.url` or the resolved callback URL back into a log line — an
+//! Neither [`AuthSessionRequest`]'s nor [`AuthSessionOutcome`]'s
+//! hand-written [`core::fmt::Debug`] impl, nor any [`AuthSessionError`]
+//! variant's `Display` message, ever echoes `req.url` or the resolved
+//! callback URL back into a log line — an
 //! authorization code or an identity-provider session detail can ride along
 //! in either one, so this crate never interpolates a URL into anything that
 //! might get logged (see [`AuthSessionRequest`]'s own doc and this crate's
@@ -92,6 +114,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
@@ -147,10 +170,11 @@ pub struct AuthSessionRequest {
     /// [`AuthSession::start`]'s scheme rule table.
     pub callback_scheme: String,
     /// Request a private/ephemeral browsing session with no persisted
-    /// cookies or history (`ASWebAuthenticationSession.prefersEphemeralWebBrowserSession`
-    /// on Apple; Android has no first-class equivalent and this crate's
-    /// stub Android backend ignores it — the real Android backend card
-    /// documents its own best-effort mapping, if any).
+    /// cookies or history
+    /// (`ASWebAuthenticationSession.prefersEphemeralWebBrowserSession` on
+    /// Apple; `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled` on
+    /// Android, where it is **advisory** — a browser that does not
+    /// implement it silently runs an ordinary session instead).
     pub ephemeral: bool,
 }
 
@@ -168,8 +192,14 @@ impl fmt::Debug for AuthSessionRequest {
 }
 
 /// How an [`AuthSession`] finished.
+///
+/// `Debug`-formats without ever printing the callback URL (this crate doc's
+/// *The URL never appears in a `Display`/`Debug` string* section): the
+/// hand-written impl below prints `Callback { url_len: N }` rather than the
+/// URL itself. Read the URL by matching the value — `Callback(url)` — never
+/// out of a `Debug` rendering.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AuthSessionOutcome {
     /// The identity provider redirected back to `callback_scheme://…` —
     /// the full callback URL, including its query string (the authorization
@@ -178,6 +208,20 @@ pub enum AuthSessionOutcome {
     /// The user dismissed the in-app browser tab before the identity
     /// provider ever redirected.
     Cancelled,
+}
+
+impl fmt::Debug for AuthSessionOutcome {
+    /// Never prints the callback URL — an authorization code and the
+    /// provider's `state` both ride in it — only its byte length.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Callback(url) => f
+                .debug_struct("Callback")
+                .field("url_len", &url.len())
+                .finish(),
+            Self::Cancelled => f.write_str("Cancelled"),
+        }
+    }
 }
 
 /// Errors from an [`AuthSession::start`] call.
@@ -221,29 +265,85 @@ pub enum AuthSessionError {
     /// no-handler condition — a platform JNI/Objective-C error this crate
     /// doesn't otherwise classify. Also covers a backend module dropping its
     /// resolution handle without ever calling back (this crate's `oneshot`
-    /// module's drop-without-send fallback), and this crate's own stub
-    /// `android`/`apple` backends (`"backend not implemented"`) until
-    /// the platform backend cards replace them.
+    /// module's drop-without-send fallback) and a callback this crate
+    /// refuses to hand back: one delivered with no URL at all, or one whose
+    /// scheme is not the [`AuthSessionRequest::callback_scheme`] the
+    /// session asked for.
     #[error("auth session error: {0}")]
     Platform(String),
 }
 
-/// A token handed to a backend's `start`, naming the one live session
-/// [`ACTIVE`] is tracking. Carries no data of its own: a backend calls
-/// [`resolve`] (which looks the live `oneshot::Sender` up from [`ACTIVE`]
-/// directly) rather than holding a channel handle of its own, since this
-/// crate's single-active-session invariant (guarded by
-/// [`AuthSessionError::Busy`]) means at most one session — and therefore at
-/// most one meaningful [`resolve`] call — is ever live at a time. A real
-/// backend (the platform cards) moves this token into whatever
-/// completion-block/JNI-callback closure eventually calls [`resolve`], so
-/// the closure's shape documents which session it belongs to even though
-/// nothing about resolution itself reads the token's contents.
-pub(crate) struct SessionToken(());
+/// The [`AuthSessionError::Platform`] message for a `Callback` a backend
+/// delivered with no URL in it. A crate-level constant because the
+/// `android` backend rejects the same condition one layer earlier (a null
+/// or empty JNI string), and the two must read identically.
+pub(crate) const CALLBACK_WITHOUT_URL: &str = "callback delivered without a URL";
 
-/// The one live session's resolution channel, if any — the process-wide
-/// Busy guard (this crate doc's *Exactly one live session* section).
-static ACTIVE: Mutex<Option<oneshot::Sender>> = Mutex::new(None);
+/// The [`AuthSessionError::Platform`] message for a callback URL whose
+/// scheme is not the one the session requested. Never names either scheme
+/// or the URL (this crate doc's URL rule — the URL is the secret-bearing
+/// half, and a message naming only one of the two invites pasting the other
+/// one in later).
+const CALLBACK_SCHEME_MISMATCH: &str =
+    "callback URL scheme does not match the requested callback scheme";
+
+/// A token handed to a backend's `start`, naming the one session that call
+/// is presenting. A backend carries [`Self::generation`] through whatever
+/// completion-block/JNI-callback path eventually produces an outcome and
+/// hands it back to [`resolve`], which is what makes every resolution
+/// attributable to the session that produced it: a result stamped with a
+/// generation other than the live one is discarded rather than completing
+/// whichever session happens to be live by then.
+pub(crate) struct SessionToken {
+    /// This session's generation — see [`next_generation`].
+    ///
+    /// Read by the `android`/`apple` backends only. The `unsupported`
+    /// backend refuses every request without ever presenting a session, so
+    /// on those targets the field is constructed and dropped unread; that
+    /// is the whole of this `allow`, and it is deliberately not applied on
+    /// a target whose backend must use it.
+    #[cfg_attr(
+        not(any(target_os = "android", target_vendor = "apple")),
+        allow(dead_code)
+    )]
+    pub(crate) generation: u64,
+}
+
+/// The one live session, if any — the process-wide Busy guard (this crate
+/// doc's *Exactly one live session* section) plus everything resolution
+/// needs to attribute and check an incoming platform result.
+struct Live {
+    /// The generation stamped on the [`SessionToken`] this session's
+    /// backend was started with; only a result carrying it may complete
+    /// this session.
+    generation: u64,
+    /// The [`AuthSessionRequest::callback_scheme`] this session asked for,
+    /// kept so [`resolve`] can re-check the scheme of a delivered callback
+    /// URL against it rather than trusting the platform to have filtered.
+    callback_scheme: String,
+    /// The channel half that completes the caller's future.
+    sender: oneshot::Sender,
+}
+
+/// The one live session's slot.
+static ACTIVE: Mutex<Option<Live>> = Mutex::new(None);
+
+/// The generation counter behind [`next_generation`]. Starts at `1` so a
+/// generation is never `0` — a zero-initialized `jlong`/`u64` reaching
+/// [`resolve`] from a host that lost track of its own session must not look
+/// like a valid one.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh, process-wide generation for one accepted session. Never `0`,
+/// including across the (theoretical) wrap of [`NEXT_GENERATION`].
+fn next_generation() -> u64 {
+    loop {
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        if generation != 0 {
+            return generation;
+        }
+    }
+}
 
 /// Lock [`ACTIVE`], recovering from poisoning instead of panicking — a panic
 /// on one side (the polling caller or a platform backend callback) must not
@@ -251,39 +351,103 @@ static ACTIVE: Mutex<Option<oneshot::Sender>> = Mutex::new(None);
 /// (`docs/CODE_STANDARDS.md`'s no-panic rule near an FFI boundary; matches
 /// `plugins/camera/src/android.rs`'s own `lock` helper). The guarded data is
 /// a plain `Option`, so a poisoned view is still coherent enough to use.
-fn lock_active() -> MutexGuard<'static, Option<oneshot::Sender>> {
+fn lock_active() -> MutexGuard<'static, Option<Live>> {
     ACTIVE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Complete the one live session with `outcome`, releasing [`ACTIVE`]'s
-/// slot. The backends call this exactly once per session, from whatever
-/// thread the platform's completion callback lands on. A call with no live
-/// session (this crate's own error path already resolved and released it,
-/// or a stray/duplicate callback) is a no-op — never a panic.
+/// Take the live session out of [`ACTIVE`], but only if it is still
+/// generation `generation`'s. Returns with the lock already released, so a
+/// caller is free to complete (and therefore wake) the returned sender.
+fn take_live(generation: u64) -> Option<Live> {
+    let mut active = lock_active();
+    if active
+        .as_ref()
+        .is_some_and(|live| live.generation == generation)
+    {
+        active.take()
+    } else {
+        None
+    }
+}
+
+/// Release generation `generation`'s slot without completing anything —
+/// the hook `oneshot::Receiver`'s `Drop` calls when the caller drops the
+/// future [`AuthSession::start`] returned. A later platform result for that
+/// generation then finds no live session and is discarded by [`resolve`]'s
+/// own generation check, so an abandoned session can neither wedge the slot
+/// nor resolve a session started after it.
+pub(crate) fn release_if_live(generation: u64) {
+    // `take_live` has already released the lock by the time the `Live` is
+    // dropped here — dropping it drops its `Sender`, whose own drop wakes
+    // the channel, which may run arbitrary caller code.
+    drop(take_live(generation));
+}
+
+/// Complete generation `generation`'s session with `outcome`, releasing
+/// [`ACTIVE`]'s slot. The backends call this from whatever thread the
+/// platform's completion callback lands on, and this crate's own
+/// pre-dispatch error path calls it too.
 ///
-/// Unused on every target this crate's originating task builds against: its
-/// stub `android`/`apple` backends reject synchronously from `start`
-/// itself (handled by [`StartFuture::new`]'s own error path, which resolves
-/// through a [`oneshot::Sender`] directly rather than this function), and
-/// [`unsupported::start`] never presents a session to resolve at all. This
-/// is the entry point a real, asynchronous backend's completion callback
-/// (a JNI callback, an Objective-C completion block dispatched later) calls
-/// once it actually has an outcome — the Android/Apple backend cards are the
-/// first real callers.
-#[allow(dead_code)]
-pub(crate) fn resolve(outcome: Result<AuthSessionOutcome, AuthSessionError>) {
-    match lock_active().take() {
-        Some(sender) => sender.send(outcome),
-        None => {
-            // No `log` dependency in this crate's Cargo.toml (the
-            // platform-plugin charter keeps this crate's dependency list to
-            // exactly what its originating task named), so this is a
-            // debug-only trace rather than a real logging call.
-            #[cfg(debug_assertions)]
-            eprintln!("frust-auth-session: resolve() called with no live session");
-        }
+/// A result whose generation is not the live one — a late callback from a
+/// session the caller already abandoned, or a duplicate delivery — leaves
+/// [`ACTIVE`] untouched and is discarded. So is a result arriving with no
+/// live session at all. Never a panic, on any path.
+///
+/// An `Ok(`[`AuthSessionOutcome::Callback`]`)` is additionally re-checked
+/// against the live session's own callback scheme before it completes
+/// anything — see [`checked_callback`].
+pub(crate) fn resolve(generation: u64, outcome: Result<AuthSessionOutcome, AuthSessionError>) {
+    let Some(live) = take_live(generation) else {
+        // No `log` dependency in this crate's Cargo.toml (the
+        // platform-plugin charter — `docs/PLUGINS_CODE_STANDARDS.md` —
+        // keeps this crate to `frust-plugin` plus FFI crates), so this is
+        // a debug-only trace rather than a real logging call.
+        #[cfg(debug_assertions)]
+        eprintln!("frust-auth-session: stale session result discarded");
+        return;
+    };
+
+    // The lock is already released: `Sender::send` wakes the caller's
+    // waker, which may run arbitrary caller code — including a `start` of
+    // the next session — so `ACTIVE` must never be held across it.
+    let outcome = checked_callback(&live.callback_scheme, outcome);
+    live.sender.send(outcome);
+}
+
+/// Re-check a delivered callback URL against `callback_scheme`, the scheme
+/// the live session actually asked for. Anything that is not an
+/// `Ok(`[`AuthSessionOutcome::Callback`]`)` passes through untouched.
+///
+/// Two rejections, both [`AuthSessionError::Platform`] and neither naming
+/// the URL (this crate doc's URL rule):
+///
+/// - an empty URL — a host that reported a callback but carried nothing in
+///   it, which a caller would otherwise parse as a real answer;
+/// - a URL whose scheme (the bytes before its first `:`, compared
+///   ASCII-case-insensitively — [`validate_callback_scheme`] already
+///   restricts the requested scheme to lowercase) is not the requested one,
+///   or which has no scheme at all.
+///
+/// This is a consistency check on the platform's own delivery, **not** an
+/// authenticity check: a matching scheme proves nothing about who sent the
+/// redirect (this crate doc's *Security* section).
+fn checked_callback(
+    callback_scheme: &str,
+    outcome: Result<AuthSessionOutcome, AuthSessionError>,
+) -> Result<AuthSessionOutcome, AuthSessionError> {
+    let Ok(AuthSessionOutcome::Callback(url)) = &outcome else {
+        return outcome;
+    };
+    if url.is_empty() {
+        return Err(AuthSessionError::Platform(CALLBACK_WITHOUT_URL.to_string()));
+    }
+    match url.find(':') {
+        Some(colon) if url[..colon].eq_ignore_ascii_case(callback_scheme) => outcome,
+        _ => Err(AuthSessionError::Platform(
+            CALLBACK_SCHEME_MISMATCH.to_string(),
+        )),
     }
 }
 
@@ -353,6 +517,14 @@ fn validate_callback_scheme(scheme: &str) -> Result<(), AuthSessionError> {
 /// backend resolves later. A single concrete type covers both cases so
 /// [`AuthSession::start`]'s `-> impl Future` return type is one type
 /// regardless of which path a given call takes.
+///
+/// **After completion, every further poll returns [`Poll::Pending`] on
+/// both variants** — the ordinary "do not poll a future after it
+/// completed" contract, answered with a permanent `Pending` rather than a
+/// panic, because a completion here can be driven by a platform callback on
+/// a thread the polling executor knows nothing about (this crate doc's
+/// *The awaitable-future contract*) and a spurious re-poll must not be able
+/// to take a process down through an FFI callback.
 enum StartFuture {
     Ready(Option<Result<AuthSessionOutcome, AuthSessionError>>),
     Pending(oneshot::Receiver),
@@ -369,26 +541,27 @@ impl StartFuture {
             return StartFuture::Ready(Some(Err(AuthSessionError::Busy)));
         }
 
-        let (sender, receiver) = oneshot::channel();
-        *active = Some(sender);
-        // Release the lock before calling into the backend: a backend that
-        // resolves synchronously (this crate's stub `android`/`apple`
-        // modules do not, but a future real backend's early-failure path
-        // might, via `resolve`) must not deadlock on a lock this function
-        // itself is still holding.
+        let generation = next_generation();
+        let (sender, receiver) = oneshot::channel(generation);
+        *active = Some(Live {
+            generation,
+            callback_scheme: req.callback_scheme.clone(),
+            sender,
+        });
+        // Release the lock before calling into the backend: a backend whose
+        // early-failure path resolves synchronously (via `resolve`) must not
+        // deadlock on a lock this function itself is still holding.
         drop(active);
 
-        match backend::start(req, SessionToken(())) {
+        match backend::start(req, SessionToken { generation }) {
             Ok(()) => StartFuture::Pending(receiver),
             Err(err) => {
                 // The backend rejected the request before ever presenting a
-                // session UI (e.g. this crate's stub backends, or a real
+                // session UI (`unsupported`'s blanket refusal, or a real
                 // backend's `PlatformNotInitialized` check) — release the
                 // slot and resolve the receiver with that error, rather than
                 // leaving it live for nothing to ever complete.
-                if let Some(sender) = lock_active().take() {
-                    sender.send(Err(err));
-                }
+                resolve(generation, Err(err));
                 StartFuture::Pending(receiver)
             }
         }
@@ -398,13 +571,16 @@ impl StartFuture {
 impl Future for StartFuture {
     type Output = Result<AuthSessionOutcome, AuthSessionError>;
 
+    /// Polls `Pending` forever once it has completed — see [`StartFuture`]'s
+    /// own doc. The `Pending` variant needs no code for that: a
+    /// [`oneshot::Receiver`] whose value has already been taken registers
+    /// the waker and reports `Pending`, exactly like one still waiting.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
-            StartFuture::Ready(value) => Poll::Ready(
-                value
-                    .take()
-                    .expect("StartFuture::Ready polled after completion"),
-            ),
+            StartFuture::Ready(value) => match value.take() {
+                Some(value) => Poll::Ready(value),
+                None => Poll::Pending,
+            },
             StartFuture::Pending(receiver) => Pin::new(receiver).poll(cx),
         }
     }
@@ -443,12 +619,14 @@ impl AuthSession {
         StartFuture::new(req)
     }
 
-    /// Whether this build target has a real (non-stub, non-`unsupported`)
-    /// authentication-session backend at all — Android or Apple
-    /// (`target_vendor = "apple"`, so iOS and macOS both). Does not
-    /// distinguish this crate's current stub `android`/`apple` backends
-    /// from a future real implementation; both report `true` here, since
-    /// both compile the same backend module in.
+    /// Whether this build target has a platform authentication user agent
+    /// at all — Android (Chrome Custom Tabs) or Apple (`target_vendor =
+    /// "apple"`, so iOS and macOS both, on
+    /// `ASWebAuthenticationSession`). A compile-time answer about the
+    /// backend module this target builds, not a runtime probe: `true` on
+    /// Android still leaves [`AuthSessionError::NoHandler`] reachable at
+    /// `start` time on a device with no Custom Tabs-capable browser
+    /// installed.
     pub fn is_supported() -> bool {
         cfg!(any(target_os = "android", target_vendor = "apple"))
     }
@@ -490,9 +668,9 @@ mod tests {
         }
     }
 
-    /// A `Waker` that does nothing — sufficient for these tests, which only
-    /// ever poll a future that resolves immediately (this crate's stub
-    /// backends never leave a session genuinely pending).
+    /// A `Waker` that does nothing — these tests poll by hand rather than
+    /// running an executor, so a wake has nothing to schedule; whether a
+    /// value arrived is read from the next [`poll_once`] instead.
     fn noop_waker() -> Waker {
         fn clone(_data: *const ()) -> RawWaker {
             RawWaker::new(std::ptr::null(), &VTABLE)
@@ -548,63 +726,81 @@ mod tests {
         }
     }
 
+    /// Claim the `ACTIVE` slot with a live session that no backend is
+    /// behind, returning its generation and the future a caller would be
+    /// holding. Reaching a genuinely pending session *through* a backend
+    /// would need a real Custom Tabs/`ASWebAuthenticationSession` host, so
+    /// every resolution test below starts from this hook instead.
+    fn live_session(callback_scheme: &str) -> (u64, StartFuture) {
+        let generation = next_generation();
+        let (sender, receiver) = oneshot::channel(generation);
+        *lock_active() = Some(Live {
+            generation,
+            callback_scheme: callback_scheme.to_string(),
+            sender,
+        });
+        (generation, StartFuture::Pending(receiver))
+    }
+
+    /// On a target with no authentication user agent, `start` refuses
+    /// before presenting anything: the future resolves on its first poll
+    /// and the slot is released rather than leaked.
+    #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
     #[test]
-    fn unsupported_or_stub_backend_reports_no_handler_or_platform_and_releases_the_slot() {
+    fn unsupported_backend_reports_no_handler_on_first_poll_and_releases_the_slot() {
         with_clean_active(|| {
             let mut fut = AuthSession::start(valid_request());
-            let outcome = poll_once(&mut fut);
-            // Android/Apple: this crate's stub backends reject with
-            // `Platform("backend not implemented")`; every other target:
-            // `unsupported::start` rejects with `NoHandler`. Either way the
-            // future must resolve on first poll and the slot must be
-            // released.
-            assert!(
-                matches!(
-                    outcome,
-                    Poll::Ready(Err(AuthSessionError::NoHandler))
-                        | Poll::Ready(Err(AuthSessionError::Platform(_)))
-                ),
-                "expected Ready(Err(NoHandler | Platform(_))), got {outcome:?}"
+            assert_eq!(
+                poll_once(&mut fut),
+                Poll::Ready(Err(AuthSessionError::NoHandler))
             );
             assert!(
                 lock_active().is_none(),
                 "the slot must be released after a pre-dispatch failure"
             );
 
-            // A second start sees the same pre-dispatch failure again, not
-            // `Busy` — proof the first call actually released the slot
-            // rather than leaking it.
-            let mut fut2 = AuthSession::start(valid_request());
-            let outcome2 = poll_once(&mut fut2);
-            assert!(
-                matches!(
-                    outcome2,
-                    Poll::Ready(Err(AuthSessionError::NoHandler))
-                        | Poll::Ready(Err(AuthSessionError::Platform(_)))
-                ),
-                "expected Ready(Err(NoHandler | Platform(_))) again, got {outcome2:?}"
+            // A second start sees the same refusal again, not `Busy` —
+            // proof the first call actually released the slot.
+            let mut second = AuthSession::start(valid_request());
+            assert_eq!(
+                poll_once(&mut second),
+                Poll::Ready(Err(AuthSessionError::NoHandler))
             );
+        });
+    }
+
+    /// On Apple, `start` hands the whole present sequence to the main queue
+    /// and returns accepted, so the future is genuinely pending and the
+    /// slot stays claimed until a completion (or the caller's drop) frees
+    /// it. Nothing here drives the main queue: the enqueued block never
+    /// runs under a test binary, which is exactly the "claimed, nothing
+    /// resolved yet" state being asserted.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn apple_backend_leaves_the_session_pending_with_the_slot_claimed() {
+        with_clean_active(|| {
+            let mut fut = AuthSession::start(valid_request());
+            assert_eq!(poll_once(&mut fut), Poll::Pending);
+
+            let active = lock_active();
+            let live = active.as_ref().expect("the slot must stay claimed");
+            assert_ne!(live.generation, 0, "a generation is never zero");
+            assert_eq!(live.callback_scheme, "frustplay");
         });
     }
 
     #[test]
     fn busy_when_a_session_is_already_live_then_resolve_frees_the_slot() {
         with_clean_active(|| {
-            // Simulate an accepted, still-live session by inserting a
-            // `Sender` directly — this crate's own stub backends never
-            // leave a session live long enough to observe `Busy` for real,
-            // so the test hook bypasses backend dispatch entirely (this
-            // module's own doc's *Busy* test).
-            let (sender, _receiver) = oneshot::channel();
-            *lock_active() = Some(sender);
+            let (generation, _fut) = live_session("frustplay");
 
-            let mut fut = AuthSession::start(valid_request());
+            let mut second = AuthSession::start(valid_request());
             assert_eq!(
-                poll_once(&mut fut),
+                poll_once(&mut second),
                 Poll::Ready(Err(AuthSessionError::Busy))
             );
 
-            resolve(Ok(AuthSessionOutcome::Cancelled));
+            resolve(generation, Ok(AuthSessionOutcome::Cancelled));
             assert!(lock_active().is_none(), "resolve() must release the slot");
         });
     }
@@ -613,9 +809,187 @@ mod tests {
     fn resolve_with_no_live_session_is_a_no_op() {
         with_clean_active(|| {
             // No panic, no live session to disturb.
-            resolve(Ok(AuthSessionOutcome::Cancelled));
+            resolve(next_generation(), Ok(AuthSessionOutcome::Cancelled));
             assert!(lock_active().is_none());
         });
+    }
+
+    #[test]
+    fn a_result_carrying_the_live_generation_completes_the_session() {
+        with_clean_active(|| {
+            let (generation, mut fut) = live_session("frustplay");
+            assert_eq!(poll_once(&mut fut), Poll::Pending);
+
+            resolve(
+                generation,
+                Ok(AuthSessionOutcome::Callback(
+                    "frustplay://auth/callback?code=x".to_string(),
+                )),
+            );
+            assert_eq!(
+                poll_once(&mut fut),
+                Poll::Ready(Ok(AuthSessionOutcome::Callback(
+                    "frustplay://auth/callback?code=x".to_string()
+                )))
+            );
+            assert!(lock_active().is_none(), "the slot must be released");
+        });
+    }
+
+    #[test]
+    fn a_result_carrying_a_stale_generation_is_discarded() {
+        with_clean_active(|| {
+            let (generation, mut fut) = live_session("frustplay");
+
+            // A late callback from an earlier session must neither complete
+            // nor release the session that is live now.
+            resolve(
+                generation.wrapping_sub(1),
+                Ok(AuthSessionOutcome::Callback(
+                    "frustplay://auth/callback?code=stale".to_string(),
+                )),
+            );
+            assert_eq!(poll_once(&mut fut), Poll::Pending);
+            assert!(
+                lock_active().is_some(),
+                "a stale result must leave the live session untouched"
+            );
+
+            // The live generation still completes it afterwards.
+            resolve(generation, Ok(AuthSessionOutcome::Cancelled));
+            assert_eq!(
+                poll_once(&mut fut),
+                Poll::Ready(Ok(AuthSessionOutcome::Cancelled))
+            );
+        });
+    }
+
+    #[test]
+    fn a_callback_whose_scheme_is_not_the_requested_one_is_refused() {
+        with_clean_active(|| {
+            let (generation, mut fut) = live_session("frustplay");
+            resolve(
+                generation,
+                Ok(AuthSessionOutcome::Callback(
+                    "attacker://auth/callback?code=secret".to_string(),
+                )),
+            );
+            match poll_once(&mut fut) {
+                Poll::Ready(Err(AuthSessionError::Platform(message))) => {
+                    assert_eq!(
+                        message,
+                        "callback URL scheme does not match the requested callback scheme"
+                    );
+                    assert!(
+                        !message.contains("secret"),
+                        "the message must never quote the URL"
+                    );
+                }
+                other => panic!("expected Ready(Err(Platform(..))), got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn a_callback_scheme_matches_case_insensitively() {
+        with_clean_active(|| {
+            let (generation, mut fut) = live_session("frustplay");
+            resolve(
+                generation,
+                Ok(AuthSessionOutcome::Callback(
+                    "FRUSTPLAY://auth/callback?code=x".to_string(),
+                )),
+            );
+            assert_eq!(
+                poll_once(&mut fut),
+                Poll::Ready(Ok(AuthSessionOutcome::Callback(
+                    "FRUSTPLAY://auth/callback?code=x".to_string()
+                )))
+            );
+        });
+    }
+
+    #[test]
+    fn a_callback_with_no_url_is_refused() {
+        with_clean_active(|| {
+            let (generation, mut fut) = live_session("frustplay");
+            resolve(generation, Ok(AuthSessionOutcome::Callback(String::new())));
+            match poll_once(&mut fut) {
+                Poll::Ready(Err(AuthSessionError::Platform(message))) => {
+                    assert_eq!(message, "callback delivered without a URL");
+                }
+                other => panic!("expected Ready(Err(Platform(..))), got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn dropping_the_future_releases_the_slot_for_the_next_session() {
+        with_clean_active(|| {
+            let (generation, fut) = live_session("frustplay");
+            assert!(lock_active().is_some());
+
+            drop(fut);
+            assert!(
+                lock_active().is_none(),
+                "dropping the caller's future must release the slot"
+            );
+
+            // The next start is accepted rather than rejected as `Busy` —
+            // whatever this target's backend then makes of it.
+            let mut next = AuthSession::start(valid_request());
+            assert_ne!(
+                poll_once(&mut next),
+                Poll::Ready(Err(AuthSessionError::Busy))
+            );
+
+            // And the abandoned session's own late result is discarded.
+            resolve(generation, Ok(AuthSessionOutcome::Cancelled));
+        });
+    }
+
+    #[test]
+    fn a_completed_future_stays_pending_on_every_later_poll() {
+        with_clean_active(|| {
+            // The `Ready` variant — here a validation failure.
+            let mut req = valid_request();
+            req.url = "http://issuer.example/authorize".to_string();
+            let mut ready = AuthSession::start(req);
+            assert_eq!(
+                poll_once(&mut ready),
+                Poll::Ready(Err(AuthSessionError::InvalidUrl))
+            );
+            assert_eq!(poll_once(&mut ready), Poll::Pending);
+            assert_eq!(poll_once(&mut ready), Poll::Pending);
+
+            // The `Pending` variant — a receiver that already yielded.
+            let (generation, mut pending) = live_session("frustplay");
+            resolve(generation, Ok(AuthSessionOutcome::Cancelled));
+            assert_eq!(
+                poll_once(&mut pending),
+                Poll::Ready(Ok(AuthSessionOutcome::Cancelled))
+            );
+            assert_eq!(poll_once(&mut pending), Poll::Pending);
+            assert_eq!(poll_once(&mut pending), Poll::Pending);
+        });
+    }
+
+    /// `AuthSessionOutcome`'s hand-written `Debug` prints the callback
+    /// URL's length, never the URL (this crate doc's URL rule) — the shape
+    /// a `{:?}` of the whole `Result` ends up carrying.
+    #[test]
+    fn debug_reports_a_callback_url_by_length_only() {
+        let outcome = AuthSessionOutcome::Callback("frustplay://cb?code=secret".to_string());
+        let rendered = format!("{outcome:?}");
+        assert_eq!(rendered, "Callback { url_len: 26 }");
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("frustplay"));
+
+        assert_eq!(format!("{:?}", AuthSessionOutcome::Cancelled), "Cancelled");
+        assert_eq!(
+            format!("{:?}", Ok::<_, AuthSessionError>(outcome)),
+            "Ok(Callback { url_len: 26 })"
+        );
     }
 
     /// Guards `src/url.rs` staying byte-identical to

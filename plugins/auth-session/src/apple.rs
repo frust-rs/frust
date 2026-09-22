@@ -39,11 +39,13 @@
 //! queue turn (see [`release_live`]) rather than inline in the completion
 //! block: releasing the last reference to a session from inside that
 //! session's own completion handler would deallocate an object whose frame
-//! is still on the stack. Each entry carries a generation tag and a release
-//! clears the slot only if the tag still matches, so a completion that
-//! lands off the main thread — Apple documents no thread for the handler —
-//! can never tear down a session the caller has already started in its
-//! place.
+//! is still on the stack. Each entry is tagged with the session's own
+//! generation — [`crate::SessionToken::generation`], the same value
+//! [`crate::resolve`] attributes an outcome by, so object lifetime and
+//! session identity are one identity rather than two — and a release clears
+//! the slot only if the tag still matches. A completion that lands off the
+//! main thread (Apple documents no thread for the handler) can therefore
+//! never tear down a session the caller has already started in its place.
 //!
 //! # The iOS 15 floor and the deprecated initializer
 //!
@@ -101,7 +103,7 @@ compile_error!(
      Apple platforms"
 );
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use block2::RcBlock;
@@ -146,11 +148,10 @@ type LiveSession = (
 thread_local! {
     /// The live session's objects, on the main thread that owns them.
     /// `crate::ACTIVE`'s Busy guard is what keeps this to at most one entry;
-    /// this slot is purely about object lifetime, never about routing.
+    /// this slot is purely about object lifetime, never about routing — the
+    /// tag it carries is the session's own generation, issued by `crate`,
+    /// not a counter of this module's own.
     static LIVE: RefCell<Option<LiveSession>> = const { RefCell::new(None) };
-
-    /// The last generation tag handed out — see [`LiveSession`].
-    static LAST_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
 define_class!(
@@ -237,13 +238,20 @@ pub(crate) fn start(req: AuthSessionRequest, token: SessionToken) -> Result<(), 
 /// failure path resolves the live session rather than returning, because
 /// [`start`] has already told its caller `Ok(())` by the time this runs.
 fn start_on_main(mtm: MainThreadMarker, req: AuthSessionRequest, token: SessionToken) {
+    // The one identity this session has: what `crate::resolve` attributes
+    // an outcome by, and what [`LIVE`]'s entry is tagged with.
+    let generation = token.generation;
+
     let Some(url) = NSURL::URLWithString(&NSString::from_str(&req.url)) else {
         // `crate::validate` already accepted this URL; `NSURL` applies its
         // own stricter parse on top. The message names neither the URL nor
         // any part of it (the crate doc's URL-never-in-a-string rule).
-        crate::resolve(Err(AuthSessionError::Platform(
-            "the platform URL parser rejected the request URL".to_string(),
-        )));
+        crate::resolve(
+            generation,
+            Err(AuthSessionError::Platform(
+                "the platform URL parser rejected the request URL".to_string(),
+            )),
+        );
         return;
     };
 
@@ -254,25 +262,17 @@ fn start_on_main(mtm: MainThreadMarker, req: AuthSessionRequest, token: SessionT
         // anyway — refusing here reports the real reason instead. An app
         // that starts a session before its first window exists (during
         // launch, say) lands on this path.
-        crate::resolve(Err(AuthSessionError::Platform(
-            "no window to present the authentication session over".to_string(),
-        )));
+        crate::resolve(
+            generation,
+            Err(AuthSessionError::Platform(
+                "no window to present the authentication session over".to_string(),
+            )),
+        );
         return;
     };
     let anchor = Anchor::new(mtm, window);
 
-    let generation = LAST_GENERATION.with(|last| {
-        let next = last.get().wrapping_add(1);
-        last.set(next);
-        next
-    });
-
     let block = RcBlock::new(move |url: *mut NSURL, error: *mut NSError| {
-        // Held for the life of this block, naming the session it completes
-        // — `crate::resolve` looks the live sender up itself (see
-        // `crate::SessionToken`).
-        let _token: &SessionToken = &token;
-
         // This runs in an AuthenticationServices frame: an unwind out of
         // here is undefined behavior, not a bug
         // (`docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule).
@@ -280,14 +280,18 @@ fn start_on_main(mtm: MainThreadMarker, req: AuthSessionRequest, token: SessionT
             // SAFETY: `url` and `error` are this completion handler's own
             // arguments — each is either null or a valid object the caller
             // keeps alive for the duration of the call.
-            crate::resolve(unsafe { outcome_from(url, error) });
+            crate::resolve(generation, unsafe { outcome_from(url, error) });
         }));
         if completed.is_err() {
-            // A no-op if the panic happened after `resolve` already took
-            // the sender (`crate::resolve`'s own documented contract).
-            crate::resolve(Err(AuthSessionError::Platform(
-                "panicked while completing the authentication session".to_string(),
-            )));
+            // A no-op if the panic happened after `resolve` already
+            // completed this generation (`crate::resolve`'s own documented
+            // contract).
+            crate::resolve(
+                generation,
+                Err(AuthSessionError::Platform(
+                    "panicked while completing the authentication session".to_string(),
+                )),
+            );
         }
 
         release_live(generation);
@@ -328,9 +332,12 @@ fn start_on_main(mtm: MainThreadMarker, req: AuthSessionRequest, token: SessionT
     if !unsafe { session.start() } {
         let previous = take_live(generation);
         drop(previous);
-        crate::resolve(Err(AuthSessionError::Platform(
-            "the platform refused to start the authentication session".to_string(),
-        )));
+        crate::resolve(
+            generation,
+            Err(AuthSessionError::Platform(
+                "the platform refused to start the authentication session".to_string(),
+            )),
+        );
     }
 }
 

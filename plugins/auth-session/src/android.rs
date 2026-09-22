@@ -1,7 +1,7 @@
 //! The Android backend for [`crate::AuthSession::start`] — Chrome Custom
 //! Tabs, driven from a `dev.frust.authsession.FrustAuthSessionHost` Kotlin
-//! host (`plugins/auth-session/platform/android/`, the sibling Kotlin-host
-//! change) over this crate's own JNI surface.
+//! host (`plugins/auth-session/platform/android/`) over this crate's own
+//! JNI surface.
 //!
 //! # The frozen contract
 //!
@@ -14,8 +14,20 @@
 //!
 //! | Direction | Member | Notes |
 //! |---|---|---|
-//! | Rust → Kotlin | `@JvmStatic fun start(url: String, callbackScheme: String, ephemeral: Boolean): Int` | Resolved once via `context.getClassLoader().loadClass(...)` (the `FrustIapHost`/`FrustBiometric` mechanism — see [`host_class`]) and cached. |
-//! | Kotlin → Rust | [`Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`]`(env, class, kind: jint, url: JString)` | The host's one callback into Rust — see *Two numbering schemes* below. |
+//! | Rust → Kotlin | `@JvmStatic fun start(url: String, callbackScheme: String, ephemeral: Boolean, generation: Long): Int` — `(Ljava/lang/String;Ljava/lang/String;ZJ)I` | Resolved once via `context.getClassLoader().loadClass(...)` (the `FrustIapHost`/`FrustBiometric` mechanism — see [`host_class`]) and cached. |
+//! | Kotlin → Rust | [`Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`]`(env, class, generation: jlong, kind: jint, url: JString)` | The host's one callback into Rust — see *Two numbering schemes* below. |
+//!
+//! # The generation round trip
+//!
+//! `start` is handed the live session's generation
+//! ([`crate::SessionToken::generation`]) and the host echoes back **exactly
+//! that value** on every `nativeOnAuthSessionResult` it makes for that
+//! launch. [`crate::resolve`] completes a session only against its own
+//! generation, so a result from a session the caller already abandoned —
+//! or a duplicate delivery of one already consumed — is discarded instead
+//! of completing whichever session happens to be live by then. The host
+//! never invents a generation: a launch it has no record of has nothing to
+//! report.
 //!
 //! # Two numbering schemes
 //!
@@ -35,10 +47,15 @@
 //!   actually ran: `2` no browser (`ActivityNotFoundException`), `3`
 //!   another exception, `4` no resumed `Activity` (re-coded from `start`'s
 //!   own return code `1` — `kind == 1` already means Cancelled here, so the
-//!   host cannot reuse it). [`outcome_from_kind`] does not need to
-//!   distinguish `2`/`3`/`4` from one another: every `kind` other than `0`
-//!   and `1` resolves the same [`crate::AuthSessionError::Platform`],
-//!   naming the raw value.
+//!   host cannot reuse it).
+//!
+//! [`outcome_from_kind`] maps each posted failure onto **the same**
+//! [`crate::AuthSessionError`] its synchronous counterpart returns, so a
+//! caller cannot tell the two delivery routes apart: `kind` `2` is the
+//! [`crate::AuthSessionError::NoHandler`] return code `2` reports, and
+//! `kind` `4` carries the same message return code `1` does
+//! ([`NO_RESUMED_ACTIVITY`]). Only `3` and an unrecognized value stay
+//! generic, naming the raw `kind`.
 //!
 //! # The resume-observation design
 //!
@@ -86,15 +103,14 @@
 //!
 //! [`crate::AuthSessionRequest::ephemeral`] forwards to `start`'s own
 //! `ephemeral: Boolean` parameter; how (or whether) `FrustAuthSessionHost`
-//! acts on it is that Kotlin module's own concern, not this file's (the
-//! Kotlin-host change, out of this task's scope).
+//! acts on it is that Kotlin module's own concern, not this file's.
 
 use std::sync::OnceLock;
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::refs::Global;
-use jni::sys::jint;
+use jni::sys::{jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
 use crate::{AuthSessionError, AuthSessionOutcome, AuthSessionRequest, SessionToken};
@@ -124,12 +140,29 @@ const START_NO_RESUMED_ACTIVITY: jint = 1;
 /// `ActivityNotFoundException` (no browser capable of a Custom Tab).
 const START_ACTIVITY_NOT_FOUND: jint = 2;
 
+/// The [`AuthSessionError::Platform`] message for "no resumed `Activity`",
+/// shared by `start`'s synchronous return code
+/// [`START_NO_RESUMED_ACTIVITY`] and the posted
+/// [`RESULT_NO_RESUMED_ACTIVITY`] `kind` — the same condition reached by
+/// two delivery routes must read identically to a caller (module doc's
+/// *Two numbering schemes*).
+const NO_RESUMED_ACTIVITY: &str = "no resumed Activity to launch the Custom Tab from";
+
 /// `nativeOnAuthSessionResult`'s `kind` meaning the identity provider
 /// redirected back — `url` carries the callback (module doc's *Two
 /// numbering schemes*).
 const RESULT_CALLBACK: jint = 0;
 /// `nativeOnAuthSessionResult`'s `kind` meaning the user dismissed the tab.
 const RESULT_CANCELLED: jint = 1;
+/// `nativeOnAuthSessionResult`'s `kind` meaning the posted launch found no
+/// browser capable of a Custom Tab — the asynchronous twin of
+/// [`START_ACTIVITY_NOT_FOUND`].
+const RESULT_NO_BROWSER: jint = 2;
+/// `nativeOnAuthSessionResult`'s `kind` meaning the posted launch found no
+/// resumed `Activity` — the asynchronous twin of
+/// [`START_NO_RESUMED_ACTIVITY`], re-coded because `1` already means
+/// Cancelled on this scale.
+const RESULT_NO_RESUMED_ACTIVITY: jint = 4;
 
 /// The cached `FrustAuthSessionHost` class, loaded once via the application
 /// classloader. A racing loser's reference is dropped immediately
@@ -138,14 +171,14 @@ const RESULT_CANCELLED: jint = 1;
 static HOST_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 
 /// Start a Chrome Custom Tabs auth session — see this module's doc's
-/// contract table and *The resume-observation design*. `token` is not
-/// retained: this backend never keeps a live Rust-side object across the
-/// async gap (unlike [`crate::apple`]'s `LIVE` slot) — the eventual outcome
-/// arrives entirely through
-/// [`Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`],
-/// which resolves [`crate::ACTIVE`]'s live sender directly via
-/// [`crate::resolve`].
-pub(crate) fn start(req: AuthSessionRequest, _token: SessionToken) -> Result<(), AuthSessionError> {
+/// contract table and *The resume-observation design*. No Rust-side object
+/// is kept alive across the async gap (unlike [`crate::apple`]'s `LIVE`
+/// slot): all this backend carries forward is the token's generation, which
+/// the host echoes back on
+/// [`Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`]
+/// so [`crate::resolve`] can attribute the result (module doc's *The
+/// generation round trip*).
+pub(crate) fn start(req: AuthSessionRequest, token: SessionToken) -> Result<(), AuthSessionError> {
     with_host(|env, class| {
         let code = run_jni(env, "FrustAuthSessionHost.start", |env| {
             let url = env.new_string(&req.url)?;
@@ -153,11 +186,17 @@ pub(crate) fn start(req: AuthSessionRequest, _token: SessionToken) -> Result<(),
             env.call_static_method(
                 class,
                 jni_str!("start"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;Z)I"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJ)I"),
                 &[
                     JValue::Object(&url),
                     JValue::Object(&scheme),
                     JValue::Bool(req.ephemeral),
+                    // `u64` → `jlong` is a reinterpretation, not a
+                    // truncation: the host treats the value as opaque and
+                    // echoes the same 64 bits back, which
+                    // `nativeOnAuthSessionResult` casts straight back to
+                    // `u64`.
+                    JValue::Long(token.generation as jlong),
                 ],
             )?
             .i()
@@ -165,9 +204,9 @@ pub(crate) fn start(req: AuthSessionRequest, _token: SessionToken) -> Result<(),
 
         match code {
             START_ACCEPTED => Ok(()),
-            START_NO_RESUMED_ACTIVITY => Err(AuthSessionError::Platform(
-                "no resumed Activity to launch the Custom Tab from".to_string(),
-            )),
+            START_NO_RESUMED_ACTIVITY => {
+                Err(AuthSessionError::Platform(NO_RESUMED_ACTIVITY.to_string()))
+            }
             START_ACTIVITY_NOT_FOUND => Err(AuthSessionError::NoHandler),
             other => Err(AuthSessionError::Platform(format!(
                 "host start returned {other}"
@@ -317,12 +356,25 @@ fn run_jni<'local, T>(
 /// outcome — the pure core of the export below (module doc's *Two numbering
 /// schemes*), factored out so it is exercisable by a plain unit test rather
 /// than only on-device.
+///
+/// A [`RESULT_CALLBACK`] with no URL in it — a null or undecodable JNI
+/// string ([`decode_result_url`]) — is refused rather than handed back as
+/// an empty callback a caller would parse as a real answer. `crate`
+/// re-checks a surviving callback's scheme on the way out
+/// ([`crate::resolve`]).
 fn outcome_from_kind(kind: jint, url: String) -> Result<AuthSessionOutcome, AuthSessionError> {
     match kind {
+        RESULT_CALLBACK if url.is_empty() => Err(AuthSessionError::Platform(
+            crate::CALLBACK_WITHOUT_URL.to_string(),
+        )),
         RESULT_CALLBACK => Ok(AuthSessionOutcome::Callback(url)),
         RESULT_CANCELLED => Ok(AuthSessionOutcome::Cancelled),
+        RESULT_NO_BROWSER => Err(AuthSessionError::NoHandler),
+        RESULT_NO_RESUMED_ACTIVITY => {
+            Err(AuthSessionError::Platform(NO_RESUMED_ACTIVITY.to_string()))
+        }
         other => Err(AuthSessionError::Platform(format!(
-            "host result kind {other}"
+            "host launch failed (kind {other})"
         ))),
     }
 }
@@ -352,7 +404,10 @@ fn decode_result_url(env: &Env<'_>, url: &JString<'_>) -> String {
 
 /// `Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`
 /// — the Kotlin host's one callback into Rust (module doc's contract
-/// table), completing the one live session via [`crate::resolve`].
+/// table), completing the session `generation` names via
+/// [`crate::resolve`]. `generation` is the value the host was started with
+/// (module doc's *The generation round trip*); a result for any other
+/// session is discarded there, not here.
 ///
 /// Wrapped in [`jni::EnvUnowned::with_env`], which runs the body under
 /// `catch_unwind` (module doc's `unsafe` section) — this module holds no
@@ -364,12 +419,14 @@ pub extern "system" fn Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnA
 >(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
+    generation: jlong,
     kind: jint,
     url: JString<'local>,
 ) {
     env.with_env(|env| {
         let decoded_url = decode_result_url(env, &url);
-        crate::resolve(outcome_from_kind(kind, decoded_url));
+        // The inverse of `start`'s own `as jlong` — the same 64 bits back.
+        crate::resolve(generation as u64, outcome_from_kind(kind, decoded_url));
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
@@ -391,6 +448,19 @@ mod tests {
         );
     }
 
+    /// A [`RESULT_CALLBACK`] the host delivered with nothing in it (a null
+    /// or undecodable JNI string) is refused, never handed back as an
+    /// empty callback.
+    #[test]
+    fn callback_kind_without_a_url_is_refused() {
+        assert_eq!(
+            outcome_from_kind(RESULT_CALLBACK, String::new()),
+            Err(AuthSessionError::Platform(
+                crate::CALLBACK_WITHOUT_URL.to_string()
+            ))
+        );
+    }
+
     /// [`RESULT_CANCELLED`] ignores whatever `url` string it was handed —
     /// the host never sends a meaningful one for this kind.
     #[test]
@@ -401,20 +471,38 @@ mod tests {
         );
     }
 
-    /// Every other kind (`2`/`3`/`4` per the host's contract, plus any
-    /// value this crate doesn't otherwise expect) is a
-    /// [`AuthSessionError::Platform`] naming the raw value — module doc's
-    /// *Two numbering schemes*: this crate does not need to distinguish
-    /// them from one another.
+    /// A posted no-browser failure is the same
+    /// [`AuthSessionError::NoHandler`] the synchronous
+    /// [`START_ACTIVITY_NOT_FOUND`] return code reports — a caller cannot
+    /// tell the two delivery routes apart (module doc's *Two numbering
+    /// schemes*).
     #[test]
-    fn every_other_kind_is_a_platform_error_naming_the_raw_value() {
-        for kind in [2, 3, 4, -1, 99] {
+    fn no_browser_kind_matches_the_synchronous_no_handler() {
+        assert_eq!(
+            outcome_from_kind(RESULT_NO_BROWSER, String::new()),
+            Err(AuthSessionError::NoHandler)
+        );
+    }
+
+    /// A posted no-resumed-`Activity` failure carries the same message the
+    /// synchronous [`START_NO_RESUMED_ACTIVITY`] return code does.
+    #[test]
+    fn no_resumed_activity_kind_matches_the_synchronous_message() {
+        assert_eq!(
+            outcome_from_kind(RESULT_NO_RESUMED_ACTIVITY, String::new()),
+            Err(AuthSessionError::Platform(NO_RESUMED_ACTIVITY.to_string()))
+        );
+    }
+
+    /// `3` (the host's "some other exception") and any value this crate
+    /// doesn't classify at all stay generic, naming the raw `kind` so a
+    /// device log can tell them apart.
+    #[test]
+    fn an_unclassified_kind_is_a_platform_error_naming_the_raw_value() {
+        for kind in [3, -1, 99] {
             match outcome_from_kind(kind, String::new()) {
                 Err(AuthSessionError::Platform(message)) => {
-                    assert!(
-                        message.contains(&kind.to_string()),
-                        "expected the raw kind {kind} in {message:?}"
-                    );
+                    assert_eq!(message, format!("host launch failed (kind {kind})"));
                 }
                 other => panic!("expected Err(Platform(..)) for kind {kind}, got {other:?}"),
             }
