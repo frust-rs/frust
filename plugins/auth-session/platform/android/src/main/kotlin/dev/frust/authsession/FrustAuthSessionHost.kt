@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -231,10 +232,19 @@ object FrustAuthSessionHost {
             // need not implement Custom Tabs at all (LineageOS's Jelly, seen on
             // the gate device, opened a plain browser window instead). Pin the
             // Intent to a browser that answers `CustomTabsService` when one is
-            // installed — the `<queries>` element in this module's manifest
-            // exists so this lookup can see them; with no provider the plain
-            // `VIEW` fallback stands.
-            CustomTabsClient.getPackageName(act, null)?.let { intent.intent.setPackage(it) }
+            // installed. `CustomTabsClient.getPackageName(context, null)` only
+            // ever tests the DEFAULT handler, so the installed https handlers
+            // are enumerated here and offered as candidates (the default one
+            // still wins when it qualifies) — both `<queries>` intents in this
+            // module's manifest exist so that enumeration and the service
+            // probe can see the browsers. With no provider the plain `VIEW`
+            // fallback stands.
+            val probe = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com"))
+                .addCategory(Intent.CATEGORY_BROWSABLE)
+            val candidates = act.packageManager
+                .queryIntentActivities(probe, PackageManager.MATCH_ALL)
+                .map { it.activityInfo.packageName }
+            CustomTabsClient.getPackageName(act, candidates)?.let { intent.intent.setPackage(it) }
             pending = Pending(callbackScheme, act.intent)
             intent.launchUrl(act, Uri.parse(url))
             0
