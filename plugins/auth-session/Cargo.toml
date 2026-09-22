@@ -39,8 +39,22 @@ jni = { workspace = true }
 # matches `frust-haptics`'s/`frust-iap`'s own `{ workspace = true }` edge —
 # this crate needs nothing narrower than `objc2`'s own default feature set.
 objc2 = { workspace = true }
-# `NSString`: the callback-scheme/URL strings marshalled into the
-# `ASWebAuthenticationSession` initializer. Not `{ workspace = true, ... }`:
+# The Foundation types the Apple backend names directly: `NSString` (the
+# callback-scheme/URL strings marshalled into the
+# `ASWebAuthenticationSession` initializer), `NSURL` (`URLWithString:` in,
+# the redirect's `absoluteString` out), `NSError` (the completion handler's
+# failure arm, read as domain + code), `NSSet` + `NSEnumerator` (iterating
+# `UIApplication.connectedScenes`, whose `iter()` is `NSEnumerator`-gated)
+# and `NSArray` (a window scene's/`NSApplication`'s `windows`). Every one of
+# these is also reached transitively — `objc2-authentication-services`'s
+# `ASWebAuthenticationSession` feature enables the first three, and
+# `objc2-ui-kit`'s `UIApplication`/`UIWindowScene` the rest — so this list
+# changes no resolve; it is named explicitly so that a future narrowing of
+# any of those upstream feature sets fails loudly here instead of silently
+# deleting a type this crate uses (the same rationale
+# `docs/PLUGINS_DEVELOPMENT.md`'s version-pin table records for
+# `frust-shell-macos`'s explicit `objc2-core-foundation` edge).
+# Not `{ workspace = true, ... }`:
 # the root `objc2-foundation = "0.3"` row is a plain version string with no
 # `default-features` set, and Cargo's workspace-dependency inheritance
 # forbids a member from overriding `default-features` unless the
@@ -50,6 +64,12 @@ objc2 = { workspace = true }
 # version literal instead of inheriting.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "NSString",
+    "NSURL",
+    "NSError",
+    "NSSet",
+    "NSEnumerator",
+    "NSArray",
 ] }
 # Constructing the completion handler `ASWebAuthenticationSession`'s
 # initializer takes (`^(NSURL * _Nullable, NSError * _Nullable)`) — a block
@@ -102,12 +122,16 @@ objc2-authentication-services = { version = "0.3", default-features = false, fea
 # the chain this crate's Apple backend walks from the running app to the key
 # window to hand back as the session's presentation anchor. `default-features
 # = false` + a minimal feature list, matching `frust-haptics`'s own
-# `objc2-ui-kit` edge.
+# `objc2-ui-kit` edge. `UISceneDefinitions` carries `UIScene.activationState`
+# alone: the backend prefers a foreground-active scene's key window, because
+# an anchor in a background scene is what
+# `ASWebAuthenticationSessionErrorCodePresentationContextInvalid` reports.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIResponder",
     "UIApplication",
     "UIScene",
+    "UISceneDefinitions",
     "UIWindowScene",
     "UIView",
     "UIWindow",
