@@ -1,7 +1,7 @@
 //! The Android backend for [`crate::AuthSession::start`] — Chrome Custom
 //! Tabs, driven from a `dev.frust.authsession.FrustAuthSessionHost` Kotlin
-//! host (`plugins/auth-session/platform/android/`, the sibling `a2-01`
-//! card) over this crate's own JNI surface.
+//! host (`plugins/auth-session/platform/android/`, the sibling Kotlin-host
+//! change) over this crate's own JNI surface.
 //!
 //! # The frozen contract
 //!
@@ -87,7 +87,7 @@
 //! [`crate::AuthSessionRequest::ephemeral`] forwards to `start`'s own
 //! `ephemeral: Boolean` parameter; how (or whether) `FrustAuthSessionHost`
 //! acts on it is that Kotlin module's own concern, not this file's (the
-//! `a2-01` card, out of this task's scope).
+//! Kotlin-host change, out of this task's scope).
 
 use std::sync::OnceLock;
 
