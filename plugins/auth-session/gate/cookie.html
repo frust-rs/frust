@@ -15,11 +15,16 @@
 <pre id="cookie-readout" style="font-size: 1.5em;"></pre>
 <p>Close this tab to return to the app.</p>
 <script>
-  if (!document.cookie.includes('frustauth=')) {
+  // Report the state BEFORE this visit sets the cookie, otherwise every
+  // visit prints `frustauth=1` and an ephemeral session is indistinguishable
+  // from a persistent one.
+  const had = document.cookie.includes('frustauth=');
+  if (!had) {
     document.cookie = 'frustauth=1; path=/; SameSite=Lax; Secure';
   }
-  document.getElementById('cookie-readout').textContent =
-    document.cookie || 'no cookie';
+  document.getElementById('cookie-readout').textContent = had
+    ? document.cookie + ' (persisted from an earlier session)'
+    : 'no cookie (set now)';
 </script>
 </body>
 </html>
