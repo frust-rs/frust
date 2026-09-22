@@ -36,18 +36,16 @@ own header comment (a `settings.gradle.kts` module include plus an
 `implementation(project(":frust-auth-session"))` line in `android/app/`,
 the same shape `plugins/secure-storage/platform/android` uses).
 
-On **iOS** the app target must additionally link
-`AuthenticationServices.framework` — `-framework AuthenticationServices` in
-the Runner's `OTHER_LDFLAGS` (or the framework in Xcode's *Frameworks*
-phase). This crate's Rust code references the framework's
+On **iOS** the app target must also link `AuthenticationServices.framework`
+— `frust plugin add auth-session` does this (its `IosFramework` contribution
+appends `-framework AuthenticationServices` to every `OTHER_LDFLAGS` list in
+`ios/Runner.xcodeproj/project.pbxproj`); an app wired by hand adds the same
+flag itself. This crate's Rust code references the framework's
 `ASWebAuthenticationSessionErrorDomain` symbol, and a Rust staticlib cannot
 carry a framework link into Xcode's link step, so without the flag the app
 fails to link with `Undefined symbols for architecture arm64:
-"_ASWebAuthenticationSessionErrorDomain"`. `frust plugin add auth-session`
-does not add it yet (`auth-session-ios-framework-link-manual-v1` in
-[LIMITATIONS.md](../../docs/LIMITATIONS.md)); `examples/playground/ios`
-carries it. A macOS binary linked by cargo needs nothing extra — the objc2
-binding's own link attribute applies there.
+"_ASWebAuthenticationSessionErrorDomain"`. A macOS binary linked by cargo
+needs nothing extra — the objc2 binding's own link attribute applies there.
 
 ---
 
@@ -95,7 +93,8 @@ before touching any platform API — a rejected request resolves
 ## 3. Platform caveats
 
 - **iOS / macOS** (`ASWebAuthenticationSession`):
-  - iOS apps must link `AuthenticationServices.framework` by hand (§ 1).
+  - iOS apps link `AuthenticationServices.framework` (§ 1 — `frust plugin
+    add` wires it; a hand-wired app adds the flag itself).
   - Your app's `Info.plist` must register `req.callback_scheme` under
     `CFBundleURLTypes` — the same scheme registration any custom-scheme deep
     link needs.
@@ -396,9 +395,9 @@ Undefined symbols for architecture arm64:
 links (macOS) but which does not travel through the iOS staticlib into
 Xcode's link; the scaffold Runner links Metal/QuartzCore/CoreText/
 CoreGraphics/CoreFoundation/UIKit only. `-framework AuthenticationServices`
-was added to the playground's `project.pbxproj` (all three configurations);
-§ 1 documents the requirement and `auth-session-ios-framework-link-manual-v1`
-tracks the missing `frust plugin add` contribution.
+was added to the playground's `project.pbxproj` (all three configurations)
+for the gate; the registry's `IosFramework` contribution now makes `frust
+plugin add auth-session` do the same (§ 1).
 
 **(1) Callback** — tap `Callback` (Ephemeral off). Apple's consent alert
 appeared — `“Runner” Wants to Use “192.168.8.140” to Sign In` / `This allows

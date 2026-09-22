@@ -25,15 +25,16 @@
 //! with `ACTION_VIEW` needs none on API 30+, and no `<queries>` element
 //! either, since it targets an implicit intent the OS itself resolves — see
 //! `URL_LAUNCHER_BASE`'s doc comment), `auth-session`
-//! (dependency plus the plugin's own Android library module — OAuth round trip
-//! completion half, mirroring `url-launcher`'s launch half; Chrome Custom Tabs
-//! on Android / ASWebAuthenticationSession on iOS — the second registry entry
-//! to pair a bare CargoDep with just a GradleModule on Android, like
-//! `native-widgets` and `video-player` — no manifest permission or plist key,
-//! since Custom Tabs carry no permission, the `<queries>` element comes from
-//! the module's own manifest via the manifest merger, and ASWebAuthenticationSession
-//! needs no plist key; desktop reports NoHandler — see `AUTH_SESSION_BASE`'s doc
-//! comment), `iap`
+//! (dependency, the plugin's own Android library module, and the
+//! `AuthenticationServices` framework link — OAuth round trip completion
+//! half, mirroring `url-launcher`'s launch half; Chrome Custom Tabs on
+//! Android / ASWebAuthenticationSession on iOS — the first registry entry to
+//! use [`Contribution::IosFramework`], since its Apple arm is pure `objc2`
+//! and references a framework symbol the scaffold's Runner never links; no
+//! manifest permission or plist key, since Custom Tabs carry no permission,
+//! the `<queries>` element comes from the module's own manifest via the
+//! manifest merger, and ASWebAuthenticationSession needs no plist key;
+//! desktop reports NoHandler — see `AUTH_SESSION_BASE`'s doc comment), `iap`
 //! (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
 //! comment for why), `database` (dependency only — pure-Rust plugin, no
@@ -324,9 +325,9 @@ const URL_LAUNCHER: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
-/// `auth-session`'s base contributions — a Cargo dependency plus the plugin's own
-/// Android library module, the `native-widgets`/`video-player` two-contribution
-/// shape (dependency + one Gradle module).
+/// `auth-session`'s base contributions — a Cargo dependency, the plugin's own
+/// Android library module, and the `AuthenticationServices` framework link
+/// for the Runner target.
 ///
 /// No [`Contribution::ManifestPermission`]: Chrome Custom Tabs carries no permission —
 /// the Android `startActivity` implied by the API needs none (unlike `haptics`'
@@ -336,9 +337,15 @@ const URL_LAUNCHER: PluginSpec = PluginSpec {
 /// carry). No [`Contribution::SwiftPackageRef`] and no [`Contribution::AppCrateMacro`]:
 /// the iOS factory is a Rust `objc2` `define_class!` type (like `native-widgets` and
 /// `video-player`'s Apple arms), so there is nothing to link from Swift and nothing
-/// for release LTO to strip. The `<queries>` element for the CustomTabsService comes
-/// from the module's own manifest via the manifest merger — the app's manifest is
-/// never touched. Desktop backends report `NoHandler` (no platform API available).
+/// for release LTO to strip — but *not* nothing to link at all: the Rust code reads
+/// `ASWebAuthenticationSessionErrorDomain`, an `extern static` of
+/// `AuthenticationServices.framework`, and the binding's own
+/// `#[link(kind = "framework")]` never reaches Xcode's link of the iOS staticlib
+/// (see [`Contribution::IosFramework`]); the a3-03 device gate's very first Xcode
+/// link of this plugin failed on that symbol. The `<queries>` element for the
+/// CustomTabsService comes from the module's own manifest via the manifest merger
+/// — the app's manifest is never touched. Desktop backends report `NoHandler` (no
+/// platform API available).
 const AUTH_SESSION_BASE: &[Contribution] = &[
     Contribution::CargoDep {
         name: "frust-auth-session",
@@ -346,6 +353,9 @@ const AUTH_SESSION_BASE: &[Contribution] = &[
     Contribution::GradleModule {
         gradle_name: ":frust-auth-session",
         rel_path: "plugins/auth-session/platform/android",
+    },
+    Contribution::IosFramework {
+        name: "AuthenticationServices",
     },
 ];
 
@@ -1195,6 +1205,75 @@ mod tests {
             snapshot_tree(&root),
             "a second apply must leave a byte-identical tree"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `auth-session` end to end: the first [`Contribution::IosFramework`]
+    /// entry must land `-framework AuthenticationServices` in **every**
+    /// `OTHER_LDFLAGS` list of the scaffold's pbxproj (one per build
+    /// configuration), leave the file well-formed, and be idempotent.
+    #[test]
+    fn auth_session_add_plugin_links_authentication_services_in_every_configuration() {
+        let root = scaffold_project("auth-session-framework");
+
+        let first = add_plugin(&root, "auth-session", &[]).unwrap();
+        assert_eq!(first.plugin_id, "auth-session");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let pbxproj_path = root.join("ios/Runner.xcodeproj/project.pbxproj");
+        let pbxproj = fs::read_to_string(&pbxproj_path).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(
+            lists >= 2,
+            "scaffold has {lists} OTHER_LDFLAGS lists:\n{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tAuthenticationServices,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "auth-session", &[]).unwrap();
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        // Half-applied: strip the flag from one configuration (a hand edit
+        // or an older add) — a re-add completes that list and reports
+        // `Applied`, never `AlreadyPresent`.
+        let stripped = pbxproj.replacen(
+            "\t\t\t\t\t\"-framework\",\n\t\t\t\t\tAuthenticationServices,\n",
+            "",
+            1,
+        );
+        assert_ne!(stripped, pbxproj);
+        fs::write(&pbxproj_path, &stripped).unwrap();
+        let third = add_plugin(&root, "auth-session", &[]).unwrap();
+        let framework_item = third
+            .items
+            .iter()
+            .find(|i| i.description.contains("AuthenticationServices"))
+            .unwrap();
+        assert_eq!(framework_item.outcome, AddOutcome::Applied, "{third:?}");
+        assert_eq!(fs::read_to_string(&pbxproj_path).unwrap(), pbxproj);
 
         let _ = fs::remove_dir_all(&root);
     }

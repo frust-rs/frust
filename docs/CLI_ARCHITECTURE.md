@@ -274,7 +274,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   never a content comparison), and refuses an absolute or `..`-containing `rel_path`. `i18n`'s
   entry is the first to use it — seeding a starter locale file — and its registry ordering puts
   that `ScaffoldFile` before the plugin's `AppCrateMacro` invocation, since the macro's generated
-  code depends on the file it creates. A plugin's three desktop-lane `Contribution`s
+  code depends on the file it creates. `Contribution::IosFramework` (first used by `auth-session`)
+  appends `-framework <name>` to every `OTHER_LDFLAGS` list of the Runner's pbxproj: a pure-`objc2`
+  Apple arm's own `#[link(kind = "framework")]` never reaches Xcode's link of the iOS staticlib, so
+  a framework symbol it references must be linked by the app. A plugin's three desktop-lane `Contribution`s
   (`MacosPlistEntry`/`MacosEntitlement`/`LinuxDesktopEntry`) are the one family `add_plugin` never
   writes into a project file at all — `macos/Info.plist`, `macos/app.entitlements`, and
   `linux/app.desktop` are user-owned, hand-editable files a pre-desktop-shells project may not even

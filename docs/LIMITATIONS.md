@@ -6139,17 +6139,3 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: raising the crate's deployment floor to iOS 17.4, or adding a floor-gated second path that uses the newer initializer when available.
 
 **Evidence**: `plugins/auth-session/src/apple.rs`'s module doc (*The iOS 15 floor and the deprecated initializer*) and its `make_session` function.
-
----
-
-### `auth-session-ios-framework-link-manual-v1` — iOS apps must link AuthenticationServices.framework by hand
-
-**Observed**: the first Xcode link of the Apple backend (`frust build ios` on `examples/playground`) failed with `Undefined symbols for architecture arm64: "_ASWebAuthenticationSessionErrorDomain"`. `objc2-authentication-services` carries `#[link(name = "AuthenticationServices", kind = "framework")]`, which rustc honours when it links the binary itself (macOS `cargo build`) but which does not travel through the iOS staticlib into Xcode's link, and the scaffold Runner's `OTHER_LDFLAGS` links only Metal/QuartzCore/CoreText/CoreGraphics/CoreFoundation/UIKit. The plugin registry's `auth-session` entry has no framework-link contribution, so `frust plugin add auth-session` produces an iOS app that does not link until `-framework AuthenticationServices` is added by hand (`examples/playground/ios/Runner.xcodeproj/project.pbxproj` carries it).
-
-**Applies to**: iOS (Xcode-linked apps). macOS binaries linked by cargo are unaffected.
-
-**Why accepted**: found by the a3-03 device gate after the plan's review cap; the app-side flag is a one-line documented fix (`plugins/auth-session/README.md` § 1) and the registry has no `Contribution` variant for a framework link yet — adding one (or a `SwiftPackageRef` shim that `import`s the framework) is a `frust-drive` change with its own tests, outside a gate card's scope.
-
-**Trigger for removal**: `frust plugin add auth-session` links the framework itself — a framework-link `Contribution` in `crates/frust-drive/src/plugin/registry.rs` (or a Swift package shim), with a registry test asserting the Runner links it.
-
-**Evidence**: `plugins/auth-session/README.md` § 6 (*iOS — iPhone 17 simulator*, *Link fix first*); the a3-03 gate row `auth-session-ios-xcode-link`.
