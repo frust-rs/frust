@@ -122,13 +122,29 @@ mod tests {
     }
 
     /// Desktop smoke test: on a real host (this workspace's `cargo test`
-    /// runs on desktop, never Android/iOS) `system_locales` must return a
-    /// non-empty, parseable list — asserting parseability, not specific
-    /// values, since the actual locale depends on the CI/dev machine's own
-    /// configuration.
+    /// runs on desktop, never Android/iOS) `system_locales` must either
+    /// report a real, parseable locale list, or fail with the documented
+    /// [`I18nError::Detection`] — never anything else, and never a panic.
+    /// A bare `LANG=C.UTF-8` host with every other locale variable unset
+    /// is a legitimate instance of the latter (see `detect::desktop`'s
+    /// module doc: `C`/`POSIX` carries no usable language, so
+    /// `raw_locale_tags` correctly reports nothing to negotiate against),
+    /// so non-emptiness of an `Ok` result is asserted rather than the call
+    /// being required to succeed outright — but that assertion is not
+    /// vacuous: `parse_tags` (exercised directly by this module's other
+    /// tests) already guarantees an `Ok` is never empty, so this test's
+    /// real job is catching a regression that returns a *wrong* error
+    /// variant (e.g. `UnsupportedPlatform`) for what should be a
+    /// `Detection` failure, or that panics instead of erroring.
     #[test]
-    fn system_locales_is_non_empty_on_the_host() {
-        let locales = system_locales().expect("the host reports at least one locale");
-        assert!(!locales.is_empty());
+    fn system_locales_reports_parseable_locales_or_a_documented_detection_error() {
+        match system_locales() {
+            Ok(locales) => assert!(
+                !locales.is_empty(),
+                "system_locales' Ok variant must never be empty"
+            ),
+            Err(I18nError::Detection(_)) => {}
+            Err(other) => panic!("unexpected error from system_locales: {other}"),
+        }
     }
 }
