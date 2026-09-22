@@ -40,6 +40,17 @@
         <intent>
             <action android:name="android.support.customtabs.action.CustomTabsService" />
         </intent>
+        <!-- `CustomTabsClient.getPackageName` enumerates the installed https
+             handlers before asking each one for its CustomTabsService; under
+             Android 11+ package visibility that enumeration is empty without
+             this second query, so no provider is ever found and the launch
+             silently falls back to the default browser (observed on the gate
+             device, whose default browser has no Custom Tabs support). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
 
     <application>
