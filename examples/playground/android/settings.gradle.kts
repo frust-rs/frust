@@ -124,3 +124,23 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-iap"))
     }
 }
+
+// frust-auth-session: the same include/projectDir/build-dir-redirect trio as
+// `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
+// writes for this plugin's `Contribution::GradleModule`. Carried in-tree
+// because playground is a committed example, not a generated project.
+//
+// The module supplies the Chrome Custom Tabs host (`FrustAuthSessionHost`)
+// + its process-start init provider; no per-control Kotlin lives in this
+// app's own source tree. `src/pages/auth_session.rs`'s "Auth" section is
+// the first end-to-end exercise of this module against the Rust JNI backend
+// (`plugins/auth-session/src/android.rs`).
+include(":frust-auth-session")
+project(":frust-auth-session").projectDir =
+    file("../../../plugins/auth-session/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-auth-session") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-auth-session"))
+    }
+}

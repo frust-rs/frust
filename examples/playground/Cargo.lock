@@ -1170,6 +1170,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-auth-session"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-authentication-services",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-camera"
 version = "0.1.0"
 dependencies = [
@@ -2967,6 +2983,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-authentication-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee6d6f7dab884a28adaec1012eb3889257a49cc145724e35f93ece2d209f8b25"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-av-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3575,6 +3603,7 @@ name = "playground"
 version = "0.1.0"
 dependencies = [
  "frust",
+ "frust-auth-session",
  "frust-camera",
  "frust-core",
  "frust-i18n",

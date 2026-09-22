@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frust-auth-session gate: callback</title>
+</head>
+<body>
+<p>Redirecting back to the app&hellip;</p>
+<p>
+  If nothing happens, tap the link below:
+  <a id="fallback" href="#">continue</a>
+</p>
+<script>
+  const params = new URLSearchParams(location.search);
+  const scheme = params.get('scheme') || 'frustplay';
+  const target = scheme + '://auth/callback?code=x&state=gate';
+  document.getElementById('fallback').href = target;
+  location.replace(target);
+</script>
+</body>
+</html>
