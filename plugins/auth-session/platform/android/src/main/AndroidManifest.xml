@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This module carries no `<uses-permission>` of its own: `CustomTabsIntent`'s
+  `launchUrl` is a plain `startActivity` under the hood — no permission is
+  needed to launch another app's Activity — and this module never binds to a
+  Custom Tabs service directly.
+
+  The `<queries>` block below is needed only for provider *discovery*:
+  `CustomTabsClient.getPackageName` (used to pick a preferred/warm-up browser)
+  enumerates packages that answer the `CustomTabsService` action, and Android
+  11+'s package-visibility filtering hides that enumeration without a
+  `<queries>` declaration. `launchUrl` itself does not need this — it resolves
+  to any installed browser via a normal `ACTION_VIEW` implicit intent — so its
+  absence would not break the happy path, only a future warm-up/preferred-
+  package optimization. Declared now so that door stays open without a manifest
+  change later.
+
+  The provider below is how `FrustAuthSessionHost` obtains an application
+  `Context` BEFORE any Activity exists, mirroring `plugins/iap/platform/android`'s
+  `FrustIapInitProvider` (itself mirroring `plugins/camera/platform/android`'s
+  `FrustCameraInitProvider`). The host needs the application `Context` to
+  register its process-wide `Application.ActivityLifecycleCallbacks` as early
+  as possible — the first Activity is otherwise the only `Context` a plugin
+  would see, and that is too late to observe that very first resume. A no-op
+  `ContentProvider` whose `onCreate` runs at process start is the standard
+  library-self-initialization mechanism for exactly this (`androidx.startup`'s
+  `InitializationProvider`, Firebase's `FirebaseInitProvider`).
+
+  `${applicationId}` is substituted by AGP at manifest-merge time, so the
+  authority is unique per consuming app (two apps on one device cannot
+  collide). `exported="false"`: nothing outside the app may reach it — it
+  exposes no data and every ContentProvider operation throws/returns null.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.authsession`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+    </queries>
+
+    <application>
+        <provider
+            android:name="dev.frust.authsession.FrustAuthSessionInitProvider"
+            android:authorities="${applicationId}.frustauthsessioninit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>
