@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frust-auth-session gate: cookie check</title>
+</head>
+<body>
+<p>
+  Use this page for a manually-dismissed session (close the in-app browser
+  tab yourself instead of waiting for a redirect), or to check whether
+  cookies persist across a session (compare with the <code>Ephemeral</code>
+  toggle in the playground app).
+</p>
+<pre id="cookie-readout" style="font-size: 1.5em;"></pre>
+<p>Close this tab to return to the app.</p>
+<script>
+  if (!document.cookie.includes('frustauth=')) {
+    document.cookie = 'frustauth=1; path=/; SameSite=Lax; Secure';
+  }
+  document.getElementById('cookie-readout').textContent =
+    document.cookie || 'no cookie';
+</script>
+</body>
+</html>

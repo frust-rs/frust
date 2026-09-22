@@ -206,6 +206,10 @@ dependencies {
     // Playground has no Rust-side IAP page or feature yet; this is the tripwire
     // only — removing this line orphans the version pin.
     implementation(project(":frust-iap"))
+    // frust-auth-session: the Chrome Custom Tabs host (`FrustAuthSessionHost`)
+    // + its process-start init provider — `src/pages/auth_session.rs`'s
+    // "Auth" section.
+    implementation(project(":frust-auth-session"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
