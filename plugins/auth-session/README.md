@@ -151,8 +151,107 @@ authorization code twice. iOS/macOS has no such double delivery — see § 3.
 
 ## 6. Device gate
 
-Owed — no device or simulator run has exercised either backend yet (see § 3
-for what each does). A follow-on task records the Android Custom Tabs and
-Apple `ASWebAuthenticationSession` device-gate transcripts; see
-[PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md)'s Auth-session
-manual test for the script it will run.
+### Android — PASSED with one recorded deviation, 2026-09-22
+
+Device: Xiaomi 12 (`2201123G`, codename `cupid`), LineageOS 23.2
+(`23.2-20260604-NIGHTLY-cupid`, build `BP4A.251205.006`), Android 16
+(`ro.build.version.sdk` = 36), connected over network `adb`. Browsers
+installed: `org.lineageos.jelly` (the device's default `https` handler — no
+Custom Tabs support), `org.mozilla.fennec_fdroid` 129.0.0 and
+`com.android.chrome` 153.0.8010.49 (both answer `CustomTabsService`).
+App: the `examples/playground` debug APK (`it.f0x.playground`) built with
+`frust build apk --debug` and installed with `adb install -r`. Gate pages
+served from this checkout's `plugins/auth-session/gate/` over a self-signed
+https origin on the LAN (`https://192.168.1.109:8443/`, typed into the page's
+Base URL field); the first Custom Tab therefore shows Fennec's certificate
+interstitial, dismissed once with *Advanced… → Accept the Risk and Continue*.
+`adb logcat -v time ActivityTaskManager:I AndroidRuntime:E *:S` captured
+alongside.
+
+**Merged manifest** — `adb shell dumpsys package it.f0x.playground` shows both
+`<queries>` intents this module contributes (`android.support.customtabs.action.CustomTabsService`
+and `android.intent.action.VIEW` + `BROWSABLE` + `https`) merged into the app:
+
+```
+queriesIntents=[Intent { act=android.support.customtabs.action.CustomTabsService },
+                Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https: }, …]
+```
+
+**Provider selection (three gate-driven fixes, all before the passing run
+below).** The first attempt launched the default browser, not a Custom Tab:
+
+```
+START u0 {act=android.intent.action.VIEW dat=https://192.168.1.109:8443/... cmp=org.lineageos.jelly/.MainActivity} … from uid 10587 (it.f0x.playground)
+```
+
+`CustomTabsIntent.launchUrl` alone resolves to the default `VIEW` handler,
+and `CustomTabsClient.getPackageName(context, null)` only probes that default
+handler — on this device neither reaches a Custom Tabs provider. The host now
+enumerates the installed `https` handlers (which needs the second `<queries>`
+intent above under Android 11+ package visibility) and offers them to
+`getPackageName`, pinning the Intent to the first provider that answers
+`CustomTabsService`; with none installed the plain `VIEW` fallback stands.
+After the fix:
+
+```
+START u0 {act=android.intent.action.VIEW dat=https://192.168.1.109:8443/... pkg=org.mozilla.fennec_fdroid cmp=org.mozilla.fennec_fdroid/org.mozilla.fenix.customtabs.ExternalAppBrowserActivity}
+```
+
+Fennec was chosen over Chrome because it sorts first among the candidates; a
+device whose *default* browser supports Custom Tabs keeps its default.
+
+**(1) Callback** — tap `Callback` (Ephemeral off). The Custom Tab loaded
+`callback.html?scheme=frustplay` (server log: `192.168.1.114 "GET
+/callback.html?scheme=frustplay HTTP/1.1" 200`), redirected, and the app
+came back through its own intent filter:
+
+```
+START u0 {act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=frustplay://auth/... flg=0x10000000 cmp=it.f0x.playground/.MainActivity}
+Displayed it.f0x.playground/.MainActivity for user 0: +99ms
+```
+
+Same process throughout (`pidof` unchanged). Labels, verbatim:
+
+```
+status: Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))
+latest deep link: frustplay://auth/callback?code=x&state=gate
+is_supported: true
+```
+
+The second line is the documented double delivery — the same Intent also
+reached `frust::deep_links()`. (Playground-only observation: the callback
+Intent re-rendered the app on its first section; the `Auth` section's labels
+were intact when re-opened.)
+
+**(2) Cancel** — tap `Cancel test`; the Custom Tab opened `cookie.html`;
+closed with the tab's **X** → `status: Cancel test -> Ok(Cancelled)`.
+Repeated and closed with the system **Back** key → `status: Cancel test ->
+Ok(Cancelled)`.
+
+**(3) Busy** — tap `Busy` → `status: Busy -> Err(Busy)` (the second call's
+result, written synchronously); the first session's tab opened and, its page
+being cached, redirected straight back, so the first future resolved to its
+callback while the label kept the `Busy` outcome.
+
+**(4) Ephemeral** — Ephemeral OFF, `Cookie check` twice: the page printed
+`frustauth=1 (persisted from an earlier session)` on the second visit
+(cookie persisted, as expected). Ephemeral ON, `Cookie check` twice: **both**
+visits printed `frustauth=1 (persisted from an earlier session)` — the
+provider selected on this device (Fennec F-Droid 129.0.0) does **not** honour
+`CustomTabsIntent.Builder#setEphemeralBrowsingEnabled`, which is advisory to
+the browser. Each session closed with **X** → `status: Cookie check ->
+Ok(Cancelled)`. Chrome 153 was installed but never selected here, so
+ephemeral browsing under Chrome remains unobserved. Recorded in
+[LIMITATIONS.md](../../docs/LIMITATIONS.md) as
+`auth-session-android-ephemeral-browser-dependent`.
+
+**(5) Negative / no-provider device** — a Pixel 4a (LineageOS 23.2, only
+`org.lineageos.jelly` installed) was attached but locked, so the plain-`VIEW`
+fallback path was not exercised on it. `is_supported()` = `true` on the
+Xiaomi (label above).
+
+### iOS + macOS — owed
+
+Not run here; see [PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md)'s
+Auth-session manual test for the script the Mac gate records, plus the
+Apple-target compile gates.

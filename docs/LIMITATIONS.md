@@ -6072,6 +6072,20 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
+### `auth-session-android-ephemeral-browser-dependent` — `ephemeral` on Android is advisory to the Custom Tabs provider
+
+**Observed**: `FrustAuthSessionHost` calls `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled(true)` (present in the pinned `androidx.browser:browser 1.10.0`), but the flag is a request the provider may ignore: on the gate device (Xiaomi 12, LineageOS 23.2) the provider selected was Fennec F-Droid 129.0.0 and two consecutive ephemeral sessions both saw the `frustauth=1` cookie set by an earlier session (`plugins/auth-session/README.md` § 6). Chrome 153 was installed but not selected, so its behaviour is unobserved.
+
+**Applies to**: Android only; apps relying on `ephemeral: true` for cookie isolation must not assume it holds on every browser.
+
+**Why accepted**: the provider is chosen from what the device has installed (default browser first, then the first `https` handler that answers `CustomTabsService`); there is no portable way to demand ephemeral support short of binding to the service and checking `CustomTabsClient.isEphemeralBrowsingSupported`, which is a follow-on, not a v1 blocker.
+
+**Trigger for removal**: the host probes ephemeral support before launching (or prefers a provider that reports it) and the gate records `no cookie (set now)` on a second ephemeral visit.
+
+**Evidence**: `plugins/auth-session/README.md` § 6 (Android transcript, step 4); `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`launch`).
+
+---
+
 ### `auth-session-linux-windows-unavailable-v1` — no in-app auth user agent on desktop Linux/Windows
 
 **Observed**: `AuthSession::start` reports `AuthSessionError::NoHandler` immediately on every target that is not Android, iOS, or macOS — Linux and Windows desktop included; `unsupported::start` never presents a session at all.
