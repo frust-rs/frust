@@ -257,8 +257,10 @@ fn verify(
     };
 
     Ok(Some(ResolvedSigning {
-        // Absolute, so Gradle's `rootProject.file(...)` base can't disagree
-        // with the three bases the gate searched.
+        // Absolute, so whichever base the project's Gradle resolves against
+        // (`rootProject.file(...)` in the shipped template, a module-relative
+        // `file(...)` in a Flutter-style rig) can't disagree with whichever
+        // of the four bases the gate searched actually landed.
         store_file: absolute(found),
         store_password: resolved[&Field::StorePassword].clone(),
         key_alias: resolved[&Field::KeyAlias].clone(),
@@ -561,13 +563,17 @@ fn absolute(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Every base a relative `storeFile` plausibly resolves against: the
-/// properties file's own directory (the relocated-rig convention), the
-/// Gradle root project (`android/`, what the shipped template uses), and the
-/// Frust project root. The gate accepts the first that lands on a real file
-/// rather than guessing which base the project's Gradle picked — and since the
-/// resolved path is then handed to Gradle *absolute*, that guess is no longer
-/// something the two sides can disagree about.
+/// Every base a relative `storeFile` plausibly resolves against, in the order
+/// tried: the properties file's own directory (the relocated-rig convention,
+/// `storeFile=prod.jks` beside `key.properties`), the Gradle root project
+/// (`android/`, what the shipped template's `rootProject.file(…)` uses), the
+/// Gradle app module (`android/app/`, what a bare `file(…)` inside
+/// `app/build.gradle.kts` resolves against — the Flutter convention, kept
+/// verbatim by a rig ported from a Flutter app), and the Frust project root.
+/// The gate accepts the first that lands on a real file rather than guessing
+/// which base the project's Gradle picked — and since the resolved path is
+/// then handed to Gradle *absolute*, that guess is no longer something the
+/// two sides can disagree about.
 fn store_file_candidates(
     project_root: &Path,
     android_dir: &Path,
@@ -583,6 +589,9 @@ fn store_file_candidates(
         bases.push(parent.to_path_buf());
     }
     bases.push(android_dir.to_path_buf());
+    // The source module `frust create` lays out — not
+    // `BuildLayout::android_app()`, which is the build *output* tree.
+    bases.push(android_dir.join("app"));
     bases.push(project_root.to_path_buf());
 
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -871,6 +880,14 @@ mod tests {
             message.contains(&dir.join("android/upload.jks").display().to_string()),
             "{message}"
         );
+        assert!(
+            message.contains(&dir.join("android/app/upload.jks").display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&dir.join("upload.jks").display().to_string()),
+            "{message}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1034,6 +1051,40 @@ mod tests {
         assert!(contents.contains("keyAlias=upload"), "{contents}");
         assert!(
             Path::new(store_file_line(&contents)).is_file(),
+            "{contents}"
+        );
+        drop(guard);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The Flutter convention, verbatim: `key.properties` lives in
+    /// `android/app/keystores/`, its `storeFile` is `keystores/production.jks`,
+    /// and the app's `build.gradle.kts` resolves it with a bare `file(…)` —
+    /// relative to the *module*, `android/app/`. Before the module base
+    /// existed the gate refused this rig over a keystore sitting exactly where
+    /// Gradle would look, listing a doubled `keystores/keystores/` path among
+    /// the bases it had tried.
+    #[test]
+    fn a_module_relative_store_file_resolves_against_android_app() {
+        let dir = unique_temp_dir("module-relative");
+        touch_keystore(&dir, "android/app/keystores/production.jks");
+        write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [signing]\nkey-properties = \"app/keystores/key.properties\"\nprefix = \"prod\"\n",
+        );
+        write(
+            dir.join("android/app/keystores/key.properties"),
+            "prod.storeFile=keystores/production.jks\nprod.storePassword=pw\n\
+             prod.keyAlias=upload\nprod.keyPassword=pw\n",
+        );
+        assert!(!dir.join("android/app/keystores/keystores").exists());
+        let (contents, guard) = generate(&dir, FakeEnv::new());
+        let generated = PathBuf::from(store_file_line(&contents));
+        assert!(generated.is_file(), "{contents}");
+        assert_eq!(
+            fs::canonicalize(&generated).unwrap(),
+            fs::canonicalize(dir.join("android/app/keystores/production.jks")).unwrap(),
             "{contents}"
         );
         drop(guard);
