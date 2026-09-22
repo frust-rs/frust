@@ -6060,15 +6060,15 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `auth-session-android-callback-rides-intent-filter` — Android cannot prove the OAuth callback scheme is bound to this app
 
-**Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme.
+**Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme. The session generation does not narrow any of this: the host keeps only the latest launch's generation in its single `pending` slot and stamps whichever callback-scheme `Intent` it observes on the next Activity resume with that value — the generation never travels through the browser or the redirect URL, so a superseded tab's late redirect, or an injected `Intent`, is attributed to the live session by timing rather than evidence. The generation only lets the Rust side discard a result for a session that is no longer live (dropped future, already resolved).
 
-**Applies to**: Android only; any app using this plugin whose callback scheme collides with another installed app's registered scheme.
+**Applies to**: Android only; any app using this plugin whose callback scheme collides with another installed app's registered scheme, or that starts a new session while a previous tab is still open.
 
 **Why accepted**: this is RFC 8252's own documented risk for a custom-scheme redirect (its §8.1 recommends reverse-domain-unique scheme naming, which narrows but does not eliminate the window), not a defect this plugin introduces — callers MUST use PKCE and verify the state parameter to defend against forged/injected callbacks (see `README.md` §3.4 *Security*). HTTPS App Links (domain-verified) or Android's newer Auth Tab API would close the gap, but neither is in this plugin's v1 scope.
 
-**Trigger for removal**: a follow-on card adds an HTTPS App Links or Auth Tab callback path and `AuthSessionRequest` grows a way to select it.
+**Trigger for removal**: a follow-on card adds an HTTPS App Links or Auth Tab callback path and `AuthSessionRequest` grows a way to select it; a narrower follow-on refuses redirects observed after a superseded launch (the host would need to remember that a tab it no longer tracks is still open).
 
-**Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt`'s class doc (*Why the outcome is read from `activity.intent`*, *The double-delivery note*); `examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` intent filter.
+**Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt`'s class doc (*Why the outcome is read from `activity.intent`*, *The double-delivery note*) and its `pending` slot; `plugins/auth-session/src/android.rs` (*The generation round trip*); `examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` intent filter.
 
 ---
 
@@ -6088,7 +6088,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `auth-session-android-resume-means-cancelled-v1` — Activity resume while a session is pending is reported as Cancelled
 
-**Observed**: An unrelated Activity resuming while `AuthSession::start`'s future is still live (e.g. a permission dialog, app switch, or system event) triggers an `onActivityResumed` callback that resolves the pending future immediately with `Err(AuthSessionError::Platform(…))`. The session slot is freed, and the future resolves with error kind 4 (Platform / no resumed activity), not `Cancelled`.
+**Observed**: An unrelated Activity resuming while `AuthSession::start`'s future is still live (e.g. a permission dialog, app switch, or system event) triggers an `onActivityResumed` callback whose resumed `Intent` carries no callback-scheme data; the host clears its pending session and reports kind `1`, so the future resolves `Ok(AuthSessionOutcome::Cancelled)` — indistinguishable from the user dismissing the Custom Tab. The tab itself is not closed by this: it stays on screen until the user dismisses it, and a redirect it delivers afterwards finds no pending session and is dropped (the app's own deep-link stream still observes it — `plugins/auth-session/README.md` § 5). Error kind `4` (`Platform`, "no resumed Activity") is a different, launch-time path: `start`'s posted runnable found no resumed Activity to launch from, so no tab was ever opened.
 
 **Applies to**: Android only; any app using this plugin whose UI context allows or expects graceful recovery from interruption while an auth session is pending.
 
@@ -6116,7 +6116,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `auth-session-no-cancel-v1` — no way to cancel a live session from Rust
 
-**Observed**: `AuthSession` exposes no `cancel` method — once `start` returns a pending future, it only resolves when the identity provider redirects, the user dismisses the platform tab themselves, or a platform-level failure occurs; there is no programmatic way for an app to dismiss a live session (e.g. on its own timeout or navigation-away). Dropping the awaited future (not awaiting it, or awaiting and then discarding the result) releases the session Busy slot immediately without waiting for platform resolution.
+**Observed**: `AuthSession` exposes no `cancel` method — once `start` returns a pending future, it only resolves when the identity provider redirects, the user dismisses the platform tab themselves, or a platform-level failure occurs; there is no programmatic way for an app to dismiss a live session (e.g. on its own timeout or navigation-away). Dropping the awaited future (not awaiting it, or awaiting and then discarding the result) releases the session Busy slot immediately without waiting for platform resolution — but it does **not** end the platform UI: on Android the Custom Tab stays on screen until the user closes it (a redirect it delivers afterwards finds no pending session and is dropped); on iOS/macOS the presented `ASWebAuthenticationSession` sheet stays up until the user dismisses it or the next `AuthSession::start` `-cancel`s it in favour of the new session (its `CanceledLogin` completion is then discarded as a stale generation).
 
 **Applies to**: every platform with a real backend (Android, iOS, macOS).
 

@@ -114,26 +114,42 @@ before touching any platform API — a rejected request resolves
     (`auth-session-android-callback-rides-intent-filter` in
     [LIMITATIONS.md](../../docs/LIMITATIONS.md)). The callback URL therefore
     reaches the app **twice** — see § 5.
-  - **Provider selection:** the default `https` handler is offered first if it
-    supports Custom Tabs; otherwise the host enumerates installed `https`
-    handlers (visible under Android 11+ package-visibility rules) and offers
-    them to `CustomTabsClient.getPackageName` in the order reported, pinning
-    to the first provider that answers `CustomTabsService` (the crate's
-    allow-list of well-known providers includes Fennec F-Droid as an allowed
-    source). With no Custom Tabs provider available, the Custom Tab launches
-    unpinned in a plain browser window.
+  - **Provider selection** (`pinCustomTabsProvider`): the user's default
+    `http://` `VIEW` handler is pinned if it alone answers `CustomTabsService`;
+    otherwise the host enumerates every installed `VIEW`/`BROWSABLE` `http://`
+    handler with `MATCH_ALL` (default-app filtering would hide every
+    non-default browser), intersects that set with a fixed allow-list of
+    well-known browsers in preference order (Chrome variants, Firefox / Fenix /
+    Fennec F-Droid, Brave, Samsung Internet, Edge, Vivaldi, DuckDuckGo) and
+    pins the first one `getPackageName(…, ignoreDefault = true)` accepts —
+    never a package outside the allow-list. With no qualifying provider the
+    Custom Tab launches unpinned and the OS resolves it like any `VIEW` intent
+    (a plain browser window). The module manifest's `<queries>` block is what
+    makes those handlers visible under Android 11+ package-visibility rules.
   - **`NoHandler`:** arises only when `CustomTabsIntent.launchUrl` raises
     `ActivityNotFoundException` — no `VIEW` handler for the authorization URL
     exists at all on the device (very rare; see kind 2 in § 5).
   - `ephemeral` maps to `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled`,
     advisory to the browser (a browser that doesn't support it opens a normal
     tab instead of refusing).
-  - Session generations are tracked so a callback arriving for a stale (earlier)
-    session is discarded; dropping the awaited future releases the Busy slot
-    (`auth-session-android-resume-means-cancelled-v1` in
-    [LIMITATIONS.md](../../docs/LIMITATIONS.md)). Error kind 4 (Platform) is
-    reported when an unrelated Activity resumes while a session is pending
-    (permission dialog, app switch, etc.).
+  - **Any Activity resume ends the pending session.** The host reads the
+    outcome from the resumed Activity's `Intent`: a callback-scheme `Intent`
+    is the redirect (`Ok(Callback)`); anything else — a permission dialog, an
+    app switch, a system event — resolves `Ok(Cancelled)`, exactly as a user
+    dismissing the tab does, and a still-open Custom Tab is left for the user
+    to close (`auth-session-android-resume-means-cancelled-v1` in
+    [LIMITATIONS.md](../../docs/LIMITATIONS.md)). Error kind 4 (`Platform`,
+    "no resumed Activity") is launch-time only: no tab was ever opened.
+  - **Attribution is by timing, not evidence.** The host stamps whichever
+    callback-scheme `Intent` it observes with the generation of the session
+    pending *now*; the generation never travels through the browser or the
+    redirect. It only lets Rust discard a result for a session that is no
+    longer live (dropped future, already resolved) — it cannot tell a
+    superseded tab's late redirect from the live session's own
+    (`auth-session-android-callback-rides-intent-filter` in
+    [LIMITATIONS.md](../../docs/LIMITATIONS.md)). PKCE + `state` (§ 3.4) are
+    the caller's defence. Dropping the awaited future releases the Busy slot
+    but does not close the tab (`auth-session-no-cancel-v1`).
 - **Desktop (Linux, Windows):** permanent — no platform authentication user
   agent exists; every session rejects with `AuthSessionError::NoHandler`
   (`auth-session-linux-windows-unavailable-v1` in
@@ -170,7 +186,11 @@ while the first is still live resolves immediately to
 browser tab is a modal, single-instance UI surface on every backend
 platform). The slot frees the moment the live session resolves — by outcome,
 by error, or by a backend module failing without ever calling back — so a
-stuck session can never wedge every later one behind it.
+stuck session can never wedge every later one behind it. Dropping the awaited
+future frees the slot too, but frees only this crate's bookkeeping: the
+platform UI stays up (Android: until the user closes the tab; iOS/macOS: until
+the user dismisses the sheet or the next `start` cancels it) —
+`auth-session-no-cancel-v1` in [LIMITATIONS.md](../../docs/LIMITATIONS.md).
 
 ---
 

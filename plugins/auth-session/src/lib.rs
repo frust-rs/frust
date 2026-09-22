@@ -48,10 +48,16 @@
 //! immediately to [`AuthSessionError::Busy`] rather than queuing or
 //! replacing the first (an in-app browser tab is a modal, single-instance
 //! UI surface on every backend platform). Each accepted `start` is stamped
-//! with a fresh, process-wide **generation**, and only a platform result
-//! carrying the live generation can complete it — a late result from an
-//! already-finished session is discarded rather than resolving whatever
-//! session happens to be live now.
+//! with a fresh, process-wide **generation**, and a platform result completes
+//! a session only while that session's generation is still the live one — a
+//! result reported after the session finished or was abandoned is discarded
+//! rather than resolving whatever session happens to be live now. The
+//! generation is bookkeeping on this side of the platform boundary, not
+//! evidence about the redirect: on Android the host stamps whichever
+//! callback-scheme `Intent` it observes with the generation pending at that
+//! moment (the `android` module's *The generation round trip*), so a stale
+//! tab's late redirect can still complete the live session. PKCE and `state`
+//! (*Security* below) are what bind a callback to a request.
 //!
 //! The slot releases when the live session resolves (by outcome or by
 //! error), when the backend drops its resolution handle without ever
@@ -62,6 +68,15 @@
 //! that presents a session and then never calls back keeps the slot claimed
 //! for exactly as long as the caller holds that future alive — dropping it
 //! (or the task awaiting it) frees the slot for the next `start`.
+//!
+//! Releasing the slot is **not** the same as ending the platform UI. A
+//! dropped future only frees this crate's bookkeeping: on Android the Custom
+//! Tab stays on screen until the user closes it (a redirect it delivers
+//! afterwards finds no pending session and is dropped); on iOS/macOS the
+//! presented `ASWebAuthenticationSession` sheet stays up until the user
+//! dismisses it or the next [`AuthSession::start`] cancels it in favour of
+//! the new session. There is no cancel API in v1 (`auth-session-no-cancel-v1`
+//! in `docs/LIMITATIONS.md`).
 //!
 //! # Security
 //!

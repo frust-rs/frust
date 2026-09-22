@@ -83,8 +83,9 @@ local_sig!(
 // own default meaning (a persisted browsing session).
 local_sig!(ephemeral_sig, bool, false);
 
-// The last button press's `Debug`-formatted `AuthSession::start` result —
-// empty until the first attempt.
+// The last button press's `AuthSession::start` result as `render` prints it
+// (the callback URL through the value, since `Debug` hides it) — empty until
+// the first attempt.
 local_sig!(status_sig, String, String::new());
 
 /// The callback-scheme registered on Android

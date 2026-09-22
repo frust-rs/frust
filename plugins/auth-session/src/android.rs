@@ -20,14 +20,24 @@
 //! # The generation round trip
 //!
 //! `start` is handed the live session's generation
-//! ([`crate::SessionToken::generation`]) and the host echoes back **exactly
-//! that value** on every `nativeOnAuthSessionResult` it makes for that
-//! launch. [`crate::resolve`] completes a session only against its own
-//! generation, so a result from a session the caller already abandoned —
-//! or a duplicate delivery of one already consumed — is discarded instead
-//! of completing whichever session happens to be live by then. The host
-//! never invents a generation: a launch it has no record of has nothing to
-//! report.
+//! ([`crate::SessionToken::generation`]) and the host stores it in its
+//! single `pending` slot, stamping every `nativeOnAuthSessionResult` it
+//! makes while that launch is pending with that value. [`crate::resolve`]
+//! completes a session only against its own generation, so a result the
+//! host reports after the caller abandoned the session (dropped future) —
+//! or after it already resolved — is discarded instead of completing
+//! whichever session happens to be live by then.
+//!
+//! What the round trip does **not** do is attribute a redirect by evidence:
+//! the generation never travels through the browser or the redirect URL.
+//! The host stamps whichever callback-scheme `Intent` it observes on the
+//! next Activity resume with the generation pending *at that moment* — a
+//! late redirect from a superseded tab, or an injected `Intent` carrying
+//! the scheme, is reported under the live generation and completes it. That
+//! attribution-by-timing is why the crate doc's *Security* section makes
+//! PKCE and `state` verification mandatory
+//! (`auth-session-android-callback-rides-intent-filter` in
+//! `docs/LIMITATIONS.md`).
 //!
 //! # Two numbering schemes
 //!

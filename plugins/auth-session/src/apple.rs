@@ -47,6 +47,14 @@
 //! main thread (Apple documents no thread for the handler) can therefore
 //! never tear down a session the caller has already started in its place.
 //!
+//! The one path that replaces a still-populated slot is a later
+//! [`start_on_main`] after the caller dropped the previous session's future
+//! (which frees `crate::ACTIVE`'s Busy slot without touching the platform
+//! UI): the previous session is `-cancel`led before its entry is dropped, so
+//! the presented sheet is dismissed rather than having its last strong
+//! reference released from under it, and its `CanceledLogin` completion is
+//! discarded by [`crate::resolve`] as a stale generation.
+//!
 //! # The iOS 15 floor and the deprecated initializer
 //!
 //! `-initWithURL:callbackURLScheme:completionHandler:` is marked
@@ -325,6 +333,22 @@ fn start_on_main(mtm: MainThreadMarker, req: AuthSessionRequest, token: SessionT
         let mut slot = live.borrow_mut();
         slot.replace((generation, session.clone(), anchor, block))
     });
+    if let Some((_, stale_session, _, _)) = &previous {
+        // A populated slot here means the caller dropped that session's
+        // future (freeing `crate::ACTIVE`'s Busy slot) while its sheet was
+        // still presented — `release_live` only ever runs after a
+        // completion. Dropping the entry outright would release the
+        // presented session's last strong reference from under the sheet;
+        // cancelling it first dismisses that UI cleanly, and its completion
+        // then reports `CanceledLogin` for the stale generation, which
+        // `crate::resolve` discards and whose `release_live` finds no
+        // matching entry (module doc's *Retained until completion*).
+        //
+        // SAFETY: `-cancel` on a session this module built and started, on
+        // the main thread; documented as a no-op on an already-cancelled
+        // session, so repeat calls cannot double-complete it.
+        unsafe { stale_session.cancel() };
+    }
     drop(previous);
 
     // SAFETY: `-start` on a fully configured session, on the main thread,
