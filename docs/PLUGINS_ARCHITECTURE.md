@@ -5,10 +5,10 @@
 PLUGINS is the leaf plugin tier sitting beside the `frust` facade. `frust-plugin` is the shared
 substrate, in two halves with opposite directions: the Android platform-handle slot
 (JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
-registry a plugin writes and a desktop shell reads. On top of it sit eight independent
+registry a plugin writes and a desktop shell reads. On top of it sit nine independent
 OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
-`iap`, `video-player`, and `url-launcher` — each exposing one platform-independent public API
-behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
+`iap`, `video-player`, `url-launcher`, and `auth-session` — each exposing one platform-independent
+public API behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
 platform's default external browser, fire-and-forget, over Android `ACTION_VIEW`, iOS
 `openURL:options:completionHandler:`, or a desktop opener — the launch half of an RFC 8252 OAuth
 round trip, whose completion returns through `frust::deep_links()`. `iap` is in-app purchases
@@ -54,6 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
 | `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot, never a frame this crate paints |
 | `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()` |
+| `plugins/auth-session` | OAuth authorization round trip in the platform auth user agent — `ASWebAuthenticationSession` (iOS/macOS; the callback URL returns in-process, no custom-scheme intent) or Chrome Custom Tabs (Android; a Gradle module whose Kotlin host launches from the resumed Activity and reads the callback Intent on resume) — resolving an awaitable `Callback(url)`/`Cancelled` with a one-session (Busy) guard and an ephemeral mode; Linux/Windows report `NoHandler` |
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
@@ -81,6 +82,7 @@ preview or a `frust build macos|windows|linux`. See
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback |
+| `auth-session` | macOS-native only | `ASWebAuthenticationSession` with an AppKit key-window anchor; Linux/Windows have no auth user agent (`auth-session-linux-windows-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
@@ -288,13 +290,14 @@ Design-System Contract for the toolkit they all build against). Their shared cha
 
 - Android requires an explicit platform-handle init (JavaVM/Context, via `frust_plugin::android`)
   before any plugin can reach the OS, done through scoped, per-call JNI attaches; Apple needs no
-  init step since `objc2` reaches the ObjC runtime globally. `camera`, `iap`, and `video-player`
-  each ship their own Android `ContentProvider`-based init provider, installing the process's
-  `Context` before `Application.onCreate` runs — three independent users of the same bootstrap
-  pattern; `camera` and `iap` additionally cache the resumed `Activity` via
-  `ActivityLifecycleCallbacks`, since billing/capture flows both need one to launch a platform
-  sheet, while `video-player` registers no such callback. `url-launcher` needs neither: its
-  Android backend runs off the process-lifetime application `Context` the shell already installs.
+  init step since `objc2` reaches the ObjC runtime globally. `camera`, `iap`, `video-player`, and
+  `auth-session` each ship their own Android `ContentProvider`-based init provider, installing the
+  process's `Context` before `Application.onCreate` runs — four independent users of the same
+  bootstrap pattern; `camera`, `iap`, and `auth-session` additionally cache the resumed `Activity`
+  via `ActivityLifecycleCallbacks`, since billing/capture/Custom-Tab-launch flows all need one to
+  launch a platform sheet, while `video-player` registers no such callback. `url-launcher` needs
+  neither: its Android backend runs off the process-lifetime application `Context` the shell
+  already installs.
 - Each plugin exposes one platform-independent public API (`SharedPreferences`/`SecureStorage`/
   `Camera`/`Clipboard`/`Haptics`/`Iap`) that dispatches to a per-platform backend implementation; a
   shared conformance suite validates all backends uniformly, including a test-only file/desktop
@@ -399,5 +402,6 @@ Design-System Contract for the toolkit they all build against). Their shared cha
 | `fmt` (`CivilDate` / `CivilTime` / `DateLength`) | ICU4X-backed decimal/percent/currency/date/time formatting entry points and their date/time value types (`formatting` feature) |
 | `VideoPlayer` / `PlayerSession` / `VideoSource` / `PlaybackState` / `PlayerEvent` / `VideoError` / `VideoPlayerHandle` | The video entry point (opens sessions, never blocks); the open session carrying the controls, a lock-free snapshot, the one-listener registration, and the `view_type`/`params_json` its native view attaches through; the file/bundled-asset/URL source enum; the frozen seven-state lifecycle; the listener's event enum; the typed error enum (`NotSupported`, `Reentrant`, `Closed`, and the host-reported failures); and the reactive handle pairing a session with the five tracked signals a `build` reads |
 | `UrlLauncher` / `UrlLauncherError` | External-browser launch entry point and its error enum (`InvalidUrl`, `PlatformNotInitialized`, `NoHandler`, `Platform`) |
+| `AuthSession` / `AuthSessionRequest` / `AuthSessionOutcome` / `AuthSessionError` | Auth-user-agent entry point, its request (https URL, callback scheme, ephemeral), the two outcomes, and the error enum (`InvalidUrl`, `Busy`, `PlatformNotInitialized`, `NoHandler`, `Platform`) |
 | `DesktopViewFactory` / `DesktopViewHandle` | `frust-plugin`'s desktop-registry vocabulary: the main-thread-only create/update-params/dispose trait a plugin registers per `view_type`, and the `!Send`, +1-retained native-view pointer handed to a desktop shell on create and given back on dispose |
 | `ButtonDecoration` / `OverflowObserver` | `frust_material`'s button-family extension seams: pluggable gradient decoration and label-overflow-strategy observation |
