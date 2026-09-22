@@ -10,11 +10,10 @@
 //! - **Callback** starts an [`AuthSession`] against `<base>callback.html?
 //!   scheme=frustplay` — `callback.html` immediately redirects to
 //!   `frustplay://auth/callback?code=x&state=gate`, so this is the
-//!   successful round trip. The status line below prints the full
-//!   `Debug`-formatted result, which — per [`AuthSessionOutcome::Callback`]'s
-//!   own doc — DOES carry the whole callback URL, unlike
-//!   [`AuthSessionRequest`]'s own `Debug` impl; that is what the scripted
-//!   gate compares against.
+//!   successful round trip. The status line below prints the callback URL
+//!   in full — read through the [`AuthSessionOutcome::Callback`] value,
+//!   since the plugin's own `Debug` impls deliberately hide URLs — because
+//!   that is what the scripted gate compares against (see [`render`]).
 //! - **Cancel test** starts a session against `<base>cookie.html` (any page
 //!   works — the tester manually dismisses the in-app browser tab without
 //!   the identity provider ever redirecting) to exercise
@@ -41,7 +40,7 @@ use frust::{
     RwSignal, Set, SizedBox, Theme, any, button, checkbox, deep_links, inflexible, spawn_local,
     text, text_input, use_context,
 };
-use frust_auth_session::{AuthSession, AuthSessionRequest};
+use frust_auth_session::{AuthSession, AuthSessionError, AuthSessionOutcome, AuthSessionRequest};
 
 use crate::PlaygroundState;
 
@@ -130,15 +129,27 @@ fn request_for(path: &str) -> AuthSessionRequest {
     }
 }
 
-/// Start a session against `<base><path>`, writing `"{label} -> {result:?}"`
-/// into [`status_sig`] once it resolves — the handler every button except
-/// `Busy` uses (see this module doc's *The four buttons*).
+/// Render a session outcome for the status label. The plugin's `Debug` for
+/// [`AuthSessionOutcome::Callback`] deliberately hides the URL (it prints
+/// `Callback { url_len: N }`), but this page is the device gate and the gate
+/// compares the callback URL verbatim, so the URL is read through the value
+/// and printed in full here; every other outcome keeps its `Debug` form.
+fn render(result: &Result<AuthSessionOutcome, AuthSessionError>) -> String {
+    match result {
+        Ok(AuthSessionOutcome::Callback(url)) => format!("Ok(Callback({url:?}))"),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Start a session against `<base><path>`, writing `"{label} -> <outcome>"`
+/// (see [`render`]) into [`status_sig`] once it resolves — the handler every
+/// button except `Busy` uses (see this module doc's *The four buttons*).
 fn fire(label: &'static str, path: &'static str) -> impl Fn(&mut PlaygroundState) + 'static {
     move |_state: &mut PlaygroundState| {
         let req = request_for(path);
         spawn_local(async move {
             let result = AuthSession::start(req).await;
-            status_sig().set(format!("{label} -> {result:?}"));
+            status_sig().set(format!("{label} -> {}", render(&result)));
         });
     }
 }
@@ -157,7 +168,7 @@ fn fire_busy(_state: &mut PlaygroundState) {
     });
     spawn_local(async move {
         let result = second.await;
-        status_sig().set(format!("Busy -> {result:?}"));
+        status_sig().set(format!("Busy -> {}", render(&result)));
     });
 }
 

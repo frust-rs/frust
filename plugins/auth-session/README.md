@@ -53,6 +53,8 @@ let req = AuthSessionRequest {
 // other executor — resolution is driven by the platform's own main thread,
 // not by whichever thread happens to be polling.
 match AuthSession::start(req).await {
+    // `{:?}` on an outcome prints `Callback { url_len: N }`, never the URL —
+    // read the String through the value, as here.
     Ok(AuthSessionOutcome::Callback(url)) => {
         // Parse the callback URL and verify the state parameter against your
         // session state (PKCE or equivalent is also required — see § 3.4).

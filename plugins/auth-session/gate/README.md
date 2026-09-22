@@ -38,7 +38,9 @@ this directory, or the httpbin equivalents above):
 
 1. **Callback.** Tap `Callback`. Expected: the in-app browser tab (Custom Tabs on Android,
    `ASWebAuthenticationSession` on iOS/macOS) presents `callback.html`, redirects immediately, and the
-   status line reads `Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`. The
+   status line reads `Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))` (the
+   playground prints the URL through the outcome value; the plugin's own `Debug` output would show
+   `Callback { url_len: 43 }`). The
    `latest deep link:` line below also updates on Android — the same callback URL additionally arrives as
    an ordinary deep link (`frust-auth-session`'s crate doc's *Android double-delivery* section); this is
    expected, not a bug.
