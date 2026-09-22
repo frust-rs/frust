@@ -300,7 +300,7 @@ object FrustAuthSessionHost {
      * 2. **Otherwise, the highest-preference allow-listed provider that is
      *    both installed and Custom-Tabs-capable.** The full-browser
      *    candidates (`queryIntentActivities` against the same no-host
-     *    `http://` probe, `CATEGORY_BROWSABLE`, `MATCH_DEFAULT_ONLY`) are
+     *    `http://` probe, `CATEGORY_BROWSABLE`, `MATCH_ALL` so a chosen default browser does not hide the rest) are
      *    intersected with [CUSTOM_TABS_PROVIDER_ALLOWLIST] — a fixed,
      *    documented set of mainstream browsers in preference order — and the
      *    ordered intersection is handed to
@@ -335,8 +335,14 @@ object FrustAuthSessionHost {
 
         val browserProbe = Intent(Intent.ACTION_VIEW, Uri.parse("http://"))
             .addCategory(Intent.CATEGORY_BROWSABLE)
+        // `MATCH_ALL` is deliberate: without it the platform applies its
+        // default-app filtering and, once the user has chosen a default
+        // browser, the query returns ONLY that browser — so the allow-list
+        // intersection is empty whenever the default has no Custom Tabs
+        // support (the exact case this step exists for; observed on the gate
+        // device). The allow-list, not the query flag, is the trust boundary.
         val installed = act.packageManager
-            .queryIntentActivities(browserProbe, PackageManager.MATCH_DEFAULT_ONLY)
+            .queryIntentActivities(browserProbe, PackageManager.MATCH_ALL)
             .map { it.activityInfo.packageName }
             .toSet()
         val candidates = CUSTOM_TABS_PROVIDER_ALLOWLIST.filter { it in installed }
