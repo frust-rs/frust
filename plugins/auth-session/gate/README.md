@@ -4,9 +4,10 @@ Two static pages the playground app's "Auth" section (`examples/playground/src/p
 drives an [`AuthSession`](../src/lib.rs) round trip against:
 
 - **`callback.html`** — reads a `?scheme=` query parameter (falling back to `frustplay`, the scheme
-  the playground app registers) and immediately redirects to `<scheme>://auth/callback?code=x&state=gate`,
-  simulating an identity provider's successful authorization redirect. A visible fallback link covers a
-  browser that refuses the automatic redirect.
+  the playground app registers), validates it against a custom-scheme allow-list (see the page's own
+  script for the rule), and redirects to `<scheme>://auth/callback?code=x&state=gate`, simulating
+  an identity provider's successful authorization redirect. Unsupported schemes render a visible
+  error without any link. A fallback link covers a browser that refuses the automatic redirect.
 - **`cookie.html`** — sets a `frustauth=1` cookie if none is present yet, then prints the full
   `document.cookie` string (or `no cookie`) in a large `<pre>` block. Useful two ways: as a page a tester
   manually dismisses the in-app browser tab from (any page works for that), and as a way to confirm

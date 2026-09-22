@@ -54,9 +54,14 @@ let req = AuthSessionRequest {
 // not by whichever thread happens to be polling.
 match AuthSession::start(req).await {
     Ok(AuthSessionOutcome::Callback(url)) => {
-        // Exchange the authorization code in `url`'s query string for
-        // tokens — this crate's job ends at handing back the raw callback
-        // URL.
+        // Parse the callback URL and verify the state parameter against your
+        // session state (PKCE or equivalent is also required — see § 3.4).
+        // Then extract the authorization code from `url`'s query string and
+        // exchange it for tokens — this crate's job ends at handing back the
+        // raw callback URL.
+        let url_str = format!("{}", url);  // read the String through match/pattern
+        // ... verify state_param from url_str matches your session ...
+        // ... verify PKCE challenge ...
     }
     Ok(AuthSessionOutcome::Cancelled) => { /* user dismissed the tab */ }
     Err(err) => { /* AuthSessionError::{InvalidUrl,Busy,PlatformNotInitialized,NoHandler,Platform} */ }
@@ -107,11 +112,26 @@ before touching any platform API — a rejected request resolves
     (`auth-session-android-callback-rides-intent-filter` in
     [LIMITATIONS.md](../../docs/LIMITATIONS.md)). The callback URL therefore
     reaches the app **twice** — see § 5.
+  - **Provider selection:** the default `https` handler is offered first if it
+    supports Custom Tabs; otherwise the host enumerates installed `https`
+    handlers (visible under Android 11+ package-visibility rules) and offers
+    them to `CustomTabsClient.getPackageName` in the order reported, pinning
+    to the first provider that answers `CustomTabsService` (the crate's
+    allow-list of well-known providers includes Fennec F-Droid as an allowed
+    source). With no Custom Tabs provider available, the Custom Tab launches
+    unpinned in a plain browser window.
+  - **`NoHandler`:** arises only when `CustomTabsIntent.launchUrl` raises
+    `ActivityNotFoundException` — no `VIEW` handler for the authorization URL
+    exists at all on the device (very rare; see kind 2 in § 5).
   - `ephemeral` maps to `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled`,
     advisory to the browser (a browser that doesn't support it opens a normal
     tab instead of refusing).
-  - No installed browser capable of a Custom Tab resolves
-    `AuthSessionError::NoHandler`.
+  - Session generations are tracked so a callback arriving for a stale (earlier)
+    session is discarded; dropping the awaited future releases the Busy slot
+    (`auth-session-android-resume-means-cancelled-v1` in
+    [LIMITATIONS.md](../../docs/LIMITATIONS.md)). Error kind 4 (Platform) is
+    reported when an unrelated Activity resumes while a session is pending
+    (permission dialog, app switch, etc.).
 - **Desktop (Linux, Windows):** permanent — no platform authentication user
   agent exists; every session rejects with `AuthSessionError::NoHandler`
   (`auth-session-linux-windows-unavailable-v1` in
@@ -121,6 +141,22 @@ before touching any platform API — a rejected request resolves
   equivalent out-of-band step) receiving the redirect — RFC 8252's own
   "loopback IP redirection" pattern for platforms with no in-app
   browser-tab primitive.
+
+---
+
+## 3.4. Security
+
+This crate returns the raw callback URL to the caller — it does not validate or consume the
+authorization code or state parameter on any platform. **Callers MUST use PKCE (RFC 7636 with
+S256 challenge method) and MUST verify the `state` parameter against their own session state
+before exchanging the code for tokens on EVERY platform.** 
+
+RFC 8252 § 8.1 documents the risks of custom-scheme redirects: Android accepts any Intent carrying
+the callback scheme while a session is pending, so any installed app or tapped link can forge a
+redirect; iOS/macOS intercept the redirect in-process (in-app only, not as a deep link), but the
+redirect itself is unauthenticated — the crate has no way to prove it came from the identity
+provider rather than the browser or another app. PKCE and state verification are essential on all
+three platforms to prevent authorization code theft.
 
 ---
 
@@ -199,6 +235,8 @@ START u0 {act=android.intent.action.VIEW dat=https://192.168.1.109:8443/... pkg=
 
 Fennec was chosen over Chrome because it sorts first among the candidates; a
 device whose *default* browser supports Custom Tabs keeps its default.
+Post-run, the provider-selection policy was tightened to use an allow-list of
+well-known providers; Fennec F-Droid remains on that list.
 
 **(1) Callback** — tap `Callback` (Ephemeral off). The Custom Tab loaded
 `callback.html?scheme=frustplay` (server log: `192.168.1.114 "GET
