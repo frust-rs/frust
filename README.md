@@ -166,50 +166,6 @@ impl Component for Counter {
 frust::run(Counter).unwrap();
 ```
 
-## Workspace crates
-
-**Framework**
-
-| Crate | Responsibility |
-|---|---|
-| `frust-core` | The declarative `View` trait, retained `Widget` trait, layout, event/focus/capture pass, animation vocabulary, and pull-based accessibility (semantics) pass. |
-| `frust-scene` | The renderer-agnostic vector scene / display list — the stable seam between widgets and the GPU backend. |
-| `frust-render` | The wgpu GPU backend, driving the frust-owned `frust-engine` strip renderer, that presents a scene to a window surface. |
-| `frust-gpu` | The `wgpu` adapter/device/surface substrate `frust-engine` and `frust-render` build on: pipeline cache, shader loading, resource pool/arena, encoder, headless testing. |
-| `frust-engine` | The frust-owned strips-on-wgpu render engine: compiles a `frust-scene` scene into sparse strips and records GPU passes into a caller-owned command encoder. |
-| `frust-text` | Text shaping (Parley/Fontique/HarfRust/Swash) and the `TextEditor` engine platform IME bridges drive. |
-| `frust-theme` | Design tokens: Material 3 and Cupertino baselines, color/type/shape/elevation/motion/glass scales. |
-| `frust-widgets` | The baseline + Material + Cupertino widget catalog, plus navigation (imperative navigator, declarative router, shared-element transitions). |
-| `frust-reactive` | The leaf reactive substrate (signals, background runtime, deep-link and back-press sources) shells and app code build on. |
-| `frust-paths` | Leaf platform-directory resolution and atomic-write helpers, shared by desktop-facing shells and plugins. |
-| `frust-plugin` | Plugin substrate: publishes the Android `(JavaVM, Context)` handle pair a plugin needs to reach the host OS, with zero per-plugin native code. |
-| `frust` | The public app-author facade: `Component`/`app!`/`run` and the widget vocabulary apps are written against. |
-
-**Shells**
-
-| Crate | Responsibility |
-|---|---|
-| `frust-shell-desktop` | Shared winit desktop shell (preview + macOS/Windows/Linux bundles). |
-| `frust-shell-macos` | macOS: the native AppKit half of `frust-shell-desktop` (menu bar, app lifecycle). |
-| `frust-shell-windows` | Windows: the native Win32 half of `frust-shell-desktop`. |
-| `frust-shell-linux` | Linux: the native half of `frust-shell-desktop` (Wayland/X11 app identity). |
-| `frust-shell-android` | Android platform shell behind the JNI surface a generated app's Kotlin `SurfaceView` calls into. |
-| `frust-shell-ios` | iOS platform shell behind the C-ABI surface a generated app's Swift code calls into. |
-| `frust-shell-web` | Browser shell: renders through `frust-engine` on WebGPU with a WebGL2 fallback. |
-| `frust-shell-common` | Platform-agnostic shell plumbing shared by every shell above. |
-
-**Tooling**
-
-| Crate | Responsibility |
-|---|---|
-| `frust-cli` | The standalone `frust` binary: project scaffolding, environment doctor, device discovery, and the `run`/`build`/`clean` pipelines. |
-| `frust-drive` | The shared drive logic behind the `frust` CLI — scaffolding, doctor, device discovery, run/build/clean pipelines — consumed by both `frust-cli` and `frust-tui`. |
-| `frust-tui` | The mouse-first `frust` terminal workbench described above. |
-| `frust-mcp` | An MCP server exposing frust app control and diagnosis to AI agents over Streamable HTTP on `127.0.0.1`. |
-| `frust-dap` | An embedded Debug Adapter Protocol server for Frust, hosted exclusively by `frust-tui` — no standalone process. |
-| `frust-devtools-protocol` | The dependency-free wire-protocol leaf connecting an in-app Frust debug service to `frust-drive`/`frust-tui`. |
-| `frust-devtools` | The in-app debug service a Frust app hosts: widget-tree inspection, frame stats, input injection over a loopback socket. |
-
 ## Learning the rendering pipeline
 
 [`docs/learning/`](docs/learning/README.md) is a hands-on, lab-based
