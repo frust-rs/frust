@@ -150,6 +150,12 @@ zero-infra httpbin alternative, not repeated here:
   app/build/outputs/mapping/release/seeds.txt` confirms the JNI-referenced host and its init
   provider survive minification (`consumer-rules.pro`'s keep rules).
 
+`plugins/auth-session/platform/android`'s JVM unit tests (`ProviderSelectionTest`, covering the
+Custom Tabs provider-selection policy `FrustAuthSessionHost.chooseCustomTabsProvider` — this
+policy regressed twice on-device with no automated coverage before this harness existed) run with
+`(cd examples/playground/android && ./gradlew :frust-auth-session:testDebugUnitTest)`; no device,
+emulator, or Robolectric needed — plain JVM JUnit 4 against the pure decision function.
+
 ## i18n manual test (desktop + Android + iOS)
 
 A device gate for `frust-i18n` (`plugins/i18n`), against an app depending on the plugin per
@@ -209,6 +215,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `icu_experimental =0.5.0` EXACT | `frust-i18n`'s currency + percent formatter surface (`fmt/currency.rs`, `fmt/number.rs`); an explicitly experimental, pre-1.0 ICU4X crate ("all code in this crate is unstable" per its own doc) that major-bumps every ICU4X release — 0.5.0 is the release whose own dependency line still resolves to this workspace's already-present 2.2.x ICU4X components. A currency-formatting dependency gets `clean-signals`-grade rigor: never bump without re-verifying the whole `icu_*` resolve | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |
 | `sys-locale =0.3.2` exact | `frust-i18n`'s desktop (macOS/Linux/Windows) system-locale detection backend — a small, young surface with no minor-version API-stability track record yet | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |
 | `trybuild 1` (dev-only) | `frust-i18n`'s dev-only compile-fail harness for the `locales!` macro's diagnostics (`tests/macro_diagnostics.rs`); never reaches a shipped dependency graph | `cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ignored` (regenerate expectations with `TRYBUILD=overwrite`) |
+| `junit:junit 4.13.2` exact (Gradle, `testImplementation`, `plugins/auth-session/platform/android/build.gradle.kts`) | `frust-auth-session`'s `ProviderSelectionTest` — JVM-only coverage of the pure `chooseCustomTabsProvider` decision function; dev-only, never reaches a shipped AAR | `(cd examples/playground/android && ./gradlew :frust-auth-session:testDebugUnitTest)` |
 
 ## See Also
 

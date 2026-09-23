@@ -15,6 +15,68 @@ import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 
 /**
+ * Well-known Custom Tabs-capable browsers `FrustAuthSessionHost.pinCustomTabsProvider`
+ * is willing to pin an `Intent` to, in preference order. See that method's KDoc for why
+ * this list exists and how it is used. Kept top-level rather than a member of
+ * [FrustAuthSessionHost] — alongside [chooseCustomTabsProvider], the pure
+ * function that reads it — so that neither can be reached from a test without
+ * also loading [FrustAuthSessionHost]'s own class initializer (which touches
+ * `Looper.getMainLooper()`, unavailable outside a real Android runtime or
+ * Robolectric).
+ */
+private val CUSTOM_TABS_PROVIDER_ALLOWLIST: List<String> = listOf(
+    "com.android.chrome",
+    "com.chrome.beta",
+    "com.chrome.dev",
+    "com.chrome.canary",
+    "org.chromium.chrome",
+    "org.mozilla.firefox",
+    "org.mozilla.firefox_beta",
+    "org.mozilla.fenix",
+    "org.mozilla.fennec_fdroid",
+    "com.brave.browser",
+    "com.sec.android.app.sbrowser",
+    "com.microsoft.emmx",
+    "com.vivaldi.browser",
+    "com.duckduckgo.mobile.android",
+)
+
+/**
+ * The pure decision half of `FrustAuthSessionHost.pinCustomTabsProvider`'s
+ * three-step policy (see that method's KDoc for the full policy and its
+ * rationale) — extracted to a top-level function, not a member of
+ * [FrustAuthSessionHost], so `ProviderSelectionTest` can drive every branch
+ * on the JVM with no `Activity`/`PackageManager`/`CustomTabsClient` and no
+ * Robolectric: calling a member of the `object` would force its class
+ * initializer to run first (it eagerly constructs a `Handler` against
+ * `Looper.getMainLooper()`), which throws under a plain JVM unit test.
+ * [answersCustomTabs] stands in for
+ * `CustomTabsClient.getPackageName(act, packages, ignoreDefault)`;
+ * `pinCustomTabsProvider` injects the real call, a test injects a fake.
+ * Byte-for-byte the same decision `pinCustomTabsProvider` used to make
+ * inline — only the two `PackageManager` lookups it feeds this function
+ * stayed behind, in `pinCustomTabsProvider` itself.
+ *
+ * `internal`, not `private`: Kotlin's `internal` is module-scoped (see
+ * `docs/PLUGINS_CODE_STANDARDS.md`), and the test source set is part of
+ * this same Gradle module, so it can call this function directly.
+ */
+internal fun chooseCustomTabsProvider(
+    defaultPackage: String?,
+    installedBrowsers: Set<String>,
+    answersCustomTabs: (List<String>, Boolean) -> String?,
+): String? {
+    if (defaultPackage != null && answersCustomTabs(listOf(defaultPackage), false) == defaultPackage) {
+        return defaultPackage
+    }
+    val candidates = CUSTOM_TABS_PROVIDER_ALLOWLIST.filter { it in installedBrowsers }
+    val chosen = answersCustomTabs(candidates, true)
+    // Never pin a package outside the allow-list, even if a future
+    // `getPackageName` implementation were to return one.
+    return if (chosen != null && chosen in CUSTOM_TABS_PROVIDER_ALLOWLIST) chosen else null
+}
+
+/**
  * The `frust-auth-session` plugin's Android Custom Tabs host — the Kotlin half
  * of the frozen Rust↔Kotlin contract also implemented by
  * `plugins/auth-session/src/android.rs`.
@@ -133,28 +195,6 @@ object FrustAuthSessionHost {
      * mistaken for the redirect).
      */
     private data class Pending(val generation: Long, val callbackScheme: String, val launchIntent: Intent?)
-
-    /**
-     * Well-known Custom Tabs-capable browsers this host is willing to pin an
-     * `Intent` to, in preference order. See [pinCustomTabsProvider] for why
-     * this list exists and how it is used.
-     */
-    private val CUSTOM_TABS_PROVIDER_ALLOWLIST: List<String> = listOf(
-        "com.android.chrome",
-        "com.chrome.beta",
-        "com.chrome.dev",
-        "com.chrome.canary",
-        "org.chromium.chrome",
-        "org.mozilla.firefox",
-        "org.mozilla.firefox_beta",
-        "org.mozilla.fenix",
-        "org.mozilla.fennec_fdroid",
-        "com.brave.browser",
-        "com.sec.android.app.sbrowser",
-        "com.microsoft.emmx",
-        "com.vivaldi.browser",
-        "com.duckduckgo.mobile.android",
-    )
 
     /**
      * Install the application [Context] — called once at process start by
@@ -320,18 +360,16 @@ object FrustAuthSessionHost {
      * `setEphemeralBrowsingEnabled` call) is advisory to whichever provider
      * is ultimately used, pinned or not — a provider that doesn't implement
      * it simply falls back to a normal (non-ephemeral) tab.
+     *
+     * The three-step decision itself is [chooseCustomTabsProvider], a pure
+     * function this method calls after doing both `PackageManager` lookups
+     * below; see that function's own KDoc for why it is split out.
      */
     private fun pinCustomTabsProvider(act: Activity, intent: CustomTabsIntent) {
         val probe = Intent(Intent.ACTION_VIEW, Uri.parse("http://"))
         val defaultPackage = act.packageManager
             .resolveActivity(probe, PackageManager.MATCH_DEFAULT_ONLY)
             ?.activityInfo?.packageName
-        if (defaultPackage != null &&
-            CustomTabsClient.getPackageName(act, listOf(defaultPackage)) == defaultPackage
-        ) {
-            intent.intent.setPackage(defaultPackage)
-            return
-        }
 
         val browserProbe = Intent(Intent.ACTION_VIEW, Uri.parse("http://"))
             .addCategory(Intent.CATEGORY_BROWSABLE)
@@ -345,16 +383,15 @@ object FrustAuthSessionHost {
             .queryIntentActivities(browserProbe, PackageManager.MATCH_ALL)
             .map { it.activityInfo.packageName }
             .toSet()
-        val candidates = CUSTOM_TABS_PROVIDER_ALLOWLIST.filter { it in installed }
-        val chosen = CustomTabsClient.getPackageName(act, candidates, /* ignoreDefault = */ true)
-        // Never pin a package outside the allow-list, even if a future
-        // `getPackageName` implementation were to return one.
-        if (chosen != null && chosen in CUSTOM_TABS_PROVIDER_ALLOWLIST) {
-            intent.intent.setPackage(chosen)
-            return
-        }
 
-        Log.d(TAG, "frust-auth-session: no allow-listed Custom Tabs provider found; launching unpinned")
+        val chosen = chooseCustomTabsProvider(defaultPackage, installed) { packages, ignoreDefault ->
+            CustomTabsClient.getPackageName(act, packages, ignoreDefault)
+        }
+        if (chosen != null) {
+            intent.intent.setPackage(chosen)
+        } else {
+            Log.d(TAG, "frust-auth-session: no allow-listed Custom Tabs provider found; launching unpinned")
+        }
     }
 
     /**
