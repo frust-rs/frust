@@ -42,13 +42,13 @@ entirely with Frust.
 
 ### Fast
 
-`frust-engine`, the frust-owned strips-on-wgpu render engine, is a stateless-per-frame compiler
-that walks the renderer-agnostic `frust-scene` display list into sparse strips, packs them into
-the GPU layouts its own WGSL reads, and records the frame's passes into a caller-owned
-`wgpu::CommandEncoder` — every rendering path returns an error rather than panicking. A tracked
-signal write wakes the shell for the next frame through the process-wide `FrameWaker`; with no
-write there is no wake, so a static screen renders no frames at all, and a decorative loop is
-paced to the active theme's cosmetic rate rather than running every vsync.
+Frust apps are plain Rust, compiled ahead of time to native code — no VM, no garbage collector —
+running the same core on Android, iOS, desktop, and the web. Every frame renders through
+`frust-engine`, Frust's own GPU strip renderer, on top of `wgpu`: Vulkan on Android and Linux,
+Metal on macOS and iOS, Direct3D 12 on Windows, and WebGPU (with a WebGL2 fallback) in the
+browser. Nothing renders until something changes — a static screen produces zero frames, and a
+decorative animation is paced to the current theme's cosmetic rate rather than running flat-out
+every vsync.
 
 ### Productive development — the TUI
 
@@ -126,7 +126,7 @@ desktop preview.
 
 ```bash
 # Clone the framework and build the `frust` CLI from it
-git clone https://github.com/f0x-it-llc/frust
+git clone https://github.com/frust-rs/frust
 cd frust
 cargo install --path crates/frust-cli
 
