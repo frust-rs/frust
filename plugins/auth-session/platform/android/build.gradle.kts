@@ -81,4 +81,12 @@ dependencies {
     // biometric helper takes for the same reason (see that module's own
     // `build.gradle.kts` comment on the seam for a module that DOES need one).
     implementation("androidx.browser:browser:1.10.0")
+
+    // `ProviderSelectionTest` (JVM unit test, `testDebugUnitTest`) covers
+    // `FrustAuthSessionHost.chooseCustomTabsProvider` — a plain Kotlin
+    // decision function with no Android framework dependency, so JUnit 4 is
+    // enough; no Robolectric needed. Exact pin, per
+    // `docs/DEVELOPMENT.md` § Version-Pin Policy — recorded in
+    // `docs/PLUGINS_DEVELOPMENT.md` § Version Pins.
+    testImplementation("junit:junit:4.13.2")
 }
