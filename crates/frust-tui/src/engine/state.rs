@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use frust_drive::host_path;
+
 use super::add_plugin::AddPluginDialog;
 use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
@@ -282,7 +284,8 @@ impl AppState {
     /// welcome screen (no active project either way) skips persistence
     /// entirely.
     pub fn new() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd =
+            host_path::simplify(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let mut state = Self::detect(&cwd);
         let detected_active = state.project_root.clone();
         let recent = super::persist::load_recent_projects();
@@ -569,11 +572,18 @@ impl AppState {
 
     /// The index of the active project in `projects` (defaults to 0 when the
     /// active root isn't found there, e.g. the welcome screen) — seeds the
-    /// switcher's cursor when it opens.
+    /// switcher's cursor when it opens. Compares through
+    /// [`host_path::same_path`] rather than raw equality, the same
+    /// project-identity rule [`Self::insert_project`] and
+    /// `persist::split_local_and_previous` use.
     pub fn active_project_index(&self) -> usize {
         self.project_root
             .as_deref()
-            .and_then(|root| self.projects.iter().position(|p| p == root))
+            .and_then(|root| {
+                self.projects
+                    .iter()
+                    .position(|p| host_path::same_path(p, root))
+            })
             .unwrap_or(0)
     }
 
@@ -603,7 +613,7 @@ impl AppState {
     /// (`local_count()`, right where the previous section begins), so only
     /// whether the count is bumped differs.
     pub fn insert_project(&mut self, root: PathBuf) {
-        if self.projects.contains(&root) {
+        if self.projects.iter().any(|p| host_path::same_path(p, &root)) {
             return;
         }
         let local_count = self.local_count();
@@ -943,6 +953,33 @@ mod tests {
         state.insert_project(PathBuf::from("/tmp/cwd/a"));
         assert_eq!(state.projects, vec![PathBuf::from("/tmp/cwd/a")]);
         assert_eq!(state.local_count(), 1);
+    }
+
+    /// Windows paths are case-insensitive: a differently-cased spelling of an
+    /// already-present project is the same project, not a new one.
+    #[cfg(windows)]
+    #[test]
+    fn insert_project_treats_a_differently_cased_windows_duplicate_as_present() {
+        let mut state = AppState {
+            cwd: PathBuf::from(r"C:\work"),
+            projects: vec![PathBuf::from(r"C:\work\a")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from(r"c:\WORK\A"));
+        assert_eq!(state.projects, vec![PathBuf::from(r"C:\work\a")]);
+        assert_eq!(state.local_count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_project_index_matches_a_differently_cased_windows_root() {
+        let state = AppState {
+            project_root: Some(PathBuf::from(r"c:\WORK\A")),
+            projects: vec![PathBuf::from(r"C:\other"), PathBuf::from(r"C:\work\a")],
+            ..AppState::default()
+        };
+        assert_eq!(state.active_project_index(), 1);
     }
 
     // ── animating() ─────────────────────────────────────────────────────────
