@@ -1114,7 +1114,11 @@ fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Resul
     };
     scaffold::generate(&dest, &ctx, None, false, arch)
         .with_context(|| format!("scaffolding into `{}`", dest.display()))?;
-    Ok(dest.canonicalize().unwrap_or(dest))
+    // `canonicalize` alone returns a Windows verbatim (`\\?\C:\...`) path on
+    // that host; `canonicalize_simplified` strips it back to the plain
+    // drive form so the toast/sidebar (and whatever persists this root next)
+    // never carry it forward.
+    Ok(frust_drive::host_path::canonicalize_simplified(&dest).unwrap_or(dest))
 }
 
 /// Resolve the wizard's directory string against the process cwd (an absolute
@@ -1132,12 +1136,17 @@ fn resolve_dest(directory: &str) -> Result<PathBuf> {
 /// The dev-time path to the `frust` facade crate (`<repo>/crates/frust`),
 /// mirroring `frust create`'s default (a temporary `frust_path`
 /// mechanism until the crates are published).
+///
+/// Rendered through [`frust_drive::host_path::to_portable_string`] rather
+/// than a bare `to_string_lossy()`: on Windows, `canonicalize()` returns a
+/// verbatim `\\?\C:\...` path, which is both an invalid escape once
+/// substituted into `Cargo.toml`'s `frust = { path = "..." }` and
+/// unresolvable by a template's `..`-relative sibling joins. Identity on
+/// every other host.
 fn resolve_frust_path() -> String {
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    raw.canonicalize()
-        .unwrap_or(raw)
-        .to_string_lossy()
-        .into_owned()
+    let canonical = raw.canonicalize().unwrap_or(raw);
+    frust_drive::host_path::to_portable_string(&canonical)
 }
 
 /// Discover devices off the UI thread (the `frust-drive` discoverer set is

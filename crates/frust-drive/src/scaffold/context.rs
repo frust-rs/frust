@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::host_path;
+
 /// Why a `--frust-path` value was rejected by [`resolve_frust_crate_path`]:
 /// neither accepted shape names the `frust` package.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -156,7 +158,10 @@ impl TemplateContext {
             ("org", self.org.clone()),
             ("description", self.description.clone()),
             ("frust_version", self.frust_version.clone()),
-            ("frust_path", self.frust_path.clone()),
+            (
+                "frust_path",
+                host_path::to_portable_string(Path::new(&self.frust_path)),
+            ),
             ("android_identifier", self.android_identifier()),
             ("iosIdentifier", self.ios_identifier()),
             ("desktop_identifier", self.desktop_identifier()),
@@ -284,7 +289,9 @@ impl TemplateContext {
     pub fn frust_embedding_android_dir(&self) -> String {
         format!(
             "{}/../../platform/android/frust-embedding",
-            frust_path_from_project_subdir(&self.frust_path)
+            frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
+                &self.frust_path
+            )))
         )
     }
 
@@ -304,7 +311,9 @@ impl TemplateContext {
     pub fn frust_embedding_ios_dir(&self) -> String {
         format!(
             "{}/../../platform/ios/FrustEmbedding",
-            frust_path_from_project_subdir(&self.frust_path)
+            frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
+                &self.frust_path
+            )))
         )
     }
 }
@@ -382,7 +391,10 @@ impl DesignSystemContext {
             ("name", self.name.clone()),
             ("title_case_name", title_case(&self.name)),
             ("frust_version", self.frust_version.clone()),
-            ("frust_path", self.frust_path.clone()),
+            (
+                "frust_path",
+                host_path::to_portable_string(Path::new(&self.frust_path)),
+            ),
         ])
     }
 
@@ -835,6 +847,83 @@ mod tests {
         assert_eq!(
             frust_path_from_project_subdir("vendor/frust"),
             "../vendor/frust"
+        );
+    }
+
+    /// A Windows-verbatim `frust_path` (what `Path::canonicalize()` returns
+    /// on Windows, and what `resolve_frust_path`'s pure host_path step turns
+    /// portable before it ever reaches a `TemplateContext`) must render a
+    /// `Cargo.toml` that actually parses, with the dependency `path` in
+    /// forward-slash form — the defect this module fixes.
+    #[test]
+    fn windows_shaped_frust_path_renders_a_parseable_cargo_toml_with_forward_slashes() {
+        use super::super::ScaffoldPlatform;
+        use super::super::renderer;
+
+        let mut ctx = test_context();
+        // `to_portable_string_inner(.., true)` exercises the Windows arm on
+        // this (Linux) test host — see the module's own tests for why the
+        // plain public `to_portable_string` can't (`cfg!(windows)` is false
+        // here regardless of the input string's shape).
+        ctx.frust_path = host_path::to_portable_string_inner(
+            Path::new(r"\\?\C:\dev\frust-checkout\crates\frust"),
+            true,
+        );
+
+        let mut vars = ctx.render_vars();
+        vars.extend(platform_render_vars(ScaffoldPlatform::DEFAULT));
+
+        let template = include_str!("../../templates/app/Cargo.toml.tmpl");
+        let rendered = renderer::render(template, &vars)
+            .expect("Cargo.toml.tmpl must render with every placeholder defined");
+
+        assert!(
+            !rendered.contains('\\'),
+            "rendered manifest must contain no backslashes: {rendered}"
+        );
+
+        let manifest: toml::Value =
+            toml::from_str(&rendered).expect("rendered Cargo.toml must parse");
+        let frust_dep_path = manifest["dependencies"]["frust"]["path"]
+            .as_str()
+            .expect("frust dependency must carry a `path`");
+        assert_eq!(frust_dep_path, "C:/dev/frust-checkout/crates/frust");
+    }
+
+    /// Same defect, `gradle.properties`: a raw backslash is itself an escape
+    /// character in a Java `.properties` value, so `frust.embedding.dir`
+    /// must come out backslash-free too.
+    #[test]
+    fn windows_shaped_frust_path_renders_gradle_properties_with_no_backslash() {
+        use super::super::renderer;
+
+        let mut ctx = test_context();
+        ctx.frust_path = host_path::to_portable_string_inner(
+            Path::new(r"\\?\C:\dev\frust-checkout\crates\frust"),
+            true,
+        );
+        let vars = ctx.render_vars();
+
+        let template = include_str!("../../templates/app/android.tmpl/gradle.properties.tmpl");
+        let rendered = renderer::render(template, &vars)
+            .expect("gradle.properties.tmpl must render with every placeholder defined");
+
+        assert!(
+            !rendered.contains('\\'),
+            "rendered gradle.properties must contain no backslashes: {rendered}"
+        );
+        // `Path::is_absolute()` only recognises a drive-letter path as
+        // absolute on an actual Windows host, so `frust_path_from_project_subdir`
+        // prepends a `../` for this same string on this (Linux) test host —
+        // harmless (still one valid relative path down to the same
+        // directory) and irrelevant to what this test asserts: the value is
+        // portable (forward-slash, no backslash) end to end.
+        assert!(
+            rendered.contains("frust.embedding.dir=")
+                && rendered.trim_end().ends_with(
+                    "C:/dev/frust-checkout/crates/frust/../../platform/android/frust-embedding"
+                ),
+            "{rendered}"
         );
     }
 

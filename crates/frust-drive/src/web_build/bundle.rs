@@ -51,6 +51,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::host_path;
 use crate::manifest::WebSection;
 
 use super::WebBuildError;
@@ -136,10 +137,16 @@ pub fn embedder_dir(project_dir: &Path) -> Result<PathBuf, WebBuildError> {
     let frust_path = frust_dep_path(&manifest).ok_or_else(|| WebBuildError::NoFrustDependency {
         manifest: manifest.clone(),
     })?;
-    let frust_abs = if Path::new(&frust_path).is_absolute() {
-        PathBuf::from(&frust_path)
+    // `frust_path` is read back verbatim from an existing project's
+    // `Cargo.toml`; a project scaffolded on Windows before the scaffold
+    // emitted a portable path may still carry a verbatim `\\?\C:\...`
+    // prefix, which `.join("..")` can't climb (verbatim disables `..`/`.`
+    // normalization) — simplify first, same as `plugin::apply::resolve_sibling`.
+    let simplified = host_path::simplify(Path::new(&frust_path));
+    let frust_abs = if simplified.is_absolute() {
+        simplified
     } else {
-        project_dir.join(&frust_path)
+        project_dir.join(&simplified)
     };
     let dir = frust_abs.join("..").join("..").join(EMBEDDER_REL_PATH);
     for file in EMBEDDER_FILES {

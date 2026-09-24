@@ -35,6 +35,12 @@ pub mod desktop_run;
 pub mod devices;
 pub mod devtools_client;
 pub mod doctor;
+/// Windows verbatim-path (`\\?\...`) simplification and portable
+/// (forward-slash) path rendering shared by every scaffold-time `frust`-path
+/// resolver, the plugin/web-embedder sibling lookups that read one back from
+/// an existing `Cargo.toml`, and (`same_path`/`is_under`) a front-end's own
+/// path-identity checks.
+pub mod host_path;
 pub mod icons;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines

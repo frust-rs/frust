@@ -11,6 +11,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
 use super::registry::{find_plugin, known_plugins};
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
 use crate::build_dirs::BuildLayout;
+use crate::host_path;
 use crate::scaffold::context::frust_path_from_project_subdir;
 
 /// Project-relative paths of the files a contribution edits.
@@ -388,11 +389,21 @@ fn repo_relative_path(frust_path: &str, rel_path: &str) -> String {
 /// Resolve a `requires_sibling` path to an absolute location for the on-disk
 /// existence check: the frust repo root (two levels above the `frust` facade
 /// crate dir) joined with the sibling's repo-root-relative path.
+///
+/// `frust_path` is read back verbatim from an existing project's
+/// `Cargo.toml` (see [`frust_dep_path`]), which — for a project scaffolded on
+/// Windows before this module existed — may still carry a verbatim
+/// `\\?\C:\...` prefix; `.join("..")` doesn't climb a verbatim path the way
+/// it climbs a plain one (verbatim disables `..`/`.` normalization by
+/// design), so [`host_path::simplify`] runs first. This only widens what
+/// this existence check can resolve; it never rewrites the project's own
+/// `Cargo.toml`.
 fn resolve_sibling(project_root: &Path, frust_path: &str, sibling: &str) -> PathBuf {
-    let frust_abs = if Path::new(frust_path).is_absolute() {
-        PathBuf::from(frust_path)
+    let frust_path = host_path::simplify(Path::new(frust_path));
+    let frust_abs = if frust_path.is_absolute() {
+        frust_path
     } else {
-        project_root.join(frust_path)
+        project_root.join(&frust_path)
     };
     frust_abs.join("..").join("..").join(sibling)
 }
