@@ -18,6 +18,28 @@
 //! string content — pure and straightforward to unit-test without touching
 //! the filesystem.
 //!
+//! ## User-editable versus frust-owned files
+//!
+//! [`WriteMode::IfAbsent`]'s leave-alone rule protects files a **user** edits
+//! — VS Code's `launch.json`, Zed's `debug.json`, the Neovim pair — so an
+//! automatic write never rewrites a frust entry the user already has. It does
+//! not apply to frust-**owned** generated files: Emacs'
+//! `.frust/dap-emacs.el` is regenerated on every run (unless byte-identical),
+//! because it is `load-file`d as code and a repo-supplied file that merely
+//! carries the frust marker must never be kept as if frust had written it.
+//!
+//! ## Writes
+//!
+//! Every file this module writes goes through [`write_contained`]: a temp
+//! file in the target's own directory, then a rename over the target. Before
+//! reading or writing, the target file and its config directory are resolved
+//! through any symlink and must stay inside the generator's
+//! [`containment root`](IdeConfigGenerator::containment_root) — a
+//! `.vscode/`/`.zed/`/`.frust/` directory (or the file itself) that is a
+//! symlink out of the project is refused with [`IdeConfigError::Refused`].
+//! A symlink that resolves *inside* the root is followed: the write lands on
+//! the resolved file, so an in-project link survives the write.
+//!
 //! ## Submodules
 //!
 //! | Module | IDE |
@@ -65,6 +87,10 @@ pub enum IdeConfigError {
     /// unrecognised `--ide` name.
     #[error("{0}")]
     Message(String),
+    /// A write refused because its target (or the target's config directory)
+    /// resolves outside the project — see the module doc's "Writes".
+    #[error("{0}")]
+    Refused(String),
 }
 
 impl IdeConfigError {
@@ -77,6 +103,10 @@ impl IdeConfigError {
 
     fn message(msg: impl Into<String>) -> Self {
         Self::Message(msg.into())
+    }
+
+    fn refused(msg: impl Into<String>) -> Self {
+        Self::Refused(msg.into())
     }
 }
 
@@ -121,9 +151,13 @@ pub enum WriteMode {
     Refresh,
     /// Create the file when missing; append the frust entry to a file that
     /// has none; but leave a file that **already contains** a frust entry
-    /// untouched (whatever port it names), reporting
-    /// [`ConfigAction::Skipped`] with [`ENTRY_PRESENT_REASON`]. The
-    /// automatic-write semantics.
+    /// untouched (whatever port it names). The outcome says whether the kept
+    /// entry still names the port being configured: the same port (or one
+    /// that cannot be read) reports [`ConfigAction::Skipped`] with
+    /// [`ENTRY_PRESENT_REASON`]; a different port reports
+    /// [`ConfigAction::StalePort`] — still with nothing written. The
+    /// automatic-write semantics. Frust-owned files (Emacs) are outside this
+    /// rule; see the module doc.
     IfAbsent,
 }
 
@@ -140,6 +174,16 @@ pub enum ConfigAction {
     Updated,
     /// Config generation was skipped (with reason).
     Skipped(String),
+    /// [`WriteMode::IfAbsent`] kept an existing frust entry that names a
+    /// different port than the one being configured — nothing was written,
+    /// so the editor would connect to `existing` while the server listens
+    /// on `bound`. Only an explicit [`WriteMode::Refresh`] rewrites it.
+    StalePort {
+        /// The port the retained entry names.
+        existing: u16,
+        /// The port generation was asked to configure (the bound port).
+        bound: u16,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -190,18 +234,44 @@ pub trait IdeConfigGenerator {
     ///
     /// Consulted only under [`WriteMode::IfAbsent`]: a `true` here leaves the
     /// file untouched. Returns an error when `existing` cannot be parsed —
-    /// the same failure `merge_config` would report for it.
+    /// the same failure `merge_config` would report for it. A frust-owned
+    /// file (Emacs) always answers `false`, so it is always regenerated.
     fn has_frust_entry(&self, existing: &str) -> Result<bool>;
+
+    /// The port `existing`'s frust entry names: `None` when there is no
+    /// entry — or when the entry names no readable port (a hand-edited
+    /// entry) — and `Some(port)` otherwise, found by the same marker
+    /// [`merge_config`](Self::merge_config) matches on.
+    ///
+    /// Consulted under [`WriteMode::IfAbsent`] once
+    /// [`has_frust_entry`](Self::has_frust_entry) found an entry, to tell a
+    /// kept entry that still matches the bound port from a stale one
+    /// ([`ConfigAction::StalePort`]). Errors exactly as `has_frust_entry`.
+    fn frust_entry_port(&self, existing: &str) -> Result<Option<u16>>;
+
+    /// The directory every file this generator writes must stay inside once
+    /// symlinks are resolved (see the module doc's "Writes").
+    ///
+    /// Defaults to `project_root`; a generator whose config lives at a
+    /// detected workspace root (VS Code, Neovim) answers that root instead —
+    /// the root it already vets with its own home-boundary guard.
+    fn containment_root(&self, project_root: &Path) -> PathBuf {
+        project_root.to_path_buf()
+    }
 
     /// Optional post-generation hook for secondary file writes.
     ///
     /// Called by [`run_generator`] after fresh creation, after merging, and
-    /// even when the primary write is skipped (as unchanged, or under
-    /// [`WriteMode::IfAbsent`] because a frust entry is already present) —
-    /// "skipped" describes only the primary file, so a secondary artifact (e.g.
-    /// Neovim's `.nvim-dap.lua`) can still be missing or stale and must stay
-    /// kept in sync regardless of whether the primary file was rewritten
-    /// this run.
+    /// when the primary write is skipped as unchanged — "skipped" describes
+    /// only the primary file, so a secondary artifact (e.g. Neovim's
+    /// `.nvim-dap.lua`) can still be missing or stale and must stay in sync
+    /// regardless of whether the primary file was rewritten this run.
+    ///
+    /// `port` is the port the **primary file now names**. Under
+    /// [`WriteMode::IfAbsent`], when an existing entry is kept, that is the
+    /// *retained* entry's port, not the one generation was asked for — the
+    /// secondary file must never disagree with the primary. When the kept
+    /// entry names no readable port, the hook is not called at all.
     ///
     /// The default implementation is a no-op.
     fn post_write(&self, _port: u16, _project_root: &Path) -> Result<()> {
@@ -223,13 +293,18 @@ pub trait IdeConfigGenerator {
 /// and are easy to unit-test without touching the filesystem.
 ///
 /// Steps:
-/// 1. Compute the target path via [`IdeConfigGenerator::config_path`].
+/// 1. Compute the target path via [`IdeConfigGenerator::config_path`] and
+///    refuse it ([`IdeConfigError::Refused`]) if it, or its config directory,
+///    already resolves outside [`IdeConfigGenerator::containment_root`] —
+///    before anything is read through it.
 /// 2. If the file already exists, read it. Under [`WriteMode::IfAbsent`],
 ///    when [`IdeConfigGenerator::has_frust_entry`] finds the frust entry
 ///    already there, skip the primary write entirely and report
-///    [`ConfigAction::Skipped`] with [`ENTRY_PRESENT_REASON`] (step 7 still
-///    runs, as for step 4's skip). Otherwise call
-///    [`IdeConfigGenerator::merge_config`].
+///    [`ConfigAction::StalePort`] when
+///    [`IdeConfigGenerator::frust_entry_port`] names a different port, else
+///    [`ConfigAction::Skipped`] with [`ENTRY_PRESENT_REASON`]. Step 7 runs
+///    with the **retained** port (and not at all when the kept entry names
+///    no readable port). Otherwise call [`IdeConfigGenerator::merge_config`].
 /// 3. If the file does not exist, call [`IdeConfigGenerator::generate`] for fresh content.
 /// 4. If the merged content is byte-identical to what's on disk, skip the
 ///    primary write (mtime untouched) and report [`ConfigAction::Skipped`] —
@@ -237,9 +312,9 @@ pub trait IdeConfigGenerator {
 ///    primary file, and [`IdeConfigGenerator::post_write`]'s own secondary
 ///    artifact can still be missing or stale.
 /// 5. Otherwise, ensure the parent directory exists (`create_dir_all`).
-/// 6. Write the content and return an [`IdeConfigResult`].
-/// 7. Call [`IdeConfigGenerator::post_write`] for any secondary file writes —
-///    on every path above, including the skip paths in steps 2 and 4.
+/// 6. Write the content via [`write_contained`] (containment re-checked,
+///    temp file + rename) and return an [`IdeConfigResult`].
+/// 7. Call [`IdeConfigGenerator::post_write`] for any secondary file writes.
 fn run_generator(
     generator: &dyn IdeConfigGenerator,
     port: u16,
@@ -247,22 +322,36 @@ fn run_generator(
     mode: WriteMode,
 ) -> Result<Option<IdeConfigResult>> {
     let config_path = generator.config_path(project_root);
+    let anchor = generator.containment_root(project_root);
+    check_contained(&config_path, &anchor)?;
 
     let (content, action) = if generator.config_exists(project_root) {
         let existing = std::fs::read_to_string(&config_path)
             .map_err(|e| IdeConfigError::io(&config_path, e))?;
         if mode == WriteMode::IfAbsent && generator.has_frust_entry(&existing)? {
+            let retained = generator.frust_entry_port(&existing)?;
+            let action = match retained {
+                Some(existing) if existing != port => ConfigAction::StalePort {
+                    existing,
+                    bound: port,
+                },
+                _ => ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string()),
+            };
             log::info!(
-                "{} DAP config skipped ({ENTRY_PRESENT_REASON}) at {}",
+                "{} DAP config kept ({ENTRY_PRESENT_REASON}: {action:?}) at {}",
                 generator.ide_name(),
                 config_path.display(),
             );
-            // Same contract as the unchanged-skip below: a secondary artifact
-            // is outside this check, so post_write still runs.
-            generator.post_write(port, project_root)?;
+            // A secondary artifact must name the port the kept primary
+            // entry names — never the port that was *not* written. An entry
+            // with no readable port gives the secondary nothing to agree
+            // with, so it is left as it is.
+            if let Some(retained) = retained {
+                generator.post_write(retained, project_root)?;
+            }
             return Ok(Some(IdeConfigResult {
                 path: config_path,
-                action: ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string()),
+                action,
             }));
         }
         let merged = generator.merge_config(&existing, port, project_root)?;
@@ -291,19 +380,14 @@ fn run_generator(
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| IdeConfigError::io(parent, e))?;
     }
-    std::fs::write(&config_path, &content).map_err(|e| IdeConfigError::io(&config_path, e))?;
+    write_contained(&config_path, &anchor, &content)?;
 
     generator.post_write(port, project_root)?;
 
-    let action_label = match &action {
-        ConfigAction::Created => "created",
-        ConfigAction::Updated => "updated",
-        ConfigAction::Skipped(_) => "skipped",
-    };
     log::info!(
-        "{} DAP config {} at {}",
+        "{} DAP config {:?} at {}",
         generator.ide_name(),
-        action_label,
+        action,
         config_path.display(),
     );
 
@@ -311,6 +395,129 @@ fn run_generator(
         path: config_path,
         action,
     }))
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Contained writes
+// ─────────────────────────────────────────────────────────────────
+
+/// Refuse `path` if it, or its parent (config) directory, exists and resolves
+/// outside `anchor` once symlinks are followed — the read-side half of
+/// [`write_contained`]'s check, run before a file is read through a link.
+///
+/// A parent that does not exist yet passes (it will be created inside
+/// `anchor`); a *dangling* symlink is refused, since creating through it
+/// would land wherever it points.
+pub(crate) fn check_contained(path: &Path, anchor: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Err(IdeConfigError::message(format!(
+            "`{}` does not name a file",
+            path.display()
+        )));
+    };
+    match std::fs::symlink_metadata(parent) {
+        Ok(_) => resolve_contained(path, anchor).map(|_| ()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(IdeConfigError::io(parent, e)),
+    }
+}
+
+/// Resolve the file a write of `path` must land on, refusing any target that
+/// escapes `anchor`: `path`'s parent directory must exist and resolve inside
+/// `anchor`; `path` itself, when it is a symlink, must resolve inside
+/// `anchor` too, and the resolved file is what gets written (so an
+/// in-project link survives the write). A dangling symlink at either level
+/// is refused.
+fn resolve_contained(path: &Path, anchor: &Path) -> Result<PathBuf> {
+    let anchor = anchor
+        .canonicalize()
+        .map_err(|e| IdeConfigError::io(anchor, e))?;
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return Err(IdeConfigError::message(format!(
+            "`{}` does not name a file",
+            path.display()
+        )));
+    };
+    let parent = parent.canonicalize().map_err(|e| {
+        if is_symlink(parent) {
+            dangling(parent, &e)
+        } else {
+            IdeConfigError::io(parent, e)
+        }
+    })?;
+    ensure_inside(&parent, &anchor, path)?;
+
+    if is_symlink(path) {
+        let resolved = path.canonicalize().map_err(|e| dangling(path, &e))?;
+        ensure_inside(&resolved, &anchor, path)?;
+        Ok(resolved)
+    } else {
+        Ok(parent.join(file_name))
+    }
+}
+
+/// Whether `path` itself (not what it points at) is a symlink.
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// The refusal for a symlink that does not resolve.
+fn dangling(path: &Path, e: &std::io::Error) -> IdeConfigError {
+    IdeConfigError::refused(format!(
+        "refusing to write DAP config: `{}` is a symlink that does not resolve ({e})",
+        path.display()
+    ))
+}
+
+/// Refuse `resolved` (what `requested` resolves to) unless it lies inside the
+/// canonical `anchor`.
+fn ensure_inside(resolved: &Path, anchor: &Path, requested: &Path) -> Result<()> {
+    if resolved.starts_with(anchor) {
+        return Ok(());
+    }
+    Err(IdeConfigError::refused(format!(
+        "refusing to write DAP config: `{}` resolves to `{}`, outside the project \
+         (`{}`) — a symlinked config file or directory must stay inside it",
+        requested.display(),
+        resolved.display(),
+        anchor.display(),
+    )))
+}
+
+/// Write `content` to `path` — the one write path every generated file takes.
+///
+/// The target is resolved and vetted by [`resolve_contained`] (it must stay
+/// inside `anchor`), then written as a temp file in the resolved target's own
+/// directory and renamed over it, so a reader never sees a torn file. An
+/// existing target's permissions carry over to the replacement. `path`'s
+/// parent directory must already exist.
+pub(crate) fn write_contained(path: &Path, anchor: &Path, content: &str) -> Result<()> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let target = resolve_contained(path, anchor)?;
+    let (Some(dir), Some(file_name)) = (target.parent(), target.file_name()) else {
+        return Err(IdeConfigError::message(format!(
+            "`{}` does not name a file",
+            target.display()
+        )));
+    };
+    let temp = dir.join(format!(
+        ".{}.frust-tmp-{}-{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::write(&temp, content).map_err(|e| IdeConfigError::io(&temp, e))?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        // Best-effort: failing leaves a fresh file's default permissions.
+        let _ = std::fs::set_permissions(&temp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(IdeConfigError::io(&target, e));
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -518,6 +725,13 @@ mod tests {
 
     #[test]
     fn test_config_action_variants_are_eq() {
+        assert_ne!(
+            ConfigAction::StalePort {
+                existing: 1,
+                bound: 2
+            },
+            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+        );
         assert_eq!(ConfigAction::Created, ConfigAction::Created);
         assert_eq!(ConfigAction::Updated, ConfigAction::Updated);
         assert_eq!(
@@ -709,16 +923,21 @@ mod tests {
         assert_eq!(parsed["configurations"][0]["debugServer"], 4711);
     }
 
+    /// A kept entry naming a different port is reported as stale — and the
+    /// file is still left byte-identical.
     #[test]
-    fn test_if_absent_never_rewrites_an_existing_frust_entry_zed() {
-        let dir = unique_temp_dir("if-absent-present-zed");
+    fn test_if_absent_reports_a_stale_port_and_leaves_the_bytes_zed() {
+        let dir = unique_temp_dir("if-absent-stale-zed");
         let path = dir.join(".zed/debug.json");
         write_file(&path, ZED_WITH_FRUST_1111);
 
         let result = generate(ParentIde::Zed, 2222, &dir, WriteMode::IfAbsent);
         assert_eq!(
             result.action,
-            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+            ConfigAction::StalePort {
+                existing: 1111,
+                bound: 2222
+            }
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -728,21 +947,79 @@ mod tests {
     }
 
     #[test]
-    fn test_if_absent_never_rewrites_an_existing_frust_entry_vscode() {
-        let dir = unique_temp_dir("if-absent-present-vscode");
+    fn test_if_absent_reports_a_stale_port_and_leaves_the_bytes_vscode() {
+        let dir = unique_temp_dir("if-absent-stale-vscode");
         let path = dir.join(".vscode/launch.json");
         write_file(&path, VSCODE_WITH_FRUST_1111);
 
         let result = generate(ParentIde::VSCode, 2222, &dir, WriteMode::IfAbsent);
         assert_eq!(
             result.action,
-            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+            ConfigAction::StalePort {
+                existing: 1111,
+                bound: 2222
+            }
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             VSCODE_WITH_FRUST_1111,
             "the file (comment and trailing comma included) is left byte-identical"
         );
+    }
+
+    /// A kept entry already naming the bound port is the plain, silent skip.
+    #[test]
+    fn test_if_absent_same_port_entry_is_the_plain_skip() {
+        for (ide, rel, content) in [
+            (ParentIde::Zed, ".zed/debug.json", ZED_WITH_FRUST_1111),
+            (
+                ParentIde::VSCode,
+                ".vscode/launch.json",
+                VSCODE_WITH_FRUST_1111,
+            ),
+        ] {
+            let dir = unique_temp_dir("if-absent-same-port");
+            let path = dir.join(rel);
+            write_file(&path, content);
+            let result = generate(ide, 1111, &dir, WriteMode::IfAbsent);
+            assert_eq!(
+                result.action,
+                ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string()),
+                "{ide:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
+
+    /// An entry with no readable port is kept as the plain skip — there is no
+    /// old port to name.
+    #[test]
+    fn test_if_absent_portless_entry_is_the_plain_skip() {
+        let dir = unique_temp_dir("if-absent-portless-zed");
+        let path = dir.join(".zed/debug.json");
+        let content = r#"[{"label": "Frust (TUI DAP)", "adapter": "Delve"}]"#;
+        write_file(&path, content);
+        let result = generate(ParentIde::Zed, 2222, &dir, WriteMode::IfAbsent);
+        assert_eq!(
+            result.action,
+            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn test_empty_zed_debug_json_is_treated_as_absent() {
+        for mode in [WriteMode::IfAbsent, WriteMode::Refresh] {
+            let dir = unique_temp_dir("empty-zed");
+            let path = dir.join(".zed/debug.json");
+            write_file(&path, " \n");
+            let result = generate(ParentIde::Zed, 4711, &dir, mode);
+            assert_eq!(result.action, ConfigAction::Updated, "{mode:?}");
+            let parsed: Vec<serde_json::Value> =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0]["tcp_connection"]["port"], 4711);
+        }
     }
 
     #[test]
@@ -806,46 +1083,181 @@ mod tests {
     }
 
     /// Neovim applies the rule to its primary `launch.json`; the secondary
-    /// `.nvim-dap.lua` keeps `post_write`'s every-path contract.
+    /// `.nvim-dap.lua` is still written — naming the **retained** entry's
+    /// port, never the one `launch.json` was not updated to.
     #[test]
-    fn test_if_absent_neovim_skips_the_primary_but_still_runs_post_write() {
+    fn test_if_absent_neovim_lua_names_the_retained_port() {
         let dir = unique_temp_dir("if-absent-present-neovim");
         let path = dir.join(".vscode/launch.json");
         write_file(&path, VSCODE_WITH_FRUST_1111);
+        let lua_path = dir.canonicalize().unwrap().join(".nvim-dap.lua");
+        // A stale snippet from some earlier run, naming neither port.
+        std::fs::write(&lua_path, "port = 9999").unwrap();
 
         let result = generate(ParentIde::Neovim, 2222, &dir, WriteMode::IfAbsent);
         assert_eq!(
             result.action,
-            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+            ConfigAction::StalePort {
+                existing: 1111,
+                bound: 2222
+            }
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             VSCODE_WITH_FRUST_1111
         );
-        assert!(dir.canonicalize().unwrap().join(".nvim-dap.lua").exists());
+        let lua = std::fs::read_to_string(&lua_path).unwrap();
+        assert!(lua.contains("port = 1111,"), "{lua}");
+        assert!(!lua.contains("2222"), "{lua}");
+        assert!(!lua.contains("9999"), "{lua}");
     }
 
+    /// Emacs' snippet is frust-owned: `IfAbsent` regenerates it with the
+    /// bound port, and never keeps a marker-bearing foreign file.
     #[test]
-    fn test_if_absent_emacs_leaves_an_existing_snippet_alone() {
-        let dir = unique_temp_dir("if-absent-present-emacs");
-        let created = generate(ParentIde::Emacs, 1111, &dir, WriteMode::IfAbsent);
-        assert_eq!(created.action, ConfigAction::Created);
-        let before = std::fs::read_to_string(&created.path).unwrap();
+    fn test_if_absent_emacs_regenerates_over_a_marker_bearing_foreign_file() {
+        let dir = unique_temp_dir("if-absent-foreign-emacs");
+        let path = dir.join(".frust/dap-emacs.el");
+        let foreign = "(message \"not written by frust\")\n\
+                       (list :type \"frust\" :name \"Frust (TUI DAP)\")\n";
+        write_file(&path, foreign);
 
         let result = generate(ParentIde::Emacs, 2222, &dir, WriteMode::IfAbsent);
-        assert_eq!(
-            result.action,
-            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
-        );
-        assert_eq!(std::fs::read_to_string(&result.path).unwrap(), before);
+        assert_eq!(result.action, ConfigAction::Updated);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("not written by frust"), "{written}");
+        assert!(written.contains(":debugServer 2222"), "{written}");
 
-        let refreshed = generate(ParentIde::Emacs, 2222, &dir, WriteMode::Refresh);
-        assert_eq!(refreshed.action, ConfigAction::Updated);
-        assert!(
-            std::fs::read_to_string(&refreshed.path)
-                .unwrap()
-                .contains(":debugServer 2222")
+        // Byte-identical content is the only write skipped.
+        let again = generate(ParentIde::Emacs, 2222, &dir, WriteMode::IfAbsent);
+        assert_eq!(
+            again.action,
+            ConfigAction::Skipped("content unchanged".to_string())
         );
+        // A new port regenerates it again, automatic path or not.
+        let moved = generate(ParentIde::Emacs, 3333, &dir, WriteMode::IfAbsent);
+        assert_eq!(moved.action, ConfigAction::Updated);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(":debugServer 3333")
+        );
+    }
+
+    // ── contained writes ────────────────────────────────────────
+
+    /// The write lands via a rename: no temp file is left behind.
+    #[test]
+    fn test_write_leaves_no_temp_file_behind() {
+        let dir = unique_temp_dir("write-no-temp");
+        generate(ParentIde::Zed, 4711, &dir, WriteMode::Refresh);
+        generate(ParentIde::Zed, 4712, &dir, WriteMode::Refresh);
+        let names: Vec<_> = std::fs::read_dir(dir.join(".zed"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["debug.json".to_string()]);
+    }
+
+    /// A `.vscode` directory symlinked outside the project is refused —
+    /// nothing is written through it, and nothing is read either.
+    #[cfg(unix)]
+    #[test]
+    fn test_write_refuses_a_vscode_symlink_pointing_outside_the_project() {
+        let outside = unique_temp_dir("symlink-outside-target");
+        let project = unique_temp_dir("symlink-outside-project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".vscode")).unwrap();
+
+        for mode in [WriteMode::Refresh, WriteMode::IfAbsent] {
+            let err = generate_ide_config(Some(ParentIde::VSCode), 4711, &project, mode)
+                .expect_err("an escaping .vscode symlink must be refused");
+            assert!(matches!(err, IdeConfigError::Refused(_)), "{err:?}");
+            assert!(err.to_string().contains("outside the project"), "{err}");
+        }
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+
+        // Same for a pre-existing file symlink that escapes.
+        let project = unique_temp_dir("symlink-outside-file-project");
+        std::fs::create_dir_all(project.join(".zed")).unwrap();
+        let foreign = outside.join("debug.json");
+        std::fs::write(&foreign, "[]").unwrap();
+        std::os::unix::fs::symlink(&foreign, project.join(".zed/debug.json")).unwrap();
+        let err = generate_ide_config(Some(ParentIde::Zed), 4711, &project, WriteMode::Refresh)
+            .expect_err("an escaping file symlink must be refused");
+        assert!(matches!(err, IdeConfigError::Refused(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "[]");
+
+        // And a dangling one, which would otherwise be created through.
+        let project = unique_temp_dir("symlink-dangling-project");
+        std::os::unix::fs::symlink(outside.join("missing"), project.join(".frust")).unwrap();
+        let err = generate_ide_config(Some(ParentIde::Emacs), 4711, &project, WriteMode::Refresh)
+            .expect_err("a dangling .frust symlink must be refused");
+        assert!(matches!(err, IdeConfigError::Refused(_)), "{err:?}");
+        assert!(!outside.join("missing").exists());
+    }
+
+    /// A symlink that resolves *inside* the project is followed: the write
+    /// lands on the resolved file and the link itself survives.
+    #[cfg(unix)]
+    #[test]
+    fn test_write_follows_an_in_project_symlink() {
+        let project = unique_temp_dir("symlink-inside-project");
+        std::fs::create_dir_all(project.join("shared/zed")).unwrap();
+        std::os::unix::fs::symlink(project.join("shared/zed"), project.join(".zed")).unwrap();
+
+        let result = generate(ParentIde::Zed, 4711, &project, WriteMode::Refresh);
+        assert_eq!(result.action, ConfigAction::Created);
+        assert!(
+            std::fs::symlink_metadata(project.join(".zed"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(project.join("shared/zed/debug.json").is_file());
+
+        // A symlinked file inside the project: rewritten in place, link kept.
+        std::fs::rename(
+            project.join("shared/zed/debug.json"),
+            project.join("shared/real.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            project.join("shared/real.json"),
+            project.join("shared/zed/debug.json"),
+        )
+        .unwrap();
+        let result = generate(ParentIde::Zed, 4712, &project, WriteMode::Refresh);
+        assert_eq!(result.action, ConfigAction::Updated);
+        assert!(
+            std::fs::symlink_metadata(project.join("shared/zed/debug.json"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(project.join("shared/real.json"))
+                .unwrap()
+                .contains("4712")
+        );
+    }
+
+    /// Neovim's secondary `.nvim-dap.lua`, symlinked outside the workspace,
+    /// is a reported refusal, not a best-effort warning.
+    #[cfg(unix)]
+    #[test]
+    fn test_nvim_lua_symlink_outside_is_refused() {
+        let outside = unique_temp_dir("symlink-lua-outside");
+        let project = unique_temp_dir("symlink-lua-project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let foreign = outside.join("init.lua");
+        std::fs::write(&foreign, "-- mine").unwrap();
+        std::os::unix::fs::symlink(&foreign, project.join(".nvim-dap.lua")).unwrap();
+
+        let err = generate_ide_config(Some(ParentIde::Neovim), 4711, &project, WriteMode::Refresh)
+            .expect_err("an escaping .nvim-dap.lua symlink must be refused");
+        assert!(matches!(err, IdeConfigError::Refused(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "-- mine");
     }
 
     #[test]

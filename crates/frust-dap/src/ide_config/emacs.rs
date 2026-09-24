@@ -5,6 +5,18 @@
 //! own `.frust/` directory, the file is always overwritten rather than
 //! merged — there is no user-managed content to preserve.
 //!
+//! ## Always regenerated, even under `IfAbsent`
+//!
+//! [`WriteMode::IfAbsent`](super::WriteMode::IfAbsent)'s "never rewrite an
+//! existing frust entry" rule is for **user-editable** configs (VS Code's
+//! `launch.json`, Zed's `debug.json`, the Neovim pair). This file is
+//! frust-**owned** and users `load-file` it — it is code Emacs runs — so a
+//! repo-supplied `.frust/dap-emacs.el` that merely carries the frust marker
+//! next to arbitrary Elisp must never be kept as if frust had written it. Its
+//! entry detection therefore always answers "absent", and every run
+//! regenerates the file; the only write skipped is a byte-identical one
+//! (`run_generator`'s unchanged check, which leaves the mtime alone).
+//!
 //! ## Usage
 //!
 //! After generation the user must manually load the file:
@@ -21,7 +33,6 @@
 
 use std::path::{Path, PathBuf};
 
-use super::merge::FRUST_CONFIG_NAME;
 use super::{IdeConfigGenerator, Result};
 
 /// Generates an Elisp snippet for Emacs `dap-mode` integration.
@@ -52,11 +63,17 @@ impl IdeConfigGenerator for EmacsGenerator {
         Ok(generate_elisp(port, to_lisp_path(&path)))
     }
 
-    /// Whether `existing` already registers the frust debug template — the
-    /// `:name "Frust (TUI DAP)"` line [`generate_elisp`] writes. The file is
-    /// frust-owned, so that template *is* the frust entry.
-    fn has_frust_entry(&self, existing: &str) -> Result<bool> {
-        Ok(existing.contains(&format!(":name \"{FRUST_CONFIG_NAME}\"")))
+    /// Always `false`: the file is frust-owned and regenerated on every run,
+    /// whatever it contains — a marker-bearing file is not trusted as frust's
+    /// own (see the module doc).
+    fn has_frust_entry(&self, _existing: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Always `None`, for the same reason as
+    /// [`has_frust_entry`](Self::has_frust_entry).
+    fn frust_entry_port(&self, _existing: &str) -> Result<Option<u16>> {
+        Ok(None)
     }
 
     /// Display name used in log messages.
@@ -171,6 +188,14 @@ mod tests {
         let content = generator.generate(4711, Path::new("/project")).unwrap();
         assert!(content.contains("load-file"));
         assert!(content.contains("M-x"));
+    }
+
+    #[test]
+    fn test_emacs_entry_detection_always_answers_absent() {
+        let generator = EmacsGenerator;
+        let ours = generator.generate(4711, Path::new("/project")).unwrap();
+        assert!(!generator.has_frust_entry(&ours).unwrap());
+        assert_eq!(generator.frust_entry_port(&ours).unwrap(), None);
     }
 
     #[test]

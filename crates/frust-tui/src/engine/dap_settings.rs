@@ -16,7 +16,7 @@
 //! (auto-configure), whether or not anyone has opened the dialog. `AppState::dap_settings_open` is what
 //! makes it a modal.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use frust_dap::ide_config::{ConfigAction, IdeConfigResult, ParentIde, WriteMode};
 
@@ -102,6 +102,21 @@ pub enum DapIdeReport {
     NoIde,
     /// Generation failed; the rendered reason is retained for display.
     Failed(String),
+    /// A report from the **automatic** (on-launch / on-bind) path, tagged
+    /// with the project root and IDE it was generated for, so the pure core
+    /// can toast a repeating outcome (a stale port, a failure) at most once
+    /// per `(project_root, ide)` per run — see
+    /// [`DapSettings::admit_auto_toast`]. The runner builds it through
+    /// [`IdeConfigRequest::posted`]; `update` unwraps it before storing, so
+    /// [`DapSettings::last_ide_config`] never holds one.
+    Auto {
+        /// The project root the automatic write targeted.
+        project_root: PathBuf,
+        /// The IDE the config was generated for.
+        ide: ParentIde,
+        /// What generation reported.
+        report: Box<DapIdeReport>,
+    },
 }
 
 impl DapIdeReport {
@@ -114,6 +129,14 @@ impl DapIdeReport {
                     ConfigAction::Created => "created".to_string(),
                     ConfigAction::Updated => "updated".to_string(),
                     ConfigAction::Skipped(reason) => format!("skipped ({reason})"),
+                    ConfigAction::StalePort { existing, bound } => {
+                        return format!(
+                            "{}: {} still names port {existing}, but the server is on \
+                             {bound} — press g in DAP settings to refresh",
+                            ide.display_name(),
+                            result.path.display()
+                        );
+                    }
                 };
                 format!("{}: {action} {}", ide.display_name(), result.path.display())
             }
@@ -122,13 +145,31 @@ impl DapIdeReport {
             }
             Self::NoIde => "no IDE detected — nothing to configure".to_string(),
             Self::Failed(reason) => format!("config generation failed: {reason}"),
+            Self::Auto { report, .. } => report.summary(),
         }
     }
 
     /// Whether this report is a failure (the status line colors it, and the
     /// toast kind follows).
     pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Failed(_))
+        match self {
+            Self::Failed(_) => true,
+            Self::Auto { report, .. } => report.is_failure(),
+            _ => false,
+        }
+    }
+
+    /// Whether this report is an automatic write that kept an entry naming
+    /// another port than the bound one ([`ConfigAction::StalePort`]) — a
+    /// warning, not a failure: nothing was written.
+    pub fn is_stale_port(&self) -> bool {
+        match self {
+            Self::Written { result, .. } => {
+                matches!(result.action, ConfigAction::StalePort { .. })
+            }
+            Self::Auto { report, .. } => report.is_stale_port(),
+            _ => false,
+        }
     }
 }
 
@@ -204,6 +245,14 @@ pub struct DapSettings {
     /// The most recent IDE-config generation outcome, retained (including a
     /// failure) until the next one replaces it.
     pub last_ide_config: Option<DapIdeReport>,
+    /// The `(project root, IDE)` pairs whose automatic write has already
+    /// toasted a stale port this run — see [`Self::admit_auto_toast`].
+    /// Run-scoped: never persisted.
+    pub auto_stale_toasted: Vec<(PathBuf, ParentIde)>,
+    /// The `(project root, IDE)` pairs whose automatic write has already
+    /// toasted a failure this run — see [`Self::admit_auto_toast`].
+    /// Run-scoped: never persisted.
+    pub auto_failed_toasted: Vec<(PathBuf, ParentIde)>,
 }
 
 impl Default for DapSettings {
@@ -228,7 +277,43 @@ impl DapSettings {
             intro_port: None,
             focus: DapFocus::Server,
             last_ide_config: None,
+            auto_stale_toasted: Vec::new(),
+            auto_failed_toasted: Vec::new(),
         }
+    }
+
+    /// Whether an **automatic** write's `report` for `(project_root, ide)`
+    /// earns a toast, recording it when it does.
+    ///
+    /// The automatic path runs on every launch and every bind, so an outcome
+    /// that repeats until the user acts — a kept entry naming a stale port,
+    /// or a failure such as an unparseable existing config — would otherwise
+    /// toast on every one of them. Each of the two toasts at most once per
+    /// `(project_root, ide)` per run (tracked separately, so a failure does
+    /// not spend the stale-port notice or vice versa); anything else (a
+    /// created/updated file) always toasts. The explicit `g` path never
+    /// comes through here — it reports every outcome.
+    pub fn admit_auto_toast(
+        &mut self,
+        project_root: &Path,
+        ide: ParentIde,
+        report: &DapIdeReport,
+    ) -> bool {
+        let seen = if report.is_stale_port() {
+            &mut self.auto_stale_toasted
+        } else if report.is_failure() {
+            &mut self.auto_failed_toasted
+        } else {
+            return true;
+        };
+        if seen
+            .iter()
+            .any(|(root, seen_ide)| root == project_root && *seen_ide == ide)
+        {
+            return false;
+        }
+        seen.push((project_root.to_path_buf(), ide));
+        true
     }
 
     /// Reset the dialog's transient edit state (focus at the top, the port
@@ -431,9 +516,12 @@ impl IdeConfigRequest {
     /// `Message::DapIdeConfig` (which stores it for the dialog and toasts it).
     ///
     /// The explicit path reports every ending. The automatic path stays quiet
-    /// about a skip — an entry already present (or Helix, which never has
-    /// anything to write) is the ordinary case on every launch, not news —
-    /// and reports only a created/updated file or a failure.
+    /// about a skip — an entry already present and naming the bound port (or
+    /// Helix, which never has anything to write) is the ordinary case on
+    /// every launch, not news — and reports only a created/updated file, a
+    /// kept entry naming a stale port ([`ConfigAction::StalePort`]), or a
+    /// failure; the latter two are further limited to one toast per project
+    /// and IDE by [`DapSettings::admit_auto_toast`].
     pub fn reports(&self, report: &DapIdeReport) -> bool {
         match self.mode {
             WriteMode::Refresh => true,
@@ -448,6 +536,25 @@ impl IdeConfigRequest {
                 }
             ),
         }
+    }
+
+    /// The message payload the runner posts for `report`, or `None` when
+    /// [`Self::reports`] says it stays quiet: the explicit path's report as
+    /// is, the automatic path's wrapped in [`DapIdeReport::Auto`] with this
+    /// request's project root and IDE, so `update` can apply the once-per-run
+    /// toast limit.
+    pub fn posted(&self, report: DapIdeReport) -> Option<DapIdeReport> {
+        if !self.reports(&report) {
+            return None;
+        }
+        Some(match self.mode {
+            WriteMode::Refresh => report,
+            WriteMode::IfAbsent => DapIdeReport::Auto {
+                project_root: self.project_root.clone(),
+                ide: self.ide,
+                report: Box::new(report),
+            },
+        })
     }
 }
 
@@ -723,15 +830,107 @@ mod tests {
         ));
         let failed = DapIdeReport::Failed("permission denied".to_string());
 
+        let stale = written(ConfigAction::StalePort {
+            existing: 1111,
+            bound: 4849,
+        });
+
         let auto = request(WriteMode::IfAbsent);
         assert!(!auto.reports(&skipped));
         assert!(auto.reports(&written(ConfigAction::Created)));
         assert!(auto.reports(&written(ConfigAction::Updated)));
         assert!(auto.reports(&failed));
+        assert!(auto.reports(&stale));
+        assert_eq!(auto.posted(skipped.clone()), None);
+        assert_eq!(
+            auto.posted(failed.clone()),
+            Some(DapIdeReport::Auto {
+                project_root: PathBuf::from("/tmp/p"),
+                ide: ParentIde::Zed,
+                report: Box::new(failed.clone()),
+            }),
+            "the automatic path's report carries its root and IDE"
+        );
 
         let explicit = request(WriteMode::Refresh);
         assert!(explicit.reports(&skipped));
         assert!(explicit.reports(&written(ConfigAction::Created)));
         assert!(explicit.reports(&failed));
+        assert_eq!(
+            explicit.posted(failed.clone()),
+            Some(failed),
+            "the explicit path posts the report unwrapped"
+        );
+        assert_eq!(explicit.posted(skipped.clone()), Some(skipped));
+    }
+
+    #[test]
+    fn a_stale_port_summary_names_the_file_both_ports_and_the_fix() {
+        let stale = DapIdeReport::Written {
+            ide: ParentIde::VSCode,
+            result: IdeConfigResult {
+                path: PathBuf::from("/tmp/p/.vscode/launch.json"),
+                action: ConfigAction::StalePort {
+                    existing: 1111,
+                    bound: 2222,
+                },
+            },
+        };
+        let summary = stale.summary();
+        assert!(summary.contains("/tmp/p/.vscode/launch.json"), "{summary}");
+        assert!(summary.contains("1111"), "{summary}");
+        assert!(summary.contains("2222"), "{summary}");
+        assert!(
+            summary.contains("press g in DAP settings to refresh"),
+            "{summary}"
+        );
+        assert!(stale.is_stale_port());
+        assert!(!stale.is_failure());
+        let wrapped = DapIdeReport::Auto {
+            project_root: PathBuf::from("/tmp/p"),
+            ide: ParentIde::VSCode,
+            report: Box::new(stale.clone()),
+        };
+        assert_eq!(wrapped.summary(), summary);
+        assert!(wrapped.is_stale_port());
+    }
+
+    /// A stale port and a failure each toast once per (root, IDE) per run —
+    /// independently of each other — while a written file always toasts.
+    #[test]
+    fn automatic_stale_and_failed_toasts_are_admitted_once_per_root_and_ide() {
+        let mut s = settings();
+        let root_a = PathBuf::from("/tmp/a");
+        let root_b = PathBuf::from("/tmp/b");
+        let stale = DapIdeReport::Written {
+            ide: ParentIde::Zed,
+            result: IdeConfigResult {
+                path: root_a.join(".zed/debug.json"),
+                action: ConfigAction::StalePort {
+                    existing: 1,
+                    bound: 2,
+                },
+            },
+        };
+        let failed = DapIdeReport::Failed("invalid JSON".to_string());
+        let created = DapIdeReport::Written {
+            ide: ParentIde::Zed,
+            result: IdeConfigResult {
+                path: root_a.join(".zed/debug.json"),
+                action: ConfigAction::Created,
+            },
+        };
+
+        assert!(s.admit_auto_toast(&root_a, ParentIde::Zed, &stale));
+        assert!(!s.admit_auto_toast(&root_a, ParentIde::Zed, &stale));
+        assert!(s.admit_auto_toast(&root_b, ParentIde::Zed, &stale));
+        assert!(s.admit_auto_toast(&root_a, ParentIde::VSCode, &stale));
+
+        assert!(s.admit_auto_toast(&root_a, ParentIde::Zed, &failed));
+        assert!(!s.admit_auto_toast(&root_a, ParentIde::Zed, &failed));
+        assert!(!s.admit_auto_toast(&root_a, ParentIde::Zed, &stale));
+
+        assert!(s.admit_auto_toast(&root_a, ParentIde::Zed, &created));
+        assert!(s.admit_auto_toast(&root_a, ParentIde::Zed, &created));
     }
 }

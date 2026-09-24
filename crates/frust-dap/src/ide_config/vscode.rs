@@ -236,6 +236,27 @@ impl VSCodeGenerator {
     }
 }
 
+/// `existing`'s `"Frust (TUI DAP)"` launch entry, found by the marker
+/// [`VSCodeGenerator::merge_config`] matches on. An empty file, or one with
+/// no `configurations` key, has none; a `configurations` that is not an
+/// array is the same error `merge_config` reports.
+fn frust_launch_entry(existing: &str) -> Result<Option<serde_json::Value>> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let root: serde_json::Value = serde_json::from_str(&clean_jsonc(existing))?;
+    let Some(configurations) = root.get("configurations") else {
+        return Ok(None);
+    };
+    let configurations = configurations
+        .as_array()
+        .ok_or_else(|| IdeConfigError::message("`configurations` is not an array"))?;
+    Ok(
+        find_json_entry_by_field(configurations, "name", FRUST_CONFIG_NAME)
+            .map(|idx| configurations[idx].clone()),
+    )
+}
+
 impl IdeConfigGenerator for VSCodeGenerator {
     fn config_path(&self, project_root: &Path) -> PathBuf {
         let workspace_root = detect_workspace_root(project_root);
@@ -290,17 +311,22 @@ impl IdeConfigGenerator for VSCodeGenerator {
     /// none; a `configurations` that is not an array is the same error
     /// `merge_config` reports.
     fn has_frust_entry(&self, existing: &str) -> Result<bool> {
-        if existing.trim().is_empty() {
-            return Ok(false);
-        }
-        let root: serde_json::Value = serde_json::from_str(&clean_jsonc(existing))?;
-        let Some(configurations) = root.get("configurations") else {
-            return Ok(false);
-        };
-        let configurations = configurations
-            .as_array()
-            .ok_or_else(|| IdeConfigError::message("`configurations` is not an array"))?;
-        Ok(find_json_entry_by_field(configurations, "name", FRUST_CONFIG_NAME).is_some())
+        Ok(frust_launch_entry(existing)?.is_some())
+    }
+
+    /// The `debugServer` port of `existing`'s `"Frust (TUI DAP)"` entry —
+    /// `None` when there is no such entry, or when its `debugServer` is not
+    /// a number in `u16` range (a hand-edited entry).
+    fn frust_entry_port(&self, existing: &str) -> Result<Option<u16>> {
+        Ok(frust_launch_entry(existing)?
+            .and_then(|entry| entry.get("debugServer").and_then(serde_json::Value::as_u64))
+            .and_then(|port| u16::try_from(port).ok()))
+    }
+
+    /// The detected workspace root — where `.vscode/` lives, already vetted
+    /// against the home boundary by [`guard_workspace_root`].
+    fn containment_root(&self, project_root: &Path) -> PathBuf {
+        detect_workspace_root(project_root)
     }
 
     fn ide_name(&self) -> &'static str {
@@ -902,5 +928,38 @@ mod tests {
     #[test]
     fn test_vscode_ide_name() {
         assert_eq!(VSCodeGenerator.ide_name(), "VS Code");
+    }
+
+    #[test]
+    fn test_vscode_frust_entry_port_reads_the_marked_entry() {
+        let generator = VSCodeGenerator;
+        let existing = r#"{
+            // JSONC is fine
+            "configurations": [
+                {"name": "Rust", "debugServer": 9},
+                {"name": "Frust (TUI DAP)", "type": "frust", "debugServer": 1234},
+            ]
+        }"#;
+        assert_eq!(generator.frust_entry_port(existing).unwrap(), Some(1234));
+        assert_eq!(generator.frust_entry_port("").unwrap(), None);
+        assert_eq!(
+            generator
+                .frust_entry_port(r#"{"configurations": [{"name": "Rust"}]}"#)
+                .unwrap(),
+            None
+        );
+        // Present but portless (or out of range): present, no port to name.
+        for portless in [
+            r#"{"configurations": [{"name": "Frust (TUI DAP)"}]}"#,
+            r#"{"configurations": [{"name": "Frust (TUI DAP)", "debugServer": 70000}]}"#,
+        ] {
+            assert!(generator.has_frust_entry(portless).unwrap());
+            assert_eq!(generator.frust_entry_port(portless).unwrap(), None);
+        }
+        assert!(
+            generator
+                .frust_entry_port(r#"{"configurations": 1}"#)
+                .is_err()
+        );
     }
 }

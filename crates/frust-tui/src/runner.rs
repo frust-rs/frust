@@ -644,30 +644,80 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
 /// (`Ok(None)`, which only the JetBrains pair reaches here — the pure core
 /// refuses the others before asking for this effect), and a failure, which is
 /// retained and shown rather than dropped. The one ending not posted is an
-/// automatic (`IfAbsent`) write's skip — the ordinary "already configured"
-/// case on every launch.
+/// automatic (`IfAbsent`) write's plain skip — the ordinary "already
+/// configured" case on every launch. An automatic write's report is posted
+/// tagged with its project and IDE
+/// ([`posted`](crate::engine::IdeConfigRequest::posted)), so the pure core can
+/// limit a repeating stale-port or failure toast to once per run.
+///
+/// **Serialized per root.** Two triggers (a fresh bind and an app launch, or
+/// an explicit `g` racing either) can ask for the same files at once, and each
+/// generation is a read-merge-write. Every generation therefore holds
+/// [`with_ide_config_lock`] for its whole run, so two never interleave on the
+/// same files; requests wait their turn and none is dropped — an explicit
+/// refresh queued behind an automatic write still runs, after it.
 fn spawn_ide_config_generation(
     request: crate::engine::IdeConfigRequest,
     tx: UnboundedSender<Message>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let report = match frust_dap::ide_config::generate_ide_config(
-            Some(request.ide),
-            request.port,
-            &request.project_root,
-            request.mode,
-        ) {
-            Ok(Some(result)) => crate::engine::DapIdeReport::Written {
-                ide: request.ide,
-                result,
-            },
-            Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
-            Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
-        };
-        if request.reports(&report) {
+        let key = ide_config_lock_key(&request.project_root);
+        let report =
+            with_ide_config_lock(key, || {
+                match frust_dap::ide_config::generate_ide_config(
+                    Some(request.ide),
+                    request.port,
+                    &request.project_root,
+                    request.mode,
+                ) {
+                    Ok(Some(result)) => crate::engine::DapIdeReport::Written {
+                        ide: request.ide,
+                        result,
+                    },
+                    Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
+                    Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
+                }
+            });
+        if let Some(report) = request.posted(report) {
             let _ = tx.send(Message::DapIdeConfig(report));
         }
     });
+}
+
+/// The key IDE-config generations for `project_root` serialize on: the
+/// detected workspace root (canonical), not the project root itself — VS
+/// Code's `launch.json` and Neovim's `.nvim-dap.lua` live at the workspace
+/// root, which two projects of one monorepo share, and every other generated
+/// file lives under the project, hence under that same key. Falls back to the
+/// project root as given when it cannot be resolved.
+fn ide_config_lock_key(project_root: &Path) -> PathBuf {
+    let workspace = frust_dap::ide_config::vscode::detect_workspace_root(project_root);
+    workspace.canonicalize().unwrap_or(workspace)
+}
+
+/// Run `generate` while holding the IDE-config lock for `key`, blocking until
+/// any other generation holding it finishes.
+///
+/// One mutex per key, handed out from a process-wide map (a handful of
+/// entries: one per distinct workspace a run configures). Nothing is ever
+/// skipped or coalesced — every caller runs `generate`, in turn. A panicked
+/// holder poisons nothing here: the lock guards no data, only exclusion.
+fn with_ide_config_lock<T>(key: PathBuf, generate: impl FnOnce() -> T) -> T {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    type Locks = Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Locks::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(locks.entry(key).or_default())
+    };
+    let _held = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    generate()
 }
 
 /// Wait out a stopped DevTools bridge thread off the event loop.
@@ -2039,6 +2089,77 @@ mod tests {
     use frust_drive::build_info::{BuildArgs, BuildInfo, BuildMode};
     use frust_drive::desktop_build::DesktopBundleTarget;
     use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
+
+    /// Generations on one key never overlap, and none is dropped: every
+    /// caller runs, strictly one after another. Each holder records
+    /// enter/exit around a sleep wide enough that an unserialized pair would
+    /// interleave; with the lock, the log is enter/exit pairs back to back.
+    #[test]
+    fn ide_config_generations_on_one_key_are_serialized_and_none_is_dropped() {
+        use std::sync::Mutex;
+
+        const CALLERS: usize = 6;
+        let key = std::env::temp_dir().join(format!(
+            "frust-tui-ide-lock-serialized-{}",
+            std::process::id()
+        ));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let handles: Vec<_> = (0..CALLERS)
+            .map(|i| {
+                let (key, log) = (key.clone(), Arc::clone(&log));
+                std::thread::spawn(move || {
+                    with_ide_config_lock(key, || {
+                        log.lock().unwrap().push(("enter", i));
+                        std::thread::sleep(Duration::from_millis(15));
+                        log.lock().unwrap().push(("exit", i));
+                        i
+                    })
+                })
+            })
+            .collect();
+        let mut ran: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        ran.sort_unstable();
+        assert_eq!(ran, (0..CALLERS).collect::<Vec<_>>(), "no caller dropped");
+
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), CALLERS * 2);
+        for pair in log.chunks(2) {
+            assert_eq!(pair[0].0, "enter", "{log:?}");
+            assert_eq!(pair[1], ("exit", pair[0].1), "interleaved: {log:?}");
+        }
+    }
+
+    /// Distinct keys do not wait on each other: a holder of one key can take
+    /// another key's lock (were it one global lock, this would deadlock).
+    #[test]
+    fn ide_config_locks_on_distinct_keys_are_independent() {
+        let base = std::env::temp_dir();
+        let a = base.join(format!("frust-tui-ide-lock-a-{}", std::process::id()));
+        let b = base.join(format!("frust-tui-ide-lock-b-{}", std::process::id()));
+        let got = with_ide_config_lock(a, || with_ide_config_lock(b, || 7));
+        assert_eq!(got, 7);
+    }
+
+    /// Two projects sharing a workspace (a monorepo) share the lock key,
+    /// since both write the workspace's `.vscode/launch.json`.
+    #[test]
+    fn ide_config_lock_key_is_the_shared_workspace_root() {
+        let workspace =
+            std::env::temp_dir().join(format!("frust-tui-ide-lock-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(workspace.join(".vscode")).unwrap();
+        std::fs::create_dir_all(workspace.join("app-a")).unwrap();
+        std::fs::create_dir_all(workspace.join("app-b")).unwrap();
+        assert_eq!(
+            ide_config_lock_key(&workspace.join("app-a")),
+            ide_config_lock_key(&workspace.join("app-b"))
+        );
+        assert_eq!(
+            ide_config_lock_key(&workspace.join("app-a")),
+            workspace.canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 
     /// The runner's own half of the session-event feed: `dispatch` is what
     /// turns an applied `Message::Session` into the lines and the ending a
