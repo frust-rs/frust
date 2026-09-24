@@ -51,35 +51,15 @@ fn config_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
     home_dir(env).map(|home| home.join(".config"))
 }
 
-/// The user's home directory: `$HOME`, then `$USERPROFILE`, then
-/// `$HOMEDRIVE`+`$HOMEPATH`'s plain string concatenation (`HOMEDRIVE` is a
-/// bare drive like `C:`, `HOMEPATH` a drive-relative path like `\Users\ed`;
-/// `Path::join` would discard the drive on that rooted second component, so
-/// this is concatenation, not a join) — mirrors
-/// `frust_dap::ide_config::vscode`'s `home_dir` exactly, including treating
-/// an empty value as unset.
-///
-/// The `$USERPROFILE`/`$HOMEDRIVE`+`$HOMEPATH` fallbacks are checked
-/// unconditionally rather than gated behind `cfg!(windows)`: those variables
-/// are practically never set on Linux/macOS, so the extra fallback changes
-/// nothing there, and staying unconditional is what makes this function
-/// exercisable — including its Windows-only tail — from a unit test on any
-/// host via [`EnvLookup`], rather than needing an actual Windows target.
+/// The user's home directory — [`host_path::home_dir_from`]'s
+/// `$HOME`/`$USERPROFILE`/`$HOMEDRIVE`+`$HOMEPATH` chain, fed by this
+/// crate's own [`EnvLookup`] seam so it stays unit-testable without mutating
+/// the real, global process environment. The same shared resolver backs
+/// `frust_dap::ide_config::vscode`'s `home_dir` and
+/// `frust_drive::android_run`'s, so the three can no longer drift apart the
+/// way they had.
 fn home_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
-    if let Some(home) = non_empty(env, "HOME") {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = non_empty(env, "USERPROFILE") {
-        return Some(PathBuf::from(profile));
-    }
-    let drive = non_empty(env, "HOMEDRIVE")?;
-    let path = non_empty(env, "HOMEPATH")?;
-    Some(PathBuf::from(format!("{drive}{path}")))
-}
-
-/// A non-empty environment value, or `None` for unset-or-empty.
-fn non_empty(env: &dyn EnvLookup, key: &str) -> Option<String> {
-    env.get(key).filter(|value| !value.is_empty())
+    host_path::home_dir_from(|key| env.get(key))
 }
 
 /// Load the persisted recent-projects list (newest first) against the real

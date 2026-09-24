@@ -714,16 +714,21 @@ pub(crate) fn is_transient(state: &SessionState) -> bool {
     )
 }
 
-/// Whether `a` and `b` name the same project root, compared *lexically* —
-/// no filesystem I/O. [`Path::components`] already normalises away trailing
-/// separators and `.` (current-dir) segments, so `/tmp/huddle`,
-/// `/tmp/huddle/`, and `/tmp/huddle/.` all compare equal here. This is
-/// deliberately not canonicalisation: two paths that are equal on disk but
-/// differ in representation (a symlink and its target, `..` segments that
-/// resolve to the same place) still compare unequal. See
+/// Whether `a` and `b` name the same project root — [`host_path::same_path`],
+/// the same platform-aware comparison `AppState::insert_project` uses:
+/// component-wise, case-folded on Windows (so `C:\Dev\x`/`c:/dev/x` match, a
+/// case-differing root can no longer defeat this guard on a case-insensitive
+/// filesystem), exact component equality elsewhere. Still purely lexical —
+/// no filesystem I/O, so this stays safe to call from the engine's `update`.
+/// [`Path::components`] (which the non-Windows arm reduces to) already
+/// normalises away trailing separators and `.` (current-dir) segments, so
+/// `/tmp/huddle`, `/tmp/huddle/`, and `/tmp/huddle/.` all compare equal here.
+/// This is deliberately not canonicalisation: two paths that are equal on
+/// disk but differ in representation (a symlink and its target, `..`
+/// segments that resolve to the same place) still compare unequal. See
 /// [`AppState::live_session_for_excluding`] for why that gap is accepted.
 fn same_project_root(a: &Path, b: &Path) -> bool {
-    a.components().eq(b.components())
+    host_path::same_path(a, b)
 }
 
 /// Bounded depth-2 walk from `root` for `frust.toml` project markers: `root`
@@ -1192,6 +1197,31 @@ mod tests {
             state.live_session_for(Path::new("/tmp/huddle/"), &SessionTarget::Desktop),
             Some(SessionId(0)),
             "a trailing separator names the same project root"
+        );
+    }
+
+    /// Windows' case-insensitive filesystem: a project root that differs only
+    /// in case from a live session's must still be caught by the
+    /// one-session-per-(project, target) launch guard — `same_project_root`'s
+    /// delegation to [`host_path::same_path`] case-folds on Windows, so this
+    /// no longer requires an exact-case match there.
+    #[cfg(windows)]
+    #[test]
+    fn same_project_root_case_folds_on_windows() {
+        assert!(same_project_root(
+            Path::new(r"C:\Dev\huddle"),
+            Path::new(r"c:\dev\huddle"),
+        ));
+
+        let state = state_with(vec![running_on(
+            0,
+            r"C:\Dev\huddle",
+            Some(SessionTarget::Desktop),
+        )]);
+        assert_eq!(
+            state.live_session_for(Path::new(r"c:\dev\huddle"), &SessionTarget::Desktop),
+            Some(SessionId(0)),
+            "a differently-cased root must still find the live session"
         );
     }
 }

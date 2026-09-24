@@ -51,12 +51,11 @@ impl EnvLookup for RealEnv {
     }
 }
 
-/// Resolve the user's home directory, trying every convention this crate's
-/// supported dev hosts use: `HOME` (Unix — Linux/macOS), then `USERPROFILE`
-/// (the Windows convention; `HOME` is normally *unset* there, so consulting
-/// only `HOME` would leave a Windows developer with no boundary at all), then
-/// `HOMEDRIVE` + `HOMEPATH` concatenated (the older Windows pair, still set by
-/// some shells when `USERPROFILE` is not).
+/// Resolve the user's home directory — [`frust_drive::host_path::home_dir_from`]'s
+/// shared `HOME`/`USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` chain, fed by this
+/// module's own [`EnvLookup`] seam. The same resolver backs
+/// `frust-tui`'s `engine::persist::home_dir` and `frust-drive`'s
+/// `android_run::home_dir`, so the three can no longer drift apart.
 ///
 /// Returns `None` only when none of those resolve to a non-empty value.
 /// Callers treat that as "the containment boundary is unknown" and **fail
@@ -66,24 +65,7 @@ impl EnvLookup for RealEnv {
 /// exists to prevent: a walk that climbs into a user's home directory, which
 /// holds a `.vscode/` for essentially every VS Code user.
 fn home_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
-    if let Some(home) = env_value(env, "HOME") {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = env_value(env, "USERPROFILE") {
-        return Some(PathBuf::from(profile));
-    }
-    // `HOMEDRIVE` is a bare drive (`C:`) and `HOMEPATH` a drive-relative path
-    // (`\Users\someone`); the home directory is their plain concatenation, not
-    // a `Path::join` (joining a rooted second component would discard the
-    // drive).
-    let drive = env_value(env, "HOMEDRIVE")?;
-    let path = env_value(env, "HOMEPATH")?;
-    Some(PathBuf::from(format!("{drive}{path}")))
-}
-
-/// A non-empty environment value, or `None` for unset-or-empty.
-fn env_value(env: &dyn EnvLookup, key: &str) -> Option<String> {
-    env.get(key).filter(|value| !value.is_empty())
+    frust_drive::host_path::home_dir_from(|key| env.get(key))
 }
 
 /// Detect the workspace root for a frust project.

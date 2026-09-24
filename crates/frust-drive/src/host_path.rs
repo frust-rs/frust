@@ -13,6 +13,15 @@
 //! never resolves because the verbatim form disables `..`/`.` normalization
 //! by design.
 //!
+//! [`home_dir_from`] is this module's other shared seam: the one
+//! `HOME`/`USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` fallback chain, fed by
+//! whatever environment-lookup abstraction each caller already has
+//! (`frust-tui`'s `persist::EnvLookup`, `frust-dap`'s
+//! `ide_config::vscode::EnvLookup`, `frust-drive`'s own
+//! `doctor::EnvLookup`) — a pure function with no knowledge of any of those
+//! traits, so it can sit below all three without a new dependency in either
+//! direction.
+//!
 //! [`simplify`] strips the verbatim prefix back to the plain drive/UNC form,
 //! but only when doing so is provably safe — the same rule the `dunce` crate
 //! popularized: a plain path that names a reserved MS-DOS device
@@ -47,6 +56,44 @@ const RESERVED_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
+
+/// The user's home directory, tried through every convention this
+/// workspace's supported dev hosts use, in order: `HOME` (Unix), then
+/// `USERPROFILE` (the usual Windows convention — `HOME` is normally unset
+/// there), then `HOMEDRIVE`+`HOMEPATH` concatenated (the older Windows pair,
+/// still set by some shells when `USERPROFILE` is not; `HOMEDRIVE` is a bare
+/// drive like `C:` and `HOMEPATH` a drive-relative path like `\Users\ed`, so
+/// this is plain string concatenation, not `Path::join` — joining a rooted
+/// second component would discard the drive). An empty value is treated as
+/// unset at every step, and the two Windows fallbacks are consulted
+/// unconditionally rather than gated behind `cfg!(windows)`: those variables
+/// are practically never set on Linux/macOS, so the extra fallback changes
+/// nothing there, and staying unconditional is what makes the whole chain —
+/// including its Windows-only tail — exercisable from a unit test on any
+/// host.
+///
+/// `get` abstracts the actual environment-variable lookup so each caller
+/// feeds its own seam (`frust-tui`'s `engine::persist::EnvLookup`,
+/// `frust-dap`'s `ide_config::vscode::EnvLookup`, `frust-drive`'s own
+/// `doctor::EnvLookup`) rather than this shared, pure resolver depending on
+/// any of them, or reading the real, global process environment directly.
+///
+/// Returns `None` only when nothing in the chain resolves to a non-empty
+/// value — a caller that needs a containment boundary (e.g. `frust-dap`'s
+/// `detect_workspace_root`/`guard_workspace_root`) fails closed on that,
+/// exactly as it did before this resolver was extracted.
+pub fn home_dir_from(get: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let value = |key: &str| get(key).filter(|value| !value.is_empty());
+    if let Some(home) = value("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = value("USERPROFILE") {
+        return Some(PathBuf::from(profile));
+    }
+    let drive = value("HOMEDRIVE")?;
+    let path = value("HOMEPATH")?;
+    Some(PathBuf::from(format!("{drive}{path}")))
+}
 
 /// Strips a Windows verbatim prefix back to the plain drive/UNC form
 /// (`\\?\C:\dev\x` -> `C:\dev\x`; `\\?\UNC\srv\sh\p` -> `\\srv\sh\p`) when
@@ -200,7 +247,7 @@ fn normalized_components(path: &Path, windows: bool) -> Vec<String> {
         simplified
             .to_string_lossy()
             .split(['/', '\\'])
-            .filter(|segment| !segment.is_empty())
+            .filter(|segment| !segment.is_empty() && *segment != ".")
             .map(|segment| segment.to_lowercase())
             .collect()
     } else {
@@ -214,6 +261,58 @@ fn normalized_components(path: &Path, windows: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// An in-memory environment fixture for [`home_dir_from`]'s tests —
+    /// built as a plain `HashMap` (rather than a trait object) since
+    /// `home_dir_from` takes a closure, not an `EnvLookup`-shaped seam.
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn home_dir_from_prefers_home_over_every_windows_fallback() {
+        let get = env(&[
+            ("HOME", "/home/ed"),
+            ("USERPROFILE", r"C:\Users\ed"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", r"\Users\ed"),
+        ]);
+        assert_eq!(home_dir_from(get), Some(PathBuf::from("/home/ed")));
+    }
+
+    #[test]
+    fn home_dir_from_falls_back_to_userprofile_when_home_unset() {
+        let get = env(&[("USERPROFILE", r"C:\Users\cpu")]);
+        assert_eq!(home_dir_from(get), Some(PathBuf::from(r"C:\Users\cpu")));
+    }
+
+    #[test]
+    fn home_dir_from_falls_back_to_homedrive_and_homepath() {
+        let get = env(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\cpu")]);
+        assert_eq!(home_dir_from(get), Some(PathBuf::from(r"C:\Users\cpu")));
+    }
+
+    #[test]
+    fn home_dir_from_treats_empty_values_as_unset() {
+        let get = env(&[
+            ("HOME", ""),
+            ("USERPROFILE", ""),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", r"\Users\cpu"),
+        ]);
+        assert_eq!(home_dir_from(get), Some(PathBuf::from(r"C:\Users\cpu")));
+    }
+
+    #[test]
+    fn home_dir_from_none_when_nothing_resolves() {
+        assert_eq!(home_dir_from(env(&[])), None);
+        assert_eq!(home_dir_from(env(&[("HOMEDRIVE", "C:")])), None);
+    }
 
     #[test]
     fn simplify_strips_verbatim_drive_prefix() {
@@ -304,6 +403,21 @@ mod tests {
             to_portable_string_inner(Path::new("/home/dev/frust/crates/frust"), false),
             "/home/dev/frust/crates/frust",
         );
+    }
+
+    #[test]
+    fn same_path_drops_a_dot_component_on_windows() {
+        // A `.` (current-dir) segment must not produce a spurious mismatch on
+        // the Windows arm, exactly as the real `Path::components()` walk
+        // already guarantees on the non-Windows arm — this is what makes
+        // `frust-tui`'s `same_project_root` (a plain delegation to
+        // `same_path`) behave identically to its own pre-`host_path`
+        // `Path::components()`-based comparison on every platform.
+        assert!(same_path_inner(
+            Path::new(r"C:\dev\huddle"),
+            Path::new(r"C:\dev\huddle\."),
+            true,
+        ));
     }
 
     #[test]
