@@ -16,15 +16,17 @@ use frust_drive::web_build::{self, WebPreflight};
 /// This entry point is where every host-bound input is fixed: the process
 /// runner injected by `commands::dispatch` (the CLI's one `Real` construction
 /// site), the [`RealEnv`] lookup seam, the host's own `target_os`, the
-/// current directory, and [`frust_drive::doctor::default_validators`]. All
-/// of them are parameters of [`run_with`], which is why the exit-code rule
-/// can be tested against a scripted environment rather than against
+/// current directory, and [`frust_drive::doctor::default_validators_for_host`].
+/// All of them are parameters of [`run_with`], which is why the exit-code
+/// rule can be tested against a scripted environment rather than against
 /// whatever toolchains the machine running the test happens to have.
 ///
 /// The host's browser toolchain — the wasm32 target, the `wasm-bindgen` CLI
 /// and `wasm-opt` — is reported by the validator list above, by the three
-/// validators `frust_drive::doctor::default_validators` registers for it
-/// (each `Partial` at worst, so none of them can move the exit code). The
+/// validators `frust_drive::doctor::default_validators_for_host` registers
+/// for it (each `Partial` at worst, so none of them can move the exit code).
+/// The same call also decides whether an `Xcode` row is registered at all:
+/// only on a macOS host, matching `report::build_report`'s iOS-area gate. The
 /// "Web" heading below therefore prints only what those rows cannot know:
 /// the *project's* own browser inputs — its `frust.toml [web]` section, the
 /// host page that would be staged, that page's module name, the artifact
@@ -50,7 +52,7 @@ pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     // honestly, degraded rather than failed (see `web_build::preflight`'s own
     // doc comment).
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let validators = frust_drive::doctor::default_validators();
+    let validators = frust_drive::doctor::default_validators_for_host(ctx.is_macos);
     Ok(run_with(&ctx, &validators, &cwd, verbose))
 }
 
@@ -320,7 +322,7 @@ mod tests {
             env: &env,
             is_macos: false,
         };
-        let validators = frust_drive::doctor::default_validators();
+        let validators = frust_drive::doctor::default_validators_for_host(ctx.is_macos);
         let results = frust_drive::doctor::run_all(&ctx, &validators);
         for name in ["wasm32 target", "wasm-bindgen CLI", "wasm-opt"] {
             let row = results
@@ -330,7 +332,60 @@ mod tests {
             assert_eq!(row.len(), 1, "`{name}` must appear exactly once");
             assert_eq!(row[0].1.status, Status::Partial, "{name}");
         }
+        assert!(
+            !results.iter().any(|(n, _)| n == "Xcode"),
+            "a non-macOS host must have no Xcode row: {results:?}"
+        );
         assert_eq!(run_with(&ctx, &validators, &dir, false), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The macOS counterpart of the test above, on the same real validator
+    /// set: a host reported as macOS carries exactly one `Xcode` row.
+    #[test]
+    fn a_macos_host_gets_exactly_one_xcode_row_in_the_real_validator_set() {
+        let dir = empty_dir("web-macos");
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustc --version",
+                ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"),
+            )
+            .with("cargo --version", ok("cargo 1.91.1\n"))
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"),
+            )
+            .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .with("adb version", ok("Android Debug Bridge version 1.0.41\n"))
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "xcodebuild -version",
+                ok("Xcode 15.4\nBuild version 15F31d\n"),
+            )
+            .with("cargo packager --version", ok("cargo-packager 0.11.8\n"))
+            .missing("wasm-bindgen --version")
+            .missing("wasm-opt --version");
+        let env = MapEnv(&[
+            ("ANDROID_HOME", "/sdk"),
+            ("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"),
+        ]);
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
+        let validators = frust_drive::doctor::default_validators_for_host(ctx.is_macos);
+        let results = frust_drive::doctor::run_all(&ctx, &validators);
+        let xcode_rows: Vec<_> = results.iter().filter(|(n, _)| n == "Xcode").collect();
+        assert_eq!(
+            xcode_rows.len(),
+            1,
+            "a macOS host must have exactly one Xcode row: {results:?}"
+        );
+        assert_eq!(xcode_rows[0].1.status, Status::Pass);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
