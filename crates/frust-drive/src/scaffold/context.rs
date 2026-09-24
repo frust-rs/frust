@@ -567,6 +567,21 @@ mod tests {
         assert_eq!(validate_project_name(""), Err(NameError::Empty));
     }
 
+    /// A host-absolute path fixture for tests exercising the
+    /// absolute-vs-relative branch of [`frust_path_from_project_subdir`]
+    /// (and the accessors built on it): a bare `/...` string is absolute on
+    /// Unix, but `Path::is_absolute()` never treats it as absolute on
+    /// Windows without a drive/UNC prefix, so a fixture meant to be absolute
+    /// on every host must route through this helper instead of a raw `/...`
+    /// literal.
+    fn abs_path(suffix: &str) -> String {
+        if cfg!(windows) {
+            format!("C:/{suffix}")
+        } else {
+            format!("/{suffix}")
+        }
+    }
+
     fn test_context() -> TemplateContext {
         TemplateContext {
             project_name: "my_app".into(),
@@ -574,7 +589,7 @@ mod tests {
             org: "dev.f0x".into(),
             description: "A new Frust application.".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/path/to/frust".into(),
+            frust_path: abs_path("path/to/frust"),
             deeplink_scheme: None,
             deeplink_host: None,
         }
@@ -704,14 +719,20 @@ mod tests {
 
     #[test]
     fn embedding_dirs_derive_from_frust_path() {
-        let ctx = test_context(); // frust_path = "/path/to/frust"
+        let ctx = test_context(); // frust_path = abs_path("path/to/frust")
         assert_eq!(
             ctx.frust_embedding_android_dir(),
-            "/path/to/frust/../../platform/android/frust-embedding"
+            format!(
+                "{}/../../platform/android/frust-embedding",
+                abs_path("path/to/frust")
+            )
         );
         assert_eq!(
             ctx.frust_embedding_ios_dir(),
-            "/path/to/frust/../../platform/ios/FrustEmbedding"
+            format!(
+                "{}/../../platform/ios/FrustEmbedding",
+                abs_path("path/to/frust")
+            )
         );
     }
 
@@ -736,17 +757,18 @@ mod tests {
     #[test]
     fn embedding_dirs_preserve_absolute_or_relative_form() {
         let mut ctx = test_context();
-        ctx.frust_path = "/absolute/frust".into();
-        assert!(ctx.frust_embedding_android_dir().starts_with('/'));
-        assert!(ctx.frust_embedding_ios_dir().starts_with('/'));
+        let absolute = abs_path("absolute/frust");
+        ctx.frust_path = absolute.clone();
+        assert!(ctx.frust_embedding_android_dir().starts_with(&absolute));
+        assert!(ctx.frust_embedding_ios_dir().starts_with(&absolute));
         // An absolute path is base-independent: emitted byte-identical.
         assert_eq!(
             ctx.frust_embedding_android_dir(),
-            "/absolute/frust/../../platform/android/frust-embedding"
+            format!("{absolute}/../../platform/android/frust-embedding")
         );
         assert_eq!(
             ctx.frust_embedding_ios_dir(),
-            "/absolute/frust/../../platform/ios/FrustEmbedding"
+            format!("{absolute}/../../platform/ios/FrustEmbedding")
         );
 
         // A relative path carries one extra `../`: both values are resolved
@@ -794,10 +816,11 @@ mod tests {
 
         let project_root = Path::new("/projects/my_app");
         for frust_path in [
-            "../checkouts/frust/crates/frust",
-            "vendor/frust/crates/frust",
-            "/absolute/checkout/crates/frust",
+            "../checkouts/frust/crates/frust".to_string(),
+            "vendor/frust/crates/frust".to_string(),
+            abs_path("absolute/checkout/crates/frust"),
         ] {
+            let frust_path = frust_path.as_str();
             let mut ctx = test_context();
             ctx.frust_path = frust_path.into();
 
@@ -838,9 +861,10 @@ mod tests {
 
     #[test]
     fn frust_path_from_project_subdir_climbs_only_for_relative_paths() {
+        let absolute = abs_path("abs/frust");
         assert_eq!(
-            frust_path_from_project_subdir("/abs/frust"),
-            "/abs/frust",
+            frust_path_from_project_subdir(&absolute),
+            absolute,
             "an absolute path is base-independent"
         );
         assert_eq!(frust_path_from_project_subdir("../frust"), "../../frust");
