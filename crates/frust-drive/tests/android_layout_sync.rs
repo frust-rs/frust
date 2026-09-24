@@ -20,6 +20,7 @@
 //! *rendered* Kotlin DSL text — not a real Gradle build.
 
 use frust_drive::build_dirs::BuildLayout;
+use frust_drive::host_path::to_portable_string;
 use frust_drive::plugin::add_plugin;
 use frust_drive::scaffold::{TemplateContext, generate};
 use std::fs;
@@ -71,17 +72,23 @@ fn settings_gradle_beforeproject_redirects_match_build_layout() {
     let settings = fs::read_to_string(dest.join("android/settings.gradle.kts"))
         .expect("read generated settings.gradle.kts");
 
+    // The generated `settings.gradle.kts` is a static, hand-written
+    // forward-slash literal (never rendered from `BuildLayout` at scaffold
+    // time — see the template's own comment), so the expectation here must
+    // compare the same portable form rather than `BuildLayout`'s own
+    // `PathBuf`s, which `Display` with the host's native separator
+    // (backslash on Windows).
     let root_redirect = format!(
         "rootDir.resolve(\"../{}\")",
-        BuildLayout::android_root().display()
+        to_portable_string(&BuildLayout::android_root())
     );
     let app_redirect = format!(
         "rootDir.resolve(\"../{}\")",
-        BuildLayout::android_app().display()
+        to_portable_string(&BuildLayout::android_app())
     );
     let embedding_redirect = format!(
         "rootDir.resolve(\"../{}\")",
-        BuildLayout::android_embedding().display()
+        to_portable_string(&BuildLayout::android_embedding())
     );
 
     assert!(
@@ -115,7 +122,14 @@ fn app_build_gradle_jni_libs_dir_matches_build_layout_in_both_sites() {
     let build_gradle = fs::read_to_string(dest.join("android/app/build.gradle.kts"))
         .expect("read generated app/build.gradle.kts");
 
-    let jni_libs_path = format!("../../{}", BuildLayout::android_jni_libs().display());
+    // Same portable-comparison rule as the `settings.gradle.kts` test above:
+    // `app/build.gradle.kts` is a static forward-slash literal, so the
+    // expectation must compare the portable form of `BuildLayout`'s
+    // `PathBuf`, not its native-separator `Display`.
+    let jni_libs_path = format!(
+        "../../{}",
+        to_portable_string(&BuildLayout::android_jni_libs())
+    );
 
     let ndk_output_site = format!("file(\"{jni_libs_path}\").absolutePath");
     assert!(
@@ -143,6 +157,15 @@ fn app_build_gradle_jni_libs_dir_matches_build_layout_in_both_sites() {
 /// exactly one `Contribution::GradleModule` (`:frust-camera`) and requires no
 /// sibling checkout, so it applies cleanly against a freshly rendered
 /// project tree with no extra fixture setup.
+// Unlike the two tests above, `plugin::apply`'s `beforeProject` redirect line
+// is NOT a static template literal — it is rendered at apply time from
+// `BuildLayout::android_module(..).display()`, so this expectation is
+// deliberately built the same (native-separator) way rather than through
+// `to_portable_string`: the production renderer needs the portable-string
+// fix first (a raw backslash inside this generated Kotlin string is a real
+// Windows defect, the same class `host_path::to_portable_string` already
+// closed for `Cargo.toml`/`gradle.properties`), and this test must be
+// updated to match in the same change.
 #[test]
 fn plugin_gradle_module_include_block_redirect_matches_build_layout() {
     let dest = rendered_app("plugin-module-redirect");

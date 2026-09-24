@@ -1297,14 +1297,20 @@ mod tests {
         // `--out-name app` is what makes the framework page's `?module=`
         // default resolve with no query string — the module doc's decision.
         assert!(calls[1].contains(" --out-name app "), "{}", calls[1]);
+        // Built with the same three separate `PathBuf::join` calls
+        // `locate_wasm` uses in production, so the expectation matches
+        // native separators exactly (a real argv, not generated file text —
+        // see the sibling test above for why a single embedded `/` doesn't
+        // work here on Windows).
         assert!(
-            calls[1].ends_with(&format!(
-                "{}",
+            calls[1].ends_with(
                 target
                     .join(WASM_TARGET_TRIPLE)
-                    .join("release/web_app.wasm")
-                    .display()
-            )),
+                    .join("release")
+                    .join("web_app.wasm")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
             "{}",
             calls[1]
         );
@@ -1721,8 +1727,14 @@ mod tests {
         )
         .unwrap();
         assert!(report.wasm.is_file());
+        // The trailing module path is built by three separate `PathBuf::join`
+        // calls in production (`locate_wasm`), which use the host's native
+        // separator — a real argv passed to `wasm-bindgen`, not generated
+        // file text, so the expectation below must match with the same
+        // native joins rather than a single string with an embedded `/`.
+        let expected_suffix = Path::new("release").join("web-app.wasm");
         assert!(
-            runner.invocations()[1].ends_with("release/web-app.wasm"),
+            runner.invocations()[1].ends_with(expected_suffix.to_string_lossy().as_ref()),
             "{}",
             runner.invocations()[1]
         );
@@ -1748,13 +1760,22 @@ mod tests {
             resolve_target_dir(&metadata, &FakeEnv::new(), &dir),
             PathBuf::from("/data/cache/target")
         );
+        // A bare `/elsewhere` is absolute on Unix but `Path::is_absolute()`
+        // never treats it as absolute on Windows without a drive/UNC prefix
+        // — a host-absolute fixture is needed to exercise the "env var wins
+        // verbatim" branch on every host.
+        let elsewhere = if cfg!(windows) {
+            "C:/elsewhere"
+        } else {
+            "/elsewhere"
+        };
         assert_eq!(
             resolve_target_dir(
                 &metadata,
-                &FakeEnv::new().set("CARGO_TARGET_DIR", "/elsewhere"),
+                &FakeEnv::new().set("CARGO_TARGET_DIR", elsewhere),
                 &dir
             ),
-            PathBuf::from("/elsewhere")
+            PathBuf::from(elsewhere)
         );
         assert_eq!(
             resolve_target_dir(&FakeProcessRunner::new(), &FakeEnv::new(), &dir),

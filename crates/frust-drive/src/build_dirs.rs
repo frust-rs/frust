@@ -235,8 +235,13 @@ mod tests {
     /// siblings, not reachable from here) actually write under.
     #[test]
     fn ios_dir_is_the_shared_prefix_of_the_ios_build_path_constants() {
-        let ios_dir = BuildLayout::ios();
-        let ios_dir = ios_dir.to_str().expect("utf8 path");
+        // `ARCHIVE_PATH` is a kept forward-slash literal (see the module
+        // doc); `BuildLayout::ios()`'s own `PathBuf` renders with the host's
+        // native separator (backslash on Windows), so the comparison must go
+        // through the same portable rendering `crate::host_path` uses for
+        // every path this crate ever embeds in generated text, rather than a
+        // raw `.to_str()`.
+        let ios_dir = crate::host_path::to_portable_string(&BuildLayout::ios());
         assert!(
             ARCHIVE_PATH.starts_with(&format!("{ios_dir}/")),
             "`ios_build::xcodebuild::ARCHIVE_PATH` (`{ARCHIVE_PATH}`) must live \
