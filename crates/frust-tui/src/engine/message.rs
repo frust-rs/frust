@@ -78,9 +78,10 @@ pub enum RegionId {
     /// A row inside the open titlebar switcher dropdown (0-based index into
     /// `AppState::projects`); click switches and closes the dropdown.
     ProjectMenuItem(usize),
-    /// The titlebar toolchain chip; click opens the bootstrap wizard (the
-    /// doctor detail panel stays reachable via `d` / the sidebar "Doctor"
-    /// action).
+    /// The titlebar toolchain chip; click opens the bootstrap wizard directly
+    /// (the doctor detail panel stays reachable via `i` / the sidebar
+    /// "Doctor" action, and offers its own "Toolchain setup" button through
+    /// to this same wizard).
     DoctorChip,
     /// A step-tree row in the bootstrap wizard (0-based index into the wizard's
     /// visible node list); click selects it (a `Platforms` header row toggles
@@ -122,6 +123,9 @@ pub enum RegionId {
     DoctorRerun,
     /// The doctor panel's close button.
     DoctorClose,
+    /// The doctor panel's "Toolchain setup" button (`t` keyboard parity);
+    /// closes the panel and opens the bootstrap wizard.
+    DoctorToolchainSetup,
     /// The sidebar "Build" action row; click opens the build launcher.
     BuildAction,
     /// The build-launcher modal's artifact-kind selector.
@@ -537,17 +541,22 @@ pub enum Message {
     SwitchProject(usize),
 
     // ── Doctor panel + titlebar chip ──────────────────────────────────────────
-    /// Run the validator set off-thread (`d` from the workbench, the sidebar
-    /// "Doctor" action, the titlebar chip, or the panel's re-run affordance)
-    /// — routed to the runner as [`super::Effect::RunDoctor`]. Also fired
-    /// once at startup (`crate::runner`) to seed the chip.
+    /// Run the validator set off-thread (the panel's own `r` re-run
+    /// affordance / Re-run button) — routed to the runner as
+    /// [`super::Effect::RunDoctor`]. Also fired once at startup
+    /// (`crate::runner`) to seed the chip.
     RunDoctor,
     /// The off-thread validator run finished: replace the cached results.
     DoctorResults(Vec<DoctorCheck>),
-    /// Open the doctor panel.
+    /// Open the doctor panel (`i` from either screen, the sidebar "Doctor"
+    /// action, or the palette).
     OpenDoctorPanel,
-    /// Close the doctor panel (`Esc`).
+    /// Close the doctor panel (`Esc` / the panel's Close button).
     CloseDoctorPanel,
+    /// Close the doctor panel and open the bootstrap wizard (the panel's `t`
+    /// key / "Toolchain setup" button) — the toolchain setup flow moved here
+    /// from its old direct `i` binding (D5).
+    OpenToolchainFromDoctor,
 
     // ── Bootstrap wizard + titlebar toolchain chip ───────────────────────────
     /// Run the component-level toolchain report off-thread
@@ -560,9 +569,10 @@ pub enum Message {
     /// directly (it derives `PartialEq`/`Eq`/`Clone`, so no mirror type is
     /// needed).
     BootstrapReport(DoctorReport),
-    /// Open the bootstrap wizard (the `i` key, or a titlebar toolchain-chip
-    /// click) — seeds it from the cached report, requesting a preflight first
-    /// if none is cached yet.
+    /// Open the bootstrap wizard (a titlebar toolchain-chip click, or the
+    /// doctor panel's `t` key / "Toolchain setup" button via
+    /// [`Message::OpenToolchainFromDoctor`]) — seeds it from the cached
+    /// report, requesting a preflight first if none is cached yet.
     OpenBootstrapWizard,
     /// Close the bootstrap wizard (`Esc` / the `[Esc] Close` title button).
     CloseBootstrapWizard,

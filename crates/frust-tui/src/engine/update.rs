@@ -831,6 +831,13 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 Outcome::idle()
             }
         }
+        Message::OpenToolchainFromDoctor => {
+            // D5's toolchain-setup route: close the doctor panel, then run
+            // the same transition `OpenBootstrapWizard` does — always a
+            // redraw, since closing the panel alone already is one.
+            state.doctor_panel_open = false;
+            open_bootstrap_wizard(state)
+        }
 
         // ── Bootstrap wizard + titlebar toolchain chip ──────────────────────
         Message::RunBootstrapReport => {
@@ -4677,6 +4684,20 @@ mod tests {
             !update(&mut st, Message::CloseDoctorPanel).redraw,
             "already closed"
         );
+    }
+
+    /// D5's toolchain-setup route out of the doctor panel: `t` closes the
+    /// panel and opens the bootstrap wizard in the same transition
+    /// `OpenBootstrapWizard` performs.
+    #[test]
+    fn open_toolchain_from_doctor_closes_the_panel_and_opens_the_wizard() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenDoctorPanel);
+        assert!(st.doctor_panel_open);
+        let out = update(&mut st, Message::OpenToolchainFromDoctor);
+        assert!(out.redraw);
+        assert!(!st.doctor_panel_open);
+        assert!(st.bootstrap_wizard.is_some());
     }
 
     // ── Build launcher ──────────────────────────────────────────────────────

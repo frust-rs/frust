@@ -192,9 +192,18 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::project_switcher::render(frame, area, state, theme, mouse);
         }
+        // D5: the doctor panel reaches over either top-level screen now that
+        // `i` opens it unconditionally, like the wizards/dialogs above —
+        // rather than the workbench-only surface it used to be reachable
+        // from through `d`.
         ActiveModal::DoctorPanel => {
             let mut suppressed = MouseCtx::suppressed();
-            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
             views::doctor::render(frame, area, &state.doctor, theme, mouse);
         }
         // The MCP panel reaches over either top-level screen (its `m` key and

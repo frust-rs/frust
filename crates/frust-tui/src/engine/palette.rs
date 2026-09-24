@@ -154,8 +154,12 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_project,
             "open a project first",
         ),
-        always("Doctor", "d", Message::OpenDoctorPanel),
-        always("Toolchain setup…", "i", Message::OpenBootstrapWizard),
+        // D5: `i` opens the Doctor panel (from either screen); toolchain
+        // setup moved off `i` onto the panel's own `t` key / "Toolchain
+        // setup" button (see `views::doctor::render`), so it keeps a palette
+        // row but no top-level keyhint of its own.
+        always("Doctor", "i", Message::OpenDoctorPanel),
+        always("Toolchain setup…", "", Message::OpenBootstrapWizard),
         always("New project…", "n", Message::OpenCreateWizard),
         gated(
             "Add plugin…",
@@ -247,12 +251,9 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_session,
             "no active session",
         ),
-        // `d` is the session view's own DevTools toggle and the workbench's
-        // doctor panel in the *other* context (no session open) — the
-        // full-screen key-namespace swap workbook §B12 defines. Both keep
-        // their key here because both are only ever reachable in their own
-        // context; the palette and help overlay render this one registry, so
-        // the pair shows exactly as the keyboard behaves.
+        // `d` is the session view's own DevTools toggle and means nothing
+        // else (D5) — with no session open it claims no key at all, since
+        // Doctor moved to its own unconditional `i`.
         gated(
             "DevTools",
             "d",

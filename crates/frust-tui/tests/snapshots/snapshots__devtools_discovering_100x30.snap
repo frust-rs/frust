@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │                                                                          
    New project · n       │    ⠋  Waiting for a devtools discovery line…                             
    Add plugin · a        │    no “frust-devtools listening on …” line seen yet — appears            
-   Doctor · d            │    the instant a debug/profile build logs it                             
+   Doctor · i            │    the instant a debug/profile build logs it                             
    Build · b             │                                                                          
-   Clean · c             │                                                                          
+   Clean                 │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
                          │                                                                          

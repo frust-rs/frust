@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │                                                                          
    New project · n       │                                                                          
    Add plugin · a        │    ⠋  Connecting to devtools service…                                    
-   Doctor · d            │    127.0.0.1:53214 · handshake pending                                   
+   Doctor · i            │    127.0.0.1:53214 · handshake pending                                   
    Build · b             │                                                                          
-   Clean · c             │                                                                          
+   Clean                 │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
                          │                                                                          

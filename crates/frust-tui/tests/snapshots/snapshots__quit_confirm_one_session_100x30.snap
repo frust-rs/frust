@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS              │  1 running session will be stopped.                  │▓▓                    
    New project · n    │  Device apps are force-stopped on quit.              │▓▓                    
    Add plugin · a     │                                                      │▓▓                    
-   Doctor · d         │   Quit     Cancel                                    │▓▓                    
+   Doctor · i         │   Quit     Cancel                                    │▓▓                    
    Build · b          │  Enter/y quit · Esc/n cancel                         │▓▓                    
-   Clean · c          ╰──────────────────────────────────────────────────────╯▓▓                    
+   Clean              ╰──────────────────────────────────────────────────────╯▓▓                    
    MCP off · M          ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                    
    DAP off · D           │                                                                          
                          │                                                                          

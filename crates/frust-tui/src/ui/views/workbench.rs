@@ -312,11 +312,21 @@ fn render_sidebar(
     let add_plugin_row = lines.len();
     lines.push(item("Add plugin · a"));
     let doctor_row = lines.len();
-    lines.push(item("Doctor · d"));
+    lines.push(item("Doctor · i"));
     let build_row = lines.len();
     lines.push(item("Build · b"));
     let clean_row = lines.len();
-    lines.push(item("Clean · c"));
+    // D7: `c` only means Clean while no session is active — with one active
+    // it copies build artifacts instead (`runner::translate_key`'s
+    // `has_active_session` predicate), so the row drops its own keyhint
+    // there rather than claiming a key it doesn't currently honor. The click
+    // still opens the confirm dialog either way (see `CleanAction` below).
+    let clean_has_session = state.active_session().is_some();
+    lines.push(item(if clean_has_session {
+        "Clean"
+    } else {
+        "Clean · c"
+    }));
     let mcp_row = lines.len();
     lines.push(mcp_line(state, theme));
     let dap_row = lines.len();
@@ -656,14 +666,16 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
                 .add_modifier(Modifier::BOLD),
         ),
         None => {
-            // `d` is DevTools with a session active and Doctor otherwise — the
-            // same `has_active_session` predicate `runner::translate_key`
-            // gates the two contexts on, so the hint never claims a key the
-            // keyboard doesn't currently honor.
+            // D5: `d` means DevTools only, with an active session, and
+            // nothing otherwise — the same `has_active_session` predicate
+            // `runner::translate_key` gates it on. Doctor lives on its own
+            // unconditional `i` (never claims a key the keyboard doesn't
+            // currently honor), so the hint shows whichever of the two
+            // actually applies.
             let d_hint = if state.active_session().is_some() {
                 "d devtools"
             } else {
-                "d doctor"
+                "i doctor"
             };
             let mut hint = format!("r run · b build · {d_hint} · ⌘ palette · ? help");
             if narrow {

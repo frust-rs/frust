@@ -161,9 +161,9 @@ pub struct AppState {
     /// Populated by a startup preflight and refreshed on demand;
     /// present regardless of whether the panel itself is open.
     pub doctor: DoctorState,
-    /// Whether the doctor panel is open (`d` from the workbench, or the
-    /// titlebar chip / sidebar "Doctor" action). While `true`, it captures
-    /// input and suppresses background mouse regions like the other modals.
+    /// Whether the doctor panel is open (`i` from either screen, or the
+    /// sidebar "Doctor" action). While `true`, it captures input and
+    /// suppresses background mouse regions like the other modals.
     pub doctor_panel_open: bool,
     /// The build-launcher modal, when open (`b` from the workbench, or the
     /// sidebar "Build" action). While `Some`, it captures input and
@@ -185,9 +185,10 @@ pub struct AppState {
     /// source. Populated by a startup preflight and re-run after a
     /// guided-fix session; present regardless of whether the wizard is open.
     pub bootstrap: BootstrapState,
-    /// The bootstrap wizard, when open (the `i` key, or a titlebar
-    /// toolchain-chip click). While `Some`, it captures input and suppresses
-    /// background mouse regions like the other modals.
+    /// The bootstrap wizard, when open (a titlebar toolchain-chip click, or
+    /// the doctor panel's `t` key / "Toolchain setup" button). While `Some`,
+    /// it captures input and suppresses background mouse regions like the
+    /// other modals.
     pub bootstrap_wizard: Option<BootstrapWizard>,
     /// The Add Plugin dialog, when open (`a`, the sidebar "Add plugin" action,
     /// or the palette — `frust-secure-storage`). While `Some`, it

@@ -15,8 +15,8 @@ expression: "render_to_string(100, 30, &state)"
    none runn│  X   Close tab                       f   Toggle follow-tail             │▓▓           
             │  b   Build…                          w   Toggle line wrap               │▓▓           
  ACTIONS    │  c   Clean…                          /   Search logs…                   │▓▓           
-   New proje│  d   Doctor                          v   Select lines…                  │▓▓           
-   Add plugi│  i   Toolchain setup…                y   Copy selection                 │▓▓           
+   New proje│  i   Doctor                          v   Select lines…                  │▓▓           
+   Add plugi│  —   Toolchain setup…                y   Copy selection                 │▓▓           
    Doctor · │  n   New project…                    l   Cycle log level filter         │▓▓           
    Build · b│  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓           
    Clean · c│  ^O  Switch project…                 d   DevTools                       │▓▓           
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
