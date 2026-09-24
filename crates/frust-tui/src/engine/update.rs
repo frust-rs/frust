@@ -6796,9 +6796,17 @@ mod tests {
         assert_eq!(st.toasts.items.len(), 1);
         let toast = &st.toasts.items[0];
         assert_eq!(toast.kind, ToastKind::Warn);
+        // Extract the path from the stale report to get the exact rendering
+        let config_path_str =
+            if let crate::engine::DapIdeReport::Written { ide: _, result } = &stale {
+                result.path.display().to_string()
+            } else {
+                panic!("stale report is not Written variant")
+            };
         assert!(
-            toast.text.contains("/tmp/a/.vscode/launch.json"),
-            "{}",
+            toast.text.contains(&config_path_str),
+            "Config path '{}' not found in toast text: {}",
+            config_path_str,
             toast.text
         );
         assert!(toast.text.contains("1111"), "{}", toast.text);
