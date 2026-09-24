@@ -491,7 +491,13 @@ fn group_kill_unix(child_pid: u32) {
 /// linger) and this function returns, leaving the caller's own
 /// `Child::kill()` fallback as what actually terminates the target. A spawn
 /// failure (`taskkill` missing from `PATH`) also just returns early, same
-/// fallback.
+/// fallback. For the desktop `cargo run` session that fallback still takes
+/// the whole tree down: the direct child there is the rustup proxy, and
+/// rustup holds the toolchain `cargo` (which in turn holds the app) in a
+/// kill-on-close Job Object, so terminating the proxy alone ends all three
+/// (observed with rustup 1.29 on Windows 11). The `taskkill` path itself is
+/// pinned against that real shape by
+/// `spawn_streaming_real_kill_terminates_a_cargo_run_tree_on_windows`.
 ///
 /// A Windows Job Object (`windows-sys`, already in the tree at 0.61.2 through
 /// `frust-shell-windows`) would track the tree without relying on `taskkill`
@@ -1906,6 +1912,114 @@ mod tests {
             "grandchild (pid {grandchild_pid}) still alive 5s after the tree kill — \
              kill did not reach the whole process tree"
         );
+    }
+
+    /// The real desktop-session shape on Windows: `cargo run` through the
+    /// rustup proxy, i.e. `cargo.exe` (the rustup proxy, the direct child) ->
+    /// the toolchain's `cargo.exe` -> the compiled binary. rustup and cargo
+    /// each own a Job Object, which the `cmd`/`powershell` chain above does not
+    /// mimic, so this drives the real tools against a throwaway one-file crate
+    /// (its own target dir, so it never contends with the outer `cargo test`
+    /// for a build lock). Every process on the chain from the direct child
+    /// down to the binary must be gone after `kill()` — the toolchain `cargo`
+    /// included, not just the binary. Repeated a few times (only the first
+    /// iteration builds, so each extra one costs well under a second) so an
+    /// ordering race in the kill path shows up here rather than as a stray
+    /// `cargo.exe` in a manual run.
+    #[cfg(windows)]
+    #[test]
+    fn spawn_streaming_real_kill_terminates_a_cargo_run_tree_on_windows() {
+        const ITERATIONS: usize = 5;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "frust-cargo-run-tree-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"frust_kill_probe\"\nversion = \"0.1.0\"\n\
+             edition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src").join("main.rs"),
+            "fn main() {\n    let path = std::env::args().nth(1).expect(\"pid file\");\n    \
+             std::fs::write(path, std::process::id().to_string()).unwrap();\n    \
+             std::thread::sleep(std::time::Duration::from_secs(300));\n}\n",
+        )
+        .unwrap();
+        let target_dir = dir.join("target").to_string_lossy().to_string();
+
+        let runner = RealProcessRunner;
+        for iteration in 0..ITERATIONS {
+            let pid_file = dir.join(format!("probe-{iteration}.pid"));
+            let pid_file_str = pid_file.to_string_lossy().to_string();
+            let mut handle = runner
+                .spawn_streaming(
+                    "cargo",
+                    &["run", "--quiet", "--", pid_file_str.as_str()],
+                    Some(dir.as_path()),
+                    &[("CARGO_TARGET_DIR", target_dir.as_str())],
+                )
+                .unwrap();
+
+            // The first iteration pays the (tiny) build.
+            let probe_pid = read_pid_when_ready_windows(&pid_file, Duration::from_secs(180))
+                .expect("the probe binary should write its pid once `cargo run` starts it");
+
+            // Walk the parent chain from the probe up to (not including) this
+            // test process: the toolchain `cargo`, then the rustup proxy.
+            let mut chain = vec![probe_pid];
+            while chain.len() < 6 {
+                match windows_parent_pid(*chain.last().unwrap()) {
+                    Some(parent) if parent != std::process::id() && parent != 0 => {
+                        chain.push(parent)
+                    }
+                    _ => break,
+                }
+            }
+            assert!(
+                chain.len() >= 2,
+                "expected at least the probe and its `cargo` parent alive before the kill, \
+                 got {chain:?}"
+            );
+
+            handle.kill();
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut alive: Vec<u32> = chain.clone();
+            while !alive.is_empty() && std::time::Instant::now() < deadline {
+                alive.retain(|pid| !windows_pid_is_dead(*pid));
+                if !alive.is_empty() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            assert!(
+                alive.is_empty(),
+                "iteration {iteration}: {alive:?} of the `cargo run` chain {chain:?} \
+                 still alive 10s after kill()"
+            );
+            assert!(!handle.wait());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The parent pid of `pid` (`Win32_Process.ParentProcessId`, through
+    /// PowerShell), or `None` when the query fails or `pid` is gone.
+    #[cfg(windows)]
+    fn windows_parent_pid(pid: u32) -> Option<u32> {
+        let query =
+            format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId");
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", query.as_str()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
     /// Bounded-poll read of a pid written to `path` by the PowerShell script
