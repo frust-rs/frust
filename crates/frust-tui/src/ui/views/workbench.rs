@@ -255,11 +255,33 @@ fn render_sidebar(
     // are interactive device rows (and the refresh affordance) so their
     // single-row click rects can be registered after layout.
     let mut lines = vec![heading("PROJECTS")];
-    let project_rows_start = lines.len();
-    // `project_lines` collapses to a single "(none detected)" placeholder
-    // when empty (never clickable); otherwise it's one line per project.
-    let project_row_count = state.projects.len();
-    lines.extend(project_lines(state, theme));
+    // `project_rows[k]` is the line index the k-th `state.projects` entry
+    // drew at — local rows first, then (only when non-empty) a blank line, a
+    // "PREVIOUS PROJECTS" heading, and the previous rows, mirroring
+    // `device_rows` below. `state.projects` order is `[local..., previous...]`
+    // (decision D6), so `project_rows`' own order already lines up with
+    // `state.projects`' indices — no separate index remap needed.
+    let mut project_rows: Vec<usize> = Vec::new();
+    let local_count = state.local_count();
+    if local_count == 0 {
+        lines.push(Line::styled(
+            "  (none detected)",
+            Style::default().fg(theme.muted()),
+        ));
+    } else {
+        for project in &state.projects[..local_count] {
+            project_rows.push(lines.len());
+            lines.push(project_line(state, project, theme));
+        }
+    }
+    if local_count < state.projects.len() {
+        lines.push(Line::from(""));
+        lines.push(heading("PREVIOUS PROJECTS"));
+        for project in &state.projects[local_count..] {
+            project_rows.push(lines.len());
+            lines.push(project_line(state, project, theme));
+        }
+    }
     lines.push(Line::from(""));
 
     // DEVICES header carries the refresh affordance on the right.
@@ -307,8 +329,8 @@ fn render_sidebar(
         let y = inner.y + row as u16;
         (y < inner.bottom()).then(|| Rect::new(inner.x, y, inner.width, 1))
     };
-    for i in 0..project_row_count {
-        if let Some(rect) = row_rect(project_rows_start + i) {
+    for (i, &row) in project_rows.iter().enumerate() {
+        if let Some(rect) = row_rect(row) {
             mouse.click(rect, RegionId::ProjectRow(i), Message::SwitchProject(i));
             mouse.context(rect, ContextTarget::ProjectRow(i));
         }
@@ -527,37 +549,26 @@ fn device_glyph(
     (color, format!("{platform}·{kind}"))
 }
 
-/// One line per detected project (bounded-walk detection); the active one
-/// (`state.project_root`, first found for now — a full switcher isn't built yet)
+/// One sidebar/switcher-dropdown row for `project` (used for both the
+/// "PROJECTS" and "PREVIOUS PROJECTS" sections — the row itself carries no
+/// marker of which section it's in); the active one (`state.project_root`)
 /// gets the hover chevron and accent color, the rest render muted.
-fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
-    if state.projects.is_empty() {
-        return vec![Line::styled(
-            "  (none detected)",
-            Style::default().fg(theme.muted()),
-        )];
+fn project_line(state: &AppState, project: &std::path::Path, theme: &Theme) -> Line<'static> {
+    let name = project
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| project.to_string_lossy().to_string());
+    let active = state.project_root.as_deref() == Some(project);
+    if active {
+        Line::styled(
+            format!(" {} {name}", theme.icons.chevron()),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Line::styled(format!("   {name}"), Style::default().fg(theme.muted()))
     }
-    state
-        .projects
-        .iter()
-        .map(|project| {
-            let name = project
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| project.to_string_lossy().to_string());
-            let active = state.project_root.as_deref() == Some(project.as_path());
-            if active {
-                Line::styled(
-                    format!(" {} {name}", theme.icons.chevron()),
-                    Style::default()
-                        .fg(theme.accent())
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Line::styled(format!("   {name}"), Style::default().fg(theme.muted()))
-            }
-        })
-        .collect()
 }
 
 fn render_dashboard(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Theme) {
@@ -840,5 +851,102 @@ mod tests {
                 "`{token}` row is {width} cols, sidebar inner is {inner_width}"
             );
         }
+    }
+
+    // ── PROJECTS / PREVIOUS PROJECTS sidebar split (decision D6) ──────────
+
+    use crate::ui::mouse::{MouseCtx, MouseRegions};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use std::path::PathBuf;
+
+    fn sidebar_state(projects: Vec<PathBuf>, local_count: usize) -> AppState {
+        AppState {
+            screen: crate::engine::Screen::Workbench,
+            project_root: projects.first().cloned(),
+            local_project_count: local_count,
+            projects,
+            ..AppState::default()
+        }
+    }
+
+    /// Render just the sidebar into a plain string, registering its mouse
+    /// regions into `regions` — mirrors `add_plugin`'s
+    /// `render_dialog_to_string` helper.
+    fn render_sidebar_to_string(state: &AppState, regions: &mut MouseRegions) -> String {
+        let backend = TestBackend::new(30, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::frust_dark();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(regions);
+                let area = Rect::new(0, 0, 30, 30);
+                render_sidebar(frame, area, state, &theme, &mut ctx);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell(Position::new(x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn both_headings_appear_in_order_when_previous_projects_exist() {
+        let state = sidebar_state(
+            vec![PathBuf::from("/tmp/local"), PathBuf::from("/tmp/prev")],
+            1,
+        );
+        let mut regions = MouseRegions::new();
+        let text = render_sidebar_to_string(&state, &mut regions);
+        let projects_at = text.find("PROJECTS").expect("PROJECTS heading present");
+        let previous_at = text
+            .find("PREVIOUS PROJECTS")
+            .expect("PREVIOUS PROJECTS heading present");
+        assert!(
+            projects_at < previous_at,
+            "PROJECTS must render before PREVIOUS PROJECTS:\n{text}"
+        );
+        assert!(text.contains("local"), "{text}");
+        assert!(text.contains("prev"), "{text}");
+    }
+
+    #[test]
+    fn no_previous_heading_when_every_project_is_local() {
+        let state = sidebar_state(vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")], 2);
+        let mut regions = MouseRegions::new();
+        let text = render_sidebar_to_string(&state, &mut regions);
+        assert!(
+            !text.contains("PREVIOUS PROJECTS"),
+            "no previous projects means no heading:\n{text}"
+        );
+    }
+
+    #[test]
+    fn clicking_the_first_previous_row_dispatches_switch_project_at_local_count() {
+        let local_count = 1;
+        let state = sidebar_state(
+            vec![PathBuf::from("/tmp/local"), PathBuf::from("/tmp/prev")],
+            local_count,
+        );
+        let mut regions = MouseRegions::new();
+        let _ = render_sidebar_to_string(&state, &mut regions);
+        // Scan straight down the sidebar's first column for the row that
+        // dispatches `SwitchProject(local_count)` — the first PREVIOUS row.
+        let hit = (0..30).find(|&y| {
+            matches!(regions.click_at(2, y), Some(Message::SwitchProject(i)) if i == local_count)
+        });
+        assert!(
+            hit.is_some(),
+            "no row dispatched SwitchProject({local_count})"
+        );
     }
 }

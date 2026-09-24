@@ -137,24 +137,56 @@ fn save_recent_project(path: &Path, project: &Path) {
     let _ = fs::write(path, doc.to_string());
 }
 
-/// Merge the persisted recent list with freshly `detect`ed project roots:
-/// every recent entry that still exists on disk, in recency
-/// order, followed by any detected root not already present — deduped
-/// throughout. A recent entry that no longer exists (moved/deleted since
-/// last use) is silently dropped rather than shown as a dead switcher row.
-pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(recent.len() + detected.len());
+/// Whether `path` is `root` itself or sits nested under it — lexical only
+/// (`Path::starts_with`, which already treats `root` as a whole-component
+/// prefix, so a path equal to `root` counts too), never canonicalised. This
+/// is the one comparison [`split_local_and_previous`]'s "is this recent
+/// project under the cwd" classification *and* its cross-list dedupe (two
+/// paths naming the same project, checked by containment both ways via
+/// [`paths_match`]) go through, so a later platform-aware upgrade
+/// (case-insensitive matching, Windows' `\\?\`-prefix normalisation) swaps
+/// this one function rather than every call site.
+pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+}
+
+/// Whether `a` and `b` name the same project root — mutual containment
+/// through [`path_is_within`], so it inherits that same future upgrade.
+fn paths_match(a: &Path, b: &Path) -> bool {
+    path_is_within(a, b) && path_is_within(b, a)
+}
+
+/// Split the persisted recent list and freshly `detect`ed project roots into
+/// one ordered `AppState::projects` vec plus the boundary between its two
+/// sections (decision D6): `[..local_count]` is "local" — every `detected`
+/// root, in walk order, followed by any *existing* recent entry that sits
+/// under `cwd` but that the bounded walk missed (still local — appended at
+/// the end of the local section, in recency order); `[local_count..]` is
+/// "previous" — every other existing recent entry not already counted as
+/// local, kept in recency order (most-recent first). A recent entry that no
+/// longer exists on disk (moved/deleted since last use) is silently dropped
+/// rather than shown as a dead switcher row; duplicates are dropped
+/// throughout via [`paths_match`].
+pub fn split_local_and_previous(
+    cwd: &Path,
+    recent: &[PathBuf],
+    detected: &[PathBuf],
+) -> (Vec<PathBuf>, usize) {
+    let mut local: Vec<PathBuf> = detected.to_vec();
+    let mut previous: Vec<PathBuf> = Vec::new();
     for p in recent {
-        if p.is_dir() && !out.contains(p) {
-            out.push(p.clone());
+        if !p.is_dir() || local.iter().any(|l| paths_match(l, p)) {
+            continue;
+        }
+        if path_is_within(p, cwd) {
+            local.push(p.clone());
+        } else if !previous.iter().any(|q| paths_match(q, p)) {
+            previous.push(p.clone());
         }
     }
-    for p in detected {
-        if !out.contains(p) {
-            out.push(p.clone());
-        }
-    }
-    out
+    let local_count = local.len();
+    local.extend(previous);
+    (local, local_count)
 }
 
 // ── Settings persistence: sidebar width, mouse-capture preference ──────────
@@ -573,20 +605,80 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    // ── split_local_and_previous (decision D6) ──────────────────────────
+
     #[test]
-    fn merge_puts_existing_recent_first_deduped_then_detected() {
-        let home = unique_temp_home(); // a real, existing dir stand-in
-        let sibling = home.join("child");
-        fs::create_dir_all(&sibling).unwrap();
-        let recent = vec![sibling.clone(), PathBuf::from("/does/not/exist")];
-        let detected = vec![sibling.clone(), PathBuf::from("/tmp/other-detected")];
-        let merged = merge_recent_and_detected(&recent, &detected);
+    fn a_cwd_project_plus_unrelated_recents_puts_cwd_first_with_local_count_one() {
+        let home = unique_temp_home();
+        let cwd = home.join("cwd_project");
+        fs::create_dir_all(&cwd).unwrap();
+        let r1 = home.join("r1");
+        let r2 = home.join("r2");
+        let r3 = home.join("r3");
+        for r in [&r1, &r2, &r3] {
+            fs::create_dir_all(r).unwrap();
+        }
+        let recent = vec![r1.clone(), r2.clone(), r3.clone()];
+        let detected = vec![cwd.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &detected);
+        assert_eq!(projects, vec![cwd, r1, r2, r3]);
+        assert_eq!(local_count, 1);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_cwd_project_yields_local_count_zero_with_the_most_recent_first() {
+        let home = unique_temp_home();
+        let cwd = home.join("empty_cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let r1 = home.join("r1");
+        let r2 = home.join("r2");
+        fs::create_dir_all(&r1).unwrap();
+        fs::create_dir_all(&r2).unwrap();
+        let recent = vec![r1.clone(), r2.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &[]);
+        assert_eq!(local_count, 0);
+        assert_eq!(projects, vec![r1.clone(), r2]);
         assert_eq!(
-            merged,
-            vec![sibling.clone(), PathBuf::from("/tmp/other-detected")],
-            "existing recent entry first, deduped against detected; a dead \
-             recent entry is dropped"
+            projects.first(),
+            Some(&r1),
+            "the most-recently-opened project would become active"
         );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_recent_under_the_cwd_that_the_walk_missed_still_counts_as_local() {
+        let home = unique_temp_home();
+        let cwd = home.join("cwd");
+        // Nested well past the bounded walk's depth — `detected` never finds
+        // it, but it's still a real, existing directory under `cwd`.
+        let deep = cwd.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        let outside = home.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let recent = vec![deep.clone(), outside.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &[]);
+        assert_eq!(local_count, 1, "the under-cwd recent is local");
+        assert_eq!(projects, vec![deep, outside]);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn split_dedupes_a_recent_already_present_as_detected() {
+        let home = unique_temp_home();
+        let cwd = home.join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let recent = vec![cwd.clone(), PathBuf::from("/does/not/exist")];
+        let detected = vec![cwd.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &detected);
+        assert_eq!(
+            projects,
+            vec![cwd],
+            "the recent duplicate of a detected root is dropped, and so is \
+             the dead recent entry"
+        );
+        assert_eq!(local_count, 1);
         let _ = fs::remove_dir_all(&home);
     }
 

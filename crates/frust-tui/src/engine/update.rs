@@ -1893,13 +1893,12 @@ fn open_create_wizard(state: &mut AppState) -> Outcome {
 }
 
 /// Open `root` as the active project in place (a freshly scaffolded project, or
-/// a switch): register it in `projects` (front, recent-first), make it active,
-/// show the workbench, focus its first session (if any), and request the
-/// runner persist it as most-recently-opened.
+/// a switch): register it in `projects` keeping the D6 local/previous
+/// boundary invariant (see `AppState::insert_project`), make it active, show
+/// the workbench, focus its first session (if any), and request the runner
+/// persist it as most-recently-opened.
 fn open_project(state: &mut AppState, root: PathBuf) -> Outcome {
-    if !state.projects.contains(&root) {
-        state.projects.insert(0, root.clone());
-    }
+    state.insert_project(root.clone());
     state.project_root = Some(root.clone());
     state.screen = Screen::Workbench;
     state.active_session = state.sessions.iter().position(|s| s.project_root == root);

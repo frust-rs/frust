@@ -97,10 +97,34 @@ pub struct AppState {
     /// project — the full switcher (`project_switcher_open`) lets the user
     /// change which one is active.
     pub project_root: Option<PathBuf>,
-    /// Every project root the bounded [`detect`] walk found, in a
-    /// deterministic (name-sorted) order; `projects[0]` is `project_root`.
-    /// Empty on the welcome screen.
+    /// Every project the sidebar/switcher lists, ordered `[local...,
+    /// previous...]` (decision D6) — see [`Self::local_project_count`] for
+    /// the boundary. "Local" is every project the bounded [`detect`] walk
+    /// found under `cwd` (plus a still-existing recent under `cwd` the walk
+    /// missed); "previous" is every other still-existing persisted recent.
+    /// Every index-based path (`Message::SwitchProject`,
+    /// `ContextTarget::ProjectRow`, `project_switcher_cursor`, the digit
+    /// shortcuts) indexes this one vec — the split only changes how the
+    /// sidebar/switcher render it, never what an index means. Empty on the
+    /// welcome screen.
     pub projects: Vec<PathBuf>,
+    /// The working directory `detect` walked, recorded once so a later
+    /// `state.projects` insertion (e.g. a freshly scaffolded project — see
+    /// [`Self::insert_project`]) can classify the new root the same way
+    /// [`super::persist::split_local_and_previous`] classified everything
+    /// else at startup. Never re-read from the process environment after
+    /// [`Self::new`]/[`Self::detect`] set it.
+    pub cwd: PathBuf,
+    /// The `projects` boundary: `projects[..local_project_count]` is
+    /// "local", `projects[local_project_count..]` is "previous" (decision
+    /// D6) — read through [`Self::local_count`], which clamps to
+    /// `projects.len()`, rather than this raw field directly. Defaults to
+    /// `usize::MAX` ([`Default`]/most hand-built test fixtures never set
+    /// this new field explicitly), which clamps to "every project is
+    /// local" — the pre-split, single-PROJECTS-section behavior — rather
+    /// than silently reclassifying an untouched fixture's projects as
+    /// "previous".
+    pub local_project_count: usize,
     /// Every supervised session's view-model, in start (id) order. The tab bar
     /// renders these grouped by project; `active_session` indexes this vec.
     pub sessions: Vec<SessionView>,
@@ -245,12 +269,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build the initial model from the current working directory, merged
-    /// with the persisted recent-projects list: a bounded walk
-    /// (see [`Self::detect`]) finds every `frust.toml` marker under the cwd,
-    /// then [`super::persist::merge_recent_and_detected`] prepends any
-    /// still-existing recently-opened project not already found, deduped —
-    /// "recent first, deduped". A cwd-detected project stays the active one
+    /// Build the initial model from the current working directory, split
+    /// against the persisted recent-projects list (decision D6): a bounded
+    /// walk (see [`Self::detect`]) finds every `frust.toml` marker under the
+    /// cwd, then [`super::persist::split_local_and_previous`] appends every
+    /// still-existing recent not already counted as local — "local first,
+    /// previous after, deduped". A cwd-detected project stays the active one
     /// (unsurprising `cd`-into-a-project-then-run behavior); with none
     /// detected, the most-recently-opened project opens instead of the
     /// welcome screen — "from any directory". Only the
@@ -261,7 +285,10 @@ impl AppState {
         let mut state = Self::detect(&cwd);
         let detected_active = state.project_root.clone();
         let recent = super::persist::load_recent_projects();
-        state.projects = super::persist::merge_recent_and_detected(&recent, &state.projects);
+        let (projects, local_project_count) =
+            super::persist::split_local_and_previous(&cwd, &recent, &state.projects);
+        state.projects = projects;
+        state.local_project_count = local_project_count;
         state.project_root = detected_active.or_else(|| state.projects.first().cloned());
         if state.project_root.is_some() {
             state.screen = Screen::Workbench;
@@ -284,9 +311,13 @@ impl AppState {
     /// Detection core (testable without touching the process cwd/reading a
     /// real project tree): [`find_projects`] walks `dir` for `frust.toml`
     /// markers; the first found (if any) becomes the active `project_root`.
+    /// Every root it finds is "local" — `local_project_count` is set to the
+    /// whole list's length — since a bounded walk never reaches outside
+    /// `dir` in the first place.
     pub fn detect(dir: &Path) -> Self {
         let projects = find_projects(dir);
         let project_root = projects.first().cloned();
+        let local_project_count = projects.len();
         let screen = if projects.is_empty() {
             Screen::Welcome
         } else {
@@ -301,6 +332,8 @@ impl AppState {
             palette: None,
             project_root,
             projects,
+            cwd: dir.to_path_buf(),
+            local_project_count,
             sessions: Vec::new(),
             active_session: None,
             wrap: false,
@@ -543,6 +576,45 @@ impl AppState {
             .unwrap_or(0)
     }
 
+    /// The effective `projects` local/previous boundary (decision D6):
+    /// `local_project_count` clamped to `projects.len()`. Every render/
+    /// insert site reads through this rather than the raw field, so a value
+    /// left at its `usize::MAX` default (or merely stale after `projects`
+    /// shrinks) degrades to "everything is local" — the one section, no
+    /// "PREVIOUS PROJECTS" heading, single sidebar list a fixture that never
+    /// set this field expects — rather than panicking or under-counting into
+    /// the previous section.
+    pub fn local_count(&self) -> usize {
+        self.local_project_count.min(self.projects.len())
+    }
+
+    /// Insert `root` into `projects`, keeping the D6 local/previous
+    /// boundary invariant — the one seam every `state.projects` mutation
+    /// site (today, `engine::update::open_project`, for a freshly scaffolded
+    /// or newly opened project) goes through, so the boundary never drifts
+    /// out of sync with a scattered set of `insert`/`push` calls. A root
+    /// already present is left exactly where it is (no reorder, no
+    /// duplicate) — this only handles a genuinely new one. A new root under
+    /// `self.cwd` ([`super::persist::path_is_within`], the same test
+    /// [`super::persist::split_local_and_previous`] uses) lands at the end
+    /// of the local section, bumping the count; anything else lands at the
+    /// head of the previous section — both are the same absolute index
+    /// (`local_count()`, right where the previous section begins), so only
+    /// whether the count is bumped differs.
+    pub fn insert_project(&mut self, root: PathBuf) {
+        if self.projects.contains(&root) {
+            return;
+        }
+        let local_count = self.local_count();
+        let becomes_local = super::persist::path_is_within(&root, &self.cwd);
+        self.projects.insert(local_count, root);
+        self.local_project_count = if becomes_local {
+            local_count + 1
+        } else {
+            local_count
+        };
+    }
+
     /// The sessions grouped by project, preserving first-seen project order and
     /// each project's session order — the tab-bar / sidebar grouping. Each
     /// group is `(project_root, [(flat tab index, &session)])`, where the flat
@@ -574,6 +646,13 @@ impl Default for AppState {
             palette: None,
             project_root: None,
             projects: Vec::new(),
+            cwd: PathBuf::new(),
+            // See the field doc: `usize::MAX` clamps (via `local_count`) to
+            // "every project is local" for a fixture built via
+            // `..Default::default()` that sets `projects` without also
+            // setting this new field — most hand-rolled `AppState` literals
+            // across the crate's own test suites.
+            local_project_count: usize::MAX,
             sessions: Vec::new(),
             active_session: None,
             wrap: false,
@@ -781,6 +860,88 @@ mod tests {
         assert_eq!(state.projects, vec![bubblebench.clone(), huddle]);
         assert_eq!(state.project_root, Some(bubblebench));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_counts_every_found_root_as_local() {
+        let root = unique_temp_dir("detect-local-count");
+        touch_project(&root);
+        let child = root.join("examples");
+        fs::create_dir_all(&child).unwrap();
+        touch_project(&child);
+        let state = AppState::detect(&root);
+        assert_eq!(state.local_count(), state.projects.len());
+        assert_eq!(state.cwd, root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── local_count() / insert_project() (decision D6) ────────────────────
+
+    #[test]
+    fn local_count_clamps_the_default_sentinel_to_every_project() {
+        let state = AppState {
+            projects: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            ..AppState::default()
+        };
+        assert_eq!(
+            state.local_count(),
+            2,
+            "a fixture that never set local_project_count treats every \
+             project as local"
+        );
+    }
+
+    #[test]
+    fn insert_project_under_the_cwd_lands_at_the_end_of_the_local_section() {
+        let mut state = AppState {
+            cwd: PathBuf::from("/tmp/cwd"),
+            projects: vec![PathBuf::from("/tmp/cwd/a"), PathBuf::from("/tmp/other/r1")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from("/tmp/cwd/b"));
+        assert_eq!(
+            state.projects,
+            vec![
+                PathBuf::from("/tmp/cwd/a"),
+                PathBuf::from("/tmp/cwd/b"),
+                PathBuf::from("/tmp/other/r1"),
+            ]
+        );
+        assert_eq!(state.local_count(), 2);
+    }
+
+    #[test]
+    fn insert_project_outside_the_cwd_lands_at_the_head_of_previous() {
+        let mut state = AppState {
+            cwd: PathBuf::from("/tmp/cwd"),
+            projects: vec![PathBuf::from("/tmp/cwd/a"), PathBuf::from("/tmp/other/r1")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from("/tmp/other/r2"));
+        assert_eq!(
+            state.projects,
+            vec![
+                PathBuf::from("/tmp/cwd/a"),
+                PathBuf::from("/tmp/other/r2"),
+                PathBuf::from("/tmp/other/r1"),
+            ]
+        );
+        assert_eq!(state.local_count(), 1, "the local section is unchanged");
+    }
+
+    #[test]
+    fn insert_project_already_present_is_a_noop() {
+        let mut state = AppState {
+            cwd: PathBuf::from("/tmp/cwd"),
+            projects: vec![PathBuf::from("/tmp/cwd/a")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from("/tmp/cwd/a"));
+        assert_eq!(state.projects, vec![PathBuf::from("/tmp/cwd/a")]);
+        assert_eq!(state.local_count(), 1);
     }
 
     // ── animating() ─────────────────────────────────────────────────────────

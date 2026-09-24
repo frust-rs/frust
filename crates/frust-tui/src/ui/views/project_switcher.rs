@@ -2,10 +2,13 @@
 //! overlaying the sidebar's PROJECTS section (same column range — full
 //! sidebar width, flush with its left edge — so it never bleeds a stray
 //! sliver of the section it's replacing on either side), listing every
-//! detected/recent project. Opened via the titlebar `▾` chevron or
-//! `Ctrl+O`/`p`; the base workbench layer renders with a *suppressed*
-//! `MouseCtx` while this is open (see `crate::ui::render`) — the same
-//! base-layer suppression the run-config modal uses.
+//! local/previous project (decision D6, same split the sidebar renders) —
+//! local rows first, then, only when both sections are non-empty, a
+//! non-clickable "Previous projects" separator and the previous rows.
+//! Opened via the titlebar `▾` chevron or `Ctrl+O`/`p`; the base workbench
+//! layer renders with a *suppressed* `MouseCtx` while this is open (see
+//! `crate::ui::render`) — the same base-layer suppression the run-config
+//! modal uses.
 //!
 //! Layering: renders `&AppState` and only *registers* interaction (item
 //! clicks); it never mutates the engine.
@@ -20,6 +23,17 @@ use crate::engine::{AppState, Message, RegionId};
 use crate::ui::layout::{Shell, sidebar_main};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
+
+/// One rendered dropdown row: either a project (its `state.projects` index)
+/// or the non-clickable "Previous projects" separator between the local and
+/// previous sections (decision D6) — `state.project_switcher_cursor` and the
+/// digit shortcuts stay indices into `state.projects` throughout; only the
+/// *rendered* row offset shifts when a separator is inserted, so `Row::Item`
+/// carries the same index the cursor already uses, unadjusted.
+enum Row {
+    Item(usize),
+    Separator,
+}
 
 /// Render the dropdown over the sidebar's PROJECTS section, registering one
 /// click region per listed project.
@@ -40,7 +54,18 @@ pub fn render(
     let shell = Shell::split(area);
     let (sidebar, _main) = sidebar_main(shell.body);
 
-    let height = (state.projects.len() as u16 + 2).min(sidebar.height);
+    let local_count = state.local_count();
+    let previous_count = state.projects.len() - local_count;
+    // A separator row is only meaningful between two non-empty sections.
+    let has_separator = local_count > 0 && previous_count > 0;
+
+    let mut rows: Vec<Row> = (0..local_count).map(Row::Item).collect();
+    if has_separator {
+        rows.push(Row::Separator);
+    }
+    rows.extend((local_count..state.projects.len()).map(Row::Item));
+
+    let height = (rows.len() as u16 + 2).min(sidebar.height);
     if height < 3 {
         // Not enough room to show the border plus at least one row.
         return;
@@ -59,8 +84,19 @@ pub fn render(
     let inner = block.inner(box_);
     frame.render_widget(block, box_);
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(state.projects.len());
-    for (i, project) in state.projects.iter().enumerate() {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let i = match row {
+            Row::Item(i) => *i,
+            Row::Separator => {
+                lines.push(Line::styled(
+                    "   Previous projects",
+                    Style::default().fg(theme.muted()),
+                ));
+                continue;
+            }
+        };
+        let project = &state.projects[i];
         let name = project
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -85,15 +121,112 @@ pub fn render(
     }
     frame.render_widget(Paragraph::new(lines), inner);
 
-    for i in 0..state.projects.len() {
-        let row_y = inner.y + i as u16;
+    for (row_offset, row) in rows.iter().enumerate() {
+        let row_y = inner.y + row_offset as u16;
         if row_y >= inner.bottom() {
             break;
         }
-        mouse.click(
-            Rect::new(inner.x, row_y, inner.width, 1),
-            RegionId::ProjectMenuItem(i),
-            Message::SwitchProject(i),
+        if let Row::Item(i) = row {
+            mouse.click(
+                Rect::new(inner.x, row_y, inner.width, 1),
+                RegionId::ProjectMenuItem(*i),
+                Message::SwitchProject(*i),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::mouse::MouseRegions;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use std::path::PathBuf;
+
+    fn switcher_state(projects: Vec<PathBuf>, local_count: usize, cursor: usize) -> AppState {
+        AppState {
+            screen: crate::engine::Screen::Workbench,
+            project_root: projects.first().cloned(),
+            local_project_count: local_count,
+            project_switcher_open: true,
+            project_switcher_cursor: cursor,
+            projects,
+            ..AppState::default()
+        }
+    }
+
+    /// Render the dropdown into a plain string, registering its mouse
+    /// regions into `regions` — mirrors `workbench`'s own render-test helper.
+    fn render_to_string(state: &AppState, regions: &mut MouseRegions) -> String {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::frust_dark();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(regions);
+                let area = frame.area();
+                render(frame, area, state, &theme, &mut ctx);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell(Position::new(x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn a_separator_row_sits_between_local_and_previous_when_both_are_non_empty() {
+        let state = switcher_state(
+            vec![PathBuf::from("/tmp/local"), PathBuf::from("/tmp/prev")],
+            1,
+            0,
+        );
+        let mut regions = MouseRegions::new();
+        let text = render_to_string(&state, &mut regions);
+        assert!(text.contains("Previous projects"), "{text}");
+    }
+
+    #[test]
+    fn no_separator_row_when_every_project_is_local() {
+        let state = switcher_state(vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")], 2, 0);
+        let mut regions = MouseRegions::new();
+        let text = render_to_string(&state, &mut regions);
+        assert!(!text.contains("Previous projects"), "{text}");
+    }
+
+    /// The separator never registers a click region, and the cursor/digit
+    /// vocabulary the row *after* it dispatches is still a `state.projects`
+    /// index — only the rendered row offset moved.
+    #[test]
+    fn the_separator_row_is_never_clickable_and_indices_stay_into_projects() {
+        let local_count = 1;
+        let state = switcher_state(
+            vec![PathBuf::from("/tmp/local"), PathBuf::from("/tmp/prev")],
+            local_count,
+            0,
+        );
+        let mut regions = MouseRegions::new();
+        let _ = render_to_string(&state, &mut regions);
+        let hits: Vec<usize> = (0..30)
+            .filter_map(|y| match regions.click_at(3, y) {
+                Some(Message::SwitchProject(i)) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hits,
+            vec![0, local_count],
+            "exactly two clickable rows, no region for the separator"
         );
     }
 }
