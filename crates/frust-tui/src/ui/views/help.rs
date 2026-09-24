@@ -199,10 +199,9 @@ mod tests {
         s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)
     }
 
-    /// Regression test for the W4 fix this card lands: off macOS, the
-    /// registry's `Alt+m` hint is 5 display columns wide — wider than the
-    /// old fixed `const HINT_WIDTH: usize = 4` this file used to hard-code.
-    /// Checked to fail against that pre-fix code: hardcoding
+    /// Regression test: off macOS, the registry's `Alt+m` hint is 5 display
+    /// columns wide — wider than a fixed `const HINT_WIDTH: usize = 4` would
+    /// allow. Checked to fail against that fixed-width code: hardcoding
     /// `hint_column_width` back to `4` and rerunning this test fails the
     /// "Toggle mouse capture" row's title-position assertion below, because
     /// `format!("{:<4}", "Alt+m")` doesn't pad or truncate a 5-char value
