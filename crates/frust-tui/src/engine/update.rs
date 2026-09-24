@@ -1653,14 +1653,35 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             request_ide_config(state, port, project_root, WriteMode::Refresh)
         }
         Message::DapIdeConfig(report) => {
-            let kind = if report.is_failure() {
-                ToastKind::Error
-            } else {
-                ToastKind::Info
+            // An automatic write's report arrives tagged with its project and
+            // IDE: a repeating outcome (stale port, failure) toasts once per
+            // pair per run. The explicit path's report arrives bare and
+            // always toasts. Either way the dialog keeps the latest outcome.
+            let (report, toast) = match report {
+                DapIdeReport::Auto {
+                    project_root,
+                    ide,
+                    report,
+                } => {
+                    let toast = state
+                        .dap_settings
+                        .admit_auto_toast(&project_root, ide, &report);
+                    (*report, toast)
+                }
+                report => (report, true),
             };
-            state
-                .toasts
-                .push(kind, format!("DAP · {}", report.summary()));
+            if toast {
+                let kind = if report.is_failure() {
+                    ToastKind::Error
+                } else if report.is_stale_port() {
+                    ToastKind::Warn
+                } else {
+                    ToastKind::Info
+                };
+                state
+                    .toasts
+                    .push(kind, format!("DAP · {}", report.summary()));
+            }
             state.dap_settings.last_ide_config = Some(report);
             Outcome::redraw()
         }
@@ -1801,10 +1822,8 @@ fn launch_effect(state: &AppState, specs: Vec<SessionSpec>) -> Option<Effect> {
     let mut roots: Vec<&Path> = Vec::new();
     for spec in &specs {
         let root = spec.project_root.as_path();
-        if !roots
-            .iter()
-            .any(|seen| seen.components().eq(root.components()))
-        {
+        // `Path` equality is already component-wise.
+        if !roots.contains(&root) {
             roots.push(root);
         }
     }
@@ -6714,6 +6733,151 @@ mod tests {
         update(&mut st, Message::DapIdeConfig(report.clone()));
         assert_eq!(st.dap_settings.last_ide_config, Some(report));
         assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+    }
+
+    /// An automatic report, as the runner posts it: tagged with its project
+    /// and IDE.
+    fn auto_report(
+        root: &str,
+        ide: frust_dap::ide_config::ParentIde,
+        report: crate::engine::DapIdeReport,
+    ) -> crate::engine::DapIdeReport {
+        crate::engine::DapIdeReport::Auto {
+            project_root: PathBuf::from(root),
+            ide,
+            report: Box::new(report),
+        }
+    }
+
+    fn stale_report(root: &str) -> crate::engine::DapIdeReport {
+        crate::engine::DapIdeReport::Written {
+            ide: frust_dap::ide_config::ParentIde::VSCode,
+            result: frust_dap::ide_config::IdeConfigResult {
+                path: PathBuf::from(root).join(".vscode/launch.json"),
+                action: frust_dap::ide_config::ConfigAction::StalePort {
+                    existing: 1111,
+                    bound: 41_234,
+                },
+            },
+        }
+    }
+
+    /// A kept entry naming a stale port warns once per (root, IDE) per run,
+    /// naming the file, both ports and the fix — and never again on a repeat,
+    /// while the dialog still shows the latest outcome.
+    #[test]
+    fn an_automatic_stale_port_toasts_once_per_root_and_ide() {
+        use frust_dap::ide_config::ParentIde;
+        let mut st = dap_workbench(Some(ParentIde::VSCode));
+        let stale = stale_report("/tmp/a");
+
+        let out = update(
+            &mut st,
+            Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::VSCode, stale.clone())),
+        );
+        assert!(out.redraw);
+        assert_eq!(st.toasts.items.len(), 1);
+        let toast = &st.toasts.items[0];
+        assert_eq!(toast.kind, ToastKind::Warn);
+        assert!(
+            toast.text.contains("/tmp/a/.vscode/launch.json"),
+            "{}",
+            toast.text
+        );
+        assert!(toast.text.contains("1111"), "{}", toast.text);
+        assert!(toast.text.contains("41234"), "{}", toast.text);
+        assert!(
+            toast.text.contains("press g in DAP settings to refresh"),
+            "{}",
+            toast.text
+        );
+        assert_eq!(
+            st.dap_settings.last_ide_config,
+            Some(stale.clone()),
+            "the dialog stores the unwrapped report"
+        );
+
+        // The next launch / bind: same pair, no second toast.
+        for _ in 0..3 {
+            update(
+                &mut st,
+                Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::VSCode, stale.clone())),
+            );
+        }
+        assert_eq!(st.toasts.items.len(), 1, "a repeat never toasts again");
+        assert_eq!(st.dap_settings.last_ide_config, Some(stale));
+
+        // Another project is its own pair.
+        update(
+            &mut st,
+            Message::DapIdeConfig(auto_report(
+                "/tmp/b",
+                ParentIde::VSCode,
+                stale_report("/tmp/b"),
+            )),
+        );
+        assert_eq!(st.toasts.items.len(), 2);
+    }
+
+    /// An automatic failure (e.g. an unparseable existing config) errors once
+    /// per (root, IDE) per run instead of on every launch.
+    #[test]
+    fn an_automatic_failure_toasts_once_per_root_and_ide() {
+        use frust_dap::ide_config::ParentIde;
+        let mut st = dap_workbench(Some(ParentIde::Zed));
+        let failed = crate::engine::DapIdeReport::Failed("invalid JSON in debug.json".to_string());
+        for _ in 0..3 {
+            update(
+                &mut st,
+                Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::Zed, failed.clone())),
+            );
+        }
+        assert_eq!(st.toasts.items.len(), 1);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+        assert_eq!(st.dap_settings.last_ide_config, Some(failed.clone()));
+
+        update(
+            &mut st,
+            Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::Emacs, failed)),
+        );
+        assert_eq!(st.toasts.items.len(), 2, "another IDE is its own pair");
+    }
+
+    /// The explicit `g` path's reports arrive untagged and always toast —
+    /// even an outcome the automatic path has already spent its toast on.
+    #[test]
+    fn the_explicit_path_reports_every_outcome_every_time() {
+        use frust_dap::ide_config::ParentIde;
+        let mut st = dap_workbench(Some(ParentIde::VSCode));
+        let failed = crate::engine::DapIdeReport::Failed("permission denied".to_string());
+        update(
+            &mut st,
+            Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::VSCode, failed.clone())),
+        );
+        assert_eq!(st.toasts.items.len(), 1);
+        st.toasts.items.clear(); // (the toast queue holds at most three)
+        for _ in 0..2 {
+            update(&mut st, Message::DapIdeConfig(failed.clone()));
+        }
+        let skipped = crate::engine::DapIdeReport::Written {
+            ide: ParentIde::VSCode,
+            result: frust_dap::ide_config::IdeConfigResult {
+                path: PathBuf::from("/tmp/a/.vscode/launch.json"),
+                action: frust_dap::ide_config::ConfigAction::Skipped(
+                    "content unchanged".to_string(),
+                ),
+            },
+        };
+        update(&mut st, Message::DapIdeConfig(skipped.clone()));
+        assert_eq!(st.toasts.items.len(), 3);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+        assert_eq!(st.toasts.items[1].kind, ToastKind::Error);
+        assert!(
+            st.toasts.items[2]
+                .text
+                .contains("skipped (content unchanged)")
+        );
+        assert_eq!(st.dap_settings.last_ide_config, Some(skipped));
     }
 
     #[test]
