@@ -554,8 +554,8 @@ pub enum Message {
     /// Close the doctor panel (`Esc` / the panel's Close button).
     CloseDoctorPanel,
     /// Close the doctor panel and open the bootstrap wizard (the panel's `t`
-    /// key / "Toolchain setup" button) — the toolchain setup flow moved here
-    /// from its old direct `i` binding (D5).
+    /// key / "Toolchain setup" button) — the toolchain setup moved here from
+    /// its old direct `i` binding.
     OpenToolchainFromDoctor,
 
     // ── Bootstrap wizard + titlebar toolchain chip ───────────────────────────

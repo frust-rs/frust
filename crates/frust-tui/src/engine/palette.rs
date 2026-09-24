@@ -154,7 +154,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_project,
             "open a project first",
         ),
-        // D5: `i` opens the Doctor panel (from either screen); toolchain
+        // Doctor panel is bound to `i` (from either screen); toolchain
         // setup moved off `i` onto the panel's own `t` key / "Toolchain
         // setup" button (see `views::doctor::render`), so it keeps a palette
         // row but no top-level keyhint of its own.
@@ -252,8 +252,8 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no active session",
         ),
         // `d` is the session view's own DevTools toggle and means nothing
-        // else (D5) — with no session open it claims no key at all, since
-        // Doctor moved to its own unconditional `i`.
+        // else — with no session open it claims no key at all, since
+        // Doctor moved to its own unconditional `i` key.
         gated(
             "DevTools",
             "d",

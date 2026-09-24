@@ -98,8 +98,8 @@ pub struct AppState {
     /// change which one is active.
     pub project_root: Option<PathBuf>,
     /// Every project the sidebar/switcher lists, ordered `[local...,
-    /// previous...]` (decision D6) — see [`Self::local_project_count`] for
-    /// the boundary. "Local" is every project the bounded [`detect`] walk
+    /// previous...]` — see [`Self::local_project_count`] for the boundary.
+    /// "Local" is every project the bounded [`detect`] walk
     /// found under `cwd` (plus a still-existing recent under `cwd` the walk
     /// missed); "previous" is every other still-existing persisted recent.
     /// Every index-based path (`Message::SwitchProject`,
@@ -116,8 +116,8 @@ pub struct AppState {
     /// [`Self::new`]/[`Self::detect`] set it.
     pub cwd: PathBuf,
     /// The `projects` boundary: `projects[..local_project_count]` is
-    /// "local", `projects[local_project_count..]` is "previous" (decision
-    /// D6) — read through [`Self::local_count`], which clamps to
+    /// "local", `projects[local_project_count..]` is "previous" — read
+    /// through [`Self::local_count`], which clamps to
     /// `projects.len()`, rather than this raw field directly. Defaults to
     /// `usize::MAX` ([`Default`]/most hand-built test fixtures never set
     /// this new field explicitly), which clamps to "every project is
@@ -271,8 +271,8 @@ pub struct AppState {
 
 impl AppState {
     /// Build the initial model from the current working directory, split
-    /// against the persisted recent-projects list (decision D6): a bounded
-    /// walk (see [`Self::detect`]) finds every `frust.toml` marker under the
+    /// into local and persisted recent projects: a bounded walk
+    /// (see [`Self::detect`]) finds every `frust.toml` marker under the
     /// cwd, then [`super::persist::split_local_and_previous`] appends every
     /// still-existing recent not already counted as local — "local first,
     /// previous after, deduped". A cwd-detected project stays the active one
@@ -577,7 +577,7 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    /// The effective `projects` local/previous boundary (decision D6):
+    /// The effective `projects` local/previous boundary:
     /// `local_project_count` clamped to `projects.len()`. Every render/
     /// insert site reads through this rather than the raw field, so a value
     /// left at its `usize::MAX` default (or merely stale after `projects`
@@ -589,8 +589,8 @@ impl AppState {
         self.local_project_count.min(self.projects.len())
     }
 
-    /// Insert `root` into `projects`, keeping the D6 local/previous
-    /// boundary invariant — the one seam every `state.projects` mutation
+    /// Insert `root` into `projects`, keeping the local/previous boundary
+    /// invariant — the one seam every `state.projects` mutation
     /// site (today, `engine::update::open_project`, for a freshly scaffolded
     /// or newly opened project) goes through, so the boundary never drifts
     /// out of sync with a scattered set of `insert`/`push` calls. A root
@@ -876,7 +876,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    // ── local_count() / insert_project() (decision D6) ────────────────────
+    // ── local_count() / insert_project() (local/previous boundary) ────────
 
     #[test]
     fn local_count_clamps_the_default_sentinel_to_every_project() {

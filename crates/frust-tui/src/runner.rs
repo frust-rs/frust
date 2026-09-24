@@ -1430,11 +1430,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('q') => vec![Message::RequestQuit],
 
         // `i` opens the Doctor panel from either screen (mouse parity: the
-        // sidebar "Doctor" action). D5: DevTools is the only thing `d` means
-        // once a session is active, so Doctor moved to its own unconditional
-        // key here; toolchain setup (the old `i` destination) is reachable
-        // from inside the panel (`t` / its "Toolchain setup" button) or
-        // straight from the titlebar toolchain chip.
+        // sidebar "Doctor" action). Doctor has its own unconditional `i` key;
+        // `d` is DevTools-only (active sessions only); toolchain setup (the
+        // old `i` destination) is reachable from inside the panel (`t` / its
+        // "Toolchain setup" button) or straight from the titlebar toolchain
+        // chip.
         KeyCode::Char('i') => vec![Message::OpenDoctorPanel],
 
         // `a` opens the Add Plugin dialog from either screen (mouse parity: the
@@ -1485,23 +1485,20 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
         KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
         // `d` opens DevTools for the active session tab (workbook §B12) and
-        // means nothing else (D5): with no session active it used to also
-        // open the doctor panel, but that collided with DevTools' own claim
-        // to `d` the moment a session starts, so Doctor moved to its own `i`
-        // key above — reachable unconditionally, on the sidebar ACTIONS row,
-        // and in the palette. `b` opens the build launcher (mouse parity:
-        // the sidebar "Build" row).
+        // does nothing without a session (Doctor moved to its own `i` key to
+        // avoid this collision — see above, sidebar ACTIONS row, and palette).
+        // `b` opens the build launcher (mouse parity: the sidebar "Build" row).
         KeyCode::Char('d') if has_active_session => vec![Message::DevtoolsToggle],
         KeyCode::Char('b') if workbench => vec![Message::OpenBuildLauncher],
         // `c` copies a build session's artifact path(s) when one is active
         // (mirroring the welcome screen's own `c` for Create, a different
-        // screen/context) — and, per D7, is *only* this while a session is
+        // screen/context) — this binding exists *only* while a session is
         // active: the sidebar ACTIONS "Clean" row still opens the
         // clean-confirm dialog on click then, it just drops its own `c`
         // keyhint (see `views::workbench::render_sidebar`) since the key
-        // itself means something else in that context. With no session
-        // active, `c` opens the clean-confirm dialog directly (mouse parity:
-        // the sidebar ACTIONS "Clean" row).
+        // means something else in that context. Without a session, `c` opens
+        // the clean-confirm dialog directly (mouse parity: the sidebar
+        // ACTIONS "Clean" row).
         KeyCode::Char('c') if has_active_session => vec![Message::CopyBuiltArtifacts],
         KeyCode::Char('c') if workbench => vec![Message::OpenCleanConfirm],
 
@@ -1784,8 +1781,8 @@ fn translate_switcher_key(code: KeyCode, state: &AppState) -> Vec<Message> {
 /// Translate one key press while the doctor panel is open. `Esc` closes it,
 /// `r` re-runs the validator set (mouse parity: the panel's Re-run button /
 /// the titlebar chip), and `t` closes the panel and opens the bootstrap
-/// wizard (mouse parity: the panel's "Toolchain setup" button) — the D5
-/// toolchain-setup route now that `i` opens this panel instead.
+/// wizard (mouse parity: the panel's "Toolchain setup" button) — the
+/// toolchain-setup route via the panel now that `i` opens the panel.
 fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseDoctorPanel],
@@ -3318,8 +3315,8 @@ mod tests {
         );
     }
 
-    /// D5: `i` opens the Doctor panel from either top-level screen — the
-    /// panel's new unconditional key, now that `d` is DevTools-only.
+    /// Doctor panel is unconditionally opened by `i` from either top-level
+    /// screen (the panel's dedicated key, since `d` is DevTools-only).
     #[test]
     fn i_opens_the_doctor_panel_from_either_screen() {
         let regions = MouseRegions::new();
@@ -3336,8 +3333,8 @@ mod tests {
         }
     }
 
-    /// D5: with no session active, `d` no longer falls back to the doctor
-    /// panel — it means DevTools or nothing, never Doctor.
+    /// With no session active, `d` means DevTools or nothing, never Doctor
+    /// (Doctor is unconditionally on `i`).
     #[test]
     fn d_does_nothing_with_no_session_open() {
         let regions = MouseRegions::new();
@@ -3581,10 +3578,9 @@ mod tests {
     /// - multi-key hints (`^O`, `⌥m`) — filtered out by the one-char check
     ///   itself, not a hand-picked skip.
     /// - `d` ("DevTools") — gated on `has_active_session`, exactly one of
-    ///   this sweep's six shapes, but `d` claims nothing with no session
-    ///   active (D5: Doctor moved off `d` onto its own `i`), so a naive
-    ///   assertion here can't also cover that no-session-means-unclaimed
-    ///   case; asserted instead in
+    ///   this sweep's six shapes, but `d` claims nothing without a session
+    ///   (Doctor is unconditionally on `i`), so a naive assertion here can't
+    ///   cover that case; asserted instead in
     ///   `d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log`
     ///   and `d_does_nothing_with_no_session_open`.
     /// - `y` ("Copy selection") — gated on `has_selection`, not one of the
@@ -3624,10 +3620,10 @@ mod tests {
                 "Refresh widget tree" => gate_state(false, false, false, false, false, true),
                 // "always enabled" commands: no gate flag needed, just the
                 // workbench screen `gate_state`'s all-false shape provides.
-                // "Toolchain setup…" is deliberately absent here — D5 made it
-                // key-less (its old `i` binding now opens the Doctor panel),
-                // so its empty hint already exits this sweep at the `chars.next()`
-                // check above.
+                // "Toolchain setup…" is deliberately absent here (its old `i`
+                // binding now opens the Doctor panel, so it has no top-level
+                // keyhint), so its empty hint already exits this sweep at the
+                // `chars.next()` check above.
                 "Doctor"
                 | "New project…"
                 | "Refresh devices"

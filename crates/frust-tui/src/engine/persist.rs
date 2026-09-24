@@ -158,7 +158,7 @@ fn paths_match(a: &Path, b: &Path) -> bool {
 
 /// Split the persisted recent list and freshly `detect`ed project roots into
 /// one ordered `AppState::projects` vec plus the boundary between its two
-/// sections (decision D6): `[..local_count]` is "local" — every `detected`
+/// sections: `[..local_count]` is "local" — every `detected`
 /// root, in walk order, followed by any *existing* recent entry that sits
 /// under `cwd` but that the bounded walk missed (still local — appended at
 /// the end of the local section, in recency order); `[local_count..]` is
@@ -605,7 +605,7 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
-    // ── split_local_and_previous (decision D6) ──────────────────────────
+    // ── split_local_and_previous (local/previous boundary) ──────────────
 
     #[test]
     fn a_cwd_project_plus_unrelated_recents_puts_cwd_first_with_local_count_one() {

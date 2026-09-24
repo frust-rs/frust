@@ -832,7 +832,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
         Message::OpenToolchainFromDoctor => {
-            // D5's toolchain-setup route: close the doctor panel, then run
+            // Toolchain setup via the Doctor panel: close it, then run
             // the same transition `OpenBootstrapWizard` does — always a
             // redraw, since closing the panel alone already is one.
             state.doctor_panel_open = false;
@@ -1900,10 +1900,10 @@ fn open_create_wizard(state: &mut AppState) -> Outcome {
 }
 
 /// Open `root` as the active project in place (a freshly scaffolded project, or
-/// a switch): register it in `projects` keeping the D6 local/previous
-/// boundary invariant (see `AppState::insert_project`), make it active, show
-/// the workbench, focus its first session (if any), and request the runner
-/// persist it as most-recently-opened.
+/// a switch): register it in `projects` keeping the local/previous boundary
+/// invariant (see `AppState::insert_project`), make it active, show the
+/// workbench, focus its first session (if any), and request the runner persist
+/// it as most-recently-opened.
 fn open_project(state: &mut AppState, root: PathBuf) -> Outcome {
     state.insert_project(root.clone());
     state.project_root = Some(root.clone());
@@ -4686,9 +4686,9 @@ mod tests {
         );
     }
 
-    /// D5's toolchain-setup route out of the doctor panel: `t` closes the
-    /// panel and opens the bootstrap wizard in the same transition
-    /// `OpenBootstrapWizard` performs.
+    /// Toolchain setup via the Doctor panel's `t` key: close the panel and
+    /// open the bootstrap wizard in the same transition `OpenBootstrapWizard`
+    /// performs.
     #[test]
     fn open_toolchain_from_doctor_closes_the_panel_and_opens_the_wizard() {
         let mut st = welcome();

@@ -1,6 +1,6 @@
 //! The doctor panel: a shadowed, centered popup listing every
 //! validator's status + actionable hints, with a re-run action and a route
-//! into the toolchain bootstrap wizard (`t` / "Toolchain setup" — D5). The
+//! into the toolchain bootstrap wizard (via the Doctor panel's `t` keybind). The
 //! base workbench layer is rendered with a *suppressed* `MouseCtx` (see
 //! `crate::ui::render`), so only this panel's regions are live while it is
 //! open — the base-layer suppression.
