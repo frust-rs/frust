@@ -55,7 +55,10 @@ question, carrying its own reply channel) is intercepted by `runner` **before** 
 documented no-op, since answering needs supervisor/launch-record state the pure core cannot reach.
 The TUI's `Theme` is its own brand palette, entirely independent of the
 framework's `frust-theme` (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)) — TUI paints
-itself, not a Frust app.
+itself, not a Frust app. `Theme` also carries the host key-glyph choice (macOS `⌘`/`⌥` versus
+spelled-out `^X`/`Alt+x` chords) as a plain field rather than an engine-side global, so `ui` reads it
+from the theme in hand and `engine` stays free of host-specific state; the snapshot test harness
+forces the macOS spelling so fixtures stay host-independent.
 
 ## Embedded MCP Surface
 
@@ -175,8 +178,8 @@ server started.
   machine already writes. Every persisted root is simplified through `frust_drive::host_path::simplify`
   at the load/save boundary, and project identity here (recents dedupe, this split, and
   `AppState::insert_project`'s placement) compares roots via `host_path::same_path`/`is_under` —
-  case- and verbatim-insensitive on Windows, exact component comparison elsewhere — distinct from
-  the launch guard's raw lexical `Path::components` comparison below.
+  case- and verbatim-insensitive on Windows, exact component comparison elsewhere — the same
+  comparison the launch guard below uses.
 - Launch guard: one live (non-terminal) session per `(project root, target)` — `AppState::live_session_for`
   (`live_session_for_excluding` for a restart, which exempts the session being replaced) is
   consulted by the run-config modal, run-on-all-devices, and the embedded MCP/DAP backend alike, so
@@ -184,10 +187,11 @@ server started.
   Warn toast ('<name>: already running here — stop it first') in the workbench and a typed
   `EmbeddedError::AlreadyRunning` over MCP/DAP; ad-hoc (targetless: build/clean/bootstrap-fix) and
   terminal sessions never occupy a target, and the guard is blind to build mode/flavor — only
-  project root and target identity matter. Roots are compared lexically (`Path::components`,
-  trailing separators and `.` segments ignored) rather than canonicalised, so a symlink and its
-  target, or a `..`-relative path resolving to the same place, still count as different projects and
-  can each hold their own "live" session.
+  project root and target identity matter. Roots are compared via `host_path::same_path` — still
+  purely lexical (no filesystem I/O) and case-/verbatim-insensitive on Windows, so a case-differing
+  root can no longer defeat the guard there — but not canonicalised, so a symlink and its target, or
+  a `..`-relative path resolving to the same place, still count as different projects and can each
+  hold their own "live" session.
 - Quit path: `Message::RequestQuit` (global `q`, the DevTools-pane `q`, Ctrl+C with no running
   session, or the palette's Quit) checks `AppState::live_session_count()`: zero live sessions quits
   immediately, otherwise `AppState.quit_confirm` opens a dialog warning that N running session(s)

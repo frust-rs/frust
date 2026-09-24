@@ -1595,8 +1595,10 @@ and auto-start can be turned off in the same dialog (or `[dap].auto_start_in_ide
 `~/.config/frust/tui.toml`). With `auto_configure_ide` on, the detected IDE's DAP launch config is
 also written automatically — on every app launch (one write per distinct project root) and, on a
 fresh bind, for the active session's project — but only in `WriteMode::IfAbsent`: a file that
-already carries the frust entry is left untouched, never rewritten. Only the dialog's own explicit
-Generate (`WriteMode::Refresh`) updates an existing entry, e.g. to pick up a changed port.
+already carries the frust entry is left untouched, never rewritten (a toast names the file when the
+retained entry's port has gone stale — see `dap-ide-config-normalizes-launchjson` below). Only the
+dialog's own explicit Generate (`WriteMode::Refresh`) updates an existing entry, e.g. to pick up a
+changed port.
 
 **Applies to**: every `frust-dap` connection, on every platform — there is no other transport (the
 stdio mode this entry once covered was removed; the server is embedded-only now).
@@ -1805,7 +1807,12 @@ and can reprint the file regardless of whether a frust entry is already present;
 on-launch/on-bind path's *first* write into a file that has no frust entry yet, since `IfAbsent`
 still calls `merge_config` (not a byte-preserving append) to add one. Once that first entry exists,
 every later automatic write leaves the file untouched (`has_frust_entry` short-circuits it) — only
-`g` can reprint it again after that.
+`g` can reprint it again after that. A kept entry that names a different port than the one the
+server bound now surfaces as a toast (`ConfigAction::StalePort`, at most once per project root and
+IDE per run) pointing at `g` — taking that suggestion runs the same destructive reprint described
+above; a kept entry whose port cannot be read is left the same way but stays silent, with no toast.
+Emacs' `.frust/dap-emacs.el` is outside this entry: it is frust-owned rather than user-editable and
+is regenerated in full every run instead of merged, so there is no hand-written content to lose.
 
 **Why accepted**: a byte-preserving surgical splice (find the frust entry's byte span inside the
 original text and edit only that span, leaving everything else untouched) is the real fix, but was
@@ -1815,13 +1822,19 @@ for a config-generation feature, and no byte-preserving JSON/JSONC crate is pinn
 this shape on the TOML side (`docs/TUI_DEVELOPMENT.md`'s pin row), but it has no JSONC-editing
 equivalent pinned here. The chosen remedy for this round is honest disclosure — this entry, plus the
 doc-comment corrections on `merge_config`/`run_generator`/`post_write` — rather than a bigger,
-unreviewed parser change.
+unreviewed parser change. This round's other write hardening (temp-file-and-rename landing, and
+refusing a config path that resolves via symlink outside the project) changes how a write lands, not
+what content is merged, so it closes a different gap without touching the loss described here.
 
 **Evidence**: `crates/frust-dap/src/ide_config/vscode.rs`'s `VSCodeGenerator::merge_config` (clean →
 parse → reprint) and its module doc; `crates/frust-dap/src/ide_config/merge.rs`'s `clean_jsonc`
 (comment/trailing-comma stripping) and `to_pretty_json` (`serde_json::to_string_pretty` reprint);
 `crates/frust-dap/src/ide_config/mod.rs`'s `run_generator` (byte-equality skip check against the
-reprinted output only).
+reprinted output only, and the `ConfigAction::StalePort` branch) and
+`IdeConfigGenerator::frust_entry_port`; `crates/frust-tui/src/engine/dap_settings.rs`'s
+`DapSettings::admit_auto_toast`
+(the once-per-root-and-IDE-per-run toast limit) and `DapIdeReport::summary`'s stale-port message;
+`crates/frust-dap/src/ide_config/emacs.rs`'s `EmacsGenerator::has_frust_entry` (always `false`).
 
 ---
 

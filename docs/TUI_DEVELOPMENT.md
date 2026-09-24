@@ -59,6 +59,13 @@ Stays manual — an ssh-driven ConPTY session can't judge these: mouse input, gl
 Windows Terminal/conhost, and whether the app's GUI window is actually visible (the app runs outside
 the interactive desktop session over ssh, so the gate can only confirm process liveness).
 
+The gate script above runs `cargo test` only; it does not run clippy. `cargo clippy --workspace
+--all-targets -- -D warnings` against the `msvc` toolchain is clean and is worth running as a
+separate manual or CI step on a Windows host after touching Windows-only code paths (`#[cfg(windows)]`
+blocks, `frust-drive::process`'s Windows process-tree kill, `host_path`'s Windows arms) — the standard
+verify gate in [DEVELOPMENT.md](DEVELOPMENT.md) already covers the host it runs on, but that host is
+not Windows.
+
 ## See Also
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — prerequisites, build/run/test gates, version-pin policy
