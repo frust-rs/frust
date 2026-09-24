@@ -55,7 +55,8 @@ impl LogLevel {
 pub fn classify_level(plain: &str) -> LogLevel {
     let l = plain.to_lowercase();
     if l.contains("panicked at")
-        || l.contains("error")
+        || is_rustc_error(plain)
+        || has_uppercase_word(plain, "ERROR")
         || l.contains("failure:")
         || l.contains("build failed")
     {
@@ -92,6 +93,14 @@ fn has_uppercase_word(haystack: &str, word: &str) -> bool {
         start = idx + word.len().max(1);
     }
     false
+}
+
+/// Whether the line starts with a rustc error diagnostic (`error:` or `error[`),
+/// allowing optional leading whitespace. Avoids matching "error" as a substring
+/// in crate names like `error-code` or `thiserror`.
+fn is_rustc_error(plain: &str) -> bool {
+    let trimmed = plain.trim_start();
+    trimmed.starts_with("error:") || trimmed.starts_with("error[")
 }
 
 /// Recognize an Android logcat level from either the `brief` format's
@@ -652,6 +661,46 @@ mod tests {
     fn classifies_rust_panic() {
         assert_eq!(
             classify_level("thread 'main' panicked at src/main.rs:42:9:"),
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn does_not_misclassify_error_crate_names() {
+        // Regression: a substring `contains("error")` would tag these as Error.
+        assert_eq!(
+            classify_level("   Compiling error-code v3.4.0"),
+            LogLevel::Info
+        );
+        assert_eq!(
+            classify_level("   Compiling thiserror-impl v2.0.0"),
+            LogLevel::Info
+        );
+    }
+
+    #[test]
+    fn does_not_misclassify_error_in_other_contexts() {
+        // A note or warning line with "error" as part of a message keeps its own level.
+        assert_eq!(
+            classify_level("note: this may become a hard error"),
+            LogLevel::Info
+        );
+        assert_eq!(
+            classify_level("warning: function with error in name is unused"),
+            LogLevel::Warn
+        );
+    }
+
+    #[test]
+    fn still_classifies_actual_error_tokens() {
+        // Ensure the fix doesn't break the original error detection.
+        assert_eq!(classify_level("error: could not compile"), LogLevel::Error);
+        assert_eq!(
+            classify_level("error[E0425]: cannot find value `x` in this scope"),
+            LogLevel::Error
+        );
+        assert_eq!(
+            classify_level("   error: mismatched types"),
             LogLevel::Error
         );
     }
