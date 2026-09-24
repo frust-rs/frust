@@ -102,27 +102,18 @@ pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/// `$HOME`, with a Windows fallback to `%USERPROFILE%` — mirrors
-/// `frust-dap`'s `ide_config::vscode::home_dir` chain (kept in sync by hand;
-/// the two live in different crates so neither can `use` the other's private
-/// helper). Only the fallback matters in practice: Unix always has `HOME`
-/// set, so [`prepare_session`]'s `GRADLE_USER_HOME` guess (used only to print
-/// a one-time "first run downloads Gradle" note, never to gate the build)
-/// resolves to nothing rather than silently checking the wrong directory on
-/// Windows, where `HOME` is typically unset.
+/// The user's home directory — [`crate::host_path::home_dir_from`]'s shared
+/// `HOME`/`USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` chain, fed by this crate's own
+/// [`EnvLookup`] seam. The same resolver backs `frust-tui`'s
+/// `engine::persist::home_dir` and `frust-dap`'s `ide_config::vscode::home_dir`,
+/// so the three can no longer drift apart the way they had — this crate's own
+/// chain previously stopped at `USERPROFILE`, so `HOMEDRIVE`+`HOMEPATH` is a
+/// new fallback leg here (still only reachable on a Windows host with neither
+/// `HOME` nor `USERPROFILE` set). Used only to print a one-time "first run
+/// downloads Gradle" note ([`prepare_session`]'s `GRADLE_USER_HOME` guess),
+/// never to gate the build — a `None` here just skips the note.
 fn home_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
-    if let Some(home) = env_value(env, "HOME") {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = env_value(env, "USERPROFILE") {
-        return Some(PathBuf::from(profile));
-    }
-    None
-}
-
-/// A non-empty environment value, or `None` for unset-or-empty.
-fn env_value(env: &dyn EnvLookup, key: &str) -> Option<String> {
-    env.get(key).filter(|value| !value.is_empty())
+    crate::host_path::home_dir_from(|key| env.get(key))
 }
 
 /// Drives the full, mode/flavor-aware Android pipeline: preflight →
@@ -646,6 +637,19 @@ mod tests {
     fn home_dir_none_when_neither_set() {
         let env = crate::doctor::FakeEnv::new();
         assert_eq!(home_dir(&env), None);
+    }
+
+    /// The leg this crate's `home_dir` gained by delegating to
+    /// `host_path::home_dir_from`: previously the chain stopped at
+    /// `USERPROFILE`, so `HOMEDRIVE`+`HOMEPATH` alone used to resolve to
+    /// `None` here (unlike `frust-dap`'s `vscode::home_dir`, which already
+    /// had it).
+    #[test]
+    fn home_dir_falls_back_to_homedrive_and_homepath() {
+        let env = crate::doctor::FakeEnv::new()
+            .set("HOMEDRIVE", "C:")
+            .set("HOMEPATH", "\\Users\\someone");
+        assert_eq!(home_dir(&env), Some(PathBuf::from("C:\\Users\\someone")));
     }
 
     mod run_pipeline {
