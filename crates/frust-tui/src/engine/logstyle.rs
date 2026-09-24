@@ -52,6 +52,18 @@ impl LogLevel {
 /// (`error[E0308]:`, `warning:`) and Gradle (`FAILURE:`, `BUILD FAILED`)
 /// diagnostics, a Rust panic marker, and logcat's level column/prefix (see
 /// [`classify_logcat_level`]).
+///
+/// Precedence, most to least specific (card m-b): panic marker > gradle/build
+/// failure > `note:`/`help:` carve-out > `warning:`-prefixed diagnostic > the
+/// word `error`/`errors` > generic `"warn"` substring fallback > `DEBUG`/
+/// `TRACE` token > logcat level column/prefix > [`LogLevel::Info`] default.
+/// The `warning:`-prefix check sits ahead of the error-word check so a
+/// diagnostic tool's own severity prefix wins over any word its message
+/// happens to quote (e.g. `` warning: unused variable: `error` `` stays
+/// Warn, not Error). The generic `"warn"` fallback sits ahead of `DEBUG`/
+/// `TRACE`/logcat — the order this module had before card W5 moved the
+/// error-word check up front and left the fallback trailing behind it; no
+/// test needs the opposite order, so the original relative position is kept.
 pub fn classify_level(plain: &str) -> LogLevel {
     let l = plain.to_lowercase();
 
@@ -73,14 +85,21 @@ pub fn classify_level(plain: &str) -> LogLevel {
         return LogLevel::Info;
     }
 
-    // Check for the word "error" as a whole word (case-insensitive), with word boundaries
-    // defined as: char before/after must not be alphanumeric, '_', or '-'.
-    if contains_error_word(plain) || has_uppercase_word(plain, "ERROR") {
+    // Check for warning prefix (rustc/javac diagnostic shape); fire ONLY on diagnostic start,
+    // and BEFORE the error-word check below — see this function's doc comment.
+    if trimmed.starts_with("warning:") || trimmed.starts_with("warning[") {
+        return LogLevel::Warn;
+    }
+
+    // Check for the word "error" (singular or plural) as a whole word, case-insensitive.
+    // `l` is already lowercased above — pass it in rather than lowercasing again.
+    if contains_error_word(&l) {
         return LogLevel::Error;
     }
 
-    // Check for warning prefix (rustc/javac diagnostic shape); fire ONLY on diagnostic start.
-    if trimmed.starts_with("warning:") || trimmed.starts_with("warning[") {
+    // Generic warning fallback (keep original behavior for log-facade WARN tokens, etc) — see
+    // this function's doc comment for why it runs ahead of the DEBUG/TRACE/logcat checks below.
+    if l.contains("warn") {
         return LogLevel::Warn;
     }
 
@@ -97,11 +116,6 @@ pub fn classify_level(plain: &str) -> LogLevel {
     // Check for logcat level markers.
     if let Some(lvl) = classify_logcat_level(plain) {
         return lvl;
-    }
-
-    // Generic warning fallback (keep original behavior for log-facade WARN tokens, etc).
-    if l.contains("warn") {
-        return LogLevel::Warn;
     }
 
     LogLevel::Info
@@ -136,17 +150,31 @@ fn strip_source_prefix(plain: &str) -> &str {
     }
 }
 
-/// Whether the line contains the word "error" (case-insensitive) as a whole word.
-/// Word boundaries are defined such that the character before and after "error"
-/// must not be alphanumeric, '_', or '-' (to avoid matching crate names like
-/// "error-code", "thiserror", "anyerror", or "error_kind").
-fn contains_error_word(plain: &str) -> bool {
-    let l = plain.to_lowercase();
-    let bytes = l.as_bytes();
-    let search_word = b"error";
+/// Whether an already-lowercased line contains "error" or "errors" as a whole
+/// word (so `found 2 errors`/`3 errors generated` count, alongside the
+/// singular). Delegates to [`contains_word_with_boundary`] for the shared
+/// boundary rule — see its doc comment for why this module now uses one rule
+/// instead of two: `error-code`, `thiserror`, `anyerror`, and `error_kind`
+/// stay excluded either way.
+fn contains_error_word(lower: &str) -> bool {
+    contains_word_with_boundary(lower, "error") || contains_word_with_boundary(lower, "errors")
+}
+
+/// Whether `haystack` contains `word` as a whole word: the byte immediately
+/// before and after a match, if any, must not be ASCII alphanumeric, `_`, or
+/// `-`. This is the one boundary rule [`contains_error_word`] and (via
+/// [`classify_level`]'s case-insensitive `error`/`errors` check) the former
+/// separate `has_uppercase_word(plain, "ERROR")` case both used to apply
+/// inconsistently — that call used a looser boundary (only excluding
+/// alphanumerics, not `_`/`-`) and was otherwise redundant with the
+/// case-insensitive check here, since lowercasing already folds any-case
+/// `ERROR` into the same match. Dropping it removes the inconsistency
+/// without changing observable behavior for any case this module classifies.
+fn contains_word_with_boundary(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
     let mut start = 0;
 
-    while let Some(pos) = l[start..].find("error") {
+    while let Some(pos) = haystack[start..].find(word) {
         let idx = start + pos;
 
         // Check character before: must be non-existent or not alphanumeric, '_', or '-'.
@@ -156,7 +184,7 @@ fn contains_error_word(plain: &str) -> bool {
         };
 
         // Check character after: must be non-existent or not alphanumeric, '_', or '-'.
-        let after_idx = idx + search_word.len();
+        let after_idx = idx + word.len();
         let after_ok = after_idx >= bytes.len() || {
             let byte = bytes[after_idx];
             !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-'
@@ -813,6 +841,36 @@ mod tests {
                 "[gradle] warning: [deprecation] foo() in Bar has been deprecated; error-prone"
             ),
             LogLevel::Warn
+        );
+    }
+
+    #[test]
+    fn warning_prefixed_lines_win_over_the_word_error() {
+        // card m-b, finding 1: a `warning:`-prefixed diagnostic line stays
+        // Warn even when its own message quotes the word "error" — the
+        // diagnostic tool's own severity prefix wins over any word its
+        // message happens to quote.
+        assert_eq!(
+            classify_level("warning: unused variable: `error`"),
+            LogLevel::Warn
+        );
+        assert_eq!(
+            classify_level("[gradle] warning: unused variable: `error`"),
+            LogLevel::Warn
+        );
+    }
+
+    #[test]
+    fn plural_errors_counts_as_the_error_word() {
+        // card m-b, finding 2: plural "errors" must classify Error just like
+        // the singular.
+        assert_eq!(classify_level("found 2 errors"), LogLevel::Error);
+        assert_eq!(classify_level("3 errors generated"), LogLevel::Error);
+        assert_eq!(
+            classify_level(
+                "error: could not compile `app` due to 2 previous errors; 3 warnings emitted"
+            ),
+            LogLevel::Error
         );
     }
 
