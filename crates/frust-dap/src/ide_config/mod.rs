@@ -105,6 +105,32 @@ pub struct IdeConfigResult {
     pub action: ConfigAction,
 }
 
+/// How [`generate_ide_config`] treats a config file that already exists.
+///
+/// The two callers want different things: an explicit "generate now" wants
+/// the frust entry brought up to date (the port may have moved), while an
+/// automatic write must never touch an entry the user already has — they may
+/// have edited it, and rewriting it on every launch is exactly the churn the
+/// automatic path exists to avoid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WriteMode {
+    /// Create the file when missing; otherwise merge the frust entry in,
+    /// replacing an existing one (its port is refreshed). The explicit
+    /// "generate now" semantics.
+    #[default]
+    Refresh,
+    /// Create the file when missing; append the frust entry to a file that
+    /// has none; but leave a file that **already contains** a frust entry
+    /// untouched (whatever port it names), reporting
+    /// [`ConfigAction::Skipped`] with [`ENTRY_PRESENT_REASON`]. The
+    /// automatic-write semantics.
+    IfAbsent,
+}
+
+/// The [`ConfigAction::Skipped`] reason [`WriteMode::IfAbsent`] reports when
+/// the file already carries a frust entry.
+pub const ENTRY_PRESENT_REASON: &str = "frust entry already present";
+
 /// What happened during config generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigAction {
@@ -157,11 +183,22 @@ pub trait IdeConfigGenerator {
     /// `docs/LIMITATIONS.md`'s `dap-ide-config-normalizes-launchjson`.
     fn merge_config(&self, existing: &str, port: u16, project_root: &Path) -> Result<String>;
 
+    /// Whether `existing` (the current content of
+    /// [`config_path`](Self::config_path)) already contains this generator's
+    /// frust entry, identified by the same marker
+    /// [`merge_config`](Self::merge_config) matches on.
+    ///
+    /// Consulted only under [`WriteMode::IfAbsent`]: a `true` here leaves the
+    /// file untouched. Returns an error when `existing` cannot be parsed —
+    /// the same failure `merge_config` would report for it.
+    fn has_frust_entry(&self, existing: &str) -> Result<bool>;
+
     /// Optional post-generation hook for secondary file writes.
     ///
     /// Called by [`run_generator`] after fresh creation, after merging, and
-    /// even when the primary write is skipped as unchanged — "unchanged"
-    /// describes only the primary file, so a secondary artifact (e.g.
+    /// even when the primary write is skipped (as unchanged, or under
+    /// [`WriteMode::IfAbsent`] because a frust entry is already present) —
+    /// "skipped" describes only the primary file, so a secondary artifact (e.g.
     /// Neovim's `.nvim-dap.lua`) can still be missing or stale and must stay
     /// kept in sync regardless of whether the primary file was rewritten
     /// this run.
@@ -187,7 +224,12 @@ pub trait IdeConfigGenerator {
 ///
 /// Steps:
 /// 1. Compute the target path via [`IdeConfigGenerator::config_path`].
-/// 2. If the file already exists, read it and call [`IdeConfigGenerator::merge_config`].
+/// 2. If the file already exists, read it. Under [`WriteMode::IfAbsent`],
+///    when [`IdeConfigGenerator::has_frust_entry`] finds the frust entry
+///    already there, skip the primary write entirely and report
+///    [`ConfigAction::Skipped`] with [`ENTRY_PRESENT_REASON`] (step 7 still
+///    runs, as for step 4's skip). Otherwise call
+///    [`IdeConfigGenerator::merge_config`].
 /// 3. If the file does not exist, call [`IdeConfigGenerator::generate`] for fresh content.
 /// 4. If the merged content is byte-identical to what's on disk, skip the
 ///    primary write (mtime untouched) and report [`ConfigAction::Skipped`] —
@@ -197,17 +239,32 @@ pub trait IdeConfigGenerator {
 /// 5. Otherwise, ensure the parent directory exists (`create_dir_all`).
 /// 6. Write the content and return an [`IdeConfigResult`].
 /// 7. Call [`IdeConfigGenerator::post_write`] for any secondary file writes —
-///    on every path above, including the skip path in step 4.
+///    on every path above, including the skip paths in steps 2 and 4.
 fn run_generator(
     generator: &dyn IdeConfigGenerator,
     port: u16,
     project_root: &Path,
+    mode: WriteMode,
 ) -> Result<Option<IdeConfigResult>> {
     let config_path = generator.config_path(project_root);
 
     let (content, action) = if generator.config_exists(project_root) {
         let existing = std::fs::read_to_string(&config_path)
             .map_err(|e| IdeConfigError::io(&config_path, e))?;
+        if mode == WriteMode::IfAbsent && generator.has_frust_entry(&existing)? {
+            log::info!(
+                "{} DAP config skipped ({ENTRY_PRESENT_REASON}) at {}",
+                generator.ide_name(),
+                config_path.display(),
+            );
+            // Same contract as the unchanged-skip below: a secondary artifact
+            // is outside this check, so post_write still runs.
+            generator.post_write(port, project_root)?;
+            return Ok(Some(IdeConfigResult {
+                path: config_path,
+                action: ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string()),
+            }));
+        }
         let merged = generator.merge_config(&existing, port, project_root)?;
         if merged == existing {
             log::info!(
@@ -267,11 +324,17 @@ fn run_generator(
 /// - The IDE doesn't support DAP config (`ParentIde::IntelliJ`/`AndroidStudio`)
 ///
 /// On success returns an [`IdeConfigResult`] describing what was created,
-/// updated, or (Helix, always; any generator, when unchanged) skipped.
+/// updated, or (Helix, always; any generator, when unchanged or — under
+/// [`WriteMode::IfAbsent`] — when a frust entry is already present) skipped.
+///
+/// `mode` decides what happens to an existing file; see [`WriteMode`]. For
+/// Neovim (primary `.vscode/launch.json` plus `.nvim-dap.lua`) the rule is
+/// applied to the primary file.
 pub fn generate_ide_config(
     ide: Option<ParentIde>,
     port: u16,
     project_root: &Path,
+    mode: WriteMode,
 ) -> Result<Option<IdeConfigResult>> {
     let ide = match ide {
         Some(ide) if ide.supports_dap_config() => ide,
@@ -281,16 +344,16 @@ pub fn generate_ide_config(
     match ide {
         // VS Code, VS Code Insiders, and Cursor share the launch.json format.
         ParentIde::VSCode | ParentIde::VSCodeInsiders | ParentIde::Cursor => {
-            run_generator(&vscode::VSCodeGenerator, port, project_root)
+            run_generator(&vscode::VSCodeGenerator, port, project_root, mode)
         }
         // Neovim uses launch.json as primary (via load_launchjs) plus a Lua snippet.
-        ParentIde::Neovim => run_generator(&neovim::NeovimGenerator, port, project_root),
+        ParentIde::Neovim => run_generator(&neovim::NeovimGenerator, port, project_root, mode),
         // Helix has no working transport for frust-dap — see helix's module doc.
         ParentIde::Helix => Ok(Some(helix::HelixGenerator.skip_result(project_root))),
         // Emacs uses a .frust/dap-emacs.el Elisp snippet.
-        ParentIde::Emacs => run_generator(&emacs::EmacsGenerator, port, project_root),
+        ParentIde::Emacs => run_generator(&emacs::EmacsGenerator, port, project_root, mode),
         // Zed uses .zed/debug.json with tcp_connection.
-        ParentIde::Zed => run_generator(&zed::ZedGenerator, port, project_root),
+        ParentIde::Zed => run_generator(&zed::ZedGenerator, port, project_root, mode),
         // Already excluded by supports_dap_config() above, but the compiler
         // requires exhaustive coverage.
         ParentIde::IntelliJ | ParentIde::AndroidStudio => Ok(None),
@@ -403,27 +466,37 @@ mod tests {
 
     #[test]
     fn test_generate_ide_config_none_returns_none() {
-        let result = generate_ide_config(None, 4711, Path::new("/unused"));
+        let result = generate_ide_config(None, 4711, Path::new("/unused"), WriteMode::Refresh);
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
     fn test_generate_ide_config_intellij_returns_none() {
-        let result = generate_ide_config(Some(ParentIde::IntelliJ), 4711, Path::new("/unused"));
+        let result = generate_ide_config(
+            Some(ParentIde::IntelliJ),
+            4711,
+            Path::new("/unused"),
+            WriteMode::Refresh,
+        );
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
     fn test_generate_ide_config_android_studio_returns_none() {
-        let result =
-            generate_ide_config(Some(ParentIde::AndroidStudio), 4711, Path::new("/unused"));
+        let result = generate_ide_config(
+            Some(ParentIde::AndroidStudio),
+            4711,
+            Path::new("/unused"),
+            WriteMode::Refresh,
+        );
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
     fn test_standalone_config_generation_vscode() {
         let dir = unique_temp_dir("dispatch-vscode");
-        let result = generate_ide_config(Some(ParentIde::VSCode), 4711, &dir).unwrap();
+        let result =
+            generate_ide_config(Some(ParentIde::VSCode), 4711, &dir, WriteMode::Refresh).unwrap();
         assert!(result.is_some());
         assert!(dir.join(".vscode/launch.json").exists());
     }
@@ -431,7 +504,7 @@ mod tests {
     #[test]
     fn test_generate_ide_config_helix_is_skipped_and_writes_nothing() {
         let dir = unique_temp_dir("dispatch-helix");
-        let result = generate_ide_config(Some(ParentIde::Helix), 4711, &dir)
+        let result = generate_ide_config(Some(ParentIde::Helix), 4711, &dir, WriteMode::IfAbsent)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -465,7 +538,7 @@ mod tests {
     fn test_run_generator_create_skip_update_sequence() {
         let dir = unique_temp_dir("run-generator-sequence");
 
-        let result1 = run_generator(&vscode::VSCodeGenerator, 12345, &dir)
+        let result1 = run_generator(&vscode::VSCodeGenerator, 12345, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
         assert!(
@@ -478,7 +551,7 @@ mod tests {
             "config file should have been written"
         );
 
-        let result2 = run_generator(&vscode::VSCodeGenerator, 12345, &dir)
+        let result2 = run_generator(&vscode::VSCodeGenerator, 12345, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
         assert!(
@@ -487,7 +560,7 @@ mod tests {
             result2.action
         );
 
-        let result3 = run_generator(&vscode::VSCodeGenerator, 54321, &dir)
+        let result3 = run_generator(&vscode::VSCodeGenerator, 54321, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
         assert!(
@@ -505,7 +578,7 @@ mod tests {
 
         let dir = unique_temp_dir("run-generator-skip-mtime");
 
-        run_generator(&vscode::VSCodeGenerator, 12345, &dir)
+        run_generator(&vscode::VSCodeGenerator, 12345, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
 
@@ -515,7 +588,7 @@ mod tests {
         // Give the clock a small window so a spurious write would be detectable.
         std::thread::sleep(Duration::from_millis(10));
 
-        let result = run_generator(&vscode::VSCodeGenerator, 12345, &dir)
+        let result = run_generator(&vscode::VSCodeGenerator, 12345, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
         assert!(matches!(result.action, ConfigAction::Skipped(_)));
@@ -538,7 +611,7 @@ mod tests {
         let dir = unique_temp_dir("run-generator-skip-recreates-secondary");
 
         // First call: creates both launch.json and .nvim-dap.lua.
-        let result1 = run_generator(&neovim::NeovimGenerator, 4711, &dir)
+        let result1 = run_generator(&neovim::NeovimGenerator, 4711, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
         assert!(matches!(result1.action, ConfigAction::Created));
@@ -557,7 +630,7 @@ mod tests {
         // Second call with the same port: primary content is unchanged, so
         // this reports Skipped — but post_write must still have run and
         // recreated the secondary artifact.
-        let result2 = run_generator(&neovim::NeovimGenerator, 4711, &dir)
+        let result2 = run_generator(&neovim::NeovimGenerator, 4711, &dir, WriteMode::Refresh)
             .unwrap()
             .unwrap();
         assert!(
@@ -569,6 +642,218 @@ mod tests {
             lua_path.exists(),
             ".nvim-dap.lua should have been recreated by post_write even though \
              the primary launch.json write was skipped"
+        );
+    }
+
+    // ── WriteMode: IfAbsent vs Refresh ──────────────────────────
+
+    /// A Zed `debug.json` carrying the frust entry at port 1111 next to a
+    /// foreign entry.
+    const ZED_WITH_FRUST_1111: &str = r#"[
+  {"label": "Other", "adapter": "other"},
+  {"label": "Frust (TUI DAP)", "adapter": "Delve", "request": "launch",
+   "tcp_connection": {"host": "127.0.0.1", "port": 1111}}
+]"#;
+
+    /// A Zed `debug.json` with only foreign entries.
+    const ZED_FOREIGN_ONLY: &str = r#"[
+  {"label": "Config A", "adapter": "a"},
+  {"label": "Config B", "adapter": "b"}
+]"#;
+
+    /// A VS Code `launch.json` (JSONC, with a comment) carrying the frust
+    /// entry at port 1111 next to a foreign entry.
+    const VSCODE_WITH_FRUST_1111: &str = r#"{
+  // hand-written
+  "version": "0.2.0",
+  "configurations": [
+    {"name": "Rust", "type": "lldb", "request": "launch"},
+    {"name": "Frust (TUI DAP)", "type": "frust", "request": "launch", "debugServer": 1111},
+  ]
+}"#;
+
+    /// A VS Code `launch.json` with only foreign entries.
+    const VSCODE_FOREIGN_ONLY: &str = r#"{
+  "version": "0.2.0",
+  "configurations": [
+    {"name": "Rust", "type": "lldb", "request": "launch"}
+  ]
+}"#;
+
+    fn write_file(path: &Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn generate(ide: ParentIde, port: u16, dir: &Path, mode: WriteMode) -> IdeConfigResult {
+        generate_ide_config(Some(ide), port, dir, mode)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_if_absent_on_a_missing_file_creates_it() {
+        let dir = unique_temp_dir("if-absent-missing-zed");
+        let result = generate(ParentIde::Zed, 4711, &dir, WriteMode::IfAbsent);
+        assert_eq!(result.action, ConfigAction::Created);
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".zed/debug.json")).unwrap())
+                .unwrap();
+        assert_eq!(parsed[0]["tcp_connection"]["port"], 4711);
+
+        let dir = unique_temp_dir("if-absent-missing-vscode");
+        let result = generate(ParentIde::VSCode, 4711, &dir, WriteMode::IfAbsent);
+        assert_eq!(result.action, ConfigAction::Created);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&result.path).unwrap()).unwrap();
+        assert_eq!(parsed["configurations"][0]["debugServer"], 4711);
+    }
+
+    #[test]
+    fn test_if_absent_never_rewrites_an_existing_frust_entry_zed() {
+        let dir = unique_temp_dir("if-absent-present-zed");
+        let path = dir.join(".zed/debug.json");
+        write_file(&path, ZED_WITH_FRUST_1111);
+
+        let result = generate(ParentIde::Zed, 2222, &dir, WriteMode::IfAbsent);
+        assert_eq!(
+            result.action,
+            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            ZED_WITH_FRUST_1111,
+            "the file is left byte-identical, stale port and all"
+        );
+    }
+
+    #[test]
+    fn test_if_absent_never_rewrites_an_existing_frust_entry_vscode() {
+        let dir = unique_temp_dir("if-absent-present-vscode");
+        let path = dir.join(".vscode/launch.json");
+        write_file(&path, VSCODE_WITH_FRUST_1111);
+
+        let result = generate(ParentIde::VSCode, 2222, &dir, WriteMode::IfAbsent);
+        assert_eq!(
+            result.action,
+            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            VSCODE_WITH_FRUST_1111,
+            "the file (comment and trailing comma included) is left byte-identical"
+        );
+    }
+
+    #[test]
+    fn test_if_absent_appends_to_a_file_without_a_frust_entry_zed() {
+        let dir = unique_temp_dir("if-absent-foreign-zed");
+        let path = dir.join(".zed/debug.json");
+        write_file(&path, ZED_FOREIGN_ONLY);
+
+        let result = generate(ParentIde::Zed, 4711, &dir, WriteMode::IfAbsent);
+        assert_eq!(result.action, ConfigAction::Updated);
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0]["label"], "Config A");
+        assert_eq!(parsed[1]["label"], "Config B");
+        assert_eq!(parsed[2]["label"], "Frust (TUI DAP)");
+        assert_eq!(parsed[2]["tcp_connection"]["port"], 4711);
+    }
+
+    #[test]
+    fn test_if_absent_appends_to_a_file_without_a_frust_entry_vscode() {
+        let dir = unique_temp_dir("if-absent-foreign-vscode");
+        let path = dir.join(".vscode/launch.json");
+        write_file(&path, VSCODE_FOREIGN_ONLY);
+
+        let result = generate(ParentIde::VSCode, 4711, &dir, WriteMode::IfAbsent);
+        assert_eq!(result.action, ConfigAction::Updated);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let configs = parsed["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0]["name"], "Rust");
+        assert_eq!(configs[1]["name"], "Frust (TUI DAP)");
+        assert_eq!(configs[1]["debugServer"], 4711);
+    }
+
+    #[test]
+    fn test_refresh_updates_the_port_of_an_existing_frust_entry() {
+        let dir = unique_temp_dir("refresh-present-zed");
+        let path = dir.join(".zed/debug.json");
+        write_file(&path, ZED_WITH_FRUST_1111);
+        let result = generate(ParentIde::Zed, 2222, &dir, WriteMode::Refresh);
+        assert_eq!(result.action, ConfigAction::Updated);
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["label"], "Other");
+        assert_eq!(parsed[1]["tcp_connection"]["port"], 2222);
+
+        let dir = unique_temp_dir("refresh-present-vscode");
+        let path = dir.join(".vscode/launch.json");
+        write_file(&path, VSCODE_WITH_FRUST_1111);
+        let result = generate(ParentIde::VSCode, 2222, &dir, WriteMode::Refresh);
+        assert_eq!(result.action, ConfigAction::Updated);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let configs = parsed["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0]["name"], "Rust");
+        assert_eq!(configs[1]["debugServer"], 2222);
+    }
+
+    /// Neovim applies the rule to its primary `launch.json`; the secondary
+    /// `.nvim-dap.lua` keeps `post_write`'s every-path contract.
+    #[test]
+    fn test_if_absent_neovim_skips_the_primary_but_still_runs_post_write() {
+        let dir = unique_temp_dir("if-absent-present-neovim");
+        let path = dir.join(".vscode/launch.json");
+        write_file(&path, VSCODE_WITH_FRUST_1111);
+
+        let result = generate(ParentIde::Neovim, 2222, &dir, WriteMode::IfAbsent);
+        assert_eq!(
+            result.action,
+            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            VSCODE_WITH_FRUST_1111
+        );
+        assert!(dir.canonicalize().unwrap().join(".nvim-dap.lua").exists());
+    }
+
+    #[test]
+    fn test_if_absent_emacs_leaves_an_existing_snippet_alone() {
+        let dir = unique_temp_dir("if-absent-present-emacs");
+        let created = generate(ParentIde::Emacs, 1111, &dir, WriteMode::IfAbsent);
+        assert_eq!(created.action, ConfigAction::Created);
+        let before = std::fs::read_to_string(&created.path).unwrap();
+
+        let result = generate(ParentIde::Emacs, 2222, &dir, WriteMode::IfAbsent);
+        assert_eq!(
+            result.action,
+            ConfigAction::Skipped(ENTRY_PRESENT_REASON.to_string())
+        );
+        assert_eq!(std::fs::read_to_string(&result.path).unwrap(), before);
+
+        let refreshed = generate(ParentIde::Emacs, 2222, &dir, WriteMode::Refresh);
+        assert_eq!(refreshed.action, ConfigAction::Updated);
+        assert!(
+            std::fs::read_to_string(&refreshed.path)
+                .unwrap()
+                .contains(":debugServer 2222")
+        );
+    }
+
+    #[test]
+    fn test_if_absent_on_a_malformed_file_is_an_error() {
+        let dir = unique_temp_dir("if-absent-malformed-zed");
+        write_file(&dir.join(".zed/debug.json"), "not json");
+        assert!(
+            generate_ide_config(Some(ParentIde::Zed), 4711, &dir, WriteMode::IfAbsent).is_err()
         );
     }
 }

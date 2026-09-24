@@ -25,7 +25,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::merge::{FRUST_CONFIG_NAME, clean_jsonc, merge_json_array_entry, to_pretty_json};
+use super::merge::{
+    FRUST_CONFIG_NAME, clean_jsonc, find_json_entry_by_field, merge_json_array_entry,
+    to_pretty_json,
+};
 use super::{IdeConfigError, IdeConfigGenerator, Result};
 
 /// Abstracts home-directory environment lookups so [`detect_workspace_root`]'s
@@ -279,6 +282,25 @@ impl IdeConfigGenerator for VSCodeGenerator {
         );
 
         Ok(to_pretty_json(&root))
+    }
+
+    /// Whether `existing`'s `configurations` already hold an entry named
+    /// `"Frust (TUI DAP)"` — the marker [`merge_config`](Self::merge_config)
+    /// matches on. An empty file, or one with no `configurations` key, has
+    /// none; a `configurations` that is not an array is the same error
+    /// `merge_config` reports.
+    fn has_frust_entry(&self, existing: &str) -> Result<bool> {
+        if existing.trim().is_empty() {
+            return Ok(false);
+        }
+        let root: serde_json::Value = serde_json::from_str(&clean_jsonc(existing))?;
+        let Some(configurations) = root.get("configurations") else {
+            return Ok(false);
+        };
+        let configurations = configurations
+            .as_array()
+            .ok_or_else(|| IdeConfigError::message("`configurations` is not an array"))?;
+        Ok(find_json_entry_by_field(configurations, "name", FRUST_CONFIG_NAME).is_some())
     }
 
     fn ide_name(&self) -> &'static str {

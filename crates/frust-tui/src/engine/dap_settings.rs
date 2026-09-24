@@ -12,13 +12,13 @@
 //! Unlike the run-config modal, this state is **not** created when the dialog
 //! opens and dropped when it closes: the preferences it holds are loaded once
 //! at [`AppState::new`](super::AppState::new) and consulted at startup
-//! (auto-start) and on every `DapListening` report (auto-configure), whether or
-//! not anyone has opened the dialog. `AppState::dap_settings_open` is what
+//! (auto-start) and on every app launch and `DapListening` report
+//! (auto-configure), whether or not anyone has opened the dialog. `AppState::dap_settings_open` is what
 //! makes it a modal.
 
 use std::path::PathBuf;
 
-use frust_dap::ide_config::{ConfigAction, IdeConfigResult, ParentIde};
+use frust_dap::ide_config::{ConfigAction, IdeConfigResult, ParentIde, WriteMode};
 
 use super::persist::DapPrefs;
 
@@ -166,7 +166,10 @@ pub struct DapSettings {
     /// Start the server automatically when the workbench is running inside an
     /// IDE's terminal (the detected-IDE case).
     pub auto_start_in_ide: bool,
-    /// Write/refresh the IDE's own DAP client config whenever the server binds.
+    /// Write the IDE's own DAP client config into an app's project when it is
+    /// launched while the server is listening (and, on a fresh bind, into the
+    /// active session's project) — adding the frust entry where it is missing,
+    /// never rewriting one that is already there.
     pub auto_configure_ide: bool,
     /// The port the next start binds (`0` = OS-assigned).
     pub port: u16,
@@ -417,6 +420,35 @@ pub struct IdeConfigRequest {
     pub port: u16,
     /// The project whose config files are written.
     pub project_root: PathBuf,
+    /// What happens to a config file that already exists:
+    /// [`WriteMode::Refresh`] for the dialog's explicit "generate now",
+    /// [`WriteMode::IfAbsent`] for the automatic on-launch write.
+    pub mode: WriteMode,
+}
+
+impl IdeConfigRequest {
+    /// Whether the runner should post `report` back as a
+    /// `Message::DapIdeConfig` (which stores it for the dialog and toasts it).
+    ///
+    /// The explicit path reports every ending. The automatic path stays quiet
+    /// about a skip — an entry already present (or Helix, which never has
+    /// anything to write) is the ordinary case on every launch, not news —
+    /// and reports only a created/updated file or a failure.
+    pub fn reports(&self, report: &DapIdeReport) -> bool {
+        match self.mode {
+            WriteMode::Refresh => true,
+            WriteMode::IfAbsent => !matches!(
+                report,
+                DapIdeReport::Written {
+                    result: IdeConfigResult {
+                        action: ConfigAction::Skipped(_),
+                        ..
+                    },
+                    ..
+                }
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -667,5 +699,39 @@ mod tests {
                 .summary()
                 .contains("IntelliJ")
         );
+    }
+
+    /// The automatic path reports only what changed on disk (or failed); the
+    /// explicit path reports everything, skips included.
+    #[test]
+    fn only_the_explicit_path_reports_a_skip() {
+        let written = |action| DapIdeReport::Written {
+            ide: ParentIde::Zed,
+            result: IdeConfigResult {
+                path: PathBuf::from("/tmp/p/.zed/debug.json"),
+                action,
+            },
+        };
+        let request = |mode| IdeConfigRequest {
+            ide: ParentIde::Zed,
+            port: 4849,
+            project_root: PathBuf::from("/tmp/p"),
+            mode,
+        };
+        let skipped = written(ConfigAction::Skipped(
+            frust_dap::ide_config::ENTRY_PRESENT_REASON.to_string(),
+        ));
+        let failed = DapIdeReport::Failed("permission denied".to_string());
+
+        let auto = request(WriteMode::IfAbsent);
+        assert!(!auto.reports(&skipped));
+        assert!(auto.reports(&written(ConfigAction::Created)));
+        assert!(auto.reports(&written(ConfigAction::Updated)));
+        assert!(auto.reports(&failed));
+
+        let explicit = request(WriteMode::Refresh);
+        assert!(explicit.reports(&skipped));
+        assert!(explicit.reports(&written(ConfigAction::Created)));
+        assert!(explicit.reports(&failed));
     }
 }

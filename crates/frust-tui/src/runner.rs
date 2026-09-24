@@ -637,11 +637,15 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
 ///
 /// `generate_ide_config` merges into whatever the editor already has on disk,
 /// so it reads, parses, creates directories and writes — none of which belongs
-/// on the event loop. Every ending is reported: a written/updated/skipped
-/// file, the IDE that has no DAP config format at all (`Ok(None)`, which only
-/// the JetBrains pair reaches here — the pure core refuses the others before
-/// asking for this effect), and a failure, which is retained and shown rather
-/// than dropped.
+/// on the event loop. `request.mode` decides what an existing file gets (see
+/// `frust_dap::ide_config::WriteMode`). Every ending the request
+/// [`reports`](crate::engine::IdeConfigRequest::reports) is posted back: a
+/// written/updated/skipped file, the IDE that has no DAP config format at all
+/// (`Ok(None)`, which only the JetBrains pair reaches here — the pure core
+/// refuses the others before asking for this effect), and a failure, which is
+/// retained and shown rather than dropped. The one ending not posted is an
+/// automatic (`IfAbsent`) write's skip — the ordinary "already configured"
+/// case on every launch.
 fn spawn_ide_config_generation(
     request: crate::engine::IdeConfigRequest,
     tx: UnboundedSender<Message>,
@@ -651,6 +655,7 @@ fn spawn_ide_config_generation(
             Some(request.ide),
             request.port,
             &request.project_root,
+            request.mode,
         ) {
             Ok(Some(result)) => crate::engine::DapIdeReport::Written {
                 ide: request.ide,
@@ -659,7 +664,9 @@ fn spawn_ide_config_generation(
             Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
             Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
         };
-        let _ = tx.send(Message::DapIdeConfig(report));
+        if request.reports(&report) {
+            let _ = tx.send(Message::DapIdeConfig(report));
+        }
     });
 }
 

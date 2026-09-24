@@ -7,7 +7,9 @@
 //! clipboard). It performs no I/O and reads no clock, so every transition is
 //! unit-testable without a terminal (see the tests below).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use frust_dap::ide_config::{ParentIde, WriteMode};
 
 use super::add_plugin::{AddPluginAdvance, AddPluginDialog};
 use super::bootstrap::BootstrapWizard;
@@ -634,7 +636,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 let specs = drop_already_running(state, specs);
                 Outcome {
                     redraw: true,
-                    effect: (!specs.is_empty()).then_some(Effect::LaunchSessions(specs)),
+                    effect: launch_effect(state, specs),
                 }
             }
             // Modal open but nothing checked, or no modal: nothing to launch.
@@ -1433,11 +1435,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         // naming the server *currently installed* — the identical race, and
         // the identical consequence of losing it, as the MCP pair above.
         //
-        // A fresh listener is additionally where auto-configuration happens:
-        // the editor's launch config must name the port that was *actually*
-        // bound (a server started on `0` learns its port here and nowhere
-        // else), so the generation request rides this report rather than the
-        // start that preceded it.
+        // A fresh listener is also one of the two auto-configuration triggers
+        // (the other is an app launch — see `launch_effect`), but only when a
+        // session is active: the config goes into *that* session's project,
+        // named with the port actually bound (a server started on `0` learns
+        // its port here and nowhere else). With no session, a bind writes
+        // nothing — the workbench's active project at startup is just the
+        // first `frust.toml` the walk found, not a project anyone asked to
+        // debug.
         Message::DapListening(generation, port) => {
             let names_installed = state
                 .dap
@@ -1454,14 +1459,17 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // Gated on `changed`, so auto-configuration runs once per bind:
             // a repeat report for a port already recorded is the same server
             // saying the same thing, not a second listener to reconfigure for.
-            if changed && state.dap_settings.auto_configure_ide {
-                let out = request_ide_config(state, port);
-                Outcome {
-                    redraw: changed || out.redraw,
-                    effect: out.effect,
-                }
+            let effect = if changed {
+                state
+                    .active_session()
+                    .map(|session| session.project_root.clone())
+                    .and_then(|root| auto_ide_config(state, &root))
             } else {
-                Outcome::dirty(changed)
+                None
+            };
+            Outcome {
+                redraw: changed,
+                effect,
             }
         }
         Message::DapStopped(generation, error) => {
@@ -1634,7 +1642,8 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 crate::supervise::DapStatus::Listening { port, .. } => port,
                 _ => state.dap_settings.port,
             };
-            request_ide_config(state, port)
+            let project_root = state.project_root.clone();
+            request_ide_config(state, port, project_root, WriteMode::Refresh)
         }
         Message::DapIdeConfig(report) => {
             let kind = if report.is_failure() {
@@ -1689,27 +1698,45 @@ fn commit_dap_port(state: &mut AppState) -> Option<Effect> {
     }
 }
 
-/// Request an IDE DAP-config generation for `port`, or record why there is
-/// nothing to generate.
+/// The IDE a config would be generated for, or the refusal explaining why
+/// there is none: no IDE detected or chosen, or an IDE with no DAP config
+/// format at all.
+fn config_ide(state: &AppState) -> Result<ParentIde, DapIdeReport> {
+    let Some(ide) = state.dap_settings.effective_ide() else {
+        return Err(DapIdeReport::NoIde);
+    };
+    if !ide.supports_dap_config() {
+        return Err(DapIdeReport::Unsupported(ide));
+    }
+    Ok(ide)
+}
+
+/// Request an IDE DAP-config generation for `port` into `project_root` with
+/// `mode`, or record why there is nothing to generate — the dialog's explicit
+/// "generate now" path.
 ///
 /// The generation itself reads and writes real files, so it can only be an
 /// [`Effect`] — but every *refusal* is decided here, in the pure core, and
 /// stored where the dialog shows it: an absent IDE, an IDE with no DAP config
 /// format at all, and a workbench with no project open are each reported
-/// rather than silently doing nothing.
-fn request_ide_config(state: &mut AppState, port: u16) -> Outcome {
+/// rather than silently doing nothing. (The automatic path,
+/// [`auto_ide_config`], refuses silently instead.)
+fn request_ide_config(
+    state: &mut AppState,
+    port: u16,
+    project_root: Option<PathBuf>,
+    mode: WriteMode,
+) -> Outcome {
     fn report(state: &mut AppState, report: DapIdeReport) -> Outcome {
         state.dap_settings.last_ide_config = Some(report);
         Outcome::redraw()
     }
 
-    let Some(ide) = state.dap_settings.effective_ide() else {
-        return report(state, DapIdeReport::NoIde);
+    let ide = match config_ide(state) {
+        Ok(ide) => ide,
+        Err(refusal) => return report(state, refusal),
     };
-    if !ide.supports_dap_config() {
-        return report(state, DapIdeReport::Unsupported(ide));
-    }
-    let Some(project_root) = state.project_root.clone() else {
+    let Some(project_root) = project_root else {
         return report(
             state,
             DapIdeReport::Failed(
@@ -1721,7 +1748,67 @@ fn request_ide_config(state: &mut AppState, port: u16) -> Outcome {
         ide,
         port,
         project_root,
+        mode,
     }))
+}
+
+/// The automatic IDE-config write for `project_root`, if one is due: only
+/// with `auto_configure_ide` on and the DAP server currently listening (its
+/// bound port is what the config names), and always
+/// [`WriteMode::IfAbsent`] — an existing frust entry is never rewritten.
+///
+/// Refusals (no IDE, an IDE with no DAP config format) are silent here: the
+/// automatic path runs on every launch, and neither stores a
+/// [`DapIdeReport`] nor toasts — only the dialog's explicit
+/// [`request_ide_config`] reports them.
+fn auto_ide_config(state: &AppState, project_root: &Path) -> Option<Effect> {
+    if !state.dap_settings.auto_configure_ide {
+        return None;
+    }
+    let crate::supervise::DapStatus::Listening { port, .. } = state.dap_status() else {
+        return None;
+    };
+    let ide = config_ide(state).ok()?;
+    Some(Effect::GenerateIdeConfig(IdeConfigRequest {
+        ide,
+        port,
+        project_root: project_root.to_path_buf(),
+        mode: WriteMode::IfAbsent,
+    }))
+}
+
+/// The effect for launching `specs` — every workbench launch path
+/// (the run-config modal, run-on-all-devices) goes through here, so an app
+/// launch is where the editor's DAP client config gets written: one
+/// [`Effect::LaunchSessions`], followed (via [`Effect::Batch`]) by one
+/// [`auto_ide_config`] write per *distinct* project root among the specs,
+/// when one is due. `None` for no specs.
+///
+/// Sessions launched through the MCP/DAP backend
+/// (`crate::supervise::mcp_backend`) never pass through here, by design: the
+/// DAP client that launched them already had a config to connect with.
+fn launch_effect(state: &AppState, specs: Vec<SessionSpec>) -> Option<Effect> {
+    if specs.is_empty() {
+        return None;
+    }
+    let mut roots: Vec<&Path> = Vec::new();
+    for spec in &specs {
+        let root = spec.project_root.as_path();
+        if !roots
+            .iter()
+            .any(|seen| seen.components().eq(root.components()))
+        {
+            roots.push(root);
+        }
+    }
+    let configs: Vec<Effect> = roots
+        .into_iter()
+        .filter_map(|root| auto_ide_config(state, root))
+        .collect();
+    let mut effects = Vec::with_capacity(1 + configs.len());
+    effects.push(Effect::LaunchSessions(specs));
+    effects.extend(configs);
+    batch(effects)
 }
 
 /// The scrollbar-track fraction (`0.0`..=`1.0`, top→bottom) for a pointer at
@@ -2075,7 +2162,7 @@ fn run_on_all_devices(state: &mut AppState) -> Outcome {
     }
     Outcome {
         redraw: true,
-        effect: Some(Effect::LaunchSessions(specs)),
+        effect: launch_effect(state, specs),
     }
 }
 
@@ -6390,6 +6477,7 @@ mod tests {
                 ide: crate::engine::IDE_OVERRIDES[0],
                 port: crate::engine::DEFAULT_DAP_PORT,
                 project_root: PathBuf::from("/tmp/huddle"),
+                mode: WriteMode::Refresh,
             }))
         );
     }
@@ -6538,12 +6626,30 @@ mod tests {
         assert!(st.dap_settings_open);
     }
 
-    /// The auto-configure path end to end at the message level: the bound
-    /// port (not the configured one) is what the editor is pointed at, and
-    /// the outcome the runner reports back is retained for the dialog.
+    /// A bind with no session writes nothing: the workbench's active project
+    /// at startup is merely the first `frust.toml` found, not a project
+    /// anyone launched.
     #[test]
-    fn a_fresh_listener_requests_ide_config_and_stores_the_reported_outcome() {
+    fn a_fresh_listener_without_a_session_writes_no_ide_config() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        assert!(st.dap_settings.auto_configure_ide);
+        st.dap = Some(dap_handle(0));
+        let out = update(&mut st, Message::DapListening(0, 41_234));
+        assert!(out.redraw, "the port still promotes the handle");
+        assert_eq!(out.effect, None);
+        assert_eq!(st.dap_settings.last_ide_config, None);
+    }
+
+    /// The auto-configure-on-bind path end to end at the message level: with
+    /// a session active, its project (not the workbench's) is configured,
+    /// the bound port (not the configured one) is what the editor is pointed
+    /// at, an existing entry is never rewritten, and the outcome the runner
+    /// reports back is retained for the dialog.
+    #[test]
+    fn a_fresh_listener_configures_the_active_sessions_project_and_stores_the_outcome() {
         let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        register_on(&mut st, 0, "/tmp/other-app", SessionTarget::Desktop);
+        assert!(st.active_session().is_some());
         st.dap = Some(dap_handle(0));
         // Started on `0`: the OS-assigned port is only known here.
         let out = update(&mut st, Message::DapListening(0, 41_234));
@@ -6552,9 +6658,15 @@ mod tests {
             Some(Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
                 ide: frust_dap::ide_config::ParentIde::VSCode,
                 port: 41_234,
-                project_root: PathBuf::from("/tmp/huddle"),
+                project_root: PathBuf::from("/tmp/other-app"),
+                mode: WriteMode::IfAbsent,
             })),
-            "the config must name the port actually bound"
+            "the config must name the port actually bound, in the session's project"
+        );
+        assert_eq!(
+            update(&mut st, Message::DapListening(0, 41_234)).effect,
+            None,
+            "a repeat report for the same port is not a second bind"
         );
 
         let result = frust_dap::ide_config::IdeConfigResult {
@@ -6603,12 +6715,169 @@ mod tests {
     #[test]
     fn auto_configure_off_leaves_a_fresh_listener_alone() {
         let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
         st.dap_settings.auto_configure_ide = false;
         st.dap = Some(dap_handle(0));
         let out = update(&mut st, Message::DapListening(0, 4849));
         assert!(out.redraw, "the port still promotes the handle");
         assert_eq!(out.effect, None);
         assert_eq!(st.dap_settings.last_ide_config, None);
+    }
+
+    /// The automatic path's refusals are silent: no effect, no stored
+    /// report, no toast — unlike the explicit "generate now".
+    #[test]
+    fn auto_configure_refusals_are_silent() {
+        for detected in [None, Some(frust_dap::ide_config::ParentIde::IntelliJ)] {
+            let mut st = dap_workbench(detected);
+            register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+            st.dap = Some(dap_handle(0));
+            let out = update(&mut st, Message::DapListening(0, 4849));
+            assert_eq!(out.effect, None, "detected={detected:?}");
+            assert_eq!(st.dap_settings.last_ide_config, None);
+            assert!(st.toasts.items.is_empty());
+
+            let out = launch_from_run_config(&mut st);
+            assert!(
+                matches!(out.effect, Some(Effect::LaunchSessions(_))),
+                "a refused config never holds up the launch, got {:?}",
+                out.effect
+            );
+            assert_eq!(st.dap_settings.last_ide_config, None);
+        }
+    }
+
+    /// Stop the one registered session (so its target is free again) and
+    /// launch the desktop target from the run-config modal.
+    fn launch_from_run_config(st: &mut AppState) -> Outcome {
+        let ids: Vec<SessionId> = st.sessions.iter().map(|s| s.id).collect();
+        for session in ids {
+            update(
+                st,
+                Message::Session(SessionEvent {
+                    id: session,
+                    kind: SessionEventKind::State(crate::supervise::SessionState::Exited(true)),
+                }),
+            );
+        }
+        update(st, Message::OpenRunConfig); // desktop checked by default
+        update(st, Message::RunConfigLaunch)
+    }
+
+    /// A launch while the server listens (auto-configure on) also writes the
+    /// launched project's config, never rewriting an existing entry.
+    #[test]
+    fn a_launch_with_dap_listening_batches_an_ide_config_for_the_launched_project() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 41_234));
+        update(&mut st, Message::OpenRunConfig);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::Batch(effects)) = out.effect else {
+            panic!("expected a Batch, got {:?}", out.effect);
+        };
+        assert_eq!(effects.len(), 2);
+        let Effect::LaunchSessions(specs) = &effects[0] else {
+            panic!("the launch comes first, got {:?}", effects[0]);
+        };
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            effects[1],
+            Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
+                ide: frust_dap::ide_config::ParentIde::Zed,
+                port: 41_234,
+                project_root: specs[0].project_root.clone(),
+                mode: WriteMode::IfAbsent,
+            })
+        );
+        assert_eq!(specs[0].project_root, PathBuf::from("/tmp/huddle"));
+    }
+
+    /// Several targets of one project are one config write, not one per
+    /// target.
+    #[test]
+    fn a_multi_target_launch_writes_one_config_per_distinct_project() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+        update(&mut st, Message::RunConfigToggleTargetAt(0)); // + desktop
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::Batch(effects)) = out.effect else {
+            panic!("expected a Batch, got {:?}", out.effect);
+        };
+        assert!(matches!(&effects[0], Effect::LaunchSessions(specs) if specs.len() == 2));
+        let configs: Vec<_> = effects[1..]
+            .iter()
+            .filter(|e| matches!(e, Effect::GenerateIdeConfig(_)))
+            .collect();
+        assert_eq!(configs.len(), 1, "one project, one config: {effects:?}");
+        assert_eq!(effects.len(), 2);
+    }
+
+    /// No listening server, or auto-configure off: a launch is only a launch.
+    #[test]
+    fn a_launch_without_a_listening_server_or_with_auto_configure_off_is_plain() {
+        // No server at all.
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            "got {:?}",
+            out.effect
+        );
+
+        // A server still starting (no bound port yet).
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(_))),
+            "got {:?}",
+            out.effect
+        );
+
+        // Listening, but auto-configure off.
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.auto_configure_ide = false;
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(_))),
+            "got {:?}",
+            out.effect
+        );
+    }
+
+    /// "Run on all devices" is the other launch path; it batches the config
+    /// write the same way.
+    #[test]
+    fn run_on_all_devices_batches_the_ide_config_too() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        update(&mut st, Message::DevicesLoaded(vec![pixel_7()]));
+
+        let out = run_on_all_devices(&mut st);
+
+        let Some(Effect::Batch(effects)) = out.effect else {
+            panic!("expected a Batch, got {:?}", out.effect);
+        };
+        assert!(matches!(&effects[0], Effect::LaunchSessions(_)));
+        assert!(matches!(
+            &effects[1],
+            Effect::GenerateIdeConfig(request)
+                if request.mode == WriteMode::IfAbsent
+                    && request.project_root == std::path::Path::new("/tmp/huddle")
+        ));
     }
 
     /// Every refusal is decided in the pure core and *reported*, never a
@@ -6659,7 +6928,9 @@ mod tests {
                 ide: frust_dap::ide_config::ParentIde::Zed,
                 port: 41_234,
                 project_root: PathBuf::from("/tmp/huddle"),
-            }))
+                mode: WriteMode::Refresh,
+            })),
+            "the explicit path always refreshes"
         );
     }
 

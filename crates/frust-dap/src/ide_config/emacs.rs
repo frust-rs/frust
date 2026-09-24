@@ -21,6 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::merge::FRUST_CONFIG_NAME;
 use super::{IdeConfigGenerator, Result};
 
 /// Generates an Elisp snippet for Emacs `dap-mode` integration.
@@ -49,6 +50,13 @@ impl IdeConfigGenerator for EmacsGenerator {
     fn merge_config(&self, _existing: &str, port: u16, project_root: &Path) -> Result<String> {
         let path = self.config_path(project_root);
         Ok(generate_elisp(port, to_lisp_path(&path)))
+    }
+
+    /// Whether `existing` already registers the frust debug template — the
+    /// `:name "Frust (TUI DAP)"` line [`generate_elisp`] writes. The file is
+    /// frust-owned, so that template *is* the frust entry.
+    fn has_frust_entry(&self, existing: &str) -> Result<bool> {
+        Ok(existing.contains(&format!(":name \"{FRUST_CONFIG_NAME}\"")))
     }
 
     /// Display name used in log messages.

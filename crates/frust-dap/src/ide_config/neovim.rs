@@ -121,6 +121,14 @@ impl IdeConfigGenerator for NeovimGenerator {
         VSCodeGenerator.merge_config(existing, port, project_root)
     }
 
+    /// Whether the primary `.vscode/launch.json` already has the frust entry —
+    /// delegates to the VS Code generator, so
+    /// [`WriteMode::IfAbsent`](super::WriteMode::IfAbsent) applies to the
+    /// primary file.
+    fn has_frust_entry(&self, existing: &str) -> Result<bool> {
+        VSCodeGenerator.has_frust_entry(existing)
+    }
+
     /// Write (or overwrite) the secondary `.nvim-dap.lua` file at the
     /// workspace root, so it stays in sync with `.vscode/launch.json` on
     /// every DAP server start.
