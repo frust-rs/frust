@@ -540,6 +540,7 @@ fn write_entry(
 /// filename allowlist instead. Currently only the Gradle wrapper script
 /// (`android.tmpl/gradlew`); its Windows counterpart (`gradlew.bat`)
 /// doesn't need a Unix exec bit.
+#[cfg(unix)]
 const EXECUTABLE_FILENAMES: &[&str] = &["gradlew"];
 
 /// Sets the Unix executable bit (`0o755`) on `path` if its file name is in

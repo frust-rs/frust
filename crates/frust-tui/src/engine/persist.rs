@@ -837,7 +837,7 @@ mod tests {
         let differently_cased =
             PathBuf::from(cwd.to_string_lossy().replace("Work", "wORK").to_string());
         let (projects, local_count) =
-            split_local_and_previous(&cwd, &[differently_cased.clone()], &[]);
+            split_local_and_previous(&cwd, std::slice::from_ref(&differently_cased), &[]);
         assert_eq!(
             local_count, 1,
             "case-insensitively under the cwd is still local"
