@@ -10,38 +10,8 @@
 //! `Message` through the same `update` every other input path uses (see
 //! `super::update::execute_palette`). `crate::ui::views::palette` renders it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use super::message::Message;
 use super::state::AppState;
-
-/// Snapshot-test-only override forcing the macOS glyph spelling regardless
-/// of the actual build target — see [`force_macos_glyphs_for_snapshot_tests`].
-static FORCE_MACOS_GLYPHS: AtomicBool = AtomicBool::new(false);
-
-/// Forces [`palette_open_hint`]/[`mouse_toggle_hint`] to the macOS spelling
-/// for the remainder of the process, regardless of `cfg!(target_os)`. Called
-/// only by the insta snapshot harness (`crates/frust-tui/tests/snapshots.rs`)
-/// so every CI host — Linux, macOS, Windows — renders the identical macOS
-/// glyphs and no snapshot needs a per-host fork; production code never calls
-/// this. Safe to call repeatedly (idempotent).
-///
-/// This is a **one-way switch, and test-only**: it only ever flips the flag
-/// to `true`, never back, so it must never be reachable from a production
-/// code path — flipping it once would wrongly force macOS glyphs on every
-/// later render for the rest of that process's life. It is `pub` (rather
-/// than `#[cfg(test)]`) purely because `crates/frust-tui/tests/snapshots.rs`
-/// is a separate integration-test binary, which cannot see a `#[cfg(test)]`
-/// item in this crate; `#[doc(hidden)]` keeps it out of this crate's public
-/// docs to signal it is not part of the real API.
-#[doc(hidden)]
-pub fn force_macos_glyphs_for_snapshot_tests() {
-    FORCE_MACOS_GLYPHS.store(true, Ordering::Relaxed);
-}
-
-fn host_is_macos() -> bool {
-    FORCE_MACOS_GLYPHS.load(Ordering::Relaxed) || cfg!(target_os = "macos")
-}
 
 /// The `(palette-open hint, mouse-toggle hint)` pair for a host, keyed off
 /// `is_macos` so both arms are directly unit-testable without depending on
@@ -49,25 +19,17 @@ fn host_is_macos() -> bool {
 /// symbols; every other host spells the modifier out — `⌘`/`⌥` aren't
 /// physical keys there — using the same `^X` notation the UI already uses
 /// for Ctrl bindings (e.g. `^O`, the "Switch project…" hint below).
-fn key_glyphs_for(is_macos: bool) -> (&'static str, &'static str) {
+///
+/// `pub(crate)` rather than private: [`crate::ui::theme::Theme`] is the glyph
+/// set's carrier (see the module doc on [`commands`]'s "Toggle mouse
+/// capture" row), so it calls this directly rather than the engine tracking
+/// host identity for the UI layer.
+pub(crate) fn key_glyphs_for(is_macos: bool) -> (&'static str, &'static str) {
     if is_macos {
         ("⌘ palette", "⌥m")
     } else {
         ("^P palette", "Alt+m")
     }
-}
-
-/// The command-palette-open hint for the current host (see [`key_glyphs_for`]).
-/// Shared by the workbench and welcome status bars.
-pub fn palette_open_hint() -> &'static str {
-    key_glyphs_for(host_is_macos()).0
-}
-
-/// The mouse-capture-toggle key hint for the current host (see
-/// [`key_glyphs_for`]). Shared by the status-bar mouse chip and this
-/// registry's own "Toggle mouse capture" row.
-pub fn mouse_toggle_hint() -> &'static str {
-    key_glyphs_for(host_is_macos()).1
 }
 
 /// The open command palette's live state: the typed query and the highlighted
@@ -247,7 +209,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         always("Start/stop DAP server", "", Message::ToggleDapServer),
         always(
             "Toggle mouse capture",
-            mouse_toggle_hint(),
+            // The registry itself carries only the host-honest default (see
+            // `key_glyphs_for`'s doc); a render-time caller that needs the
+            // exact glyph set an in-hand `Theme` picked (e.g. the help
+            // overlay, so its snapshot fixtures stay host-independent)
+            // substitutes this row's hint from the theme instead of reading
+            // it here — see `crate::ui::views::help::render`.
+            key_glyphs_for(cfg!(target_os = "macos")).1,
             Message::ToggleMouseCapture,
         ),
         gated(

@@ -483,7 +483,7 @@ fn render_status(
     };
 
     let label_width = label.chars().count() as u16;
-    let indicator = crate::ui::mouse_indicator(state);
+    let indicator = crate::ui::mouse_indicator(state, theme);
     // ` ` + label + ` │ ` + hint, with the right-aligned indicator's columns
     // reserved (it paints over this row afterwards).
     let available = area
