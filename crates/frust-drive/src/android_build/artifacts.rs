@@ -701,7 +701,17 @@ mod tests {
             &mut silent(),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("outputs/apk/release"), "{err}");
+        // `Path::join`, not a `/`-joined literal: the error names the
+        // directory via `Path::display`, which renders `\`-separated on
+        // Windows, so a forward-slash substring like `"outputs/apk/release"`
+        // never matches there.
+        let expected_dir =
+            expected_output_dir(&dir, &apk(&["arm64-v8a"]), BuildMode::Release, None);
+        assert!(
+            err.to_string()
+                .contains(&expected_dir.display().to_string()),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -728,8 +738,15 @@ mod tests {
 
         assert_eq!(lines.len(), 1, "{lines:?}");
         let warning = &lines[0];
-        assert!(warning.contains("android/app/build/outputs"), "{warning}");
-        assert!(warning.contains("build/android/app/outputs"), "{warning}");
+        // `Path::join`-derived expectations, not `/`-joined literals — see
+        // `discover_errs_naming_the_migrated_dir_when_neither_exists`.
+        let legacy = legacy_output_dir(&dir, &apk(&["arm64-v8a"]), BuildMode::Release, None);
+        let current = expected_output_dir(&dir, &apk(&["arm64-v8a"]), BuildMode::Release, None);
+        assert!(warning.contains(&legacy.display().to_string()), "{warning}");
+        assert!(
+            warning.contains(&current.display().to_string()),
+            "{warning}"
+        );
         assert!(warning.contains(MIGRATION_RECIPE_DOC), "{warning}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -800,11 +817,20 @@ mod tests {
         )
         .unwrap_err();
         let message = err.to_string();
+        // `Path::join`-derived expectations, not `/`-joined literals: the
+        // error names both directories via `Path::display`, which renders
+        // `\`-separated on Windows.
+        let expected_current =
+            expected_output_dir(&dir, &apk(&["arm64-v8a"]), BuildMode::Release, None);
+        let legacy = legacy_output_dir(&dir, &apk(&["arm64-v8a"]), BuildMode::Release, None);
         assert!(
-            message.contains("build/android/app/outputs/apk/release"),
+            message.contains(&expected_current.display().to_string()),
             "{message}"
         );
-        assert!(!message.contains("android/app/build/outputs"), "{message}");
+        assert!(
+            !message.contains(&legacy.display().to_string()),
+            "{message}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -861,8 +887,14 @@ mod tests {
         fs::write(&apk_path, b"fake").unwrap();
         // Pin the mtime explicitly to `not_before` rather than relying on
         // write-then-check ordering, so the test can't flake on a coarse
-        // filesystem timestamp.
-        fs::File::open(&apk_path)
+        // filesystem timestamp. Opened for write, not `File::open`'s
+        // read-only handle: `set_modified` needs `FILE_WRITE_ATTRIBUTES` on
+        // the handle to succeed on Windows (`Access is denied`, os error 5),
+        // where — unlike Unix's path-based `utimes` — the timestamp update
+        // goes through the open handle.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&apk_path)
             .unwrap()
             .set_modified(not_before)
             .unwrap();
@@ -895,7 +927,11 @@ mod tests {
         let apk_path = out_dir.join("app-release.apk");
         fs::write(&apk_path, b"fake").unwrap();
         let stale_mtime = SystemTime::now() - std::time::Duration::from_secs(3600);
-        fs::File::open(&apk_path)
+        // Opened for write — see the sibling fresh-artifact test for why
+        // `File::open`'s read-only handle fails `set_modified` on Windows.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&apk_path)
             .unwrap()
             .set_modified(stale_mtime)
             .unwrap();

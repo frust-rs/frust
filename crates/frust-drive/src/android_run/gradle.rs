@@ -196,9 +196,16 @@ mod tests {
     /// falls back to the longest registered key that is a *prefix* of the
     /// real one, so a missing or misplaced `--project-cache-dir` finds no
     /// fixture at all and fails the call.
+    ///
+    /// Leads with [`gradle_wrapper`]'s own output — `./gradlew` everywhere
+    /// but Windows, where `assemble` spawns the absolute `gradlew.bat`
+    /// wrapper — rather than a hardcoded `"./gradlew"`, so this fixture key
+    /// matches what `assemble` actually invokes on every host `cargo test`
+    /// runs on.
     fn gradlew_argv(project_dir: &Path, task: &str, props: &[&str]) -> String {
         let mut key = format!(
-            "./gradlew --project-cache-dir {} {task}",
+            "{} --project-cache-dir {} {task}",
+            gradle_wrapper(&project_dir.join("android")).to_string_lossy(),
             project_cache_dir(project_dir).display()
         );
         for prop in props {
@@ -208,12 +215,26 @@ mod tests {
         key
     }
 
+    /// A real, host-native absolute project directory for tests that never
+    /// touch the filesystem (pure `FakeProcessRunner` argv assertions): a
+    /// hardcoded Unix-style literal like `/tmp/myapp` is only a genuine
+    /// absolute path under Unix path rules, so on Windows
+    /// [`project_cache_dir`]/[`gradle_wrapper`]'s `std::path::absolute` calls
+    /// would silently rewrite it (prefixing the process's current drive)
+    /// instead of leaving it unchanged, breaking exact-string assertions
+    /// built against the literal. Deriving it from [`std::env::temp_dir`]
+    /// keeps it genuinely absolute — and hence a no-op under
+    /// `std::path::absolute` — on whichever host runs the test.
+    fn fake_project_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("frust-cli-gradle-test-argv-{tag}"))
+    }
+
     #[test]
     fn assemble_runs_gradlew_with_task_props_java_home_env_and_prefixes_lines() {
-        let project_dir = Path::new("/tmp/myapp");
+        let project_dir = fake_project_dir("assemble-basic");
         let runner = FakeProcessRunner::new().with(
             gradlew_argv(
-                project_dir,
+                &project_dir,
                 "assembleDebug",
                 &[
                     "-Pfrust.targetPlatforms=arm64-v8a",
@@ -233,7 +254,7 @@ mod tests {
         ];
         let out = assemble(
             &runner,
-            project_dir,
+            &project_dir,
             &project_dir.join("android"),
             "/opt/jdk17",
             "assembleDebug",
@@ -262,19 +283,23 @@ mod tests {
     /// same project-rooted path.
     #[test]
     fn assemble_leads_with_an_absolute_project_cache_dir_under_build_android() {
-        let project_dir = Path::new("/tmp/myapp");
-        let expected_cache = Path::new("/tmp/myapp/build/android/.gradle");
-        assert_eq!(project_cache_dir(project_dir), expected_cache);
+        let project_dir = fake_project_dir("cache-dir");
+        // A real, host-native absolute `project_dir` makes `project_cache_dir`'s
+        // `std::path::absolute` call a no-op, so the expected cache path can
+        // be a plain `Path::join` instead of a hardcoded (Unix-only-absolute)
+        // literal — see `fake_project_dir`.
+        let expected_cache = project_dir.join(BuildLayout::android_gradle_cache());
+        assert_eq!(project_cache_dir(&project_dir), expected_cache);
         assert_eq!(
-            leading_args(project_dir),
+            leading_args(&project_dir),
             [
                 "--project-cache-dir".to_string(),
-                "/tmp/myapp/build/android/.gradle".to_string(),
+                expected_cache.display().to_string(),
             ]
         );
 
         let runner = FakeProcessRunner::new().with(
-            "./gradlew --project-cache-dir /tmp/myapp/build/android/.gradle assembleRelease",
+            gradlew_argv(&project_dir, "assembleRelease", &[]),
             Output {
                 success: true,
                 stdout: "BUILD SUCCESSFUL".to_string(),
@@ -283,7 +308,7 @@ mod tests {
         );
         let out = assemble(
             &runner,
-            project_dir,
+            &project_dir,
             &project_dir.join("android"),
             "/opt/jdk17",
             "assembleRelease",
@@ -310,9 +335,9 @@ mod tests {
 
     #[test]
     fn assemble_surfaces_failure() {
-        let project_dir = Path::new("/tmp/failing-app");
+        let project_dir = fake_project_dir("failing-app");
         let runner = FakeProcessRunner::new().with(
-            gradlew_argv(project_dir, "assembleRelease", &[]),
+            gradlew_argv(&project_dir, "assembleRelease", &[]),
             Output {
                 success: false,
                 stdout: "> Task :app:compileReleaseKotlin FAILED".to_string(),
@@ -321,7 +346,7 @@ mod tests {
         );
         let out = assemble(
             &runner,
-            project_dir,
+            &project_dir,
             &project_dir.join("android"),
             "/opt/jdk17",
             "assembleRelease",
@@ -418,11 +443,19 @@ mod tests {
     /// CreateProcess can't run `./gradlew` (a POSIX shell script) and
     /// Rust's `Command` neither appends `.bat` nor resolves a bare name
     /// against the child's `current_dir`.
+    ///
+    /// `android_dir` has to be genuinely absolute on whichever host runs
+    /// this (see [`fake_project_dir`]): `gradle_wrapper_for` calls
+    /// `std::path::absolute`, which is a no-op on a truly absolute input but
+    /// would otherwise prefix a Unix-only-absolute literal like
+    /// `/tmp/myapp/android` with the process's current drive on a real
+    /// Windows host, no longer matching the plain `Path::join` this asserts
+    /// against.
     #[test]
     fn gradle_wrapper_is_absolute_gradlew_bat_on_windows() {
-        let android_dir = Path::new("/tmp/myapp/android");
+        let android_dir = std::path::absolute(Path::new("myapp/android")).unwrap();
         assert_eq!(
-            gradle_wrapper_for(android_dir, true),
+            gradle_wrapper_for(&android_dir, true),
             android_dir.join("gradlew.bat")
         );
         assert_eq!(gradle_wrapper_display_for(true), "gradlew.bat");

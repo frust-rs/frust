@@ -876,12 +876,24 @@ mod tests {
         let err = check(&dir, BuildMode::Release).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("no file exists there"), "{message}");
+        // Component-wise `Path::join`s, not a single `/`-embedded string:
+        // the production candidates are built base-then-filename via two
+        // separate `.join()` calls (see `store_file_candidates`), which on
+        // Windows renders pure-`\` — `dir.join("android/upload.jks")` would
+        // instead carry a literal `/` inside the pushed component, never
+        // matching that `Display` output there.
         assert!(
-            message.contains(&dir.join("android/upload.jks").display().to_string()),
+            message.contains(&dir.join("android").join("upload.jks").display().to_string()),
             "{message}"
         );
         assert!(
-            message.contains(&dir.join("android/app/upload.jks").display().to_string()),
+            message.contains(
+                &dir.join("android")
+                    .join("app")
+                    .join("upload.jks")
+                    .display()
+                    .to_string()
+            ),
             "{message}"
         );
         assert!(
@@ -933,7 +945,7 @@ mod tests {
         );
         let store_file = store_file_line(&contents);
         assert!(
-            Path::new(store_file).is_absolute() && Path::new(store_file).is_file(),
+            Path::new(&store_file).is_absolute() && Path::new(&store_file).is_file(),
             "storeFile must be an absolute path to a real keystore: {store_file}"
         );
 
@@ -964,7 +976,7 @@ mod tests {
         assert!(contents.contains("keyAlias=upload"), "{contents}");
         let store_file = store_file_line(&contents);
         assert!(
-            Path::new(store_file).is_file(),
+            Path::new(&store_file).is_file(),
             "storeFile must resolve to the real keystore: {store_file}"
         );
 
@@ -1050,7 +1062,7 @@ mod tests {
         let (contents, guard) = generate(&dir, FakeEnv::new());
         assert!(contents.contains("keyAlias=upload"), "{contents}");
         assert!(
-            Path::new(store_file_line(&contents)).is_file(),
+            Path::new(&store_file_line(&contents)).is_file(),
             "{contents}"
         );
         drop(guard);
@@ -1301,11 +1313,35 @@ mod tests {
     }
 
     /// The `storeFile=` value out of a generated file, unescaping the only
-    /// escape a filesystem path can realistically carry here.
-    fn store_file_line(contents: &str) -> &str {
-        contents
+    /// escape a filesystem path can realistically carry here: the backslash
+    /// doubling `escape_property_value` applies to every `\` (Windows path
+    /// separators, and the `\\?\` verbatim-path prefix `fs::canonicalize`
+    /// returns there). Never surfaced on Unix, where a real path has no `\`
+    /// to double in the first place — a bare "strip the prefix" used to be
+    /// enough there, but reading a raw `\\`-doubled path back on Windows
+    /// makes `Path::is_absolute`/`is_file` fail against a string that no
+    /// longer names the real file.
+    fn store_file_line(contents: &str) -> String {
+        let raw = contents
             .lines()
             .find_map(|line| line.strip_prefix("storeFile="))
-            .unwrap_or_else(|| panic!("no storeFile line in:\n{contents}"))
+            .unwrap_or_else(|| panic!("no storeFile line in:\n{contents}"));
+        unescape_backslashes(raw)
+    }
+
+    /// Reverses `escape_property_value`'s `\` → `\\` doubling. Deliberately
+    /// narrow (backslash only) — this test helper only ever reads back a
+    /// filesystem path, never the `\n`/`\r`/`\t`/`\uXXXX` escapes that
+    /// function also emits for arbitrary values.
+    fn unescape_backslashes(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' && chars.as_str().starts_with('\\') {
+                chars.next();
+            }
+            out.push(ch);
+        }
+        out
     }
 }

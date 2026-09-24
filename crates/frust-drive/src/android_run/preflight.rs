@@ -626,6 +626,15 @@ mod tests {
         assert!(err.contains("Java 17+"), "{err}");
     }
 
+    /// Pins the macOS/Linux flavor of the not-found message specifically —
+    /// via [`check_java_for`] with `windows: false` explicitly, rather than
+    /// [`run`] (whose `check_java` bakes in `cfg!(target_os = "windows")`).
+    /// `run` would fold in the *actual* host's `windows` flag regardless of
+    /// this test's `is_macos: true`, so on a real Windows host the message
+    /// would come back Windows-flavored (no `/usr/lib/jvm`) and this
+    /// assertion would fail for a reason this test isn't about — mirrors
+    /// `android_run::gradle::gradle_wrapper_for`'s "take the flag explicitly"
+    /// pattern for testing an OS-conditional branch on any host.
     #[test]
     fn not_found_error_lists_every_source_tried() {
         let runner = FakeProcessRunner::new()
@@ -643,7 +652,7 @@ mod tests {
             env: &env,
             is_macos: true,
         };
-        let err = run(&ctx).unwrap_err();
+        let err = check_java_for(&ctx, false).unwrap_err();
         assert!(err.contains("JAVA_HOME"), "{err}");
         assert!(err.contains("Android Studio's bundled JBR"), "{err}");
         assert!(err.contains("java` on PATH"), "{err}");

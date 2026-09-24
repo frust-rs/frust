@@ -267,9 +267,17 @@ mod tests {
     /// registered key that is a *prefix* of the real one — is what makes
     /// these tests assert the argv: drop or misplace the cache flag and no
     /// fixture matches at all.
+    ///
+    /// The leading program name is [`crate::android_run::gradle::gradle_wrapper`]'s
+    /// own output — `./gradlew` everywhere but Windows, where
+    /// `build_with_env` spawns the absolute `gradlew.bat` wrapper — rather
+    /// than a hardcoded `"./gradlew"`, so this fixture key matches what the
+    /// pipeline actually invokes on every host `cargo test` runs on.
     fn gradlew_key(project_dir: &Path, task_and_props: &str) -> String {
+        let android_dir = project_dir.join("android");
         format!(
-            "./gradlew --project-cache-dir {} {task_and_props}",
+            "{} --project-cache-dir {} {task_and_props}",
+            crate::android_run::gradle::gradle_wrapper(&android_dir).to_string_lossy(),
             crate::android_run::gradle::project_cache_dir(project_dir).display()
         )
     }
