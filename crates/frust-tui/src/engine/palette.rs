@@ -25,6 +25,16 @@ static FORCE_MACOS_GLYPHS: AtomicBool = AtomicBool::new(false);
 /// so every CI host — Linux, macOS, Windows — renders the identical macOS
 /// glyphs and no snapshot needs a per-host fork; production code never calls
 /// this. Safe to call repeatedly (idempotent).
+///
+/// This is a **one-way switch, and test-only**: it only ever flips the flag
+/// to `true`, never back, so it must never be reachable from a production
+/// code path — flipping it once would wrongly force macOS glyphs on every
+/// later render for the rest of that process's life. It is `pub` (rather
+/// than `#[cfg(test)]`) purely because `crates/frust-tui/tests/snapshots.rs`
+/// is a separate integration-test binary, which cannot see a `#[cfg(test)]`
+/// item in this crate; `#[doc(hidden)]` keeps it out of this crate's public
+/// docs to signal it is not part of the real API.
+#[doc(hidden)]
 pub fn force_macos_glyphs_for_snapshot_tests() {
     FORCE_MACOS_GLYPHS.store(true, Ordering::Relaxed);
 }
