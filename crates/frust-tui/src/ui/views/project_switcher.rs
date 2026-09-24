@@ -2,7 +2,7 @@
 //! overlaying the sidebar's PROJECTS section (same column range — full
 //! sidebar width, flush with its left edge — so it never bleeds a stray
 //! sliver of the section it's replacing on either side), listing every
-//! local/previous project (decision D6, same split the sidebar renders) —
+//! local/previous project (using the same local/previous boundary the sidebar renders) —
 //! local rows first, then, only when both sections are non-empty, a
 //! non-clickable "Previous projects" separator and the previous rows.
 //! Opened via the titlebar `▾` chevron or `Ctrl+O`/`p`; the base workbench
@@ -26,10 +26,11 @@ use crate::ui::theme::Theme;
 
 /// One rendered dropdown row: either a project (its `state.projects` index)
 /// or the non-clickable "Previous projects" separator between the local and
-/// previous sections (decision D6) — `state.project_switcher_cursor` and the
-/// digit shortcuts stay indices into `state.projects` throughout; only the
-/// *rendered* row offset shifts when a separator is inserted, so `Row::Item`
-/// carries the same index the cursor already uses, unadjusted.
+/// previous sections (the local/previous project split: `state.projects` is one
+/// ordered Vec [local..., previous...] with `local_project_count` as the boundary) —
+/// `state.project_switcher_cursor` and the digit shortcuts stay indices into `state.projects`
+/// throughout; only the *rendered* row offset shifts when a separator is inserted, so
+/// `Row::Item` carries the same index the cursor already uses, unadjusted.
 enum Row {
     Item(usize),
     Separator,

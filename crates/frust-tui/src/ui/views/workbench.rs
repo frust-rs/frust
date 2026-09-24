@@ -258,9 +258,9 @@ fn render_sidebar(
     // `project_rows[k]` is the line index the k-th `state.projects` entry
     // drew at — local rows first, then (only when non-empty) a blank line, a
     // "PREVIOUS PROJECTS" heading, and the previous rows, mirroring
-    // `device_rows` below. `state.projects` order is `[local..., previous...]`
-    // (decision D6), so `project_rows`' own order already lines up with
-    // `state.projects`' indices — no separate index remap needed.
+    // `device_rows` below. `state.projects` is one ordered Vec [local..., previous...]
+    // with `local_project_count` as the boundary, so `project_rows`' own order already
+    // lines up with `state.projects`' indices — no separate index remap needed.
     let mut project_rows: Vec<usize> = Vec::new();
     let local_count = state.local_count();
     if local_count == 0 {
@@ -316,11 +316,10 @@ fn render_sidebar(
     let build_row = lines.len();
     lines.push(item("Build · b"));
     let clean_row = lines.len();
-    // D7: `c` only means Clean while no session is active — with one active
-    // it copies build artifacts instead (`runner::translate_key`'s
-    // `has_active_session` predicate), so the row drops its own keyhint
-    // there rather than claiming a key it doesn't currently honor. The click
-    // still opens the confirm dialog either way (see `CleanAction` below).
+    // With an active session, `c` copies build artifacts instead of cleaning
+    // (see `runner::translate_key`'s `has_active_session` predicate), so the row
+    // drops its `· c` hint there rather than claiming a key it doesn't currently honor.
+    // The click still opens the confirm dialog either way (see `CleanAction` below).
     let clean_has_session = state.active_session().is_some();
     lines.push(item(if clean_has_session {
         "Clean"
@@ -666,12 +665,11 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
                 .add_modifier(Modifier::BOLD),
         ),
         None => {
-            // D5: `d` means DevTools only, with an active session, and
-            // nothing otherwise — the same `has_active_session` predicate
-            // `runner::translate_key` gates it on. Doctor lives on its own
-            // unconditional `i` (never claims a key the keyboard doesn't
-            // currently honor), so the hint shows whichever of the two
-            // actually applies.
+            // `i` opens Doctor unconditionally on both screens; `d` is DevTools only
+            // (with an active session — the same `has_active_session` predicate
+            // `runner::translate_key` gates it on). Doctor never claims a key the
+            // keyboard doesn't currently honor, so the hint shows whichever of the
+            // two actually applies.
             let d_hint = if state.active_session().is_some() {
                 "d devtools"
             } else {
@@ -865,7 +863,7 @@ mod tests {
         }
     }
 
-    // ── PROJECTS / PREVIOUS PROJECTS sidebar split (decision D6) ──────────
+    // ── PROJECTS / PREVIOUS PROJECTS sidebar split (local/previous boundary) ──────────
 
     use crate::ui::mouse::{MouseCtx, MouseRegions};
     use ratatui::Terminal;
