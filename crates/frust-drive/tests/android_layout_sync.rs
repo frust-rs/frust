@@ -157,15 +157,10 @@ fn app_build_gradle_jni_libs_dir_matches_build_layout_in_both_sites() {
 /// exactly one `Contribution::GradleModule` (`:frust-camera`) and requires no
 /// sibling checkout, so it applies cleanly against a freshly rendered
 /// project tree with no extra fixture setup.
-// Unlike the two tests above, `plugin::apply`'s `beforeProject` redirect line
-// is NOT a static template literal — it is rendered at apply time from
-// `BuildLayout::android_module(..).display()`, so this expectation is
-// deliberately built the same (native-separator) way rather than through
-// `to_portable_string`: the production renderer needs the portable-string
-// fix first (a raw backslash inside this generated Kotlin string is a real
-// Windows defect, the same class `host_path::to_portable_string` already
-// closed for `Cargo.toml`/`gradle.properties`), and this test must be
-// updated to match in the same change.
+// Like the two tests above, the expectation is built using `to_portable_string`
+// to ensure forward slashes on all platforms, matching the production renderer
+// in `plugin::apply` which uses `to_portable_string` to emit portable paths
+// (avoiding raw backslashes in generated Kotlin strings on Windows).
 #[test]
 fn plugin_gradle_module_include_block_redirect_matches_build_layout() {
     let dest = rendered_app("plugin-module-redirect");
@@ -177,7 +172,7 @@ fn plugin_gradle_module_include_block_redirect_matches_build_layout() {
 
     let module_redirect = format!(
         "../{}",
-        BuildLayout::android_module("frust-camera").display()
+        to_portable_string(&BuildLayout::android_module("frust-camera"))
     );
     let beforeproject_line = format!("rootDir.resolve(\"{module_redirect}\")");
 
