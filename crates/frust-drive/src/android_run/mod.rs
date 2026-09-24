@@ -684,11 +684,48 @@ mod tests {
         /// registered key that is a *prefix* of the real one — is what makes
         /// these tests assert the argv: drop or misplace the cache flag and no
         /// fixture matches at all.
+        ///
+        /// The leading program name is [`crate::android_run::gradle::gradle_wrapper`]'s
+        /// own output — `./gradlew` everywhere but Windows, where the run
+        /// pipeline spawns the absolute `gradlew.bat` wrapper — rather than a
+        /// hardcoded `"./gradlew"`, so this fixture key matches what the
+        /// pipeline actually invokes on every host `cargo test` runs on.
         fn gradlew_key(project_dir: &Path, task_and_props: &str) -> String {
+            let android_dir = project_dir.join("android");
             format!(
-                "./gradlew --project-cache-dir {} {task_and_props}",
+                "{} --project-cache-dir {} {task_and_props}",
+                crate::android_run::gradle::gradle_wrapper(&android_dir).to_string_lossy(),
                 crate::android_run::gradle::project_cache_dir(project_dir).display()
             )
+        }
+
+        /// `frust run`'s pipeline always builds a single-ABI, non-split APK —
+        /// the `AndroidArtifact` shape `discover_single_apk_since` searches
+        /// with.
+        fn apk_target() -> AndroidArtifact {
+            AndroidArtifact::Apk {
+                split_per_abi: false,
+                abis: Vec::new(),
+            }
+        }
+
+        /// The migrated `build/android/app/outputs/apk/…` directory a
+        /// fixture plants an APK in — via
+        /// [`crate::android_build::artifacts::expected_output_dir`] rather
+        /// than a `/`-joined literal, so this matches the pure-native-
+        /// separator path `discover_single_apk_since` actually resolves and
+        /// hands to `adb install` on every host `cargo test` runs on (a
+        /// literal like `dir.join("build/android/app/outputs/apk/debug")`
+        /// pushes one component whose *own* text still carries `/`, which
+        /// `Path::display` never rewrites to `\` on Windows).
+        fn output_dir(dir: &Path, mode: BuildMode, flavor: Option<&str>) -> PathBuf {
+            crate::android_build::artifacts::expected_output_dir(dir, &apk_target(), mode, flavor)
+        }
+
+        /// The pre-migration `android/app/build/outputs/apk/…` directory —
+        /// see [`output_dir`].
+        fn legacy_dir(dir: &Path, mode: BuildMode, flavor: Option<&str>) -> PathBuf {
+            crate::android_build::artifacts::legacy_output_dir(dir, &apk_target(), mode, flavor)
         }
 
         /// Complete release signing material for a default-configured
@@ -783,7 +820,7 @@ mod tests {
         fn debug_default_assembles_debug_and_installs_debug_apk_unchanged() {
             let dir = unique_project_dir("debug-default");
             let android_dir = dir.join("android");
-            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
@@ -820,7 +857,7 @@ mod tests {
         #[test]
         fn pre_migration_layout_still_installs_and_warns_once() {
             let dir = unique_project_dir("legacy-layout-run");
-            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            let out_dir = legacy_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             let planted_apk = out_dir.join("app-debug.apk");
             fs::write(&planted_apk, b"fake").unwrap();
@@ -829,8 +866,14 @@ mod tests {
             // instant; this fixture plants the file before that call (the
             // fake `./gradlew` never touches the filesystem), so its mtime
             // is pinned into the future to stand in for "this run's Gradle
-            // just (re)built it".
-            fs::File::open(&planted_apk)
+            // just (re)built it". Opened for write, not `File::open`'s
+            // read-only handle: `set_modified` needs `FILE_WRITE_ATTRIBUTES`
+            // on the handle to succeed on Windows (`Access is denied`, os
+            // error 5) — unlike Unix's path-based `utimes`, the timestamp
+            // update there goes through the open handle.
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&planted_apk)
                 .unwrap()
                 .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
                 .unwrap();
@@ -888,13 +931,18 @@ mod tests {
         #[test]
         fn pre_migration_layout_still_installs_a_stale_apk_with_a_warning() {
             let dir = unique_project_dir("legacy-layout-stale");
-            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            let out_dir = legacy_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             let apk_path = out_dir.join("app-debug.apk");
             fs::write(&apk_path, b"fake").unwrap();
             // Predates any `SystemTime::now()` captured during this test.
+            // Opened for write — see `pre_migration_layout_still_installs_and_warns_once`
+            // for why `File::open`'s read-only handle fails `set_modified` on
+            // Windows.
             let stale = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-            fs::File::open(&apk_path)
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&apk_path)
                 .unwrap()
                 .set_modified(stale)
                 .unwrap();
@@ -954,7 +1002,7 @@ mod tests {
         #[test]
         fn prepare_session_warns_once_about_a_legacy_jni_libs_leftover() {
             let dir = unique_project_dir("legacy-jnilibs-run");
-            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
@@ -1018,7 +1066,7 @@ mod tests {
             let dir = unique_project_dir("release-default");
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
-            let out_dir = dir.join("build/android/app/outputs/apk/release");
+            let out_dir = output_dir(&dir, BuildMode::Release, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1054,7 +1102,7 @@ mod tests {
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
             fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
-            let out_dir = dir.join("build/android/app/outputs/apk/release");
+            let out_dir = output_dir(&dir, BuildMode::Release, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1109,7 +1157,7 @@ mod tests {
                 "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
             )
             .unwrap();
-            let out_dir = dir.join("build/android/app/outputs/apk/release");
+            let out_dir = output_dir(&dir, BuildMode::Release, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1164,7 +1212,7 @@ mod tests {
             let dir = unique_project_dir("gradle-debug-signed");
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
-            let out_dir = dir.join("build/android/app/outputs/apk/release");
+            let out_dir = output_dir(&dir, BuildMode::Release, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
 
@@ -1201,7 +1249,7 @@ mod tests {
                 "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[signing]\nexternal = true\n",
             )
             .unwrap();
-            let out_dir = dir.join("build/android/app/outputs/apk/release");
+            let out_dir = output_dir(&dir, BuildMode::Release, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1245,7 +1293,7 @@ mod tests {
         #[test]
         fn profile_assembles_profile_and_installs_profile_apk() {
             let dir = unique_project_dir("profile-default");
-            let out_dir = dir.join("build/android/app/outputs/apk/profile");
+            let out_dir = output_dir(&dir, BuildMode::Profile, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-profile.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1274,7 +1322,7 @@ mod tests {
             let dir = unique_project_dir("flavor-release");
             let android_dir = dir.join("android");
             write_release_signing(&android_dir);
-            let out_dir = dir.join("build/android/app/outputs/apk/paid/release");
+            let out_dir = output_dir(&dir, BuildMode::Release, Some("paid"));
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1316,7 +1364,7 @@ mod tests {
         #[test]
         fn device_abi_flows_into_target_platforms_property() {
             let dir = unique_project_dir("device-abi-x86-64");
-            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
@@ -1346,9 +1394,18 @@ mod tests {
         /// under `dir`, returning the `aapt2` path the badging step will
         /// invoke and the `ANDROID_HOME` value pointing at its SDK root.
         fn plant_aapt2(dir: &std::path::Path) -> (String, String) {
-            let build_tools = dir.join("sdk/build-tools/35.0.1");
+            // Component-wise `Path::join`s, not a `/`-joined literal: they
+            // must render exactly like `badging::locate_aapt2`'s own
+            // real-directory-read `.join()` chain, or the fake runner's
+            // `dump badging` key (built from this return value) never
+            // matches what the pipeline actually spawns on Windows. The
+            // binary name mirrors `badging::AAPT2_BIN` (`aapt2.exe` on
+            // Windows) for the same reason: `locate_aapt2` only considers a
+            // version directory that holds *that* file.
+            let aapt2_bin = if cfg!(windows) { "aapt2.exe" } else { "aapt2" };
+            let build_tools = dir.join("sdk").join("build-tools").join("35.0.1");
             fs::create_dir_all(&build_tools).unwrap();
-            let aapt2 = build_tools.join("aapt2");
+            let aapt2 = build_tools.join(aapt2_bin);
             fs::write(&aapt2, "#!/bin/sh\n").unwrap();
             (
                 aapt2.to_string_lossy().into_owned(),
@@ -1367,7 +1424,7 @@ mod tests {
         #[test]
         fn badging_identity_drives_both_the_launch_component_and_the_pid_poll() {
             let dir = unique_project_dir("badging-flavor");
-            let out_dir = dir.join("build/android/app/outputs/apk/dev/debug");
+            let out_dir = output_dir(&dir, BuildMode::Debug, Some("dev"));
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-dev-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir
@@ -1432,7 +1489,7 @@ mod tests {
         #[test]
         fn unreadable_badging_warns_once_and_falls_back_to_the_frust_toml_identity() {
             let dir = unique_project_dir("badging-fallback");
-            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
@@ -1494,7 +1551,7 @@ mod tests {
         #[test]
         fn spawn_session_reaches_a_drainable_logcat_stream() {
             let dir = unique_project_dir("spawn-happy");
-            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
             let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
