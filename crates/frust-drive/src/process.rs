@@ -440,9 +440,9 @@ const TERMINATION_SIGNALS: [i32; 3] = [1, 2, 15];
 /// `cargo run` left its preview window alive). Signalling the *negative* pgid
 /// reaches every process in the group at once.
 ///
-/// **Unix-only.** Windows has no process-group signal; a job-object equivalent
-/// is a tracked fast-follow, so today's Windows path keeps the pre-existing
-/// direct-child-only `Child::kill` (same gap it already had).
+/// **Unix-only.** Windows has no process-group signal; [`windows_tree_kill`]
+/// below is this platform's equivalent, using `taskkill /T` to reach the
+/// whole process tree instead.
 #[cfg(unix)]
 fn group_kill_unix(child_pid: u32) {
     // SIGKILL is 9 across every Unix target Frust builds for (Linux, macOS,
@@ -461,6 +461,53 @@ fn group_kill_unix(child_pid: u32) {
     unsafe {
         kill(-pgid, SIGKILL);
     }
+}
+
+/// Best-effort-terminates the whole Windows process tree rooted at `pid` via
+/// `taskkill /T /F /PID <pid>`, run with no window flash
+/// (`CREATE_NO_WINDOW`) and its stdio nulled so nothing leaks onto a raw-mode
+/// TUI terminal.
+///
+/// **Windows-only.** Mirrors [`group_kill_unix`]'s job on the other platform:
+/// [`ProcessRunner::spawn_streaming`]'s child is the direct process (`cmd`,
+/// `cargo run`, …), so a bare [`std::process::Child::kill`] — which signals
+/// only that one process — orphans anything it spawned (the same
+/// orphaned-grandchild shape group-kill fixes on Unix). `taskkill /T` walks
+/// the whole descendant tree by PID, which Windows tracks itself, so no
+/// process-group setup at spawn time is needed the way `process_group(0)` is
+/// on Unix.
+///
+/// Idempotent and safe against an already-exited `pid`: `taskkill` against a
+/// gone process exits non-zero ("not found"), which this function silently
+/// ignores — the caller's own fallback `Child::kill()` call is equally
+/// idempotent (an already-reaped child's `kill()` just errors, also ignored).
+/// The wait is inherently bounded: `taskkill /F` forcibly terminates rather
+/// than requesting graceful shutdown, so the child process itself returns
+/// promptly once spawned; `Command::status()` blocks only on that.
+///
+/// A Windows Job Object (`windows-sys`, already in the tree at 0.61.2 through
+/// `frust-shell-windows`) would track the tree without relying on `taskkill`
+/// being present, but needs a new dependency edge on `frust-drive` plus a
+/// version-pin review — `taskkill` ships with every supported Windows release
+/// and needs neither, so it is the one used here; revisit only if `taskkill`
+/// proves unworkable in practice.
+#[cfg(windows)]
+fn windows_tree_kill(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+
+    // CREATE_NO_WINDOW: suppresses the console window `taskkill` would
+    // otherwise flash open — this runs from a GUI-less/TUI context, never an
+    // interactive console session of its own.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
 
 /// Shells out for real via [`std::process::Command`].
@@ -633,9 +680,9 @@ impl ProcessRunner for RealProcessRunner {
 
         // Put the child in its own process group so a later [`kill`] can reach
         // the whole tree (`cargo run` + the compiled preview binary it forks),
-        // not just the direct child — see [`group_kill_unix`]. Windows has no
-        // equivalent here yet (tracked job-object fast-follow); it keeps the
-        // pre-existing direct-child-only kill below.
+        // not just the direct child — see [`group_kill_unix`]. Windows needs
+        // no equivalent setup here: `taskkill /T` (see [`windows_tree_kill`])
+        // walks the descendant tree by PID, which Windows tracks itself.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -648,9 +695,10 @@ impl ProcessRunner for RealProcessRunner {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         // Captured now (before the child moves into the shared `Arc<Mutex>`)
-        // so the group kill below can derive the pgid. On Unix the pgid equals
-        // this pid, set by `process_group(0)` above.
-        #[cfg(unix)]
+        // so the tree/group kill below can address it. On Unix this is also
+        // the pgid, set by `process_group(0)` above; on Windows it is the PID
+        // `taskkill /T /PID` targets.
+        #[cfg(any(unix, windows))]
         let child_pid = child.id();
         // The child itself is shared: the reader thread below waits on
         // (reaps) it once stdout hits EOF, while `kill` locks it briefly
@@ -732,8 +780,7 @@ impl ProcessRunner for RealProcessRunner {
         let kill_child = Arc::clone(&child);
         // Unix: group-kill first so the whole process group dies (`cargo run`
         // + the preview binary it forks), then reap the direct child through
-        // std for pid-reuse-safe cleanup. Non-Unix keeps today's
-        // direct-child-only `Child::kill` (the tracked Windows job-object gap).
+        // std for pid-reuse-safe cleanup.
         #[cfg(unix)]
         let kill_action: Box<dyn FnOnce() + Send> = Box::new(move || {
             group_kill_unix(child_pid);
@@ -742,7 +789,22 @@ impl ProcessRunner for RealProcessRunner {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .kill();
         });
-        #[cfg(not(unix))]
+        // Windows: `taskkill /T /F` first so the whole descendant tree dies
+        // (mirrors the Unix group-kill above), then fall back to/reap through
+        // `Child::kill` — needed either way for pid-reuse-safe cleanup when
+        // `taskkill` succeeds, and as the sole kill path when it fails or is
+        // missing from `PATH`.
+        #[cfg(windows)]
+        let kill_action: Box<dyn FnOnce() + Send> = Box::new(move || {
+            windows_tree_kill(child_pid);
+            let _ = kill_child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .kill();
+        });
+        // Neither Unix nor Windows (no target Frust ships for today): the
+        // plain direct-child kill `std::process::Child` guarantees everywhere.
+        #[cfg(not(any(unix, windows)))]
         let kill_action: Box<dyn FnOnce() + Send> = Box::new(move || {
             let _ = kill_child
                 .lock()
@@ -1711,6 +1773,127 @@ mod tests {
         // caller memory; signal `0` only probes the target without signalling.
         let rc = unsafe { kill(pid, 0) };
         rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(ESRCH)
+    }
+
+    /// Regression for the orphaned-descendant bug on Windows
+    /// (`act_000001a0d3d1be59PQaZLLht`): `kill()` must terminate the whole
+    /// process **tree**, not just the direct child — the Windows counterpart
+    /// of [`spawn_streaming_real_kill_terminates_the_whole_process_group`]
+    /// above. The direct child (`cmd /C`) launches `powershell`, which starts
+    /// a detached `ping` (the *grandchild*, `Start-Process -PassThru`) and
+    /// then blocks on `Wait-Process` until it exits — so both intermediate
+    /// levels stay alive until the kill, exactly like the Unix
+    /// `sleep … & … wait` script. Killing through the public `kill()` path
+    /// (now `taskkill /T /F`, see [`windows_tree_kill`]) must reach the
+    /// grandchild; before this fix a bare `Child::kill()` only ever touched
+    /// the top-level `cmd` process, leaving `powershell` and `ping` running.
+    #[cfg(windows)]
+    #[test]
+    fn spawn_streaming_real_kill_terminates_the_whole_process_tree_on_windows() {
+        // Unique tmp path for the grandchild-pid handoff, mirroring the Unix
+        // test's `pid_file` (pid + a nanosecond nonce so parallel test runs
+        // never collide).
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_file = std::env::temp_dir().join(format!(
+            "frust-grandchild-pid-{}-{nonce}.tmp",
+            std::process::id()
+        ));
+        let pid_file_str = pid_file.to_string_lossy().to_string();
+
+        // Single-quoted throughout (no embedded double quotes), so Rust's
+        // default Windows argument quoting — which wraps this whole string in
+        // `"..."` since it contains spaces — needs no internal escaping, and
+        // `cmd /C powershell -NoProfile -Command "<this>"` reaches PowerShell
+        // as one clean argument.
+        let ps_script = format!(
+            "$p = Start-Process -FilePath 'ping' -ArgumentList '-n','60','127.0.0.1' \
+             -WindowStyle Hidden -PassThru; $p.Id | Out-File -FilePath '{pid_file_str}' \
+             -Encoding ascii; Wait-Process -Id $p.Id"
+        );
+
+        let runner = RealProcessRunner;
+        let mut handle = runner
+            .spawn_streaming(
+                "cmd",
+                &[
+                    "/C",
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    ps_script.as_str(),
+                ],
+                None,
+                &[],
+            )
+            .unwrap();
+
+        let grandchild_pid = read_pid_when_ready_windows(&pid_file, Duration::from_secs(10))
+            .expect("grandchild pid file should be written within the timeout");
+
+        // Sanity: the grandchild is alive before the kill.
+        assert!(
+            !windows_pid_is_dead(grandchild_pid),
+            "grandchild (pid {grandchild_pid}) should be alive before the kill"
+        );
+
+        handle.kill();
+
+        // `taskkill /T` must reach the grandchild: assert it is gone within a
+        // bounded poll.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut dead = false;
+        while std::time::Instant::now() < deadline {
+            if windows_pid_is_dead(grandchild_pid) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(
+            dead,
+            "grandchild (pid {grandchild_pid}) still alive 5s after the tree kill — \
+             kill did not reach the whole process tree"
+        );
+    }
+
+    /// Bounded-poll read of a pid written to `path` by the PowerShell script
+    /// in [`spawn_streaming_real_kill_terminates_the_whole_process_tree_on_windows`],
+    /// returning the parsed pid once the file exists and holds a full integer
+    /// (avoids a fixed sleep racing `Start-Process`'s own write).
+    #[cfg(windows)]
+    fn read_pid_when_ready_windows(path: &Path, timeout: Duration) -> Option<u32> {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+            {
+                return Some(pid);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
+
+    /// Probes whether `pid` is gone via `tasklist /FI "PID eq <pid>"`: dead
+    /// iff the filtered listing contains no row naming it (an empty/"INFO: No
+    /// tasks…" result rather than an `<image name>  <pid> …` row). Treats a
+    /// `tasklist` invocation failure as "not proven dead" rather than
+    /// "dead", so a broken probe fails the caller's bounded poll loudly
+    /// (timeout) instead of a false pass.
+    #[cfg(windows)]
+    fn windows_pid_is_dead(pid: u32) -> bool {
+        let filter = format!("PID eq {pid}");
+        match Command::new("tasklist")
+            .args(["/FI", &filter, "/NH"])
+            .output()
+        {
+            Ok(out) => !String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()),
+            Err(_) => false,
+        }
     }
 
     /// The stdio-config invariant, asserted in one place: every TUI-reachable
