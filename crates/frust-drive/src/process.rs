@@ -1155,6 +1155,14 @@ mod tests {
         assert_eq!(decode_stream_line(b"no-newline"), "no-newline");
     }
 
+    // Unix-only: this is an end-to-end proof that a real child's raw pipe
+    // bytes flow through lossily-decoded (`decode_stream_line_replaces_invalid_utf8_lossily`
+    // above already covers the decode logic itself, portably). Producing a
+    // single raw, non-UTF-8 byte (`\xff`) from a one-line shell command needs
+    // `sh -c printf`; there is no `cmd`/PowerShell one-liner that emits a raw
+    // invalid byte rather than an encoded character, so this stays Unix-only
+    // rather than gaining a non-equivalent Windows arm.
+    #[cfg(unix)]
     #[test]
     fn run_streaming_handles_invalid_utf8_from_a_real_process() {
         // Spawns a real child (`sh -c printf`) that writes an invalid UTF-8
@@ -1570,8 +1578,20 @@ mod tests {
     #[test]
     fn spawn_streaming_real_process_lines_arrive_in_order_and_exit_status_surfaces() {
         let runner = RealProcessRunner;
+        // `sh -c "echo one; echo two"` on Unix; `cmd /C "echo one&echo two"`
+        // is the equivalent Windows one-liner (`&` sequences commands the way
+        // `;` does under `sh` — no surrounding spaces, so neither `echo`
+        // picks up a stray trailing/leading space in its output) — the
+        // behavior under test (line ordering, exit status) is
+        // host-independent, so a real Windows arm keeps this meaningful
+        // there instead of merely gating it away.
+        #[cfg(unix)]
         let mut handle = runner
             .spawn_streaming("/bin/sh", &["-c", "echo one; echo two"], None, &[])
+            .unwrap();
+        #[cfg(windows)]
+        let mut handle = runner
+            .spawn_streaming("cmd", &["/C", "echo one&echo two"], None, &[])
             .unwrap();
         let seen: Vec<String> = handle.lines.iter().collect();
         assert_eq!(seen, vec!["one", "two"]);
@@ -1581,8 +1601,17 @@ mod tests {
     #[test]
     fn spawn_streaming_real_kill_terminates_a_hung_process_promptly() {
         let runner = RealProcessRunner;
+        // `sh -c "sleep 30"` on Unix; `cmd`/Windows has no `sleep` builtin, so
+        // `ping -n 31 127.0.0.1` (30 round trips, ~30s) is the conventional
+        // stand-in, with its own chatty output redirected away since this
+        // test only cares about `kill()` timing.
+        #[cfg(unix)]
         let mut handle = runner
             .spawn_streaming("/bin/sh", &["-c", "sleep 30"], None, &[])
+            .unwrap();
+        #[cfg(windows)]
+        let mut handle = runner
+            .spawn_streaming("cmd", &["/C", "ping -n 31 127.0.0.1 >NUL"], None, &[])
             .unwrap();
 
         let start = std::time::Instant::now();

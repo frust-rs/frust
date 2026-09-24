@@ -699,7 +699,7 @@ mod tests {
         }
 
         fn file(self, rel: &str, body: &str) -> Fixture {
-            let path = self.dir.join(rel);
+            let path = self.path(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, body).unwrap();
             self
@@ -727,12 +727,29 @@ mod tests {
             self
         }
 
+        /// Join `rel` onto the fixture root **one component at a time**
+        /// (`rel` is always written `/`-separated, even in a test's own
+        /// literal) rather than via a single `self.dir.join(rel)` push.
+        /// `PathBuf::join`/`push` never re-splits the string it is given, so
+        /// a single push of a multi-segment literal leaves those embedded
+        /// `/`s verbatim inside an otherwise backslash-separated path on
+        /// Windows — harmless for opening the file (Windows accepts either
+        /// separator), but it breaks byte-for-byte comparison against a path
+        /// the product code built one `.join()` call per component (e.g.
+        /// [`super::macos::codesign`]'s `--entitlements`/app-bundle
+        /// arguments, matched against a [`FakeProcessRunner`] registration
+        /// key by exact string). Splitting here keeps every fixture path
+        /// separator-identical to the product's own.
         fn path(&self, rel: &str) -> PathBuf {
-            self.dir.join(rel)
+            let mut path = self.dir.clone();
+            for component in rel.split('/') {
+                path.push(component);
+            }
+            path
         }
 
         fn read(&self, rel: &str) -> String {
-            fs::read_to_string(self.dir.join(rel)).unwrap_or_else(|e| panic!("reading {rel}: {e}"))
+            fs::read_to_string(self.path(rel)).unwrap_or_else(|e| panic!("reading {rel}: {e}"))
         }
     }
 
@@ -1323,7 +1340,19 @@ mod tests {
             .file("macos/app.entitlements", "<plist><dict/></plist>");
 
         let app = fixture.path("build/desktop/macos/My App.app");
-        let entitlements = fixture.path("macos/app.entitlements");
+        // Built as `fixture.dir.join("macos/app.entitlements")` — one push of
+        // the same compound literal `contributions::apply`'s own
+        // `project_dir.join(PROJECT_ENTITLEMENTS_REL)` uses to resolve the
+        // project's own entitlements file — rather than through
+        // `Fixture::path`'s per-component join. `PathBuf::push` only ever
+        // inserts a separator at the *join boundary*; it never rewrites a
+        // `/` already embedded in the pushed argument itself, so a
+        // two-segment literal pushed as one argument keeps that inner `/`
+        // even on Windows. `Fixture::path`'s per-component splitting matches
+        // how `build_dirs::BuildLayout`'s own accessors (e.g. `app`, above)
+        // build a path — a different, unrelated convention this one
+        // literal does not follow.
+        let entitlements = fixture.dir.join("macos/app.entitlements");
         // A Developer ID identity is Apple-issued: both `--options runtime`
         // (Hardened Runtime, always) and `--timestamp` (a secure timestamp,
         // Apple-issued identities only) are present, in this exact order.

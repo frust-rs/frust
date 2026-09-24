@@ -397,9 +397,17 @@ fn legacy_xdg_or_home(
     suffix: &[&str],
 ) -> Option<PathBuf> {
     if let Some(xdg) = xdg {
-        let path = PathBuf::from(xdg);
-        if path.is_absolute() {
-            return Some(path);
+        // This models macOS/Unix path semantics unconditionally — the
+        // function is compiled under `cfg(any(target_os = "macos", test))`
+        // precisely so its logic can be exercised from a non-macOS test
+        // host — so absoluteness is checked the way a real (Unix) macOS
+        // `XDG_DATA_HOME`/`XDG_CACHE_HOME` value is always shaped, not via
+        // `Path::is_absolute()`, which answers for the *compiling* host: on
+        // Windows a forward-slash value like `/custom/data` is not
+        // `is_absolute()` (no drive letter), even though it is exactly what
+        // every real macOS value looks like.
+        if xdg.starts_with('/') {
+            return Some(PathBuf::from(xdg));
         }
         log::debug!("frust-paths: ignoring non-absolute {xdg_var_name} ({xdg})");
     }

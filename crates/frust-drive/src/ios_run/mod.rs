@@ -939,9 +939,16 @@ mod tests {
     }
 
     /// The `plutil` invocation the launch-identity step makes for the `.app`
-    /// at `app_path`.
+    /// at `app_path`. Mirrors `bundle_id::resolve`'s own
+    /// `Path::new(app_path).join("Info.plist")` + `to_string_lossy()`
+    /// exactly, rather than a hand-formatted `"{app_path}/Info.plist"`:
+    /// `PathBuf::push` always inserts the *host's* separator (a backslash on
+    /// Windows) regardless of the separator style already present in
+    /// `app_path`, so a hand-formatted key with a literal `/` before
+    /// `Info.plist` silently drifts from the real invocation key there.
     fn plutil_key(app_path: &str) -> String {
-        format!("plutil -extract CFBundleIdentifier raw {app_path}/Info.plist")
+        let plist = std::path::Path::new(app_path).join("Info.plist");
+        format!("plutil -extract CFBundleIdentifier raw {}", plist.display())
     }
 
     /// Registers the preflight/scheme-listing fixtures every `run_physical`
