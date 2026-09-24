@@ -53,7 +53,7 @@ impl LogLevel {
 /// diagnostics, a Rust panic marker, and logcat's level column/prefix (see
 /// [`classify_logcat_level`]).
 ///
-/// Precedence, most to least specific (card m-b): panic marker > gradle/build
+/// Precedence, most to least specific: panic marker > gradle/build
 /// failure > `note:`/`help:` carve-out > `warning:`-prefixed diagnostic > the
 /// word `error`/`errors` > generic `"warn"` substring fallback > `DEBUG`/
 /// `TRACE` token > logcat level column/prefix > [`LogLevel::Info`] default.
@@ -61,9 +61,9 @@ impl LogLevel {
 /// diagnostic tool's own severity prefix wins over any word its message
 /// happens to quote (e.g. `` warning: unused variable: `error` `` stays
 /// Warn, not Error). The generic `"warn"` fallback sits ahead of `DEBUG`/
-/// `TRACE`/logcat — the order this module had before card W5 moved the
-/// error-word check up front and left the fallback trailing behind it; no
-/// test needs the opposite order, so the original relative position is kept.
+/// `TRACE`/logcat: the error-word check runs ahead of the generic fallback,
+/// and no test needs the opposite order, so the fallback's relative
+/// position is left unchanged.
 pub fn classify_level(plain: &str) -> LogLevel {
     let l = plain.to_lowercase();
 
@@ -846,10 +846,9 @@ mod tests {
 
     #[test]
     fn warning_prefixed_lines_win_over_the_word_error() {
-        // card m-b, finding 1: a `warning:`-prefixed diagnostic line stays
-        // Warn even when its own message quotes the word "error" — the
-        // diagnostic tool's own severity prefix wins over any word its
-        // message happens to quote.
+        // A `warning:`-prefixed diagnostic line stays Warn even when its own
+        // message quotes the word "error" — the diagnostic tool's own
+        // severity prefix wins over any word its message happens to quote.
         assert_eq!(
             classify_level("warning: unused variable: `error`"),
             LogLevel::Warn
@@ -862,8 +861,7 @@ mod tests {
 
     #[test]
     fn plural_errors_counts_as_the_error_word() {
-        // card m-b, finding 2: plural "errors" must classify Error just like
-        // the singular.
+        // Plural "errors" must classify Error just like the singular.
         assert_eq!(classify_level("found 2 errors"), LogLevel::Error);
         assert_eq!(classify_level("3 errors generated"), LogLevel::Error);
         assert_eq!(

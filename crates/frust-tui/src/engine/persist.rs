@@ -581,9 +581,9 @@ mod tests {
         assert_eq!(home_dir(&env), Some(PathBuf::from("/home/ed")));
     }
 
-    /// The Windows console gap this card fixes: no `$HOME`, but
-    /// `$USERPROFILE` set — the file must land where an `ssh` session into
-    /// the same machine already writes it (OpenSSH sets `HOME=%USERPROFILE%`).
+    /// A plain Windows console has no `$HOME`, only `$USERPROFILE` set — the
+    /// file must land where an `ssh` session into the same machine already
+    /// writes it (OpenSSH sets `HOME=%USERPROFILE%`).
     #[test]
     fn home_unset_falls_back_to_userprofile_for_the_config_path() {
         let env = FakeEnv::with(&[("USERPROFILE", r"C:\Users\cpu")]);
@@ -829,8 +829,8 @@ mod tests {
     // ── Windows project-identity: dedupe on save, heal on load ───────────
 
     /// A `\\?\`-verbatim path and its plain equivalent name the same
-    /// project — the wizard/cwd-detection duplication this card fixes — and
-    /// must collapse to one recorded entry.
+    /// project — the wizard and cwd-detection paths must not record it
+    /// twice — and must collapse to one recorded entry.
     #[cfg(windows)]
     #[test]
     fn a_verbatim_and_plain_windows_path_dedupe_on_save() {
