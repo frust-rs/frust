@@ -312,7 +312,7 @@ fn render_welcome(
 }
 
 fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let palette_hint = crate::engine::palette::palette_open_hint();
+    let palette_hint = theme.palette_open_hint();
     let left = Line::from(Span::styled(
         format!("? help · {palette_hint} · a add plugin · q quit"),
         Style::default().fg(theme.muted()),
@@ -323,7 +323,7 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            mouse_indicator(state),
+            mouse_indicator(state, theme),
             Style::default().fg(theme.muted()),
         ))
         .alignment(Alignment::Right)
@@ -334,16 +334,15 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
 
 /// The status-bar mouse-capture indicator: a check while capture is
 /// on, an "off" hint (with the host's mouse-toggle key, see
-/// [`crate::engine::palette::mouse_toggle_hint`]) while it's off so users
-/// know the terminal's own text selection is available. Shared by the
-/// welcome and workbench status bars.
-pub(crate) fn mouse_indicator(state: &AppState) -> String {
-    if state.mouse_capture {
-        "[mouse ✓]".to_string()
-    } else {
-        format!(
-            "[mouse off · {}]",
-            crate::engine::palette::mouse_toggle_hint()
-        )
+/// [`Theme::mouse_toggle_hint`]) while it's off so users know the terminal's
+/// own text selection is available. Shared by the welcome and workbench
+/// status bars. Selects among a handful of static strings keyed on
+/// `(capture on/off, glyph set)` rather than allocating a `String` on every
+/// redraw.
+pub(crate) fn mouse_indicator(state: &AppState, theme: &Theme) -> &'static str {
+    match (state.mouse_capture, theme.macos_glyphs()) {
+        (true, _) => "[mouse ✓]",
+        (false, true) => "[mouse off · ⌥m]",
+        (false, false) => "[mouse off · Alt+m]",
     }
 }

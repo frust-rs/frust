@@ -655,7 +655,7 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
         .filter(|s| s.select_mode)
         .map(|s| s.selected_visible_count(state.search.filter.as_deref()));
     let used_left = format!("{dot} {label}").chars().count() + "  │  ".chars().count();
-    let indicator = crate::ui::mouse_indicator(state).chars().count();
+    let indicator = crate::ui::mouse_indicator(state, theme).chars().count();
     let budget = (area.width as usize).saturating_sub(used_left + indicator + 2);
     let (hint, hint_style) = match select {
         Some(lines) => (
@@ -675,7 +675,7 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
             } else {
                 "i doctor"
             };
-            let palette_hint = crate::engine::palette::palette_open_hint();
+            let palette_hint = theme.palette_open_hint();
             let mut hint = format!("r run · b build · {d_hint} · {palette_hint} · ? help");
             if narrow {
                 // The narrow-breakpoint sidebar-overlay toggle only matters
@@ -697,7 +697,7 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            crate::ui::mouse_indicator(state),
+            crate::ui::mouse_indicator(state, theme),
             Style::default().fg(theme.muted()),
         ))
         .alignment(Alignment::Right)
@@ -864,7 +864,7 @@ mod tests {
         }
     }
 
-    // ── PROJECTS / PREVIOUS PROJECTS sidebar split (local/previous boundary) ──────────
+    // ── PROJECTS / PREVIOUS PROJECTS sidebar split (local/previous boundary) ─
 
     use crate::ui::mouse::{MouseCtx, MouseRegions};
     use ratatui::Terminal;

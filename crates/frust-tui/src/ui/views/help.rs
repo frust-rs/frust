@@ -120,7 +120,19 @@ pub fn render(
 ) {
     // The same registry + gating the palette ranks — nothing filtered out
     // (see the module doc comment on why key-less entries still render).
-    let commands = palette::commands(state);
+    // The registry's own "Toggle mouse capture" hint is a host-honest
+    // default (`crate::engine::palette::commands`'s doc), not the theme's —
+    // substitute the theme's glyph set here so the rendered hint matches
+    // whatever `Theme` this frame was actually drawn with (e.g. the
+    // snapshot suite's macOS-forced theme), without the engine tracking
+    // host identity for us.
+    let mut commands = palette::commands(state);
+    if let Some(cmd) = commands
+        .iter_mut()
+        .find(|c| c.title == "Toggle mouse capture")
+    {
+        cmd.hint = theme.mouse_toggle_hint();
+    }
     let (mut lines, hint_width, title_width) = command_lines(&commands, theme);
     let rows_per_col = lines.len();
     lines.push(Line::from(""));
