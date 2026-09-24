@@ -40,6 +40,25 @@ observed through the same `AppState` the workbench renders, over a scripted `Fak
 with no `#[ignore]`. Every wait is on a produced signal (a ready port, an HTTP response, an engine
 message, or a bounded yield-until-condition poll) rather than a sleep.
 
+## Testing on Windows
+
+[`scripts/testing/tui-windows-gate.sh`](../scripts/testing/tui-windows-gate.sh) is the repeatable
+Windows gate for the TUI, driven from a Linux host over ssh against a Windows box (default
+`dell_mini_pc`): it ships a commit, runs the tooling crates' `cargo test` suites there, then drives
+the real `frust.exe` workbench over `ssh -tt` (Windows OpenSSH's ConPTY) inside a private local tmux
+server, asserting on captured screens — startup/project detection, persistence with `HOME` cleared,
+`frust create` via the CLI and the TUI wizard, duplicate-free project rows, desktop run/stop/quit
+with no orphaned processes, key handling, IDE DAP-config generation, and MCP/DAP server start/stop.
+
+Run it as `scripts/testing/tui-windows-gate.sh [--sha <rev>] [--host <ssh-host>] [--skip-tests]
+[--skip-e2e]`. It needs a Windows host reachable by ssh with an OpenSSH server, the Rust `msvc`
+toolchain, `git`/`tar`, Smart App Control off, and a local tmux; it only creates/deletes its own
+scratch state under `C:\dev\wintui-gate-*` on the box and only kills its own processes.
+
+Stays manual — an ssh-driven ConPTY session can't judge these: mouse input, glyph rendering in
+Windows Terminal/conhost, and whether the app's GUI window is actually visible (the app runs outside
+the interactive desktop session over ssh, so the gate can only confirm process liveness).
+
 ## See Also
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — prerequisites, build/run/test gates, version-pin policy

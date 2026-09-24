@@ -168,7 +168,15 @@ server started.
   still-existing recent entry (most-recent first) — with `AppState::local_project_count` marking the
   boundary between the two. The sidebar and titlebar switcher render the split as two groups,
   PROJECTS then (only when non-empty) PREVIOUS PROJECTS; `AppState::insert_project` is the one seam
-  every fresh open/scaffold goes through to keep the boundary invariant.
+  every fresh open/scaffold goes through to keep the boundary invariant. Persisted at
+  `$XDG_CONFIG_HOME` (else `<home>/.config`)`/frust/tui.toml`, where `<home>` is `$HOME`, else
+  `$USERPROFILE`, else `$HOMEDRIVE`+`$HOMEPATH` — a plain Windows console session with no `$HOME`
+  lands on `%USERPROFILE%\.config\frust\tui.toml`, the same file an OpenSSH session into the same
+  machine already writes. Every persisted root is simplified through `frust_drive::host_path::simplify`
+  at the load/save boundary, and project identity here (recents dedupe, this split, and
+  `AppState::insert_project`'s placement) compares roots via `host_path::same_path`/`is_under` —
+  case- and verbatim-insensitive on Windows, exact component comparison elsewhere — distinct from
+  the launch guard's raw lexical `Path::components` comparison below.
 - Launch guard: one live (non-terminal) session per `(project root, target)` — `AppState::live_session_for`
   (`live_session_for_excluding` for a restart, which exempts the session being replaced) is
   consulted by the run-config modal, run-on-all-devices, and the embedded MCP/DAP backend alike, so
