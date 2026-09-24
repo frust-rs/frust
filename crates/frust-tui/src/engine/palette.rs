@@ -10,8 +10,55 @@
 //! `Message` through the same `update` every other input path uses (see
 //! `super::update::execute_palette`). `crate::ui::views::palette` renders it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::message::Message;
 use super::state::AppState;
+
+/// Snapshot-test-only override forcing the macOS glyph spelling regardless
+/// of the actual build target — see [`force_macos_glyphs_for_snapshot_tests`].
+static FORCE_MACOS_GLYPHS: AtomicBool = AtomicBool::new(false);
+
+/// Forces [`palette_open_hint`]/[`mouse_toggle_hint`] to the macOS spelling
+/// for the remainder of the process, regardless of `cfg!(target_os)`. Called
+/// only by the insta snapshot harness (`crates/frust-tui/tests/snapshots.rs`)
+/// so every CI host — Linux, macOS, Windows — renders the identical macOS
+/// glyphs and no snapshot needs a per-host fork; production code never calls
+/// this. Safe to call repeatedly (idempotent).
+pub fn force_macos_glyphs_for_snapshot_tests() {
+    FORCE_MACOS_GLYPHS.store(true, Ordering::Relaxed);
+}
+
+fn host_is_macos() -> bool {
+    FORCE_MACOS_GLYPHS.load(Ordering::Relaxed) || cfg!(target_os = "macos")
+}
+
+/// The `(palette-open hint, mouse-toggle hint)` pair for a host, keyed off
+/// `is_macos` so both arms are directly unit-testable without depending on
+/// the machine actually running the test. macOS keeps the existing `⌘`/`⌥`
+/// symbols; every other host spells the modifier out — `⌘`/`⌥` aren't
+/// physical keys there — using the same `^X` notation the UI already uses
+/// for Ctrl bindings (e.g. `^O`, the "Switch project…" hint below).
+fn key_glyphs_for(is_macos: bool) -> (&'static str, &'static str) {
+    if is_macos {
+        ("⌘ palette", "⌥m")
+    } else {
+        ("^P palette", "Alt+m")
+    }
+}
+
+/// The command-palette-open hint for the current host (see [`key_glyphs_for`]).
+/// Shared by the workbench and welcome status bars.
+pub fn palette_open_hint() -> &'static str {
+    key_glyphs_for(host_is_macos()).0
+}
+
+/// The mouse-capture-toggle key hint for the current host (see
+/// [`key_glyphs_for`]). Shared by the status-bar mouse chip and this
+/// registry's own "Toggle mouse capture" row.
+pub fn mouse_toggle_hint() -> &'static str {
+    key_glyphs_for(host_is_macos()).1
+}
 
 /// The open command palette's live state: the typed query and the highlighted
 /// row (an index into [`ranked`], clamped). Opening it primes an empty query so
@@ -188,7 +235,11 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         // without claiming a second top-level key.
         always("DAP server…", "D", Message::OpenDapSettings),
         always("Start/stop DAP server", "", Message::ToggleDapServer),
-        always("Toggle mouse capture", "⌥m", Message::ToggleMouseCapture),
+        always(
+            "Toggle mouse capture",
+            mouse_toggle_hint(),
+            Message::ToggleMouseCapture,
+        ),
         gated(
             "Toggle follow-tail",
             "f",
@@ -431,5 +482,17 @@ mod tests {
             .find(|c| c.title == "Build…")
             .unwrap();
         assert_eq!(build.message, Message::OpenBuildLauncher);
+    }
+
+    #[test]
+    fn key_glyphs_keep_the_mac_symbols_on_macos() {
+        assert_eq!(key_glyphs_for(true), ("⌘ palette", "⌥m"));
+    }
+
+    #[test]
+    fn key_glyphs_spell_the_modifiers_out_off_macos() {
+        // ⌘/⌥ aren't physical keys off macOS, so the hint uses the same
+        // `^X` Ctrl notation already in use (`^O`) plus a spelled-out `Alt+`.
+        assert_eq!(key_glyphs_for(false), ("^P palette", "Alt+m"));
     }
 }

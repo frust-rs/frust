@@ -15,7 +15,11 @@ pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
         println!();
         println!("Run `frust doctor` to check your toolchain, or:");
         println!("  - start an Android emulator (Android Studio > Device Manager)");
-        println!("  - boot an iOS simulator (`open -a Simulator`)");
+        // `open -a Simulator` only exists on macOS — a host-honest hint never
+        // suggests a command that can't run here.
+        if cfg!(target_os = "macos") {
+            println!("  - boot an iOS simulator (`open -a Simulator`)");
+        }
         println!("  - connect a physical device and trust this computer");
     } else {
         print_table(&devices);

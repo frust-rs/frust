@@ -12,8 +12,15 @@ impl Validator for XcodeValidator {
 
     fn validate(&self, ctx: &DoctorCtx) -> Validation {
         if !ctx.is_macos {
+            // `Partial`, not `Pass`: a host-honest `frust doctor` must never
+            // print `[✓] Xcode` on a host that cannot have Xcode at all (see
+            // `crates/frust-cli/src/commands/doctor.rs`'s `print_results` —
+            // only a non-`Pass` status prints its message inline without
+            // `-v`, which is exactly what "skipped (not macOS)" needs to be
+            // visible by default). It never gates the exit code (only `Fail`
+            // does), so this is display-only.
             return Validation {
-                status: Status::Pass,
+                status: Status::Partial,
                 messages: vec!["skipped (not macOS)".to_string()],
             };
         }
@@ -85,7 +92,12 @@ mod tests {
             is_macos: false,
         };
         let result = XcodeValidator.validate(&ctx);
-        assert_eq!(result.status, Status::Pass);
+        // Not `Pass`: `frust doctor` must never render a checkmark for a
+        // component that cannot exist on this host (see `print_results` in
+        // `crates/frust-cli/src/commands/doctor.rs` — a non-`Pass` status is
+        // the only way "skipped (not macOS)" shows without `-v`).
+        assert_eq!(result.status, Status::Partial);
+        assert_eq!(result.messages, vec!["skipped (not macOS)".to_string()]);
     }
 
     #[test]

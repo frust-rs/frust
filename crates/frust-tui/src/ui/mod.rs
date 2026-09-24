@@ -312,8 +312,9 @@ fn render_welcome(
 }
 
 fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let palette_hint = crate::engine::palette::palette_open_hint();
     let left = Line::from(Span::styled(
-        "? help · ⌘ palette · a add plugin · q quit",
+        format!("? help · {palette_hint} · a add plugin · q quit"),
         Style::default().fg(theme.muted()),
     ));
     frame.render_widget(
@@ -332,13 +333,17 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
 }
 
 /// The status-bar mouse-capture indicator: a check while capture is
-/// on, an "off" hint (with the `⌥m` toggle key) while it's off so users know
-/// the terminal's own text selection is available. Shared by the welcome and
-/// workbench status bars.
-pub(crate) fn mouse_indicator(state: &AppState) -> &'static str {
+/// on, an "off" hint (with the host's mouse-toggle key, see
+/// [`crate::engine::palette::mouse_toggle_hint`]) while it's off so users
+/// know the terminal's own text selection is available. Shared by the
+/// welcome and workbench status bars.
+pub(crate) fn mouse_indicator(state: &AppState) -> String {
     if state.mouse_capture {
-        "[mouse ✓]"
+        "[mouse ✓]".to_string()
     } else {
-        "[mouse off · ⌥m]"
+        format!(
+            "[mouse off · {}]",
+            crate::engine::palette::mouse_toggle_hint()
+        )
     }
 }
