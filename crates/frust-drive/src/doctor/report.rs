@@ -646,6 +646,28 @@ mod tests {
         assert_eq!(report.rollup(), ComponentStatus::Partial);
     }
 
+    /// Direct, area-gating-independent regression coverage for the
+    /// host-honest doctor fix: even called head-on (bypassing
+    /// `build_report`'s own `is_macos` gate on the whole iOS area, see
+    /// `non_macos_host_has_no_ios_section` below for that path), the Xcode
+    /// component must never render as `Ok` on a non-macOS host — the CLI's
+    /// `print_results` only shows a component's message inline without `-v`
+    /// when the status isn't `Ok`/`Pass`, and a checkmark for a component
+    /// that can't exist on this host is exactly the bug this closes.
+    #[test]
+    fn xcode_component_is_not_ok_on_a_non_macos_host() {
+        let runner = FakeProcessRunner::new();
+        let env = FakeEnv::new();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let xcode = xcode_component(&ctx);
+        assert_ne!(xcode.status, ComponentStatus::Ok);
+        assert!(xcode.summary.contains("skipped (not macOS)"));
+    }
+
     #[test]
     fn non_macos_host_has_no_ios_section() {
         // Android-only fixtures; a call the iOS section would make (e.g.

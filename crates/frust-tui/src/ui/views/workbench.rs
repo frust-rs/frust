@@ -675,7 +675,8 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
             } else {
                 "i doctor"
             };
-            let mut hint = format!("r run · b build · {d_hint} · ⌘ palette · ? help");
+            let palette_hint = crate::engine::palette::palette_open_hint();
+            let mut hint = format!("r run · b build · {d_hint} · {palette_hint} · ? help");
             if narrow {
                 // The narrow-breakpoint sidebar-overlay toggle only matters
                 // (and only shows) once the sidebar has actually collapsed
