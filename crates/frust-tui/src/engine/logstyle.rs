@@ -65,11 +65,6 @@ pub fn classify_level(plain: &str) -> LogLevel {
         return LogLevel::Error;
     }
 
-    // Check for warning prefix; if found, return Warn even if line contains "error" word.
-    if l.contains("warn") {
-        return LogLevel::Warn;
-    }
-
     // Check for note: or help: prefixes (after stripping source marker); these are not Error
     // even if they contain the word "error".
     let stripped = strip_source_prefix(plain);
@@ -82,6 +77,11 @@ pub fn classify_level(plain: &str) -> LogLevel {
     // defined as: char before/after must not be alphanumeric, '_', or '-'.
     if contains_error_word(plain) || has_uppercase_word(plain, "ERROR") {
         return LogLevel::Error;
+    }
+
+    // Check for warning prefix (rustc/javac diagnostic shape); fire ONLY on diagnostic start.
+    if trimmed.starts_with("warning:") || trimmed.starts_with("warning[") {
+        return LogLevel::Warn;
     }
 
     // Check for debug/trace tokens (case-sensitive, whole-word only).
@@ -97,6 +97,11 @@ pub fn classify_level(plain: &str) -> LogLevel {
     // Check for logcat level markers.
     if let Some(lvl) = classify_logcat_level(plain) {
         return lvl;
+    }
+
+    // Generic warning fallback (keep original behavior for log-facade WARN tokens, etc).
+    if l.contains("warn") {
+        return LogLevel::Warn;
     }
 
     LogLevel::Info
@@ -785,6 +790,36 @@ mod tests {
             classify_level("   error: mismatched types"),
             LogLevel::Error
         );
+    }
+
+    #[test]
+    fn rustc_error_summary_with_warnings_is_error() {
+        // The rustc summary line contains both "error" and "warnings".
+        // It should classify as Error, not Warn.
+        assert_eq!(
+            classify_level(
+                "error: could not compile `app` (bin \"app\") due to 2 previous errors; 3 warnings emitted"
+            ),
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn gradle_warning_with_error_prone_is_warn() {
+        // Gradle warnings that mention "error-prone" as a tool/concept should stay Warn,
+        // because the line starts with "warning:" diagnostic shape.
+        assert_eq!(
+            classify_level(
+                "[gradle] warning: [deprecation] foo() in Bar has been deprecated; error-prone"
+            ),
+            LogLevel::Warn
+        );
+    }
+
+    #[test]
+    fn uppercase_warn_token_is_warn() {
+        // WARN uppercase log-facade token (not the diagnostic "warning:" shape).
+        assert_eq!(classify_level("WARN something"), LogLevel::Warn);
     }
 
     #[test]
