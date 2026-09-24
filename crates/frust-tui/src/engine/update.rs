@@ -811,7 +811,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             if has_fail && quiet {
                 state
                     .toasts
-                    .push(ToastKind::Error, "Doctor found problems · press d");
+                    .push(ToastKind::Error, "Doctor found problems · press i");
             }
             Outcome::redraw()
         }
@@ -4689,6 +4689,23 @@ mod tests {
         update(&mut st, Message::DoctorResults(results.clone()));
         assert!(!st.doctor.refreshing);
         assert_eq!(st.doctor.results, results);
+    }
+
+    #[test]
+    fn doctor_failure_toast_shows_correct_key() {
+        let mut st = welcome();
+        update(&mut st, Message::RunDoctor);
+        let results = vec![DoctorCheck {
+            name: "Rust toolchain".to_string(),
+            status: Status::Fail,
+            messages: vec!["Something is wrong".to_string()],
+        }];
+        update(&mut st, Message::DoctorResults(results));
+        assert_eq!(st.toasts.items.len(), 1);
+        let toast = &st.toasts.items[0];
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(toast.text.contains("press i"), "{}", toast.text);
+        assert!(!toast.text.contains("press d"), "{}", toast.text);
     }
 
     #[test]
