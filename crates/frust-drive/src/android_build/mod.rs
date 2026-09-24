@@ -175,16 +175,25 @@ fn build_with_env(
         args.push(prop.as_str());
     }
 
+    // `gradlew.bat` on Windows, absolute — `./gradlew` (relative, run in
+    // `android_dir`) unchanged elsewhere; see
+    // `android_run::gradle::gradle_wrapper`'s doc for why. Shared with
+    // `android_run::gradle::assemble` so the two Gradle-invoking lanes spawn
+    // the identical program.
+    let wrapper = crate::android_run::gradle::gradle_wrapper(&android_dir);
+    let wrapper_cmd = wrapper.to_string_lossy().into_owned();
+    let display = crate::android_run::gradle::gradle_wrapper_display();
+
     let mut prefixed = |line: &str| on_line(&format!("[gradle] {line}"));
     let out = runner
         .run_streaming(
-            "./gradlew",
+            &wrapper_cmd,
             &args,
             Some(&android_dir),
             &[("JAVA_HOME", &outcome.java_home)],
             &mut prefixed,
         )
-        .with_context(|| format!("running `./gradlew {task}` in `{}`", android_dir.display()))?;
+        .with_context(|| format!("running `{display} {task}` in `{}`", android_dir.display()))?;
     // Gradle has returned; the generated signing file has no further reader.
     // (An early `?` above drops it just the same — this only narrows the
     // window for the success path.)

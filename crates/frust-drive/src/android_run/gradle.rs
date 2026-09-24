@@ -52,12 +52,52 @@ pub fn leading_args(project_dir: &Path) -> [String; 2] {
     ]
 }
 
-/// Runs `./gradlew --project-cache-dir <dir> <task> [-P...]` in `android_dir`
-/// — `task` and `props` are `android_build::tasks::task_name`/
-/// `gradle_properties`' output, reused rather than duplicated here so the run
-/// and build pipelines compute a variant's task name and `-P` properties from
-/// exactly one place. Streams each line of output through `on_line` (prefixed
-/// `[gradle] `) and exports `JAVA_HOME=java_home` for the child process only.
+/// The Gradle wrapper program to spawn for `android_dir`, host-appropriate:
+/// the relative `./gradlew` (run with `android_dir` as the child's
+/// `current_dir`, unchanged) everywhere except Windows, where CreateProcess
+/// cannot execute a POSIX shell script and Rust's `Command` neither appends
+/// `.bat` nor resolves a bare program name against the child's `current_dir`
+/// (only `PATH`) — there this names the absolute `gradlew.bat` wrapper the
+/// scaffold also ships, so the spawn works regardless of the process's own
+/// working directory.
+///
+/// `pub(crate)`: `android_build::build_with_env` reuses this rather than
+/// re-deriving the wrapper program, so the two Gradle-invoking lanes cannot
+/// drift on which file they spawn.
+pub(crate) fn gradle_wrapper(android_dir: &Path) -> PathBuf {
+    gradle_wrapper_for(android_dir, cfg!(target_os = "windows"))
+}
+
+/// [`gradle_wrapper`]'s inner logic, taking `windows` explicitly (rather than
+/// baking in `cfg!(target_os = "windows")`) so both arms run under `cargo
+/// test` on any host.
+fn gradle_wrapper_for(android_dir: &Path, windows: bool) -> PathBuf {
+    if windows {
+        let candidate = android_dir.join("gradlew.bat");
+        std::path::absolute(&candidate).unwrap_or(candidate)
+    } else {
+        PathBuf::from("./gradlew")
+    }
+}
+
+/// The wrapper name used in log/error text — just the file name, never
+/// [`gradle_wrapper`]'s (possibly long, absolute) Windows path, so a failure
+/// message stays readable on either host.
+pub(crate) fn gradle_wrapper_display() -> &'static str {
+    gradle_wrapper_display_for(cfg!(target_os = "windows"))
+}
+
+fn gradle_wrapper_display_for(windows: bool) -> &'static str {
+    if windows { "gradlew.bat" } else { "./gradlew" }
+}
+
+/// Runs `./gradlew --project-cache-dir <dir> <task> [-P...]` (`gradlew.bat`
+/// on Windows — see [`gradle_wrapper`]) in `android_dir` — `task` and `props`
+/// are `android_build::tasks::task_name`/`gradle_properties`' output, reused
+/// rather than duplicated here so the run and build pipelines compute a
+/// variant's task name and `-P` properties from exactly one place. Streams
+/// each line of output through `on_line` (prefixed `[gradle] `) and exports
+/// `JAVA_HOME=java_home` for the child process only.
 ///
 /// `project_dir` is the Frust project root (`android_dir`'s parent); it is
 /// taken explicitly rather than derived so a caller that already resolved it
@@ -83,16 +123,20 @@ pub fn assemble(
         args.push(prop.as_str());
     }
 
+    let wrapper = gradle_wrapper(android_dir);
+    let wrapper_cmd = wrapper.to_string_lossy().into_owned();
+    let display = gradle_wrapper_display();
+
     let mut prefixed = |line: &str| on_line(&format!("[gradle] {line}"));
     runner
         .run_streaming(
-            "./gradlew",
+            &wrapper_cmd,
             &args,
             Some(android_dir),
             &[("JAVA_HOME", java_home)],
             &mut prefixed,
         )
-        .with_context(|| format!("running `./gradlew {task}` in `{}`", android_dir.display()))
+        .with_context(|| format!("running `{display} {task}` in `{}`", android_dir.display()))
 }
 
 /// Resolves the single APK a non-split `assemble<Flavor><Mode>` build should
@@ -355,5 +399,46 @@ mod tests {
         fs::write(dists.join("marker"), b"x").unwrap();
         assert!(wrapper_dist_cached(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Unix arm unchanged: relative `./gradlew`, run with `android_dir` as
+    /// `current_dir` — byte-identical to the pre-Windows-support program, so
+    /// existing tests/scripts don't move.
+    #[test]
+    fn gradle_wrapper_is_relative_gradlew_off_windows() {
+        let android_dir = Path::new("/tmp/myapp/android");
+        assert_eq!(
+            gradle_wrapper_for(android_dir, false),
+            PathBuf::from("./gradlew")
+        );
+        assert_eq!(gradle_wrapper_display_for(false), "./gradlew");
+    }
+
+    /// Windows arm: the absolute `gradlew.bat` wrapper under `android_dir` —
+    /// CreateProcess can't run `./gradlew` (a POSIX shell script) and
+    /// Rust's `Command` neither appends `.bat` nor resolves a bare name
+    /// against the child's `current_dir`.
+    #[test]
+    fn gradle_wrapper_is_absolute_gradlew_bat_on_windows() {
+        let android_dir = Path::new("/tmp/myapp/android");
+        assert_eq!(
+            gradle_wrapper_for(android_dir, true),
+            android_dir.join("gradlew.bat")
+        );
+        assert_eq!(gradle_wrapper_display_for(true), "gradlew.bat");
+    }
+
+    /// A relative `android_dir` still yields an absolute Windows wrapper
+    /// path — `gradle_wrapper`'s doc promises an absolute program so the
+    /// spawn works regardless of the caller's own working directory.
+    #[test]
+    fn gradle_wrapper_windows_path_is_absolute_even_for_a_relative_android_dir() {
+        let wrapper = gradle_wrapper_for(Path::new("myapp/android"), true);
+        assert!(wrapper.is_absolute(), "{}", wrapper.display());
+        assert!(
+            wrapper.ends_with("myapp/android/gradlew.bat"),
+            "{}",
+            wrapper.display()
+        );
     }
 }

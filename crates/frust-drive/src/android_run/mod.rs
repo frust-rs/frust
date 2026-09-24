@@ -11,7 +11,7 @@ pub mod preflight;
 pub mod project;
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
@@ -100,6 +100,29 @@ pub fn parse_prompt_selection(input: &str, count: usize) -> Result<usize, String
 /// list-and-exit for [`DeviceSelection::Ambiguous`].
 pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
+}
+
+/// `$HOME`, with a Windows fallback to `%USERPROFILE%` — mirrors
+/// `frust-dap`'s `ide_config::vscode::home_dir` chain (kept in sync by hand;
+/// the two live in different crates so neither can `use` the other's private
+/// helper). Only the fallback matters in practice: Unix always has `HOME`
+/// set, so [`prepare_session`]'s `GRADLE_USER_HOME` guess (used only to print
+/// a one-time "first run downloads Gradle" note, never to gate the build)
+/// resolves to nothing rather than silently checking the wrong directory on
+/// Windows, where `HOME` is typically unset.
+fn home_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
+    if let Some(home) = env_value(env, "HOME") {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = env_value(env, "USERPROFILE") {
+        return Some(PathBuf::from(profile));
+    }
+    None
+}
+
+/// A non-empty environment value, or `None` for unset-or-empty.
+fn env_value(env: &dyn EnvLookup, key: &str) -> Option<String> {
+    env.get(key).filter(|value| !value.is_empty())
 }
 
 /// Drives the full, mode/flavor-aware Android pipeline: preflight →
@@ -221,7 +244,7 @@ fn prepare_session(
     };
     let outcome = preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
 
-    if let Some(gradle_user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+    if let Some(gradle_user_home) = home_dir(env) {
         let gradle_user_home = gradle_user_home.join(".gradle");
         if !gradle::wrapper_dist_cached(&gradle_user_home) {
             on_line("Note: first Gradle run downloads the wrapper distribution (~1-2 min).");
@@ -601,6 +624,28 @@ mod tests {
     #[test]
     fn parse_prompt_selection_rejects_non_numeric() {
         assert!(parse_prompt_selection("abc", 3).is_err());
+    }
+
+    #[test]
+    fn home_dir_prefers_home_over_userprofile() {
+        let env = crate::doctor::FakeEnv::new()
+            .set("HOME", "/home/someone")
+            .set("USERPROFILE", "C:\\Users\\someone");
+        assert_eq!(home_dir(&env), Some(PathBuf::from("/home/someone")));
+    }
+
+    /// The Windows-only path in practice: no `HOME`, `%USERPROFILE%` set —
+    /// mirrors `frust-dap`'s `vscode::home_dir` fallback.
+    #[test]
+    fn home_dir_falls_back_to_userprofile_when_home_unset() {
+        let env = crate::doctor::FakeEnv::new().set("USERPROFILE", "C:\\Users\\someone");
+        assert_eq!(home_dir(&env), Some(PathBuf::from("C:\\Users\\someone")));
+    }
+
+    #[test]
+    fn home_dir_none_when_neither_set() {
+        let env = crate::doctor::FakeEnv::new();
+        assert_eq!(home_dir(&env), None);
     }
 
     mod run_pipeline {
