@@ -481,9 +481,17 @@ fn group_kill_unix(child_pid: u32) {
 /// gone process exits non-zero ("not found"), which this function silently
 /// ignores — the caller's own fallback `Child::kill()` call is equally
 /// idempotent (an already-reaped child's `kill()` just errors, also ignored).
-/// The wait is inherently bounded: `taskkill /F` forcibly terminates rather
-/// than requesting graceful shutdown, so the child process itself returns
-/// promptly once spawned; `Command::status()` blocks only on that.
+///
+/// **Bounded, never blocks indefinitely**: `taskkill` is `spawn`ed (not
+/// `status`ed) and polled via `try_wait` up to [`TASKKILL_WAIT_BUDGET`],
+/// rather than a plain blocking wait — [`StreamHandle::kill`]'s documented
+/// contract is that it "never deadlocks", which a wait with no ceiling on an
+/// external tool (missing, hung, or itself killed mid-run) would violate. On
+/// timeout the `taskkill` process itself is best-effort-killed (so it doesn't
+/// linger) and this function returns, leaving the caller's own
+/// `Child::kill()` fallback as what actually terminates the target. A spawn
+/// failure (`taskkill` missing from `PATH`) also just returns early, same
+/// fallback.
 ///
 /// A Windows Job Object (`windows-sys`, already in the tree at 0.61.2 through
 /// `frust-shell-windows`) would track the tree without relying on `taskkill`
@@ -495,20 +503,60 @@ fn group_kill_unix(child_pid: u32) {
 fn windows_tree_kill(pid: u32) {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
+    use std::time::Instant;
 
     // CREATE_NO_WINDOW: suppresses the console window `taskkill` would
     // otherwise flash open — this runs from a GUI-less/TUI context, never an
     // interactive console session of its own.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let _ = Command::new("taskkill")
+    let mut taskkill = match Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .status();
+        .spawn()
+    {
+        Ok(child) => child,
+        // Missing/unspawnable `taskkill`: nothing more to do here — the
+        // caller's own `Child::kill()` fallback runs regardless.
+        Err(_) => return,
+    };
+
+    let deadline = Instant::now() + TASKKILL_WAIT_BUDGET;
+    loop {
+        match taskkill.try_wait() {
+            // Exited, success or failure ("not found" included) — either way
+            // there is nothing left to wait on.
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(TASKKILL_POLL_INTERVAL);
+            }
+            // Budget exhausted, or `try_wait` itself errored: stop waiting on
+            // `taskkill` — best-effort-kill it so it doesn't linger, then
+            // return; the caller's `Child::kill()` fallback covers the target
+            // process either way.
+            _ => {
+                let _ = taskkill.kill();
+                return;
+            }
+        }
+    }
 }
+
+/// How long [`windows_tree_kill`] polls a spawned `taskkill` before giving up
+/// on it — long enough for a forced (`/F`) tree-kill to settle under load,
+/// short enough that a hung/missing `taskkill` can never stall a
+/// [`StreamHandle::kill`] caller past a human-perceptible moment.
+#[cfg(windows)]
+const TASKKILL_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Poll interval [`windows_tree_kill`] sleeps between `try_wait` checks —
+/// frequent enough that a fast `taskkill` exit is observed promptly, coarse
+/// enough not to spin the CPU over the up-to-3s budget.
+#[cfg(windows)]
+const TASKKILL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Shells out for real via [`std::process::Command`].
 pub struct RealProcessRunner;
