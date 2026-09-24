@@ -197,13 +197,36 @@ rprocs() {
     rsh 'tasklist /FO CSV /NH' | cut -d, -f1 | tr -d '"' | tr '[:upper:]' '[:lower:]'
 }
 
-# Orphans: app exe, cargo.exe or rustc.exe still alive (space-separated list).
+# Orphans: the app exe (by name, as before) plus cargo.exe/rustc.exe, but only
+# when their CommandLine references one of the gate's own paths (its shipped
+# tree $SRC, or a C:\dev\wintui-gate-*/C:\dev\target-tui scratch path) — a
+# cargo.exe/rustc.exe belonging to another user session or another directory
+# on the box must never count. One "name|pid|ppid|cmdline" line per leftover.
 orphans() {
-    rprocs | grep -Ex "cargo\.exe|rustc\.exe|${APP_EXE//./\\.}" | sort | uniq -c \
-        | awk '{printf "%s%s(x%s)", sep, $2, $1; sep=" "}' || true
+    local file="$WORK/wintui-gate-orphans.ps1" ps
+    ps=$(cat <<'PS'
+$targets = 'C:\dev\wintui-gate-', 'C:\dev\target-tui', '__GATE_SRC__'
+Get-CimInstance Win32_Process | Where-Object {
+    if ($_.Name -like 'wintui_gate_*.exe') { return $true }
+    if ($_.Name -notin 'cargo.exe', 'rustc.exe') { return $false }
+    if (-not $_.CommandLine) { return $false }
+    foreach ($t in $targets) { if ($_.CommandLine -like "*$t*") { return $true } }
+    return $false
+} | ForEach-Object {
+    $cmd = $_.CommandLine -replace '[\r\n]+', ' '
+    Write-Output "$($_.Name)|$($_.ProcessId)|$($_.ParentProcessId)|$cmd"
+}
+PS
+)
+    ps=${ps//__GATE_SRC__/$SRC}
+    printf '%s\n' "$ps" | sed 's/$/\r/' > "$file"
+    rput "$file" "C:/dev/wintui-gate-orphans.ps1" || { log "orphans: could not upload probe script"; return 0; }
+    rsh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\wintui-gate-orphans.ps1' | grep -v '^$' || true
 }
 
-# Poll until orphans() is empty; echo what remained on timeout.
+# Poll until orphans() is empty; on timeout, format what remained as
+# "name pid=<pid> ppid=<ppid> cmd=<cmdline>" per leftover (diagnosable from
+# the FAIL detail alone, without a separate box login).
 wait_no_orphans() {
     local timeout=$1 left=""
     local end=$((SECONDS + timeout))
@@ -212,7 +235,7 @@ wait_no_orphans() {
         [ -z "$left" ] && return 0
         sleep 3
     done
-    printf '%s' "$left"
+    printf '%s' "$left" | awk -F'|' '{printf "%s%s pid=%s ppid=%s cmd=%s", sep, $1, $2, $3, $4; sep="; "}'
     return 1
 }
 
@@ -356,7 +379,7 @@ ship() {
     local tgz="$WORK/frust-$SHORT.tar.gz"
     git -C "$REPO" archive --format=tar.gz --prefix="frust-$SHORT/" "$FULL_SHA" > "$tgz"
     rput "$tgz" "C:/dev/frust-$SHORT.tar.gz"
-    rsh "cd /d C:\\dev && tar -xzf frust-$SHORT.tar.gz" >&2
+    rsh "cd /d C:\\dev && tar -m -xzf frust-$SHORT.tar.gz" >&2
     rexists "$SRC\\Cargo.toml"
 }
 if ! ship; then
