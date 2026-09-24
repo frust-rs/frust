@@ -4433,7 +4433,7 @@ mod tests {
 
         // The runner posts the absolute root back; the wizard closes and the
         // project opens in the workbench.
-        let root = dest.canonicalize().unwrap();
+        let root = frust_drive::host_path::canonicalize_simplified(&dest).unwrap();
         let out = update(
             &mut st,
             Message::ScaffoldSucceeded {
