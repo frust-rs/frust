@@ -1903,8 +1903,11 @@ fn open_create_wizard(state: &mut AppState) -> Outcome {
 /// a switch): register it in `projects` keeping the local/previous boundary
 /// invariant (see `AppState::insert_project`), make it active, show the
 /// workbench, focus its first session (if any), and request the runner persist
-/// it as most-recently-opened.
+/// it as most-recently-opened. `root` is run through `host_path::simplify`
+/// first — the wizard/open-result entry point paths enter state through, so a
+/// Windows verbatim scaffold path never reaches `projects`/`project_root`.
 fn open_project(state: &mut AppState, root: PathBuf) -> Outcome {
+    let root = frust_drive::host_path::simplify(&root);
     state.insert_project(root.clone());
     state.project_root = Some(root.clone());
     state.screen = Screen::Workbench;
