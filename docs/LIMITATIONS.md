@@ -1592,8 +1592,11 @@ with a one-time notice naming the port, and a listener starts on that run only i
 to (`[dap].intro_seen` records that the notice was spent, whether or not they acted). Every launch
 after that binds silently, as the defaults ask — the acknowledgment is one-time, not per-launch —
 and auto-start can be turned off in the same dialog (or `[dap].auto_start_in_ide = false` in
-`~/.config/frust/tui.toml`). A successful bind additionally rewrites the detected IDE's DAP launch
-config while `auto_configure_ide` is on.
+`~/.config/frust/tui.toml`). With `auto_configure_ide` on, the detected IDE's DAP launch config is
+also written automatically — on every app launch (one write per distinct project root) and, on a
+fresh bind, for the active session's project — but only in `WriteMode::IfAbsent`: a file that
+already carries the frust entry is left untouched, never rewritten. Only the dialog's own explicit
+Generate (`WriteMode::Refresh`) updates an existing entry, e.g. to pick up a changed port.
 
 **Applies to**: every `frust-dap` connection, on every platform — there is no other transport (the
 stdio mode this entry once covered was removed; the server is embedded-only now).
@@ -1743,8 +1746,9 @@ already running (`frust-dap`'s only shape, since there is no standalone `frust d
 spawn).
 
 **Applies to**: any workbench where the detected or overridden IDE is Helix; the DAP settings
-dialog's `g` (Generate) action and the auto-configure-on-listen flow both report the skip rather
-than a written file.
+dialog's `g` (Generate) action always reports the skip, and the automatic on-launch/on-bind flow's
+own `IdeConfigRequest::reports` treats it the same as any other no-op (silent, since it never wrote
+anything a user would need to hear about).
 
 **Why accepted**: fdemon-pro (the ported source this module follows) worked around the identical gap
 by spawning a *second*, separate adapter-binary process — a workaround `frust-dap` cannot reuse,
@@ -1759,18 +1763,21 @@ actually connect was rejected in favor of honestly reporting nothing was written
 ### `dap-zed-adapter-unverified` — the generated Zed DAP config names an unverified adapter
 
 **Observed**: `crates/frust-dap/src/ide_config/zed.rs`'s `ZedGenerator` names the debug adapter as
-`"CodeLLDB"` in the generated `.zed/debug.json` entry — a best-effort choice (mirroring
-fdemon-pro's own analogous workaround of naming Go's `"Delve"` adapter for a non-Go TCP peer), never
-verified against a real Zed release. Whether Zed's debug panel accepts a `CodeLLDB` entry pointed at
-a non-lldb TCP peer, or validates the adapter/language pairing in a way that would reject it, is
-unconfirmed.
+`"Delve"` (Go's adapter) in the generated `.zed/debug.json` entry — mirroring fdemon's own Zed
+generator, which uses the same name for the identical reason: Zed ships no native adapter for
+either language, and `"Delve"` is a name Zed's debug panel already recognises, with the
+`tcp_connection` forwarding the session to the already-running server that speaks the actual
+protocol. Only the adapter name is mirrored — fdemon writes `"request": "attach"`, frust keeps
+`"request": "launch"` (`frust-dap` has no attach story). Never verified against a real Zed release.
 
 **Applies to**: any workbench where the detected or overridden IDE is Zed and a DAP config is
 generated for it.
 
-**Why accepted**: Zed ships no native Frust (or Dart/Flutter-family) adapter to name honestly;
-`CodeLLDB` is the closest generic match for a Rust project's debug panel. Verifying needs a real Zed
-instance, unavailable this round — do not surface this adapter name in user-facing docs until it is.
+**Why accepted**: Zed ships no native Frust (or Go, fdemon's case) adapter to name honestly;
+`"Delve"` is the same workaround fdemon already ships. Verifying needs a real Zed instance,
+unavailable this round — do not surface this adapter name in user-facing docs until it is; remove
+this entry once confirmed (or replace it if a future Zed release starts validating the
+adapter/language pairing and rejects the workaround).
 
 **Evidence**: `crates/frust-dap/src/ide_config/zed.rs`'s `ZED_ADAPTER` doc comment.
 
@@ -1791,10 +1798,14 @@ a redundant rewrite, it does not prevent the destructive first rewrite of a file
 user's comments/formatting.
 
 **Applies to**: any project whose `.vscode/launch.json` predates frust-dap and carries hand-written
-comments or formatting, the moment its DAP server (re)binds with `[dap].auto_configure_ide` on (the
-default — see `dap-tcp-unauthenticated-v1` above) and detects VS Code/VS Code Insiders/Cursor as the
-parent IDE. This fires automatically, not on an explicit user action: the first bind after that file
-exists silently reprints it.
+comments or formatting, detecting VS Code/VS Code Insiders/Cursor as the parent IDE, in either of
+two cases now that the automatic path writes under `WriteMode::IfAbsent` (see
+`dap-tcp-unauthenticated-v1` above): the dialog's explicit `g` (`WriteMode::Refresh`) always merges
+and can reprint the file regardless of whether a frust entry is already present; or the automatic
+on-launch/on-bind path's *first* write into a file that has no frust entry yet, since `IfAbsent`
+still calls `merge_config` (not a byte-preserving append) to add one. Once that first entry exists,
+every later automatic write leaves the file untouched (`has_frust_entry` short-circuits it) — only
+`g` can reprint it again after that.
 
 **Why accepted**: a byte-preserving surgical splice (find the frust entry's byte span inside the
 original text and edit only that span, leaving everything else untouched) is the real fix, but was
@@ -1811,6 +1822,27 @@ parse → reprint) and its module doc; `crates/frust-dap/src/ide_config/merge.rs
 (comment/trailing-comma stripping) and `to_pretty_json` (`serde_json::to_string_pretty` reprint);
 `crates/frust-dap/src/ide_config/mod.rs`'s `run_generator` (byte-equality skip check against the
 reprinted output only).
+
+---
+
+### `dap-mcp-launched-sessions-skip-auto-ide-config` — a session launched through the embedded MCP/DAP backend never triggers automatic IDE-config generation
+
+**Observed**: `engine::update::launch_effect` — the one path an app launch's automatic
+`GenerateIdeConfig` write rides — is reached only from the workbench's own launch paths (the
+run-config modal, run-on-all-devices); a session an MCP tool or a DAP client starts through
+`supervise::mcp_backend`'s `TuiSessionBackend::run_app` bypasses it entirely, by design, so that
+launch never writes or refreshes an IDE's DAP launch config. (2026-09-24)
+
+**Applies to**: every session started via the embedded MCP `run_app` tool or a DAP client's
+`launch` request; a session started by hand in the workbench, or the DAP settings dialog's own
+explicit `g`, are unaffected.
+
+**Why accepted**: an MCP/DAP-launched session already has a client attached over a protocol that
+required a config to connect with in the first place — generating one for it would be redundant,
+not corrective. A human launching the same project by hand still gets the usual on-launch write.
+
+**Evidence**: `crates/frust-tui/src/engine/update.rs`'s `launch_effect` doc comment ("Sessions
+launched through the MCP/DAP backend … never pass through here, by design").
 
 ---
 

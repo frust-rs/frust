@@ -100,11 +100,13 @@ bundler, no npm dependency) registering debug type `frust`. It never spawns a pr
 `DebugAdapterDescriptorFactory` returns a `vscode.DebugAdapterServer`, connecting to whatever port
 a launch config's `debugServer` names, falling back to the `frust.dapPort` workspace setting and
 then the `frust-dap` default (4849) — attach-by-port against the TUI's own embedded server, always.
-`frust-dap`'s launch-config generation (the DAP settings dialog's `g`, or the auto-configure flow on
-server start) writes a matching `.vscode/launch.json` entry through
-`frust_dap::ide_config::vscode`, so a project the TUI has configured needs no manual `launch.json`
-edit — only the extension itself installed (`npx @vscode/vsce package` → a local `.vsix`, run by
-hand, not by any workspace gate — Node.js is not required to build or test the Rust workspace).
+`frust-dap`'s launch-config generation (the DAP settings dialog's `g`, which refreshes the entry; or
+the automatic flow, which fires on an app launch and, on a fresh server bind, for the active
+session's project — and never rewrites a frust entry already present) writes a matching
+`.vscode/launch.json` entry through `frust_dap::ide_config::vscode`, so a project the TUI has
+configured needs no manual `launch.json` edit — only the extension itself installed
+(`npx @vscode/vsce package` → a local `.vsix`, run by hand, not by any workspace gate — Node.js is
+not required to build or test the Rust workspace).
 
 ## See Also
 
