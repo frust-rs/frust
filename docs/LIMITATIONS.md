@@ -1504,7 +1504,13 @@ reports `EmbeddedError::NoSuchSession`, diverging from `frust-mcp`'s own referen
 which evicts its terminal-session record and its tab-equivalent state together. The human-driven
 insert path — every session a user launches from the workbench's own UI — has no cap at all; only
 the MCP-driven path is bounded, because only an unattended agent can plausibly launch sessions for
-hours unattended.
+hours unattended. The keyboard restart (`R` / palette 'Restart session') shares this same ghost
+risk and has the same toast-not-silent-drop fix as its MCP twin: `runner::apply_effect` reconciles
+`McpSessionRecords` with the engine after every `update()` (`observe`/`mark_closed`), so a record
+whose tab was closed or replaced by a restart now counts as finished and is evictable — the map no
+longer grows by one record per keyboard restart — and a keyboard restart that lands on an already-
+evicted record surfaces a Warn toast ('no launch record for this session — relaunch it with r')
+instead of the old stderr-only log line.
 
 **Applies to**: `frust-tui`'s `AppState::sessions` for the whole session lifetime; the MCP-launched
 subset's *record* (not tab) is capped as described above.
@@ -1518,6 +1524,76 @@ MCP path was judged the fix that matters for v1.
 **Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
 deliberately cannot do" — "An evicted MCP record's tab still exists"); `McpSessionRecords::
 retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached` test.
+
+---
+
+### `no-hot-reload-restart-is-a-rebuild` — every restart is a full rebuild + relaunch, never a hot reload
+
+**Observed**: every restart path — the TUI's `R` keypress / palette 'Restart session', the TUI's own
+'Watch: restart on save' (`W`/palette/run-config checkbox), `frust run --watch`'s file-change
+relaunch, MCP's `restart_app`, and DAP's `frustRestart` — is a full rebuild and relaunch with app
+state reset each time: Flutter's "hot restart" semantics, never "hot reload". A device restart
+reruns the whole build → install → launch pipeline rather than patching a running process (see
+`tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight` for what "stop"
+already does and does not guarantee before that relaunch begins). The TUI's own `R` restart shares
+that same best-effort stop window: the stop is issued, not awaited, before the relaunch fires.
+'Watch: restart on save' is desktop-only — a device or ad-hoc session refuses it (`Message::ToggleWatch`)
+with "Watch is desktop-only: the watch loop has no device-side kill/rebuild/relaunch story yet",
+`frust run --watch`'s own reason — and shares `R`'s rebuild+relaunch path (`engine::update`'s
+`restart_session_at`) rather than being a fourth mechanism. `engine::update`'s `on_session_event` turns a session's `watch` flag off the moment it lands
+`SessionState::Killed`, whichever path killed it — the keyboard `x`, `close_tab` (X/palette/context
+menu, which clears it immediately rather than waiting for `Killed`), MCP's `stop_app`, DAP
+terminate/disconnect, or `restart_app`'s own kill of the session it replaces — so a stopped session's
+watcher never outlives it; `Exited(_)` is left untouched, so a crash or compile-error exit keeps a
+watched session watching and the next save still relaunches it. Neither MCP's `restart_app` nor DAP's
+`frustRestart` carries that flag onto the *new* session, though: both bypass `restart_session_at`, the
+one seam that re-sends `EnableWatch` after a relaunch, so the replacement session always starts
+unwatched and watch must be re-toggled by hand afterward. On MCP/DAP stop paths the old tab is not
+removed either — it parks in the session list as `Killed`, same as any other MCP-launched session (see
+`tui-mcp-sessions-tab-uncapped`). The 300ms
+trailing-edge debounce itself is duplicated rather than shared: `frust-cli`'s `watch_loop_with_slot`
+and `frust-tui`'s `supervise::watch` each run their own copy (`frust-tui` has no dependency on
+`frust-cli`) — a tracked follow-up is moving it into `frust-drive`. On Windows, both loops' kill
+(the TUI's session stop/restart and the CLI's respawn) already route through the same
+`frust_drive::process::StreamHandle::kill` → `windows_tree_kill` (`taskkill /T /F`) path, so a
+watched session's relaunch reaches the whole `cargo run` tree there too, falling back to a
+direct-child-only `Child::kill` only if `taskkill` itself is missing or fails.
+
+**Applies to**: every restart entry point across `frust-tui` (including 'Watch: restart on save'),
+`frust-cli`'s `--watch` flag, `frust-mcp`, and `frust-dap` — desktop and device alike.
+
+**Why accepted**: in-process hot restart and hot reload both need capability the framework doesn't
+have yet. Hot restart (state reset, code re-run without a process relaunch) would need a seam to
+dispose and rebuild the running app, but the root `Component` is taken by value once, by
+`frust::run` (`crates/frust/src/lib.rs:1837`); it runs under the shell's **root** `Owner`, which
+lives for the whole process and is never disposed (`crates/frust-core/src/component.rs:56-68`); and
+`ReactiveRuntime` is installed once into a process-lifetime `OnceLock` and never torn down
+(`crates/frust-reactive/src/runtime.rs:122`) — none of the three has a dispose-and-rebuild path
+short of exiting the process. Hot reload (patching running code in place) has no Rust-native path
+short of subsecond-class hot-patching tooling that is tip-crate-only, unsupported across
+struct-layout changes, and experimental/unproven on Android and iOS; the devtools wire protocol also
+has no structure-mutating method to carry a reload over (`crates/frust-devtools-protocol/src/method.rs`'s
+`Method` enum is read/input-simulation only: `handshake`, `widget_tree`, `widget_props`,
+`frame_stats_subscribe`, `frame_stats`, `metrics_snapshot`, `input_tap`, `input_scroll`,
+`input_text`, `screenshot`). The rebuild cost is judged acceptable meanwhile: on an i5-12600 Linux
+host (2026-09-25), an incremental `cargo build` after touching one file took 1.0s (the app crate),
+1.7s (`frust-widgets`), and 1.9s (`frust-core`), against a 43s cold build — consistent with
+`docs/DEVELOPMENT.md`'s separately measured 0.89s incremental-build median.
+
+**Reopen path**: a framework spike replacing `frust::run`'s by-value root with a factory closure, a
+disposable (not process-lifetime) root `Owner`, a resettable `ReactiveRuntime`, and a devtools
+`restart` method to drive the three remotely.
+
+**Evidence**: `crates/frust/src/lib.rs:1837` (`pub fn run<C: Component>`);
+`crates/frust-core/src/component.rs:56-68` (`Component::init` doc, root-component owner);
+`crates/frust-reactive/src/runtime.rs:122` (`static RUNTIME: OnceLock<ReactiveRuntime>`);
+`crates/frust-devtools-protocol/src/method.rs` (`Method` enum); on-host build measurement,
+i5-12600 Linux host, 2026-09-25; `docs/DEVELOPMENT.md`'s incremental-build baseline.
+`crates/frust-tui/src/supervise/watch.rs` (`WATCH_DEBOUNCE`, module doc's debounce-duplication note);
+`crates/frust-tui/src/engine/update.rs` (`WATCH_DESKTOP_ONLY`, `restart_session_at`, `toggle_watch`);
+`crates/frust-tui/src/supervise/mcp_backend.rs`'s `restart_app` (no `SourceWatchers` access);
+`crates/frust-drive/src/process.rs`'s `windows_tree_kill` (shared by `RealProcessRunner::spawn_streaming`,
+which both `frust-cli`'s `run` command and `frust-tui`'s `Supervisor`/`supervise::watch` build on).
 
 ---
 

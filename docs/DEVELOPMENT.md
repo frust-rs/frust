@@ -20,21 +20,18 @@ none — everything they need is here):
 - Rust 1.88+ (workspace `rust-version`), edition 2024.
 - A real Metal or Vulkan adapter for the GPU smoke gate (`frust-render`'s `--ignored` test);
   headless Vulkan needs no display server. Other hosts build and run the non-GPU suite.
-- **Android** (only for `frust run`/`build`/`create`'s Android output): `rustup target add
-  aarch64-linux-android`; `cargo install cargo-ndk`; JDK 17+ on `JAVA_HOME` (Android Studio's
-  bundled JBR auto-detected on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`, `ANDROID_NDK_HOME` set —
-  `frust doctor` checks all of these (Rust targets only on macOS hosts).
-- **iOS** (only for `frust run`/`build`/`create`'s iOS output; macOS host only): Xcode 26+ resolved
-  by `xcode-select -p`; `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`. A booted
-  Simulator suffices for a debug `frust run`; a signed build needs a codesigning identity (`frust`
-  auto-detects `DEVELOPMENT_TEAM`, or set `FRUST_IOS_TEAM`/`[ios] team`), and a physical iPhone run
-  needs iOS 17+, unlocked/paired/trusted with Developer Mode on.
+- **Android** (only for `frust run`/`build`/`create`'s Android output): `rustup target add aarch64-linux-android`; `cargo install
+  cargo-ndk`; JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR auto-detected on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`,
+  `ANDROID_NDK_HOME` set — `frust doctor` checks all of these (Rust targets only on macOS hosts).
+- **iOS** (only for `frust run`/`build`/`create`'s iOS output; macOS host only): Xcode 26+ resolved by `xcode-select -p`; `rustup target add
+  aarch64-apple-ios-sim aarch64-apple-ios`. A booted Simulator suffices for a debug `frust run`; a signed build needs a codesigning identity
+  (`frust` auto-detects `DEVELOPMENT_TEAM`, or set `FRUST_IOS_TEAM`/`[ios] team`), and a physical iPhone run needs iOS 17+,
+  unlocked/paired/trusted with Developer Mode on.
 - **Web** (only needed for browser output): `rustup target add wasm32-unknown-unknown` (no
   RUSTFLAGS/cfg needed on the `wgpu` 30.0.1 pin). Packaging needs host `wasm-bindgen-cli` 0.2.128
   (must equal the `wasm-bindgen` pin) and `wasm-opt` — see `examples/web-gallery/README.md` § Build.
-- **clean-signals-rs**: not required to build — `clean-signals` is git+rev-pinned to its public repo
-  (*Version-Pin Policy*), so a sibling checkout (`../clean-signals-rs`) only helps local
-  `[patch]`-override iteration on `clean-signals` itself.
+- **clean-signals-rs**: not required to build — `clean-signals` is git+rev-pinned to its public repo (*Version-Pin Policy*), so a sibling
+  checkout (`../clean-signals-rs`) only helps local `[patch]`-override iteration on `clean-signals` itself.
 - **`frust-database --features engine-turso`**: needs libclang on the host (pulls
   `bindgen`/`clang-sys`). The default (`engine-sqlite`) build does not — `rusqlite`'s `bundled`
   feature only needs a `cc`-compatible C toolchain.
@@ -177,13 +174,20 @@ frust run --watch
 ```
 
 Desktop only: watches `src/` and `Cargo.toml`, killing and relaunching (`cargo run`, incremental) on
-change, debouncing a save-burst into one relaunch. Kill/relaunch and Ctrl-C exit both group-kill on
-Unix (Windows stays direct-child-only). A **relaunch loop, not state-preserving hot reload** — app
-state resets every rebuild. `--watch` + `-d <device>` is a hard error (device-side watch isn't
-implemented). **Measured baseline**: default-config incremental `cargo build` medians 0.89s;
-edit-to-first-frame medians ~263ms once built. An alternate linker and `cranelift` both measured
-worse, so **no fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that
-changes.
+change, debouncing a save-burst into one relaunch. Kill/relaunch and Ctrl-C exit both reach the whole
+`cargo run` tree — Unix process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared
+by every kill path below). A **relaunch loop, not state-preserving hot reload** — app state resets
+every rebuild. `--watch` + `-d <device>` is a hard error (device-side watch isn't implemented).
+**Measured baseline**: default-config incremental `cargo build` medians 0.89s; edit-to-first-frame
+medians ~263ms once built. An alternate linker and `cranelift` both measured worse, so **no fast-dev
+template recipe ships** — re-run `scripts/devloop-measure.sh` if that changes.
+
+**TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
+never state-preserving. 'Watch: restart on save' (`W`, palette, or the run-config checkbox) restarts
+a **desktop** session on every settled save-burst with the same 300ms debounce (`supervise/watch.rs`)
+— one relaunch per burst. A device session's `R` reruns build → install → launch instead; watch is
+refused there (desktop-only, see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)). Measured 2026-09-25
+(i5-12600, Linux): a watched relaunch's incremental build took 1.29s, matching the baseline above.
 
 ## Release Builds
 

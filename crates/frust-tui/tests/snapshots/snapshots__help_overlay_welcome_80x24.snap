@@ -3,23 +3,23 @@ source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(80, 24, &state)"
 ---
                                                            toolchain ◌ checking…
-                                                                                
   ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮   
   │                                                                         │▓▓ 
-  │  r   Run on device(s)…               D   DAP server…                    │▓▓ 
-  │  —   Run on all devices              —   Start/stop DAP server          │▓▓ 
-  │  x   Stop session                    ⌥m  Toggle mouse capture           │▓▓ 
-  │  X   Close tab                       f   Toggle follow-tail             │▓▓ 
-  │  b   Build…                          w   Toggle line wrap               │▓▓ 
-  │  c   Clean…                          /   Search logs…                   │▓▓ 
-  │  i   Doctor                          v   Select lines…                  │▓▓ 
-  │  —   Toolchain setup…                y   Copy selection                 │▓▓ 
-  │  n   New project…                    l   Cycle log level filter         │▓▓ 
-  │  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓ 
-  │  ^O  Switch project…                 d   DevTools                       │▓▓ 
-  │  R   Refresh devices                 r   Refresh widget tree            │▓▓ 
-  │  m   MCP server…                     q   Quit                           │▓▓ 
-  │  M   Start/stop MCP server                                              │▓▓ 
+  │  r   Run on device(s)…               M   Start/stop MCP server          │▓▓ 
+  │  —   Run on all devices              D   DAP server…                    │▓▓ 
+  │  x   Stop session                    —   Start/stop DAP server          │▓▓ 
+  │  R   Restart session                 ⌥m  Toggle mouse capture           │▓▓ 
+  │  W   Watch: restart on save          f   Toggle follow-tail             │▓▓ 
+  │  X   Close tab                       w   Toggle line wrap               │▓▓ 
+  │  b   Build…                          /   Search logs…                   │▓▓ 
+  │  c   Clean…                          v   Select lines…                  │▓▓ 
+  │  i   Doctor                          y   Copy selection                 │▓▓ 
+  │  —   Toolchain setup…                l   Cycle log level filter         │▓▓ 
+  │  n   New project…                    z   Toggle nearest backtrace fold  │▓▓ 
+  │  a   Add plugin…                     d   DevTools                       │▓▓ 
+  │  ^O  Switch project…                 r   Refresh widget tree            │▓▓ 
+  │  R   Refresh devices                 q   Quit                           │▓▓ 
+  │  m   MCP server…                                                        │▓▓ 
   │                                                                         │▓▓ 
   │  — = palette/mouse only                                                 │▓▓ 
   │  Esc close                                                              │▓▓ 

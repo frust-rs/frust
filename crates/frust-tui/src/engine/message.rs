@@ -66,6 +66,9 @@ pub enum RegionId {
     RunFlavorRow,
     /// The run-config modal's defines text field; click focuses it.
     RunDefinesRow,
+    /// The run-config modal's "Watch src/ and restart on change" checkbox
+    /// row; click toggles it.
+    RunWatchRow,
     /// The run-config modal's launch button.
     RunLaunch,
     /// The run-config modal's cancel button.
@@ -398,6 +401,54 @@ pub enum Message {
     /// Stop the active session (`Ctrl+C` / `x`) — routed to the supervisor as
     /// an [`super::Effect::StopSession`].
     StopSession,
+    /// Stop the active session and relaunch its retained launch spec as a
+    /// new session tab (`R` with a session active, and the palette's
+    /// "Restart session" row) — the keyboard twin of MCP `restart_app` / DAP
+    /// `frustRestart`
+    /// (`crate::supervise::mcp_backend::restart_app`), routed to the
+    /// supervisor as an [`super::Effect::RestartSession`]. Refused (no
+    /// effect, a toast explains why) for an ad-hoc session (no
+    /// [`SessionTarget`]) or when another live session already occupies the
+    /// same (project, target); an already-terminal active session still
+    /// restarts — a crashed session must be relaunchable, not just a running
+    /// one. The relaunch's tab becomes active when it registers.
+    RestartSession,
+    /// Toggle "Watch: restart on save" on the active session (the palette's
+    /// "Watch: restart on save" row, `W`): while on, any change under the
+    /// project's `src/` or its `Cargo.toml` restarts the session through the
+    /// [`Self::RestartSession`] path, once per save-burst. Desktop sessions
+    /// only — a device (or ad-hoc) session refuses with a toast, the
+    /// `frust run --watch` rule. Routed to the runner as
+    /// [`super::Effect::WatchSet`], which starts/stops the session's
+    /// `crate::supervise::SourceWatchers` entry.
+    ToggleWatch,
+    /// A watched session's source tree settled after a change burst (posted
+    /// by its `crate::supervise::SourceWatchers` debounce thread, already
+    /// debounced to one per burst). Restarts `session` through the shared
+    /// restart path when it still has watch on and no restart is already
+    /// pending for it; otherwise a no-op.
+    WatchTriggered {
+        /// The session whose sources changed.
+        session: SessionId,
+    },
+    /// Turn watch on for a just-registered desktop session without a toggle
+    /// — posted by the runner right after a launch that should carry the
+    /// flag registers: the relaunch of a watched session (how the flag
+    /// survives a restart), or a desktop launch from the run-config modal
+    /// with its watch checkbox ticked. Always arrives after that launch's
+    /// [`Self::RegisterSession`] (same channel, sent later).
+    EnableWatch {
+        /// The freshly launched session.
+        session: SessionId,
+    },
+    /// The runner could not start `session`'s source watcher: its watch flag
+    /// is cleared and `reason` toasted.
+    WatchFailed {
+        /// The session whose watcher failed to start.
+        session: SessionId,
+        /// Why, for the toast.
+        reason: String,
+    },
     /// Close a tab by index into `sessions` (the context menu's "Close tab" /
     /// "Stop & close" entries, and the palette's "Close tab" command). A
     /// session already in a terminal state is removed immediately; a live
@@ -509,6 +560,10 @@ pub enum Message {
     RunConfigToggleTarget,
     /// Toggle a target checkbox by index (mouse click parity).
     RunConfigToggleTargetAt(usize),
+    /// Toggle the modal's "Watch src/ and restart on change (desktop only)"
+    /// checkbox (mouse click parity; `Space` on the focused row reaches it
+    /// through [`Self::RunConfigToggleTarget`]).
+    RunConfigToggleWatch,
     /// Cycle the build mode by `delta` (`←`/`→`).
     RunConfigCycleMode(isize),
     /// Move modal focus to a specific control (mouse parity for the

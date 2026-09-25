@@ -50,8 +50,8 @@ pub struct RunTarget {
 }
 
 /// Which control in the run-config modal has keyboard focus. Ordered
-/// top-to-bottom: the target checkboxes, then mode, flavor, defines, and the
-/// launch button — the order [`RunConfig::focus_next`]/[`focus_prev`] walk.
+/// top-to-bottom: the target checkboxes, then mode, flavor, defines, the
+/// watch checkbox, and the launch button — the order [`RunConfig::focus_next`]/[`focus_prev`] walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunFocus {
     /// A target checkbox row (0-based index into [`RunConfig::targets`]).
@@ -62,6 +62,9 @@ pub enum RunFocus {
     Flavor,
     /// The defines text field (`KEY=VALUE` pairs, space-separated).
     Defines,
+    /// The "Watch src/ and restart on change (desktop only)" checkbox
+    /// (`Space` toggles it).
+    Watch,
     /// The launch button.
     Launch,
 }
@@ -81,6 +84,11 @@ pub struct RunConfig {
     pub flavor: String,
     /// The `--define`s as typed (`KEY=VALUE` pairs, space-separated).
     pub defines: String,
+    /// Whether the launched **desktop** session gets "Watch: restart on
+    /// save" turned on as soon as it registers (the runner's
+    /// `Message::EnableWatch`). Device targets ignore it — the watch loop
+    /// has no device-side story. Off by default.
+    pub watch: bool,
     /// Which control has focus.
     pub focus: RunFocus,
 }
@@ -113,6 +121,7 @@ impl RunConfig {
             mode: BuildMode::Debug,
             flavor: String::new(),
             defines: String::new(),
+            watch: false,
             focus: RunFocus::Target(0),
         }
     }
@@ -123,6 +132,7 @@ impl RunConfig {
         order.push(RunFocus::Mode);
         order.push(RunFocus::Flavor);
         order.push(RunFocus::Defines);
+        order.push(RunFocus::Watch);
         order.push(RunFocus::Launch);
         order
     }
@@ -144,13 +154,24 @@ impl RunConfig {
         self.focus = order[next];
     }
 
-    /// Toggle the checkbox of the focused target row (no-op off a target row).
+    /// Toggle the focused checkbox: a target row's selection, or the watch
+    /// checkbox (no-op on any other control).
     pub fn toggle_focused_target(&mut self) {
-        if let RunFocus::Target(i) = self.focus
-            && let Some(t) = self.targets.get_mut(i)
-        {
-            t.selected = !t.selected;
+        match self.focus {
+            RunFocus::Target(i) => {
+                if let Some(t) = self.targets.get_mut(i) {
+                    t.selected = !t.selected;
+                }
+            }
+            RunFocus::Watch => self.watch = !self.watch,
+            RunFocus::Mode | RunFocus::Flavor | RunFocus::Defines | RunFocus::Launch => {}
         }
+    }
+
+    /// Toggle the watch checkbox, focusing it (mouse click parity).
+    pub fn toggle_watch(&mut self) {
+        self.watch = !self.watch;
+        self.focus = RunFocus::Watch;
     }
 
     /// Toggle a target by index (mouse click parity).
@@ -314,6 +335,7 @@ mod tests {
             RunFocus::Mode,
             RunFocus::Flavor,
             RunFocus::Defines,
+            RunFocus::Watch,
             RunFocus::Launch,
         ];
         for expected in order.iter().skip(1) {
@@ -414,5 +436,20 @@ mod tests {
         m.toggle_target(2);
         assert!(m.targets[2].selected);
         assert_eq!(m.focus, RunFocus::Target(2));
+    }
+
+    #[test]
+    fn watch_starts_off_and_space_or_a_click_toggles_it() {
+        let mut m = modal();
+        assert!(!m.watch, "watch is opt-in");
+        m.focus = RunFocus::Watch;
+        m.toggle_focused_target();
+        assert!(m.watch);
+        // The checkbox never touches a target's selection.
+        assert!(!m.targets[0].selected);
+        m.focus = RunFocus::Target(0);
+        m.toggle_watch();
+        assert!(!m.watch);
+        assert_eq!(m.focus, RunFocus::Watch, "a click focuses the checkbox");
     }
 }

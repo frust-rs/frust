@@ -337,6 +337,15 @@ pub struct SessionView {
     /// `super::update::on_session_event`) instead of staying around like an
     /// ordinary stopped session. `false` for every ordinary session.
     pub close_on_exit: bool,
+    /// "Watch: restart on save" (`Message::ToggleWatch`): while `true` the
+    /// runner keeps a source watcher over this session's project and a
+    /// settled change burst restarts it (`Message::WatchTriggered`). Desktop
+    /// sessions only. Survives a terminal state on purpose — a build that
+    /// failed to compile is exactly the session a save should relaunch — and
+    /// carries over to the relaunch: the runner re-enables it on the new
+    /// session with `Message::EnableWatch` once that registers. `false` for
+    /// every freshly registered session.
+    pub watch: bool,
     /// The parsed `frust-perf` sparkline/stats panel for this session —
     /// fed one line at a time from [`Self::push_line`].
     pub perf: PerfPanel,
@@ -406,6 +415,7 @@ impl SessionView {
             clicked_since_enter: false,
             dropped: 0,
             close_on_exit: false,
+            watch: false,
             perf: PerfPanel::default(),
             level_filter: LevelFilter::default(),
             panic_tracker: PanicTracker::default(),

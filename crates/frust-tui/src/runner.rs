@@ -40,7 +40,8 @@ use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
     DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge,
     PendingWidgetTrees, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState,
-    SessionSubscribers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state, serve_command,
+    SessionSubscribers, SourceWatchers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state,
+    serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -149,6 +150,12 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // for the embedded server's snapshots and its `restart_app`. Empty (and
     // untouched) while no MCP server is running.
     let mut mcp_records = McpSessionRecords::new();
+    // The "Watch: restart on save" watchers (`crate::supervise::watch`): one
+    // `notify` watcher + debounce thread per watched desktop session,
+    // posting `Message::WatchTriggered` on the engine channel. Started and
+    // stopped only through `apply_effect`; dropped (every thread stopped and
+    // bounded-joined against one deadline) when this loop returns.
+    let mut watchers = SourceWatchers::new(msg_tx.clone());
     // The embedded servers' two deferred-answer registries (see
     // `crate::supervise::session_feeds`): the open session-event feeds a DAP
     // client's output/exit pumps read, and the widget-tree pulls waiting on a
@@ -279,6 +286,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            watchers: &mut watchers,
                             backend: &backend,
                             clipboard: clipboard_backend,
                         },
@@ -305,6 +313,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                     tx: &msg_tx,
                                     next_adhoc_id: &mut next_adhoc_id,
                                     records: &mut mcp_records,
+                                    watchers: &mut watchers,
                                     backend: &backend,
                                     clipboard: clipboard_backend,
                                 },
@@ -351,6 +360,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            watchers: &mut watchers,
                             backend: &backend,
                             clipboard: clipboard_backend,
                         },
@@ -374,6 +384,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         tx: &msg_tx,
                         next_adhoc_id: &mut next_adhoc_id,
                         records: &mut mcp_records,
+                        watchers: &mut watchers,
                         backend: &backend,
                         clipboard: clipboard_backend,
                     },
@@ -387,6 +398,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // no-ops while nothing has started one.
     engine.stop_mcp();
     engine.stop_dap();
+    // …and stop every source watcher now, while the terminal is still ours,
+    // rather than whenever the locals happen to drop.
+    drop(watchers);
 
     Ok(())
 }
@@ -480,6 +494,9 @@ struct EffectCtx<'a> {
     next_adhoc_id: &'a mut u64,
     /// The MCP launch records a started session is recorded in.
     records: &'a mut McpSessionRecords,
+    /// The per-session "Watch: restart on save" source watchers, keyed by
+    /// session id alongside `records` (whose spec gives a watcher its root).
+    watchers: &'a mut SourceWatchers,
     /// The one [`TuiSessionBackend`] both embedded servers are started over —
     /// built once per run, so an MCP agent and a DAP client drive the same
     /// session world rather than two backends over the same supervisor.
@@ -494,6 +511,12 @@ struct EffectCtx<'a> {
 /// pure engine can't perform: killing a session through the supervisor, writing
 /// the system clipboard, discovering devices off-thread, and launching
 /// sessions.
+///
+/// Every `update()` application in [`run_loop`] is followed by exactly one
+/// call here, so this is also where the launch records catch up with the
+/// model: [`McpSessionRecords::observe`] runs first, because the pure engine
+/// removes tabs (close, restart) without any way to tell the runner-owned
+/// records, and a record whose tab is gone must stop counting as live.
 fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
     let EffectCtx {
         engine,
@@ -503,11 +526,59 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         tx,
         next_adhoc_id,
         records,
+        watchers,
         backend,
         clipboard: clipboard_backend,
     } = ctx;
+    records.observe(&engine.state);
     match effect {
-        Some(Effect::StopSession(id)) => supervisor.stop(id),
+        Some(Effect::StopSession(id)) => {
+            supervisor.stop(id);
+            spawn_teardown(watchers.stop(id));
+        }
+        // The keyboard restart's enactment: `update()` has already applied
+        // its guard (`crate::supervise::mcp_backend::restart_app`'s doc
+        // names the shared contract this mirrors), so this only needs the
+        // retained spec to stop-then-relaunch. The replaced record is marked
+        // closed first so it stops counting as live however its tab goes.
+        //
+        // A missing record IS reachable: `McpSessionRecords::retain_bounded`
+        // evicts the oldest terminal records across the whole shared map on
+        // every MCP launch/restart, so a keyboard-launched record can be
+        // evicted while an MCP agent is active (the keyboard face of
+        // LIMITATIONS `tui-mcp-sessions-tab-uncapped`). A launch-error record
+        // (an ad-hoc failure tab) is already screened by `update()`'s target
+        // guard. Either way there is nothing to relaunch, and the tab may
+        // already be gone, so the user is told with a toast — stderr is
+        // invisible under the raw-mode TUI.
+        //
+        // A watched session's flag survives the relaunch here, in the runner
+        // (the pure core has no id for the relaunch until it registers): the
+        // replaced session's watcher is stopped and, if it had one, the new
+        // session is sent `EnableWatch` right after its `RegisterSession` —
+        // same channel, so the engine always sees the registration first —
+        // which flips its flag and asks for a fresh watcher (`WatchSet`).
+        Some(Effect::RestartSession(id)) => {
+            let watched = watchers.contains(id);
+            spawn_teardown(watchers.stop(id));
+            match records.get(id) {
+                Some(record) if record.launch_error.is_none() => {
+                    let spec = record.spec.clone();
+                    records.mark_closed(id);
+                    supervisor.stop(id);
+                    let started = launch_sessions(vec![spec], supervisor, tx, records);
+                    if watched {
+                        enable_watch_on(&started, tx);
+                    }
+                }
+                _ => {
+                    let _ = tx.send(Message::Notify {
+                        level: ToastKind::Warn,
+                        text: "no launch record for this session — relaunch it with r".to_string(),
+                    });
+                }
+            }
+        }
         Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
             Ok(clipboard::CopyOutcome::Complete) => {}
             Ok(clipboard::CopyOutcome::Truncated { kept_bytes }) => {
@@ -524,7 +595,47 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
             }
         },
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
-        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
+        Some(Effect::LaunchSessions(specs)) => {
+            launch_sessions(specs, supervisor, tx, records);
+        }
+        Some(Effect::LaunchWatchedSessions(specs)) => {
+            let started = launch_sessions(specs, supervisor, tx, records);
+            enable_watch_on(&started, tx);
+        }
+        Some(Effect::WatchSet { id, on: true }) => {
+            // The launch record's root is the spec the session runs; the
+            // tab's own root is the fallback for a record since evicted.
+            let root = records
+                .get(id)
+                .map(|record| record.spec.project_root.clone())
+                .or_else(|| {
+                    engine
+                        .state
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.project_root.clone())
+                });
+            match root {
+                Some(root) => {
+                    let (started, replaced) = watchers.start(id, &root);
+                    spawn_teardown(replaced);
+                    if let Err(reason) = started {
+                        let _ = tx.send(Message::WatchFailed {
+                            session: id,
+                            reason,
+                        });
+                    }
+                }
+                None => {
+                    let _ = tx.send(Message::WatchFailed {
+                        session: id,
+                        reason: "the session is gone".to_string(),
+                    });
+                }
+            }
+        }
+        Some(Effect::WatchSet { id, on: false }) => spawn_teardown(watchers.stop(id)),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         Some(Effect::ProbeCleanSignals) => {
             // Neither the create wizard's arch cards nor the Add Plugin
@@ -620,6 +731,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                         tx,
                         next_adhoc_id,
                         records,
+                        watchers,
                         backend,
                         clipboard: *clipboard_backend,
                     },
@@ -629,6 +741,27 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
+    }
+    // Reconcile the watchers with the model *after* the effect: a watched tab
+    // can leave without an effect naming it (a terminal tab closed on the
+    // spot), and its watcher must not outlive it. Running after the match
+    // (not before, like `observe`) lets the restart arm above read a
+    // just-removed tab's watcher to carry its flag over first.
+    let watched = |id: SessionId| engine.state.sessions.iter().any(|s| s.id == id && s.watch);
+    for teardown in watchers.retain(watched) {
+        spawn_teardown(Some(teardown));
+    }
+}
+
+/// Post [`Message::EnableWatch`] for every desktop session in `started` — the
+/// carry-over of "Watch: restart on save" onto a relaunch, and the run-config
+/// modal's watch checkbox. Sent after `launch_sessions` has already sent each
+/// session's `RegisterSession`, so the engine always has the tab first.
+fn enable_watch_on(started: &[(SessionId, bool)], tx: &UnboundedSender<Message>) {
+    for &(session, desktop) in started {
+        if desktop {
+            let _ = tx.send(Message::EnableWatch { session });
+        }
     }
 }
 
@@ -1214,17 +1347,22 @@ fn spawn_device_discovery(tx: UnboundedSender<Message>) {
 /// Launch one supervised session per spec (the run-config modal's checked
 /// targets), registering each successfully-started session back into the model
 /// so its events have a home. A spec that fails to start (e.g. a desktop
-/// `cargo run` that can't spawn) is skipped — a device pipeline that fails
-/// mid-build instead surfaces the error as a line in its own session tab.
+/// `cargo run` that can't spawn) is skipped and reported as a warn toast —
+/// stderr is invisible under the raw-mode TUI, and on the restart path the
+/// tab being replaced is already gone, so a silent skip would leave the user
+/// with no tab and no explanation. A device pipeline that fails mid-build
+/// instead surfaces the error as a line in its own session tab.
 fn launch_sessions(
     specs: Vec<SessionSpec>,
     supervisor: &mut Supervisor,
     tx: &UnboundedSender<Message>,
     records: &mut McpSessionRecords,
-) {
+) -> Vec<(SessionId, bool)> {
+    let mut started = Vec::with_capacity(specs.len());
     for spec in specs {
         match supervisor.start(&spec) {
             Ok(id) => {
+                started.push((id, matches!(spec.target, DeviceTarget::Desktop)));
                 let _ = tx.send(Message::RegisterSession {
                     id,
                     project_root: spec.project_root.clone(),
@@ -1241,9 +1379,18 @@ fn launch_sessions(
                 // can reconstruct a spec after the fact.
                 records.insert(id, spec);
             }
-            Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
+            Err(err) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: format!(
+                        "failed to start {}: {err:#} — relaunch it with r",
+                        target_label(&spec.target)
+                    ),
+                });
+            }
         }
     }
+    started
 }
 
 /// What a launched app session's own config says about reaching its devtools
@@ -1423,6 +1570,8 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     }
 
     let has_active_session = state.active_session().is_some();
+    // An active tab with a launch target — the only kind `R` can restart.
+    let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
     let active_running = state
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
@@ -1527,9 +1676,19 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // sidebar ACTIONS "New project" row).
         KeyCode::Char('n') if workbench => vec![Message::OpenCreateWizard],
         // `r`/`Enter` open the run-config modal primed with the panel
-        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance).
+        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance) —
+        // except with an *app* session active, where `R` restarts it instead
+        // (the keyboard twin of MCP `restart_app` / DAP `frustRestart`). An
+        // ad-hoc build/clean tab has nothing to relaunch, so there `R` keeps
+        // its discovery job rather than claiming a key that only refuses.
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
+        KeyCode::Char('R') if has_app_session => vec![Message::RestartSession],
         KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
+        // `W` toggles "Watch: restart on save" on the active session (mouse
+        // parity: the palette row). Free in every session context; the pure
+        // core refuses it (with the `frust run --watch` wording) on anything
+        // but a desktop app session.
+        KeyCode::Char('W') if has_active_session => vec![Message::ToggleWatch],
         KeyCode::Enter if devices_focused => vec![Message::OpenRunConfig],
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
@@ -2089,6 +2248,39 @@ mod tests {
     use frust_drive::build_info::{BuildArgs, BuildInfo, BuildMode};
     use frust_drive::desktop_build::DesktopBundleTarget;
     use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
+
+    /// A fresh scratch directory for one watch test, under the OS temp dir —
+    /// never the checkout. Removed first in case a previous run of the same
+    /// test left it behind; the caller removes it again once done.
+    fn watch_scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "frust-tui-watch-runner-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A minimal desktop-target [`SessionSpec`] rooted at `root`, matching
+    /// `crate::supervise::supervisor`'s own `desktop_spec` test helper —
+    /// its `launch_plan()` is the fixed `cargo run --features
+    /// frust/perf-trace --features frust/devtools` invocation a
+    /// `FakeProcessRunner` script below matches on.
+    fn watch_desktop_spec(root: &Path) -> SessionSpec {
+        use std::collections::HashMap;
+        SessionSpec {
+            project_root: root.to_path_buf(),
+            target: DeviceTarget::Desktop,
+            build: BuildInfo {
+                mode: BuildMode::Debug,
+                flavor: None,
+                defines: HashMap::new(),
+                build_name: None,
+                build_number: None,
+            },
+        }
+    }
 
     /// Generations on one key never overlap, and none is dropped: every
     /// caller runs, strictly one after another. Each holder records
@@ -3470,6 +3662,432 @@ mod tests {
         );
     }
 
+    /// `R` restarts only an *app* session (one with a launch target); on an
+    /// ad-hoc build/clean tab, or with no session at all, it keeps its other
+    /// job, re-running device discovery.
+    #[test]
+    fn shift_r_restarts_an_app_session_and_refreshes_devices_otherwise() {
+        use crate::engine::SessionView;
+
+        let regions = MouseRegions::new();
+        let mut app_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &app_session, &regions),
+            vec![Message::RestartSession]
+        );
+
+        let mut ad_hoc = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build apk",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &ad_hoc, &regions),
+            vec![Message::RefreshDevices],
+            "an ad-hoc tab has nothing to restart"
+        );
+
+        let no_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &no_session, &regions),
+            vec![Message::RefreshDevices]
+        );
+    }
+
+    /// A restart whose launch record is gone (evicted by the MCP path's
+    /// bounded retention) must reach the user as a toast, not vanish into
+    /// stderr under the raw-mode TUI.
+    #[test]
+    fn restart_session_effect_on_an_evicted_record_toasts_instead_of_dropping_silently() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(7))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut SourceWatchers::new(tx.clone()),
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::Notify { level, text }) => {
+                assert_eq!(level, ToastKind::Warn);
+                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+            }
+            other => panic!("expected a warn toast, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "nothing was relaunched");
+    }
+
+    /// A process runner whose every spawn is refused — the shape of a restart
+    /// whose relaunch cannot start (binary gone after a failed rebuild, a
+    /// spawn error). Everything else delegates to the fake runner.
+    struct FailingSpawnRunner(frust_drive::process::FakeProcessRunner);
+
+    impl ProcessRunner for FailingSpawnRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<frust_drive::process::Output> {
+            self.0.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<frust_drive::process::Output> {
+            self.0.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+        ) -> anyhow::Result<frust_drive::process::StreamHandle> {
+            Err(anyhow::anyhow!("spawn refused by the test runner"))
+        }
+    }
+
+    /// A restart whose relaunch fails to spawn must reach the user as a toast:
+    /// the tab being replaced is already gone by then, so a silent skip would
+    /// leave nothing on screen and nothing to explain it.
+    #[test]
+    fn a_restart_whose_relaunch_fails_to_spawn_toasts_instead_of_dropping_silently() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) =
+            Supervisor::new(Arc::new(FailingSpawnRunner(FakeProcessRunner::new())));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(
+            SessionId(7),
+            watch_desktop_spec(Path::new("/tmp/frust-restart-spawn-failure")),
+        );
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(7))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut SourceWatchers::new(tx.clone()),
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::Notify { level, text }) => {
+                assert_eq!(level, ToastKind::Warn);
+                assert!(text.contains("failed to start"), "toast text: {text}");
+                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+            }
+            other => panic!("expected a warn toast, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no RegisterSession: nothing was launched"
+        );
+    }
+
+    // ── Watch reconciliation (`Effect::WatchSet`, `Effect::RestartSession`,
+    // the post-effect `SourceWatchers::retain` sweep) ───────────────────────
+
+    /// `Effect::WatchSet { on: true }` on a session with a live launch record
+    /// starts a real filesystem watcher for it (the runner's enactment of
+    /// [`Message::ToggleWatch`] / [`Message::EnableWatch`]).
+    #[test]
+    fn watch_set_on_starts_a_watcher_for_a_recorded_session() {
+        use crate::engine::SessionView;
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("starts");
+        let mut engine = Engine::new(AppState::default());
+        // A tab with `watch` already on — what `toggle_watch`/`enable_watch`
+        // set in the model before this effect is ever enacted — so the
+        // post-effect reconciliation sweep (which reads the model, not the
+        // watcher map) does not immediately tear the fresh watcher back down.
+        engine.state.sessions.push(SessionView::with_devtools(
+            SessionId(1),
+            root.clone(),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        engine.state.sessions[0].watch = true;
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(1), watch_desktop_spec(&root));
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::WatchSet {
+                id: SessionId(1),
+                on: true,
+            }),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            watchers.contains(SessionId(1)),
+            "a watcher was started for the recorded session"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a resolvable root never reports WatchFailed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Effect::WatchSet { on: true }` on a session with no launch record and
+    /// no tab (evicted, or racing its own removal) can resolve no root, so it
+    /// reports [`Message::WatchFailed`] rather than silently doing nothing —
+    /// [`Message::WatchFailed`]'s own handler is what turns the flag back off
+    /// and toasts the user.
+    #[test]
+    fn watch_set_on_an_unknown_session_reports_watch_failed() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::WatchSet {
+                id: SessionId(99),
+                on: true,
+            }),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::WatchFailed { session, reason }) => {
+                assert_eq!(session, SessionId(99));
+                assert_eq!(reason, "the session is gone");
+            }
+            other => panic!("expected WatchFailed, got {other:?}"),
+        }
+        assert!(!watchers.contains(SessionId(99)));
+    }
+
+    /// [`Effect::RestartSession`] on a watched session carries the flag over
+    /// the relaunch: the replaced session's watcher stops, and once the new
+    /// session has registered (so the engine always sees the tab before
+    /// anything acts on it) [`Message::EnableWatch`] follows for its id —
+    /// never the other way around.
+    // `#[tokio::test]`: the replaced session's watcher teardown goes through
+    // `spawn_teardown` (`tokio::task::spawn_blocking`), which needs a runtime
+    // in scope even though this test awaits nothing itself.
+    #[tokio::test]
+    async fn restarting_a_watched_session_reenables_watch_after_registration() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("restart-reenable");
+        let mut engine = Engine::new(AppState::default());
+        let runner = Arc::new(FakeProcessRunner::new().with_stream(
+            "cargo run --features frust/perf-trace --features frust/devtools",
+            ["   Compiling app", "     Running `app`"],
+            true,
+        ));
+        let (mut supervisor, _events) = Supervisor::new(runner.clone());
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(5), watch_desktop_spec(&root));
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let (started, _replaced) = watchers.start(SessionId(5), &root);
+        started.expect("a real fs watcher starts for the session being restarted");
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(tx.clone(), runner));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(5))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            !watchers.contains(SessionId(5)),
+            "the replaced session's watcher is stopped"
+        );
+        let registered = match rx.try_recv() {
+            Ok(Message::RegisterSession { id, .. }) => id,
+            other => panic!("expected RegisterSession first, got {other:?}"),
+        };
+        match rx.try_recv() {
+            Ok(Message::EnableWatch { session }) => {
+                assert_eq!(
+                    session, registered,
+                    "EnableWatch names the relaunch's own id"
+                );
+            }
+            other => panic!("expected EnableWatch after RegisterSession, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The post-effect reconciliation sweep stops a watcher whose tab left
+    /// without an effect naming it (a terminal tab closed on the spot) —
+    /// `apply_effect`'s own module doc names this as the "after, not before"
+    /// step that keeps a watcher from outliving its session.
+    // `#[tokio::test]`: the dropped watcher's teardown goes through
+    // `spawn_teardown` (`tokio::task::spawn_blocking`), which needs a runtime
+    // in scope even though this test awaits nothing itself.
+    #[tokio::test]
+    async fn the_sweep_drops_a_watcher_whose_tab_is_gone() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("sweep");
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, _rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let (started, _replaced) = watchers.start(SessionId(3), &root);
+        started.expect("a real fs watcher starts");
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        // `engine.state.sessions` has no tab for `SessionId(3)` at all — the
+        // exact shape a terminal tab closed on the spot leaves behind.
+        apply_effect(
+            None,
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            !watchers.contains(SessionId(3)),
+            "the sweep drops a watcher whose tab is gone"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The doctor panel's `t` key (mouse parity: its "Toolchain setup"
     /// button) closes the panel and opens the bootstrap wizard.
     #[test]
@@ -3729,6 +4347,29 @@ mod tests {
                     gate_state(true, false, false, false, false, false)
                 }
                 "Stop session" => gate_state(false, false, false, true, false, false),
+                // Needs an *app* session (`target = Some`), which none of
+                // `gate_state`'s existing shapes give without also opening
+                // DevTools (`inspector_live`, which would hijack `R` into
+                // `translate_devtools_key` instead) — built directly instead.
+                // "Watch: restart on save" needs the same desktop app session.
+                "Restart session" | "Watch: restart on save" => {
+                    use crate::engine::SessionView;
+                    let mut state = AppState {
+                        screen: Screen::Workbench,
+                        ..Default::default()
+                    };
+                    let mut session = SessionView::with_devtools(
+                        SessionId(0),
+                        PathBuf::from("/tmp/huddle"),
+                        "desktop",
+                        DevtoolsLaunch::unavailable(),
+                        Some(SessionTarget::Desktop),
+                    );
+                    session.state = SessionState::Running;
+                    state.sessions.push(session);
+                    state.active_session = Some(0);
+                    state
+                }
                 "Close tab"
                 | "Toggle follow-tail"
                 | "Toggle line wrap"

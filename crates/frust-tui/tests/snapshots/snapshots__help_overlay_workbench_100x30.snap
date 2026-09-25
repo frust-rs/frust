@@ -6,23 +6,23 @@ expression: "render_to_string(100, 30, &state)"
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │                                                                          
-  ▸ huddle               │  Dashboard                                                               
-            ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮             
- DEVICES ↻ r│                                                                         │▓▓           
-   none foun│  r   Run on device(s)…               D   DAP server…                    │▓▓           
-            │  —   Run on all devices              —   Start/stop DAP server          │▓▓           
- SESSIONS   │  x   Stop session                    ⌥m  Toggle mouse capture           │▓▓           
-   none runn│  X   Close tab                       f   Toggle follow-tail             │▓▓           
-            │  b   Build…                          w   Toggle line wrap               │▓▓           
- ACTIONS    │  c   Clean…                          /   Search logs…                   │▓▓           
-   New proje│  i   Doctor                          v   Select lines…                  │▓▓           
-   Add plugi│  —   Toolchain setup…                y   Copy selection                 │▓▓           
-   Doctor · │  n   New project…                    l   Cycle log level filter         │▓▓           
-   Build · b│  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓           
-   Clean · c│  ^O  Switch project…                 d   DevTools                       │▓▓           
-   MCP off ·│  R   Refresh devices                 r   Refresh widget tree            │▓▓           
-   DAP off ·│  m   MCP server…                     q   Quit                           │▓▓           
-            │  M   Start/stop MCP server                                              │▓▓           
+  ▸ huddle  ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮             
+            │                                                                         │▓▓           
+ DEVICES ↻ r│  r   Run on device(s)…               M   Start/stop MCP server          │▓▓           
+   none foun│  —   Run on all devices              D   DAP server…                    │▓▓           
+            │  x   Stop session                    —   Start/stop DAP server          │▓▓           
+ SESSIONS   │  R   Restart session                 ⌥m  Toggle mouse capture           │▓▓           
+   none runn│  W   Watch: restart on save          f   Toggle follow-tail             │▓▓           
+            │  X   Close tab                       w   Toggle line wrap               │▓▓           
+ ACTIONS    │  b   Build…                          /   Search logs…                   │▓▓           
+   New proje│  c   Clean…                          v   Select lines…                  │▓▓           
+   Add plugi│  i   Doctor                          y   Copy selection                 │▓▓           
+   Doctor · │  —   Toolchain setup…                l   Cycle log level filter         │▓▓           
+   Build · b│  n   New project…                    z   Toggle nearest backtrace fold  │▓▓           
+   Clean · c│  a   Add plugin…                     d   DevTools                       │▓▓           
+   MCP off ·│  ^O  Switch project…                 r   Refresh widget tree            │▓▓           
+   DAP off ·│  R   Refresh devices                 q   Quit                           │▓▓           
+            │  m   MCP server…                                                        │▓▓           
             │                                                                         │▓▓           
             │  — = palette/mouse only                                                 │▓▓           
             │  Esc close                                                              │▓▓           

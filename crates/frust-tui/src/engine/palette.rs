@@ -96,6 +96,15 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();
     let has_session = state.active_session().is_some();
+    // `R` restarts an app session and refreshes devices everywhere else
+    // (`crate::runner`'s `translate_key`), so exactly one of the two rows
+    // below carries the `R` hint at a time.
+    let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
+    // "Watch: restart on save" is the `frust run --watch` loop, which is
+    // desktop-preview only — a device (or ad-hoc) session gates it off.
+    let has_desktop_session = state
+        .active_session()
+        .is_some_and(|s| s.target == Some(super::session_view::SessionTarget::Desktop));
     let has_selection = state
         .active_session()
         .is_some_and(|s| s.selection.is_some());
@@ -152,6 +161,27 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             running,
             "no running session",
         ),
+        // The keyboard twin of MCP `restart_app` / DAP `frustRestart` — an
+        // app session only (`target.is_some()`), unlike "Stop session" above,
+        // which cares only whether it's still running: a restart needs a
+        // retained launch spec to relaunch, which only an app session has.
+        gated(
+            "Restart session",
+            "R",
+            Message::RestartSession,
+            has_app_session,
+            "no session to restart",
+        ),
+        // A toggle: the same row turns it off again. Enabled only for a
+        // desktop app session (`Message::ToggleWatch`'s own refusal covers
+        // the `W` key on anything else).
+        gated(
+            "Watch: restart on save",
+            "W",
+            Message::ToggleWatch,
+            has_desktop_session,
+            "desktop app sessions only",
+        ),
         gated(
             "Close tab",
             "X",
@@ -194,7 +224,11 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_projects,
             "no projects detected",
         ),
-        always("Refresh devices", "R", Message::RefreshDevices),
+        always(
+            "Refresh devices",
+            if has_app_session { "" } else { "R" },
+            Message::RefreshDevices,
+        ),
         // Workbook §B13. Both are always enabled: the embedded server serves
         // *this* workbench whether or not a project is open (a `run_app` with
         // none open reports that itself), and the panel is readable in every
@@ -450,6 +484,130 @@ mod tests {
         assert!(!by_title("Stop session").enabled);
         assert!(by_title("Doctor").enabled);
         assert!(by_title("Quit").enabled);
+    }
+
+    #[test]
+    fn restart_session_row_is_enabled_only_for_an_app_session() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+
+        let by_title = |state: &AppState| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == "Restart session")
+                .expect("command present")
+        };
+
+        // No session at all.
+        let no_session = workbench();
+        let row = by_title(&no_session);
+        assert!(!row.enabled);
+        assert_eq!(row.disabled_reason, Some("no session to restart"));
+
+        // An ad-hoc session (build/clean) has no launch spec worth
+        // relaunching, so it does not enable the row either.
+        let mut ad_hoc = workbench();
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert!(!by_title(&ad_hoc).enabled);
+
+        // An app session (a target) enables it.
+        let mut app_session = workbench();
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        let row = by_title(&app_session);
+        assert!(row.enabled);
+        assert_eq!(row.message, Message::RestartSession);
+    }
+
+    #[test]
+    fn watch_row_is_enabled_only_for_a_desktop_app_session() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+        use frust_drive::devices::Platform;
+
+        let by_title = |state: &AppState| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == "Watch: restart on save")
+                .expect("command present")
+        };
+        let with_session = |target: Option<SessionTarget>| {
+            let mut state = workbench();
+            state.sessions.push(SessionView::with_devtools(
+                SessionId(0),
+                PathBuf::from("/tmp/huddle"),
+                "s",
+                DevtoolsLaunch::unavailable(),
+                target,
+            ));
+            state.active_session = Some(0);
+            state
+        };
+
+        let row = by_title(&workbench());
+        assert!(!row.enabled);
+        assert_eq!(row.disabled_reason, Some("desktop app sessions only"));
+        assert!(!by_title(&with_session(None)).enabled, "ad-hoc session");
+        let device = with_session(Some(SessionTarget::Device {
+            id: "emu-1".into(),
+            name: "Pixel".into(),
+            platform: Platform::Android,
+        }));
+        assert!(!by_title(&device).enabled, "device session");
+
+        let row = by_title(&with_session(Some(SessionTarget::Desktop)));
+        assert!(row.enabled);
+        assert_eq!(row.message, Message::ToggleWatch);
+        assert_eq!(row.hint, "W");
+    }
+
+    #[test]
+    fn the_r_hint_sits_on_refresh_devices_only_without_an_app_session() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+
+        let hint = |state: &AppState, title: &str| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == title)
+                .expect("command present")
+                .hint
+        };
+
+        let no_session = workbench();
+        assert_eq!(hint(&no_session, "Refresh devices"), "R");
+
+        let mut ad_hoc = workbench();
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert_eq!(hint(&ad_hoc, "Refresh devices"), "R");
+
+        let mut app_session = workbench();
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        assert_eq!(hint(&app_session, "Refresh devices"), "");
+        assert_eq!(hint(&app_session, "Restart session"), "R");
     }
 
     #[test]
