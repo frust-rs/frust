@@ -2238,6 +2238,39 @@ mod tests {
     use frust_drive::desktop_build::DesktopBundleTarget;
     use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
 
+    /// A fresh scratch directory for one watch test, under the OS temp dir —
+    /// never the checkout. Removed first in case a previous run of the same
+    /// test left it behind; the caller removes it again once done.
+    fn watch_scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "frust-tui-watch-runner-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A minimal desktop-target [`SessionSpec`] rooted at `root`, matching
+    /// `crate::supervise::supervisor`'s own `desktop_spec` test helper —
+    /// its `launch_plan()` is the fixed `cargo run --features
+    /// frust/perf-trace --features frust/devtools` invocation a
+    /// `FakeProcessRunner` script below matches on.
+    fn watch_desktop_spec(root: &Path) -> SessionSpec {
+        use std::collections::HashMap;
+        SessionSpec {
+            project_root: root.to_path_buf(),
+            target: DeviceTarget::Desktop,
+            build: BuildInfo {
+                mode: BuildMode::Debug,
+                flavor: None,
+                defines: HashMap::new(),
+                build_name: None,
+                build_number: None,
+            },
+        }
+    }
+
     /// Generations on one key never overlap, and none is dropped: every
     /// caller runs, strictly one after another. Each holder records
     /// enter/exit around a sleep wide enough that an unserialized pair would
@@ -3713,6 +3746,248 @@ mod tests {
             other => panic!("expected a warn toast, got {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "nothing was relaunched");
+    }
+
+    // ── Watch reconciliation (`Effect::WatchSet`, `Effect::RestartSession`,
+    // the post-effect `SourceWatchers::retain` sweep) ───────────────────────
+
+    /// `Effect::WatchSet { on: true }` on a session with a live launch record
+    /// starts a real filesystem watcher for it (the runner's enactment of
+    /// [`Message::ToggleWatch`] / [`Message::EnableWatch`]).
+    #[test]
+    fn watch_set_on_starts_a_watcher_for_a_recorded_session() {
+        use crate::engine::SessionView;
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("starts");
+        let mut engine = Engine::new(AppState::default());
+        // A tab with `watch` already on — what `toggle_watch`/`enable_watch`
+        // set in the model before this effect is ever enacted — so the
+        // post-effect reconciliation sweep (which reads the model, not the
+        // watcher map) does not immediately tear the fresh watcher back down.
+        engine.state.sessions.push(SessionView::with_devtools(
+            SessionId(1),
+            root.clone(),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        engine.state.sessions[0].watch = true;
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(1), watch_desktop_spec(&root));
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::WatchSet {
+                id: SessionId(1),
+                on: true,
+            }),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            watchers.contains(SessionId(1)),
+            "a watcher was started for the recorded session"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a resolvable root never reports WatchFailed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Effect::WatchSet { on: true }` on a session with no launch record and
+    /// no tab (evicted, or racing its own removal) can resolve no root, so it
+    /// reports [`Message::WatchFailed`] rather than silently doing nothing —
+    /// [`Message::WatchFailed`]'s own handler is what turns the flag back off
+    /// and toasts the user.
+    #[test]
+    fn watch_set_on_an_unknown_session_reports_watch_failed() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::WatchSet {
+                id: SessionId(99),
+                on: true,
+            }),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::WatchFailed { session, reason }) => {
+                assert_eq!(session, SessionId(99));
+                assert_eq!(reason, "the session is gone");
+            }
+            other => panic!("expected WatchFailed, got {other:?}"),
+        }
+        assert!(!watchers.contains(SessionId(99)));
+    }
+
+    /// [`Effect::RestartSession`] on a watched session carries the flag over
+    /// the relaunch: the replaced session's watcher stops, and once the new
+    /// session has registered (so the engine always sees the tab before
+    /// anything acts on it) [`Message::EnableWatch`] follows for its id —
+    /// never the other way around.
+    // `#[tokio::test]`: the replaced session's watcher teardown goes through
+    // `spawn_teardown` (`tokio::task::spawn_blocking`), which needs a runtime
+    // in scope even though this test awaits nothing itself.
+    #[tokio::test]
+    async fn restarting_a_watched_session_reenables_watch_after_registration() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("restart-reenable");
+        let mut engine = Engine::new(AppState::default());
+        let runner = Arc::new(FakeProcessRunner::new().with_stream(
+            "cargo run --features frust/perf-trace --features frust/devtools",
+            ["   Compiling app", "     Running `app`"],
+            true,
+        ));
+        let (mut supervisor, _events) = Supervisor::new(runner.clone());
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(5), watch_desktop_spec(&root));
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let (started, _replaced) = watchers.start(SessionId(5), &root);
+        started.expect("a real fs watcher starts for the session being restarted");
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(tx.clone(), runner));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(5))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            !watchers.contains(SessionId(5)),
+            "the replaced session's watcher is stopped"
+        );
+        let registered = match rx.try_recv() {
+            Ok(Message::RegisterSession { id, .. }) => id,
+            other => panic!("expected RegisterSession first, got {other:?}"),
+        };
+        match rx.try_recv() {
+            Ok(Message::EnableWatch { session }) => {
+                assert_eq!(
+                    session, registered,
+                    "EnableWatch names the relaunch's own id"
+                );
+            }
+            other => panic!("expected EnableWatch after RegisterSession, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The post-effect reconciliation sweep stops a watcher whose tab left
+    /// without an effect naming it (a terminal tab closed on the spot) —
+    /// `apply_effect`'s own module doc names this as the "after, not before"
+    /// step that keeps a watcher from outliving its session.
+    // `#[tokio::test]`: the dropped watcher's teardown goes through
+    // `spawn_teardown` (`tokio::task::spawn_blocking`), which needs a runtime
+    // in scope even though this test awaits nothing itself.
+    #[tokio::test]
+    async fn the_sweep_drops_a_watcher_whose_tab_is_gone() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("sweep");
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, _rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let (started, _replaced) = watchers.start(SessionId(3), &root);
+        started.expect("a real fs watcher starts");
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        // `engine.state.sessions` has no tab for `SessionId(3)` at all — the
+        // exact shape a terminal tab closed on the spot leaves behind.
+        apply_effect(
+            None,
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            !watchers.contains(SessionId(3)),
+            "the sweep drops a watcher whose tab is gone"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The doctor panel's `t` key (mouse parity: its "Toolchain setup"

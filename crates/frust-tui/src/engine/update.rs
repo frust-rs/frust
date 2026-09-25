@@ -2384,6 +2384,7 @@ fn fix_copy_text(fix: &frust_drive::doctor::FixCommand) -> String {
 /// an unknown id is dropped (the session must be registered first — see
 /// [`Message::RegisterSession`]).
 fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
+    use crate::supervise::SessionState;
     let Some(idx) = state.session_index(ev.id) else {
         return Outcome::idle();
     };
@@ -2419,6 +2420,31 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
             }
             SessionEventKind::State(s) => {
                 session.state = s;
+                // `Killed` is the terminal transition of *every* external
+                // stop: the keyboard `x` (`Message::StopSession`, which
+                // already clears `watch` itself), `close_tab`/`CloseActiveTab`
+                // (X, palette, context menu), an MCP `stop_app` or
+                // `restart_app`, and a DAP terminate/disconnect
+                // (`SessionBackend::stop_app` — `frust-dap`'s adapter routes
+                // through the same call) — all of them end here because none
+                // of `mcp_backend.rs`'s handlers can reach into `AppState` to
+                // clear the flag themselves (`McpServeCtx::state` is `&AppState`,
+                // read-only). So this is the one place that must do it for
+                // every path other than the keyboard stop, which is why the
+                // check lives on the *state*, not the message that produced
+                // it: without it, a session an agent (or the user, from a
+                // route other than `x`/close) stopped would keep `watch` set
+                // and the next save would relaunch what was just stopped, or
+                // (after `restart_app`) leave a doomed watcher armed on the
+                // now-replaced tab while the new one runs unwatched.
+                //
+                // `Exited(_)` is left untouched on purpose: a crash or a
+                // compile-error exit is not a stop request, so a watched
+                // session keeps watching and the next save relaunches it —
+                // that is the whole point of "restart on save".
+                if session.state == SessionState::Killed {
+                    session.watch = false;
+                }
                 if session.state.is_terminal() {
                     session_ended = session.devtools.on_session_end();
                     metrics_ended = session.devtools.metrics.on_session_end();
@@ -2506,6 +2532,12 @@ fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
     } else {
         let id = session.id;
         state.sessions[idx].close_on_exit = true;
+        // Clear watch immediately, exactly like `Message::StopSession`
+        // (rather than waiting for the terminal `Killed` event this same
+        // `StopSession` effect will eventually produce): otherwise the ⟳
+        // glyph would linger on a tab already told to stop for as long as
+        // the process takes to actually die.
+        state.sessions[idx].watch = false;
         Outcome::effect(Effect::StopSession(id))
     }
 }
@@ -3658,6 +3690,74 @@ mod tests {
         assert!(st.sessions.is_empty(), "the terminal tab goes at once");
     }
 
+    /// An external stop (MCP `stop_app`, DAP terminate/disconnect, or an MCP
+    /// `restart_app`'s own kill of the session it replaces) delivers `Killed`
+    /// with no prior [`Message::StopSession`] ever applied — that terminal
+    /// event is what must turn watch off, or the next save relaunches
+    /// something the agent (or user, via a route other than `x`) just
+    /// stopped.
+    #[test]
+    fn an_externally_killed_watched_session_turns_watch_off_and_the_next_save_does_nothing() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert!(
+            !st.sessions[0].watch,
+            "an externally delivered Killed turns watch off"
+        );
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(
+            out.effect, None,
+            "watch is off, so a leftover trigger does nothing"
+        );
+    }
+
+    /// An MCP `restart_app` never goes through [`restart_session_at`] — it
+    /// stops the old session and starts the new one directly
+    /// (`crate::supervise::mcp_backend::restart_app`'s own doc), so the new
+    /// session's `RegisterSession` can land *before* the old one's
+    /// asynchronous `Killed` event does. Once `Killed` lands the old
+    /// session's watch is off (no refusal toast — this is an ordinary stop,
+    /// not a failure) and the new session, having bypassed the one place that
+    /// carries the flag over, stays unwatched.
+    #[test]
+    fn an_mcp_restart_of_a_watched_session_leaves_no_armed_watcher() {
+        let mut st = workbench_with_project();
+        let s1 = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        let s2 = register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, state_event(s1, SessionState::Killed));
+        assert!(!st.sessions[st.session_index(s1).unwrap()].watch);
+
+        let out = update(&mut st, Message::WatchTriggered { session: s1 });
+        assert_eq!(
+            out.effect, None,
+            "the stopped session's own leftover trigger is a no-op"
+        );
+        // `Killed` always raises its own routine "stopped" toast
+        // (`terminal_toast`) — the refusal this asserts against is the
+        // watch-specific one ([`Message::WatchFailed`]'s "Watch unavailable:
+        // …"), which never fires here since `watch_triggered` finds the flag
+        // already off and idles before reaching anything that could refuse.
+        assert!(
+            !warn_texts(&st)
+                .iter()
+                .any(|t| t.contains("Watch unavailable")),
+            "an ordinary stop-then-relaunch is not a watch refusal: {:?}",
+            warn_texts(&st)
+        );
+        assert!(
+            !st.sessions[st.session_index(s2).unwrap()].watch,
+            "restart_app's relaunch bypasses restart_session_at and stays unwatched"
+        );
+    }
+
     #[test]
     fn a_watch_restart_of_a_background_tab_does_not_steal_focus() {
         let mut st = workbench_with_project();
@@ -3722,6 +3822,36 @@ mod tests {
         let out = update(&mut st, Message::StopSession);
         assert_eq!(out.effect, Some(Effect::StopSession(a)));
         assert!(!st.sessions[0].watch);
+    }
+
+    /// `close_tab` (the `x`/palette/context-menu "Close tab" and "Stop &
+    /// close" routes, and `CloseActiveTab`'s `X`) clears `watch` immediately,
+    /// mirroring [`Message::StopSession`] — the ⟳ glyph must not linger on a
+    /// tab already told to stop.
+    #[test]
+    fn closing_a_watched_tab_turns_watch_off() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::CloseTab(0));
+        assert_eq!(out.effect, Some(Effect::StopSession(a)));
+        assert!(st.sessions[0].close_on_exit);
+        assert!(!st.sessions[0].watch, "CloseTab turns watch off at once");
+
+        // `CloseActiveTab` (the `X` key) shares the same path.
+        let mut st = workbench_with_project();
+        let b = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        st.active_session = Some(0);
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::CloseActiveTab);
+        assert_eq!(out.effect, Some(Effect::StopSession(b)));
+        assert!(!st.sessions[0].watch, "CloseActiveTab turns watch off too");
     }
 
     #[test]
