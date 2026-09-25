@@ -2464,13 +2464,20 @@ fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
 /// it from its own duplicate check) and refuses with the same toast wording
 /// [`drop_already_running`] uses on a hit; then the workbench-wide live-session
 /// count (excluding this session) is checked against
-/// `crate::supervise::mcp_backend::MCP_RECORD_CAP` the same excluding-self way
-/// `restart_app` checks `McpSessionRecords::live_count` — refused with a toast
-/// naming the cap. Once both guards clear, the active tab is marked for
-/// removal-once-terminal exactly as [`close_tab`] does for a live session,
-/// except an already-terminal tab is removed immediately *and* the effect
-/// still fires — a crashed session must still relaunch, unlike closing a tab,
-/// which has nothing left to do once the tab is gone.
+/// `crate::supervise::mcp_backend::MCP_RECORD_CAP`, excluding-self the same
+/// way `restart_app` excludes it from `McpSessionRecords::live_count` —
+/// refused with a toast naming the cap. The *population* counted differs,
+/// deliberately: `restart_app` counts only MCP-launched records, but
+/// `update()` is I/O-free and holds no `McpSessionRecords`, so it counts
+/// every non-terminal session in `state.sessions` instead — ad-hoc
+/// build/clean tabs included. That is a conservative approximation: this
+/// check can refuse a keyboard restart earlier than `restart_app` would (more
+/// tabs counted against the same cap), never later. Once both guards clear,
+/// the active tab is marked for removal-once-terminal exactly as
+/// [`close_tab`] does for a live session, except an already-terminal tab is
+/// removed immediately *and* the effect still fires — a crashed session must
+/// still relaunch, unlike closing a tab, which has nothing left to do once
+/// the tab is gone.
 fn restart_session(state: &mut AppState) -> Outcome {
     let Some(idx) = state.active_session else {
         return Outcome::idle();
@@ -2502,6 +2509,11 @@ fn restart_session(state: &mut AppState) -> Outcome {
         return Outcome::idle();
     }
 
+    // A conservative approximation of `restart_app`'s
+    // `McpSessionRecords::live_count`: this counts every non-terminal
+    // session, not only MCP-launched ones (an ad-hoc build/clean tab has no
+    // record), because `update()` is I/O-free and never sees the records —
+    // it can refuse a restart earlier than `restart_app` would, never later.
     let live_others = state
         .sessions
         .iter()

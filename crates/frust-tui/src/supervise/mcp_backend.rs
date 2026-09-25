@@ -1080,7 +1080,12 @@ fn failed_launch(
 /// palette "Restart session" row) are the two callers of one contract —
 /// guard-excluding-self, cap-excluding-self, stop, relaunch spec — one over
 /// an MCP id, the other over the active tab; keep them aligned rather than
-/// letting either drift.
+/// letting either drift. The cap check's *population* differs, deliberately:
+/// this counts only [`McpSessionRecords::live_count`] (MCP-launched
+/// sessions), while the keyboard path is I/O-free and holds no records, so it
+/// counts every live tab (ad-hoc build/clean sessions included) — a
+/// conservative approximation that can refuse a keyboard restart earlier than
+/// this fn would, never later.
 fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSessionId, EmbeddedError> {
     let Some(view) = mcp_view(ctx.state, ctx.records, id) else {
         return Err(EmbeddedError::NoSuchSession(id.0));
