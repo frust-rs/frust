@@ -398,6 +398,18 @@ pub enum Message {
     /// Stop the active session (`Ctrl+C` / `x`) — routed to the supervisor as
     /// an [`super::Effect::StopSession`].
     StopSession,
+    /// Stop the active session and relaunch its retained launch spec as a
+    /// new session tab (`R` with a session active, and the palette's
+    /// "Restart session" row) — the keyboard twin of MCP `restart_app` / DAP
+    /// `frustRestart`
+    /// (`crate::supervise::mcp_backend::restart_app`), routed to the
+    /// supervisor as an [`super::Effect::RestartSession`]. Refused (no
+    /// effect, a toast explains why) for an ad-hoc session (no
+    /// [`SessionTarget`]) or when another live session already occupies the
+    /// same (project, target); an already-terminal active session still
+    /// restarts — a crashed session must be relaunchable, not just a running
+    /// one.
+    RestartSession,
     /// Close a tab by index into `sessions` (the context menu's "Close tab" /
     /// "Stop & close" entries, and the palette's "Close tab" command). A
     /// session already in a terminal state is removed immediately; a live

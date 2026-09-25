@@ -9,20 +9,20 @@ expression: "render_to_string(100, 30, &state)"
   ▸ huddle               │  Dashboard                                                               
             ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮             
  DEVICES ↻ r│                                                                         │▓▓           
-   none foun│  r   Run on device(s)…               D   DAP server…                    │▓▓           
-            │  —   Run on all devices              —   Start/stop DAP server          │▓▓           
- SESSIONS   │  x   Stop session                    ⌥m  Toggle mouse capture           │▓▓           
-   none runn│  X   Close tab                       f   Toggle follow-tail             │▓▓           
-            │  b   Build…                          w   Toggle line wrap               │▓▓           
- ACTIONS    │  c   Clean…                          /   Search logs…                   │▓▓           
-   New proje│  i   Doctor                          v   Select lines…                  │▓▓           
-   Add plugi│  —   Toolchain setup…                y   Copy selection                 │▓▓           
-   Doctor · │  n   New project…                    l   Cycle log level filter         │▓▓           
-   Build · b│  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓           
-   Clean · c│  ^O  Switch project…                 d   DevTools                       │▓▓           
-   MCP off ·│  R   Refresh devices                 r   Refresh widget tree            │▓▓           
-   DAP off ·│  m   MCP server…                     q   Quit                           │▓▓           
-            │  M   Start/stop MCP server                                              │▓▓           
+   none foun│  r   Run on device(s)…               M   Start/stop MCP server          │▓▓           
+            │  —   Run on all devices              D   DAP server…                    │▓▓           
+ SESSIONS   │  x   Stop session                    —   Start/stop DAP server          │▓▓           
+   none runn│  R   Restart session                 ⌥m  Toggle mouse capture           │▓▓           
+            │  X   Close tab                       f   Toggle follow-tail             │▓▓           
+ ACTIONS    │  b   Build…                          w   Toggle line wrap               │▓▓           
+   New proje│  c   Clean…                          /   Search logs…                   │▓▓           
+   Add plugi│  i   Doctor                          v   Select lines…                  │▓▓           
+   Doctor · │  —   Toolchain setup…                y   Copy selection                 │▓▓           
+   Build · b│  n   New project…                    l   Cycle log level filter         │▓▓           
+   Clean · c│  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓           
+   MCP off ·│  ^O  Switch project…                 d   DevTools                       │▓▓           
+   DAP off ·│  R   Refresh devices                 r   Refresh widget tree            │▓▓           
+            │  m   MCP server…                     q   Quit                           │▓▓           
             │                                                                         │▓▓           
             │  — = palette/mouse only                                                 │▓▓           
             │  Esc close                                                              │▓▓           

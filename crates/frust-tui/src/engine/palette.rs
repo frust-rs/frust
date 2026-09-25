@@ -152,6 +152,17 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             running,
             "no running session",
         ),
+        // The keyboard twin of MCP `restart_app` / DAP `frustRestart` — an
+        // app session only (`target.is_some()`), unlike "Stop session" above,
+        // which cares only whether it's still running: a restart needs a
+        // retained launch spec to relaunch, which only an app session has.
+        gated(
+            "Restart session",
+            "R",
+            Message::RestartSession,
+            state.active_session().is_some_and(|s| s.target.is_some()),
+            "no session to restart",
+        ),
         gated(
             "Close tab",
             "X",
@@ -450,6 +461,50 @@ mod tests {
         assert!(!by_title("Stop session").enabled);
         assert!(by_title("Doctor").enabled);
         assert!(by_title("Quit").enabled);
+    }
+
+    #[test]
+    fn restart_session_row_is_enabled_only_for_an_app_session() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+
+        let by_title = |state: &AppState| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == "Restart session")
+                .expect("command present")
+        };
+
+        // No session at all.
+        let no_session = workbench();
+        let row = by_title(&no_session);
+        assert!(!row.enabled);
+        assert_eq!(row.disabled_reason, Some("no session to restart"));
+
+        // An ad-hoc session (build/clean) has no launch spec worth
+        // relaunching, so it does not enable the row either.
+        let mut ad_hoc = workbench();
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert!(!by_title(&ad_hoc).enabled);
+
+        // An app session (a target) enables it.
+        let mut app_session = workbench();
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        let row = by_title(&app_session);
+        assert!(row.enabled);
+        assert_eq!(row.message, Message::RestartSession);
     }
 
     #[test]

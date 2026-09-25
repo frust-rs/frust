@@ -6,9 +6,10 @@ expression: "render_to_string(80, 24, &state)"
                                                                                 
   ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮   
   │                                                                         │▓▓ 
-  │  r   Run on device(s)…               D   DAP server…                    │▓▓ 
-  │  —   Run on all devices              —   Start/stop DAP server          │▓▓ 
-  │  x   Stop session                    ⌥m  Toggle mouse capture           │▓▓ 
+  │  r   Run on device(s)…               M   Start/stop MCP server          │▓▓ 
+  │  —   Run on all devices              D   DAP server…                    │▓▓ 
+  │  x   Stop session                    —   Start/stop DAP server          │▓▓ 
+  │  R   Restart session                 ⌥m  Toggle mouse capture           │▓▓ 
   │  X   Close tab                       f   Toggle follow-tail             │▓▓ 
   │  b   Build…                          w   Toggle line wrap               │▓▓ 
   │  c   Clean…                          /   Search logs…                   │▓▓ 
@@ -19,7 +20,6 @@ expression: "render_to_string(80, 24, &state)"
   │  ^O  Switch project…                 d   DevTools                       │▓▓ 
   │  R   Refresh devices                 r   Refresh widget tree            │▓▓ 
   │  m   MCP server…                     q   Quit                           │▓▓ 
-  │  M   Start/stop MCP server                                              │▓▓ 
   │                                                                         │▓▓ 
   │  — = palette/mouse only                                                 │▓▓ 
   │  Esc close                                                              │▓▓ 

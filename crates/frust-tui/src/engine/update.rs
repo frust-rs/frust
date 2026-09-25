@@ -36,6 +36,14 @@ const COPY_LINE_PREVIEW_CHARS: usize = 60;
 pub enum Effect {
     /// Stop a session: route to `Supervisor::stop` (the group-kill).
     StopSession(SessionId),
+    /// Stop `id` and relaunch its retained spec as a new session — the
+    /// keyboard restart's enactment (`Message::RestartSession`), mirroring
+    /// `crate::supervise::mcp_backend::restart_app`'s own stop-then-relaunch
+    /// contract (see that fn's doc for the shared guard/cap discipline the
+    /// two callers keep aligned). The runner looks the spec up by `id` in its
+    /// own launch records; `update()` has already applied every guard this
+    /// effect needs before requesting it.
+    RestartSession(SessionId),
     /// Copy text to the system clipboard (the runner emits an OSC 52 sequence).
     Copy(String),
     /// Discover devices off-thread (`frust-drive`'s `DeviceDiscovery` set),
@@ -396,6 +404,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Some(id) => Outcome::effect(Effect::StopSession(id)),
             None => Outcome::idle(),
         },
+        Message::RestartSession => restart_session(state),
         Message::CloseTab(idx) => close_tab(state, idx),
         Message::CloseActiveTab => match state.active_session {
             Some(idx) => close_tab(state, idx),
@@ -2442,6 +2451,81 @@ fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
     }
 }
 
+/// Restart the active session (`R` with a session active, and the palette's
+/// "Restart session" row) — the keyboard twin of
+/// `crate::supervise::mcp_backend::restart_app`/DAP `frustRestart`; see that
+/// fn's doc for the shared guard/cap contract this mirrors so the two stay
+/// aligned.
+///
+/// No active session idles. An ad-hoc session (no `SessionTarget`) refuses
+/// with a toast — only an app launch has a spec worth relaunching. Otherwise:
+/// the one-live-session guard runs excluding the session being restarted
+/// (`AppState::live_session_for_excluding`, exactly as `restart_app` excludes
+/// it from its own duplicate check) and refuses with the same toast wording
+/// [`drop_already_running`] uses on a hit; then the workbench-wide live-session
+/// count (excluding this session) is checked against
+/// `crate::supervise::mcp_backend::MCP_RECORD_CAP` the same excluding-self way
+/// `restart_app` checks `McpSessionRecords::live_count` — refused with a toast
+/// naming the cap. Once both guards clear, the active tab is marked for
+/// removal-once-terminal exactly as [`close_tab`] does for a live session,
+/// except an already-terminal tab is removed immediately *and* the effect
+/// still fires — a crashed session must still relaunch, unlike closing a tab,
+/// which has nothing left to do once the tab is gone.
+fn restart_session(state: &mut AppState) -> Outcome {
+    let Some(idx) = state.active_session else {
+        return Outcome::idle();
+    };
+    let Some(session) = state.sessions.get(idx) else {
+        return Outcome::idle();
+    };
+    let id = session.id;
+    let Some(target) = session.target.clone() else {
+        state.toasts.push(
+            ToastKind::Warn,
+            "only an app session can be restarted".to_string(),
+        );
+        return Outcome::idle();
+    };
+    let project_root = session.project_root.clone();
+
+    if state
+        .live_session_for_excluding(&project_root, &target, Some(id))
+        .is_some()
+    {
+        state.toasts.push(
+            ToastKind::Warn,
+            format!(
+                "{}: already running here — stop it first (x)",
+                target.label()
+            ),
+        );
+        return Outcome::idle();
+    }
+
+    let live_others = state
+        .sessions
+        .iter()
+        .filter(|s| s.id != id && !s.state.is_terminal())
+        .count();
+    if live_others >= crate::supervise::mcp_backend::MCP_RECORD_CAP {
+        state.toasts.push(
+            ToastKind::Warn,
+            format!(
+                "the workbench already has {} sessions live — stop one before restarting",
+                crate::supervise::mcp_backend::MCP_RECORD_CAP
+            ),
+        );
+        return Outcome::idle();
+    }
+
+    if state.sessions[idx].state.is_terminal() {
+        remove_session(state, idx);
+    } else {
+        state.sessions[idx].close_on_exit = true;
+    }
+    Outcome::effect(Effect::RestartSession(id))
+}
+
 /// Remove `sessions[idx]`, repairing `active_session` and closing a context
 /// menu that targeted the removed tab.
 ///
@@ -3195,6 +3279,105 @@ mod tests {
         let out = update(&mut st, state_event(a, SessionState::Killed));
         assert!(!out.redraw);
         assert!(st.sessions.is_empty());
+    }
+
+    #[test]
+    fn restart_routes_the_active_session_id_and_marks_the_tab_for_removal_once_terminal() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert_eq!(st.sessions.len(), 1, "the old tab is not removed yet");
+        assert!(st.sessions[0].close_on_exit);
+
+        // The terminal event now removes the old tab exactly once — the
+        // restart's relaunch is a brand new session, registered separately.
+        let out = update(&mut st, state_event(a, SessionState::Killed));
+        assert!(out.redraw);
+        assert!(st.sessions.is_empty());
+
+        // With no active session, restart is a no-op.
+        let mut empty = welcome();
+        assert_eq!(update(&mut empty, Message::RestartSession).effect, None);
+    }
+
+    #[test]
+    fn restart_of_an_already_terminal_tab_removes_it_immediately_and_still_emits_the_effect() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, state_event(a, SessionState::Exited(false)));
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(
+            out.effect,
+            Some(Effect::RestartSession(a)),
+            "a crashed session must still relaunch"
+        );
+        assert!(
+            st.sessions.is_empty(),
+            "an already-terminal tab is removed on the spot, like close_tab"
+        );
+    }
+
+    #[test]
+    fn restart_with_another_live_session_on_the_same_target_is_refused_with_a_toast() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        // A second session on the *other* device does not block the first —
+        // only an exact (project, target) hit does. Simulate the collision by
+        // registering a second desktop session for the same project directly
+        // (bypassing the launch guard, exactly like `register_on` does for
+        // every other guard test in this module).
+        register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        st.active_session = Some(st.session_index(a).unwrap());
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["desktop: already running here — stop it first (x)"]
+        );
+    }
+
+    #[test]
+    fn restart_of_a_targetless_session_is_refused() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["only an app session can be restarted"]
+        );
+    }
+
+    #[test]
+    fn restart_refuses_at_the_cap_excluding_the_session_being_restarted() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        for seq in 1..=crate::supervise::mcp_backend::MCP_RECORD_CAP as u64 {
+            let id = register(&mut st, seq, &format!("/tmp/other-{seq}"), "build");
+            let idx = st.session_index(id).unwrap();
+            st.sessions[idx].state = SessionState::Running;
+        }
+        let a_idx = st.session_index(a).unwrap();
+        st.active_session = Some(a_idx);
+        st.sessions[a_idx].state = SessionState::Running;
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(
+            out.effect, None,
+            "the cap is already met by the *other* live sessions alone"
+        );
+        assert_eq!(warn_texts(&st).len(), 1);
+        assert!(
+            warn_texts(&st)[0].contains(&crate::supervise::mcp_backend::MCP_RECORD_CAP.to_string()),
+            "the toast names the cap: {:?}",
+            warn_texts(&st)
+        );
     }
 
     #[test]

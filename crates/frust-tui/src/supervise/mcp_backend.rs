@@ -1075,6 +1075,12 @@ fn failed_launch(
 /// exactly met. The duplicate guard is excluded the same way and for the same
 /// reason — the session it would trip over is the one being replaced — while
 /// any *other* live session on that target still refuses it.
+///
+/// This and `crate::engine::update`'s `restart_session` (the `R` key /
+/// palette "Restart session" row) are the two callers of one contract —
+/// guard-excluding-self, cap-excluding-self, stop, relaunch spec — one over
+/// an MCP id, the other over the active tab; keep them aligned rather than
+/// letting either drift.
 fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSessionId, EmbeddedError> {
     let Some(view) = mcp_view(ctx.state, ctx.records, id) else {
         return Err(EmbeddedError::NoSuchSession(id.0));

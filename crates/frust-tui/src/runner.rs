@@ -508,6 +508,22 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
     } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
+        // The keyboard restart's enactment: `update()` has already applied
+        // every guard (`crate::supervise::mcp_backend::restart_app`'s doc
+        // names the shared contract this mirrors), so this only needs the
+        // retained spec to stop-then-relaunch. No record (evicted, or a
+        // race with the session ending) or a launch-error record (an ad-hoc
+        // failure tab, which `update()`'s target guard already refused
+        // before requesting this — defensive here, not reachable in
+        // practice) means there is nothing to relaunch: log and stop.
+        Some(Effect::RestartSession(id)) => match records.get(id) {
+            Some(record) if record.launch_error.is_none() => {
+                let spec = record.spec.clone();
+                supervisor.stop(id);
+                launch_sessions(vec![spec], supervisor, tx, records);
+            }
+            _ => eprintln!("frust-tui: restart requested for an unknown session: {id:?}"),
+        },
         Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
             Ok(clipboard::CopyOutcome::Complete) => {}
             Ok(clipboard::CopyOutcome::Truncated { kept_bytes }) => {
@@ -1527,8 +1543,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // sidebar ACTIONS "New project" row).
         KeyCode::Char('n') if workbench => vec![Message::OpenCreateWizard],
         // `r`/`Enter` open the run-config modal primed with the panel
-        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance).
+        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance) —
+        // except with a session active, where `R` restarts it instead (the
+        // keyboard twin of MCP `restart_app` / DAP `frustRestart`), the same
+        // `has_active_session`-first context-sensitivity as `c`/`d` below:
+        // the devices panel is only focusable with no active session, so `R`
+        // never loses `RefreshDevices` where it is actually reachable.
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
+        KeyCode::Char('R') if has_active_session => vec![Message::RestartSession],
         KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
         KeyCode::Enter if devices_focused => vec![Message::OpenRunConfig],
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
@@ -3470,6 +3492,40 @@ mod tests {
         );
     }
 
+    /// `R` is context-sensitive like `c`/`d`: with a session active it
+    /// restarts it; with none it falls back to its other job, re-running
+    /// device discovery (the devices panel is only reachable with no active
+    /// session, so `RefreshDevices` never loses its binding where it matters).
+    #[test]
+    fn shift_r_restarts_the_active_session_but_refreshes_devices_without_one() {
+        use crate::engine::SessionView;
+
+        let regions = MouseRegions::new();
+        let mut with_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        with_session.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+        ));
+        with_session.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &with_session, &regions),
+            vec![Message::RestartSession]
+        );
+
+        let workbench = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &workbench, &regions),
+            vec![Message::RefreshDevices]
+        );
+    }
+
     /// The doctor panel's `t` key (mouse parity: its "Toolchain setup"
     /// button) closes the panel and opens the bootstrap wizard.
     #[test]
@@ -3729,6 +3785,28 @@ mod tests {
                     gate_state(true, false, false, false, false, false)
                 }
                 "Stop session" => gate_state(false, false, false, true, false, false),
+                // Needs an *app* session (`target = Some`), which none of
+                // `gate_state`'s existing shapes give without also opening
+                // DevTools (`inspector_live`, which would hijack `R` into
+                // `translate_devtools_key` instead) — built directly instead.
+                "Restart session" => {
+                    use crate::engine::SessionView;
+                    let mut state = AppState {
+                        screen: Screen::Workbench,
+                        ..Default::default()
+                    };
+                    let mut session = SessionView::with_devtools(
+                        SessionId(0),
+                        PathBuf::from("/tmp/huddle"),
+                        "desktop",
+                        DevtoolsLaunch::unavailable(),
+                        Some(SessionTarget::Desktop),
+                    );
+                    session.state = SessionState::Running;
+                    state.sessions.push(session);
+                    state.active_session = Some(0);
+                    state
+                }
                 "Close tab"
                 | "Toggle follow-tail"
                 | "Toggle line wrap"
