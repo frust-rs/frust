@@ -1540,10 +1540,17 @@ that same best-effort stop window: the stop is issued, not awaited, before the r
 'Watch: restart on save' is desktop-only — a device or ad-hoc session refuses it (`Message::ToggleWatch`)
 with "Watch is desktop-only: the watch loop has no device-side kill/rebuild/relaunch story yet",
 `frust run --watch`'s own reason — and shares `R`'s rebuild+relaunch path (`engine::update`'s
-`restart_session_at`) rather than being a fourth mechanism. Neither MCP's `restart_app` nor DAP's
-`frustRestart` carries a watched session's flag onto its own relaunch: `supervise::mcp_backend`'s
-`restart_app` never touches `supervise::watch`, so an MCP/DAP-restarted session's watcher (if any) is
-simply dropped once its old tab is gone, and watch must be re-toggled by hand afterward. The 300ms
+`restart_session_at`) rather than being a fourth mechanism. `engine::update`'s `on_session_event` turns a session's `watch` flag off the moment it lands
+`SessionState::Killed`, whichever path killed it — the keyboard `x`, `close_tab` (X/palette/context
+menu, which clears it immediately rather than waiting for `Killed`), MCP's `stop_app`, DAP
+terminate/disconnect, or `restart_app`'s own kill of the session it replaces — so a stopped session's
+watcher never outlives it; `Exited(_)` is left untouched, so a crash or compile-error exit keeps a
+watched session watching and the next save still relaunches it. Neither MCP's `restart_app` nor DAP's
+`frustRestart` carries that flag onto the *new* session, though: both bypass `restart_session_at`, the
+one seam that re-sends `EnableWatch` after a relaunch, so the replacement session always starts
+unwatched and watch must be re-toggled by hand afterward. On MCP/DAP stop paths the old tab is not
+removed either — it parks in the session list as `Killed`, same as any other MCP-launched session (see
+`tui-mcp-sessions-tab-uncapped`). The 300ms
 trailing-edge debounce itself is duplicated rather than shared: `frust-cli`'s `watch_loop_with_slot`
 and `frust-tui`'s `supervise::watch` each run their own copy (`frust-tui` has no dependency on
 `frust-cli`) — a tracked follow-up is moving it into `frust-drive`. On Windows, both loops' kill

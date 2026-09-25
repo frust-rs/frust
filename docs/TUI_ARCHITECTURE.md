@@ -38,7 +38,9 @@ tooling-to-tooling crossings, not framework ones, sanctioned by
 UI, `crossterm` reads raw input and mouse events (terminal mouse modes are unchanged by anything
 below), and `ansi-to-tui` renders ANSI-coded log output. `arboard` (workspace pin `=3.6.1`, owned by
 the PLUGINS unit — see [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)) is `crate::clipboard`'s
-system-clipboard backend, held as a per-write instance rather than a long-lived handle.
+system-clipboard backend, held as a per-write instance rather than a long-lived handle; `notify`
+(workspace-pinned) backs `supervise::watch`'s filesystem watcher, the same pin `frust-cli`'s own
+`--watch` loop uses.
 `tokio` and `futures-util` drive the async event loop, channels, and stream combinators (`tokio`'s
 `net` feature is enabled for both embedded servers' own loopback listeners); `tokio-util` supplies
 the `CancellationToken` each server shuts down on; `toml_edit` gives format-preserving persistence
@@ -118,8 +120,11 @@ arm drops the replaced session's watcher, then — only after the new session's 
 sends `Message::EnableWatch { session }` on the same channel, flipping the new session's flag and
 re-emitting `WatchSet` for a fresh watcher (the run-config modal's watch checkbox reaches the same
 `EnableWatch` step via `Effect::LaunchWatchedSessions`). Unlike the keyboard path, MCP's `restart_app`
-and DAP's `frustRestart` never carry a watch flag onto their own relaunch — a restarted session's
-watcher, if any, is simply dropped once its old tab is gone (see [LIMITATIONS.md](LIMITATIONS.md)'s
+and DAP's `frustRestart` never carry a watch flag onto their own relaunch, since both bypass
+`restart_session_at`, so the replacement session always starts unwatched. The replaced session's own
+watcher does not linger, though: `on_session_event` turns `watch` off for any session landing
+`SessionState::Killed` regardless of which path killed it, and `close_tab` clears it immediately on
+its own stop paths rather than waiting for that event (see [LIMITATIONS.md](LIMITATIONS.md)'s
 `no-hot-reload-restart-is-a-rebuild`).
 
 `AppState::mcp` holds the running server's handle (`None` = stopped); `mcp_panel_open`/`mcp_error`
