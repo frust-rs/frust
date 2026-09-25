@@ -1731,7 +1731,15 @@ impl SceneCompiler {
         self.clips.clip_run(&mut frame.strips, start, alpha_start);
         let strip_range = start..frame.strips.strips.len();
 
-        if strip_range.is_empty() {
+        // A run is only a draw when it carries content: the generator ends
+        // every path with a sentinel strip, so a path that covered nothing
+        // (zero-area geometry, coverage a mask clip removed entirely) leaves a
+        // *lone* sentinel behind. The renderer's pairwise walk reads each
+        // span's extent off the strip after it, so a lone sentinel is not a
+        // run at all — roll it back exactly like an empty one.
+        if strip_range.len() < 2 {
+            frame.strips.strips.truncate(start);
+            frame.strips.alphas.truncate(alpha_start);
             return false;
         }
 

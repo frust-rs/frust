@@ -1180,6 +1180,58 @@ fn blurred_rect_with_extreme_std_dev_produces_valid_strips() {
     );
 }
 
+/// A path that covers nothing under a degenerate (zero-width, inverted) mask
+/// clip must not be recorded as a draw. The generator ends every path with a
+/// sentinel strip, so zero coverage leaves a *lone* sentinel behind; the
+/// compiler once recorded that one-strip run as a draw, which the renderer's
+/// pairwise walk (each span's extent is read off the strip after it) cannot
+/// parse. Pins the exact proptest shrink that found it (seed
+/// `2fba13f4…6281cf`): a zero-width clip whose `y1 < y0`, a stroke along its
+/// edge, then a fill of a two-point (zero-area) path with a denormal endpoint.
+#[test]
+fn a_lone_sentinel_under_a_degenerate_clip_records_no_draw() {
+    let mut stroke = BezPath::new();
+    stroke.move_to((0.0, 0.0));
+    stroke.line_to((0.0, -139.9624104245768));
+    let mut fill = BezPath::new();
+    fill.move_to((-225.44460536376482, 255.91540778341005));
+    fill.line_to((2.2250738585072014e-308, 0.0));
+
+    let scene = scene_of(&[
+        Op::PushClip {
+            rect: Rect::new(0.0, 75.27956636905675, 0.0, 10.28498332395015),
+        },
+        Op::StrokePath {
+            path: stroke,
+            width: 58.867383183128474,
+            dash: None,
+            brush: Brush::Solid(RED),
+        },
+        Op::FillPath {
+            path: fill,
+            brush: Brush::Solid(RED),
+        },
+    ]);
+
+    let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("a degenerate clip over zero-coverage paths must compile");
+
+    let failures = strip_packing_failures(&frame);
+    assert!(
+        failures.is_empty(),
+        "{} malformed strip(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    for (index, draw) in frame.draws().iter().enumerate() {
+        assert!(
+            draw.strip_range.len() >= 2,
+            "draw {index}: a recorded draw carries at least one strip plus its sentinel"
+        );
+    }
+}
+
 /// A wide-but-realistic blur keeps its full falloff: the kernel pad cap is a
 /// coverage-only overflow guard, so at `std_dev` 32 the inflated bounds are
 /// exactly the uncapped `2.5 * std_dev` inflation on every side, and the
