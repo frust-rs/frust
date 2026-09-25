@@ -73,7 +73,8 @@ bare CLI:
   both driving the same sessions the workbench shows.
 
 See [the website's TUI docs](https://frust.dev/docs/tooling/tui) for the full picture. (There is
-no hot reload — a code change still needs a rebuild.)
+no hot reload — a code change still needs a rebuild. Press `R` in the TUI, or use `frust run
+--watch` on desktop, to rebuild and relaunch.)
 
 ### Extensible
 

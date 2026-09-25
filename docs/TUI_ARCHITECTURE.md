@@ -86,6 +86,19 @@ bookkeeping, so a refusal can never itself grow `AppState::sessions` (see
 both checks, so a 1-for-1 relaunch is never refused by its own predecessor while any other live
 session on that target still blocks it.
 
+The same guard-excluding/cap-excluding/stop/relaunch contract now has three callers: MCP's
+`restart_app`, DAP's `frustRestart`, and the workbench's own keyboard `R` / palette 'Restart
+session' row (an active session's `Message::RestartSession` → `Effect::RestartSession`, enacted by
+`runner`) — `supervise::mcp_backend`'s `restart_app` doc comment cross-references the keyboard path
+as the contract's other caller. Unlike the two tooling callers, the keyboard path also owns tab
+lifecycle: the replaced tab is marked `close_on_exit` (removed once its terminal event lands, the
+same as `CloseTab`) or removed immediately if already terminal, and the new session registers as
+its own tab. Because `update()` is I/O-free and holds no session records, its cap check is a
+conservative approximation of `McpSessionRecords`' own live count: it counts every non-terminal tab
+excluding the one being restarted, rather than only MCP-launched sessions (see
+[LIMITATIONS.md](LIMITATIONS.md)'s `no-hot-reload-restart-is-a-rebuild` for what a restart does and
+does not preserve).
+
 `AppState::mcp` holds the running server's handle (`None` = stopped); `mcp_panel_open`/`mcp_error`
 back the MCP panel (§B13) and its retained failure reason. `Engine::start_mcp`/`stop_mcp` bind or
 cancel a `frust_mcp::serve_embedded` task against a `ClientRegistry`; `Effect::StartMcpServer`/

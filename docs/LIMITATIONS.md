@@ -1521,6 +1521,48 @@ retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions
 
 ---
 
+### `no-hot-reload-restart-is-a-rebuild` — every restart is a full rebuild + relaunch, never a hot reload
+
+**Observed**: every restart path — the TUI's `R` keypress / palette 'Restart session', `frust run
+--watch`'s file-change relaunch, MCP's `restart_app`, and DAP's `frustRestart` — is a full rebuild
+and relaunch with app state reset each time: Flutter's "hot restart" semantics, never "hot reload".
+A device restart reruns the whole build → install → launch pipeline rather than patching a running
+process (see `tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`
+for what "stop" already does and does not guarantee before that relaunch begins).
+
+**Applies to**: every restart entry point across `frust-tui`, `frust-cli`'s `--watch` flag,
+`frust-mcp`, and `frust-dap` — desktop and device alike.
+
+**Why accepted**: in-process hot restart and hot reload both need capability the framework doesn't
+have yet. Hot restart (state reset, code re-run without a process relaunch) would need a seam to
+dispose and rebuild the running app, but the root `Component` is taken by value once, by
+`frust::run` (`crates/frust/src/lib.rs:1837`); it runs under the shell's **root** `Owner`, which
+lives for the whole process and is never disposed (`crates/frust-core/src/component.rs:56-68`); and
+`ReactiveRuntime` is installed once into a process-lifetime `OnceLock` and never torn down
+(`crates/frust-reactive/src/runtime.rs:122`) — none of the three has a dispose-and-rebuild path
+short of exiting the process. Hot reload (patching running code in place) has no Rust-native path
+short of subsecond-class hot-patching tooling that is tip-crate-only, unsupported across
+struct-layout changes, and experimental/unproven on Android and iOS; the devtools wire protocol also
+has no structure-mutating method to carry a reload over (`crates/frust-devtools-protocol/src/method.rs`'s
+`Method` enum is read/input-simulation only: `handshake`, `widget_tree`, `widget_props`,
+`frame_stats_subscribe`, `frame_stats`, `metrics_snapshot`, `input_tap`, `input_scroll`,
+`input_text`, `screenshot`). The rebuild cost is judged acceptable meanwhile: on an i5-12600 Linux
+host (2026-09-25), an incremental `cargo build` after touching one file took 1.0s (the app crate),
+1.7s (`frust-widgets`), and 1.9s (`frust-core`), against a 43s cold build — consistent with
+`docs/DEVELOPMENT.md`'s separately measured 0.89s incremental-build median.
+
+**Reopen path**: a framework spike replacing `frust::run`'s by-value root with a factory closure, a
+disposable (not process-lifetime) root `Owner`, a resettable `ReactiveRuntime`, and a devtools
+`restart` method to drive the three remotely.
+
+**Evidence**: `crates/frust/src/lib.rs:1837` (`pub fn run<C: Component>`);
+`crates/frust-core/src/component.rs:56-68` (`Component::init` doc, root-component owner);
+`crates/frust-reactive/src/runtime.rs:122` (`static RUNTIME: OnceLock<ReactiveRuntime>`);
+`crates/frust-devtools-protocol/src/method.rs` (`Method` enum); on-host build measurement,
+i5-12600 Linux host, 2026-09-25; `docs/DEVELOPMENT.md`'s incremental-build baseline.
+
+---
+
 ### `dap-no-stepping-v1` — `frust-dap` has no breakpoints, stack, or variable inspection
 
 **Observed**: `frust-dap`'s DAP surface is launch orchestration only —
