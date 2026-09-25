@@ -1529,17 +1529,31 @@ retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions
 
 ### `no-hot-reload-restart-is-a-rebuild` — every restart is a full rebuild + relaunch, never a hot reload
 
-**Observed**: every restart path — the TUI's `R` keypress / palette 'Restart session', `frust run
---watch`'s file-change relaunch, MCP's `restart_app`, and DAP's `frustRestart` — is a full rebuild
-and relaunch with app state reset each time: Flutter's "hot restart" semantics, never "hot reload".
-A device restart reruns the whole build → install → launch pipeline rather than patching a running
-process (see `tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`
-for what "stop" already does and does not guarantee before that relaunch begins). The TUI's own `R`
-restart shares that same best-effort stop window: the stop is issued, not awaited, before the
-relaunch fires.
+**Observed**: every restart path — the TUI's `R` keypress / palette 'Restart session', the TUI's own
+'Watch: restart on save' (`W`/palette/run-config checkbox), `frust run --watch`'s file-change
+relaunch, MCP's `restart_app`, and DAP's `frustRestart` — is a full rebuild and relaunch with app
+state reset each time: Flutter's "hot restart" semantics, never "hot reload". A device restart
+reruns the whole build → install → launch pipeline rather than patching a running process (see
+`tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight` for what "stop"
+already does and does not guarantee before that relaunch begins). The TUI's own `R` restart shares
+that same best-effort stop window: the stop is issued, not awaited, before the relaunch fires.
+'Watch: restart on save' is desktop-only — a device or ad-hoc session refuses it (`Message::ToggleWatch`)
+with "Watch is desktop-only: the watch loop has no device-side kill/rebuild/relaunch story yet",
+`frust run --watch`'s own reason — and shares `R`'s rebuild+relaunch path (`engine::update`'s
+`restart_session_at`) rather than being a fourth mechanism. Neither MCP's `restart_app` nor DAP's
+`frustRestart` carries a watched session's flag onto its own relaunch: `supervise::mcp_backend`'s
+`restart_app` never touches `supervise::watch`, so an MCP/DAP-restarted session's watcher (if any) is
+simply dropped once its old tab is gone, and watch must be re-toggled by hand afterward. The 300ms
+trailing-edge debounce itself is duplicated rather than shared: `frust-cli`'s `watch_loop_with_slot`
+and `frust-tui`'s `supervise::watch` each run their own copy (`frust-tui` has no dependency on
+`frust-cli`) — a tracked follow-up is moving it into `frust-drive`. On Windows, both loops' kill
+(the TUI's session stop/restart and the CLI's respawn) already route through the same
+`frust_drive::process::StreamHandle::kill` → `windows_tree_kill` (`taskkill /T /F`) path, so a
+watched session's relaunch reaches the whole `cargo run` tree there too, falling back to a
+direct-child-only `Child::kill` only if `taskkill` itself is missing or fails.
 
-**Applies to**: every restart entry point across `frust-tui`, `frust-cli`'s `--watch` flag,
-`frust-mcp`, and `frust-dap` — desktop and device alike.
+**Applies to**: every restart entry point across `frust-tui` (including 'Watch: restart on save'),
+`frust-cli`'s `--watch` flag, `frust-mcp`, and `frust-dap` — desktop and device alike.
 
 **Why accepted**: in-process hot restart and hot reload both need capability the framework doesn't
 have yet. Hot restart (state reset, code re-run without a process relaunch) would need a seam to
@@ -1568,6 +1582,11 @@ disposable (not process-lifetime) root `Owner`, a resettable `ReactiveRuntime`, 
 `crates/frust-reactive/src/runtime.rs:122` (`static RUNTIME: OnceLock<ReactiveRuntime>`);
 `crates/frust-devtools-protocol/src/method.rs` (`Method` enum); on-host build measurement,
 i5-12600 Linux host, 2026-09-25; `docs/DEVELOPMENT.md`'s incremental-build baseline.
+`crates/frust-tui/src/supervise/watch.rs` (`WATCH_DEBOUNCE`, module doc's debounce-duplication note);
+`crates/frust-tui/src/engine/update.rs` (`WATCH_DESKTOP_ONLY`, `restart_session_at`, `toggle_watch`);
+`crates/frust-tui/src/supervise/mcp_backend.rs`'s `restart_app` (no `SourceWatchers` access);
+`crates/frust-drive/src/process.rs`'s `windows_tree_kill` (shared by `RealProcessRunner::spawn_streaming`,
+which both `frust-cli`'s `run` command and `frust-tui`'s `Supervisor`/`supervise::watch` build on).
 
 ---
 
