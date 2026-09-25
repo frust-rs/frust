@@ -33,8 +33,8 @@ pub fn render(
     mouse: &mut MouseCtx,
 ) {
     // wordmark(1)+blank(1)+"Targets:"(1)+targets+blank(1)+mode(1)+flavor(1)+
-    // defines(1)+blank(1)+buttons(1)+hint(1), plus the border (2).
-    let inner_rows = modal.targets.len() as u16 + 9;
+    // defines(1)+watch(1)+blank(1)+buttons(1)+hint(1), plus the border (2).
+    let inner_rows = modal.targets.len() as u16 + 10;
     let height = (inner_rows + 2).min(area.height);
     let box_ = centered(area, MODAL_WIDTH, height);
 
@@ -170,6 +170,42 @@ pub fn render(
         RegionId::RunDefinesRow,
         Message::RunConfigFocus(RunFocus::Defines),
         theme,
+    );
+    advance(&mut y);
+
+    // ── Watch checkbox ───────────────────────────────────────────────────
+    // Desktop only (the label says so): the runner turns watch on for the
+    // launched desktop session and ignores it for devices.
+    let watch_focused = modal.focus == RunFocus::Watch;
+    let watch_line = Line::from(vec![
+        Span::styled(
+            if watch_focused { "\u{25b8} " } else { "  " }.to_string(),
+            Style::default().fg(theme.accent()),
+        ),
+        Span::styled(
+            if modal.watch { "[x] " } else { "[ ] " }.to_string(),
+            Style::default().fg(if modal.watch {
+                theme.success()
+            } else {
+                theme.muted()
+            }),
+        ),
+        Span::styled(
+            "Watch src/ and restart on change (desktop only)".to_string(),
+            if watch_focused {
+                Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
+            } else if modal.watch {
+                Style::default().fg(theme.fg())
+            } else {
+                Style::default().fg(theme.muted())
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(watch_line), row_rect(y));
+    mouse.click(
+        row_rect(y),
+        RegionId::RunWatchRow,
+        Message::RunConfigToggleWatch,
     );
     advance(&mut y);
 

@@ -31,6 +31,9 @@
 //!   one System/Network metrics-sampling thread per session (workbook
 //!   §B12's System/Network tabs), a sibling to `devtools_bridge` rather than
 //!   part of it — see that module's doc for why.
+//! - [`watch`] is the fourth — [`SourceWatchers`] owns one `notify` watcher
+//!   plus debounce thread per session with "Watch: restart on save" on,
+//!   posting a debounced `Message::WatchTriggered` into the engine channel.
 //!
 //! The desktop `cargo run` path and the multi-phase device pipeline (build →
 //! install → launch → logcat, via `frust-drive`'s `android_run`/`ios_run`
@@ -55,6 +58,7 @@ mod progress;
 mod session;
 pub mod session_feeds;
 mod supervisor;
+mod watch;
 
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -74,6 +78,7 @@ pub use session::{
 };
 pub use session_feeds::{PendingWidgetTrees, SessionCursor, SessionSubscribers};
 pub use supervisor::Supervisor;
+pub use watch::{SourceWatchers, WATCH_DEBOUNCE};
 
 /// How long a [`Teardown`] waits for its signalled thread before detaching it.
 ///

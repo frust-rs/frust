@@ -20,12 +20,12 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
    New project · n │  Mode     ‹ release ›                                      │▓▓                 
    Add plugin · a  │  Flavor   paid                                             │▓▓                 
    Doctor · i      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
-   Build · b       │                                                            │▓▓                 
-   Clean · c       │   Launch (1)     Cancel                                    │▓▓                 
-   MCP off · M     │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
-   DAP off · D     ╰────────────────────────────────────────────────────────────╯▓▓                 
+   Build · b       │    [ ] Watch src/ and restart on change (desktop only)     │▓▓                 
+   Clean · c       │                                                            │▓▓                 
+   MCP off · M     │   Launch (1)     Cancel                                    │▓▓                 
+   DAP off · D     │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
+                   ╰────────────────────────────────────────────────────────────╯▓▓                 
                      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                 
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

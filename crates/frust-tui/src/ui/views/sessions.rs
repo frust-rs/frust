@@ -201,6 +201,12 @@ fn status_style(s: &SessionState, animation_frame: u64, theme: &Theme) -> (Strin
     }
 }
 
+/// The tab-label suffix marking a watched session (`SessionView::watch`).
+const WATCH_GLYPH_SUFFIX: &str = " \u{27f3}"; // ⟳
+
+/// The log status line's segment for a watched session.
+const WATCH_STATUS: &str = "\u{27f3} watch"; // ⟳ watch
+
 /// Render the tab bar: sessions grouped by project (a muted `name:` label per
 /// group), each tab numbered `1`–`9` where jumpable, the active tab accented.
 fn render_tab_bar(
@@ -246,7 +252,15 @@ fn render_tab_bar(
             } else {
                 String::new()
             };
-            let label = format!(" {number}{glyph} {} ", session.target_label);
+            // A watched session ("Watch: restart on save") carries a small
+            // `⟳` after its label — hardcoded Unicode like the status glyphs
+            // above (no Nerd Font variant in `Icons` for it).
+            let watch_mark = if session.watch {
+                WATCH_GLYPH_SUFFIX
+            } else {
+                ""
+            };
+            let label = format!(" {number}{glyph} {}{watch_mark} ", session.target_label);
 
             let tab_x = area.x + col;
             let tab_style = if active {
@@ -274,7 +288,7 @@ fn render_tab_bar(
                 push(
                     &mut spans,
                     &mut col,
-                    format!(" {} ", session.target_label),
+                    format!(" {}{watch_mark} ", session.target_label),
                     tab_style,
                 );
             }
@@ -506,6 +520,13 @@ fn render_log_status(
     if session.selection.is_some() {
         left.push(Span::styled("  ·  ", Style::default().fg(theme.border())));
         left.push(Span::styled("y copy", Style::default().fg(theme.accent())));
+    }
+    if session.watch {
+        left.push(Span::styled("  ·  ", Style::default().fg(theme.border())));
+        left.push(Span::styled(
+            WATCH_STATUS.to_string(),
+            Style::default().fg(theme.accent()),
+        ));
     }
 
     let filter = session.level_filter;
@@ -1326,6 +1347,55 @@ mod tests {
     /// prefix chrome ([`PREFIX_WIDTH`]) stripped off.
     fn msg_only(l: &Line<'static>) -> String {
         row_text(l).chars().skip(PREFIX_WIDTH).collect()
+    }
+
+    /// Render the session workspace for `state` into a plain string.
+    fn render_main_to_string(state: &AppState) -> String {
+        use crate::ui::mouse::MouseRegions;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Position;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("test terminal");
+        let mut regions = MouseRegions::new();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                let area = frame.area();
+                render_main(frame, area, state, &theme(), &mut ctx);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in buf.area.top()..buf.area.bottom() {
+            for x in buf.area.left()..buf.area.right() {
+                if let Some(cell) = buf.cell(Position::new(x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn a_watched_session_shows_the_watch_mark_on_its_tab_and_status_line() {
+        let mut state = AppState::default();
+        state.sessions.push(session(3));
+        state.active_session = Some(0);
+        let unwatched = render_main_to_string(&state);
+        assert!(!unwatched.contains('\u{27f3}'), "{unwatched}");
+
+        state.sessions[0].watch = true;
+        let watched = render_main_to_string(&state);
+        assert!(
+            watched.contains(&format!("desktop{WATCH_GLYPH_SUFFIX}")),
+            "the tab carries the mark:\n{watched}"
+        );
+        assert!(
+            watched.contains(WATCH_STATUS),
+            "the status line says so:\n{watched}"
+        );
     }
 
     #[test]

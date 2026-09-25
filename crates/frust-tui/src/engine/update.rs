@@ -44,6 +44,18 @@ pub enum Effect {
     /// own launch records; `update()` has already applied every guard this
     /// effect needs before requesting it.
     RestartSession(SessionId),
+    /// Start (`on`) or stop session `id`'s source watcher — the enactment of
+    /// a "Watch: restart on save" flip ([`Message::ToggleWatch`],
+    /// [`Message::EnableWatch`]). The runner keys its
+    /// `crate::supervise::SourceWatchers` by `id`, watching the launch
+    /// record's project root; every settled change burst comes back as
+    /// [`Message::WatchTriggered`].
+    WatchSet {
+        /// The session whose watcher starts/stops.
+        id: SessionId,
+        /// Start (`true`) or stop (`false`).
+        on: bool,
+    },
     /// Copy text to the system clipboard (the runner emits an OSC 52 sequence).
     Copy(String),
     /// Discover devices off-thread (`frust-drive`'s `DeviceDiscovery` set),
@@ -52,6 +64,11 @@ pub enum Effect {
     /// Launch one supervised session per spec (the run-config modal's checked
     /// targets), registering each returned id back into the model.
     LaunchSessions(Vec<SessionSpec>),
+    /// [`Self::LaunchSessions`] for desktop specs launched with the
+    /// run-config modal's watch checkbox ticked: the runner launches them
+    /// exactly the same way, then posts [`Message::EnableWatch`] for each
+    /// session that started, after its registration.
+    LaunchWatchedSessions(Vec<SessionSpec>),
     /// Persist `path` as the most-recently-opened project (`toml_edit`
     /// format-preserving save to `~/.config/frust/tui.toml`) — the runner
     /// performs the actual file I/O; the pure engine only requests it.
@@ -404,11 +421,32 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 Outcome::idle()
             }
         }
-        Message::StopSession => match state.active_session().map(|s| s.id) {
-            Some(id) => Outcome::effect(Effect::StopSession(id)),
+        Message::StopSession => match state.active_session_mut() {
+            Some(session) => {
+                // An explicit stop ends the watch loop too (the runner's
+                // `StopSession` enactment stops the watcher): otherwise the
+                // next save would relaunch what the user just stopped.
+                session.watch = false;
+                Outcome::effect(Effect::StopSession(session.id))
+            }
             None => Outcome::idle(),
         },
-        Message::RestartSession => restart_session(state),
+        Message::RestartSession => match state.active_session {
+            Some(idx) => restart_session_at(state, idx),
+            None => Outcome::idle(),
+        },
+        Message::ToggleWatch => toggle_watch(state),
+        Message::WatchTriggered { session } => watch_triggered(state, session),
+        Message::EnableWatch { session } => enable_watch(state, session),
+        Message::WatchFailed { session, reason } => {
+            if let Some(idx) = state.session_index(session) {
+                state.sessions[idx].watch = false;
+            }
+            state
+                .toasts
+                .push(ToastKind::Warn, format!("Watch unavailable: {reason}"));
+            Outcome::redraw()
+        }
         Message::CloseTab(idx) => close_tab(state, idx),
         Message::CloseActiveTab => match state.active_session {
             Some(idx) => close_tab(state, idx),
@@ -633,6 +671,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigFocusPrev => with_modal(state, RunConfig::focus_prev),
         Message::RunConfigToggleTarget => with_modal(state, RunConfig::toggle_focused_target),
         Message::RunConfigToggleTargetAt(i) => with_modal(state, |m| m.toggle_target(i)),
+        Message::RunConfigToggleWatch => with_modal(state, RunConfig::toggle_watch),
         Message::RunConfigCycleMode(delta) => with_modal(state, |m| {
             m.cycle_mode(delta);
             m.focus = super::run_config::RunFocus::Mode;
@@ -643,13 +682,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigLaunch => match &state.run_config {
             Some(modal) if modal.any_selected() => {
                 let specs = modal.launch_specs();
+                let watch = modal.watch;
                 state.run_config = None;
                 // The modal closes either way: a refusal is explained by its
                 // own toast, not by leaving the dialog up.
                 let specs = drop_already_running(state, specs);
                 Outcome {
                     redraw: true,
-                    effect: launch_effect(state, specs),
+                    effect: launch_effect(state, specs, watch),
                 }
             }
             // Modal open but nothing checked, or no modal: nothing to launch.
@@ -1823,12 +1863,15 @@ fn auto_ide_config(state: &AppState, project_root: &Path) -> Option<Effect> {
 /// launch is where the editor's DAP client config gets written: one
 /// [`Effect::LaunchSessions`], followed (via [`Effect::Batch`]) by one
 /// [`auto_ide_config`] write per *distinct* project root among the specs,
-/// when one is due. `None` for no specs.
+/// when one is due. `None` for no specs. With `watch` set (the run-config
+/// modal's checkbox), the desktop specs go out as
+/// [`Effect::LaunchWatchedSessions`] instead and the device specs stay in a
+/// plain [`Effect::LaunchSessions`] — watch is desktop-only.
 ///
 /// Sessions launched through the MCP/DAP backend
 /// (`crate::supervise::mcp_backend`) never pass through here, by design: the
 /// DAP client that launched them already had a config to connect with.
-fn launch_effect(state: &AppState, specs: Vec<SessionSpec>) -> Option<Effect> {
+fn launch_effect(state: &AppState, specs: Vec<SessionSpec>, watch: bool) -> Option<Effect> {
     if specs.is_empty() {
         return None;
     }
@@ -1844,8 +1887,20 @@ fn launch_effect(state: &AppState, specs: Vec<SessionSpec>) -> Option<Effect> {
         .into_iter()
         .filter_map(|root| auto_ide_config(state, root))
         .collect();
-    let mut effects = Vec::with_capacity(1 + configs.len());
-    effects.push(Effect::LaunchSessions(specs));
+    let mut effects = Vec::with_capacity(2 + configs.len());
+    if watch {
+        let (desktop, devices): (Vec<SessionSpec>, Vec<SessionSpec>) = specs
+            .into_iter()
+            .partition(|spec| matches!(spec.target, DeviceTarget::Desktop));
+        if !desktop.is_empty() {
+            effects.push(Effect::LaunchWatchedSessions(desktop));
+        }
+        if !devices.is_empty() {
+            effects.push(Effect::LaunchSessions(devices));
+        }
+    } else {
+        effects.push(Effect::LaunchSessions(specs));
+    }
     effects.extend(configs);
     batch(effects)
 }
@@ -2203,7 +2258,7 @@ fn run_on_all_devices(state: &mut AppState) -> Outcome {
     }
     Outcome {
         redraw: true,
-        effect: launch_effect(state, specs),
+        effect: launch_effect(state, specs, false),
     }
 }
 
@@ -2455,31 +2510,36 @@ fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
     }
 }
 
-/// Restart the active session (`R` with an app session active, and the
-/// palette's "Restart session" row) — the keyboard twin of
-/// `crate::supervise::mcp_backend::restart_app`/DAP `frustRestart`; see that
-/// fn's doc for the shared contract this mirrors (same duplicate guard,
+/// Restart the session at `idx` — the one restart path shared by the active
+/// tab (`R` with an app session active, and the palette's "Restart session"
+/// row) and a watched session's settled save-burst
+/// ([`Message::WatchTriggered`], via [`watch_triggered`]). The keyboard twin
+/// of `crate::supervise::mcp_backend::restart_app`/DAP `frustRestart`; see
+/// that fn's doc for the shared contract this mirrors (same duplicate guard,
 /// excluding the session being restarted; stop; relaunch the retained spec)
 /// so the two stay aligned. MCP additionally applies its record cap; this
 /// path has none — a restart is a net-zero swap, and the keyboard's own `r`
 /// launches are uncapped too.
 ///
-/// No active session idles. An ad-hoc session (no `SessionTarget`) refuses
-/// with a toast — only an app launch has a spec worth relaunching. Otherwise
-/// the one-live-session guard runs excluding the session being restarted
-/// (`AppState::live_session_for_excluding`, exactly as `restart_app` excludes
-/// it from its own duplicate check) and refuses with the same toast wording
-/// [`drop_already_running`] uses on a hit. Once it clears, the active tab is
-/// marked for removal-once-terminal exactly as [`close_tab`] does for a live
-/// session, except an already-terminal tab is removed immediately *and* the
-/// effect still fires — a crashed session must still relaunch, unlike
-/// closing a tab, which has nothing left to do once the tab is gone. The
+/// An out-of-range `idx` idles. An ad-hoc session (no `SessionTarget`)
+/// refuses with a toast — only an app launch has a spec worth relaunching.
+/// Otherwise the one-live-session guard runs excluding the session being
+/// restarted (`AppState::live_session_for_excluding`, exactly as
+/// `restart_app` excludes it from its own duplicate check) and refuses with
+/// the same toast wording [`drop_already_running`] uses on a hit. Once it
+/// clears, the tab is marked for removal-once-terminal exactly as
+/// [`close_tab`] does for a live session, except an already-terminal tab is
+/// removed immediately *and* the effect still fires — a crashed session must
+/// still relaunch, unlike closing a tab, which has nothing left to do once
+/// the tab is gone. When the restarted tab was the active one, the
 /// relaunch's tab is focused when it registers
-/// (`AppState::focus_next_registered`).
-fn restart_session(state: &mut AppState) -> Outcome {
-    let Some(idx) = state.active_session else {
-        return Outcome::idle();
-    };
+/// (`AppState::focus_next_registered`); a watched background tab's relaunch
+/// does not steal focus.
+///
+/// The replaced tab's `watch` flag is cleared: the runner stops its watcher
+/// in the same enactment and re-enables watch on the *relaunch* instead
+/// ([`Message::EnableWatch`]), so the dying tab never shows the indicator.
+fn restart_session_at(state: &mut AppState, idx: usize) -> Outcome {
     let Some(session) = state.sessions.get(idx) else {
         return Outcome::idle();
     };
@@ -2507,13 +2567,85 @@ fn restart_session(state: &mut AppState) -> Outcome {
         return Outcome::idle();
     }
 
+    let refocus = state.active_session == Some(idx);
+    state.sessions[idx].watch = false;
     if state.sessions[idx].state.is_terminal() {
         remove_session(state, idx);
     } else {
         state.sessions[idx].close_on_exit = true;
     }
-    state.focus_next_registered = Some((project_root, target));
+    if refocus {
+        state.focus_next_registered = Some((project_root, target));
+    }
     Outcome::effect(Effect::RestartSession(id))
+}
+
+/// The refusal toast for "Watch: restart on save" on anything but a desktop
+/// app session — `frust run --watch`'s own reason (`frust-cli`'s `run` docs).
+const WATCH_DESKTOP_ONLY: &str = "Watch is desktop-only: the watch loop has no device-side \
+     kill/rebuild/relaunch story yet";
+
+/// Flip "Watch: restart on save" on the active session
+/// ([`Message::ToggleWatch`]). No active session idles; a session whose
+/// target is not the desktop preview (a device, or an ad-hoc session with no
+/// target) refuses with [`WATCH_DESKTOP_ONLY`] and no effect. Otherwise the
+/// flag flips and the runner is told to start/stop the watcher.
+fn toggle_watch(state: &mut AppState) -> Outcome {
+    let Some(session) = state.active_session_mut() else {
+        return Outcome::idle();
+    };
+    if session.target != Some(SessionTarget::Desktop) {
+        state
+            .toasts
+            .push(ToastKind::Warn, WATCH_DESKTOP_ONLY.to_string());
+        return Outcome::redraw();
+    }
+    session.watch = !session.watch;
+    let (id, on) = (session.id, session.watch);
+    let text = if on {
+        "Watching src/ + Cargo.toml — a save restarts this session"
+    } else {
+        "Watch off"
+    };
+    state.toasts.push(ToastKind::Info, text.to_string());
+    Outcome::effect(Effect::WatchSet { id, on })
+}
+
+/// A watched session's sources settled after a change
+/// ([`Message::WatchTriggered`]): restart it through [`restart_session_at`]
+/// — unless it is gone, has watch off, or already has a restart pending
+/// (`close_on_exit` set by an earlier restart or close that has not landed
+/// yet). That last guard is what keeps one save-burst to one relaunch: a
+/// trigger already in flight when the first restart was requested finds the
+/// replaced tab marked and does nothing.
+fn watch_triggered(state: &mut AppState, session: SessionId) -> Outcome {
+    let Some(idx) = state.session_index(session) else {
+        return Outcome::idle();
+    };
+    let view = &state.sessions[idx];
+    if !view.watch || view.close_on_exit {
+        return Outcome::idle();
+    }
+    restart_session_at(state, idx)
+}
+
+/// Turn watch on for a freshly launched session the runner says should carry
+/// it ([`Message::EnableWatch`] — a watched session's relaunch, or a
+/// watch-checked desktop launch). Only a desktop app session takes it;
+/// anything else, an unknown id, or a session already watching idles.
+fn enable_watch(state: &mut AppState, session: SessionId) -> Outcome {
+    let Some(idx) = state.session_index(session) else {
+        return Outcome::idle();
+    };
+    let view = &mut state.sessions[idx];
+    if view.watch || view.target != Some(SessionTarget::Desktop) {
+        return Outcome::idle();
+    }
+    view.watch = true;
+    Outcome::effect(Effect::WatchSet {
+        id: session,
+        on: true,
+    })
 }
 
 /// Remove `sessions[idx]`, repairing `active_session` and closing a context
@@ -3397,6 +3529,258 @@ mod tests {
         st.active_session = Some(st.session_index(first).unwrap());
         register_on(&mut st, 9, "/tmp/huddle", SessionTarget::Desktop);
         assert_eq!(st.active_session().map(|s| s.id), Some(first));
+    }
+
+    // ── Watch: restart on save ──────────────────────────────────────────────
+
+    /// Every effect `out` carries, flattening one level of `Effect::Batch`.
+    fn effects_of(out: &Outcome) -> Vec<Effect> {
+        match &out.effect {
+            Some(Effect::Batch(effects)) => effects.clone(),
+            Some(effect) => vec![effect.clone()],
+            None => vec![],
+        }
+    }
+
+    #[test]
+    fn toggle_watch_on_a_device_session_refuses_with_the_cli_wording() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, None);
+        assert!(!st.sessions[0].watch);
+        assert_eq!(warn_texts(&st), vec![WATCH_DESKTOP_ONLY]);
+        assert!(
+            WATCH_DESKTOP_ONLY
+                .contains("the watch loop has no device-side kill/rebuild/relaunch story yet"),
+            "reuses `frust run --watch`'s wording"
+        );
+
+        // An ad-hoc (targetless) session refuses the same way.
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+        assert_eq!(update(&mut st, Message::ToggleWatch).effect, None);
+        assert!(!st.sessions[0].watch);
+
+        // No session at all: nothing to do, nothing said.
+        let mut empty = welcome();
+        let out = update(&mut empty, Message::ToggleWatch);
+        assert_eq!(out.effect, None);
+        assert!(warn_texts(&empty).is_empty());
+    }
+
+    #[test]
+    fn toggle_watch_on_a_desktop_session_flips_the_flag_and_emits_watch_set() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: a, on: true }));
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: a, on: false }));
+        assert!(!st.sessions[0].watch);
+    }
+
+    #[test]
+    fn watch_triggered_for_a_session_with_watch_off_is_a_no_op() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, None);
+        assert!(!st.sessions[0].close_on_exit);
+
+        // An unknown session id is ignored too.
+        let out = update(
+            &mut st,
+            Message::WatchTriggered {
+                session: SessionId(99),
+            },
+        );
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn watch_triggered_restarts_that_session_once_per_burst() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(
+            st.sessions[0].close_on_exit,
+            "the replaced tab is removed once terminal"
+        );
+        assert!(
+            !st.sessions[0].watch,
+            "the dying tab hands the flag to its relaunch"
+        );
+
+        // A second trigger already in flight for the same burst finds the
+        // restart pending and does nothing — one relaunch, never two.
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, None);
+
+        // The terminal event removes the replaced tab exactly once.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert!(st.sessions.is_empty());
+    }
+
+    #[test]
+    fn a_pending_close_blocks_a_watch_restart_even_with_the_flag_still_on() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        st.sessions[0].watch = true;
+        st.sessions[0].close_on_exit = true;
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn a_crashed_watched_session_is_relaunched_by_the_next_save() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+        // A compile error: the session exits non-zero; watch stays on.
+        update(&mut st, state_event(a, SessionState::Exited(false)));
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions.is_empty(), "the terminal tab goes at once");
+    }
+
+    #[test]
+    fn a_watch_restart_of_a_background_tab_does_not_steal_focus() {
+        let mut st = workbench_with_project();
+        let watched = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        let other = register(&mut st, 1, "/tmp/huddle", "build apk");
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        st.active_session = Some(st.session_index(other).unwrap());
+
+        let out = update(&mut st, Message::WatchTriggered { session: watched });
+        assert_eq!(out.effect, Some(Effect::RestartSession(watched)));
+        assert_eq!(st.focus_next_registered, None);
+    }
+
+    #[test]
+    fn the_relaunch_of_a_watched_session_carries_watch_on() {
+        let mut st = workbench_with_project();
+        let old = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        update(&mut st, Message::WatchTriggered { session: old });
+
+        // The runner relaunches the spec (a synthetic registration here) and,
+        // because `old` had a watcher, posts `EnableWatch` for the new id
+        // right after it.
+        let new = register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        assert!(
+            !st.sessions[1].watch,
+            "a registration alone starts unwatched"
+        );
+        let out = update(&mut st, Message::EnableWatch { session: new });
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: new, on: true }));
+        let view = &st.sessions[st.session_index(new).unwrap()];
+        assert!(view.watch);
+        assert_eq!(st.active_session().map(|s| s.id), Some(new));
+
+        // Idempotent: a repeated enable starts nothing twice.
+        assert_eq!(
+            update(&mut st, Message::EnableWatch { session: new }).effect,
+            None
+        );
+    }
+
+    #[test]
+    fn enable_watch_is_refused_for_a_device_session() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        assert_eq!(
+            update(&mut st, Message::EnableWatch { session: a }).effect,
+            None
+        );
+        assert!(!st.sessions[0].watch);
+    }
+
+    #[test]
+    fn stopping_a_watched_session_turns_watch_off() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+
+        let out = update(&mut st, Message::StopSession);
+        assert_eq!(out.effect, Some(Effect::StopSession(a)));
+        assert!(!st.sessions[0].watch);
+    }
+
+    #[test]
+    fn a_failed_watcher_clears_the_flag_and_says_why() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+
+        update(
+            &mut st,
+            Message::WatchFailed {
+                session: a,
+                reason: "no inotify".to_string(),
+            },
+        );
+        assert!(!st.sessions[0].watch);
+        assert_eq!(warn_texts(&st), vec!["Watch unavailable: no inotify"]);
+    }
+
+    #[test]
+    fn a_watch_checked_launch_routes_only_the_desktop_spec_through_the_watched_launch() {
+        let mut st = workbench_with_project();
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+        update(&mut st, Message::RunConfigToggleTargetAt(0)); // desktop on
+        update(&mut st, Message::RunConfigToggleWatch);
+        assert!(st.run_config.as_ref().unwrap().watch);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+        let effects = effects_of(&out);
+        let watched: Vec<&SessionSpec> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LaunchWatchedSessions(specs) => Some(specs),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let plain: Vec<&SessionSpec> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LaunchSessions(specs) => Some(specs),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(watched.len(), 1);
+        assert_eq!(watched[0].target, DeviceTarget::Desktop);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(SessionTarget::of(&plain[0].target), pixel_7_target());
+
+        // Unchecked (the default), the same launch stays one plain effect.
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            effects_of(&out)
+                .iter()
+                .all(|e| !matches!(e, Effect::LaunchWatchedSessions(_)))
+        );
     }
 
     #[test]

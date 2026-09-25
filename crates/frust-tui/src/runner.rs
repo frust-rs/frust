@@ -40,7 +40,8 @@ use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
     DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge,
     PendingWidgetTrees, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState,
-    SessionSubscribers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state, serve_command,
+    SessionSubscribers, SourceWatchers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state,
+    serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -149,6 +150,12 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // for the embedded server's snapshots and its `restart_app`. Empty (and
     // untouched) while no MCP server is running.
     let mut mcp_records = McpSessionRecords::new();
+    // The "Watch: restart on save" watchers (`crate::supervise::watch`): one
+    // `notify` watcher + debounce thread per watched desktop session,
+    // posting `Message::WatchTriggered` on the engine channel. Started and
+    // stopped only through `apply_effect`; dropped (every thread stopped and
+    // bounded-joined against one deadline) when this loop returns.
+    let mut watchers = SourceWatchers::new(msg_tx.clone());
     // The embedded servers' two deferred-answer registries (see
     // `crate::supervise::session_feeds`): the open session-event feeds a DAP
     // client's output/exit pumps read, and the widget-tree pulls waiting on a
@@ -279,6 +286,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            watchers: &mut watchers,
                             backend: &backend,
                             clipboard: clipboard_backend,
                         },
@@ -305,6 +313,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                     tx: &msg_tx,
                                     next_adhoc_id: &mut next_adhoc_id,
                                     records: &mut mcp_records,
+                                    watchers: &mut watchers,
                                     backend: &backend,
                                     clipboard: clipboard_backend,
                                 },
@@ -351,6 +360,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            watchers: &mut watchers,
                             backend: &backend,
                             clipboard: clipboard_backend,
                         },
@@ -374,6 +384,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         tx: &msg_tx,
                         next_adhoc_id: &mut next_adhoc_id,
                         records: &mut mcp_records,
+                        watchers: &mut watchers,
                         backend: &backend,
                         clipboard: clipboard_backend,
                     },
@@ -387,6 +398,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // no-ops while nothing has started one.
     engine.stop_mcp();
     engine.stop_dap();
+    // …and stop every source watcher now, while the terminal is still ours,
+    // rather than whenever the locals happen to drop.
+    drop(watchers);
 
     Ok(())
 }
@@ -480,6 +494,9 @@ struct EffectCtx<'a> {
     next_adhoc_id: &'a mut u64,
     /// The MCP launch records a started session is recorded in.
     records: &'a mut McpSessionRecords,
+    /// The per-session "Watch: restart on save" source watchers, keyed by
+    /// session id alongside `records` (whose spec gives a watcher its root).
+    watchers: &'a mut SourceWatchers,
     /// The one [`TuiSessionBackend`] both embedded servers are started over —
     /// built once per run, so an MCP agent and a DAP client drive the same
     /// session world rather than two backends over the same supervisor.
@@ -509,12 +526,16 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         tx,
         next_adhoc_id,
         records,
+        watchers,
         backend,
         clipboard: clipboard_backend,
     } = ctx;
     records.observe(&engine.state);
     match effect {
-        Some(Effect::StopSession(id)) => supervisor.stop(id),
+        Some(Effect::StopSession(id)) => {
+            supervisor.stop(id);
+            spawn_teardown(watchers.stop(id));
+        }
         // The keyboard restart's enactment: `update()` has already applied
         // its guard (`crate::supervise::mcp_backend::restart_app`'s doc
         // names the shared contract this mirrors), so this only needs the
@@ -530,20 +551,34 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         // guard. Either way there is nothing to relaunch, and the tab may
         // already be gone, so the user is told with a toast — stderr is
         // invisible under the raw-mode TUI.
-        Some(Effect::RestartSession(id)) => match records.get(id) {
-            Some(record) if record.launch_error.is_none() => {
-                let spec = record.spec.clone();
-                records.mark_closed(id);
-                supervisor.stop(id);
-                launch_sessions(vec![spec], supervisor, tx, records);
+        //
+        // A watched session's flag survives the relaunch here, in the runner
+        // (the pure core has no id for the relaunch until it registers): the
+        // replaced session's watcher is stopped and, if it had one, the new
+        // session is sent `EnableWatch` right after its `RegisterSession` —
+        // same channel, so the engine always sees the registration first —
+        // which flips its flag and asks for a fresh watcher (`WatchSet`).
+        Some(Effect::RestartSession(id)) => {
+            let watched = watchers.contains(id);
+            spawn_teardown(watchers.stop(id));
+            match records.get(id) {
+                Some(record) if record.launch_error.is_none() => {
+                    let spec = record.spec.clone();
+                    records.mark_closed(id);
+                    supervisor.stop(id);
+                    let started = launch_sessions(vec![spec], supervisor, tx, records);
+                    if watched {
+                        enable_watch_on(&started, tx);
+                    }
+                }
+                _ => {
+                    let _ = tx.send(Message::Notify {
+                        level: ToastKind::Warn,
+                        text: "no launch record for this session — relaunch it with r".to_string(),
+                    });
+                }
             }
-            _ => {
-                let _ = tx.send(Message::Notify {
-                    level: ToastKind::Warn,
-                    text: "no launch record for this session — relaunch it with r".to_string(),
-                });
-            }
-        },
+        }
         Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
             Ok(clipboard::CopyOutcome::Complete) => {}
             Ok(clipboard::CopyOutcome::Truncated { kept_bytes }) => {
@@ -560,7 +595,47 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
             }
         },
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
-        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
+        Some(Effect::LaunchSessions(specs)) => {
+            launch_sessions(specs, supervisor, tx, records);
+        }
+        Some(Effect::LaunchWatchedSessions(specs)) => {
+            let started = launch_sessions(specs, supervisor, tx, records);
+            enable_watch_on(&started, tx);
+        }
+        Some(Effect::WatchSet { id, on: true }) => {
+            // The launch record's root is the spec the session runs; the
+            // tab's own root is the fallback for a record since evicted.
+            let root = records
+                .get(id)
+                .map(|record| record.spec.project_root.clone())
+                .or_else(|| {
+                    engine
+                        .state
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.project_root.clone())
+                });
+            match root {
+                Some(root) => {
+                    let (started, replaced) = watchers.start(id, &root);
+                    spawn_teardown(replaced);
+                    if let Err(reason) = started {
+                        let _ = tx.send(Message::WatchFailed {
+                            session: id,
+                            reason,
+                        });
+                    }
+                }
+                None => {
+                    let _ = tx.send(Message::WatchFailed {
+                        session: id,
+                        reason: "the session is gone".to_string(),
+                    });
+                }
+            }
+        }
+        Some(Effect::WatchSet { id, on: false }) => spawn_teardown(watchers.stop(id)),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         Some(Effect::ProbeCleanSignals) => {
             // Neither the create wizard's arch cards nor the Add Plugin
@@ -656,6 +731,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                         tx,
                         next_adhoc_id,
                         records,
+                        watchers,
                         backend,
                         clipboard: *clipboard_backend,
                     },
@@ -665,6 +741,27 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
+    }
+    // Reconcile the watchers with the model *after* the effect: a watched tab
+    // can leave without an effect naming it (a terminal tab closed on the
+    // spot), and its watcher must not outlive it. Running after the match
+    // (not before, like `observe`) lets the restart arm above read a
+    // just-removed tab's watcher to carry its flag over first.
+    let watched = |id: SessionId| engine.state.sessions.iter().any(|s| s.id == id && s.watch);
+    for teardown in watchers.retain(watched) {
+        spawn_teardown(Some(teardown));
+    }
+}
+
+/// Post [`Message::EnableWatch`] for every desktop session in `started` — the
+/// carry-over of "Watch: restart on save" onto a relaunch, and the run-config
+/// modal's watch checkbox. Sent after `launch_sessions` has already sent each
+/// session's `RegisterSession`, so the engine always has the tab first.
+fn enable_watch_on(started: &[(SessionId, bool)], tx: &UnboundedSender<Message>) {
+    for &(session, desktop) in started {
+        if desktop {
+            let _ = tx.send(Message::EnableWatch { session });
+        }
     }
 }
 
@@ -1257,10 +1354,12 @@ fn launch_sessions(
     supervisor: &mut Supervisor,
     tx: &UnboundedSender<Message>,
     records: &mut McpSessionRecords,
-) {
+) -> Vec<(SessionId, bool)> {
+    let mut started = Vec::with_capacity(specs.len());
     for spec in specs {
         match supervisor.start(&spec) {
             Ok(id) => {
+                started.push((id, matches!(spec.target, DeviceTarget::Desktop)));
                 let _ = tx.send(Message::RegisterSession {
                     id,
                     project_root: spec.project_root.clone(),
@@ -1280,6 +1379,7 @@ fn launch_sessions(
             Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
         }
     }
+    started
 }
 
 /// What a launched app session's own config says about reaching its devtools
@@ -1573,6 +1673,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
         KeyCode::Char('R') if has_app_session => vec![Message::RestartSession],
         KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
+        // `W` toggles "Watch: restart on save" on the active session (mouse
+        // parity: the palette row). Free in every session context; the pure
+        // core refuses it (with the `frust run --watch` wording) on anything
+        // but a desktop app session.
+        KeyCode::Char('W') if has_active_session => vec![Message::ToggleWatch],
         KeyCode::Enter if devices_focused => vec![Message::OpenRunConfig],
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
@@ -3594,6 +3699,7 @@ mod tests {
                 tx: &tx,
                 next_adhoc_id: &mut next_adhoc_id,
                 records: &mut records,
+                watchers: &mut SourceWatchers::new(tx.clone()),
                 backend: &backend,
                 clipboard: ClipboardBackend::Disabled { reason: "test" },
             },
@@ -3872,7 +3978,8 @@ mod tests {
                 // `gate_state`'s existing shapes give without also opening
                 // DevTools (`inspector_live`, which would hijack `R` into
                 // `translate_devtools_key` instead) — built directly instead.
-                "Restart session" => {
+                // "Watch: restart on save" needs the same desktop app session.
+                "Restart session" | "Watch: restart on save" => {
                     use crate::engine::SessionView;
                     let mut state = AppState {
                         screen: Screen::Workbench,

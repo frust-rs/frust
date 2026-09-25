@@ -100,6 +100,11 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     // (`crate::runner`'s `translate_key`), so exactly one of the two rows
     // below carries the `R` hint at a time.
     let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
+    // "Watch: restart on save" is the `frust run --watch` loop, which is
+    // desktop-preview only — a device (or ad-hoc) session gates it off.
+    let has_desktop_session = state
+        .active_session()
+        .is_some_and(|s| s.target == Some(super::session_view::SessionTarget::Desktop));
     let has_selection = state
         .active_session()
         .is_some_and(|s| s.selection.is_some());
@@ -166,6 +171,16 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             Message::RestartSession,
             has_app_session,
             "no session to restart",
+        ),
+        // A toggle: the same row turns it off again. Enabled only for a
+        // desktop app session (`Message::ToggleWatch`'s own refusal covers
+        // the `W` key on anything else).
+        gated(
+            "Watch: restart on save",
+            "W",
+            Message::ToggleWatch,
+            has_desktop_session,
+            "desktop app sessions only",
         ),
         gated(
             "Close tab",
@@ -513,6 +528,48 @@ mod tests {
         let row = by_title(&app_session);
         assert!(row.enabled);
         assert_eq!(row.message, Message::RestartSession);
+    }
+
+    #[test]
+    fn watch_row_is_enabled_only_for_a_desktop_app_session() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+        use frust_drive::devices::Platform;
+
+        let by_title = |state: &AppState| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == "Watch: restart on save")
+                .expect("command present")
+        };
+        let with_session = |target: Option<SessionTarget>| {
+            let mut state = workbench();
+            state.sessions.push(SessionView::with_devtools(
+                SessionId(0),
+                PathBuf::from("/tmp/huddle"),
+                "s",
+                DevtoolsLaunch::unavailable(),
+                target,
+            ));
+            state.active_session = Some(0);
+            state
+        };
+
+        let row = by_title(&workbench());
+        assert!(!row.enabled);
+        assert_eq!(row.disabled_reason, Some("desktop app sessions only"));
+        assert!(!by_title(&with_session(None)).enabled, "ad-hoc session");
+        let device = with_session(Some(SessionTarget::Device {
+            id: "emu-1".into(),
+            name: "Pixel".into(),
+            platform: Platform::Android,
+        }));
+        assert!(!by_title(&device).enabled, "device session");
+
+        let row = by_title(&with_session(Some(SessionTarget::Desktop)));
+        assert!(row.enabled);
+        assert_eq!(row.message, Message::ToggleWatch);
+        assert_eq!(row.hint, "W");
     }
 
     #[test]
