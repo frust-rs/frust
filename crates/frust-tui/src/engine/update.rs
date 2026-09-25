@@ -382,10 +382,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // an existing absolute line index, and a freshly registered
             // session has no lines yet — so `Follow` is the only valid
             // starting state.
+            // A keyboard restart's relaunch takes focus (the replaced tab is
+            // on its way out); the pending focus is consumed by this
+            // registration either way — see `AppState::focus_next_registered`.
+            let restart_relaunch = state.take_restart_focus(&project_root, target.as_ref());
             let view = SessionView::with_devtools(id, project_root, target_label, devtools, target);
             state.sessions.push(view);
             // Auto-select the first session that appears.
-            if state.active_session.is_none() {
+            if state.active_session.is_none() || restart_relaunch {
                 state.active_session = Some(state.sessions.len() - 1);
             }
             Outcome::redraw()
@@ -2451,33 +2455,27 @@ fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
     }
 }
 
-/// Restart the active session (`R` with a session active, and the palette's
-/// "Restart session" row) — the keyboard twin of
+/// Restart the active session (`R` with an app session active, and the
+/// palette's "Restart session" row) — the keyboard twin of
 /// `crate::supervise::mcp_backend::restart_app`/DAP `frustRestart`; see that
-/// fn's doc for the shared guard/cap contract this mirrors so the two stay
-/// aligned.
+/// fn's doc for the shared contract this mirrors (same duplicate guard,
+/// excluding the session being restarted; stop; relaunch the retained spec)
+/// so the two stay aligned. MCP additionally applies its record cap; this
+/// path has none — a restart is a net-zero swap, and the keyboard's own `r`
+/// launches are uncapped too.
 ///
 /// No active session idles. An ad-hoc session (no `SessionTarget`) refuses
-/// with a toast — only an app launch has a spec worth relaunching. Otherwise:
+/// with a toast — only an app launch has a spec worth relaunching. Otherwise
 /// the one-live-session guard runs excluding the session being restarted
 /// (`AppState::live_session_for_excluding`, exactly as `restart_app` excludes
 /// it from its own duplicate check) and refuses with the same toast wording
-/// [`drop_already_running`] uses on a hit; then the workbench-wide live-session
-/// count (excluding this session) is checked against
-/// `crate::supervise::mcp_backend::MCP_RECORD_CAP`, excluding-self the same
-/// way `restart_app` excludes it from `McpSessionRecords::live_count` —
-/// refused with a toast naming the cap. The *population* counted differs,
-/// deliberately: `restart_app` counts only MCP-launched records, but
-/// `update()` is I/O-free and holds no `McpSessionRecords`, so it counts
-/// every non-terminal session in `state.sessions` instead — ad-hoc
-/// build/clean tabs included. That is a conservative approximation: this
-/// check can refuse a keyboard restart earlier than `restart_app` would (more
-/// tabs counted against the same cap), never later. Once both guards clear,
-/// the active tab is marked for removal-once-terminal exactly as
-/// [`close_tab`] does for a live session, except an already-terminal tab is
-/// removed immediately *and* the effect still fires — a crashed session must
-/// still relaunch, unlike closing a tab, which has nothing left to do once
-/// the tab is gone.
+/// [`drop_already_running`] uses on a hit. Once it clears, the active tab is
+/// marked for removal-once-terminal exactly as [`close_tab`] does for a live
+/// session, except an already-terminal tab is removed immediately *and* the
+/// effect still fires — a crashed session must still relaunch, unlike
+/// closing a tab, which has nothing left to do once the tab is gone. The
+/// relaunch's tab is focused when it registers
+/// (`AppState::focus_next_registered`).
 fn restart_session(state: &mut AppState) -> Outcome {
     let Some(idx) = state.active_session else {
         return Outcome::idle();
@@ -2509,32 +2507,12 @@ fn restart_session(state: &mut AppState) -> Outcome {
         return Outcome::idle();
     }
 
-    // A conservative approximation of `restart_app`'s
-    // `McpSessionRecords::live_count`: this counts every non-terminal
-    // session, not only MCP-launched ones (an ad-hoc build/clean tab has no
-    // record), because `update()` is I/O-free and never sees the records —
-    // it can refuse a restart earlier than `restart_app` would, never later.
-    let live_others = state
-        .sessions
-        .iter()
-        .filter(|s| s.id != id && !s.state.is_terminal())
-        .count();
-    if live_others >= crate::supervise::mcp_backend::MCP_RECORD_CAP {
-        state.toasts.push(
-            ToastKind::Warn,
-            format!(
-                "the workbench already has {} sessions live — stop one before restarting",
-                crate::supervise::mcp_backend::MCP_RECORD_CAP
-            ),
-        );
-        return Outcome::idle();
-    }
-
     if state.sessions[idx].state.is_terminal() {
         remove_session(state, idx);
     } else {
         state.sessions[idx].close_on_exit = true;
     }
+    state.focus_next_registered = Some((project_root, target));
     Outcome::effect(Effect::RestartSession(id))
 }
 
@@ -3367,29 +3345,58 @@ mod tests {
     }
 
     #[test]
-    fn restart_refuses_at_the_cap_excluding_the_session_being_restarted() {
+    fn a_restart_relaunch_becomes_the_active_tab_and_stays_active_once_the_old_tab_goes() {
         let mut st = workbench_with_project();
-        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
-        for seq in 1..=crate::supervise::mcp_backend::MCP_RECORD_CAP as u64 {
-            let id = register(&mut st, seq, &format!("/tmp/other-{seq}"), "build");
-            let idx = st.session_index(id).unwrap();
-            st.sessions[idx].state = SessionState::Running;
-        }
-        let a_idx = st.session_index(a).unwrap();
-        st.active_session = Some(a_idx);
-        st.sessions[a_idx].state = SessionState::Running;
+        let a = register(&mut st, 0, "/tmp/huddle", "build apk");
+        let old = register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        let b = register(&mut st, 2, "/tmp/huddle", "clean");
+        st.sessions[1].state = SessionState::Running;
+        st.active_session = Some(st.session_index(old).unwrap());
 
         let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(old)));
+
+        let new = register_on(&mut st, 3, "/tmp/huddle", SessionTarget::Desktop);
         assert_eq!(
-            out.effect, None,
-            "the cap is already met by the *other* live sessions alone"
+            st.active_session().map(|s| s.id),
+            Some(new),
+            "the relaunch's tab takes focus when it registers"
         );
-        assert_eq!(warn_texts(&st).len(), 1);
-        assert!(
-            warn_texts(&st)[0].contains(&crate::supervise::mcp_backend::MCP_RECORD_CAP.to_string()),
-            "the toast names the cap: {:?}",
-            warn_texts(&st)
+        assert_eq!(
+            st.focus_next_registered, None,
+            "the pending focus is consumed"
         );
+
+        // The replaced tab's terminal event removes it; `new` stays active.
+        update(&mut st, state_event(old, SessionState::Killed));
+        assert_eq!(
+            st.sessions.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![a, b, new]
+        );
+        assert_eq!(st.active_session().map(|s| s.id), Some(new));
+    }
+
+    #[test]
+    fn a_pending_restart_focus_only_applies_to_the_very_next_matching_registration() {
+        let mut st = workbench_with_project();
+        let old = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::RestartSession);
+
+        // The relaunch never registered (e.g. its launch failed); an
+        // unrelated registration arrives next. It is not focused, and it
+        // consumes the pending focus.
+        let unrelated = register(&mut st, 7, "/tmp/huddle", "build apk");
+        assert_eq!(st.active_session().map(|s| s.id), Some(old));
+        assert_ne!(st.active_session().map(|s| s.id), Some(unrelated));
+        assert_eq!(st.focus_next_registered, None);
+
+        // A later desktop launch is not focused by the stale restart.
+        update(&mut st, state_event(old, SessionState::Killed));
+        let first = register(&mut st, 8, "/tmp/huddle", "clean");
+        st.active_session = Some(st.session_index(first).unwrap());
+        register_on(&mut st, 9, "/tmp/huddle", SessionTarget::Desktop);
+        assert_eq!(st.active_session().map(|s| s.id), Some(first));
     }
 
     #[test]

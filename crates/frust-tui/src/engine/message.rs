@@ -408,7 +408,7 @@ pub enum Message {
     /// [`SessionTarget`]) or when another live session already occupies the
     /// same (project, target); an already-terminal active session still
     /// restarts — a crashed session must be relaunchable, not just a running
-    /// one.
+    /// one. The relaunch's tab becomes active when it registers.
     RestartSession,
     /// Close a tab by index into `sessions` (the context menu's "Close tab" /
     /// "Stop & close" entries, and the palette's "Close tab" command). A

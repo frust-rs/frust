@@ -69,7 +69,7 @@
 //!   truly unknown id gets, not a crash, but a real divergence this doc
 //!   records rather than hides.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -439,6 +439,14 @@ pub struct SessionRecord {
 #[derive(Debug, Default)]
 pub struct McpSessionRecords {
     by_id: HashMap<SessionId, SessionRecord>,
+    /// Record ids that have been seen with a session view in `AppState` at
+    /// least once ([`Self::observe`]). A record in here whose view is gone
+    /// had its tab removed (closed, restarted, or cleared) — terminal, not
+    /// the not-yet-registered fresh launch a missing view otherwise means.
+    observed: HashSet<SessionId>,
+    /// Record ids whose session was explicitly replaced or closed by the
+    /// runner ([`Self::mark_closed`]) — terminal even if never observed.
+    closed: HashSet<SessionId>,
 }
 
 impl McpSessionRecords {
@@ -477,27 +485,53 @@ impl McpSessionRecords {
         self.by_id.get(&id)
     }
 
+    /// Mark every record whose session currently has a view in `state` as
+    /// observed — the half of [`Self::record_is_terminal`]'s join that lets a
+    /// record whose tab has since been *removed* count as terminal.
+    ///
+    /// The runner calls this after every `update()` application: the pure
+    /// engine removes tabs (close, restart, a close-on-exit session ending)
+    /// without being able to tell the runner-owned records, so this is how a
+    /// removal becomes visible here. O(tabs) — one map lookup per view.
+    pub fn observe(&mut self, state: &AppState) {
+        for view in &state.sessions {
+            if self.by_id.contains_key(&view.id) {
+                self.observed.insert(view.id);
+            }
+        }
+    }
+
+    /// Mark `id`'s session as closed — the runner calls this for the session
+    /// a keyboard restart replaces, before relaunching its spec, so the old
+    /// record stops counting as live even if its tab was removed before a
+    /// view was ever observed.
+    pub fn mark_closed(&mut self, id: SessionId) {
+        if self.by_id.contains_key(&id) {
+            self.closed.insert(id);
+        }
+    }
+
     /// Evict oldest-terminal-first past [`MCP_RECORD_CAP`], mirroring
     /// `frust_mcp::engine`'s own `insert_retaining` shape.
     ///
-    /// A record alone carries no live [`McpSessionState`] — only joining
-    /// against `state`'s session views through [`session_state`] can say
-    /// whether its session has actually ended (see this type's doc). A
-    /// record this pass cannot find a view for (the just-launched one, whose
-    /// `RegisterSession` the caller posted but the loop has not applied yet
-    /// — see [`serve_command`]'s ordering note) is treated as live, never
-    /// terminal: unprovable terminal-ness must never be evicted.
+    /// Terminal-ness is [`Self::record_is_terminal`]'s join against `state`'s
+    /// session views plus this registry's own observed/closed marks (see
+    /// that fn for both halves); unprovable terminal-ness — a just-launched
+    /// record with no view yet — is never evicted.
     fn retain_bounded(&mut self, state: &AppState) {
+        self.observe(state);
         let mut terminal: Vec<(SessionId, SystemTime)> = self
             .by_id
             .iter()
-            .filter(|(id, record)| record_is_terminal(state, **id, record))
+            .filter(|(id, record)| self.record_is_terminal(state, **id, record))
             .map(|(id, record)| (*id, record.started_at))
             .collect();
         terminal.sort_by_key(|(_, started_at)| *started_at);
         let excess = terminal.len().saturating_sub(MCP_RECORD_CAP);
         for (id, _) in terminal.into_iter().take(excess) {
             self.by_id.remove(&id);
+            self.observed.remove(&id);
+            self.closed.remove(&id);
         }
     }
 
@@ -510,21 +544,31 @@ impl McpSessionRecords {
         self.by_id
             .iter()
             .filter(|(id, _)| Some(**id) != exclude)
-            .filter(|(id, record)| !record_is_terminal(state, **id, record))
+            .filter(|(id, record)| !self.record_is_terminal(state, **id, record))
             .count()
     }
-}
 
-/// Whether `id`'s record is provably terminal, joining against `state`'s
-/// session views through [`session_state`] — see
-/// [`McpSessionRecords::retain_bounded`]. `false` (treated as live) when
-/// `state` does not yet contain a view for `id`, never assumed.
-fn record_is_terminal(state: &AppState, id: SessionId, record: &SessionRecord) -> bool {
-    state
-        .sessions
-        .iter()
-        .find(|view| view.id == id)
-        .is_some_and(|view| session_state(view, record).is_terminal())
+    /// Whether `id`'s record is provably terminal.
+    ///
+    /// With a view in `state`, the view decides (through
+    /// [`session_state`]). With none, two cases look alike and must not be
+    /// confused:
+    ///
+    /// - **Never seen with a view** — the just-launched session whose
+    ///   `RegisterSession` the caller posted but the loop has not applied yet
+    ///   (see [`serve_command`]'s ordering note). Treated as live: unprovable
+    ///   terminal-ness must never be evicted or uncounted.
+    /// - **Seen before, or explicitly closed** ([`Self::observe`],
+    ///   [`Self::mark_closed`]) — its tab has been removed (closed,
+    ///   replaced by a restart), so the session is gone: terminal, which is
+    ///   what keeps a long run of keyboard restarts from inflating
+    ///   [`Self::live_count`] and lets [`Self::retain_bounded`] evict it.
+    fn record_is_terminal(&self, state: &AppState, id: SessionId, record: &SessionRecord) -> bool {
+        match state.sessions.iter().find(|view| view.id == id) {
+            Some(view) => session_state(view, record).is_terminal(),
+            None => self.observed.contains(&id) || self.closed.contains(&id),
+        }
+    }
 }
 
 // ── The running server's handle ─────────────────────────────────────────────
@@ -1077,15 +1121,13 @@ fn failed_launch(
 /// any *other* live session on that target still refuses it.
 ///
 /// This and `crate::engine::update`'s `restart_session` (the `R` key /
-/// palette "Restart session" row) are the two callers of one contract —
-/// guard-excluding-self, cap-excluding-self, stop, relaunch spec — one over
-/// an MCP id, the other over the active tab; keep them aligned rather than
-/// letting either drift. The cap check's *population* differs, deliberately:
-/// this counts only [`McpSessionRecords::live_count`] (MCP-launched
-/// sessions), while the keyboard path is I/O-free and holds no records, so it
-/// counts every live tab (ad-hoc build/clean sessions included) — a
-/// conservative approximation that can refuse a keyboard restart earlier than
-/// this fn would, never later.
+/// palette "Restart session" row) share one contract — the same duplicate
+/// guard (`live_session_for_excluding`, excluding the session being
+/// restarted), stop, relaunch the retained spec — one over an MCP id, the
+/// other over the active tab; keep them aligned rather than letting either
+/// drift. MCP additionally applies its record cap
+/// ([`McpSessionRecords::live_count`], excluding self); the keyboard path has
+/// no cap, like the keyboard's own launches.
 fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSessionId, EmbeddedError> {
     let Some(view) = mcp_view(ctx.state, ctx.records, id) else {
         return Err(EmbeddedError::NoSuchSession(id.0));
@@ -1746,6 +1788,113 @@ mod tests {
             2,
             "the excluded session must not count against its own restart"
         );
+    }
+
+    /// A running view for `id` — what a registered, live session looks like.
+    fn running_view(id: u64) -> SessionView {
+        let mut v = view(id);
+        v.state = SessionState::Running;
+        v
+    }
+
+    #[test]
+    fn a_record_whose_tab_was_removed_after_registration_is_terminal_and_evictable() {
+        let mut records = McpSessionRecords::new();
+        // The single oldest record: pure age-sorted eviction would take it
+        // first, but only if it is terminal.
+        records.by_id.insert(
+            SessionId(0),
+            SessionRecord {
+                spec: spec(DeviceTarget::Desktop),
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                launch_error: None,
+            },
+        );
+        let registered = state_with(running_view(0));
+        records.observe(&registered);
+        assert_eq!(records.live_count(&registered, None), 1);
+
+        // Its tab is removed (closed / replaced) — the view is gone.
+        let mut views = Vec::new();
+        for seq in 1..=MCP_RECORD_CAP as u64 {
+            push_terminal(&mut records, &mut views, seq);
+        }
+        let removed = state_with_many(views);
+        assert_eq!(
+            records.live_count(&removed, None),
+            0,
+            "a record seen with a view that has since gone is not live"
+        );
+
+        records.retain_bounded(&removed);
+        assert!(
+            records.get(SessionId(0)).is_none(),
+            "the removed tab's record is the oldest terminal one and is evicted"
+        );
+        assert_eq!(records.by_id.len(), MCP_RECORD_CAP);
+    }
+
+    #[test]
+    fn a_fresh_launch_with_no_view_yet_is_still_live() {
+        let mut records = McpSessionRecords::new();
+        records.by_id.insert(
+            SessionId(0),
+            SessionRecord {
+                spec: spec(DeviceTarget::Desktop),
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                launch_error: None,
+            },
+        );
+        let mut views = Vec::new();
+        for seq in 1..=(MCP_RECORD_CAP + 1) as u64 {
+            push_terminal(&mut records, &mut views, seq);
+        }
+        // No view for session 0: its `RegisterSession` has not been applied.
+        let state = state_with_many(views);
+
+        assert_eq!(records.live_count(&state, None), 1);
+        records.retain_bounded(&state);
+        assert!(
+            records.get(SessionId(0)).is_some(),
+            "a never-registered launch is unprovably terminal and must survive"
+        );
+        assert_eq!(records.live_count(&state, None), 1);
+    }
+
+    #[test]
+    fn thirty_three_keyboard_restarts_leave_live_count_at_one() {
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let mut state = state_with(running_view(0));
+        records.observe(&state);
+
+        for id in 1..=33u64 {
+            // The runner's restart enactment: the replaced record is closed,
+            // the relaunch recorded; its tab has not registered yet and the
+            // old one is already gone.
+            records.mark_closed(SessionId(id - 1));
+            records.insert(SessionId(id), spec(DeviceTarget::Desktop));
+            state = state_with_many(Vec::new());
+            records.observe(&state);
+            assert_eq!(
+                records.live_count(&state, None),
+                1,
+                "restart {id}: only the unregistered relaunch counts as live"
+            );
+
+            // The relaunch registers.
+            state = state_with(running_view(id));
+            records.observe(&state);
+            records.retain_bounded(&state);
+            assert!(
+                records.by_id.len() <= MCP_RECORD_CAP + 1,
+                "restart {id}: the record map stays bounded ({} records)",
+                records.by_id.len()
+            );
+        }
+
+        assert_eq!(records.live_count(&state, None), 1);
+        assert!(records.get(SessionId(33)).is_some());
     }
 
     #[test]

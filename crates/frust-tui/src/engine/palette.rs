@@ -96,6 +96,10 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();
     let has_session = state.active_session().is_some();
+    // `R` restarts an app session and refreshes devices everywhere else
+    // (`crate::runner`'s `translate_key`), so exactly one of the two rows
+    // below carries the `R` hint at a time.
+    let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
     let has_selection = state
         .active_session()
         .is_some_and(|s| s.selection.is_some());
@@ -160,7 +164,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "Restart session",
             "R",
             Message::RestartSession,
-            state.active_session().is_some_and(|s| s.target.is_some()),
+            has_app_session,
             "no session to restart",
         ),
         gated(
@@ -205,7 +209,11 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_projects,
             "no projects detected",
         ),
-        always("Refresh devices", "R", Message::RefreshDevices),
+        always(
+            "Refresh devices",
+            if has_app_session { "" } else { "R" },
+            Message::RefreshDevices,
+        ),
         // Workbook §B13. Both are always enabled: the embedded server serves
         // *this* workbench whether or not a project is open (a `run_app` with
         // none open reports that itself), and the panel is readable in every
@@ -505,6 +513,44 @@ mod tests {
         let row = by_title(&app_session);
         assert!(row.enabled);
         assert_eq!(row.message, Message::RestartSession);
+    }
+
+    #[test]
+    fn the_r_hint_sits_on_refresh_devices_only_without_an_app_session() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+
+        let hint = |state: &AppState, title: &str| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == title)
+                .expect("command present")
+                .hint
+        };
+
+        let no_session = workbench();
+        assert_eq!(hint(&no_session, "Refresh devices"), "R");
+
+        let mut ad_hoc = workbench();
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert_eq!(hint(&ad_hoc, "Refresh devices"), "R");
+
+        let mut app_session = workbench();
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        assert_eq!(hint(&app_session, "Refresh devices"), "");
+        assert_eq!(hint(&app_session, "Restart session"), "R");
     }
 
     #[test]

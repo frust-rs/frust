@@ -494,6 +494,12 @@ struct EffectCtx<'a> {
 /// pure engine can't perform: killing a session through the supervisor, writing
 /// the system clipboard, discovering devices off-thread, and launching
 /// sessions.
+///
+/// Every `update()` application in [`run_loop`] is followed by exactly one
+/// call here, so this is also where the launch records catch up with the
+/// model: [`McpSessionRecords::observe`] runs first, because the pure engine
+/// removes tabs (close, restart) without any way to tell the runner-owned
+/// records, and a record whose tab is gone must stop counting as live.
 fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
     let EffectCtx {
         engine,
@@ -506,23 +512,37 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         backend,
         clipboard: clipboard_backend,
     } = ctx;
+    records.observe(&engine.state);
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
         // The keyboard restart's enactment: `update()` has already applied
-        // every guard (`crate::supervise::mcp_backend::restart_app`'s doc
+        // its guard (`crate::supervise::mcp_backend::restart_app`'s doc
         // names the shared contract this mirrors), so this only needs the
-        // retained spec to stop-then-relaunch. No record (evicted, or a
-        // race with the session ending) or a launch-error record (an ad-hoc
-        // failure tab, which `update()`'s target guard already refused
-        // before requesting this — defensive here, not reachable in
-        // practice) means there is nothing to relaunch: log and stop.
+        // retained spec to stop-then-relaunch. The replaced record is marked
+        // closed first so it stops counting as live however its tab goes.
+        //
+        // A missing record IS reachable: `McpSessionRecords::retain_bounded`
+        // evicts the oldest terminal records across the whole shared map on
+        // every MCP launch/restart, so a keyboard-launched record can be
+        // evicted while an MCP agent is active (the keyboard face of
+        // LIMITATIONS `tui-mcp-sessions-tab-uncapped`). A launch-error record
+        // (an ad-hoc failure tab) is already screened by `update()`'s target
+        // guard. Either way there is nothing to relaunch, and the tab may
+        // already be gone, so the user is told with a toast — stderr is
+        // invisible under the raw-mode TUI.
         Some(Effect::RestartSession(id)) => match records.get(id) {
             Some(record) if record.launch_error.is_none() => {
                 let spec = record.spec.clone();
+                records.mark_closed(id);
                 supervisor.stop(id);
                 launch_sessions(vec![spec], supervisor, tx, records);
             }
-            _ => eprintln!("frust-tui: restart requested for an unknown session: {id:?}"),
+            _ => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: "no launch record for this session — relaunch it with r".to_string(),
+                });
+            }
         },
         Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
             Ok(clipboard::CopyOutcome::Complete) => {}
@@ -1439,6 +1459,8 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     }
 
     let has_active_session = state.active_session().is_some();
+    // An active tab with a launch target — the only kind `R` can restart.
+    let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
     let active_running = state
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
@@ -1544,13 +1566,12 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('n') if workbench => vec![Message::OpenCreateWizard],
         // `r`/`Enter` open the run-config modal primed with the panel
         // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance) —
-        // except with a session active, where `R` restarts it instead (the
-        // keyboard twin of MCP `restart_app` / DAP `frustRestart`), the same
-        // `has_active_session`-first context-sensitivity as `c`/`d` below:
-        // the devices panel is only focusable with no active session, so `R`
-        // never loses `RefreshDevices` where it is actually reachable.
+        // except with an *app* session active, where `R` restarts it instead
+        // (the keyboard twin of MCP `restart_app` / DAP `frustRestart`). An
+        // ad-hoc build/clean tab has nothing to relaunch, so there `R` keeps
+        // its discovery job rather than claiming a key that only refuses.
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
-        KeyCode::Char('R') if has_active_session => vec![Message::RestartSession],
+        KeyCode::Char('R') if has_app_session => vec![Message::RestartSession],
         KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
         KeyCode::Enter if devices_focused => vec![Message::OpenRunConfig],
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
@@ -3492,38 +3513,100 @@ mod tests {
         );
     }
 
-    /// `R` is context-sensitive like `c`/`d`: with a session active it
-    /// restarts it; with none it falls back to its other job, re-running
-    /// device discovery (the devices panel is only reachable with no active
-    /// session, so `RefreshDevices` never loses its binding where it matters).
+    /// `R` restarts only an *app* session (one with a launch target); on an
+    /// ad-hoc build/clean tab, or with no session at all, it keeps its other
+    /// job, re-running device discovery.
     #[test]
-    fn shift_r_restarts_the_active_session_but_refreshes_devices_without_one() {
+    fn shift_r_restarts_an_app_session_and_refreshes_devices_otherwise() {
         use crate::engine::SessionView;
 
         let regions = MouseRegions::new();
-        let mut with_session = AppState {
+        let mut app_session = AppState {
             screen: Screen::Workbench,
             ..Default::default()
         };
-        with_session.sessions.push(SessionView::new(
+        app_session.sessions.push(SessionView::with_devtools(
             SessionId(0),
             PathBuf::from("/tmp/huddle"),
             "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
         ));
-        with_session.active_session = Some(0);
+        app_session.active_session = Some(0);
         assert_eq!(
-            translate_event(key(KeyCode::Char('R')), &with_session, &regions),
+            translate_event(key(KeyCode::Char('R')), &app_session, &regions),
             vec![Message::RestartSession]
         );
 
-        let workbench = AppState {
+        let mut ad_hoc = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build apk",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &ad_hoc, &regions),
+            vec![Message::RefreshDevices],
+            "an ad-hoc tab has nothing to restart"
+        );
+
+        let no_session = AppState {
             screen: Screen::Workbench,
             ..Default::default()
         };
         assert_eq!(
-            translate_event(key(KeyCode::Char('R')), &workbench, &regions),
+            translate_event(key(KeyCode::Char('R')), &no_session, &regions),
             vec![Message::RefreshDevices]
         );
+    }
+
+    /// A restart whose launch record is gone (evicted by the MCP path's
+    /// bounded retention) must reach the user as a toast, not vanish into
+    /// stderr under the raw-mode TUI.
+    #[test]
+    fn restart_session_effect_on_an_evicted_record_toasts_instead_of_dropping_silently() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(7))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::Notify { level, text }) => {
+                assert_eq!(level, ToastKind::Warn);
+                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+            }
+            other => panic!("expected a warn toast, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "nothing was relaunched");
     }
 
     /// The doctor panel's `t` key (mouse parity: its "Toolchain setup"

@@ -132,6 +132,18 @@ pub struct AppState {
     pub sessions: Vec<SessionView>,
     /// The index into `sessions` of the tab whose log view is shown, if any.
     pub active_session: Option<usize>,
+    /// Set by a keyboard restart (`R` / the palette's "Restart session") to
+    /// the (project, target) it is relaunching, so the relaunch's tab becomes
+    /// active when it registers — see [`Self::take_restart_focus`].
+    ///
+    /// Consumed by the very next `RegisterSession`, whatever it registers:
+    /// the runner reports a relaunch that never starts (no launch record, a
+    /// spawn failure) with a toast or not at all, never with a registration,
+    /// so a flag left waiting for "its" tab could otherwise steal focus for
+    /// some unrelated later launch. Only a registration naming the same
+    /// (project, target) is focused, so an interleaved foreign registration
+    /// clears the flag without being focused itself.
+    pub focus_next_registered: Option<(PathBuf, SessionTarget)>,
     /// Whether the log view soft-wraps long lines (`w` toggles).
     pub wrap: bool,
     /// The log search/filter overlay state.
@@ -340,6 +352,7 @@ impl AppState {
             local_project_count,
             sessions: Vec::new(),
             active_session: None,
+            focus_next_registered: None,
             wrap: false,
             search: SearchState::default(),
             devices: Vec::new(),
@@ -545,6 +558,25 @@ impl AppState {
             .map(|s| s.id)
     }
 
+    /// Consume [`Self::focus_next_registered`] for a session registering on
+    /// `project_root`/`target`, answering whether that registration is the
+    /// awaited restart relaunch and should become the active tab.
+    ///
+    /// Always clears the flag — see the field doc for why a pending focus
+    /// only ever applies to the very next registration.
+    pub fn take_restart_focus(
+        &mut self,
+        project_root: &Path,
+        target: Option<&SessionTarget>,
+    ) -> bool {
+        let Some((want_root, want_target)) = self.focus_next_registered.take() else {
+            return false;
+        };
+        target.is_some_and(|t| {
+            t.is_same_place_as(&want_target) && same_project_root(&want_root, project_root)
+        })
+    }
+
     /// Clamp `device_cursor` into range after the device list changes (an
     /// empty list parks it at 0).
     pub fn clamp_device_cursor(&mut self) {
@@ -666,6 +698,7 @@ impl Default for AppState {
             local_project_count: usize::MAX,
             sessions: Vec::new(),
             active_session: None,
+            focus_next_registered: None,
             wrap: false,
             search: SearchState::default(),
             devices: Vec::new(),
