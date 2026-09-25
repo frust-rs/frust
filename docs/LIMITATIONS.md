@@ -1504,7 +1504,13 @@ reports `EmbeddedError::NoSuchSession`, diverging from `frust-mcp`'s own referen
 which evicts its terminal-session record and its tab-equivalent state together. The human-driven
 insert path — every session a user launches from the workbench's own UI — has no cap at all; only
 the MCP-driven path is bounded, because only an unattended agent can plausibly launch sessions for
-hours unattended.
+hours unattended. The keyboard restart (`R` / palette 'Restart session') shares this same ghost
+risk and has the same toast-not-silent-drop fix as its MCP twin: `runner::apply_effect` reconciles
+`McpSessionRecords` with the engine after every `update()` (`observe`/`mark_closed`), so a record
+whose tab was closed or replaced by a restart now counts as finished and is evictable — the map no
+longer grows by one record per keyboard restart — and a keyboard restart that lands on an already-
+evicted record surfaces a Warn toast ('no launch record for this session — relaunch it with r')
+instead of the old stderr-only log line.
 
 **Applies to**: `frust-tui`'s `AppState::sessions` for the whole session lifetime; the MCP-launched
 subset's *record* (not tab) is capped as described above.
@@ -1528,7 +1534,9 @@ retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions
 and relaunch with app state reset each time: Flutter's "hot restart" semantics, never "hot reload".
 A device restart reruns the whole build → install → launch pipeline rather than patching a running
 process (see `tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`
-for what "stop" already does and does not guarantee before that relaunch begins).
+for what "stop" already does and does not guarantee before that relaunch begins). The TUI's own `R`
+restart shares that same best-effort stop window: the stop is issued, not awaited, before the
+relaunch fires.
 
 **Applies to**: every restart entry point across `frust-tui`, `frust-cli`'s `--watch` flag,
 `frust-mcp`, and `frust-dap` — desktop and device alike.

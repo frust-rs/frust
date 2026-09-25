@@ -86,18 +86,24 @@ bookkeeping, so a refusal can never itself grow `AppState::sessions` (see
 both checks, so a 1-for-1 relaunch is never refused by its own predecessor while any other live
 session on that target still blocks it.
 
-The same guard-excluding/cap-excluding/stop/relaunch contract now has three callers: MCP's
-`restart_app`, DAP's `frustRestart`, and the workbench's own keyboard `R` / palette 'Restart
-session' row (an active session's `Message::RestartSession` → `Effect::RestartSession`, enacted by
-`runner`) — `supervise::mcp_backend`'s `restart_app` doc comment cross-references the keyboard path
-as the contract's other caller. Unlike the two tooling callers, the keyboard path also owns tab
-lifecycle: the replaced tab is marked `close_on_exit` (removed once its terminal event lands, the
-same as `CloseTab`) or removed immediately if already terminal, and the new session registers as
-its own tab. Because `update()` is I/O-free and holds no session records, its cap check is a
-conservative approximation of `McpSessionRecords`' own live count: it counts every non-terminal tab
-excluding the one being restarted, rather than only MCP-launched sessions (see
-[LIMITATIONS.md](LIMITATIONS.md)'s `no-hot-reload-restart-is-a-rebuild` for what a restart does and
-does not preserve).
+The same guard/stop/relaunch contract now has three callers: MCP's `restart_app`, DAP's
+`frustRestart`, and the workbench's own keyboard `R` / palette 'Restart session' row (an app
+session's `Message::RestartSession` → `Effect::RestartSession`, enacted by `runner`) —
+`supervise::mcp_backend`'s `restart_app` doc comment cross-references the keyboard path as the
+contract's other caller. `R` restarts only a session with a launch target; on an ad-hoc build/clean
+tab it keeps its other job, `RefreshDevices` (the palette's 'Refresh devices' row carries the `R`
+hint only when no app session is active). Unlike the two tooling callers, the keyboard path also
+owns tab lifecycle: the replaced tab is marked `close_on_exit` (removed once its terminal event
+lands, the same as `CloseTab`) or removed immediately if already terminal, and the relaunch
+registers as its own tab and becomes the active one (`AppState::focus_next_registered`). The
+keyboard path applies only the shared `live_session_for_excluding` duplicate guard; it has no cap
+of its own — MCP keeps its `MCP_RECORD_CAP` check, and the keyboard's own `r` launches are uncapped
+too. `runner::apply_effect` reconciles `McpSessionRecords` with the engine after every `update()`
+(`observe` marks every record with a current tab; a restart's replaced record is also
+`mark_closed`), so a record whose tab was registered and later removed counts terminal and is
+evictable, while a launch not yet registered stays live (see [LIMITATIONS.md](LIMITATIONS.md)'s
+`no-hot-reload-restart-is-a-rebuild` for what a restart does and does not preserve, and
+`tui-mcp-sessions-tab-uncapped` for the eviction race this reconciliation closes).
 
 `AppState::mcp` holds the running server's handle (`None` = stopped); `mcp_panel_open`/`mcp_error`
 back the MCP panel (§B13) and its retained failure reason. `Engine::start_mcp`/`stop_mcp` bind or
