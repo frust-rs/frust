@@ -637,30 +637,87 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
 ///
 /// `generate_ide_config` merges into whatever the editor already has on disk,
 /// so it reads, parses, creates directories and writes — none of which belongs
-/// on the event loop. Every ending is reported: a written/updated/skipped
-/// file, the IDE that has no DAP config format at all (`Ok(None)`, which only
-/// the JetBrains pair reaches here — the pure core refuses the others before
-/// asking for this effect), and a failure, which is retained and shown rather
-/// than dropped.
+/// on the event loop. `request.mode` decides what an existing file gets (see
+/// `frust_dap::ide_config::WriteMode`). Every ending the request
+/// [`reports`](crate::engine::IdeConfigRequest::reports) is posted back: a
+/// written/updated/skipped file, the IDE that has no DAP config format at all
+/// (`Ok(None)`, which only the JetBrains pair reaches here — the pure core
+/// refuses the others before asking for this effect), and a failure, which is
+/// retained and shown rather than dropped. The one ending not posted is an
+/// automatic (`IfAbsent`) write's plain skip — the ordinary "already
+/// configured" case on every launch. An automatic write's report is posted
+/// tagged with its project and IDE
+/// ([`posted`](crate::engine::IdeConfigRequest::posted)), so the pure core can
+/// limit a repeating stale-port or failure toast to once per run.
+///
+/// **Serialized per root.** Two triggers (a fresh bind and an app launch, or
+/// an explicit `g` racing either) can ask for the same files at once, and each
+/// generation is a read-merge-write. Every generation therefore holds
+/// [`with_ide_config_lock`] for its whole run, so two never interleave on the
+/// same files; requests wait their turn and none is dropped — an explicit
+/// refresh queued behind an automatic write still runs, after it.
 fn spawn_ide_config_generation(
     request: crate::engine::IdeConfigRequest,
     tx: UnboundedSender<Message>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let report = match frust_dap::ide_config::generate_ide_config(
-            Some(request.ide),
-            request.port,
-            &request.project_root,
-        ) {
-            Ok(Some(result)) => crate::engine::DapIdeReport::Written {
-                ide: request.ide,
-                result,
-            },
-            Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
-            Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
-        };
-        let _ = tx.send(Message::DapIdeConfig(report));
+        let key = ide_config_lock_key(&request.project_root);
+        let report =
+            with_ide_config_lock(key, || {
+                match frust_dap::ide_config::generate_ide_config(
+                    Some(request.ide),
+                    request.port,
+                    &request.project_root,
+                    request.mode,
+                ) {
+                    Ok(Some(result)) => crate::engine::DapIdeReport::Written {
+                        ide: request.ide,
+                        result,
+                    },
+                    Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
+                    Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
+                }
+            });
+        if let Some(report) = request.posted(report) {
+            let _ = tx.send(Message::DapIdeConfig(report));
+        }
     });
+}
+
+/// The key IDE-config generations for `project_root` serialize on: the
+/// detected workspace root (canonical), not the project root itself — VS
+/// Code's `launch.json` and Neovim's `.nvim-dap.lua` live at the workspace
+/// root, which two projects of one monorepo share, and every other generated
+/// file lives under the project, hence under that same key. Falls back to the
+/// project root as given when it cannot be resolved.
+fn ide_config_lock_key(project_root: &Path) -> PathBuf {
+    let workspace = frust_dap::ide_config::vscode::detect_workspace_root(project_root);
+    workspace.canonicalize().unwrap_or(workspace)
+}
+
+/// Run `generate` while holding the IDE-config lock for `key`, blocking until
+/// any other generation holding it finishes.
+///
+/// One mutex per key, handed out from a process-wide map (a handful of
+/// entries: one per distinct workspace a run configures). Nothing is ever
+/// skipped or coalesced — every caller runs `generate`, in turn. A panicked
+/// holder poisons nothing here: the lock guards no data, only exclusion.
+fn with_ide_config_lock<T>(key: PathBuf, generate: impl FnOnce() -> T) -> T {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    type Locks = Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Locks::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(locks.entry(key).or_default())
+    };
+    let _held = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    generate()
 }
 
 /// Wait out a stopped DevTools bridge thread off the event loop.
@@ -1107,7 +1164,11 @@ fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Resul
     };
     scaffold::generate(&dest, &ctx, None, false, arch)
         .with_context(|| format!("scaffolding into `{}`", dest.display()))?;
-    Ok(dest.canonicalize().unwrap_or(dest))
+    // `canonicalize` alone returns a Windows verbatim (`\\?\C:\...`) path on
+    // that host; `canonicalize_simplified` strips it back to the plain
+    // drive form so the toast/sidebar (and whatever persists this root next)
+    // never carry it forward.
+    Ok(frust_drive::host_path::canonicalize_simplified(&dest).unwrap_or(dest))
 }
 
 /// Resolve the wizard's directory string against the process cwd (an absolute
@@ -1125,12 +1186,17 @@ fn resolve_dest(directory: &str) -> Result<PathBuf> {
 /// The dev-time path to the `frust` facade crate (`<repo>/crates/frust`),
 /// mirroring `frust create`'s default (a temporary `frust_path`
 /// mechanism until the crates are published).
+///
+/// Rendered through [`frust_drive::host_path::to_portable_string`] rather
+/// than a bare `to_string_lossy()`: on Windows, `canonicalize()` returns a
+/// verbatim `\\?\C:\...` path, which is both an invalid escape once
+/// substituted into `Cargo.toml`'s `frust = { path = "..." }` and
+/// unresolvable by a template's `..`-relative sibling joins. Identity on
+/// every other host.
 fn resolve_frust_path() -> String {
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    raw.canonicalize()
-        .unwrap_or(raw)
-        .to_string_lossy()
-        .into_owned()
+    let canonical = raw.canonicalize().unwrap_or(raw);
+    frust_drive::host_path::to_portable_string(&canonical)
 }
 
 /// Discover devices off the UI thread (the `frust-drive` discoverer set is
@@ -1413,9 +1479,13 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // `Ctrl+Q` above is the only unconditional bypass.
         KeyCode::Char('q') => vec![Message::RequestQuit],
 
-        // `i` opens the toolchain bootstrap wizard from either screen (mouse
-        // parity: the titlebar toolchain chip) — the fresh-machine flow.
-        KeyCode::Char('i') => vec![Message::OpenBootstrapWizard],
+        // `i` opens the Doctor panel from either screen (mouse parity: the
+        // sidebar "Doctor" action). Doctor has its own unconditional `i` key;
+        // `d` is DevTools-only (active sessions only); toolchain setup (the
+        // old `i` destination) is reachable from inside the panel (`t` / its
+        // "Toolchain setup" button) or straight from the titlebar toolchain
+        // chip.
+        KeyCode::Char('i') => vec![Message::OpenDoctorPanel],
 
         // `a` opens the Add Plugin dialog from either screen (mouse parity: the
         // sidebar "Add plugin" action / the palette). Gated on an open project
@@ -1464,18 +1534,21 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
         KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
-        // `d` opens DevTools for the active session tab (workbook §B12) and,
-        // with no session open, the doctor panel — the two contexts never
-        // collide, and the doctor panel additionally stays on the sidebar
-        // ACTIONS row and in the palette. `b` opens the build launcher
-        // (mouse parity: the sidebar "Build" row).
+        // `d` opens DevTools for the active session tab (workbook §B12) and
+        // does nothing without a session (Doctor moved to its own `i` key to
+        // avoid this collision — see above, sidebar ACTIONS row, and palette).
+        // `b` opens the build launcher (mouse parity: the sidebar "Build" row).
         KeyCode::Char('d') if has_active_session => vec![Message::DevtoolsToggle],
-        KeyCode::Char('d') if workbench => vec![Message::OpenDoctorPanel],
         KeyCode::Char('b') if workbench => vec![Message::OpenBuildLauncher],
         // `c` copies a build session's artifact path(s) when one is active
         // (mirroring the welcome screen's own `c` for Create, a different
-        // screen/context); otherwise it opens the clean-confirm dialog (mouse
-        // parity: the sidebar ACTIONS "Clean" row).
+        // screen/context) — this binding exists *only* while a session is
+        // active: the sidebar ACTIONS "Clean" row still opens the
+        // clean-confirm dialog on click then, it just drops its own `c`
+        // keyhint (see `views::workbench::render_sidebar`) since the key
+        // means something else in that context. Without a session, `c` opens
+        // the clean-confirm dialog directly (mouse parity: the sidebar
+        // ACTIONS "Clean" row).
         KeyCode::Char('c') if has_active_session => vec![Message::CopyBuiltArtifacts],
         KeyCode::Char('c') if workbench => vec![Message::OpenCleanConfirm],
 
@@ -1757,11 +1830,14 @@ fn translate_switcher_key(code: KeyCode, state: &AppState) -> Vec<Message> {
 
 /// Translate one key press while the doctor panel is open. `Esc` closes it,
 /// `r` re-runs the validator set (mouse parity: the panel's Re-run button /
-/// the titlebar chip).
+/// the titlebar chip), and `t` closes the panel and opens the bootstrap
+/// wizard (mouse parity: the panel's "Toolchain setup" button) — the
+/// toolchain-setup route via the panel now that `i` opens the panel.
 fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseDoctorPanel],
         KeyCode::Char('r') => vec![Message::RunDoctor],
+        KeyCode::Char('t') => vec![Message::OpenToolchainFromDoctor],
         _ => vec![],
     }
 }
@@ -2013,6 +2089,77 @@ mod tests {
     use frust_drive::build_info::{BuildArgs, BuildInfo, BuildMode};
     use frust_drive::desktop_build::DesktopBundleTarget;
     use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
+
+    /// Generations on one key never overlap, and none is dropped: every
+    /// caller runs, strictly one after another. Each holder records
+    /// enter/exit around a sleep wide enough that an unserialized pair would
+    /// interleave; with the lock, the log is enter/exit pairs back to back.
+    #[test]
+    fn ide_config_generations_on_one_key_are_serialized_and_none_is_dropped() {
+        use std::sync::Mutex;
+
+        const CALLERS: usize = 6;
+        let key = std::env::temp_dir().join(format!(
+            "frust-tui-ide-lock-serialized-{}",
+            std::process::id()
+        ));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let handles: Vec<_> = (0..CALLERS)
+            .map(|i| {
+                let (key, log) = (key.clone(), Arc::clone(&log));
+                std::thread::spawn(move || {
+                    with_ide_config_lock(key, || {
+                        log.lock().unwrap().push(("enter", i));
+                        std::thread::sleep(Duration::from_millis(15));
+                        log.lock().unwrap().push(("exit", i));
+                        i
+                    })
+                })
+            })
+            .collect();
+        let mut ran: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        ran.sort_unstable();
+        assert_eq!(ran, (0..CALLERS).collect::<Vec<_>>(), "no caller dropped");
+
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), CALLERS * 2);
+        for pair in log.chunks(2) {
+            assert_eq!(pair[0].0, "enter", "{log:?}");
+            assert_eq!(pair[1], ("exit", pair[0].1), "interleaved: {log:?}");
+        }
+    }
+
+    /// Distinct keys do not wait on each other: a holder of one key can take
+    /// another key's lock (were it one global lock, this would deadlock).
+    #[test]
+    fn ide_config_locks_on_distinct_keys_are_independent() {
+        let base = std::env::temp_dir();
+        let a = base.join(format!("frust-tui-ide-lock-a-{}", std::process::id()));
+        let b = base.join(format!("frust-tui-ide-lock-b-{}", std::process::id()));
+        let got = with_ide_config_lock(a, || with_ide_config_lock(b, || 7));
+        assert_eq!(got, 7);
+    }
+
+    /// Two projects sharing a workspace (a monorepo) share the lock key,
+    /// since both write the workspace's `.vscode/launch.json`.
+    #[test]
+    fn ide_config_lock_key_is_the_shared_workspace_root() {
+        let workspace =
+            std::env::temp_dir().join(format!("frust-tui-ide-lock-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(workspace.join(".vscode")).unwrap();
+        std::fs::create_dir_all(workspace.join("app-a")).unwrap();
+        std::fs::create_dir_all(workspace.join("app-b")).unwrap();
+        assert_eq!(
+            ide_config_lock_key(&workspace.join("app-a")),
+            ide_config_lock_key(&workspace.join("app-b"))
+        );
+        assert_eq!(
+            ide_config_lock_key(&workspace.join("app-a")),
+            workspace.canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 
     /// The runner's own half of the session-event feed: `dispatch` is what
     /// turns an applied `Message::Session` into the lines and the ending a
@@ -3289,8 +3436,28 @@ mod tests {
         );
     }
 
+    /// Doctor panel is unconditionally opened by `i` from either top-level
+    /// screen (the panel's dedicated key, since `d` is DevTools-only).
     #[test]
-    fn d_still_opens_the_doctor_panel_with_no_session_open() {
+    fn i_opens_the_doctor_panel_from_either_screen() {
+        let regions = MouseRegions::new();
+        for screen in [Screen::Welcome, Screen::Workbench] {
+            let state = AppState {
+                screen,
+                ..Default::default()
+            };
+            assert_eq!(
+                translate_event(key(KeyCode::Char('i')), &state, &regions),
+                vec![Message::OpenDoctorPanel],
+                "{screen:?}"
+            );
+        }
+    }
+
+    /// With no session active, `d` means DevTools or nothing, never Doctor
+    /// (Doctor is unconditionally on `i`).
+    #[test]
+    fn d_does_nothing_with_no_session_open() {
         let regions = MouseRegions::new();
         let workbench = AppState {
             screen: Screen::Workbench,
@@ -3298,8 +3465,24 @@ mod tests {
         };
         assert_eq!(
             translate_event(key(KeyCode::Char('d')), &workbench, &regions),
-            vec![Message::OpenDoctorPanel],
-            "the doctor panel keeps `d` in the context DevTools cannot claim"
+            Vec::<Message>::new(),
+            "`d` is unclaimed with no active session"
+        );
+    }
+
+    /// The doctor panel's `t` key (mouse parity: its "Toolchain setup"
+    /// button) closes the panel and opens the bootstrap wizard.
+    #[test]
+    fn t_in_the_doctor_panel_opens_the_toolchain_wizard() {
+        let regions = MouseRegions::new();
+        let state = AppState {
+            screen: Screen::Workbench,
+            doctor_panel_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('t')), &state, &regions),
+            vec![Message::OpenToolchainFromDoctor]
         );
     }
 
@@ -3515,11 +3698,12 @@ mod tests {
     /// Deliberately excluded (not every single-char hint enters this sweep):
     /// - multi-key hints (`^O`, `⌥m`) — filtered out by the one-char check
     ///   itself, not a hand-picked skip.
-    /// - the `d` pair ("Doctor" / "DevTools") — both hint `d`, one binding
-    ///   per context (workbook §B12's full-namespace swap); asserted
-    ///   separately in `d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log`
-    ///   and would need its own has-session-vs-not distinction this sweep's
-    ///   six gate shapes don't carry.
+    /// - `d` ("DevTools") — gated on `has_active_session`, exactly one of
+    ///   this sweep's six shapes, but `d` claims nothing without a session
+    ///   (Doctor is unconditionally on `i`), so a naive assertion here can't
+    ///   cover that case; asserted instead in
+    ///   `d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log`
+    ///   and `d_does_nothing_with_no_session_open`.
     /// - `y` ("Copy selection") — gated on `has_selection`, not one of the
     ///   six shapes above; asserted inside the selection mode's own key table
     ///   in `v_enters_the_mode_and_the_cursor_keys_then_move_the_selection`.
@@ -3557,7 +3741,11 @@ mod tests {
                 "Refresh widget tree" => gate_state(false, false, false, false, false, true),
                 // "always enabled" commands: no gate flag needed, just the
                 // workbench screen `gate_state`'s all-false shape provides.
-                "Toolchain setup…"
+                // "Toolchain setup…" is deliberately absent here (its old `i`
+                // binding now opens the Doctor panel, so it has no top-level
+                // keyhint), so its empty hint already exits this sweep at the
+                // `chars.next()` check above.
+                "Doctor"
                 | "New project…"
                 | "Refresh devices"
                 | "MCP server…"

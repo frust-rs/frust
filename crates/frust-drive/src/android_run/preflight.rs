@@ -10,6 +10,13 @@ use crate::process::ProcessRunner;
 /// when `JAVA_HOME` is unset or points at a < 17 JDK.
 pub const STUDIO_JBR_HOME: &str = "/Applications/Android Studio.app/Contents/jbr/Contents/Home";
 
+/// Android Studio's bundled-JBR install locations on Windows, relative to the
+/// env vars they hang off (see [`windows_studio_jbr_homes`]): the
+/// machine-wide install under `%ProgramFiles%`, and the per-user one under
+/// `%LOCALAPPDATA%`.
+const STUDIO_JBR_WINDOWS_PROGRAM_FILES_SUFFIX: [&str; 3] = ["Android", "Android Studio", "jbr"];
+const STUDIO_JBR_WINDOWS_LOCALAPPDATA_SUFFIX: [&str; 3] = ["Programs", "Android Studio", "jbr"];
+
 pub struct PreflightCtx<'a> {
     pub runner: &'a dyn ProcessRunner,
     pub env: &'a dyn EnvLookup,
@@ -105,16 +112,26 @@ impl JavaSource {
 /// returning the first hit along with which step resolved it:
 /// 1. The `JAVA_HOME` env var (unchanged — still wins over everything else).
 /// 2. Android Studio's bundled JBR (macOS only).
-/// 3. `java` on `PATH`, resolved via `-XshowSettings:properties`'s
+/// 3. Android Studio's bundled JBR at its Windows install locations (Windows
+///    only — see [`windows_studio_jbr_homes`]).
+/// 4. `java` on `PATH`, resolved via `-XshowSettings:properties`'s
 ///    `java.home` (see [`probe_path_java`]) — the machine this bug was
 ///    filed against has no `JAVA_HOME` at all but a working `java` on PATH
 ///    (Manjaro's `/usr/bin/java` symlink chain into
 ///    `/usr/lib/jvm/java-17-openjdk`).
-/// 4. A Linux well-known location (see [`well_known_jvm_homes`]).
+/// 5. A Linux well-known location (see [`well_known_jvm_homes`]).
 ///
 /// `pub(crate)`: also the JDK probe `doctor::report`'s component-level
 /// report reuses, rather than re-implementing Java-version detection.
 pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<(String, JavaSource), String> {
+    check_java_for(ctx, cfg!(target_os = "windows"))
+}
+
+/// [`check_java`]'s inner logic, taking `windows` explicitly (rather than
+/// baking in `cfg!(target_os = "windows")`) so the Windows JBR-probe branch
+/// runs under `cargo test` on any host — mirrors
+/// `android_run::gradle::gradle_wrapper_for`'s pattern.
+fn check_java_for(ctx: &PreflightCtx, windows: bool) -> Result<(String, JavaSource), String> {
     if let Some(home) = ctx.env.get("JAVA_HOME")
         && java_at_least_17(ctx.runner, &home)
     {
@@ -122,6 +139,13 @@ pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<(String, JavaSource), Str
     }
     if ctx.is_macos && java_at_least_17(ctx.runner, STUDIO_JBR_HOME) {
         return Ok((STUDIO_JBR_HOME.to_string(), JavaSource::StudioJbr));
+    }
+    if windows {
+        for home in windows_studio_jbr_homes(ctx.env) {
+            if java_at_least_17(ctx.runner, &home) {
+                return Ok((home, JavaSource::StudioJbr));
+            }
+        }
     }
     if let Some(home) = probe_path_java(ctx.runner)
         && java_at_least_17(ctx.runner, &home)
@@ -133,16 +157,63 @@ pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<(String, JavaSource), Str
             return Ok((home, JavaSource::WellKnown));
         }
     }
-    let studio_clause = if ctx.is_macos {
+    Err(no_java_error(ctx.is_macos, windows))
+}
+
+/// Windows locations Android Studio installs its bundled JBR, tried in
+/// order: the machine-wide `%ProgramFiles%\Android\Android Studio\jbr`, then
+/// the per-user `%LOCALAPPDATA%\Programs\Android Studio\jbr`. Each candidate
+/// is built with `Path::join` (so the separator matches the compile target,
+/// never a hand-rolled `\`) and kept only if `bin\java.exe` exists there —
+/// checked before ever invoking [`java_at_least_17`], the same
+/// filesystem-gated shape [`well_known_jvm_homes`] uses for its own
+/// candidates. Driven entirely through [`EnvLookup`], so both env vars are
+/// fakeable in a test.
+fn windows_studio_jbr_homes(env: &dyn EnvLookup) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(program_files) = env.get("ProgramFiles") {
+        let mut home = std::path::PathBuf::from(program_files);
+        home.extend(STUDIO_JBR_WINDOWS_PROGRAM_FILES_SUFFIX);
+        candidates.push(home);
+    }
+    if let Some(local_appdata) = env.get("LOCALAPPDATA") {
+        let mut home = std::path::PathBuf::from(local_appdata);
+        home.extend(STUDIO_JBR_WINDOWS_LOCALAPPDATA_SUFFIX);
+        candidates.push(home);
+    }
+    candidates
+        .into_iter()
+        .filter(|home| home.join("bin").join("java.exe").exists())
+        .map(|home| home.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// [`check_java_for`]'s final failure message: names exactly the sources
+/// tried on this host, so a Linux/macOS message never suggests a Windows
+/// path and a Windows message never dangles a `.app` bundle or
+/// `/usr/lib/jvm`.
+fn no_java_error(is_macos: bool, is_windows: bool) -> String {
+    let studio_clause = if is_macos || is_windows {
         ", Android Studio's bundled JBR"
     } else {
         ""
     };
-    Err(format!(
-        "no Java 17+ found (tried JAVA_HOME{studio_clause}, `java` on PATH, and well-known \
-         {WELL_KNOWN_JVM_ROOT} paths). Set JAVA_HOME to a JDK 17+ install, or install Android \
-         Studio (bundles a JBR at `{STUDIO_JBR_HOME}`)."
-    ))
+    let well_known_clause = if is_windows {
+        String::new()
+    } else {
+        format!(", and well-known {WELL_KNOWN_JVM_ROOT} paths")
+    };
+    let install_hint = if is_windows {
+        "install Android Studio (bundles a JBR at `%ProgramFiles%\\Android\\Android Studio\\jbr` \
+         or `%LOCALAPPDATA%\\Programs\\Android Studio\\jbr`)"
+            .to_string()
+    } else {
+        format!("install Android Studio (bundles a JBR at `{STUDIO_JBR_HOME}`)")
+    };
+    format!(
+        "no Java 17+ found (tried JAVA_HOME{studio_clause}, `java` on PATH{well_known_clause}). \
+         Set JAVA_HOME to a JDK 17+ install, or {install_hint}."
+    )
 }
 
 /// Resolves the `java.home` a PATH-visible `java` reports via
@@ -555,6 +626,15 @@ mod tests {
         assert!(err.contains("Java 17+"), "{err}");
     }
 
+    /// Pins the macOS/Linux flavor of the not-found message specifically —
+    /// via [`check_java_for`] with `windows: false` explicitly, rather than
+    /// [`run`] (whose `check_java` bakes in `cfg!(target_os = "windows")`).
+    /// `run` would fold in the *actual* host's `windows` flag regardless of
+    /// this test's `is_macos: true`, so on a real Windows host the message
+    /// would come back Windows-flavored (no `/usr/lib/jvm`) and this
+    /// assertion would fail for a reason this test isn't about — mirrors
+    /// `android_run::gradle::gradle_wrapper_for`'s "take the flag explicitly"
+    /// pattern for testing an OS-conditional branch on any host.
     #[test]
     fn not_found_error_lists_every_source_tried() {
         let runner = FakeProcessRunner::new()
@@ -572,11 +652,153 @@ mod tests {
             env: &env,
             is_macos: true,
         };
-        let err = run(&ctx).unwrap_err();
+        let err = check_java_for(&ctx, false).unwrap_err();
         assert!(err.contains("JAVA_HOME"), "{err}");
         assert!(err.contains("Android Studio's bundled JBR"), "{err}");
         assert!(err.contains("java` on PATH"), "{err}");
         assert!(err.contains("/usr/lib/jvm"), "{err}");
+    }
+
+    /// Plants a fake JBR's `bin/java.exe` under `root` (standing in for
+    /// `%ProgramFiles%\Android\Android Studio\jbr` or its `%LOCALAPPDATA%`
+    /// sibling), returning the resolved home directory's own path — built
+    /// with the same `Path::join` [`windows_studio_jbr_homes`] uses, so the
+    /// existence check finds it on any host `cargo test` runs on.
+    fn plant_fake_jbr(root: &std::path::Path, suffix: &[&str]) -> String {
+        let mut home = root.to_path_buf();
+        for part in suffix {
+            home.push(part);
+        }
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join("java.exe"), b"").unwrap();
+        home.to_string_lossy().into_owned()
+    }
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "frust-cli-preflight-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The Windows arm of [`check_java`]'s chain: no `JAVA_HOME`, but
+    /// `%ProgramFiles%\Android\Android Studio\jbr\bin\java.exe` exists and
+    /// reports 17+ — resolved as [`JavaSource::StudioJbr`], exercised with
+    /// `windows: true` so it runs under `cargo test` on Linux.
+    #[test]
+    fn windows_probes_studio_jbr_at_program_files() {
+        let root = unique_temp_dir("program-files");
+        let home = plant_fake_jbr(&root, &STUDIO_JBR_WINDOWS_PROGRAM_FILES_SUFFIX);
+        let runner = FakeProcessRunner::new().with(
+            format!("{home}/bin/java -version"),
+            java_ok_stderr("17.0.9"),
+        );
+        let env = FakeEnv::new().set("ProgramFiles", &root.to_string_lossy());
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let (resolved_home, source) = check_java_for(&ctx, true).unwrap();
+        assert_eq!(resolved_home, home);
+        assert_eq!(source, JavaSource::StudioJbr);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `%LOCALAPPDATA%` sibling, tried when `%ProgramFiles%` is unset (or
+    /// its JBR doesn't exist).
+    #[test]
+    fn windows_probes_studio_jbr_at_localappdata_when_program_files_absent() {
+        let root = unique_temp_dir("localappdata");
+        let home = plant_fake_jbr(&root, &STUDIO_JBR_WINDOWS_LOCALAPPDATA_SUFFIX);
+        let runner = FakeProcessRunner::new().with(
+            format!("{home}/bin/java -version"),
+            java_ok_stderr("17.0.9"),
+        );
+        let env = FakeEnv::new().set("LOCALAPPDATA", &root.to_string_lossy());
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let (resolved_home, source) = check_java_for(&ctx, true).unwrap();
+        assert_eq!(resolved_home, home);
+        assert_eq!(source, JavaSource::StudioJbr);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Neither Windows env var points at an actually-installed JBR (no
+    /// `bin/java.exe` on disk at all): the candidate is never even probed via
+    /// the runner (no fixture registered for it — an unexpected call would
+    /// itself error), and resolution falls through to the next step.
+    #[test]
+    fn windows_skips_a_studio_jbr_candidate_with_no_java_exe_on_disk() {
+        let root = unique_temp_dir("no-jbr");
+        std::fs::create_dir_all(&root).unwrap();
+        let runner = FakeProcessRunner::new().with(
+            "java -XshowSettings:properties -version",
+            java_properties("/usr/lib/jvm/java-17-openjdk", "17.0.9"),
+        );
+        let env = FakeEnv::new().set("ProgramFiles", &root.to_string_lossy());
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let err = check_java_for(&ctx, true).unwrap_err();
+        assert!(err.contains("Java 17+"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Windows arm of [`check_java`] is never reached with `windows:
+    /// false` — no `ProgramFiles`/`LOCALAPPDATA` fixture is registered at
+    /// all, so a regression that probed it unconditionally would find no
+    /// `bin/java.exe` and (harmlessly) still fall through, but this also
+    /// proves `windows_studio_jbr_homes` itself is never called by checking
+    /// no filesystem probe happens against a bogus `ProgramFiles` pointing
+    /// nowhere.
+    #[test]
+    fn non_windows_never_probes_studio_jbr_windows_locations() {
+        let runner = FakeProcessRunner::new()
+            .with(
+                "java -XshowSettings:properties -version",
+                java_properties("/usr/lib/jvm/java-17-openjdk", "17.0.9"),
+            )
+            .with(
+                "/usr/lib/jvm/java-17-openjdk/bin/java -version",
+                java_ok_stderr("17.0.9"),
+            );
+        // Points nowhere real — if `windows_studio_jbr_homes` were consulted
+        // with `windows: false`, its existence check would (correctly) find
+        // nothing there either, but resolution must reach `Path` via the
+        // non-Windows branch either way.
+        let env = FakeEnv::new().set("ProgramFiles", "/nonexistent");
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let (home, source) = check_java_for(&ctx, false).unwrap();
+        assert_eq!(home, "/usr/lib/jvm/java-17-openjdk");
+        assert_eq!(source, JavaSource::Path);
+    }
+
+    /// The Windows error text: no `/usr/lib/jvm`, no macOS `.app` bundle
+    /// path — instead the two Windows JBR install locations.
+    #[test]
+    fn windows_not_found_error_names_windows_locations_only() {
+        let err = no_java_error(false, true);
+        assert!(err.contains("JAVA_HOME"), "{err}");
+        assert!(err.contains("Android Studio's bundled JBR"), "{err}");
+        assert!(err.contains("java` on PATH"), "{err}");
+        assert!(err.contains("%ProgramFiles%"), "{err}");
+        assert!(err.contains("%LOCALAPPDATA%"), "{err}");
+        assert!(!err.contains("/usr/lib/jvm"), "{err}");
+        assert!(!err.contains(".app"), "{err}");
     }
 
     #[test]

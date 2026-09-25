@@ -7,13 +7,20 @@
 //!    setup and is handled by delegating to [`super::vscode::VSCodeGenerator`].
 //!
 //! 2. **Secondary**: `.nvim-dap.lua` — a project-local Lua snippet users can
-//!    source directly. Written as an informational best-effort file; failure
-//!    to write it never fails the overall config generation.
+//!    source directly. Written as an informational best-effort file; an I/O
+//!    failure writing it never fails the overall config generation — but a
+//!    containment refusal (the file is a symlink out of the workspace) does,
+//!    so it is reported rather than logged away.
+//!
+//! The two files always name the **same** port: when an automatic
+//! (`IfAbsent`) run keeps an existing `launch.json` entry, the snippet is
+//! written with that retained entry's port, never the port that was not
+//! written to `launch.json` (see `IdeConfigGenerator::post_write`).
 
 use std::path::{Path, PathBuf};
 
 use super::vscode::{self, VSCodeGenerator};
-use super::{IdeConfigGenerator, Result};
+use super::{IdeConfigError, IdeConfigGenerator, Result, write_contained};
 
 /// Generates DAP config for Neovim's nvim-dap plugin.
 ///
@@ -67,34 +74,45 @@ table.insert(dap.configurations.rust, {{
 
     /// Write `.nvim-dap.lua` to the workspace root.
     ///
-    /// Best-effort: errors (including a
-    /// [`guard_workspace_root`](vscode::guard_workspace_root) containment
-    /// violation — review Major E's defense-in-depth) are logged as warnings
-    /// but do not propagate. The file is always overwritten (frust-owned).
+    /// Best-effort: an I/O error, and a
+    /// [`guard_workspace_root`](vscode::guard_workspace_root) home-boundary
+    /// violation (review Major E's defense-in-depth), are logged as warnings
+    /// and answer `Ok`. The one error returned is a symlink containment
+    /// refusal ([`IdeConfigError::Refused`]): `.nvim-dap.lua` resolving
+    /// outside the workspace root is reported, not silently skipped. The file
+    /// is always overwritten (frust-owned), via the shared temp-file-and-rename
+    /// write.
     ///
     /// Placed at the workspace root (detected via
     /// [`vscode::detect_workspace_root`]) so Neovim finds it when opened at
     /// the same directory VS Code would be opened at.
-    pub fn write_nvim_dap_lua(&self, port: u16, project_root: &Path) {
-        self.write_nvim_dap_lua_with(port, project_root, &vscode::RealEnv);
+    pub fn write_nvim_dap_lua(&self, port: u16, project_root: &Path) -> Result<()> {
+        self.write_nvim_dap_lua_with(port, project_root, &vscode::RealEnv)
     }
 
     /// Testable core of [`write_nvim_dap_lua`](Self::write_nvim_dap_lua),
     /// taking an injected [`vscode::EnvLookup`] so the `$HOME`-boundary tests
     /// can exercise it without mutating the real process environment (same
     /// seam `vscode`'s own tests use).
-    fn write_nvim_dap_lua_with(&self, port: u16, project_root: &Path, env: &dyn vscode::EnvLookup) {
+    fn write_nvim_dap_lua_with(
+        &self,
+        port: u16,
+        project_root: &Path,
+        env: &dyn vscode::EnvLookup,
+    ) -> Result<()> {
         let workspace_root = vscode::detect_workspace_root_with(project_root, env);
         if let Err(e) = vscode::guard_workspace_root_with(&workspace_root, project_root, env) {
             log::warn!("refusing to write .nvim-dap.lua: {e}");
-            return;
+            return Ok(());
         }
         let path = workspace_root.join(".nvim-dap.lua");
         let content = self.generate_lua_snippet(port);
-        match std::fs::write(&path, content) {
+        match write_contained(&path, &workspace_root, &content) {
             Ok(()) => log::debug!("wrote .nvim-dap.lua at {}", path.display()),
+            Err(e @ IdeConfigError::Refused(_)) => return Err(e),
             Err(e) => log::warn!("failed to write .nvim-dap.lua: {e}"),
         }
+        Ok(())
     }
 }
 
@@ -121,12 +139,32 @@ impl IdeConfigGenerator for NeovimGenerator {
         VSCodeGenerator.merge_config(existing, port, project_root)
     }
 
+    /// Whether the primary `.vscode/launch.json` already has the frust entry —
+    /// delegates to the VS Code generator, so
+    /// [`WriteMode::IfAbsent`](super::WriteMode::IfAbsent) applies to the
+    /// primary file.
+    fn has_frust_entry(&self, existing: &str) -> Result<bool> {
+        VSCodeGenerator.has_frust_entry(existing)
+    }
+
+    /// The primary `launch.json` entry's port — delegates to the VS Code
+    /// generator.
+    fn frust_entry_port(&self, existing: &str) -> Result<Option<u16>> {
+        VSCodeGenerator.frust_entry_port(existing)
+    }
+
+    /// The detected workspace root, where both `.vscode/launch.json` and
+    /// `.nvim-dap.lua` live — delegates to the VS Code generator.
+    fn containment_root(&self, project_root: &Path) -> PathBuf {
+        VSCodeGenerator.containment_root(project_root)
+    }
+
     /// Write (or overwrite) the secondary `.nvim-dap.lua` file at the
-    /// workspace root, so it stays in sync with `.vscode/launch.json` on
-    /// every DAP server start.
+    /// workspace root, naming `port` — the port the primary
+    /// `.vscode/launch.json` now names (the retained entry's port when an
+    /// automatic run kept it), so the two files never disagree.
     fn post_write(&self, port: u16, project_root: &Path) -> Result<()> {
-        self.write_nvim_dap_lua(port, project_root);
-        Ok(())
+        self.write_nvim_dap_lua(port, project_root)
     }
 
     fn ide_name(&self) -> &'static str {
@@ -330,7 +368,7 @@ mod tests {
     fn test_neovim_write_lua_snippet_creates_file() {
         let dir = unique_temp_dir("neovim-write-lua-creates");
         let generator = NeovimGenerator;
-        generator.write_nvim_dap_lua(4711, &dir);
+        generator.write_nvim_dap_lua(4711, &dir).unwrap();
         let lua_path = dir.canonicalize().unwrap().join(".nvim-dap.lua");
         assert!(lua_path.exists());
     }
@@ -342,7 +380,7 @@ mod tests {
         std::fs::write(&lua_path, "old content").unwrap();
 
         let generator = NeovimGenerator;
-        generator.write_nvim_dap_lua(9999, &dir);
+        generator.write_nvim_dap_lua(9999, &dir).unwrap();
 
         let content = std::fs::read_to_string(&lua_path).unwrap();
         assert!(content.contains("port = 9999"));
@@ -353,8 +391,12 @@ mod tests {
     fn test_neovim_write_lua_snippet_failure_does_not_panic() {
         let generator = NeovimGenerator;
         // Non-existent parent directory triggers a write error — should log
-        // a warning and return, not panic.
-        generator.write_nvim_dap_lua(4711, Path::new("/nonexistent/deep/path"));
+        // a warning and return Ok (best-effort), not panic.
+        assert!(
+            generator
+                .write_nvim_dap_lua(4711, Path::new("/nonexistent/deep/path"))
+                .is_ok()
+        );
     }
 
     // ── write_nvim_dap_lua: $HOME boundary (review Major E, item e) ──
@@ -394,7 +436,9 @@ mod tests {
 
         let env = FakeEnv::new().set("HOME", home.canonicalize().unwrap().to_string_lossy());
         let generator = NeovimGenerator;
-        generator.write_nvim_dap_lua_with(4711, &project, &env);
+        generator
+            .write_nvim_dap_lua_with(4711, &project, &env)
+            .unwrap();
 
         let project_lua = project.canonicalize().unwrap().join(".nvim-dap.lua");
         assert!(

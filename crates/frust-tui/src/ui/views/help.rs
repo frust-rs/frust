@@ -28,41 +28,61 @@ use crate::ui::layout::centered;
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 
-/// Width of the left-aligned keyhint field within each command column
-/// (`^O`/`⌥m` are the widest real hints at two characters; a key-less
-/// command's hint renders as `—`).
-const HINT_WIDTH: usize = 4;
+/// Floor for the left-aligned keyhint field within each command column, in
+/// display columns — not the actual width. The column is sized to the
+/// registry's widest hint (via [`ratatui::text::Span::width`], display
+/// columns rather than byte or `char` count, though for every hint in this
+/// registry the two coincide) whenever that exceeds the floor — e.g.
+/// `Alt+m` (5 columns) off macOS, which used to overflow a fixed 4-column
+/// field and push that one row's title a column later than every other
+/// row's (see [`hint_column_width`], and the regression test below). The
+/// floor matches macOS's own widest hint (`^O`/`⌥m`, both 2 columns) plus
+/// breathing room, so macOS's rendered overlay is unchanged by this file.
+const MIN_HINT_WIDTH: usize = 4;
 
 /// Columns of blank space between the overlay's two command columns.
 const COLUMN_GAP: usize = 3;
 
-/// Render the help overlay centered over `area`.
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    state: &AppState,
+/// A key-less command's hint renders as `—` rather than being left blank
+/// (see the module doc comment on why key-less entries still show at all).
+fn hint_of(hint: &str) -> &str {
+    if hint.is_empty() { "—" } else { hint }
+}
+
+/// The keyhint column width (display columns) `commands` needs: the widest
+/// hint in the registry (after the empty-hint-to-`—` substitution), floored
+/// at [`MIN_HINT_WIDTH`].
+fn hint_column_width(commands: &[palette::PaletteCommand]) -> usize {
+    commands
+        .iter()
+        .map(|c| Span::raw(hint_of(c.hint)).width())
+        .max()
+        .unwrap_or(0)
+        .max(MIN_HINT_WIDTH)
+}
+
+/// Builds the overlay's two-column line list plus the `(hint_width,
+/// title_width)` the modal is sized from. Split out from [`render`] so the
+/// column-alignment invariant — every row's title starts in the same place —
+/// is unit-testable against a plain [`palette::PaletteCommand`] list, with no
+/// `Frame` needed.
+fn command_lines(
+    commands: &[palette::PaletteCommand],
     theme: &Theme,
-    mouse: &mut MouseCtx,
-) {
-    // The same registry + gating the palette ranks — nothing filtered out
-    // (see the module doc comment on why key-less entries still render).
-    let commands = palette::commands(state);
-    let hint_width = HINT_WIDTH;
+) -> (Vec<Line<'static>>, usize, usize) {
+    let hint_width = hint_column_width(commands);
     let title_width = commands
         .iter()
         .map(|c| c.title.chars().count())
         .max()
         .unwrap_or(0);
-    fn hint_of(hint: &str) -> &str {
-        if hint.is_empty() { "—" } else { hint }
-    }
 
     // Split the registry across two columns, left column carrying the extra
     // row when the count is odd.
     let rows_per_col = commands.len().div_ceil(2).max(1);
     let (left, right) = commands.split_at(rows_per_col.min(commands.len()));
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows_per_col + 3);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows_per_col);
     for (i, left_cmd) in left.iter().enumerate() {
         let mut spans = vec![
             Span::styled(
@@ -87,6 +107,34 @@ pub fn render(
         }
         lines.push(Line::from(spans));
     }
+    (lines, hint_width, title_width)
+}
+
+/// Render the help overlay centered over `area`.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
+    // The same registry + gating the palette ranks — nothing filtered out
+    // (see the module doc comment on why key-less entries still render).
+    // The registry's own "Toggle mouse capture" hint is a host-honest
+    // default (`crate::engine::palette::commands`'s doc), not the theme's —
+    // substitute the theme's glyph set here so the rendered hint matches
+    // whatever `Theme` this frame was actually drawn with (e.g. the
+    // snapshot suite's macOS-forced theme), without the engine tracking
+    // host identity for us.
+    let mut commands = palette::commands(state);
+    if let Some(cmd) = commands
+        .iter_mut()
+        .find(|c| c.title == "Toggle mouse capture")
+    {
+        cmd.hint = theme.mouse_toggle_hint();
+    }
+    let (mut lines, hint_width, title_width) = command_lines(&commands, theme);
+    let rows_per_col = lines.len();
     lines.push(Line::from(""));
     lines.push(Line::styled(
         "— = palette/mouse only",
@@ -125,4 +173,82 @@ pub fn render(
     // rows carry no per-command action of their own (this is a reference
     // panel, not a second palette).
     mouse.click(box_, RegionId::HelpClose, Message::CloseHelpOverlay);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::palette::PaletteCommand;
+    use crate::ui::theme::Theme;
+
+    fn cmd(title: &'static str, hint: &'static str) -> PaletteCommand {
+        PaletteCommand {
+            title,
+            hint,
+            message: Message::RequestQuit,
+            enabled: true,
+            disabled_reason: None,
+        }
+    }
+
+    /// Byte offset of the `n`th `char` in `s`, or `s.len()` past the end —
+    /// `str` indexing is by byte, but our column math is by `char` (every
+    /// hint here is single-width, so `char` count and display-column width
+    /// coincide), and `—` alone is a multi-byte `char`.
+    fn nth_char_byte(s: &str, n: usize) -> usize {
+        s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)
+    }
+
+    /// Regression test: off macOS, the registry's `Alt+m` hint is 5 display
+    /// columns wide — wider than a fixed `const HINT_WIDTH: usize = 4` would
+    /// allow. Checked to fail against that fixed-width code: hardcoding
+    /// `hint_column_width` back to `4` and rerunning this test fails the
+    /// "Toggle mouse capture" row's title-position assertion below, because
+    /// `format!("{:<4}", "Alt+m")` doesn't pad or truncate a 5-char value
+    /// into a 4-wide field — it just leaves the field one column too wide,
+    /// which pushes that one row's title a column later than every other
+    /// row's in the same column.
+    #[test]
+    fn every_row_title_starts_in_the_same_column_off_macos() {
+        let commands = vec![
+            cmd("Run on device(s)…", "r"),
+            cmd("Toggle mouse capture", "Alt+m"),
+            cmd("Doctor", "i"),
+            cmd("Stop session", "x"),
+            cmd("Switch project…", "^O"),
+            cmd("Quit", ""),
+        ];
+        let theme = Theme::frust_dark();
+        let (lines, hint_width, title_width) = command_lines(&commands, &theme);
+
+        assert!(
+            hint_width >= Span::raw("Alt+m").width(),
+            "hint column ({hint_width}) must fit `Alt+m`"
+        );
+
+        let rows_per_col = commands.len().div_ceil(2);
+        let (left, right) = commands.split_at(rows_per_col);
+        let right_title_at = hint_width + title_width + COLUMN_GAP + hint_width;
+
+        assert_eq!(lines.len(), left.len());
+        for (i, line) in lines.iter().enumerate() {
+            let rendered = line.to_string();
+            let left_title = left[i].title;
+            let left_at = nth_char_byte(&rendered, hint_width);
+            assert!(
+                rendered[left_at..].starts_with(left_title),
+                "row {i}: left title {left_title:?} does not start at column \
+                 {hint_width} in {rendered:?}"
+            );
+            if let Some(right_cmd) = right.get(i) {
+                let right_at = nth_char_byte(&rendered, right_title_at);
+                assert!(
+                    rendered[right_at..].starts_with(right_cmd.title),
+                    "row {i}: right title {:?} does not start at column \
+                     {right_title_at} in {rendered:?}",
+                    right_cmd.title
+                );
+            }
+        }
+    }
 }

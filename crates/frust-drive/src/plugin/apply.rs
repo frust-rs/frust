@@ -11,6 +11,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
 use super::registry::{find_plugin, known_plugins};
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
 use crate::build_dirs::BuildLayout;
+use crate::host_path;
 use crate::scaffold::context::frust_path_from_project_subdir;
 
 /// Project-relative paths of the files a contribution edits.
@@ -388,11 +389,21 @@ fn repo_relative_path(frust_path: &str, rel_path: &str) -> String {
 /// Resolve a `requires_sibling` path to an absolute location for the on-disk
 /// existence check: the frust repo root (two levels above the `frust` facade
 /// crate dir) joined with the sibling's repo-root-relative path.
+///
+/// `frust_path` is read back verbatim from an existing project's
+/// `Cargo.toml` (see [`frust_dep_path`]), which — for a project scaffolded on
+/// Windows before this module existed — may still carry a verbatim
+/// `\\?\C:\...` prefix; `.join("..")` doesn't climb a verbatim path the way
+/// it climbs a plain one (verbatim disables `..`/`.` normalization by
+/// design), so [`host_path::simplify`] runs first. This only widens what
+/// this existence check can resolve; it never rewrites the project's own
+/// `Cargo.toml`.
 fn resolve_sibling(project_root: &Path, frust_path: &str, sibling: &str) -> PathBuf {
-    let frust_abs = if Path::new(frust_path).is_absolute() {
-        PathBuf::from(frust_path)
+    let frust_path = host_path::simplify(Path::new(frust_path));
+    let frust_abs = if frust_path.is_absolute() {
+        frust_path
     } else {
-        project_root.join(frust_path)
+        project_root.join(&frust_path)
     };
     frust_abs.join("..").join("..").join(sibling)
 }
@@ -532,10 +543,23 @@ fn apply_scaffold_file(
 /// in the registry is a static, trusted string, but the check stays
 /// defensive rather than assuming that forever (see
 /// [`PluginAddError::UnsafeScaffoldPath`]).
+///
+/// `Path::is_absolute()` alone is not enough: on Windows, `/etc/passwd` has
+/// no drive prefix so it is *not* `is_absolute()`, yet `project_root.join(...)`
+/// on a rooted-without-prefix path replaces everything but the drive,
+/// yielding `C:\etc\passwd` — a full escape from `project_root`. Rejecting
+/// [`Component::RootDir`] (a bare root, drive-relative on Windows, absolute
+/// on Unix) and [`Component::Prefix`] (`C:`, `\\server\share`) alongside
+/// [`Component::ParentDir`] closes that gap on every OS; on Unix `RootDir`
+/// alone already covers what `is_absolute()` used to check.
 fn safe_scaffold_rel_path(rel_path: &str) -> Result<&Path, PluginAddError> {
     let path = Path::new(rel_path);
-    let is_unsafe =
-        path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir));
+    let is_unsafe = path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    });
     if is_unsafe {
         return Err(PluginAddError::UnsafeScaffoldPath(rel_path.to_string()));
     }
@@ -614,7 +638,20 @@ fn apply_gradle_module(
 fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -> String {
     let build_dir = gradle_name.trim_start_matches(':');
     let module_dir = repo_relative_path(frust_path, rel_path);
-    let build_redirect = format!("../{}", BuildLayout::android_module(build_dir).display());
+    // `Path::display()` renders with the host's native separator (backslash
+    // on Windows); this literal is embedded verbatim into a Kotlin-DSL
+    // `rootDir.resolve(...)` string, which — like every other path literal
+    // this module writes — is always forward-slash, regardless of the host
+    // building the project. A raw backslash here is also an invalid escape
+    // inside the generated Kotlin string literal, not just a stylistic
+    // mismatch. `host_path::to_portable_string` is the crate's existing
+    // display()-for-generated-text counterpart (used by the scaffold
+    // pipeline's own `Cargo.toml`/`gradle.properties`/pbxproj emitters for
+    // the same reason).
+    let build_redirect = format!(
+        "../{}",
+        host_path::to_portable_string(&BuildLayout::android_module(build_dir))
+    );
     format!(
         "\n\
          // Added by `frust` Add Plugin: a plugin's Android library module,\n\
@@ -1264,6 +1301,39 @@ mod tests {
     fn add_secure_storage_with_biometric_applies_every_edit() {
         let root = scaffold_project("ss-biometric");
 
+        // `test_context()`'s default `frust_path` (`/nonexistent/frust/checkout`)
+        // is a forward-slash-rooted literal with no drive letter — not
+        // `Path::is_absolute()` on Windows, so `frust_path_from_project_subdir`
+        // would treat it as relative and prepend an extra `../` climb. A real
+        // project's `frust` path dep on Windows always carries a drive letter,
+        // so swap in a host-real absolute stand-in (still guaranteed absent on
+        // disk) to keep this fixture meaningful on every host — the same
+        // post-scaffold Cargo.toml rewrite
+        // `gradle_module_projectdir_resolves_from_the_android_subdirectory`
+        // uses for its own relative-path fixture, below. Forward slashes even
+        // on Windows: a raw `\` inside a TOML basic string is an invalid
+        // escape (this crate's own `host_path` module doc explains why every
+        // path this pipeline writes into a `Cargo.toml`/`.properties`/pbxproj
+        // value is portable-slash, never a native backslash).
+        #[cfg(windows)]
+        const FRUST_PATH: &str = "C:/nonexistent/frust/checkout";
+        #[cfg(not(windows))]
+        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        #[cfg(windows)]
+        {
+            let cargo_path = root.join(CARGO_TOML_REL);
+            let cargo_src = fs::read_to_string(&cargo_path).unwrap();
+            let rewritten = cargo_src.replace(
+                "path = \"/nonexistent/frust/checkout\"",
+                &format!("path = \"{FRUST_PATH}\""),
+            );
+            assert_ne!(
+                rewritten, cargo_src,
+                "expected to rewrite the frust path dep"
+            );
+            fs::write(&cargo_path, rewritten).unwrap();
+        }
+
         let manifest_before = fs::read(root.join(MANIFEST_REL)).unwrap();
         let proguard_before = fs::read(root.join(PROGUARD_REL)).unwrap();
 
@@ -1284,7 +1354,7 @@ mod tests {
         let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
         assert!(cargo.contains("frust-secure-storage"), "{cargo}");
         assert!(
-            cargo.contains("/nonexistent/frust/checkout/../../plugins/secure-storage"),
+            cargo.contains(&format!("{FRUST_PATH}/../../plugins/secure-storage")),
             "{cargo}"
         );
 
@@ -1329,10 +1399,10 @@ mod tests {
             "{settings}"
         );
         assert!(
-            settings.contains(
+            settings.contains(&format!(
                 "project(\":frust-secure-storage\").projectDir = \
-                 file(\"/nonexistent/frust/checkout/../../plugins/secure-storage/platform/android\")"
-            ),
+                 file(\"{FRUST_PATH}/../../plugins/secure-storage/platform/android\")"
+            )),
             "{settings}"
         );
         assert!(
@@ -1358,6 +1428,27 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The build-dir redirect `settings_include_block` emits must be
+    /// forward-slash on every host: it is spliced verbatim into a Kotlin-DSL
+    /// `rootDir.resolve("...")` string literal, where a raw backslash is an
+    /// invalid escape sequence, not merely a stylistic mismatch. Pinned at
+    /// the unit level (not just through the `add_plugin` integration tests
+    /// above) so a future regression that reintroduces `Path::display()`
+    /// fails here regardless of host.
+    #[test]
+    fn settings_include_block_build_redirect_is_always_forward_slash() {
+        let block = settings_include_block(
+            ":frust-secure-storage",
+            "/nonexistent/frust/checkout",
+            "plugins/secure-storage/platform/android",
+        );
+        assert!(
+            block.contains(r#"rootDir.resolve("../build/android/frust-secure-storage")"#),
+            "{block}"
+        );
+        assert!(!block.contains('\\'), "{block}");
     }
 
     /// `test_context`'s `frust_path` is deliberately nonexistent, so the
@@ -1941,6 +2032,25 @@ mod tests {
             matches!(&err, PluginAddError::UnsafeScaffoldPath(p) if p == "/etc/passwd"),
             "{err}"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Windows-only escape shapes `is_absolute()` alone would miss:
+    /// `C:foo` (a drive [`Component::Prefix`] with no [`Component::RootDir`] —
+    /// drive-relative, but still not project-relative) and `\\srv\sh\x` (a UNC
+    /// [`Component::Prefix`]). Both must be rejected the same way `/etc/passwd`
+    /// is on every OS (see `scaffold_file_rejects_absolute_path` above).
+    #[test]
+    #[cfg(windows)]
+    fn scaffold_file_rejects_windows_prefixed_paths() {
+        let root = scaffold_project("scaffold-file-windows-prefix");
+        for rel in ["C:foo", "\\\\srv\\sh\\x"] {
+            let err = apply_scaffold_file(&root, rel, SCAFFOLD_CONTENTS).unwrap_err();
+            assert!(
+                matches!(&err, PluginAddError::UnsafeScaffoldPath(p) if p == rel),
+                "{rel}: {err}"
+            );
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2547,6 +2657,21 @@ mod tests {
     /// in for the camera plugin's, whose registry entry lands in a later task.
     const PKG: &str = "FrustCamera";
     const PKG_REL: &str = "plugins/camera/platform/ios/FrustCamera";
+    // Host-real absolute (a drive-rooted path on Windows, `/`-rooted on
+    // Unix) — `frust_path_from_project_subdir` treats an absolute path as
+    // base-independent and returns it byte-identical, but a forward-slash
+    // literal with no drive letter is not `Path::is_absolute()` on Windows,
+    // so it would be "climbed" as if relative there. A real project's
+    // `frust` path dep is always genuinely absolute on whatever host wrote
+    // it, so this keeps the fixture meaningful cross-platform. Forward
+    // slashes even on the Windows drive-rooted form: this value is spliced
+    // into a generated `project.pbxproj`'s quoted `relativePath`, an old-style
+    // property list whose quoted strings support C-style backslash escapes —
+    // a raw `\` would silently corrupt the value instead of failing loudly
+    // the way the equivalent TOML case does.
+    #[cfg(windows)]
+    const TEST_FRUST_PATH: &str = "C:/nonexistent/frust/checkout";
+    #[cfg(not(windows))]
     const TEST_FRUST_PATH: &str = "/nonexistent/frust/checkout";
 
     /// The three ids minted against a freshly rendered template, whose own

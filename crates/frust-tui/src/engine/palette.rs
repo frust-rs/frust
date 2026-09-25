@@ -13,6 +13,25 @@
 use super::message::Message;
 use super::state::AppState;
 
+/// The `(palette-open hint, mouse-toggle hint)` pair for a host, keyed off
+/// `is_macos` so both arms are directly unit-testable without depending on
+/// the machine actually running the test. macOS keeps the existing `⌘`/`⌥`
+/// symbols; every other host spells the modifier out — `⌘`/`⌥` aren't
+/// physical keys there — using the same `^X` notation the UI already uses
+/// for Ctrl bindings (e.g. `^O`, the "Switch project…" hint below).
+///
+/// `pub(crate)` rather than private: [`crate::ui::theme::Theme`] is the glyph
+/// set's carrier (see the module doc on [`commands`]'s "Toggle mouse
+/// capture" row), so it calls this directly rather than the engine tracking
+/// host identity for the UI layer.
+pub(crate) fn key_glyphs_for(is_macos: bool) -> (&'static str, &'static str) {
+    if is_macos {
+        ("⌘ palette", "⌥m")
+    } else {
+        ("^P palette", "Alt+m")
+    }
+}
+
 /// The open command palette's live state: the typed query and the highlighted
 /// row (an index into [`ranked`], clamped). Opening it primes an empty query so
 /// the full registry shows in its natural order.
@@ -154,8 +173,12 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_project,
             "open a project first",
         ),
-        always("Doctor", "d", Message::OpenDoctorPanel),
-        always("Toolchain setup…", "i", Message::OpenBootstrapWizard),
+        // Doctor panel is bound to `i` (from either screen); toolchain
+        // setup moved off `i` onto the panel's own `t` key / "Toolchain
+        // setup" button (see `views::doctor::render`), so it keeps a palette
+        // row but no top-level keyhint of its own.
+        always("Doctor", "i", Message::OpenDoctorPanel),
+        always("Toolchain setup…", "", Message::OpenBootstrapWizard),
         always("New project…", "n", Message::OpenCreateWizard),
         gated(
             "Add plugin…",
@@ -184,7 +207,17 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         // without claiming a second top-level key.
         always("DAP server…", "D", Message::OpenDapSettings),
         always("Start/stop DAP server", "", Message::ToggleDapServer),
-        always("Toggle mouse capture", "⌥m", Message::ToggleMouseCapture),
+        always(
+            "Toggle mouse capture",
+            // The registry itself carries only the host-honest default (see
+            // `key_glyphs_for`'s doc); a render-time caller that needs the
+            // exact glyph set an in-hand `Theme` picked (e.g. the help
+            // overlay, so its snapshot fixtures stay host-independent)
+            // substitutes this row's hint from the theme instead of reading
+            // it here — see `crate::ui::views::help::render`.
+            key_glyphs_for(cfg!(target_os = "macos")).1,
+            Message::ToggleMouseCapture,
+        ),
         gated(
             "Toggle follow-tail",
             "f",
@@ -247,12 +280,9 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_session,
             "no active session",
         ),
-        // `d` is the session view's own DevTools toggle and the workbench's
-        // doctor panel in the *other* context (no session open) — the
-        // full-screen key-namespace swap workbook §B12 defines. Both keep
-        // their key here because both are only ever reachable in their own
-        // context; the palette and help overlay render this one registry, so
-        // the pair shows exactly as the keyboard behaves.
+        // `d` is the session view's own DevTools toggle and means nothing
+        // else — with no session open it claims no key at all, since
+        // Doctor moved to its own unconditional `i` key.
         gated(
             "DevTools",
             "d",
@@ -430,5 +460,17 @@ mod tests {
             .find(|c| c.title == "Build…")
             .unwrap();
         assert_eq!(build.message, Message::OpenBuildLauncher);
+    }
+
+    #[test]
+    fn key_glyphs_keep_the_mac_symbols_on_macos() {
+        assert_eq!(key_glyphs_for(true), ("⌘ palette", "⌥m"));
+    }
+
+    #[test]
+    fn key_glyphs_spell_the_modifiers_out_off_macos() {
+        // ⌘/⌥ aren't physical keys off macOS, so the hint uses the same
+        // `^X` Ctrl notation already in use (`^O`) plus a spelled-out `Alt+`.
+        assert_eq!(key_glyphs_for(false), ("^P palette", "Alt+m"));
     }
 }

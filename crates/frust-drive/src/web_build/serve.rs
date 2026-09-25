@@ -50,7 +50,7 @@
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,6 +82,27 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a response write may stall. Generous because the payload is a
 /// multi-megabyte `.wasm`, though on loopback it never approaches this.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound on how long [`handle_connection`] waits, after it has written its
+/// response, to drain any bytes the peer might still have in flight before
+/// the connection is dropped.
+///
+/// This exists for one platform-specific reason: closing a socket while
+/// unread bytes remain in its receive buffer makes some TCP stacks —
+/// Windows chief among them — answer with an abortive RST instead of a
+/// graceful FIN, which the peer sees as a forced reset
+/// (`ConnectionReset`, Windows `WSAECONNRESET` / os error 10054) rather
+/// than a clean end-of-stream, even though the response it wanted had
+/// already been delivered in full. This server only ever reads up through
+/// a request's blank line (see `read_request`) and never reads a body —
+/// so a request this server refuses with a body attached (a `POST`, say)
+/// or a peer whose write races the response leaves exactly that unread
+/// tail behind. Draining it here, bounded and best-effort, keeps the
+/// close graceful for a well-behaved client without giving a slow or
+/// silent peer any way to hold a connection thread open. Short because
+/// this server's `Connection: close` contract means a well-behaved peer
+/// has nothing left to send once it has read the response.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// How often the accept loop wakes to notice [`DevServer::shutdown`]. Polling
 /// a non-blocking listener costs one wake-up per interval and needs no
@@ -423,6 +444,7 @@ fn handle_connection(stream: TcpStream, root: &Path, log: Option<&(dyn Fn(&str) 
                 None,
                 false,
             );
+            finish_connection(&writer, &mut reader);
             return;
         }
         Err(_) => return,
@@ -528,6 +550,29 @@ fn handle_connection(stream: TcpStream, root: &Path, log: Option<&(dyn Fn(&str) 
             sanitize_log_field(&request.target),
             status.code()
         ));
+    }
+
+    finish_connection(&writer, &mut reader);
+}
+
+/// Half-closes the write side — sending the FIN this server's
+/// `Connection: close` contract promises — then drains, bounded by
+/// [`DRAIN_TIMEOUT`], any bytes the peer might still be sending before the
+/// connection is dropped. See [`DRAIN_TIMEOUT`] for why: this server never
+/// reads a request body (`read_request` stops at the blank line), so a
+/// refused request that carried one (a `POST`, say) leaves it sitting
+/// unread in the socket's receive buffer, and closing with unread bytes
+/// still there is exactly the condition that makes a platform answer with
+/// an abortive reset instead of a graceful close.
+fn finish_connection(writer: &TcpStream, reader: &mut BufReader<TcpStream>) {
+    let _ = writer.shutdown(Shutdown::Write);
+    let _ = reader.get_ref().set_read_timeout(Some(DRAIN_TIMEOUT));
+    let mut discard = [0u8; 1024];
+    loop {
+        match reader.read(&mut discard) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => continue,
+        }
     }
 }
 
@@ -1215,6 +1260,31 @@ mod tests {
         );
         assert!(post.starts_with("HTTP/1.1 405 "), "{post}");
         assert!(post.contains("Allow: GET, HEAD\r\n"), "{post}");
+        server.shutdown();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A refused request can still carry a body (a `POST`, since
+    /// `read_request` never reads one), which leaves those bytes sitting
+    /// unread in the socket's receive buffer at close time — the shape
+    /// that makes a platform answer with an abortive reset instead of a
+    /// graceful close, even though the response was already sent in full.
+    /// Confirms the connection still closes cleanly; see
+    /// [`finish_connection`]/[`DRAIN_TIMEOUT`].
+    #[test]
+    fn a_refused_request_with_an_unread_body_still_closes_cleanly() {
+        let root = artifact_root("e2e-post-body-drain");
+        let server = test_server(&root);
+        let body = "x".repeat(4096);
+        let response = request(
+            server.local_addr(),
+            &format!(
+                "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 405 "), "{response}");
         server.shutdown();
         let _ = fs::remove_dir_all(&root);
     }

@@ -175,16 +175,25 @@ fn build_with_env(
         args.push(prop.as_str());
     }
 
+    // `gradlew.bat` on Windows, absolute — `./gradlew` (relative, run in
+    // `android_dir`) unchanged elsewhere; see
+    // `android_run::gradle::gradle_wrapper`'s doc for why. Shared with
+    // `android_run::gradle::assemble` so the two Gradle-invoking lanes spawn
+    // the identical program.
+    let wrapper = crate::android_run::gradle::gradle_wrapper(&android_dir);
+    let wrapper_cmd = wrapper.to_string_lossy().into_owned();
+    let display = crate::android_run::gradle::gradle_wrapper_display();
+
     let mut prefixed = |line: &str| on_line(&format!("[gradle] {line}"));
     let out = runner
         .run_streaming(
-            "./gradlew",
+            &wrapper_cmd,
             &args,
             Some(&android_dir),
             &[("JAVA_HOME", &outcome.java_home)],
             &mut prefixed,
         )
-        .with_context(|| format!("running `./gradlew {task}` in `{}`", android_dir.display()))?;
+        .with_context(|| format!("running `{display} {task}` in `{}`", android_dir.display()))?;
     // Gradle has returned; the generated signing file has no further reader.
     // (An early `?` above drops it just the same — this only narrows the
     // window for the success path.)
@@ -258,9 +267,17 @@ mod tests {
     /// registered key that is a *prefix* of the real one — is what makes
     /// these tests assert the argv: drop or misplace the cache flag and no
     /// fixture matches at all.
+    ///
+    /// The leading program name is [`crate::android_run::gradle::gradle_wrapper`]'s
+    /// own output — `./gradlew` everywhere but Windows, where
+    /// `build_with_env` spawns the absolute `gradlew.bat` wrapper — rather
+    /// than a hardcoded `"./gradlew"`, so this fixture key matches what the
+    /// pipeline actually invokes on every host `cargo test` runs on.
     fn gradlew_key(project_dir: &Path, task_and_props: &str) -> String {
+        let android_dir = project_dir.join("android");
         format!(
-            "./gradlew --project-cache-dir {} {task_and_props}",
+            "{} --project-cache-dir {} {task_and_props}",
+            crate::android_run::gradle::gradle_wrapper(&android_dir).to_string_lossy(),
             crate::android_run::gradle::project_cache_dir(project_dir).display()
         )
     }

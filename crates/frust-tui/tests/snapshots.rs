@@ -41,9 +41,16 @@ fn render_to_string(w: u16, h: u16, state: &AppState) -> String {
 /// per-depth color behavior itself is unit-tested in
 /// `crates/frust-tui/src/ui/anim/shimmer.rs`.
 fn render_to_string_at(w: u16, h: u16, state: &AppState, depth: ColorDepth) -> String {
+    // Host-honest key glyphs (`⌘`/`⌥` vs `^P`/`Alt+m`, see
+    // `frust_tui::engine::palette::key_glyphs_for`) are keyed off the real
+    // build target by default, which would otherwise make every snapshot
+    // containing a palette/mouse hint diverge between a Linux/Windows CI run
+    // and an actual macOS gate. Build the theme with the macOS spelling
+    // forced for the whole snapshot suite instead, so it renders identically
+    // everywhere; no `.snap` fixture needs a per-host fork.
     let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).expect("test terminal");
-    let theme = Theme::frust_dark_at(depth);
+    let theme = Theme::frust_dark_at_macos(depth);
     let mut regions = MouseRegions::new();
     terminal
         .draw(|frame| {

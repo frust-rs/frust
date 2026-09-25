@@ -107,8 +107,9 @@ pub fn render(
 /// Render the titlebar toolchain chip for the welcome screen (right-aligned),
 /// wired to the real startup-preflight state — the same chip logic
 /// `views::workbench::titlebar` uses. Clicking it opens the bootstrap wizard
-/// (keyboard parity: `i`), so a fresh machine can reach the toolchain
-/// setup even before creating a project.
+/// directly (keyboard route: `i` opens the doctor panel, whose `t` key /
+/// "Toolchain setup" button reaches the same wizard), so a fresh machine can
+/// reach the toolchain setup even before creating a project.
 pub fn titlebar(
     frame: &mut Frame,
     area: Rect,

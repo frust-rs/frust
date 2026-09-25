@@ -18,9 +18,9 @@ SEL    ▸ ▶ desktop           │   12:00:07 [app]    app: recovering
      ACTIONS                 │                                                                                              
        New project · n       │                                                                                              
        Add plugin · a        │                                                                                              
-       Doctor · d            │                                                                                              
+       Doctor · i            │                                                                                              
        Build · b             │                                                                                              
-       Clean · c             │                                                                                              
+       Clean                 │                                                                                              
        MCP off · M           │                                                                                              
        DAP off · D           │                                                                                              
                              │                                                                                              

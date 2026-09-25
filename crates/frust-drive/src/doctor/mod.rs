@@ -71,19 +71,36 @@ pub trait Validator {
     fn validate(&self, ctx: &DoctorCtx) -> Validation;
 }
 
-/// The v1 validator set, in report order.
-pub fn default_validators() -> Vec<Box<dyn Validator>> {
-    vec![
+/// The v1 validator set, in report order, for a host known to be (or not be)
+/// macOS. `XcodeValidator` is registered only when `is_macos` is `true`: the
+/// structured report (`report::build_report`) already gates its whole iOS
+/// area out off macOS, and the flat list must agree — otherwise a non-macOS
+/// `frust doctor` run carries a permanent `[!] Xcode` row for a component
+/// that can never exist on the host.
+pub fn default_validators_for_host(is_macos: bool) -> Vec<Box<dyn Validator>> {
+    let mut validators: Vec<Box<dyn Validator>> = vec![
         Box::new(RustToolchainValidator),
         Box::new(MobileTargetsValidator),
         Box::new(CargoNdkValidator),
         Box::new(AndroidSdkValidator),
-        Box::new(XcodeValidator),
-        Box::new(CargoPackagerValidator),
+    ];
+    if is_macos {
+        validators.push(Box::new(XcodeValidator));
+    }
+    validators.extend([
+        Box::new(CargoPackagerValidator) as Box<dyn Validator>,
         Box::new(WasmTargetValidator),
         Box::new(WasmBindgenCliValidator),
         Box::new(WasmOptValidator),
-    ]
+    ]);
+    validators
+}
+
+/// The v1 validator set for the current host. See
+/// [`default_validators_for_host`] for the macOS-only `Xcode` gate, applied
+/// here via `cfg!(target_os = "macos")`.
+pub fn default_validators() -> Vec<Box<dyn Validator>> {
+    default_validators_for_host(cfg!(target_os = "macos"))
 }
 
 /// Runs every validator against `ctx`, in order.
@@ -114,5 +131,31 @@ impl FakeEnv {
 impl EnvLookup for FakeEnv {
     fn get(&self, key: &str) -> Option<String> {
         self.0.get(key).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flat validator list must never carry an `Xcode` row on a host
+    /// that cannot have Xcode at all, and must always carry one on a macOS
+    /// host — the same host-honest gate `report::build_report` already
+    /// applies to the whole iOS area.
+    #[test]
+    fn xcode_validator_is_registered_only_on_macos() {
+        let non_macos = default_validators_for_host(false);
+        let non_macos_names: Vec<&str> = non_macos.iter().map(|v| v.name()).collect();
+        assert!(
+            !non_macos_names.contains(&"Xcode"),
+            "non-macOS validator list must have no Xcode row: {non_macos_names:?}"
+        );
+
+        let macos = default_validators_for_host(true);
+        let macos_names: Vec<&str> = macos.iter().map(|v| v.name()).collect();
+        assert!(
+            macos_names.contains(&"Xcode"),
+            "macOS validator list must have an Xcode row: {macos_names:?}"
+        );
     }
 }

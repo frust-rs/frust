@@ -17,7 +17,7 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS              │                                                      │▓▓                    
    New project · n    │  Remove build output for huddle?                     │▓▓                    
    Add plugin · a     │  cargo clean · build/ · legacy: android/app/build ·  │▓▓                    
-   Doctor · d         │                                                      │▓▓                    
+   Doctor · i         │                                                      │▓▓                    
    Build · b          │   Clean     Cancel                                   │▓▓                    
    Clean · c          │  Enter/y clean · Esc cancel                          │▓▓                    
    MCP off · M        ╰──────────────────────────────────────────────────────╯▓▓                    
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

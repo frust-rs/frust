@@ -17,7 +17,7 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS          │    Port      4849                                            │▓▓                
    New project · n│    [x] auto-start in an IDE terminal                         │▓▓                
    Add plugin · a │    [x] auto-configure the IDE on start                       │▓▓                
-   Doctor · d     │    IDE       ‹ detected: none ›                              │▓▓                
+   Doctor · i     │    IDE       ‹ detected: none ›                              │▓▓                
    Build · b      │   Generate IDE config now     Close                          │▓▓                
    Clean · c      │                                                              │▓▓                
    MCP off · M    │  start it to debug this project from your editor             │▓▓                
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

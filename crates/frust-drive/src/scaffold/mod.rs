@@ -540,6 +540,7 @@ fn write_entry(
 /// filename allowlist instead. Currently only the Gradle wrapper script
 /// (`android.tmpl/gradlew`); its Windows counterpart (`gradlew.bat`)
 /// doesn't need a Unix exec bit.
+#[cfg(unix)]
 const EXECUTABLE_FILENAMES: &[&str] = &["gradlew"];
 
 /// Sets the Unix executable bit (`0o755`) on `path` if its file name is in
@@ -1887,8 +1888,14 @@ mod tests {
         // `.contains("windows/icon.ico")` would also match a stale
         // pre-migration literal (e.g. a wrongly reintroduced root-level
         // `windows/icon.ico`), silently passing on the wrong path.
-        let icon_path = BuildLayout::windows_icon();
-        let icon_path = icon_path.to_str().expect("utf8 path");
+        // The generated `windows/build.rs` embeds this path as a portable,
+        // forward-slash literal (it is a plain Rust string in the template,
+        // not rendered from `BuildLayout` at scaffold time) — so the pin
+        // below must compare the same portable form rather than
+        // `BuildLayout::windows_icon()`'s own `PathBuf`, which renders with
+        // the host's native separator (backslash on Windows).
+        let icon_path = crate::host_path::to_portable_string(&BuildLayout::windows_icon());
+        let icon_path = icon_path.as_str();
         assert_eq!(icon_path, "build/desktop/windows/icon.ico");
         assert!(
             build_rs.contains(icon_path),

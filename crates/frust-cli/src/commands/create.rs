@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use frust_drive::host_path;
 use frust_drive::scaffold::{
     self, DesignSystemContext, ScaffoldPlatform, TemplateContext, context,
 };
@@ -185,21 +186,26 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
 /// repo-root value can otherwise silently bake `frust = { path =
 /// "<repo-root>" }`, a virtual-workspace manifest with no `[package]` table
 /// and a hard Cargo error at build time instead of scaffold time.
+///
+/// Both the default and the (normalised) override value are rendered through
+/// [`host_path::to_portable_string`] before returning: on Windows,
+/// `Path::canonicalize()` returns a verbatim `\\?\C:\...` path, which is
+/// both an invalid TOML escape sequence once substituted into `Cargo.toml`'s
+/// `frust = { path = "..." }` and unresolvable by a template's `..`-relative
+/// sibling joins — the portable, forward-slash form Cargo/Gradle/Xcode all
+/// accept on Windows fixes both. Identity on every other host.
 fn resolve_frust_path(overridden: Option<&str>) -> Result<String> {
     if let Some(path) = overridden {
         let resolved = context::resolve_frust_crate_path(Path::new(path))?;
-        let resolved = resolved.to_string_lossy().into_owned();
+        let resolved = host_path::to_portable_string(&resolved);
         if resolved != path {
             println!("note: --frust-path `{path}` normalised to `{resolved}`");
         }
         return Ok(resolved);
     }
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    Ok(raw
-        .canonicalize()
-        .unwrap_or(raw)
-        .to_string_lossy()
-        .into_owned())
+    let canonical = raw.canonicalize().unwrap_or(raw);
+    Ok(host_path::to_portable_string(&canonical))
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`

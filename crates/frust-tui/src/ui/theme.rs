@@ -153,6 +153,12 @@ pub struct Theme {
     t_border: ThemeColor,
     /// The icon table (Nerd Font vs plain Unicode).
     pub icons: Icons,
+    /// `true` selects the macOS `⌘`/`⌥` key-glyph spelling
+    /// ([`crate::engine::palette::key_glyphs_for`]); `false` selects the
+    /// spelled-out `^X`/`Alt+x` notation used everywhere else. Threaded
+    /// through render calls as a plain value rather than a process-global —
+    /// see [`Self::palette_open_hint`]/[`Self::mouse_toggle_hint`].
+    macos_glyphs: bool,
 }
 
 impl Theme {
@@ -190,8 +196,23 @@ impl Theme {
     }
 
     /// The Frust dark brand theme forced to a specific depth (tests, or a CLI
-    /// override later).
+    /// override later). Key glyphs are the real build target's
+    /// (`cfg!(target_os = "macos")`) — the production path.
     pub fn frust_dark_at(depth: ColorDepth) -> Self {
+        Self::frust_dark_with_glyphs(depth, cfg!(target_os = "macos"))
+    }
+
+    /// [`Self::frust_dark_at`] with the macOS key-glyph spelling forced
+    /// regardless of the actual build target. Used only by the insta
+    /// snapshot harness (`crates/frust-tui/tests/snapshots.rs`'s render
+    /// helper) so every CI host — Linux, macOS, Windows — renders the
+    /// identical glyphs and no `.snap` fixture needs a per-host fork;
+    /// production code never calls this.
+    pub fn frust_dark_at_macos(depth: ColorDepth) -> Self {
+        Self::frust_dark_with_glyphs(depth, true)
+    }
+
+    fn frust_dark_with_glyphs(depth: ColorDepth, macos_glyphs: bool) -> Self {
         Self {
             depth,
             // See the module-level table for the sampled hex per token.
@@ -207,6 +228,7 @@ impl Theme {
             t_error: ThemeColor::new(0xF4, 0x3F, 0x5E, 197, Color::Red),
             t_border: ThemeColor::new(0x3A, 0x32, 0x2A, 238, Color::DarkGray),
             icons: Icons::unicode(),
+            macos_glyphs,
         }
     }
 
@@ -259,6 +281,26 @@ impl Theme {
     pub fn border(&self) -> Color {
         self.t_border.resolve(self.depth)
     }
+
+    /// `true` when this theme carries the macOS key-glyph spelling.
+    pub fn macos_glyphs(&self) -> bool {
+        self.macos_glyphs
+    }
+
+    /// The command-palette-open hint for this theme's host glyph set (see
+    /// [`crate::engine::palette::key_glyphs_for`]). Shared by the workbench
+    /// and welcome status bars.
+    pub fn palette_open_hint(&self) -> &'static str {
+        crate::engine::palette::key_glyphs_for(self.macos_glyphs).0
+    }
+
+    /// The mouse-capture-toggle key hint for this theme's host glyph set
+    /// (see [`crate::engine::palette::key_glyphs_for`]). Shared by the
+    /// status-bar mouse chip and the help overlay's "Toggle mouse capture"
+    /// row.
+    pub fn mouse_toggle_hint(&self) -> &'static str {
+        crate::engine::palette::key_glyphs_for(self.macos_glyphs).1
+    }
 }
 
 #[cfg(test)]
@@ -290,5 +332,27 @@ mod tests {
         assert_eq!(i.create(), "\u{2692}");
         let n = Icons { nerd: true };
         assert_ne!(n.create(), i.create());
+    }
+
+    /// A theme built with the macOS glyph set forced carries the `⌘`/`⌥`
+    /// spelling through both hint accessors, regardless of the actual build
+    /// target — the path `crates/frust-tui/tests/snapshots.rs` relies on for
+    /// host-independent fixtures.
+    #[test]
+    fn macos_glyph_theme_carries_the_mac_hints() {
+        let theme = Theme::frust_dark_at_macos(ColorDepth::TrueColor);
+        assert!(theme.macos_glyphs());
+        assert_eq!(theme.palette_open_hint(), "⌘ palette");
+        assert_eq!(theme.mouse_toggle_hint(), "⌥m");
+    }
+
+    /// [`Theme::frust_dark_with_glyphs`] with the non-macOS set carries the
+    /// spelled-out `^P`/`Alt+m` hints through both accessors.
+    #[test]
+    fn non_macos_glyph_theme_carries_the_spelled_out_hints() {
+        let theme = Theme::frust_dark_with_glyphs(ColorDepth::TrueColor, false);
+        assert!(!theme.macos_glyphs());
+        assert_eq!(theme.palette_open_hint(), "^P palette");
+        assert_eq!(theme.mouse_toggle_hint(), "Alt+m");
     }
 }

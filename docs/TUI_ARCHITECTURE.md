@@ -19,7 +19,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 
 | Module | Responsibility |
 |--------|-----------------|
-| `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY. `engine::logstyle` classifies each log line once at push into per-line metadata (level, source, panic-fold role) consumed only by rendering. `SessionView` (`visible_indices`/`bottom_pos`) owns the visible-sequence/scroll-anchor math, computed once and consumed as-is by both scroll input and rendering. `engine::devtools` holds each session's DevTools view-model (`DevtoolsState`: five-phase connection, active tab, per-tab sub-state) as plain data + pure transitions mirroring what the bridges below report. `engine::dap_settings` holds the DAP settings dialog's model — focus walk, port validation, IDE selector, auto-start/auto-configure decision — as plain data loaded once at startup (not created/dropped with the dialog, unlike the run-config modal), so the preferences it holds back both the startup auto-start check and every `DapListening` report's auto-configure check whether or not the dialog is ever opened. `engine::build_launcher` holds the build-target picker's model (`ArtifactKind`): Android/iOS artifacts plus, on desktop, exactly the host's own bundle target (`DesktopBundleTarget::host()` — never a foreign-OS choice) |
+| `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY. `engine::logstyle` classifies each log line once at push into per-line metadata (level, source, panic-fold role) consumed only by rendering. `SessionView` (`visible_indices`/`bottom_pos`) owns the visible-sequence/scroll-anchor math, computed once and consumed as-is by both scroll input and rendering. `engine::devtools` holds each session's DevTools view-model (`DevtoolsState`: five-phase connection, active tab, per-tab sub-state) as plain data + pure transitions mirroring what the bridges below report. `engine::dap_settings` holds the DAP settings dialog's model — focus walk, port validation, IDE selector, auto-start/auto-configure decision — as plain data loaded once at startup (not created/dropped with the dialog, unlike the run-config modal), so the preferences it holds back both the startup auto-start check and every app-launch's and `DapListening` report's auto-configure check whether or not the dialog is ever opened. `engine::build_launcher` holds the build-target picker's model (`ArtifactKind`): Android/iOS artifacts plus, on desktop, exactly the host's own bundle target (`DesktopBundleTarget::host()` — never a foreign-OS choice) |
 | `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages. `supervise::progress` is a pure, side-effect-free build-phase-label extractor over streamed output lines, called from the drain path. `supervise::devtools_bridge`/`supervise::metrics_bridge` are DevTools' impure half, one thread per session each: the former owns a blocking devtools-protocol connection (token handshake, coalesced frame-stats, on-demand widget-tree/props pulls, `adb forward` on Android — see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)); the latter is a local `frust-drive::metrics` sampler with no build-feature gate, started once a session's Android identity resolves rather than once a discovery line lands. A device session's `stop` additionally dispatches a best-effort OS-level app termination (`adb shell am force-stop` / `simctl terminate`) on a tracked detached thread the supervisor bounded-joins from `stop_all`/`Drop` — shared by the user's stop keypress and MCP's/DAP's `stop_app`/`restart_app`. An Android session also runs a liveness prober on its own tracked thread: `adb shell pidof` every 2s while streaming, and two consecutive not-alive answers close the logcat stream and land the session `Exited(false)` with an explanatory note line — the only way `adb logcat --pid` (which does not exit when its pid dies) reports an app's death. iOS needs no prober (a simulator session's console pty exits with the app); a physical iOS device's app death goes undetected (see [LIMITATIONS.md](LIMITATIONS.md)'s `tui-physical-ios-app-death-undetected`). `supervise::mcp_backend` implements `frust-mcp`'s `SessionBackend` (fourteen methods, including the three `frust-dap`-only ones — `subscribe_session_events`, `fetch_widget_tree`, `project_root`) over this same supervise layer — see Embedded MCP Surface and Embedded DAP Surface below. `supervise::session_feeds` holds the two deferred-answer registries the first two of those need (`project_root` answers synchronously, from a field read, so it needs none): `SessionSubscribers` (live `SessionEventFeed` senders, fed by `crate::runner` replaying whatever a `Message::Session` transition appended) and `PendingWidgetTrees` (in-flight widget-tree pulls awaiting the devtools bridge's own async reply). `supervise::dap_server` is the DAP counterpart of `mcp_backend`'s server-handle half: `DapServerHandle`/`DapStatus`, deliberately shaped identically to `McpServerHandle`/`McpStatus` |
 | `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state. `ui::views::sessions` renders the log pane from the engine's `SessionView` visible-sequence rather than re-deriving line membership. `ui::anim` holds pure animation primitives (braille spinner, shimmer sweep) themed via `Theme`. `ui::views::devtools` renders the DevTools chrome: the four-tab strip and its five connection-state screens (workbook §B12). `ui::views::mcp` renders the MCP panel: server status, the connected-client list, and a start/stop action (workbook §B13). `ui::views::dap_settings` renders the DAP settings dialog: server status/toggle, port field, auto-start/auto-configure checkboxes, IDE selector, and the last generate-config result |
 | `runner` | Terminal lifecycle owner: `run()` first refuses a non-interactive terminal (stdin and stdout must both be TTYs) with a clean error, then owns raw-mode/panic-hook setup and the async event loop translating raw input into `Message`s and enacting `Effect`s |
@@ -55,7 +55,10 @@ question, carrying its own reply channel) is intercepted by `runner` **before** 
 documented no-op, since answering needs supervisor/launch-record state the pure core cannot reach.
 The TUI's `Theme` is its own brand palette, entirely independent of the
 framework's `frust-theme` (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)) — TUI paints
-itself, not a Frust app.
+itself, not a Frust app. `Theme` also carries the host key-glyph choice (macOS `⌘`/`⌥` versus
+spelled-out `^X`/`Alt+x` chords) as a plain field rather than an engine-side global, so `ui` reads it
+from the theme in hand and `engine` stays free of host-specific state; the snapshot test harness
+forces the macOS spelling so fixtures stay host-independent.
 
 ## Embedded MCP Surface
 
@@ -124,15 +127,21 @@ startup from the persisted `[dap]` table (`enabled`, `auto_start_in_ide`, `auto_
 `port`, `ide_override`, `intro_seen`) in `~/.config/frust/tui.toml`, not created and dropped with
 the dialog, so two effects fire whether or not anyone ever opens it: at startup,
 `Message::DapAutoStart` starts the server when
-`enabled || (auto_start_in_ide && a parent IDE is detected)`; on every `DapListening` report whose
-bound port actually changed, `auto_configure_ide` (default on) writes the detected/overridden IDE's
-DAP launch config via `frust_dap::ide_config` — an implicit, config-file-writing side effect of a
-successful server start, not only something the dialog's `g` triggers by hand. That auto-start is
-**gated once per install**: the first `DapAutoStart` that would otherwise have bound silently
-instead opens this dialog carrying a one-time notice (`DapSettings::intro_port`/`intro_notice`)
-naming the port, starts nothing itself, and persists `intro_seen = true` immediately — so the
-notice is spent even if the user quits without acting, and on that run only the dialog's own Start
-action binds a listener. Every later launch is the silent auto-start the defaults ask for.
+`enabled || (auto_start_in_ide && a parent IDE is detected)`; and, with `auto_configure_ide` on
+(default), `frust_dap::ide_config` writes the detected/overridden IDE's DAP launch config
+automatically at two points — every workbench app launch (one write per distinct project root
+among the launched sessions, batched after `Effect::LaunchSessions`) and, on a fresh server bind,
+for the active session's project alone — always in `WriteMode::IfAbsent`, which leaves a file that
+already carries the frust entry untouched rather than rewriting it. Only the dialog's own `g`
+(`WriteMode::Refresh`) replaces an existing entry, e.g. after the bound port changes; sessions
+launched through the embedded MCP/DAP backend (`supervise::mcp_backend`) never trigger this
+automatic write, since the client that launched them already has a config to connect with. That
+auto-start is **gated once per install**: the first `DapAutoStart` that would otherwise have bound
+silently instead opens this dialog carrying a one-time notice (`DapSettings::intro_port`/
+`intro_notice`) naming the port, starts nothing itself, and persists `intro_seen = true`
+immediately — so the notice is spent even if the user quits without acting, and on that run only
+the dialog's own Start action binds a listener. Every later launch is the silent auto-start the
+defaults ask for.
 `intro_seen` is burned only when the gate actually fires, so an install whose early launches are
 outside an IDE still gets the notice on its first launch inside one (see
 [LIMITATIONS.md](LIMITATIONS.md)'s `dap-tcp-unauthenticated-v1` for why this asymmetry with MCP —
@@ -156,6 +165,21 @@ server started.
   streaming its lines into the session log the same way a build does. A failed `cargo clean` ends
   the session `Exited(false)` (failed), never succeeding silently — the same `CleanReport`
   contract `frust-cli`'s own exit code follows (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
+- Recent projects: `engine::persist::split_local_and_previous` classifies the persisted recent list
+  plus freshly `detect()`-found roots into one ordered `AppState::projects` vec — every detected
+  root, then any still-existing recent entry under the cwd the walk missed, then every other
+  still-existing recent entry (most-recent first) — with `AppState::local_project_count` marking the
+  boundary between the two. The sidebar and titlebar switcher render the split as two groups,
+  PROJECTS then (only when non-empty) PREVIOUS PROJECTS; `AppState::insert_project` is the one seam
+  every fresh open/scaffold goes through to keep the boundary invariant. Persisted at
+  `$XDG_CONFIG_HOME` (else `<home>/.config`)`/frust/tui.toml`, where `<home>` is `$HOME`, else
+  `$USERPROFILE`, else `$HOMEDRIVE`+`$HOMEPATH` — a plain Windows console session with no `$HOME`
+  lands on `%USERPROFILE%\.config\frust\tui.toml`, the same file an OpenSSH session into the same
+  machine already writes. Every persisted root is simplified through `frust_drive::host_path::simplify`
+  at the load/save boundary, and project identity here (recents dedupe, this split, and
+  `AppState::insert_project`'s placement) compares roots via `host_path::same_path`/`is_under` —
+  case- and verbatim-insensitive on Windows, exact component comparison elsewhere — the same
+  comparison the launch guard below uses.
 - Launch guard: one live (non-terminal) session per `(project root, target)` — `AppState::live_session_for`
   (`live_session_for_excluding` for a restart, which exempts the session being replaced) is
   consulted by the run-config modal, run-on-all-devices, and the embedded MCP/DAP backend alike, so
@@ -163,10 +187,11 @@ server started.
   Warn toast ('<name>: already running here — stop it first') in the workbench and a typed
   `EmbeddedError::AlreadyRunning` over MCP/DAP; ad-hoc (targetless: build/clean/bootstrap-fix) and
   terminal sessions never occupy a target, and the guard is blind to build mode/flavor — only
-  project root and target identity matter. Roots are compared lexically (`Path::components`,
-  trailing separators and `.` segments ignored) rather than canonicalised, so a symlink and its
-  target, or a `..`-relative path resolving to the same place, still count as different projects and
-  can each hold their own "live" session.
+  project root and target identity matter. Roots are compared via `host_path::same_path` — still
+  purely lexical (no filesystem I/O) and case-/verbatim-insensitive on Windows, so a case-differing
+  root can no longer defeat the guard there — but not canonicalised, so a symlink and its target, or
+  a `..`-relative path resolving to the same place, still count as different projects and can each
+  hold their own "live" session.
 - Quit path: `Message::RequestQuit` (global `q`, the DevTools-pane `q`, Ctrl+C with no running
   session, or the palette's Quit) checks `AppState::live_session_count()`: zero live sessions quits
   immediately, otherwise `AppState.quit_confirm` opens a dialog warning that N running session(s)
@@ -276,7 +301,7 @@ server started.
 | `SessionTarget` | A session's launch identity (`Desktop` \| `Device { id, name, platform }`), distinct from its display label; devices compare by id alone. Backs the launch guard's `(project root, target)` key and `SessionView.target`/`Message::RegisterSession.target` |
 | `ActiveModal` | Exhaustively-matched enum selecting which modal/overlay is on top, shared by render dispatch and key routing so an unhandled new variant fails to compile. `QuitConfirm` shares CleanConfirm's priority tier, rendering over either top-level screen |
 | `MouseCtx` / `RegionId` | Per-frame clickable/hoverable region registry translated into `Message`s on the next input event; `RegionId::LogRow(abs)` is one such region per drawn log row, and the row-carrying `ContextTarget::LogView { row }` lets the context menu know which row (if any) was right-clicked |
-| `Theme` / `Palette` | The TUI's own brand palette (independent of `frust-theme`), and the fuzzy command palette whose registry (`engine::palette::commands`) also drives the help overlay. A runner test tripwires registry drift: it translates every single-printable-char hint through the real key-routing path under a state satisfying that entry's gate and asserts the resulting message matches the registry's own (documented exceptions: multi-key hints, the context-dependent `d` pair, and `y`, each asserted separately). The help overlay renders key-less (mouse/palette-only) entries with a '—' hint and a legend row explaining it |
+| `Theme` / `Palette` | The TUI's own brand palette (independent of `frust-theme`), and the fuzzy command palette whose registry (`engine::palette::commands`) also drives the help overlay. A runner test tripwires registry drift: it translates every single-printable-char hint through the real key-routing path under a state satisfying that entry's gate and asserts the resulting message matches the registry's own (documented exceptions: multi-key hints, the session-gated `d` DevTools hint (unclaimed with no active session), and `y`, each asserted separately). The help overlay renders key-less (mouse/palette-only) entries with a '—' hint and a legend row explaining it |
 | `PhaseLabel` | A parsed, displayable build/install/launch phase (`supervise::progress`); `None` when the streamed output doesn't match a recognized shape |
 | `LogLevel` / `LineMeta` / `LevelFilter` | Per-line log classification (`engine::logstyle`) — level/source/fold-role metadata computed once at push, and the filter narrowing the visible line sequence |
 | `DevtoolsState` | Per-session DevTools view-model (`engine::devtools`): five-phase connection (`ConnState`), active tab, and each tab's own sub-state — `PerformanceTab` (frame focus/scrub), `InspectorTab` (tree/selection), `MetricsState`/`SamplingState`/`MetricsIdentity` (System/Network's sampler status and rings) |

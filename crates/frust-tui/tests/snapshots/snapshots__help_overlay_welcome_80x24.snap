@@ -12,8 +12,8 @@ expression: "render_to_string(80, 24, &state)"
   │  X   Close tab                       f   Toggle follow-tail             │▓▓ 
   │  b   Build…                          w   Toggle line wrap               │▓▓ 
   │  c   Clean…                          /   Search logs…                   │▓▓ 
-  │  d   Doctor                          v   Select lines…                  │▓▓ 
-  │  i   Toolchain setup…                y   Copy selection                 │▓▓ 
+  │  i   Doctor                          v   Select lines…                  │▓▓ 
+  │  —   Toolchain setup…                y   Copy selection                 │▓▓ 
   │  n   New project…                    l   Cycle log level filter         │▓▓ 
   │  a   Add plugin…                     z   Toggle nearest backtrace fold  │▓▓ 
   │  ^O  Switch project…                 d   DevTools                       │▓▓ 

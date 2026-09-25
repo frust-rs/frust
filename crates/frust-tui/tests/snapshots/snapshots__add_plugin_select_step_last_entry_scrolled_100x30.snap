@@ -1,6 +1,5 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 709
 expression: rendered
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -18,7 +17,7 @@ expression: rendered
  ACTIONS          │    ( ) database                                              │▓▓                
    New project · n│        Embedded SQL database (SQLite via rusqlite;           │▓▓                
    Add plugin · a │    ( ) i18n                                                  │▓▓                
-   Doctor · d     │        Fluent Project-based                                  │▓▓                
+   Doctor · i     │        Fluent Project-based                                  │▓▓                
    Build · b      │    ( ) glyph                                                 │▓▓                
    Clean · c      │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
    MCP off · M    │    ( ) material                                              │▓▓                
@@ -32,4 +31,4 @@ expression: rendered
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

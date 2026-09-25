@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use frust_dap::ide_config::{ParentIde, parse_ide_name};
 use frust_drive::doctor::{EnvLookup, RealEnv};
+use frust_drive::host_path;
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use super::dap_settings::{DapSetting, persisted_ide_name};
@@ -29,8 +30,14 @@ use super::state::{SIDEBAR_DEFAULT_WIDTH, clamp_sidebar_width};
 const MAX_RECENT: usize = 20;
 
 /// The config file path: `$XDG_CONFIG_HOME/frust/tui.toml`, falling back to
-/// `~/.config/frust/tui.toml`. `None` if neither `XDG_CONFIG_HOME` nor
-/// `HOME` resolves — no persistence that run, never a hard error.
+/// `<home>/.config/frust/tui.toml` where `<home>` is [`home_dir`] — `$HOME`,
+/// then (on a host with none) `$USERPROFILE`, then `$HOMEDRIVE`+`$HOMEPATH`.
+/// That chain is what makes a plain Windows console session (no `$HOME` set)
+/// land on the *same* file an `ssh` session into the same machine already
+/// writes, since OpenSSH's server sets `HOME=%USERPROFILE%` for the login
+/// shell — an existing Windows store carries over rather than forking into a
+/// second, console-only file. `None` if nothing in the chain resolves — no
+/// persistence that run, never a hard error.
 fn config_path(env: &dyn EnvLookup) -> Option<PathBuf> {
     config_dir(env).map(|dir| dir.join("frust").join("tui.toml"))
 }
@@ -41,8 +48,18 @@ fn config_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
     {
         return Some(PathBuf::from(xdg));
     }
-    env.get("HOME")
-        .map(|home| PathBuf::from(home).join(".config"))
+    home_dir(env).map(|home| home.join(".config"))
+}
+
+/// The user's home directory — [`host_path::home_dir_from`]'s
+/// `$HOME`/`$USERPROFILE`/`$HOMEDRIVE`+`$HOMEPATH` chain, fed by this
+/// crate's own [`EnvLookup`] seam so it stays unit-testable without mutating
+/// the real, global process environment. The same shared resolver backs
+/// `frust_dap::ide_config::vscode`'s `home_dir` and
+/// `frust_drive::android_run`'s, so the three can no longer drift apart the
+/// way they had.
+fn home_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
+    host_path::home_dir_from(|key| env.get(key))
 }
 
 /// Load the persisted recent-projects list (newest first) against the real
@@ -70,8 +87,16 @@ fn recent_from_path(path: &Path) -> Vec<PathBuf> {
     recent_from_doc(&doc)
 }
 
+/// Reads `[recent].projects` off `doc`, running every entry through
+/// [`host_path::simplify`] (the "paths entering state get simplified once at
+/// the boundary" rule) and then collapsing duplicates ([`paths_match`],
+/// first occurrence — i.e. most-recently-used — wins). The second step heals
+/// a file a pre-[`host_path`] build already wrote with a duplicated entry
+/// (e.g. a canonicalized verbatim path alongside the plain one for the same
+/// project) on its very next load, without any user action.
 fn recent_from_doc(doc: &DocumentMut) -> Vec<PathBuf> {
-    doc.as_table()
+    let raw: Vec<PathBuf> = doc
+        .as_table()
         .get("recent")
         .and_then(Item::as_table)
         .and_then(|t| t.get("projects"))
@@ -79,10 +104,24 @@ fn recent_from_doc(doc: &DocumentMut) -> Vec<PathBuf> {
         .map(|arr| {
             arr.iter()
                 .filter_map(Value::as_str)
-                .map(PathBuf::from)
+                .map(|s| host_path::simplify(Path::new(s)))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    dedupe_first_wins(raw)
+}
+
+/// Collapse `paths` to its first occurrence of each distinct project
+/// ([`paths_match`]), preserving order — the load-time duplicate healing
+/// [`recent_from_doc`] applies.
+fn dedupe_first_wins(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for p in paths {
+        if !out.iter().any(|q| paths_match(q, &p)) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// Record `project` as the most-recently-opened (moved to the front,
@@ -111,9 +150,10 @@ fn save_recent_project(path: &Path, project: &Path) {
         .and_then(|text| text.parse::<DocumentMut>().ok())
         .unwrap_or_default();
 
+    let project = host_path::simplify(project);
     let mut recent = recent_from_doc(&doc);
-    recent.retain(|p| p != project);
-    recent.insert(0, project.to_path_buf());
+    recent.retain(|p| !paths_match(p, &project));
+    recent.insert(0, project);
     recent.truncate(MAX_RECENT);
 
     let array: Array = recent
@@ -137,24 +177,58 @@ fn save_recent_project(path: &Path, project: &Path) {
     let _ = fs::write(path, doc.to_string());
 }
 
-/// Merge the persisted recent list with freshly `detect`ed project roots:
-/// every recent entry that still exists on disk, in recency
-/// order, followed by any detected root not already present — deduped
-/// throughout. A recent entry that no longer exists (moved/deleted since
-/// last use) is silently dropped rather than shown as a dead switcher row.
-pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(recent.len() + detected.len());
+/// Whether `path` is `root` itself or sits nested under it — [`host_path::is_under`]:
+/// component-prefix containment after [`host_path::simplify`], case-insensitive
+/// on Windows (so a path equal to `root` counts too, and `\\?\`-verbatim or
+/// differently-cased Windows paths naming the same place still match), exact
+/// component comparison elsewhere. Never touches the filesystem. This is the
+/// one comparison [`split_local_and_previous`]'s "is this recent project
+/// under the cwd" classification *and* [`AppState::insert_project`]'s
+/// local/previous placement go through — the platform-aware seam every
+/// project-identity call site shares rather than reimplementing.
+///
+/// [`AppState::insert_project`]: super::state::AppState::insert_project
+pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
+    host_path::is_under(path, root)
+}
+
+/// Whether `a` and `b` name the same project root — [`host_path::same_path`],
+/// the same platform-aware rule [`path_is_within`] uses.
+fn paths_match(a: &Path, b: &Path) -> bool {
+    host_path::same_path(a, b)
+}
+
+/// Split the persisted recent list and freshly `detect`ed project roots into
+/// one ordered `AppState::projects` vec plus the boundary between its two
+/// sections: `[..local_count]` is "local" — every `detected`
+/// root, in walk order, followed by any *existing* recent entry that sits
+/// under `cwd` but that the bounded walk missed (still local — appended at
+/// the end of the local section, in recency order); `[local_count..]` is
+/// "previous" — every other existing recent entry not already counted as
+/// local, kept in recency order (most-recent first). A recent entry that no
+/// longer exists on disk (moved/deleted since last use) is silently dropped
+/// rather than shown as a dead switcher row; duplicates are dropped
+/// throughout via [`paths_match`].
+pub fn split_local_and_previous(
+    cwd: &Path,
+    recent: &[PathBuf],
+    detected: &[PathBuf],
+) -> (Vec<PathBuf>, usize) {
+    let mut local: Vec<PathBuf> = detected.to_vec();
+    let mut previous: Vec<PathBuf> = Vec::new();
     for p in recent {
-        if p.is_dir() && !out.contains(p) {
-            out.push(p.clone());
+        if !p.is_dir() || local.iter().any(|l| paths_match(l, p)) {
+            continue;
+        }
+        if path_is_within(p, cwd) {
+            local.push(p.clone());
+        } else if !previous.iter().any(|q| paths_match(q, p)) {
+            previous.push(p.clone());
         }
     }
-    for p in detected {
-        if !out.contains(p) {
-            out.push(p.clone());
-        }
-    }
-    out
+    let local_count = local.len();
+    local.extend(previous);
+    (local, local_count)
 }
 
 // ── Settings persistence: sidebar width, mouse-capture preference ──────────
@@ -450,6 +524,18 @@ mod tests {
             m.insert("HOME".to_string(), home.to_string_lossy().into_owned());
             Self(m)
         }
+
+        /// An arbitrary set of environment variables — the `home_dir`
+        /// fallback-chain tests, which need `HOME` absent while other
+        /// variables are set.
+        fn with(pairs: &[(&str, &str)]) -> Self {
+            Self(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        }
     }
 
     impl EnvLookup for FakeEnv {
@@ -467,6 +553,74 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── config_path / home_dir fallback chain ────────────────────────────
+
+    #[test]
+    fn xdg_config_home_wins_over_home_and_the_windows_fallbacks() {
+        let env = FakeEnv::with(&[
+            ("XDG_CONFIG_HOME", "/xdg"),
+            ("HOME", "/home/ed"),
+            ("USERPROFILE", r"C:\Users\ed"),
+        ]);
+        assert_eq!(
+            config_path(&env),
+            Some(PathBuf::from("/xdg").join("frust").join("tui.toml"))
+        );
+    }
+
+    #[test]
+    fn home_wins_over_userprofile_and_homedrive_homepath() {
+        let env = FakeEnv::with(&[
+            ("HOME", "/home/ed"),
+            ("USERPROFILE", r"C:\Users\ed"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", r"\Users\ed"),
+        ]);
+        assert_eq!(home_dir(&env), Some(PathBuf::from("/home/ed")));
+    }
+
+    /// A plain Windows console has no `$HOME`, only `$USERPROFILE` set — the
+    /// file must land where an `ssh` session into the same machine already
+    /// writes it (OpenSSH sets `HOME=%USERPROFILE%`).
+    #[test]
+    fn home_unset_falls_back_to_userprofile_for_the_config_path() {
+        let env = FakeEnv::with(&[("USERPROFILE", r"C:\Users\cpu")]);
+        assert_eq!(
+            config_path(&env),
+            Some(
+                PathBuf::from(r"C:\Users\cpu")
+                    .join(".config")
+                    .join("frust")
+                    .join("tui.toml")
+            )
+        );
+    }
+
+    #[test]
+    fn home_and_userprofile_unset_falls_back_to_homedrive_and_homepath() {
+        let env = FakeEnv::with(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\cpu")]);
+        assert_eq!(home_dir(&env), Some(PathBuf::from(r"C:\Users\cpu")));
+    }
+
+    #[test]
+    fn empty_values_are_treated_as_unset_and_fall_through_the_chain() {
+        let env = FakeEnv::with(&[
+            ("XDG_CONFIG_HOME", ""),
+            ("HOME", ""),
+            ("USERPROFILE", ""),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", r"\Users\cpu"),
+        ]);
+        assert_eq!(home_dir(&env), Some(PathBuf::from(r"C:\Users\cpu")));
+    }
+
+    #[test]
+    fn nothing_resolvable_yields_none_as_today() {
+        let env = FakeEnv::with(&[]);
+        assert_eq!(home_dir(&env), None);
+        assert_eq!(config_path(&env), None);
     }
 
     #[test]
@@ -573,19 +727,180 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    // ── split_local_and_previous (local/previous boundary) ──────────────
+
     #[test]
-    fn merge_puts_existing_recent_first_deduped_then_detected() {
-        let home = unique_temp_home(); // a real, existing dir stand-in
-        let sibling = home.join("child");
-        fs::create_dir_all(&sibling).unwrap();
-        let recent = vec![sibling.clone(), PathBuf::from("/does/not/exist")];
-        let detected = vec![sibling.clone(), PathBuf::from("/tmp/other-detected")];
-        let merged = merge_recent_and_detected(&recent, &detected);
+    fn a_cwd_project_plus_unrelated_recents_puts_cwd_first_with_local_count_one() {
+        let home = unique_temp_home();
+        let cwd = home.join("cwd_project");
+        fs::create_dir_all(&cwd).unwrap();
+        let r1 = home.join("r1");
+        let r2 = home.join("r2");
+        let r3 = home.join("r3");
+        for r in [&r1, &r2, &r3] {
+            fs::create_dir_all(r).unwrap();
+        }
+        let recent = vec![r1.clone(), r2.clone(), r3.clone()];
+        let detected = vec![cwd.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &detected);
+        assert_eq!(projects, vec![cwd, r1, r2, r3]);
+        assert_eq!(local_count, 1);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_cwd_project_yields_local_count_zero_with_the_most_recent_first() {
+        let home = unique_temp_home();
+        let cwd = home.join("empty_cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let r1 = home.join("r1");
+        let r2 = home.join("r2");
+        fs::create_dir_all(&r1).unwrap();
+        fs::create_dir_all(&r2).unwrap();
+        let recent = vec![r1.clone(), r2.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &[]);
+        assert_eq!(local_count, 0);
+        assert_eq!(projects, vec![r1.clone(), r2]);
         assert_eq!(
-            merged,
-            vec![sibling.clone(), PathBuf::from("/tmp/other-detected")],
-            "existing recent entry first, deduped against detected; a dead \
-             recent entry is dropped"
+            projects.first(),
+            Some(&r1),
+            "the most-recently-opened project would become active"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_recent_under_the_cwd_that_the_walk_missed_still_counts_as_local() {
+        let home = unique_temp_home();
+        let cwd = home.join("cwd");
+        // Nested well past the bounded walk's depth — `detected` never finds
+        // it, but it's still a real, existing directory under `cwd`.
+        let deep = cwd.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        let outside = home.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let recent = vec![deep.clone(), outside.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &[]);
+        assert_eq!(local_count, 1, "the under-cwd recent is local");
+        assert_eq!(projects, vec![deep, outside]);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn split_dedupes_a_recent_already_present_as_detected() {
+        let home = unique_temp_home();
+        let cwd = home.join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let recent = vec![cwd.clone(), PathBuf::from("/does/not/exist")];
+        let detected = vec![cwd.clone()];
+        let (projects, local_count) = split_local_and_previous(&cwd, &recent, &detected);
+        assert_eq!(
+            projects,
+            vec![cwd],
+            "the recent duplicate of a detected root is dropped, and so is \
+             the dead recent entry"
+        );
+        assert_eq!(local_count, 1);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Windows' case-insensitive filesystem: a recent entry naming the same
+    /// directory as `cwd` but differently cased must still classify as
+    /// local — [`split_local_and_previous`]'s `path_is_within` check goes
+    /// through [`host_path::is_under`], which folds case on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_recent_matching_the_cwd_only_by_case_still_counts_as_local() {
+        let home = unique_temp_home();
+        let cwd = home.join("Work");
+        fs::create_dir_all(&cwd).unwrap();
+        let differently_cased =
+            PathBuf::from(cwd.to_string_lossy().replace("Work", "wORK").to_string());
+        let (projects, local_count) =
+            split_local_and_previous(&cwd, std::slice::from_ref(&differently_cased), &[]);
+        assert_eq!(
+            local_count, 1,
+            "case-insensitively under the cwd is still local"
+        );
+        assert_eq!(projects, vec![differently_cased]);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // ── Windows project-identity: dedupe on save, heal on load ───────────
+
+    /// A `\\?\`-verbatim path and its plain equivalent name the same
+    /// project — the wizard and cwd-detection paths must not record it
+    /// twice — and must collapse to one recorded entry.
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_and_plain_windows_path_dedupe_on_save() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        record_recent_project_with(&env, Path::new(r"\\?\C:\dev\wintui-scratch"));
+        record_recent_project_with(&env, Path::new(r"C:\dev\wintui-scratch"));
+        let recent = load_recent_projects_with(&env);
+        assert_eq!(
+            recent,
+            vec![PathBuf::from(r"C:\dev\wintui-scratch")],
+            "the verbatim and plain forms are the same project"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Windows paths are case-insensitive: `C:\Dev\x` and `c:\dev\x` name the
+    /// same project and must not produce two recents rows.
+    #[cfg(windows)]
+    #[test]
+    fn differently_cased_windows_paths_dedupe_on_save() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        record_recent_project_with(&env, Path::new(r"C:\Dev\x"));
+        record_recent_project_with(&env, Path::new(r"c:\dev\x"));
+        assert_eq!(load_recent_projects_with(&env).len(), 1);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The Unix counterpart: case is significant on a case-sensitive
+    /// filesystem, so `/a/X` and `/a/x` stay two distinct recents.
+    #[cfg(not(windows))]
+    #[test]
+    fn differently_cased_unix_paths_stay_distinct_on_save() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        record_recent_project_with(&env, Path::new("/a/X"));
+        record_recent_project_with(&env, Path::new("/a/x"));
+        assert_eq!(load_recent_projects_with(&env).len(), 2);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A `tui.toml` already carrying a duplicate pair from before project
+    /// identity went through `host_path` (the wizard's canonicalized
+    /// verbatim path alongside cwd-detection's plain one) heals to one entry
+    /// on the very next load, with no user action.
+    #[cfg(windows)]
+    #[test]
+    fn loading_an_already_duplicated_windows_file_heals_to_one_entry() {
+        let home = unique_temp_home();
+        let config_dir = home.join(".config").join("frust");
+        fs::create_dir_all(&config_dir).unwrap();
+        let array: Array = vec![
+            r"C:\dev\wintui-scratch".to_string(),
+            r"\\?\C:\dev\wintui-scratch".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let mut recent_table = Table::new();
+        recent_table.insert("projects", Item::Value(Value::Array(array)));
+        let mut doc = DocumentMut::new();
+        doc.insert("recent", Item::Table(recent_table));
+        fs::write(config_dir.join("tui.toml"), doc.to_string()).unwrap();
+
+        let env = FakeEnv::home(&home);
+        let recent = load_recent_projects_with(&env);
+        assert_eq!(
+            recent,
+            vec![PathBuf::from(r"C:\dev\wintui-scratch")],
+            "first occurrence wins, healed on load"
         );
         let _ = fs::remove_dir_all(&home);
     }
