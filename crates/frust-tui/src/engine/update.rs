@@ -2585,6 +2585,16 @@ fn restart_session_at(state: &mut AppState, idx: usize) -> Outcome {
     };
     let project_root = session.project_root.clone();
 
+    // Re-entry guard: a restart already requested for this tab (its
+    // `close_on_exit` is set and it is waiting for the kill to land) must not
+    // be requested again. The duplicate guard below deliberately excludes the
+    // tab itself, so without this check a held `R` (terminal key-repeat) or a
+    // second palette activation would pass every guard and the runner would
+    // relaunch the same spec twice — two live sessions on one target.
+    if session.close_on_exit {
+        return Outcome::idle();
+    }
+
     if state
         .live_session_for_excluding(&project_root, &target, Some(id))
         .is_some()
@@ -3455,6 +3465,39 @@ mod tests {
         // With no active session, restart is a no-op.
         let mut empty = welcome();
         assert_eq!(update(&mut empty, Message::RestartSession).effect, None);
+    }
+
+    #[test]
+    fn a_second_restart_of_a_tab_already_being_replaced_is_ignored() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        // First press: the tab is marked for replacement and the effect fires.
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions[0].close_on_exit);
+
+        // Key-repeat / a second palette activation before the kill lands:
+        // the duplicate guard excludes the tab itself, so only the re-entry
+        // guard stands between this press and a second relaunch of the same
+        // spec. It must idle — no effect, no toast, nothing else changed.
+        let toasts_before = st.toasts.items.len();
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(
+            out.effect, None,
+            "a pending restart is never requested twice"
+        );
+        assert_eq!(
+            st.toasts.items.len(),
+            toasts_before,
+            "silent: key-repeat must not spam toasts"
+        );
+        assert_eq!(st.sessions.len(), 1);
+
+        // Once the kill lands the tab goes, exactly as after a single press.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert!(st.sessions.is_empty());
     }
 
     #[test]

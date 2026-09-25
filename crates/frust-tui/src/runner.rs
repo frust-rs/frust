@@ -1347,8 +1347,11 @@ fn spawn_device_discovery(tx: UnboundedSender<Message>) {
 /// Launch one supervised session per spec (the run-config modal's checked
 /// targets), registering each successfully-started session back into the model
 /// so its events have a home. A spec that fails to start (e.g. a desktop
-/// `cargo run` that can't spawn) is skipped — a device pipeline that fails
-/// mid-build instead surfaces the error as a line in its own session tab.
+/// `cargo run` that can't spawn) is skipped and reported as a warn toast —
+/// stderr is invisible under the raw-mode TUI, and on the restart path the
+/// tab being replaced is already gone, so a silent skip would leave the user
+/// with no tab and no explanation. A device pipeline that fails mid-build
+/// instead surfaces the error as a line in its own session tab.
 fn launch_sessions(
     specs: Vec<SessionSpec>,
     supervisor: &mut Supervisor,
@@ -1376,7 +1379,15 @@ fn launch_sessions(
                 // can reconstruct a spec after the fact.
                 records.insert(id, spec);
             }
-            Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
+            Err(err) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: format!(
+                        "failed to start {}: {err:#} — relaunch it with r",
+                        target_label(&spec.target)
+                    ),
+                });
+            }
         }
     }
     started
@@ -3746,6 +3757,93 @@ mod tests {
             other => panic!("expected a warn toast, got {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "nothing was relaunched");
+    }
+
+    /// A process runner whose every spawn is refused — the shape of a restart
+    /// whose relaunch cannot start (binary gone after a failed rebuild, a
+    /// spawn error). Everything else delegates to the fake runner.
+    struct FailingSpawnRunner(frust_drive::process::FakeProcessRunner);
+
+    impl ProcessRunner for FailingSpawnRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<frust_drive::process::Output> {
+            self.0.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<frust_drive::process::Output> {
+            self.0.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+        ) -> anyhow::Result<frust_drive::process::StreamHandle> {
+            Err(anyhow::anyhow!("spawn refused by the test runner"))
+        }
+    }
+
+    /// A restart whose relaunch fails to spawn must reach the user as a toast:
+    /// the tab being replaced is already gone by then, so a silent skip would
+    /// leave nothing on screen and nothing to explain it.
+    #[test]
+    fn a_restart_whose_relaunch_fails_to_spawn_toasts_instead_of_dropping_silently() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) =
+            Supervisor::new(Arc::new(FailingSpawnRunner(FakeProcessRunner::new())));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(
+            SessionId(7),
+            watch_desktop_spec(Path::new("/tmp/frust-restart-spawn-failure")),
+        );
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(7))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut SourceWatchers::new(tx.clone()),
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::Notify { level, text }) => {
+                assert_eq!(level, ToastKind::Warn);
+                assert!(text.contains("failed to start"), "toast text: {text}");
+                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+            }
+            other => panic!("expected a warn toast, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no RegisterSession: nothing was launched"
+        );
     }
 
     // ── Watch reconciliation (`Effect::WatchSet`, `Effect::RestartSession`,
