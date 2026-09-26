@@ -809,13 +809,6 @@ fn validate_name(name: &str) -> Result<(), DatabaseError> {
 /// which probes `<base>/<app_stem>` — a `databases/` directory is
 /// deliberately shared by every frust app on the machine and joins no
 /// app-stem component, so that probe can never see it.
-
-#[cfg(target_os = "android")]
-const UNRESOLVED_DATA_DIR: &str = "could not resolve the app data directory: the host shell has not installed the Android directories yet (Database::open must run after FrustSurfaceView.nativeInitPlatform, i.e. from app code, not from a static initializer)";
-
-#[cfg(not(target_os = "android"))]
-const UNRESOLVED_DATA_DIR: &str = "could not resolve a user data directory (HOME/APPDATA unset)";
-
 fn resolve_db_path_from(
     base: &Path,
     legacy_base: Option<&Path>,
@@ -846,6 +839,13 @@ fn resolve_db_path_from(
     }
     Ok(path)
 }
+
+/// The [`DatabaseError::Storage`] text for an unresolvable data directory — cfg-selected: Android names the nativeInitPlatform ordering, every other target keeps the HOME/APPDATA wording (pinned by a host test).
+#[cfg(target_os = "android")]
+const UNRESOLVED_DATA_DIR: &str = "could not resolve the app data directory: the host shell has not installed the Android directories yet (Database::open must run after FrustSurfaceView.nativeInitPlatform, i.e. from app code, not from a static initializer)";
+
+#[cfg(not(target_os = "android"))]
+const UNRESOLVED_DATA_DIR: &str = "could not resolve a user data directory (HOME/APPDATA unset)";
 
 /// [`Database::open`]'s full path resolution: sanitize `name`, resolve the
 /// user data directory, join this crate's standard `databases/<name>.db`
