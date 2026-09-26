@@ -46,6 +46,10 @@ selecting between six sections:
    bytes by diffing every platform snapshot against that sentinel — with the
    derived stream and an event log rendered on screen (and logged; grep
    `playground keys`).
+7. **DB** — the `frust-database` device-gate vehicle: opens
+   `<filesDir>/databases/playground.db`, inserts, counts; proves
+   `frust_paths::data_dir()` resolves on Android without any HOME/XDG env
+   var.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
