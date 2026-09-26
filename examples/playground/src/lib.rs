@@ -163,6 +163,10 @@ pub struct PlaygroundState {
     /// Tracks the last applied deep-link URL to guard against re-applying the
     /// same link on unrelated rebuilds. None means no link has been applied yet.
     pub last_deep_link_url: std::cell::RefCell<Option<String>>,
+    /// Flag set by a deep-link arrival targeting the DB section; consumed once
+    /// by the DB page to auto-run its smoke test. Initialized false; set true by
+    /// the deep-link handler, cleared by the page function after spawning.
+    pub auto_run_db_smoke: RwSignal<bool>,
 }
 
 impl PlaygroundState {
@@ -178,6 +182,7 @@ impl PlaygroundState {
             nav: NavigatorController::new(),
             animations_enabled: RwSignal::new(true),
             last_deep_link_url: std::cell::RefCell::new(None),
+            auto_run_db_smoke: RwSignal::new(false),
         }
     }
 }
@@ -338,6 +343,9 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
                     if let Some(index) = pages::section_index_for(label) {
                         state.section.set(index);
                         state.reverse.set(false);
+                        if index == pages::section_index_for("db").unwrap_or(usize::MAX) {
+                            state.auto_run_db_smoke.set(true);
+                        }
                         log::info!("playground deep-link: section {} -> {}", label, index);
                         *state.last_deep_link_url.borrow_mut() = Some(url.clone());
                     } else {
