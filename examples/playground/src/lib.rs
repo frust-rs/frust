@@ -351,11 +351,14 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
 
     // One safe area around the whole column: unlike a design-system app bar
     // that consumes the top window inset itself, the M3 `app_bar` above is a
-    // plain 64dp row, so the shell owns every edge's inset here.
+    // plain 64dp row, so the shell owns every edge's inset here. The Material
+    // navigation bar consumes the bottom inset itself (self-sizing chrome rule),
+    // so the safe area leaves that edge to it.
     let column = safe_area(FlexView::new(
         Axis::Vertical,
         vec![inflexible(playground_app_bar(state)), body, section_bar],
-    ));
+    ))
+    .bottom(false);
 
     // `AppBackground` is the BOTTOM-most layer (see the module docs' "Mode B
     // background" section above): under the ON `FRUST_TRANSLUCENT_SURFACE`/

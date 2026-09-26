@@ -317,7 +317,7 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
 
     const PHONE_W: f64 = 390.0;
     const PHONE_H: f64 = 844.0;
-    const NAV_HEIGHT: f64 = 64.0;
+    const NAV_HEIGHT: f64 = 80.0;
     const SLOT_W: f64 = PHONE_W / SECTION_LABELS.len() as f64;
     // Mirrors `frust_material::navbar`'s current (post p4-03-navbar-rework,
     // merge `cacaaf21`) item layout — the label's top-edge offset from its
@@ -326,11 +326,11 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
     // `PAD_TOP + INDICATOR_H + LABEL_GAP` = 8 + 32 + 4 = 44. The rework
     // dropped `PAD_TOP` and instead centres the icon+label column inside the
     // item's full height — matching upstream's `Column(mainAxisAlignment:
-    // center)` — so the offset is now `((HEIGHT_SMALL - content_h) / 2.0) +
+    // center)` — so the offset is now `((HEIGHT_MEDIUM - content_h) / 2.0) +
     // INDICATOR_H + LABEL_GAP`, where `content_h = INDICATOR_H + LABEL_GAP +
     // <single-line label height>` (32 + 4 + 16 = 52 at the default
-    // `NavBarSize::Small`, 64dp). That's `((64.0 - 52.0) / 2.0) + 32.0 + 4.0`
-    // = 6.0 + 36.0 = 42.0. A SINGLE-LINE item's label lands at exactly this Y
+    // `NavBarSize::Medium`, 80dp). That's `((80.0 - 52.0) / 2.0) + 32.0 + 4.0`
+    // = 14.0 + 36.0 = 50.0. A SINGLE-LINE item's label lands at exactly this Y
     // (the label block's TOP, not its baseline — see `NavItemWidget::layout`'s
     // `self.label.set_origin`) — but `top` (and so this offset) is itself a
     // function of the label's own content height, so a WRAPPED (two-line)
@@ -342,7 +342,7 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
     // shows up as zero here (not two), unlike a loose "anywhere in the bar's
     // Y band" filter, which would also catch unclipped off-screen page
     // filler content that happens to paint in that band.
-    const LABEL_TOP_OFFSET: f64 = 42.0;
+    const LABEL_TOP_OFFSET: f64 = 50.0;
     let nav_top = PHONE_H - NAV_HEIGHT;
     let expected_label_y = nav_top + LABEL_TOP_OFFSET;
 
