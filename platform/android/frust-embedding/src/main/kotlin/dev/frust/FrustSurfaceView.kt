@@ -826,6 +826,11 @@ class FrustSurfaceView(
      * light-on-light or dark-on-dark icons whenever they did). Called from
      * [surfaceCreated], [onConfigurationChanged], and every frame via
      * [pollAppBrightness] (change-gated by [lastAppliedDark] there).
+     *
+     * The [surfaceCreated] call must stay ungated (no early-return, no
+     * "only if changed" guard): `FrustActivity.enableEdgeToEdge` seeds a
+     * device-derived icon appearance first, at activity-create, and this is
+     * what makes the app's own resolved brightness win over that guess.
      */
     private fun updateSystemBarsAppearance(dark: Boolean) {
         lastAppliedDark = dark
