@@ -49,7 +49,10 @@ selecting between six sections:
 7. **DB** — the `frust-database` device-gate vehicle: opens
    `<filesDir>/databases/playground.db`, inserts, counts; proves
    `frust_paths::data_dir()` resolves on Android without any HOME/XDG env
-   var.
+   var. Gated 2026-09-26 on Pixel 5 / Android 14 (and Xiaomi 12 / Android 16,
+   API 35 x86_64 emulator): `db ok rows=1` then `rows=2` at
+   `/data/user/0/it.f0x.playground/files/databases/playground.db`, bare
+   scaffold `MainActivity`, no env var set.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
