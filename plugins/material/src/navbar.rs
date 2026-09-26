@@ -72,10 +72,16 @@
 //!   (there is no `Theme` to read at build time), so the closest shipped role
 //!   stays. Unselected labels are `on_surface_variant` as upstream.
 //! * **Unported upstream props**: `density`, `shapeFamily`, `elevation`,
-//!   `padding`, `safeArea`, and `selectedIcon`. Safe-area insets are a shell
-//!   concern here (a bar wraps itself in `safe_area(..)`, see
-//!   `docs/CODE_STANDARDS.md`'s self-sizing chrome rule) and the rest are
-//!   container/decoration knobs with no axis in this port's scope.
+//!   `padding`, and `selectedIcon` — container/decoration knobs with no axis
+//!   in this port's scope. `safeArea` **is** ported: the bar consumes the
+//!   bottom window inset itself by default, in its own `layout`
+//!   (`docs/CODE_STANDARDS.md`'s self-sizing-chrome rule), and paints its
+//!   `surface_container` fill through the consumed band; `.safe_area(false)`
+//!   opts out for a bar that isn't docked to the window's bottom edge. Do not
+//!   additionally wrap the bar in `frust::safe_area(..)` for the bottom edge:
+//!   a `SafeArea` removes what it consumes from its subtree, so this never
+//!   double-insets, but the safe area's own padding sits outside the bar's
+//!   box and is left unpainted instead of matching the bar's container color.
 //!
 //! # Semantics
 //!
@@ -680,6 +686,7 @@ pub struct NavigationBarView<State: 'static> {
     size: NavBarSize,
     label_behavior: NavBarLabelBehavior,
     indicator_style: NavBarIndicatorStyle,
+    safe_area: bool,
 }
 
 /// Create a navigation bar over `items`, with `selected` the current
@@ -702,6 +709,7 @@ pub fn navigation_bar<State: 'static, F: Fn(&mut State, usize) + 'static>(
         size: NavBarSize::default(),
         label_behavior: NavBarLabelBehavior::default(),
         indicator_style: NavBarIndicatorStyle::default(),
+        safe_area: true,
     }
 }
 
@@ -733,6 +741,15 @@ impl<State: 'static> NavigationBarView<State> {
     /// Selection indicator style (`M3ENavigationBar.indicatorStyle`).
     pub fn indicator_style(mut self, style: NavBarIndicatorStyle) -> Self {
         self.indicator_style = style;
+        self
+    }
+
+    /// Whether the bar consumes the bottom window inset itself, self-sizing
+    /// around it and painting its container fill through it
+    /// (`M3ENavigationBar.safeArea`). Default `true`; disable when the bar
+    /// isn't docked to the window's bottom edge, e.g. embedded mid-screen.
+    pub fn safe_area(mut self, enabled: bool) -> Self {
+        self.safe_area = enabled;
         self
     }
 }
@@ -978,6 +995,12 @@ pub struct NavigationBarWidget {
     /// contract).
     selected: usize,
     size: NavBarSize,
+    safe_area: bool,
+    /// The bottom window inset consumed on the last `layout` pass — `0.0`
+    /// when `safe_area` is disabled or no shell pushed a nonzero inset. Kept
+    /// so `paint`/tests can read what `layout` consumed without recomputing
+    /// it against a live `LayoutCtx`.
+    bottom_inset: f64,
     indicator_style: NavBarIndicatorStyle,
     indicator: LiquidIndicator,
     /// Raised by `rebuild` when the selection moved, consumed by the next
@@ -1005,6 +1028,8 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
             items,
             selected: self.selected,
             size: self.size,
+            safe_area: self.safe_area,
+            bottom_inset: 0.0,
             indicator_style: self.indicator_style,
             indicator: LiquidIndicator::new(),
             selection_moved: false,
@@ -1141,6 +1166,10 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
             element.size = self.size;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        if prev.safe_area != self.safe_area {
+            element.safe_area = self.safe_area;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         if prev.label_behavior != self.label_behavior {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
@@ -1187,7 +1216,14 @@ impl Widget for NavigationBarWidget {
         } else {
             0.0
         };
-        let height = self.size.height();
+        let band = self.size.height();
+        let inset = if self.safe_area {
+            ctx.window_insets().padding().bottom
+        } else {
+            0.0
+        };
+        self.bottom_inset = inset;
+        let height = band + inset;
         // Reduced motion turns the travel into the same jump every non-selection
         // geometry change takes.
         let reduce_motion = Theme::from_layout_ctx(ctx).is_some_and(|t| t.motion.reduce_motion);
@@ -1201,7 +1237,7 @@ impl Widget for NavigationBarWidget {
         }
         let slot_w = width / n as f64;
         for (i, pod) in self.items.iter_mut().enumerate() {
-            pod.layout_child(ctx, &BoxConstraints::tight(Size::new(slot_w, height)));
+            pod.layout_child(ctx, &BoxConstraints::tight(Size::new(slot_w, band)));
             pod.set_origin(Point::new(i as f64 * slot_w, 0.0));
         }
         if let Some(rest) = self.selected_indicator_rect() {
@@ -1275,7 +1311,7 @@ impl Widget for NavigationBarWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
-    use frust::authoring::{BuildCtx, PointerButton, PointerEvent};
+    use frust::authoring::{BuildCtx, PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets};
     use frust_widgets::test_support::{RecordingScene, leaf_any};
     use std::any::Any;
     use std::cell::Cell;
@@ -1300,6 +1336,23 @@ mod tests {
         let mut lctx =
             LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(theme as &dyn Any));
         w.layout(&mut lctx, bc)
+    }
+
+    /// Lay out under a window carrying `bottom` px of bottom system-bar inset
+    /// and nothing else, the shape a shell pushes for a home-indicator/nav-bar
+    /// occlusion.
+    fn layout_with_bottom_inset(
+        w: &mut NavigationBarWidget,
+        bc: &BoxConstraints,
+        bottom: f64,
+    ) -> Size {
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, bottom),
+            WindowEdgeInsets::ZERO,
+        );
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(insets, |ctx| w.layout(ctx, bc))
     }
 
     fn three_items() -> Vec<NavItem<()>> {
@@ -1386,6 +1439,110 @@ mod tests {
             assert_eq!(laid.height, expected, "{size:?}");
             assert_eq!(w.items[0].size().height, expected, "{size:?}");
         }
+    }
+
+    // ---- Self-inset (`safe_area`) ------------------------------------------
+
+    #[test]
+    fn safe_area_grows_the_bar_by_the_consumed_bottom_inset() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        let size = layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        assert_eq!(size, Size::new(300.0, HEIGHT_SMALL + 34.0));
+        assert_eq!(w.bottom_inset, 34.0);
+    }
+
+    #[test]
+    fn items_stay_at_the_bare_band_height_under_a_self_consumed_inset() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        for item in &w.items {
+            assert_eq!(
+                item.origin().y,
+                0.0,
+                "items sit at the top of the taller bar"
+            );
+            assert_eq!(
+                item.size().height,
+                HEIGHT_SMALL,
+                "items stay the bare band tall"
+            );
+        }
+    }
+
+    #[test]
+    fn indicator_geometry_is_unchanged_by_a_self_consumed_inset() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 1, |_s: &mut (), _i| {});
+        let bc = BoxConstraints::loose(Size::new(300.0, 200.0));
+
+        let mut zero = build(&view);
+        layout(&mut zero, &bc);
+        let (zero_scene, _) = paint_at(&mut zero, Size::new(300.0, HEIGHT_SMALL), ft(0.0));
+
+        let mut inset = build(&view);
+        layout_with_bottom_inset(&mut inset, &bc, 34.0);
+        let (inset_scene, _) = paint_at(&mut inset, Size::new(300.0, HEIGHT_SMALL + 34.0), ft(0.0));
+
+        assert_eq!(
+            zero_scene.rounded, inset_scene.rounded,
+            "the pill's geometry is item-local and byte-identical for a nonzero inset"
+        );
+    }
+
+    #[test]
+    fn safe_area_false_ignores_the_window_inset() {
+        let view: NavigationBarView<()> =
+            navigation_bar(three_items(), 0, |_s: &mut (), _i| {}).safe_area(false);
+        let mut w = build(&view);
+        let size = layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        assert_eq!(size, Size::new(300.0, HEIGHT_SMALL));
+        assert_eq!(w.bottom_inset, 0.0, "an opted-out bar consumes nothing");
+    }
+
+    #[test]
+    fn container_fill_covers_the_full_band_plus_inset_size() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        let (scene, _) = paint_at(&mut w, Size::new(300.0, HEIGHT_SMALL + 34.0), ft(0.0));
+        assert_eq!(
+            scene.rects[0],
+            (Point::ZERO, Size::new(300.0, HEIGHT_SMALL + 34.0)),
+            "the container fill covers the band plus the consumed inset"
+        );
+    }
+
+    #[test]
+    fn rebuild_flipping_safe_area_returns_layout() {
+        let mut counter = 0u64;
+        let prev: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = View::<()>::build(&prev, &mut ctx(&mut counter));
+
+        let next: NavigationBarView<()> =
+            navigation_bar(three_items(), 0, |_s: &mut (), _i| {}).safe_area(false);
+        let flags = View::<()>::rebuild(&next, &prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            flags.needs_layout(),
+            "safe_area toggles the self-inset, a layout change"
+        );
+        assert!(!w.safe_area);
     }
 
     #[test]
