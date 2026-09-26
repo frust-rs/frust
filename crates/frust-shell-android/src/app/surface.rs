@@ -278,6 +278,10 @@ impl AndroidAppHandle {
     /// PAINT` pending, which the frame gate already treats as
     /// dirty (`change_flags_pending`) — no new gate input needed. The continuous
     /// Choreographer loop repaints the next tick with no extra wake.
+    ///
+    /// On a real change (after the no-op guard), emits an `info`-level log line
+    /// for inspection by smoke tests and human observers: the exact format string
+    /// `frust-insets view_padding l={:.1} t={:.1} r={:.1} b={:.1} view_insets l={:.1} t={:.1} r={:.1} b={:.1} scale={:.2}`.
     pub(crate) fn set_insets(&mut self, physical: [f64; 8]) {
         let scale = sanitize_scale(self.scale);
         let insets = logical_insets(physical, scale);
@@ -285,6 +289,19 @@ impl AndroidAppHandle {
             return; // no-op push — skip both the relayout and the re-provide
         }
         self.insets = insets;
+        log::info!(
+            target: "frust",
+            "frust-insets view_padding l={:.1} t={:.1} r={:.1} b={:.1} view_insets l={:.1} t={:.1} r={:.1} b={:.1} scale={:.2}",
+            insets.view_padding.left,
+            insets.view_padding.top,
+            insets.view_padding.right,
+            insets.view_padding.bottom,
+            insets.view_insets.left,
+            insets.view_insets.top,
+            insets.view_insets.right,
+            insets.view_insets.bottom,
+            scale
+        );
         self.push_insets(insets);
         // The composite window-shape context carries a copy of these insets, so
         // an insets change is also a metrics change (self-guarded).
