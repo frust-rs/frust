@@ -51,6 +51,7 @@ use jni::errors::LogErrorAndDefault;
 use jni::objects::{JClass, JObject, JString};
 use jni::refs::Global;
 use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
+use jni::{Env, jni_sig, jni_str};
 use ndk::native_window::NativeWindow;
 
 use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
@@ -237,6 +238,18 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> ji
 /// context (not the Activity) is stored deliberately: it is stable across
 /// activity recreation, so retaining it can't leak an Activity.
 ///
+/// ALSO installs the app's files/cache directories into `frust-paths`
+/// (`Context.getFilesDir()`/`Context.getCacheDir()`, first-wins) — the first
+/// thing the `Once` body does, before either of the two steps above. This is
+/// what makes `frust_paths::data_dir()`/`cache_dir()` — and therefore
+/// `frust_database::Database::open` — work on Android: both stay `None` until
+/// this call has run. A resolution failure is logged and the directory install
+/// is skipped, but the plugin platform-handle install below it always
+/// continues regardless (a directories failure can never take the handle
+/// install down with it). The pipeline-cache `cacheDir` string `nativeInit`
+/// separately receives (see [`native_init`]) is an older, unrelated channel,
+/// left as-is by this change.
+///
 /// A hand-written, process-wide export (like [`JNI_OnLoad`]) rather than a
 /// per-app `android_app!`-generated one — the handles are process state, not
 /// per-`AppHandle` state. Routed through [`guard`] like every export so a panic
@@ -260,6 +273,59 @@ pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeInitPlatform<'local
 fn native_init_platform(mut env: EnvUnowned, context: JObject) {
     guard("nativeInitPlatform", (), || {
         PLATFORM_INIT.call_once(|| {
+            // Resolve + install the app's files/cache directories into
+            // frust-paths FIRST — before the JavaVM null-check below — so this
+            // step can never be taken down by a (defensive-only) JNI_OnLoad
+            // ordering failure. See this function's rustdoc for the full
+            // ordering contract.
+            let resolved_dirs = env
+                .with_env(
+                    |env| -> jni::errors::Result<Option<frust_paths::AndroidDirs>> {
+                        match resolve_android_dirs(env, &context) {
+                            Ok(dirs) => Ok(Some(dirs)),
+                            Err(err) => {
+                                log::error!(
+                                    "frust-shell-android: nativeInitPlatform failed to resolve \
+                                 Context.getFilesDir()/getCacheDir(): {err}"
+                                );
+                                Ok(None)
+                            }
+                        }
+                    },
+                )
+                .resolve::<LogErrorAndDefault>();
+            match resolved_dirs {
+                Some(dirs) => match frust_paths::install_android_dirs(dirs.clone()) {
+                    Ok(()) => {
+                        log::debug!(
+                            "frust-shell-android: frust-paths Android dirs installed: data={} \
+                             cache={}",
+                            dirs.data_dir.display(),
+                            dirs.cache_dir.display()
+                        );
+                    }
+                    Err(frust_paths::InstallAndroidDirsError::AlreadyInstalled) => {
+                        // Cannot happen under this `Once` (this is the only
+                        // caller), but handled defensively —
+                        // `install_android_dirs`'s own contract is first-wins,
+                        // independent of this call site.
+                        log::debug!(
+                            "frust-shell-android: frust-paths Android dirs already installed"
+                        );
+                    }
+                    Err(err @ frust_paths::InstallAndroidDirsError::NotAbsolute { .. }) => {
+                        log::error!("frust-shell-android: {err}");
+                    }
+                },
+                None => {
+                    log::error!(
+                        "frust-shell-android: nativeInitPlatform could not resolve \
+                         Context.getFilesDir()/getCacheDir(); frust_paths::data_dir()/cache_dir() \
+                         will stay None on this device (frust-database open will fail)"
+                    );
+                }
+            }
+
             let vm_ptr = JAVA_VM.load(Ordering::Acquire);
             if vm_ptr.is_null() {
                 log::error!(
@@ -298,6 +364,70 @@ fn native_init_platform(mut env: EnvUnowned, context: JObject) {
             log::debug!("frust-shell-android: plugin platform handles installed");
         });
     });
+}
+
+/// Resolve `Context.getFilesDir()`/`Context.getCacheDir()` into the
+/// [`frust_paths::AndroidDirs`] pair [`native_init_platform`] installs, via two
+/// plain no-arg JNI method calls (`jni` 0.22 idiom — see
+/// `plugins/shared-preferences/src/android.rs`'s `with_prefs`/`read_string` for
+/// the same `jni_str!`/`jni_sig!` call shape). A null `File` returned by either
+/// getter, or a null string returned by `File.getAbsolutePath()`, is treated as
+/// an error ([`jni::errors::Error::NullPtr`]) — never silently coerced to an
+/// empty path, which `frust_paths::install_android_dirs`'s absolute-path check
+/// would otherwise reject anyway, just less legibly.
+fn resolve_android_dirs(
+    env: &mut Env,
+    context: &JObject,
+) -> Result<frust_paths::AndroidDirs, jni::errors::Error> {
+    let files_dir = env
+        .call_method(
+            context,
+            jni_str!("getFilesDir"),
+            jni_sig!("()Ljava/io/File;"),
+            &[],
+        )?
+        .l()?;
+    if files_dir.is_null() {
+        return Err(jni::errors::Error::NullPtr("Context.getFilesDir()"));
+    }
+    let data_dir = file_absolute_path(env, &files_dir)?;
+
+    let cache_dir_file = env
+        .call_method(
+            context,
+            jni_str!("getCacheDir"),
+            jni_sig!("()Ljava/io/File;"),
+            &[],
+        )?
+        .l()?;
+    if cache_dir_file.is_null() {
+        return Err(jni::errors::Error::NullPtr("Context.getCacheDir()"));
+    }
+    let cache_dir = file_absolute_path(env, &cache_dir_file)?;
+
+    Ok(frust_paths::AndroidDirs {
+        data_dir: PathBuf::from(data_dir),
+        cache_dir: PathBuf::from(cache_dir),
+    })
+}
+
+/// `File.getAbsolutePath()` on a live `java.io.File` object, the shared body
+/// of [`resolve_android_dirs`]'s two directory lookups. A null result is
+/// treated as an error, not an empty path (see [`resolve_android_dirs`]'s docs).
+fn file_absolute_path(env: &mut Env, file: &JObject) -> Result<String, jni::errors::Error> {
+    let path = env
+        .call_method(
+            file,
+            jni_str!("getAbsolutePath"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )?
+        .l()?;
+    if path.is_null() {
+        return Err(jni::errors::Error::NullPtr("File.getAbsolutePath()"));
+    }
+    let jstr = env.cast_local::<JString>(path)?;
+    Ok(jstr.to_string())
 }
 
 /// Spawn the single background GPU pre-init thread, best-effort and
