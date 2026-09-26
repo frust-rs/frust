@@ -62,10 +62,10 @@
 //!   own note): selection feedback is the pill, so an item runs no
 //!   [`super::state_layer`]/[`crate::interaction`] overlay and repaints on
 //!   selection, never on press.
-//! * **Default size is [`NavBarSize::Small`]** (64dp), where the reference
-//!   defaults to `medium` (80dp). 64dp is androidx `NavigationBarTokens`'
+//! * **Default size is [`NavBarSize::Medium`]** (80dp), matching the reference
+//!   default. [`NavBarSize::Small`] (64dp) — androidx `NavigationBarTokens`'
 //!   current Expressive container height and the height this widget has
-//!   shipped; both are reachable, only the default differs.
+//!   shipped — is still reachable via `.size(NavBarSize::Small)`.
 //! * **A selected label keeps the `on_surface` themed role.** The reference
 //!   paints selected content `onSecondaryContainer`; [`ThemeTextColor`] has no
 //!   such role, and a themed text color resolves from a *role* after `build`
@@ -495,11 +495,11 @@ fn launched_pop() -> AnimationController {
 /// The bar's container height variant (`M3ENavBarSize`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavBarSize {
-    /// [`HEIGHT_SMALL`] (64dp) — this port's default; see the [module
-    /// docs](self)' porting decisions.
-    #[default]
+    /// [`HEIGHT_SMALL`] (64dp) — androidx `NavigationBarTokens`' Expressive container height,
+    /// reachable via `.size(NavBarSize::Small)`; see the [module docs](self)' porting decisions.
     Small,
-    /// [`HEIGHT_MEDIUM`] (80dp), the reference's own default.
+    /// [`HEIGHT_MEDIUM`] (80dp), the reference's own default — this port's default.
+    #[default]
     Medium,
 }
 
@@ -836,11 +836,11 @@ impl Widget for NavItemWidget {
             0.0
         };
         // The bar always constrains an item tightly to its own height; an
-        // unbounded parent falls back to the compact container height.
+        // unbounded parent falls back to the default container height.
         let height = if bc.max().height.is_finite() {
             bc.max().height
         } else {
-            HEIGHT_SMALL
+            NavBarSize::default().height()
         };
 
         let label_size = self.label.as_mut().map(|label| {
@@ -1417,11 +1417,14 @@ mod tests {
         let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
         let mut w = build(&view);
         let size = layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 200.0)));
-        assert_eq!(size, Size::new(300.0, HEIGHT_SMALL));
+        assert_eq!(size, Size::new(300.0, NavBarSize::default().height()));
         assert_eq!(w.items[0].origin().x, 0.0);
         assert_eq!(w.items[1].origin().x, 100.0);
         assert_eq!(w.items[2].origin().x, 200.0);
-        assert_eq!(w.items[0].size(), Size::new(100.0, HEIGHT_SMALL));
+        assert_eq!(
+            w.items[0].size(),
+            Size::new(100.0, NavBarSize::default().height())
+        );
     }
 
     #[test]
@@ -1441,6 +1444,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_size_is_medium() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        let size = layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 200.0)));
+        assert_eq!(size, Size::new(300.0, HEIGHT_MEDIUM));
+        assert_eq!(w.items[0].size().height, HEIGHT_MEDIUM);
+    }
+
     // ---- Self-inset (`safe_area`) ------------------------------------------
 
     #[test]
@@ -1452,7 +1464,10 @@ mod tests {
             &BoxConstraints::loose(Size::new(300.0, 200.0)),
             34.0,
         );
-        assert_eq!(size, Size::new(300.0, HEIGHT_SMALL + 34.0));
+        assert_eq!(
+            size,
+            Size::new(300.0, NavBarSize::default().height() + 34.0)
+        );
         assert_eq!(w.bottom_inset, 34.0);
     }
 
@@ -1473,7 +1488,7 @@ mod tests {
             );
             assert_eq!(
                 item.size().height,
-                HEIGHT_SMALL,
+                NavBarSize::default().height(),
                 "items stay the bare band tall"
             );
         }
@@ -1486,11 +1501,19 @@ mod tests {
 
         let mut zero = build(&view);
         layout(&mut zero, &bc);
-        let (zero_scene, _) = paint_at(&mut zero, Size::new(300.0, HEIGHT_SMALL), ft(0.0));
+        let (zero_scene, _) = paint_at(
+            &mut zero,
+            Size::new(300.0, NavBarSize::default().height()),
+            ft(0.0),
+        );
 
         let mut inset = build(&view);
         layout_with_bottom_inset(&mut inset, &bc, 34.0);
-        let (inset_scene, _) = paint_at(&mut inset, Size::new(300.0, HEIGHT_SMALL + 34.0), ft(0.0));
+        let (inset_scene, _) = paint_at(
+            &mut inset,
+            Size::new(300.0, NavBarSize::default().height() + 34.0),
+            ft(0.0),
+        );
 
         assert_eq!(
             zero_scene.rounded, inset_scene.rounded,
@@ -1508,7 +1531,7 @@ mod tests {
             &BoxConstraints::loose(Size::new(300.0, 200.0)),
             34.0,
         );
-        assert_eq!(size, Size::new(300.0, HEIGHT_SMALL));
+        assert_eq!(size, Size::new(300.0, NavBarSize::default().height()));
         assert_eq!(w.bottom_inset, 0.0, "an opted-out bar consumes nothing");
     }
 
@@ -1521,10 +1544,17 @@ mod tests {
             &BoxConstraints::loose(Size::new(300.0, 200.0)),
             34.0,
         );
-        let (scene, _) = paint_at(&mut w, Size::new(300.0, HEIGHT_SMALL + 34.0), ft(0.0));
+        let (scene, _) = paint_at(
+            &mut w,
+            Size::new(300.0, NavBarSize::default().height() + 34.0),
+            ft(0.0),
+        );
         assert_eq!(
             scene.rects[0],
-            (Point::ZERO, Size::new(300.0, HEIGHT_SMALL + 34.0)),
+            (
+                Point::ZERO,
+                Size::new(300.0, NavBarSize::default().height() + 34.0)
+            ),
             "the container fill covers the band plus the consumed inset"
         );
     }
@@ -1579,7 +1609,7 @@ mod tests {
             .widget_mut()
             .downcast_mut::<NavItemWidget>()
             .unwrap();
-        let expected_top = (HEIGHT_SMALL - INDICATOR_H) / 2.0;
+        let expected_top = (NavBarSize::default().height() - INDICATOR_H) / 2.0;
         assert!((item.indicator_rect.y0 - expected_top).abs() < 1e-9);
         assert_eq!(item.indicator_rect.width(), INDICATOR_W);
     }
@@ -1891,7 +1921,7 @@ mod tests {
 
     #[test]
     fn a_badge_wraps_the_icon_without_moving_the_hit_target() {
-        let bar = Size::new(300.0, HEIGHT_SMALL);
+        let bar = Size::new(300.0, NavBarSize::default().height());
         let bare: NavigationBarView<()> = navigation_bar(
             vec![nav_item("Home").icon(leaf_any(24.0, 24.0))],
             0,
@@ -1932,11 +1962,18 @@ mod tests {
         );
         assert!(badged_icon.height <= INDICATOR_H, "still inside the box");
         // The item's own slot — and therefore its hit target — is untouched.
-        assert_eq!(w.items[1].size(), Size::new(150.0, HEIGHT_SMALL));
+        assert_eq!(
+            w.items[1].size(),
+            Size::new(150.0, NavBarSize::default().height())
+        );
 
         let mut unit = ();
         let unit_any: &mut dyn Any = &mut unit;
-        let mut ectx = EventCtx::new(unit_any, Point::ZERO, Size::new(300.0, HEIGHT_SMALL));
+        let mut ectx = EventCtx::new(
+            unit_any,
+            Point::ZERO,
+            Size::new(300.0, NavBarSize::default().height()),
+        );
         w.event(&mut ectx, &ev(PointerPhase::Down, 200.0, 20.0));
         w.event(&mut ectx, &ev(PointerPhase::Up, 200.0, 20.0));
         assert_eq!(
