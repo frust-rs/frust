@@ -22,6 +22,10 @@
 //! **zero** app code — `frust::navigator` (imported below) auto-wires
 //! Android/gesture back handling for the shared [`NavigatorController`].
 //!
+//! Deep links via `frustplay://section/<label>` route to a section through the
+//! facade's [`deep_links()`](frust::deep_links) signal, so an external launcher
+//! or smoke test can navigate to a section without UI interaction.
+//!
 //! # Mode B background
 //!
 //! The generated Android/iOS glue turns `FRUST_TRANSLUCENT_SURFACE`/
@@ -60,8 +64,8 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get,
     GetUntracked, MotionScheme, NavigatorController, Padding, PageTransition, RwSignal, Set, Stack,
-    Theme, TransitionSpec, View, any, button, flexible, icon, icons, inflexible, navigator,
-    safe_area, scroll_view, set_app_theme, text,
+    Theme, TransitionSpec, View, any, button, deep_links, flexible, icon, icons, inflexible,
+    navigator, safe_area, scroll_view, set_app_theme, text,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -156,6 +160,9 @@ pub struct PlaygroundState {
     /// `MotionScheme::reduce_motion` push the app-bar reduce-motion toggle
     /// drives, so every convention-following widget collapses for free.
     pub animations_enabled: RwSignal<bool>,
+    /// Tracks the last applied deep-link URL to guard against re-applying the
+    /// same link on unrelated rebuilds. None means no link has been applied yet.
+    pub last_deep_link_url: std::cell::RefCell<Option<String>>,
 }
 
 impl PlaygroundState {
@@ -170,6 +177,7 @@ impl PlaygroundState {
             toasts: RwSignal::new(Vec::new()),
             nav: NavigatorController::new(),
             animations_enabled: RwSignal::new(true),
+            last_deep_link_url: std::cell::RefCell::new(None),
         }
     }
 }
@@ -312,6 +320,35 @@ fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
 /// rebuild (the navigator re-invokes its page builder), so the signal reads
 /// here subscribe the shell to section/brightness/toast changes.
 fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+    // Read the deep-links signal to handle cold-start and warm deep links.
+    // Parse `frustplay://section/<label>` format and navigate to the section.
+    let links = deep_links();
+    let current_link_url = links.latest.get().map(|link| link.url.clone());
+
+    if let Some(ref url) = current_link_url {
+        // Avoid re-applying the same link on unrelated rebuilds.
+        let last_url = state.last_deep_link_url.borrow().clone();
+        if last_url.as_ref() != Some(url) {
+            // Parse frustplay://section/<label>
+            // Format: frustplay://section/<label>[/...]
+            if let Some(rest) = url.strip_prefix("frustplay://section/") {
+                // Extract the label (first path segment after the scheme and host)
+                let label = rest.split(['/', '?', '#']).next().unwrap_or("");
+                if !label.is_empty() {
+                    if let Some(index) = pages::section_index_for(label) {
+                        state.section.set(index);
+                        state.reverse.set(false);
+                        log::info!("playground deep-link: section {} -> {}", label, index);
+                        *state.last_deep_link_url.borrow_mut() = Some(url.clone());
+                    } else {
+                        log::info!("playground deep-link: section {} unknown", label);
+                        *state.last_deep_link_url.borrow_mut() = Some(url.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let section = state.section.get();
     let reverse = state.reverse.get();
     let pending = state.toasts.get();

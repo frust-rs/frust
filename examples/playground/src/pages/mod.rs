@@ -89,3 +89,52 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         _ => platform_views::page(state),
     }
 }
+
+/// Resolve a section index from its label via `frustplay://section/<label>`
+/// deep links. Matches case-insensitively against SECTION_LABELS (e.g. "db",
+/// "DB", "Keys" all resolve to the database section).
+///
+/// Returns `Some(index)` for a recognized label, or `None` for an unknown one.
+pub fn section_index_for(label: &str) -> Option<usize> {
+    SECTION_LABELS
+        .iter()
+        .position(|&s| s.eq_ignore_ascii_case(label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_section_index_for() {
+        // Test each label in its exact case
+        for (expected_idx, label) in SECTION_LABELS.iter().enumerate() {
+            assert_eq!(
+                section_index_for(label),
+                Some(expected_idx),
+                "label {} at index {}",
+                label,
+                expected_idx
+            );
+        }
+
+        // Test case-insensitive matching
+        assert_eq!(section_index_for("db"), Some(10), "lowercase 'db'");
+        assert_eq!(section_index_for("DB"), Some(10), "uppercase 'DB'");
+        assert_eq!(
+            section_index_for("platform"),
+            Some(0),
+            "lowercase 'platform'"
+        );
+        assert_eq!(
+            section_index_for("PLATFORM"),
+            Some(0),
+            "uppercase 'PLATFORM'"
+        );
+        assert_eq!(section_index_for("camera"), Some(1), "lowercase 'camera'");
+
+        // Test unknown label
+        assert_eq!(section_index_for("unknown"), None, "unknown label");
+        assert_eq!(section_index_for(""), None, "empty string");
+    }
+}
