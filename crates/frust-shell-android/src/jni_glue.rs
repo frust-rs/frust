@@ -246,9 +246,12 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> ji
 /// this call has run. A resolution failure is logged and the directory install
 /// is skipped, but the plugin platform-handle install below it always
 /// continues regardless (a directories failure can never take the handle
-/// install down with it). The pipeline-cache `cacheDir` string `nativeInit`
-/// separately receives (see [`native_init`]) is an older, unrelated channel,
-/// left as-is by this change.
+/// install down with it). Any Java exception thrown by `Context.getFilesDir()`
+/// or `Context.getCacheDir()` is cleared before returning, leaving the JNI env
+/// exactly as it was found so the subsequent JavaVM/global-ref/handle install
+/// and return to Kotlin behave as if the directory step never existed. The
+/// pipeline-cache `cacheDir` string `nativeInit` separately receives (see
+/// [`native_init`]) is an older, unrelated channel, left as-is by this change.
 ///
 /// A hand-written, process-wide export (like [`JNI_OnLoad`]) rather than a
 /// per-app `android_app!`-generated one — the handles are process state, not
@@ -284,9 +287,15 @@ fn native_init_platform(mut env: EnvUnowned, context: JObject) {
                         match resolve_android_dirs(env, &context) {
                             Ok(dirs) => Ok(Some(dirs)),
                             Err(err) => {
+                                // The directory step must leave the JNI env exactly as it found it —
+                                // no pending exception — so the JavaVM/global-ref/handle install below
+                                // and the return to Kotlin behave as before this step existed.
+                                if env.exception_check() {
+                                    env.exception_clear();
+                                }
                                 log::error!(
                                     "frust-shell-android: nativeInitPlatform failed to resolve \
-                                 Context.getFilesDir()/getCacheDir(): {err}"
+                                 Context.getFilesDir()/getCacheDir() (Java exception cleared): {err}"
                                 );
                                 Ok(None)
                             }
