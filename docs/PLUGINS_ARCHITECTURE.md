@@ -137,7 +137,10 @@ plugins write desktop view factories and desktop shells read them** — which is
 `frust-plugin` a leaf either way, with neither side ever naming the other.
 `database` is the first plugin to need neither `frust-plugin` nor an FFI crate at all — a pure-Rust
 plugin whose "platform" is the filesystem — which the charter accommodates rather than exempts: it
-still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
+still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. On
+Android its `<data_dir>/databases/<name>.db` resolves under `Context.getFilesDir()` through
+frust-paths' shell-installed slot, so `Database::open` needs no `frust-plugin` handle but must run
+after `nativeInitPlatform`. Each
 plugin's backends are cfg-gated modules (`apple`/`android`/`file`/`desktop`/`unsupported`) behind
 one platform-independent public API, with FFI dependencies target-gated rather than unconditional.
 The five design-system plugins are a further, distinct shape the charter above accommodates rather
