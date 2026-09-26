@@ -63,7 +63,9 @@ semantics), `frust-scene` (renderer-agnostic `Scene`/`SceneBuilder`), `frust-tex
 state), `frust-render` (`SurfaceRenderer`, encode/present, pipeline cache) and `frust-reactive`
 (`ReactiveRuntime`, `deep_link`, `back`, `menu`, `task`). Desktop and Android also depend on
 `frust-paths` for cache-dir persistence, and Android on `frust-plugin` to install the
-JavaVM/Context handle plugins read.
+JavaVM/Context handle plugins read — the same `nativeInitPlatform` call installs the app's
+files/cache directories into `frust-paths` (`install_android_dirs`) first, which is what makes
+`data_dir()`/`cache_dir()` resolve there.
 
 `frust-shell-common` is a hard platform-free leaf: no `jni`/`ndk`/`winit` dependency, no unsafe
 code, and no reactive dependency in its shipped surface, so every concrete shell can share it

@@ -24,7 +24,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
 | `frust-reactive::task` / `deep_link` / `back` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link and back-press event sources |
-| `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback) and an atomic-write helper for desktop and mobile shells |
+| `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells |
 | `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` |
 
 ## Layer Dependencies
@@ -51,8 +51,11 @@ built-in probe is `app_stem()`-granular, so the two differently-shaped in-repo c
 (`plugins/database`, `frust-shell-desktop`'s pipeline cache) instead resolve the legacy base
 themselves via the public `legacy_data_dir()`/`legacy_cache_dir()` and do their own file-level
 read-through with the same never-migrate contract. See `paths-macos-legacy-fallback-runtime-unverified`
-in [LIMITATIONS.md](LIMITATIONS.md) for runtime-verification status. The facade's dependency on
-`frust-widgets`/`frust-theme` (WIDGETS) and the shell crates (SHELLS) is
+in [LIMITATIONS.md](LIMITATIONS.md) for runtime-verification status. On Android, `data_dir()`/
+`cache_dir()` instead resolve the slot the host shell installs via `install_android_dirs`
+(first-wins, both paths validated absolute) and answer `None` until the Android shell's
+`nativeInitPlatform` has installed it; `HOME`/`XDG_*` are never consulted on that target. The
+facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and the shell crates (SHELLS) is
 the facade/plugin boundary described in the index; CORE itself never depends on either.
 
 ## Data Flow

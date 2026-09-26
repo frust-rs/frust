@@ -136,6 +136,18 @@ frust-url-launcher = { path = "../../plugins/url-launcher" }
 # public surface.
 frust-auth-session = { path = "../../plugins/auth-session" }
 
+# frust-database: playground is the device-gate vehicle for the "DB"
+# section — `src/pages/database.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-native-widgets`/`frust-i18n`/`frust-video-player`/
+# `frust-url-launcher`/`frust-auth-session` above (not yet a `frust tui` Add
+# Plugin contribution). The section exists to prove `frust_paths::data_dir()`
+# resolves on Android — the app process has neither `HOME` nor an XDG
+# variable, so `Database::open`'s standard-location resolution is only
+# provably correct once it has run inside a real app process. Default
+# features on (`engine-sqlite`): this app wants the bundled-SQLite backend
+# the smoke test runs against, not the opt-in `engine-turso` bridge.
+frust-database = { path = "../../plugins/database" }
+
 # Test-harness-only, NOT an escape hatch: the headless smoke test
 # (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
 # shell's own rebuild/layout/paint seam, no GPU, no window — the same harness

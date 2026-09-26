@@ -463,6 +463,14 @@ impl Database {
     /// deleted. `data_dir()`'s own built-in macOS fallback probes
     /// `<base>/<app_stem>` and so can never see this crate's paths.
     ///
+    /// Platform locations:
+    /// - **Android**: `<Context.getFilesDir()>/databases/<name>.db`. This directory
+    ///   is installed by the platform shell at `nativeInitPlatform` time; `Database::open`
+    ///   must run *after* this initialization completes (typically from app code, not from
+    ///   a static initializer).
+    /// - **iOS, macOS, Linux, Windows**: `<data_dir>/databases/<name>.db`, where `data_dir`
+    ///   is resolved from environment variables (`HOME`, `XDG_DATA_HOME`, `APPDATA`, etc.).
+    ///
     /// # Errors
     /// [`DatabaseError::Storage`] if `name` is invalid, no data directory
     /// can be resolved (an unset `HOME`/`APPDATA` — this crate never
@@ -832,17 +840,26 @@ fn resolve_db_path_from(
     Ok(path)
 }
 
+/// The [`DatabaseError::Storage`] text for an unresolvable data directory — cfg-selected: Android names the nativeInitPlatform ordering, every other target keeps the HOME/APPDATA wording (pinned by a host test).
+#[cfg(target_os = "android")]
+const UNRESOLVED_DATA_DIR: &str = "could not resolve the app data directory: the host shell has not installed the Android directories yet (Database::open must run after FrustSurfaceView.nativeInitPlatform, i.e. from app code, not from a static initializer)";
+
+#[cfg(not(target_os = "android"))]
+const UNRESOLVED_DATA_DIR: &str = "could not resolve a user data directory (HOME/APPDATA unset)";
+
 /// [`Database::open`]'s full path resolution: sanitize `name`, resolve the
 /// user data directory, join this crate's standard `databases/<name>.db`
 /// location (reading through to a legacy base where one exists — see
 /// [`resolve_db_path_from`]), and ensure the resolved database's parent
 /// directory exists.
+///
+/// On Android, the user data directory is `<Context.getFilesDir()>`, installed
+/// by the platform shell's `nativeInitPlatform`. Returns [`DatabaseError::Storage`]
+/// if the directory cannot be resolved (e.g. `Database::open` is called before
+/// `nativeInitPlatform` completes).
 fn resolve_db_path(name: &str) -> Result<PathBuf, DatabaseError> {
-    let base = frust_paths::data_dir().ok_or_else(|| {
-        DatabaseError::Storage(
-            "could not resolve a user data directory (HOME/APPDATA unset)".into(),
-        )
-    })?;
+    let base = frust_paths::data_dir()
+        .ok_or_else(|| DatabaseError::Storage(UNRESOLVED_DATA_DIR.into()))?;
     let path = resolve_db_path_from(&base, frust_paths::legacy_data_dir().as_deref(), name)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1100,5 +1117,21 @@ mod tests {
     #[cfg(not(any(feature = "engine-sqlite", feature = "engine-turso")))]
     fn default_engine_errors_when_nothing_compiled() {
         assert!(default_engine().is_err());
+    }
+
+    // --- Error messages --------------------------------------------------
+
+    #[test]
+    fn unresolved_data_dir_is_non_empty() {
+        assert!(!UNRESOLVED_DATA_DIR.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn non_android_unresolved_data_dir_matches_legacy_wording() {
+        assert_eq!(
+            UNRESOLVED_DATA_DIR,
+            "could not resolve a user data directory (HOME/APPDATA unset)"
+        );
     }
 }

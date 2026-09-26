@@ -292,6 +292,13 @@ To use it, just open a database the normal way:
 let db = Database::open("app")?;
 ```
 
+**Android platform note:** On Android, `Database::open` stores databases in
+`<Context.getFilesDir()>/databases/<name>.db`. This directory is installed by
+the platform shell's `nativeInitPlatform` during app initialization. `Database::open`
+must run *after* this initialization completes — typically from application code,
+not from static initializers. No `HOME` or XDG environment variable is consulted
+on Android; the directories are set up through platform-specific calls.
+
 ### 5.2 Turso (optional, `engine-turso`)
 
 The `engine-turso` feature compiles the [`turso`](https://crates.io/crates/turso)
