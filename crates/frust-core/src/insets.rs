@@ -19,9 +19,18 @@
 //! All values are **logical px** (the shell divides device px by the density
 //! before crossing into core). The insets are **global** — measured against the
 //! window, not any particular widget's origin — so containers need no per-child
-//! adjustment: a `SafeArea` consumes them knowing it spans the window. Nested
-//! inset semantics (Flutter's `MediaQuery.removePadding`) are a documented
-//! non-goal for v1.
+//! adjustment: a `SafeArea` consumes them knowing it spans the window.
+//!
+//! # Consumption (Flutter's `MediaQuery.removePadding`)
+//!
+//! A widget that pads its subtree by the safe-area padding also *removes* what
+//! it consumed from that subtree: it derives a reduced value with
+//! [`WindowInsets::consuming`] and installs it for its children through
+//! [`LayoutCtx::with_window_insets`](crate::widget::LayoutCtx::with_window_insets)
+//! / [`PaintCtx::with_window_insets`](crate::widget::PaintCtx::with_window_insets).
+//! Descendants then read zero padding on the consumed edges, so a self-insetting
+//! widget nested inside a `SafeArea` does not inset a second time. Outside such
+//! a scope the value is the single root-seeded one.
 
 /// Per-edge inset amounts, in logical pixels.
 ///
@@ -140,6 +149,42 @@ impl WindowInsets {
     pub fn padding(&self) -> EdgeInsets {
         self.view_padding.saturating_sub(self.view_insets)
     }
+
+    /// These insets with the safe-area [`padding`](WindowInsets::padding) on
+    /// each enabled edge marked as consumed — the value a widget that has
+    /// already padded by those edges hands to its subtree.
+    ///
+    /// Flutter parity: `MediaQuery.removePadding` as applied by `SafeArea`. For
+    /// each enabled edge, `view_padding.<edge>` is reduced by
+    /// `self.padding().<edge>` (saturating at zero); `view_insets` is left
+    /// untouched. The invariants are:
+    ///
+    /// * `consuming(..).padding().<edge> == 0.0` on every enabled edge;
+    /// * `view_insets` is unchanged, so the IME still reaches descendants for
+    ///   keyboard avoidance;
+    /// * disabled edges are unchanged in both sets;
+    /// * the operation is idempotent — consuming an already-consumed edge is a
+    ///   no-op, which is what makes nested `SafeArea`s consume only once.
+    #[must_use]
+    pub fn consuming(self, left: bool, top: bool, right: bool, bottom: bool) -> WindowInsets {
+        let padding = self.padding();
+        let consume = |enabled: bool, view_padding: f64, padding: f64| {
+            if enabled {
+                (view_padding - padding).max(0.0)
+            } else {
+                view_padding
+            }
+        };
+        WindowInsets {
+            view_padding: EdgeInsets {
+                left: consume(left, self.view_padding.left, padding.left),
+                top: consume(top, self.view_padding.top, padding.top),
+                right: consume(right, self.view_padding.right, padding.right),
+                bottom: consume(bottom, self.view_padding.bottom, padding.bottom),
+            },
+            view_insets: self.view_insets,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +231,65 @@ mod tests {
     #[test]
     fn window_insets_default_is_zero_padding() {
         assert_eq!(WindowInsets::default().padding(), EdgeInsets::ZERO);
+    }
+
+    #[test]
+    fn consuming_all_edges_zeroes_padding_and_keeps_view_insets() {
+        let insets = WindowInsets::new(
+            EdgeInsets::new(10.0, 20.0, 30.0, 40.0),
+            EdgeInsets::new(0.0, 0.0, 0.0, 15.0),
+        );
+        let consumed = insets.consuming(true, true, true, true);
+        assert_eq!(consumed.padding(), EdgeInsets::ZERO);
+        // Bottom: padding was 40 - 15 = 25, so view_padding drops to 15 (the
+        // part the IME already covers); the other edges drop to 0.
+        assert_eq!(consumed.view_padding, EdgeInsets::new(0.0, 0.0, 0.0, 15.0));
+        assert_eq!(consumed.view_insets, insets.view_insets);
+    }
+
+    #[test]
+    fn consuming_bottom_only_leaves_other_edges_visible() {
+        let insets = WindowInsets::new(EdgeInsets::new(10.0, 20.0, 30.0, 40.0), EdgeInsets::ZERO);
+        let consumed = insets.consuming(false, false, false, true);
+        assert_eq!(consumed.padding(), EdgeInsets::new(10.0, 20.0, 30.0, 0.0));
+        assert_eq!(
+            consumed.view_padding,
+            EdgeInsets::new(10.0, 20.0, 30.0, 0.0)
+        );
+        assert_eq!(consumed.view_insets, EdgeInsets::ZERO);
+    }
+
+    #[test]
+    fn consuming_an_ime_covered_edge_changes_nothing() {
+        // The IME (300) fully covers the 40px bottom system inset, so that
+        // edge's padding is already 0: consuming it leaves view_padding intact.
+        let insets = WindowInsets::new(
+            EdgeInsets::new(0.0, 24.0, 0.0, 40.0),
+            EdgeInsets::new(0.0, 0.0, 0.0, 300.0),
+        );
+        assert_eq!(insets.padding().bottom, 0.0);
+        let consumed = insets.consuming(false, false, false, true);
+        assert_eq!(consumed, insets);
+        assert_eq!(consumed.padding().bottom, 0.0);
+        assert_eq!(consumed.view_insets.bottom, 300.0);
+    }
+
+    #[test]
+    fn consuming_is_idempotent() {
+        let insets = WindowInsets::new(
+            EdgeInsets::new(10.0, 20.0, 30.0, 40.0),
+            EdgeInsets::new(5.0, 0.0, 0.0, 60.0),
+        );
+        for edges in [
+            (true, true, true, true),
+            (true, false, true, false),
+            (false, true, false, true),
+            (false, false, false, false),
+        ] {
+            let (l, t, r, b) = edges;
+            let once = insets.consuming(l, t, r, b);
+            assert_eq!(once.consuming(l, t, r, b), once, "edges {edges:?}");
+        }
+        assert_eq!(insets.consuming(false, false, false, false), insets);
     }
 }
