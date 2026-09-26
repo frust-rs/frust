@@ -44,18 +44,37 @@
 # Usage:
 #   scripts/testing/android-smoke.sh [--serial SERIAL] [--keep] [--repo PATH]
 #                                     [--leg template|playground|all]
+#                                     [--target-platform CSV]
 #
-#   --serial SERIAL   adb serial of the target device. Defaults to
-#                      $ANDROID_SERIAL, else the single device `adb devices`
-#                      reports; more than one attached device with neither
-#                      set is a hard error (pass --serial to disambiguate).
-#   --keep             Keep the scratch scaffold directory (leg "template")
-#                      instead of removing it on exit; the kept path is
-#                      printed in the final summary.
-#   --leg WHICH        Which leg(s) to run: `template`, `playground`, or
-#                      `all` (default: `all`).
-#   --repo PATH        Repository root to build against. Defaults to the
-#                      root derived from this script's own location.
+#   --serial SERIAL       adb serial of the target device. Defaults to
+#                          $ANDROID_SERIAL, else the single device `adb devices`
+#                          reports; more than one attached device with neither
+#                          set is a hard error (pass --serial to disambiguate).
+#   --keep                Keep the scratch scaffold directory (leg "template")
+#                          instead of removing it on exit; the kept path is
+#                          printed in the final summary.
+#   --leg WHICH           Which leg(s) to run: `template`, `playground`, or
+#                          `all` (default: `all`).
+#   --repo PATH           Repository root to build against. Defaults to the
+#                          root derived from this script's own location.
+#   --target-platform CSV ABI(s) to build: comma-separated list of
+#                          `android-arm64`, `android-arm`, or `android-x64`.
+#                          Forwarded verbatim to `frust build apk --debug`.
+#                          Defaults to the CLI's default (all three ABIs).
+#                          Can also be set via $ANDROID_SMOKE_TARGET_PLATFORM.
+#                          A phone typically wants `android-arm64`; an x86_64
+#                          emulator wants `android-x64`. The target must be
+#                          installed via `rustup target add`.
+#
+# Cleanup and artifacts:
+#   - The scratch scaffold (leg "template") is created under `mktemp -d` and
+#     removed via `trap cleanup EXIT` on normal exit (unless `--keep` is given).
+#     The trap runs on all exit paths, including `exit 3` from failed build/install
+#     steps, so the scratch directory is always cleaned unless explicitly kept.
+#   - Artifacts (logcat dumps and visual-probe PNGs) are written to
+#     $ARTIFACTS_DIR, which defaults to `$REPO_ROOT/build/android-smoke`.
+#     Override via the $ANDROID_SMOKE_ARTIFACTS_DIR environment variable.
+#     The build/ directory is git-ignored; artifacts persist across runs.
 #
 # Toolchain notes:
 #   - Requires `adb`, `cargo-ndk`, a JDK 17+ (via $JAVA_HOME or PATH), and
@@ -67,8 +86,6 @@
 #     $JAVA_HOME itself — it inherits whatever the caller's environment
 #     already has, so a shared/warm target directory keeps working exactly
 #     as the caller configured it.
-#   - The scaffold for leg "template" is created under `mktemp -d` (outside
-#     this repository) and removed on exit unless `--keep` is given.
 #   - A dozing device reports zeroed insets and an all-black screencap: this
 #     script wakes the device (`input keyevent KEYCODE_WAKEUP`) and dismisses
 #     the keyguard (`wm dismiss-keyguard`) before every launch and before any
@@ -89,10 +106,12 @@
 #
 # Exit codes:
 #   0   every assertion in every requested leg passed.
-#   1   a usage error (bad argument, ambiguous/missing device).
+#   1   a usage error (bad argument, ambiguous/missing device) or an adb
+#       command reported a usage error (adb serial not found, etc.).
 #   2   a missing toolchain component (adb/JDK/cargo-ndk/ANDROID_HOME) or a
 #       failing `frust doctor` check.
-#   3   a build, install, or launch step failed.
+#   3   a build, install, or launch step failed (frust build apk, adb install,
+#       adb shell am start, or similar device interaction).
 #   4   a logcat assertion failed (the actual smoke-check failure this
 #       script exists to catch).
 
@@ -109,10 +128,11 @@ REPO_ROOT="$DEFAULT_REPO_ROOT"
 SERIAL="${ANDROID_SERIAL:-}"
 KEEP=0
 LEG="all"
+TARGET_PLATFORM="${ANDROID_SMOKE_TARGET_PLATFORM:-}"
 
 usage() {
   cat <<'EOF' >&2
-Usage: android-smoke.sh [--serial SERIAL] [--keep] [--leg template|playground|all] [--repo PATH]
+Usage: android-smoke.sh [--serial SERIAL] [--keep] [--leg template|playground|all] [--repo PATH] [--target-platform CSV]
 EOF
 }
 
@@ -146,6 +166,14 @@ while [ $# -gt 0 ]; do
       REPO_ROOT="$2"
       shift 2
       ;;
+    --target-platform)
+      if [ $# -lt 2 ]; then
+        echo "error: --target-platform requires a comma-separated ABI list" >&2
+        exit 1
+      fi
+      TARGET_PLATFORM="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -167,6 +195,28 @@ case "$LEG" in
 esac
 
 REPO_ROOT="$(cd "$REPO_ROOT" >/dev/null 2>&1 && pwd)"
+
+# --- Artifacts directory -------------------------------------------------------
+
+ARTIFACTS_DIR="${ANDROID_SMOKE_ARTIFACTS_DIR:-$REPO_ROOT/build/android-smoke}"
+mkdir -p "$ARTIFACTS_DIR"
+
+# Confirm build/android-smoke is git-ignored
+if ! git -C "$REPO_ROOT" check-ignore "$ARTIFACTS_DIR" >/dev/null 2>&1; then
+  echo "warning: $ARTIFACTS_DIR is not git-ignored; artifacts may be committed" >&2
+fi
+
+# --- Scratch cleanup on exit ---------------------------------------------------
+
+SCRATCH=""
+
+cleanup() {
+  if [ -n "$SCRATCH" ] && [ "$KEEP" -eq 0 ] && [ -d "$SCRATCH" ]; then
+    rm -rf "$SCRATCH"
+  fi
+}
+
+trap cleanup EXIT
 
 # --- Result tracking -----------------------------------------------------------
 
@@ -204,6 +254,32 @@ fail_tool() {
 fail_build() {
   echo "error: $1" >&2
   exit 3
+}
+
+# --- Device command helpers ---------------------------------------------------
+
+# Wraps `adb install` and routes failure to fail_build(3).
+adb_install() {
+  local serial="$1" apk="$2"
+  if ! adb -s "$serial" install -r "$apk" >/dev/null 2>&1; then
+    fail_build "adb install failed on $serial"
+  fi
+}
+
+# Wraps `adb shell am start -W` and routes failure to fail_build(3).
+# Arguments: serial, am-start-args (passed verbatim after `-W`)
+adb_shell_am_start() {
+  local serial="$1"
+  shift
+  if ! adb -s "$serial" shell am start -W "$@" >/dev/null 2>&1; then
+    fail_build "adb shell am start failed on $serial"
+  fi
+}
+
+# Dumps full logcat to a file.
+dump_logcat() {
+  local serial="$1" outfile="$2"
+  adb -s "$serial" logcat -d >"$outfile" 2>/dev/null || true
 }
 
 # --- Preflight: required tools ------------------------------------------------
@@ -282,9 +358,14 @@ cli() {
 # `android/`), tees combined output to $2 for diagnostics, and echoes the
 # absolute APK path parsed from the CLI's own `Built: <path>` line (the last
 # such line, in case a future flag ever produces more than one).
+# Forwards --target-platform $TARGET_PLATFORM when set.
 build_apk() {
   local project_dir="$1" build_log="$2"
-  if ! (cd "$project_dir" && cli build apk --debug) >"$build_log" 2>&1; then
+  local build_cmd="cli build apk --debug"
+  if [ -n "$TARGET_PLATFORM" ]; then
+    build_cmd="$build_cmd --target-platform $TARGET_PLATFORM"
+  fi
+  if ! (cd "$project_dir" && eval "$build_cmd") >"$build_log" 2>&1; then
     cat "$build_log" >&2
     fail_build "\`frust build apk --debug\` failed in $project_dir; see output above"
   fi
@@ -456,38 +537,36 @@ PYEOF
 
 run_leg_template() {
   local serial="$1"
-  local scratch scaffold build_log apk package png
+  local scaffold build_log apk package png
 
-  scratch="$(mktemp -d)"
-  if [ "$KEEP" -eq 0 ]; then
-    trap "rm -rf '$scratch'" RETURN
-  else
-    note "keeping scratch scaffold directory: $scratch"
+  SCRATCH="$(mktemp -d)"
+  if [ "$KEEP" -eq 1 ]; then
+    note "keeping scratch scaffold directory: $SCRATCH"
   fi
 
-  scaffold="$scratch/smokeapp"
+  scaffold="$SCRATCH/smokeapp"
   echo "== leg template: scaffolding a fresh app at $scaffold ==" >&2
   if ! cli create "$scaffold" \
       --org dev.frust.smoke \
       --project-name smokeapp \
       --frust-path "$REPO_ROOT" \
       --platforms android \
-      >"$scratch/create.log" 2>&1; then
-    cat "$scratch/create.log" >&2
+      >"$SCRATCH/create.log" 2>&1; then
+    cat "$SCRATCH/create.log" >&2
     fail_build "\`frust create\` failed; see output above"
   fi
 
   echo "== leg template: building the debug APK ==" >&2
-  build_log="$scratch/build.log"
+  build_log="$SCRATCH/build.log"
   apk="$(build_apk "$scaffold" "$build_log")"
   package="$(application_id "$scaffold")"
 
   echo "== leg template: install, launch, and assert on $serial (package=$package) ==" >&2
-  adb -s "$serial" install -r "$apk" >/dev/null
+  adb_install "$serial" "$apk"
   adb -s "$serial" logcat -c
   wake_device "$serial"
   adb -s "$serial" shell am force-stop "$package" >/dev/null 2>&1 || true
-  adb -s "$serial" shell am start -W -n "$package/.MainActivity" >/dev/null
+  adb_shell_am_start "$serial" -n "$package/.MainActivity"
 
   if poll_logcat "$serial" _predicate_nonzero_insets 20; then
     pass "template: frust-insets reports non-zero view_padding (t>0, b>0)"
@@ -503,8 +582,10 @@ run_leg_template() {
     pass "template: legacy-theme warning is absent"
   fi
 
-  png="$scratch/template.png"
+  png="$ARTIFACTS_DIR/template.png"
   visual_probe "$serial" "$png"
+
+  dump_logcat "$serial" "$ARTIFACTS_DIR/logcat-template.log"
 
   adb -s "$serial" shell am force-stop "$package" >/dev/null 2>&1 || true
   adb -s "$serial" uninstall "$package" >/dev/null 2>&1 || true
@@ -524,13 +605,13 @@ run_leg_playground() {
   package="$(application_id "$project_dir")"
 
   echo "== leg playground: install, launch via deep link, and assert on $serial (package=$package) ==" >&2
-  adb -s "$serial" install -r "$apk" >/dev/null
+  adb_install "$serial" "$apk"
   adb -s "$serial" logcat -c
   wake_device "$serial"
-  adb -s "$serial" shell am start -W \
+  adb_shell_am_start "$serial" \
     -a android.intent.action.VIEW \
     -d "frustplay://section/db" \
-    "$package" >/dev/null
+    "$package"
 
   local db_result
   db_result="$(wait_for_db_smoke "$serial" 60)"
@@ -551,6 +632,8 @@ run_leg_playground() {
   else
     fail_assertion "playground: no frust-insets line with non-zero view_padding within timeout"
   fi
+
+  dump_logcat "$serial" "$ARTIFACTS_DIR/logcat-playground.log"
 
   rm -f "$build_log"
   # Deliberately left installed per the header's leave-it-installed policy.
@@ -585,6 +668,11 @@ done
 for line in "${FAIL_LINES[@]:-}"; do
   [ -n "$line" ] && echo "FAIL: $line" >&2
 done
+
+echo "artifacts directory: $ARTIFACTS_DIR" >&2
+if [ "$KEEP" -eq 1 ] && [ -n "$SCRATCH" ]; then
+  echo "scratch directory (kept): $SCRATCH" >&2
+fi
 
 if [ "$FAILED_ASSERTIONS" -eq 0 ]; then
   echo "android-smoke: all assertions passed (leg=$LEG, device=$SERIAL)" >&2
