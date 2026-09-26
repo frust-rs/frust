@@ -341,6 +341,17 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   `WindowMetricsPublisher` against per-frame churn (see
   [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Desktop seeds insets as the default, since winit
   0.30 offers no cross-platform safe-area accessor.
+- **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
+  calls androidx `enableEdgeToEdge` with transparent status/navigation-bar `SystemBarStyle`s, then
+  on API < 35 adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the status/nav-bar
+  contrast scrim, so transparent bars and real window insets arrive regardless of the manifest
+  theme; API 35+ enforces edge-to-edge platform-side regardless of any of this. The scaffold
+  template names `@android:style/Theme.Material.NoActionBar`; a still-legacy theme (missing
+  `windowDrawsSystemBarBackgrounds`) keeps working — the added flag covers it — but logs one
+  `frust`-tagged warning naming the migration recipe (see
+  [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)). Every real inset change logs `frust-insets
+  view_padding l=… t=… r=… b=… view_insets l=… t=… r=… b=… scale=…`
+  (`crates/frust-shell-android/src/app/surface.rs`).
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
   re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
   on the resolved brightness actually moving so an override swapping one dark theme for another

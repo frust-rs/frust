@@ -170,12 +170,19 @@ build from.
     CODE_STANDARDS.md. Back arbitration's reach check (above) derives from this same
     `input_routed_pages()` set, so it is the single reach definition shared by input, semantics, and
     back.
+- Safe-area flow: `safe_area(child)` pads by the resolved `WindowInsets` on its enabled edges, then
+  **removes** what it consumed from its subtree via `WindowInsets::consuming` — installed for the
+  child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
+  descendant, or a nested `safe_area`, does not inset the same edge twice. `.minimum` is extra
+  padding, never consumed, and `view_insets` (the IME) always flows through unchanged.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
   most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
   slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
   `bottom_bar` self-size for the top/bottom inset the same way (reading `ctx.window_insets()` in their own
-  `layout`), and `body` is never pre-inset; `fab` is the one slot the Scaffold insets on the caller's behalf,
-  floating above `bottom_bar` when present and off the raw window edge otherwise.
+  `layout` — Material's `navigation_bar` is one such self-insetting `bottom_bar`, see
+  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)), and `body` is never pre-inset; `fab` is the one slot
+  the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw
+  window edge otherwise.
 - Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)`
   and `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
   clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface

@@ -379,13 +379,11 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
 - **A self-sizing chrome widget consumes its own window inset exactly once, in its own
   `layout`, never pre-inset by its container** (`Scaffold`'s R-B4-inset: `app_bar`/`bottom_bar`
   self-size for top/bottom this way, so a bar that doesn't self-inset must wrap itself in
-  `safe_area(...)` instead — see `docs/WIDGETS_ARCHITECTURE.md`'s Scaffold flow).
+  `safe_area(...)` instead — see `docs/WIDGETS_ARCHITECTURE.md`'s Scaffold flow). `safe_area` removes what it consumed, so wrapping a self-insetting bar in it is harmless but leaves the band unpainted — pick one.
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear internal flags
-  (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A structural container
-  rebuild can synthesize a `Cancel` to a still-captured child delivered over a throwaway
-  `()` state (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — a handler reaching for real state
-  there panics on the `()` downcast, a deliberate tripwire.
+  (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A rebuild can synthesize a
+  `Cancel` to a still-captured child over a throwaway `()` state (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — reaching for real state there panics on the `()` downcast, a deliberate tripwire.
 
 - **A container that suppresses routing to its children must cancel their capture, clear
   their focus, and publish a cleared IME surface — in that order, with no bypass.** This
