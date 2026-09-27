@@ -289,19 +289,27 @@ impl AndroidAppHandle {
             return; // no-op push — skip both the relayout and the re-provide
         }
         self.insets = insets;
-        log::info!(
-            target: "frust",
-            "frust-insets view_padding l={:.1} t={:.1} r={:.1} b={:.1} view_insets l={:.1} t={:.1} r={:.1} b={:.1} scale={:.2}",
-            insets.view_padding.left,
-            insets.view_padding.top,
-            insets.view_padding.right,
-            insets.view_padding.bottom,
-            insets.view_insets.left,
-            insets.view_insets.top,
-            insets.view_insets.right,
-            insets.view_insets.bottom,
-            scale
-        );
+        // Emit insets log ONLY in debug builds (debug_assertions) rather than log::debug.
+        // The Android logger is initialised with max_level=Info in every build (see
+        // jni_glue.rs:579-582), so debug! would never reach logcat. This line is required
+        // by scripts/testing/android-smoke.sh, which greps the exact format from debug APKs
+        // where debug_assertions is enabled. The format string and log target are unchanged;
+        // release builds omit this log entirely.
+        if cfg!(debug_assertions) {
+            log::info!(
+                target: "frust",
+                "frust-insets view_padding l={:.1} t={:.1} r={:.1} b={:.1} view_insets l={:.1} t={:.1} r={:.1} b={:.1} scale={:.2}",
+                insets.view_padding.left,
+                insets.view_padding.top,
+                insets.view_padding.right,
+                insets.view_padding.bottom,
+                insets.view_insets.left,
+                insets.view_insets.top,
+                insets.view_insets.right,
+                insets.view_insets.bottom,
+                scale
+            );
+        }
         self.push_insets(insets);
         // The composite window-shape context carries a copy of these insets, so
         // an insets change is also a metrics change (self-guarded).
