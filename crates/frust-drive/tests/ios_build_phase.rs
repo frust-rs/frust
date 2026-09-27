@@ -118,3 +118,23 @@ fn ios_build_phase_copies_the_resolved_staticlib_into_built_products_dir() {
         "rendered pbxproj must copy the resolved staticlib path:\n{pbxproj}"
     );
 }
+
+/// Xcode runs script build phases with its own PATH, which does not include
+/// rustup's `~/.cargo/bin`, so a Run from the Xcode UI failed with
+/// `cargo: command not found` (only the frust CLI, which inherits the shell's
+/// PATH, could build). The phase must put `${CARGO_HOME:-$HOME/.cargo}/bin`
+/// on PATH before the first `cargo` invocation.
+#[test]
+fn ios_build_phase_puts_rustups_bin_dir_on_path_before_cargo() {
+    let text = rendered_pbxproj();
+    let export = text
+        .find(r#"export PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\""#)
+        .expect("build phase exports rustup's bin dir on PATH");
+    let first_cargo = text
+        .find("cargo build --target")
+        .expect("build phase runs cargo build");
+    assert!(
+        export < first_cargo,
+        "PATH must be set before the first cargo invocation"
+    );
+}
