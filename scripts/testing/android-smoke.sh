@@ -75,6 +75,11 @@
 #     $ARTIFACTS_DIR, which defaults to `$REPO_ROOT/build/android-smoke`.
 #     Override via the $ANDROID_SMOKE_ARTIFACTS_DIR environment variable.
 #     The build/ directory is git-ignored; artifacts persist across runs.
+#   - Each leg's logcat (`logcat-template.log` / `logcat-playground.log`) is
+#     dumped at the end of the leg on pass AND on assertion failure, and also
+#     when `adb install` or `adb shell am start` fails (exit 3) — in that case
+#     adb's own output is echoed to stderr first, so an install/launch failure
+#     never leaves the run without diagnostics.
 #
 # Toolchain notes:
 #   - Requires `adb`, `cargo-ndk`, a JDK 17+ (via $JAVA_HOME or PATH), and
@@ -258,28 +263,62 @@ fail_build() {
 
 # --- Device command helpers ---------------------------------------------------
 
-# Wraps `adb install` and routes failure to fail_build(3).
+# Path of the current leg's logcat artifact. Each leg sets it before its
+# first device step so a failing install/launch can still dump logcat there.
+LEG_LOGCAT=""
+
+# Shared failure path for the device-step wrappers: surface the adb output
+# that was captured, dump the device logcat to the current leg's artifact (if
+# a leg has declared one), then exit 3.
+_device_step_failed() {
+  local serial="$1" what="$2" output="$3"
+  if [ -n "$output" ]; then
+    echo "--- $what output ---" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- end $what output ---" >&2
+  fi
+  if [ -n "$LEG_LOGCAT" ]; then
+    dump_logcat "$serial" "$LEG_LOGCAT"
+    [ -s "$LEG_LOGCAT" ] && echo "logcat dumped to $LEG_LOGCAT" >&2
+  fi
+  fail_build "$what failed on $serial"
+}
+
+# Wraps `adb install` and routes failure to fail_build(3). adb's own
+# stdout+stderr is captured and shown only on failure.
 adb_install() {
-  local serial="$1" apk="$2"
-  if ! adb -s "$serial" install -r "$apk" >/dev/null 2>&1; then
-    fail_build "adb install failed on $serial"
+  local serial="$1" apk="$2" output=""
+  if ! output="$(adb -s "$serial" install -r "$apk" 2>&1)"; then
+    _device_step_failed "$serial" "adb install" "$output"
   fi
 }
 
-# Wraps `adb shell am start -W` and routes failure to fail_build(3).
+# Wraps `adb shell am start -W` and routes failure to fail_build(3). adb's
+# own stdout+stderr is captured and shown only on failure.
 # Arguments: serial, am-start-args (passed verbatim after `-W`)
 adb_shell_am_start() {
-  local serial="$1"
+  local serial="$1" output=""
   shift
-  if ! adb -s "$serial" shell am start -W "$@" >/dev/null 2>&1; then
-    fail_build "adb shell am start failed on $serial"
+  if ! output="$(adb -s "$serial" shell am start -W "$@" 2>&1)"; then
+    _device_step_failed "$serial" "adb shell am start" "$output"
   fi
 }
 
-# Dumps full logcat to a file.
+# Dumps full logcat to a file. Best-effort: skipped (with a note) when the
+# device is not reachable — `adb logcat` blocks indefinitely waiting for a
+# missing device, which would turn an install/launch failure into a hang —
+# and bounded by `timeout` where that binary exists (Linux; macOS lacks it).
 dump_logcat() {
   local serial="$1" outfile="$2"
-  adb -s "$serial" logcat -d >"$outfile" 2>/dev/null || true
+  if ! adb -s "$serial" get-state >/dev/null 2>&1; then
+    note "device $serial not reachable; skipping logcat dump to $outfile"
+    return 0
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 60 adb -s "$serial" logcat -d >"$outfile" 2>/dev/null || true
+  else
+    adb -s "$serial" logcat -d >"$outfile" 2>/dev/null || true
+  fi
 }
 
 # --- Preflight: required tools ------------------------------------------------
@@ -562,6 +601,7 @@ run_leg_template() {
   package="$(application_id "$scaffold")"
 
   echo "== leg template: install, launch, and assert on $serial (package=$package) ==" >&2
+  LEG_LOGCAT="$ARTIFACTS_DIR/logcat-template.log"
   adb_install "$serial" "$apk"
   adb -s "$serial" logcat -c
   wake_device "$serial"
@@ -585,7 +625,7 @@ run_leg_template() {
   png="$ARTIFACTS_DIR/template.png"
   visual_probe "$serial" "$png"
 
-  dump_logcat "$serial" "$ARTIFACTS_DIR/logcat-template.log"
+  dump_logcat "$serial" "$LEG_LOGCAT"
 
   adb -s "$serial" shell am force-stop "$package" >/dev/null 2>&1 || true
   adb -s "$serial" uninstall "$package" >/dev/null 2>&1 || true
@@ -605,6 +645,7 @@ run_leg_playground() {
   package="$(application_id "$project_dir")"
 
   echo "== leg playground: install, launch via deep link, and assert on $serial (package=$package) ==" >&2
+  LEG_LOGCAT="$ARTIFACTS_DIR/logcat-playground.log"
   adb_install "$serial" "$apk"
   adb -s "$serial" logcat -c
   wake_device "$serial"
@@ -633,7 +674,7 @@ run_leg_playground() {
     fail_assertion "playground: no frust-insets line with non-zero view_padding within timeout"
   fi
 
-  dump_logcat "$serial" "$ARTIFACTS_DIR/logcat-playground.log"
+  dump_logcat "$serial" "$LEG_LOGCAT"
 
   rm -f "$build_log"
   # Deliberately left installed per the header's leave-it-installed policy.
