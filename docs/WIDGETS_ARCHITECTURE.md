@@ -174,7 +174,10 @@ build from.
   **removes** what it consumed from its subtree via `WindowInsets::consuming` — installed for the
   child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
   descendant, or a nested `safe_area`, does not inset the same edge twice. `.minimum` is extra
-  padding, never consumed, and `view_insets` (the IME) always flows through unchanged.
+  padding, never consumed, and `view_insets` (the IME) always flows through unchanged. A pod floated
+  through the overlay portal carries its owner's consumed `WindowInsets` along in its
+  `OverlayEntry`, so a paint-time read inside floated content still agrees with the layout-time one
+  it saw under its owner's `LayoutCtx`; hit testing and event routing are unaffected.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
   most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
   slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and

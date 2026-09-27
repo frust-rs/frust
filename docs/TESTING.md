@@ -596,19 +596,28 @@ T400 path works.
 
 `scripts/testing/android-smoke.sh --serial <serial>` is the automated entry point against an
 attached device or a running emulator (`--serial` defaults to `$ANDROID_SERIAL`, else the sole
-`adb devices` target). It runs two legs (`--leg template|playground|all`):
+`adb devices` target). Device reachability (`adb get-state`) is checked before any build, failing
+fast (exit 1) on a wrong `--serial` rather than after a multi-minute build. Both legs build a
+**debug** APK — required, since the `frust-insets` log line and the playground DB auto-run are
+both debug-only (`cfg!(debug_assertions)`). It runs two legs (`--leg template|playground|all`):
 
 - **template** — scaffolds a fresh app, builds and installs it, and asserts `frust-insets` reports
-  non-zero top/bottom `view_padding` and that the legacy-theme warning is absent.
+  non-zero top/bottom `view_padding` and that the legacy-theme warning is absent; its scratch
+  scaffold is removed at the end of the leg unless `--keep`.
 - **playground** — builds/installs `examples/playground`, launches it via the
   `frustplay://section/db` deep link, and asserts `frust-database smoke: ok` appears in logcat
   alongside the same non-zero-insets check.
 
-A negative control (pointing the script at an APK built from a manifest that still names the
-legacy theme, which must fail leg "template") is documented in the script's header but not
-automated. `.github/workflows/android-smoke.yml` provisions an emulator (`workflow_dispatch` +
-nightly) and runs this script, but is a delivered template, not part of this repository's
-required gates.
+The artifacts directory is emptied of the script's own `logcat-*.log`/`*.png` files at the start of
+each run. Each leg's dumped logcat is filtered to `frust:V AndroidRuntime:E DEBUG:I
+ActivityManager:I libc:F` by default; `--full-logcat` (or `ANDROID_SMOKE_FULL_LOGCAT=1`) keeps the
+unfiltered device-wide dump. A negative control (pointing the script at an APK built from a
+manifest that still names the legacy theme, which must fail leg "template") is documented in the
+script's header but not automated. `.github/workflows/android-smoke.yml` provisions an emulator
+(`workflow_dispatch` + nightly) and runs this script with `--target-platform android-x64
+--full-logcat`, but is a delivered template, not part of this repository's required gates; GitHub
+registers a workflow only from the default branch, so it cannot be dispatched or scheduled — and
+has never been executed — until `dev` is promoted to `main`.
 
 ### Android Scenario Matrix
 

@@ -23,7 +23,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-scene::glyph` / `shader` | Carries shaped text and opaque WGSL shader handles from `frust-text` through the `Scene` |
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
-| `frust-reactive::task` / `deep_link` / `back` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link and back-press event sources |
+| `frust-reactive::task` / `deep_link` / `back` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link and back-press event sources — each delivered `DeepLink` carries a monotonic per-process `sequence`; consumers dedupe a delivery by comparing `sequence`, not the URL text |
 | `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells |
 | `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` |
 

@@ -351,7 +351,9 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   `frust`-tagged warning naming the migration recipe (see
   [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)). Every real inset change logs `frust-insets
   view_padding l=… t=… r=… b=… view_insets l=… t=… r=… b=… scale=…`
-  (`crates/frust-shell-android/src/app/surface.rs`).
+  (`crates/frust-shell-android/src/app/surface.rs`) — debug builds only (`cfg!(debug_assertions)`),
+  since the Android logger is capped at Info in every build so an unconditional `log::debug!` would
+  never surface.
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
   re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
   on the resolved brightness actually moving so an override swapping one dark theme for another

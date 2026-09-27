@@ -54,9 +54,13 @@ selecting between six sections:
    `/data/user/0/it.f0x.playground/files/databases/playground.db`, bare
    scaffold `MainActivity`, no env var set. A `frustplay://section/<label>`
    deep link (case-insensitive against `SECTION_LABELS`) routes straight to a
-   section; a cold `am start -a android.intent.action.VIEW -d
-   frustplay://section/db it.f0x.playground` lands on this section and
-   auto-runs the smoke once, logging `playground deep-link: section db -> 10`
+   section; an unrecognized `<label>` shows a toast instead of routing.
+   Deliveries dedupe by `DeepLink::sequence`, not URL text, so two deliveries
+   of an identical link each apply. A cold `am start -a
+   android.intent.action.VIEW -d frustplay://section/db it.f0x.playground`
+   lands on this section and auto-runs the smoke once — a debug-build-only
+   behavior (a shipped release build never auto-runs a DB write from an
+   external deep link) — logging `playground deep-link: section db -> 10`
    then `frust-database smoke: ok rows=N` — `scripts/testing/android-smoke.sh`
    passed all 5 assertions against the same Pixel 5. That same 2026-09-26 gate
    also exercised the Android edge-to-edge fix: on the Pixel 5 (gesture nav),
