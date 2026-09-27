@@ -7,11 +7,16 @@
 #
 # The workflow is MANUAL + NIGHTLY by design: an x86_64 Android emulator with
 # the NDK + SDK toolchain takes 20-25 minutes of wall-clock runner time per
-# run. The build itself compiles for three ABIs (arm64-v8a, armeabi-v7a, x86_64)
-# and publishes diagnostics to build/android-smoke/ on failure. In a private
-# repository, that is a budgeted cost, not a free-tier case. The owner may
-# enable, edit, or delete this workflow at any time; it is delivered as a
-# template, not a required gate.
+# run. The build targets only the x86_64 ABI for the emulator and publishes
+# diagnostics to build/android-smoke/ on failure. In a private repository, that
+# is a budgeted cost, not a free-tier case. The owner may enable, edit, or delete
+# this workflow at any time; it is delivered as a template, not a required gate.
+#
+# IMPORTANT: This workflow is registered by GitHub only from the default branch
+# (currently main). Until dev is promoted to main, the workflow cannot be
+# dispatched or scheduled, and has never been executed. Artifacts are published
+# to build/android-smoke/** on failure; the emulator is x86_64, so only one
+# ABI (x86_64-linux-android) is built.
 #
 # This workflow is NOT part of the plan's acceptance criteria and must never be
 # assumed in docs or tests.
@@ -49,9 +54,11 @@ jobs:
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          targets: x86_64-linux-android
 
       - name: Install Android Rust targets
-        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+        run: rustup target add x86_64-linux-android
 
       - name: Show Rust toolchain
         run: rustup show
@@ -104,7 +111,7 @@ jobs:
           disk-size: 2048M
           heap-size: 512M
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: scripts/testing/android-smoke.sh --leg all
+          script: scripts/testing/android-smoke.sh --leg all --target-platform android-x64 --full-logcat
 
       - name: Upload android-smoke diagnostics on failure
         if: failure()
