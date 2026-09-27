@@ -50,4 +50,9 @@
 /plugins/*/platform/ios/*/Package.resolved
 /platform/ios/FrustEmbedding/Package.resolved
 
+# Xcode writes per-user SwiftPM state (scheme order, workspace settings) into a
+# `.swiftpm/` directory beside every local package it opens, including when a
+# consuming app references the package. None of it is shared configuration.
+.swiftpm/
+
 .zabinenv
