@@ -157,9 +157,12 @@ const CAMERA_BASE: &[Contribution] = &[
     // multi-package shape without building it — see
     // `plugins/camera/platform/ios`'s own `Package.swift` doc comment).
     // `rel_path` points at the package
-    // directory itself (no nested `FrustCamera/` subdirectory — that is
-    // just the package/product *name*), mirroring `GradleModule`'s
-    // `rel_path` convention above.
+    // directory itself (camera's has no nested `FrustCamera/` subdirectory),
+    // mirroring `GradleModule`'s `rel_path` convention above. Its last path
+    // component is the package's SwiftPM identity (`ios` here), which must be
+    // unique across every SwiftPackageRef — see
+    // `swift_package_refs_have_unique_spm_identities`; later plugin packages
+    // therefore nest in a directory named for their product (iap's `FrustIap/`).
     Contribution::SwiftPackageRef {
         package_name: "FrustCamera",
         rel_path: "plugins/camera/platform/ios",
@@ -390,9 +393,11 @@ const IAP_BASE: &[Contribution] = &[
         gradle_name: ":frust-iap",
         rel_path: "plugins/iap/platform/android",
     },
+    // Nested in `FrustIap/`: at `plugins/iap/platform/ios` its SwiftPM identity
+    // would be `ios`, camera's, and Xcode silently drops one of the two.
     Contribution::SwiftPackageRef {
         package_name: "FrustIap",
-        rel_path: "plugins/iap/platform/ios",
+        rel_path: "plugins/iap/platform/ios/FrustIap",
     },
 ];
 
@@ -947,7 +952,7 @@ mod tests {
             spec.base[2],
             Contribution::SwiftPackageRef {
                 package_name: "FrustIap",
-                rel_path: "plugins/iap/platform/ios",
+                rel_path: "plugins/iap/platform/ios/FrustIap",
             }
         ));
         assert!(
@@ -987,6 +992,50 @@ mod tests {
             }
         }
         assert!(found, "expected at least one SwiftPackageRef contribution");
+    }
+
+    /// SwiftPM names a local package by its directory's last path component,
+    /// lowercased, and keeps only the first of two packages sharing a name —
+    /// with no error at resolution, only a later `Missing package product`.
+    /// iap's package once sat at `plugins/iap/platform/ios`, camera's identity
+    /// `ios`, so an app adding both plugins lost `FrustIap`. Every
+    /// SwiftPackageRef, plus the embedding package every app template
+    /// references, must therefore end in a distinct directory name.
+    #[test]
+    fn swift_package_refs_have_unique_spm_identities() {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        seen.insert(
+            "frustembedding".to_string(),
+            "platform/ios/FrustEmbedding".to_string(),
+        );
+        for plugin in known_plugins() {
+            for contribution in plugin.base.iter().chain(
+                plugin
+                    .optional_features
+                    .iter()
+                    .flat_map(|f| f.contributions.iter()),
+            ) {
+                if let Contribution::SwiftPackageRef { rel_path, .. } = contribution {
+                    let identity = Path::new(rel_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .expect("rel_path ends in a directory name")
+                        .to_lowercase();
+                    if let Some(previous) = seen.get(&identity) {
+                        // The same package contributed twice (e.g. by a
+                        // feature and a base list) is not a collision.
+                        assert_eq!(
+                            previous, rel_path,
+                            "`{rel_path}` and `{previous}` share the SwiftPM \
+                             identity `{identity}`; nest one in a directory \
+                             named for its product"
+                        );
+                    } else {
+                        seen.insert(identity, rel_path.to_string());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! The iOS [`Backend`] — StoreKit, reached through the `FrustIapBridge` Swift
-//! glue (`plugins/iap/platform/ios`) as JSON strings over the ObjC runtime.
+//! glue (`plugins/iap/platform/ios/FrustIap`) as JSON strings over the ObjC runtime.
 //!
 //! `#[cfg(target_os = "ios")]` — iOS only, not `target_vendor = "apple"`: this
 //! crate has no macOS arm to share with (see [`crate::desktop`]'s deferral),

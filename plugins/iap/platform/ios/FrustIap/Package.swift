@@ -4,6 +4,12 @@ import PackageDescription
 // `frust-iap`'s iOS Swift package — the ObjC-visible bridge Rust reaches
 // through the ObjC runtime, over OpenIAP's Apple SDK.
 //
+// The package lives in its own `FrustIap/` directory (like
+// `platform/ios/FrustEmbedding`), not directly in `platform/ios`: SwiftPM
+// names a local package by its directory's last path component, so a second
+// plugin package at `…/platform/ios` would share camera's identity `ios`
+// and be silently dropped from any app that references both.
+//
 // Two deliberate differences from `plugins/camera/platform/ios`, the existing
 // plugin-package precedent:
 //

@@ -47,6 +47,7 @@
 # records its own resolution in its project; the package-local file is
 # tooling exhaust, never committed.
 /plugins/*/platform/ios/Package.resolved
+/plugins/*/platform/ios/*/Package.resolved
 /platform/ios/FrustEmbedding/Package.resolved
 
 .zabinenv
