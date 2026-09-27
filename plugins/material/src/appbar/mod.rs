@@ -134,11 +134,15 @@
 //!
 //! # Not ported
 //!
-//! * **`safeArea` / `MediaQuery.viewPadding`.** This catalog's chrome widgets
+//! * **`safeArea` / `MediaQuery.viewPadding`.** This family's own bars still
 //!   never self-inset (`docs/CODE_STANDARDS.md`'s
 //!   self-sizing-chrome-consumes-its-own-inset rule leaves the choice to the
-//!   composer); a caller wraps a bar in `frust::safe_area(...)`, the same way
-//!   [`crate::selection_app_bar`] documents.
+//!   composer); a caller wraps a top/collapsing/bottom app bar in
+//!   `frust::safe_area(...)`, the same way [`crate::selection_app_bar`]
+//!   documents. [`crate::navigation_bar`] is this catalog's one
+//!   self-insetting chrome widget (the bottom edge, `.safe_area(bool)`,
+//!   default on) — an exception to this family's contract, not a precedent
+//!   for it.
 //! * **`automaticallyImplyLeading`.** Upstream reads `Navigator.maybeOf(context)`
 //!   to synthesize a back button; a widget here has no navigator handle, and
 //!   this catalog's convention is an explicit `leading` slot (supply

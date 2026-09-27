@@ -1,5 +1,6 @@
 //! Database section: `frust-database`'s open/create/insert/count smoke —
-//! the plugin's whole vertical slice exercised from a real button press,
+//! the plugin's whole vertical slice exercised from a real button press, or
+//! automatically once when the section is reached through `frustplay://section/db`,
 //! and the Android device-gate vehicle for `frust_paths::data_dir()`
 //! resolving inside the app process (`Context.getFilesDir()`, no HOME/XDG
 //! environment variable the desktop backends fall back to — see
@@ -90,6 +91,31 @@ fn gap_h(w: f64) -> FlexChild<PlaygroundState> {
     inflexible(SizedBox(Some(w), None))
 }
 
+/// Run the smoke test asynchronously: spawn the blocking operation off the UI
+/// thread, log results with [`SMOKE_LOG_PREFIX`], update the status signal, and
+/// push a toast message. Called from the "Open + insert" button handler or
+/// automatically when the section is reached via a deep link to the DB page.
+fn spawn_smoke(status: RwSignal<String>, toasts: RwSignal<Vec<String>>) {
+    spawn_local(async move {
+        let message = match spawn_blocking(run_smoke).await {
+            Ok(Ok(count)) => {
+                log::info!("{SMOKE_LOG_PREFIX} ok rows={count}");
+                format!("db ok rows={count}")
+            }
+            Ok(Err(err)) => {
+                log::error!("{SMOKE_LOG_PREFIX} error {err}");
+                format!("db error: {err}")
+            }
+            Err(join_err) => {
+                log::error!("{SMOKE_LOG_PREFIX} error {join_err}");
+                format!("db error: {join_err}")
+            }
+        };
+        status.set(message.clone());
+        toasts.update(|queue| queue.push(message));
+    });
+}
+
 /// Open (creating if absent) `playground`'s database, ensure the `smoke`
 /// table exists, insert one row stamped with the current wall-clock second,
 /// and return the table's row count.
@@ -130,11 +156,21 @@ fn run_clear() -> Result<(), DatabaseError> {
     Ok(())
 }
 
-/// See the page-fn contract in [`crate::pages`]. Reads no
-/// [`PlaygroundState`] signal for its own status line (that lives in
-/// [`status_sig`]) — only `state.toasts` is touched, and only from inside
-/// the two buttons' event handlers.
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
+/// See the page-fn contract in [`crate::pages`]. If the DB section is reached
+/// via a deep link (`frustplay://section/db`), auto-runs the smoke test once
+/// (via [`spawn_smoke`]) before building the page. Reads no [`PlaygroundState`]
+/// signal for its own status line (that lives in [`status_sig`]) — only
+/// `state.toasts` and `state.auto_run_db_smoke` are accessed.
+pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+    // Auto-run the smoke test on deep-link arrival to the DB section.
+    // Use `get_untracked` so the page build does not subscribe to the flag,
+    // then clear it before spawning so a rebuild during the async run cannot
+    // start a second smoke.
+    if state.auto_run_db_smoke.get_untracked() {
+        state.auto_run_db_smoke.set(false);
+        spawn_smoke(status_sig(), state.toasts);
+    }
+
     let status = status_sig().get();
     let status_line = if status.is_empty() {
         "status: (no attempt yet)".to_string()
@@ -161,25 +197,7 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                 inflexible(any(button(
                     "Open + insert",
                     |state: &mut PlaygroundState| {
-                        let toasts = state.toasts;
-                        spawn_local(async move {
-                            let message = match spawn_blocking(run_smoke).await {
-                                Ok(Ok(count)) => {
-                                    log::info!("{SMOKE_LOG_PREFIX} ok rows={count}");
-                                    format!("db ok rows={count}")
-                                }
-                                Ok(Err(err)) => {
-                                    log::error!("{SMOKE_LOG_PREFIX} error {err}");
-                                    format!("db error: {err}")
-                                }
-                                Err(join_err) => {
-                                    log::error!("{SMOKE_LOG_PREFIX} error {join_err}");
-                                    format!("db error: {join_err}")
-                                }
-                            };
-                            status_sig().set(message.clone());
-                            toasts.update(|queue| queue.push(message));
-                        });
+                        spawn_smoke(status_sig(), state.toasts);
                     },
                 )
                 .style(ButtonStyle::Primary)

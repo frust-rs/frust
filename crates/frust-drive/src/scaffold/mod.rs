@@ -1314,7 +1314,7 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20android:icon=\"@mipmap/ic_launcher\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.Material.NoActionBar\">\n\
              \n\
              \x20\x20\x20\x20\x20\x20\x20\x20<!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->\n\
              \x20\x20\x20\x20\x20\x20\x20\x20<meta-data android:name=\"dev.frust.nativeLibrary\" android:value=\"{project}\" />\n\
@@ -1324,7 +1324,7 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:exported=\"true\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:configChanges=\"orientation|screenSize|keyboardHidden|uiMode\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:windowSoftInputMode=\"adjustResize\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.Material.NoActionBar\">\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<intent-filter>\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<action android:name=\"android.intent.action.MAIN\" />\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<category android:name=\"android.intent.category.LAUNCHER\" />\n\

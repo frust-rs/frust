@@ -93,9 +93,12 @@ The repository already contains substantial non-pixel coverage:
 
 Known gaps are tracked by the comprehensive-testing feature plan:
 
-- No automated Android emulator provisioning, launch, state normalization,
-  screenshot comparison, or lifecycle matrix.
-- No committed CI configuration or dedicated self-hosted GPU-runner workflow.
+- No emulator-provisioning script in this repository, no screenshot-baseline comparison, and no
+  full lifecycle matrix. `scripts/testing/android-smoke.sh` (see § Android Emulator GPU Lab) covers
+  automated launch, device-state normalization (wake/dismiss-keyguard), and a best-effort
+  black-band visual probe against an attached device or emulator, but does not provision one.
+- No committed CI configuration or dedicated self-hosted GPU-runner workflow; a workflow file
+  (`.github/workflows/android-smoke.yml`) exists but is not executed by this repo's gates.
 - Accessibility and several platform plugin paths remain manual physical-device
   gates.
 
@@ -588,6 +591,24 @@ Retain the emulator's startup log. It identifies the chosen graphics mode and
 is required evidence when a supposedly hardware-backed result is promoted.
 Use `-gpu swiftshader` as a diagnostic/reference mode, not as proof that the
 T400 path works.
+
+### Automated Entry Point
+
+`scripts/testing/android-smoke.sh --serial <serial>` is the automated entry point against an
+attached device or a running emulator (`--serial` defaults to `$ANDROID_SERIAL`, else the sole
+`adb devices` target). It runs two legs (`--leg template|playground|all`):
+
+- **template** — scaffolds a fresh app, builds and installs it, and asserts `frust-insets` reports
+  non-zero top/bottom `view_padding` and that the legacy-theme warning is absent.
+- **playground** — builds/installs `examples/playground`, launches it via the
+  `frustplay://section/db` deep link, and asserts `frust-database smoke: ok` appears in logcat
+  alongside the same non-zero-insets check.
+
+A negative control (pointing the script at an APK built from a manifest that still names the
+legacy theme, which must fail leg "template") is documented in the script's header but not
+automated. `.github/workflows/android-smoke.yml` provisions an emulator (`workflow_dispatch` +
+nightly) and runs this script, but is a delivered template, not part of this repository's
+required gates.
 
 ### Android Scenario Matrix
 

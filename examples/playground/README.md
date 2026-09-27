@@ -52,7 +52,22 @@ selecting between six sections:
    var. Gated 2026-09-26 on Pixel 5 / Android 14 (and Xiaomi 12 / Android 16,
    API 35 x86_64 emulator): `db ok rows=1` then `rows=2` at
    `/data/user/0/it.f0x.playground/files/databases/playground.db`, bare
-   scaffold `MainActivity`, no env var set.
+   scaffold `MainActivity`, no env var set. A `frustplay://section/<label>`
+   deep link (case-insensitive against `SECTION_LABELS`) routes straight to a
+   section; a cold `am start -a android.intent.action.VIEW -d
+   frustplay://section/db it.f0x.playground` lands on this section and
+   auto-runs the smoke once, logging `playground deep-link: section db -> 10`
+   then `frust-database smoke: ok rows=N` — `scripts/testing/android-smoke.sh`
+   passed all 5 assertions against the same Pixel 5. That same 2026-09-26 gate
+   also exercised the Android edge-to-edge fix: on the Pixel 5 (gesture nav),
+   the Mode A `material3-demo` sampled pure black in 165/168 status-bar and
+   72/144 gesture-bar pixels with no `DRAWS_SYSTEM_BAR_BACKGROUNDS` flag before
+   the fix; after, the window carries that flag, logcat shows `frust-insets
+   view_padding l=0.0 t=49.5 r=0.0 b=24.0 … scale=2.75`, and both bands sample
+   zero pure-black pixels. A legacy-theme APK still gets the flag/insets and
+   logs the migration warning (see
+   `docs/SHELLS_DEVELOPMENT.md`). Xiaomi 12 / Android 16 shows no regression
+   (`t=39.3, b=0.0` — its gesture bar is hidden).
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with

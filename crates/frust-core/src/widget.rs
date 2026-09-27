@@ -567,7 +567,9 @@ pub struct LayoutCtx<'a> {
     /// concrete core-owned type carried by copy — global (origin-independent,
     /// see the [`crate::insets`] module docs), so the single layout context the
     /// render root threads down carries it unchanged to every widget in the
-    /// tree. Defaults to the zero inset in bare-core tests and pre-insets apps.
+    /// tree — except inside a [`LayoutCtx::with_window_insets`] scope, where a
+    /// consuming ancestor (`SafeArea`) installs a reduced value for its subtree.
+    /// Defaults to the zero inset in bare-core tests and pre-insets apps.
     window_insets: WindowInsets,
     /// The window's logical size, threaded down by the render root
     /// ([`crate::app::RenderRoot::layout`]) exactly like `window_insets` above —
@@ -657,9 +659,10 @@ impl<'a> LayoutCtx<'a> {
 
     /// The window's insets ([`WindowInsets`]) for this layout pass (a cheap
     /// copy). Global and origin-independent (see the [`crate::insets`] module
-    /// docs), so every widget in the tree reads the same value regardless of its
-    /// position; defaults to the zero inset when no shell pushed one. A
-    /// `SafeArea` widget insets by [`WindowInsets::padding`].
+    /// docs), so every widget reads the same value regardless of its position —
+    /// save that a consuming ancestor may have narrowed it for its subtree via
+    /// [`LayoutCtx::with_window_insets`]; defaults to the zero inset when no
+    /// shell pushed one. A `SafeArea` widget insets by [`WindowInsets::padding`].
     pub fn window_insets(&self) -> WindowInsets {
         self.window_insets
     }
@@ -670,6 +673,34 @@ impl<'a> LayoutCtx<'a> {
     /// so no per-child adjustment is needed.
     pub(crate) fn set_window_insets(&mut self, insets: WindowInsets) {
         self.window_insets = insets;
+    }
+
+    /// Run `f` with `insets` installed as this context's window insets, then
+    /// restore the previous value and return `f`'s result.
+    ///
+    /// The window insets are otherwise a single root-seeded, global value that
+    /// every widget reads unchanged. This scoped override is how a widget that
+    /// has already padded its subtree by some inset edges removes them from
+    /// that subtree (Flutter's `MediaQuery.removePadding`): `SafeArea` lays its
+    /// child out inside
+    /// `ctx.with_window_insets(ctx.window_insets().consuming(..), |ctx| ..)`, so
+    /// a self-insetting descendant reads zero padding on the consumed edges
+    /// instead of insetting a second time. Pair it with
+    /// [`PaintCtx::with_window_insets`] around the matching `paint_child` so a
+    /// paint-time read agrees with the layout-time one.
+    ///
+    /// The restore is a plain assignment after `f` returns — there is no drop
+    /// guard, so if `f` panics the override is not undone (the pass is being
+    /// unwound anyway).
+    pub fn with_window_insets<R>(
+        &mut self,
+        insets: WindowInsets,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = std::mem::replace(&mut self.window_insets, insets);
+        let result = f(self);
+        self.window_insets = saved;
+        result
     }
 
     /// The window's logical size for this layout pass (a cheap copy).
@@ -1013,8 +1044,9 @@ impl<'a> PaintCtx<'a> {
 
     /// The window's insets ([`WindowInsets`]) for this paint pass (a cheap
     /// copy). The paint-pass mirror of [`LayoutCtx::window_insets`]:
-    /// global/origin-independent, so every widget reads the same value; defaults
-    /// to the zero inset when no shell pushed one.
+    /// global/origin-independent, so every widget reads the same value (unless a
+    /// consuming ancestor narrowed it via [`PaintCtx::with_window_insets`]);
+    /// defaults to the zero inset when no shell pushed one.
     pub fn window_insets(&self) -> WindowInsets {
         self.window_insets
     }
@@ -1031,6 +1063,31 @@ impl<'a> PaintCtx<'a> {
     /// (copied, so it holds no borrow of `self`).
     pub(crate) fn window_insets_ref(&self) -> WindowInsets {
         self.window_insets
+    }
+
+    /// Run `f` with `insets` installed as this context's window insets, then
+    /// restore the previous value and return `f`'s result.
+    ///
+    /// The paint-pass mirror of [`LayoutCtx::with_window_insets`]. The value is
+    /// otherwise root-seeded and copied down unchanged by
+    /// [`ChildPod::paint_child`]; because `paint_child` copies it from the
+    /// parent context it is handed, wrapping `paint_child` in this scope hands
+    /// the override to the whole painted subtree. `SafeArea` does exactly that
+    /// with the same consumed value it laid its child out under, so a widget
+    /// that reads insets at paint time sees what it was laid out with.
+    ///
+    /// The restore is a plain assignment after `f` returns — there is no drop
+    /// guard, so if `f` panics the override is not undone (the pass is being
+    /// unwound anyway).
+    pub fn with_window_insets<R>(
+        &mut self,
+        insets: WindowInsets,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = std::mem::replace(&mut self.window_insets, insets);
+        let result = f(self);
+        self.window_insets = saved;
+        result
     }
 
     /// The shell's running count of frames the render thread has actually
@@ -3186,6 +3243,25 @@ mod tests {
         let mut ctx = LayoutCtx::new();
         let bc = BoxConstraints::loose(Size::new(200.0, 100.0));
         assert_eq!(w.layout(&mut ctx, &bc), Size::new(200.0, 100.0));
+    }
+
+    #[test]
+    fn with_window_insets_scopes_and_restores_on_both_contexts() {
+        use crate::insets::EdgeInsets;
+        let root = WindowInsets::new(EdgeInsets::new(1.0, 2.0, 3.0, 4.0), EdgeInsets::ZERO);
+        let scoped = root.consuming(true, true, true, true);
+
+        let mut lctx = LayoutCtx::new();
+        lctx.set_window_insets(root);
+        let inside = lctx.with_window_insets(scoped, |ctx| ctx.window_insets());
+        assert_eq!(inside, scoped);
+        assert_eq!(lctx.window_insets(), root, "layout override restored");
+
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        pctx.set_window_insets(root);
+        let inside = pctx.with_window_insets(scoped, |ctx| ctx.window_insets());
+        assert_eq!(inside, scoped);
+        assert_eq!(pctx.window_insets(), root, "paint override restored");
     }
 
     #[test]

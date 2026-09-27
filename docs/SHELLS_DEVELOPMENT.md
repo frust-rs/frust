@@ -31,6 +31,28 @@ physical device has none — tap a registered `CFBundleURLSchemes` link instead.
 `frust.toml`'s `[deeplink]` section is informational only, so use `--overwrite` or edit
 the platform files directly to change the scheme.
 
+## Migrating an already-scaffolded app to edge-to-edge
+
+**Symptom:** black bands behind the status bar and gesture/nav bar, and `frust-insets` reporting a
+zeroed `view_padding` — on Android 14 (API 34) and below only (API 35+ enforces edge-to-edge
+regardless of the app's theme).
+
+**Fix:** change `android:theme` on both the `<application>` and `<activity>` elements in
+`android/app/src/main/AndroidManifest.xml` from the legacy `@android:style/Theme.NoTitleBar` to
+`@android:style/Theme.Material.NoActionBar` (the current scaffold template's theme).
+
+Rebuilding against the current embedding already fixes the bars and the insets even on the legacy
+theme — `FrustActivity.onCreate` adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` itself on API < 35 (see
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s cross-cutting host-signal flow) — but it keeps
+logging one `frust`-tagged warning naming this section until the manifest theme actually moves.
+
+**Verify:**
+
+```bash
+adb logcat -s frust               # frust-insets view_padding ... t=<nonzero> ... b=<nonzero> ...
+adb shell dumpsys window windows  # the app's window fl= carries DRAWS_SYSTEM_BAR_BACKGROUNDS
+```
+
 ## Safe-area / keyboard / back manual test (Android + iOS)
 
 A device/emulator gate for the inset and back contracts (see
@@ -46,6 +68,9 @@ is a person-driven check:
   and falls through to the platform's own default at the root.
 - **Density refresh:** move a running app between displays of different density; confirm
   layout rescales rather than sticking to launch-time density.
+- **Bar region (Android):** confirm no black band shows behind the status bar or gesture/nav bar
+  in either orientation — `scripts/testing/android-smoke.sh` is the automated equivalent of this
+  leg (see [TESTING.md](TESTING.md) § Android Emulator GPU Lab).
 
 ## Clipboard manual test (Android + iOS)
 

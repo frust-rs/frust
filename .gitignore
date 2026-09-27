@@ -35,6 +35,12 @@
 # `frust-iap` are the instances today.
 /plugins/*/platform/ios/.build/
 
+# Root /build/ directory holds diagnostics from the Android smoke-test script
+# (scripts/testing/android-smoke.sh writes to build/android-smoke/, uploaded
+# by the CI workflow). App-project build directories live inside example/app,
+# not at the repository root.
+/build/
+
 # A direct/SourceKit package resolution also drops a `Package.resolved`
 # beside the manifest (frust-iap's external OpenIAP dependency makes this
 # routine — camera's all-local deps never produced one). A consuming app

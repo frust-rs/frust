@@ -3,12 +3,12 @@
   "adapter": "Apple M4",
   "driver": "",
   "os": "macos",
-  "frust_commit": "97b219f46cc1f841c6977ae9d14c9e1b71de8f1b",
+  "frust_commit": "8a1bca89d556364c7f96be475187d6178ae4148a",
   "case": "page-material-home",
   "tolerance": {
     "channel": 2,
     "alpha": 2,
     "diff_pixels": 0
   },
-  "timestamp": "2026-08-31T12:46:22Z"
+  "timestamp": "2026-09-27T04:43:07Z"
 }

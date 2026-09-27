@@ -314,7 +314,7 @@ cargo test -p frust-cli --test create_e2e -- --ignored
 cargo test -p frust-cli --test create_ios -- --ignored
 
 # Build pipeline e2e (frust-cli): scaffolds a project, generates a throwaway keystore, runs
-# `build apk --release` through a real Gradle build — needs Android SDK/NDK; ~1 minute.
+# `build apk --release` through a real Gradle build — needs Android SDK/NDK; minutes of wall-clock on a cold machine (see the test's doc comment).
 cargo test -p frust-cli --test build_e2e -- --ignored
 
 # Macro-diagnostics compile-fail suite (frust-i18n): a generated trybuild project compiled
@@ -562,7 +562,7 @@ An app scaffolded before the `build/` root migration still writes Gradle/Xcode/d
 6. `.gitignore`: track `/build` (keep `/target`).
 7. Run `frust clean` once — it also removes the legacy paths (`android/app/build`, `android/build`, `android/.gradle`, `android/app/src/main/jniLibs`, `dist/`).
 
-Until step 7 runs, `frust build`/`frust run` print the one-time legacy-layout warning, and a stale `android/app/src/main/jniLibs` would otherwise ship packaged alongside the migrated output.
+Until step 7 runs, `frust build`/`frust run` print the one-time legacy-layout warning, and a stale `android/app/src/main/jniLibs` would otherwise ship packaged alongside the migrated output. See [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) § "Migrating an already-scaffolded app to edge-to-edge" for the separate Android theme migration.
 
 ## Known Issues
 
