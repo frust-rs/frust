@@ -158,17 +158,26 @@ fn run_clear() -> Result<(), DatabaseError> {
 
 /// See the page-fn contract in [`crate::pages`]. If the DB section is reached
 /// via a deep link (`frustplay://section/db`), auto-runs the smoke test once
-/// (via [`spawn_smoke`]) before building the page. Reads no [`PlaygroundState`]
-/// signal for its own status line (that lives in [`status_sig`]) — only
-/// `state.toasts` and `state.auto_run_db_smoke` are accessed.
+/// (via [`spawn_smoke`]) before building the page — but **only in a debug
+/// build** (`cfg!(debug_assertions)`): an exported/deep-linkable activity
+/// must not let an arbitrary external caller make a release build write to
+/// its database, so a release build logs and drops the flag instead of
+/// running the insert. Reads no [`PlaygroundState`] signal for its own status
+/// line (that lives in [`status_sig`]) — only `state.toasts` and
+/// `state.auto_run_db_smoke` are accessed; the latter is a plain `Cell`, not a
+/// tracked signal, since nothing subscribes to it (see
+/// [`PlaygroundState::auto_run_db_smoke`]'s doc comment).
 pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    // Auto-run the smoke test on deep-link arrival to the DB section.
-    // Use `get_untracked` so the page build does not subscribe to the flag,
-    // then clear it before spawning so a rebuild during the async run cannot
-    // start a second smoke.
-    if state.auto_run_db_smoke.get_untracked() {
+    // Consume the flag unconditionally (so a release build never leaves it
+    // set for a later debug rebuild to auto-run retroactively), then only
+    // spawn the smoke test in a debug build.
+    if state.auto_run_db_smoke.get() {
         state.auto_run_db_smoke.set(false);
-        spawn_smoke(status_sig(), state.toasts);
+        if cfg!(debug_assertions) {
+            spawn_smoke(status_sig(), state.toasts);
+        } else {
+            log::info!("frust-database smoke: auto-run disabled in release builds");
+        }
     }
 
     let status = status_sig().get();
