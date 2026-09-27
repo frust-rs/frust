@@ -84,7 +84,7 @@ move or rename it.
 ### 1c. iOS setup — add the plugin's local Swift package
 
 In Xcode: **File → Add Package Dependencies… → Add Local…**, select
-`<frust checkout>/plugins/iap/platform/ios`, and add the `FrustIap` product
+`<frust checkout>/plugins/iap/platform/ios/FrustIap`, and add the `FrustIap` product
 to the `Runner` target (alongside the existing `FrustEmbedding` package —
 SwiftPM dedupes the shared dependency rather than vendoring it twice).
 
