@@ -400,11 +400,11 @@ cli() {
 # Forwards --target-platform $TARGET_PLATFORM when set.
 build_apk() {
   local project_dir="$1" build_log="$2"
-  local build_cmd="cli build apk --debug"
+  local -a build_args=(build apk --debug)
   if [ -n "$TARGET_PLATFORM" ]; then
-    build_cmd="$build_cmd --target-platform $TARGET_PLATFORM"
+    build_args+=(--target-platform "$TARGET_PLATFORM")
   fi
-  if ! (cd "$project_dir" && eval "$build_cmd") >"$build_log" 2>&1; then
+  if ! (cd "$project_dir" && cli "${build_args[@]}") >"$build_log" 2>&1; then
     cat "$build_log" >&2
     fail_build "\`frust build apk --debug\` failed in $project_dir; see output above"
   fi
