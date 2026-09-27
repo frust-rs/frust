@@ -717,6 +717,8 @@ mod tests {
             gitignore.contains("android/local.properties"),
             "{gitignore}"
         );
+        // Xcode's per-user state, written whenever the project is opened.
+        assert!(gitignore.contains("xcuserdata/"), "{gitignore}");
         assert!(dest.join("assets/.gitkeep").exists());
         // The Android link-flags file: a dot-directory manifest entry
         // (`.cargo/config.toml`), carried verbatim so a scaffolded app
