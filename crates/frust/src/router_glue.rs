@@ -30,19 +30,21 @@
 //! `Component::build` (rebuild re-runs `build` far more often than a new link
 //! actually arrives — see `docs/ARCHITECTURE.md`'s Component state boundary).
 //! It tracks the live [`DeepLinks::latest`](frust_reactive::DeepLinks::latest)
-//! signal but only calls [`Router::handle_location`] when the observed link
-//! differs from the last one it consumed (a plain "consumed marker", not a
-//! numeric generation counter, since [`DeepLink`] is a value type) — see this
-//! module's tests for the exact contract: a rebuild re-run that observes the
-//! same already-consumed link must not re-navigate.
+//! signal but only calls [`Router::handle_location`] when the observed link's
+//! [`DeepLink::sequence`](frust_reactive::DeepLink::sequence) differs from
+//! the last one it consumed — the marker
+//! is the delivered *sequence*, not the link itself, so a rebuild re-run that
+//! observes the same already-consumed delivery is a no-op, while a repeated
+//! identical URL (a genuinely new delivery, carrying a new sequence) still
+//! navigates — see this module's tests for the exact contract.
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust_reactive::{DeepLink, ReactiveRuntime, deep_links};
+use frust_reactive::{ReactiveRuntime, deep_links};
 use frust_widgets::{RouteNavigator, Router};
-use reactive_graph::traits::Get;
+use reactive_graph::traits::{Get, GetUntracked};
 
 use crate::route_state::RouteObserver;
 
@@ -112,7 +114,12 @@ fn normalize_deep_link(raw: &str) -> String {
 /// subsequent warm links.
 pub struct RouterDeepLinks<State: 'static> {
     router: Router<State>,
-    consumed: Rc<RefCell<Option<DeepLink>>>,
+    /// The [`DeepLink::sequence`](frust_reactive::DeepLink::sequence) of the
+    /// last delivery this instance has handled, if any. Compared against —
+    /// never against the link's URL or the link itself — so a rebuild
+    /// re-observing the same delivery is a no-op while a repeated identical
+    /// URL (a new delivery, new sequence) still navigates.
+    consumed: Rc<Cell<Option<u64>>>,
     /// The route-state observable wired to this router's navigator — see
     /// [`routes`](Self::routes).
     routes: RouteObserver,
@@ -147,12 +154,27 @@ impl<State: 'static> RouterDeepLinks<State> {
             .unwrap_or_else(|| initial_location.to_string());
         router.handle_location(&normalize_deep_link(&start));
 
-        // The link that resolved the start location (if any) is already
-        // handled — record it as consumed so the first `track()` call, which
-        // will observe the same value via `latest` (a cold-start push sets
-        // both `initial` and `latest` — see `frust_reactive::deep_link`'s
-        // module docs), does not re-navigate to it.
-        let consumed = Rc::new(RefCell::new(links.initial.map(DeepLink::new)));
+        // If a cold-start link resolved the start location above, seed the
+        // consumed marker with the SEQUENCE of the real delivery that
+        // produced it (read from `latest`, never minted with
+        // `DeepLink::new` — that would assign a sequence the actual delivery
+        // never carried, so the first `track()` would see it as new and
+        // re-navigate). A cold-start push sets both `initial` and `latest`
+        // together (see `frust_reactive::deep_link`'s module docs), so as
+        // long as `latest` still holds that same URL, its sequence is the
+        // one to seed with. If a *different*, newer link has already arrived
+        // by the time this constructor runs, `latest`'s URL will have moved
+        // on — leave the marker at `None` so the first `track()` navigates
+        // to that newer link exactly as it would have before this change.
+        let consumed = Rc::new(Cell::new(links.initial.as_deref().and_then(
+            |initial_url| {
+                links
+                    .latest
+                    .get_untracked()
+                    .filter(|link| link.url == initial_url)
+                    .map(|link| link.sequence)
+            },
+        )));
 
         Self {
             router,
@@ -180,11 +202,11 @@ impl<State: 'static> RouterDeepLinks<State> {
         let Some(link) = deep_links().latest.get() else {
             return;
         };
-        let already_consumed = self.consumed.borrow().as_ref() == Some(&link);
+        let already_consumed = self.consumed.get() == Some(link.sequence);
         if already_consumed {
             return;
         }
-        *self.consumed.borrow_mut() = Some(link.clone());
+        self.consumed.set(Some(link.sequence));
         self.router.handle_location(&normalize_deep_link(&link.url));
     }
 
@@ -441,6 +463,38 @@ mod tests {
         push_deep_link("/profile/42");
         let mut warm = Harness::new(router_with_error_leaf(), "/");
         assert_eq!(warm.paint(), PROFILE);
+
+        // Criterion 5a (cold-start dedupe, the regression this task fixes):
+        // the constructor seeds the consumed marker from the SEQUENCE of the
+        // real cold-start delivery (read from `latest`), not a freshly minted
+        // one — so navigate away by hand, then call `track()` with no new
+        // push, and the router must stay put rather than re-navigating back
+        // to `/profile/42`. Against the pre-fix code (which minted a new
+        // `DeepLink` — and therefore a new sequence — to seed the marker)
+        // this assertion fails: the freshly minted sequence never equals the
+        // real delivery's, so `track()` treats the cold-start link as
+        // unconsumed and calls `handle_location` again.
+        warm.links.router().go("/");
+        warm.rebuild();
+        assert_eq!(warm.paint(), HOME);
+        assert_eq!(
+            warm.track_and_paint(),
+            HOME,
+            "track() must not re-navigate to the cold-start link on the first call"
+        );
+
+        // Criterion 5b (repeat delivery): pushing the identical URL again is
+        // a genuinely new delivery (a new sequence), so it must navigate
+        // again rather than being treated as already consumed.
+        push_deep_link("/profile/42");
+        assert_eq!(
+            warm.track_and_paint(),
+            PROFILE,
+            "an identical URL delivered again must still navigate"
+        );
+        warm.links.router().go("/");
+        warm.rebuild();
+        assert_eq!(warm.paint(), HOME);
 
         // Criterion 2: a warm link pushed during a running session navigates
         // on the next `track()`.
