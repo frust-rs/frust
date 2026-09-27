@@ -77,6 +77,7 @@ use std::rc::Rc;
 use kurbo::Rect;
 
 use crate::event::PassBracket;
+use crate::insets::WindowInsets;
 use crate::widget::ChildPod;
 
 thread_local! {
@@ -256,6 +257,10 @@ pub struct OverlayEntry {
     /// [`Point::ZERO`](kurbo::Point::ZERO) unless you mean an offset the hit test
     /// will not know about (routing tests `window_rect` alone).
     pub pod: OverlayPod,
+    /// The window insets the pod was laid out under (its owner's `LayoutCtx`
+    /// view); paint installs the same value so paint-time reads agree with
+    /// layout-time reads.
+    pub insets: WindowInsets,
 }
 
 impl fmt::Debug for OverlayEntry {
@@ -269,6 +274,7 @@ impl fmt::Debug for OverlayEntry {
             .field("input", &self.input)
             .field("outside_tap", &self.outside_tap)
             .field("window_rect", &self.window_rect)
+            .field("insets", &self.insets)
             .field("pod", &"<pod>")
             .finish()
     }
@@ -400,6 +406,7 @@ mod tests {
             outside_tap: OutsideTap::Ignore,
             window_rect: rect,
             pod: Rc::new(RefCell::new(ChildPod::new(Box::new(StubWidget)))),
+            insets: WindowInsets::default(),
         }
     }
 
