@@ -386,7 +386,6 @@ require_cargo_ndk() {
 
 run_doctor_backstop() {
   local log="$1"
-  TEMP_FILES+=("$log")
   if ! (cd "$REPO_ROOT" && cargo run --manifest-path "$REPO_ROOT/Cargo.toml" -p frust-cli -- doctor) >"$log" 2>&1; then
     echo "--- frust doctor output ---" >&2
     cat "$log" >&2
@@ -435,10 +434,9 @@ cli() {
 # absolute APK path parsed from the CLI's own `Built: <path>` line (the last
 # such line, in case a future flag ever produces more than one).
 # Forwards --target-platform $TARGET_PLATFORM when set.
-# The build_log is added to TEMP_FILES for cleanup on exit.
+# The caller must register build_log in TEMP_FILES; build_apk runs in a subshell.
 build_apk() {
   local project_dir="$1" build_log="$2"
-  TEMP_FILES+=("$build_log")
   local -a build_args=(build apk --debug)
   if [ -n "$TARGET_PLATFORM" ]; then
     build_args+=(--target-platform "$TARGET_PLATFORM")
@@ -684,6 +682,7 @@ run_leg_playground() {
 
   project_dir="$REPO_ROOT/examples/playground"
   build_log="$(mktemp)"
+  TEMP_FILES+=("$build_log")
 
   echo "== leg playground: building the debug APK ==" >&2
   apk="$(build_apk "$project_dir" "$build_log")"
@@ -721,7 +720,6 @@ run_leg_playground() {
 
   dump_logcat "$serial" "$LEG_LOGCAT"
 
-  # build_log is cleaned up via TEMP_FILES on exit
   # Deliberately left installed per the header's leave-it-installed policy.
 }
 
