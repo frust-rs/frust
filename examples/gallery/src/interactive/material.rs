@@ -660,7 +660,8 @@ impl Component for NavigationBarCase {
                     state.selected,
                     |state: &mut NavigationBarState, index| state.selected = index,
                 )
-                .label_behavior(NavBarLabelBehavior::AlwaysShow),
+                .label_behavior(NavBarLabelBehavior::AlwaysShow)
+                .safe_area(false),
             ),
         )
     }
