@@ -745,9 +745,20 @@ impl<State: 'static> NavigationBarView<State> {
     }
 
     /// Whether the bar consumes the bottom window inset itself, self-sizing
-    /// around it and painting its container fill through it
-    /// (`M3ENavigationBar.safeArea`). Default `true`; disable when the bar
-    /// isn't docked to the window's bottom edge, e.g. embedded mid-screen.
+    /// around it and painting its container fill through it — matching Flutter's
+    /// Material 3 NavigationBar (which reads `MediaQuery.padding.bottom` only;
+    /// horizontals belong to the Scaffold). Default `true`. The bar consumes the
+    /// **bottom** inset **only**; left/right display-cutout insets are the
+    /// caller's responsibility.
+    ///
+    /// For a bottom-docked bar respecting horizontal safe areas / landscape
+    /// cutouts, wrap the bar in `safe_area(bar).top(false).bottom(false)`
+    /// — the bottom-false leaves the bar's self-inset unconsumed by the safe
+    /// area, so the bar still paints under its gesture area and self-paints
+    /// the cutout band. For a bar embedded mid-screen (e.g. in a preview or
+    /// gallery), use `.safe_area(false)`.
+    ///
+    /// (`M3ENavigationBar.safeArea`)
     pub fn safe_area(mut self, enabled: bool) -> Self {
         self.safe_area = enabled;
         self

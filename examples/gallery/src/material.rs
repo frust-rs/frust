@@ -520,7 +520,8 @@ fn navigation_bar_case() -> AnyView<()> {
                 0,
                 |_: &mut (), _: usize| {},
             )
-            .label_behavior(NavBarLabelBehavior::AlwaysShow),
+            .label_behavior(NavBarLabelBehavior::AlwaysShow)
+            .safe_area(false),
         ),
     )
 }
