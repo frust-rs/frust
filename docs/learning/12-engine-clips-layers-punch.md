@@ -1,6 +1,6 @@
 # Lab 12 — Clips, layers, snapshots and the clear punch
 
-**Concept:** Lab 4 compiled plain fills into strips. The display list also carries *brackets* —
+**Concept:** [Lab 11](11-engine-compiler.md) compiled plain fills into strips. The display list also carries *brackets* —
 `PushClip`/`PushClipRounded`, `PushLayer`, `PushSnapshot`, each closed by a `Pop*` — plus one
 command that erases rather than paints, `ClearRect`. This lab shows how `SceneCompiler` lowers all
 of them without ever allocating an intermediate texture for a clip: a clip is a rectangle the strip
@@ -97,8 +97,8 @@ rect decides scissor-vs-mask; an alpha decides isolation; a scale composes a tra
 
 ## Experiments
 
-Run each as its own filtered target. Never run `cargo test -p frust-engine` unfiltered — it
-includes `tests/proptest_strips.rs`, whose allocations run to tens of GB.
+Run each as its own filtered target. Run the crate's tests per file, never bare — see the
+README's note on `proptest_strips`.
 
 ### 12.1 — Scissor versus mask
 

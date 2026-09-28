@@ -43,6 +43,9 @@ decides — once per run, per frame — whether its glyphs are *sampled from the
    (`set_paint_image` + `fill_rect` at the sink). Everything else is one outline per glyph.
    `classify_run` answers in this order, each an `OutlineReason`:
    - `Disabled` — `FRUST_ENGINE_NO_ATLAS` (or a disabled image residency; `glyph_atlas_policy`).
+   - `NotCollecting` — the compiler is outside the `classify` lap's `Phase::Collect` window;
+     unreachable for a correctly phased compile, since `classify_run` is only ever called from
+     within it.
    - `ColorFont` — the face has a `COLR` table (idea 3).
    - `TransformUncacheable` — `device_font_size` returned `None`: not a positive uniform scale
      without skew. Refused outright, not as an optimisation: glifo probes its cache with the
@@ -83,8 +86,8 @@ decides — once per run, per frame — whether its glyphs are *sampled from the
 
 ## Experiments
 
-GPU-free except 15.5. Use a per-worktree `CARGO_TARGET_DIR`; never run `cargo test -p frust-engine`
-bare, never `--test proptest_strips` (tens of GB).
+GPU-free except 15.5. Use a per-worktree `CARGO_TARGET_DIR`. Run the crate's tests per file,
+never bare — see the README's note on `proptest_strips`.
 
 ### 15.1 — The outline path, end to end
 
@@ -174,7 +177,7 @@ Replays atlas pages on a real device and reads the layer back: an outline covers
 
 ## What to notice before moving on
 
-- Lab 6 §6.3 predates this machinery: COLR glyphs do **not** ride the atlas — they are refused it
-  per face (`OutlineReason::ColorFont`) and drawn through `ColorGlyph`.
+- Lab 6 §6.3 summarises the same routing from the frust-text side: COLR glyphs do **not** ride the
+  atlas — they are refused it per face (`OutlineReason::ColorFont`) and drawn through `ColorGlyph`.
 - Every refusal is a *route*, never a failure: outlines are correct pixels, only slower — which is
   why `FRUST_ENGINE_NO_ATLAS` is a safe bisection switch for a text-rendering defect.

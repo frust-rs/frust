@@ -97,9 +97,7 @@ and `glifo` at `=0.3.0`). There is no `vello` crate in the graph — see lab 5.
 
 ## Experiments
 
-> **WARNING:** never run `cargo test -p frust-engine` bare or `--test proptest_strips` on a laptop
-> — the strip proptest has allocated 35–187 GB on random seeds; use `--test <file>` per file as
-> this chapter does.
+> Run the crate's tests per file, never bare — see the README's note on `proptest_strips`.
 
 ### 11.1 — Read the compiler's own contract tests
 

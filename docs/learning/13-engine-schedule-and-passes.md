@@ -124,8 +124,8 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
 
 ## Experiments
 
-All GPU-free except 13.5. Never run `cargo test -p frust-engine` bare: its `proptest_strips`
-target allocates tens of gigabytes. Always name the `--test` target.
+All GPU-free except 13.5. Run the crate's tests per file, never bare — see the README's note
+on `proptest_strips`.
 
 ### 13.1 — Count rounds from the scheduler's own tests
 

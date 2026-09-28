@@ -14,20 +14,26 @@ the mechanism working in this repo.
 
 ## How to use this
 
-1. Do the labs in order the first time; each builds vocabulary the next uses.
+1. First time through, do the labs in this order — each builds vocabulary
+   the next uses: 1, 2, 10, 3, 4, 11, 12, 13, 14, 6, 15, 16, 5 (historical),
+   7, 8, 9.
 2. Actually run the experiments. The whole premise is that
    `FRUST_TRACE=1 cargo run` teaches you more than a chapter of prose.
 3. Symbols are the contract, not the `≈line` numbers next to them: those are
    hints that **will drift**. Search for the named function/type if a line
-   number misses. Re-verified 2026-09-28, HEAD
-   `c55a65fee8fc400a19cd2d85415eed3be3d7fbb0`.
+   number misses. Re-verified 2026-09-28 against the branch this file is
+   committed on.
 4. Everything desktop-runnable works on this machine today. Device labs
    (chapter 7) need a physical Android/iOS device; the iOS Simulator renders
    correctly too, under `frust-engine` (`docs/DEVELOPMENT.md` → Known Issues).
 5. Never run `cargo test -p frust-engine` bare, and never
-   `--test proptest_strips` on its own — that proptest has allocated
-   35–187 GB on random seeds. Always name a narrower `--test <file>` (or
-   `--lib <module>`) target, the way the engine chapters (11–15) do.
+   `--test proptest_strips` on its own — name a narrower `--test <file>` (or
+   `--lib <module>`) target instead, the way the engine chapters (11–15) do.
+   Why: the strip proptest (`tests/proptest_strips.rs`) has twice exhausted
+   memory on random inputs during workspace gates (a ~35 GB RSS OOM kill on
+   2026-09-08 and a 187 GB allocation abort on 2026-09-26, both recorded in
+   the project's review ledger, both still open); `docs/RENDER_DEVELOPMENT.md`'s
+   frust-engine test arm carries the same caveat.
 
 ## Prerequisite (one-time)
 
@@ -74,11 +80,12 @@ chapter 8.
 - **UI track** (1, 2, 10, 3) — the display list, painting widgets, the
   widget-tree machinery underneath both, and one whole frame end to end: how
   a `View` becomes pixels, entirely on the CPU side.
-- **Engine track** (4, 11, 12, 13, 14, 15, 16, then 5 as history, 6) — how
+- **Engine track** (4, 11, 12, 13, 14, 6, 15, 16, then 5 as history) — how
   `frust-engine` turns a `Scene` into strips, rounds and GPU passes, plus its
   paint/image/filter and text pipelines and the `frust-gpu` substrate below
-  it, with the historical vello internals (lab 5) read last, once you already
-  know the architecture that replaced it, and lab 6 revisited in light of it.
+  it: lab 6 revisited before lab 15's atlas-vs-outline routing, then the
+  historical vello internals (lab 5) read last, once you already know the
+  architecture that replaced it.
 - **Platform & measurement track** (7, 8, 9) — the mobile frame gate,
   measuring real frames, and how native OS views composite alongside the GPU
   surface.

@@ -128,7 +128,8 @@ between layer extent and depth via `within_total_bytes` — never more than the 
 
 ## Experiments
 
-From the repo root. Never run `cargo test -p frust-engine` bare or `--test proptest_strips`.
+From the repo root. Run the crate's tests per file, never bare — see the README's note on
+`proptest_strips`.
 
 ### 14.1 — Solid inline, gradient indexed
 
