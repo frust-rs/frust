@@ -11,6 +11,13 @@
 //! `#[serde(rename = "...")]` only where a Rust keyword (`type`) or an
 //! enum-variant-name mismatch needs it — see each type for specifics.
 //!
+//! **iOS-suffixed fields need an explicit rename.** The wire spells the
+//! platform suffix `IOS` (`onlyIncludeActiveItemsIOS`), but `camelCase` turns
+//! `_ios` into `Ios`. Swift's decoder ignores an unknown key without error, so
+//! a missing rename silently drops the field; every `*_ios` field below
+//! carries its wire name, and `ios_suffixed_fields_use_the_wire_casing` pins
+//! them. `_android` needs nothing: `camelCase` already yields `Android`.
+//!
 //! # Enum values are kebab-case on the wire, not the GraphQL schema's SCREAMING_CASE
 //!
 //! `error.graphql`/`type.graphql` spell enum members `UserCancelled`/
@@ -441,11 +448,19 @@ pub struct RequestPurchaseProps {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PurchaseOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "alsoPublishToEventListenerIOS"
+    )]
     pub also_publish_to_event_listener_ios: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_suspended_android: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "onlyIncludeActiveItemsIOS"
+    )]
     pub only_include_active_items_ios: Option<bool>,
 }
 
@@ -533,13 +548,25 @@ pub enum FetchProductsResult {
 pub struct ActiveSubscription {
     pub product_id: String,
     pub is_active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "expirationDateIOS"
+    )]
     pub expiration_date_ios: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_renewing_android: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "environmentIOS"
+    )]
     pub environment_ios: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "daysUntilExpirationIOS"
+    )]
     pub days_until_expiration_ios: Option<f64>,
     pub transaction_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -551,7 +578,11 @@ pub struct ActiveSubscription {
     pub purchase_token_android: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_plan_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "renewalInfoIOS"
+    )]
     pub renewal_info_ios: Option<serde_json::Value>,
 }
 
@@ -1303,5 +1334,41 @@ mod tests {
         let head = excerpt.split('…').next().unwrap();
         assert_eq!(head.len(), PAYLOAD_EXCERPT_BYTES - 1);
         assert!(head.ends_with('x'), "{head}");
+    }
+
+    /// The wire spells the iOS suffix `IOS`; `camelCase` alone would send
+    /// `…Ios`, which Swift's decoder drops without error (so the purchase
+    /// query below read the full history, refunds included).
+    #[test]
+    fn ios_suffixed_fields_use_the_wire_casing() {
+        let options = PurchaseOptions {
+            also_publish_to_event_listener_ios: Some(true),
+            include_suspended_android: Some(true),
+            only_include_active_items_ios: Some(true),
+        };
+        assert_eq!(
+            serde_json::to_value(&options).unwrap(),
+            serde_json::json!({
+                "alsoPublishToEventListenerIOS": true,
+                "includeSuspendedAndroid": true,
+                "onlyIncludeActiveItemsIOS": true,
+            })
+        );
+
+        let subscription: ActiveSubscription = serde_json::from_value(serde_json::json!({
+            "productId": "pro",
+            "isActive": true,
+            "transactionId": "t1",
+            "transactionDate": 1.0,
+            "expirationDateIOS": 2.0,
+            "environmentIOS": "Sandbox",
+            "daysUntilExpirationIOS": 3.0,
+            "renewalInfoIOS": { "willAutoRenew": true },
+        }))
+        .unwrap();
+        assert_eq!(subscription.expiration_date_ios, Some(2.0));
+        assert_eq!(subscription.environment_ios.as_deref(), Some("Sandbox"));
+        assert_eq!(subscription.days_until_expiration_ios, Some(3.0));
+        assert!(subscription.renewal_info_ios.is_some());
     }
 }
