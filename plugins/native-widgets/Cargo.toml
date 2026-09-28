@@ -1,5 +1,7 @@
 # `frust-native-widgets`: the native-controls-from-pure-Rust platform
-# plugin. Leaf
+# plugin — three platform arms: Android (`jni`), iOS (`objc2-ui-kit`) and
+# macOS (`objc2-app-kit`, hosted through the desktop Mode-A platform-view
+# host; no Mac Catalyst). Leaf
 # platform plugin per `docs/CODE_STANDARDS.md`'s Plugin Conventions:
 # `frust-plugin` + FFI crates only, never another `frust-*` framework
 # crate. Feature lists below start from an earlier throwaway spike crate's
@@ -80,12 +82,12 @@ jni = { workspace = true }
 
 # iOS only — **not** `target_vendor = "apple"`. Unlike
 # `plugins/camera`/`plugins/shared-preferences`/`plugins/secure-storage`,
-# this plugin's Apple surface is UIKit (`objc2-ui-kit`), which doesn't
-# exist on macOS (no AppKit backend, no Mac Catalyst support here); gating
-# on `target_vendor = "apple"` would try to link the `UIKit` framework into
-# a macOS desktop-preview host build and fail (`ld: framework 'UIKit' not
-# found`) — confirmed by `cargo test -p frust-native-widgets` on this
-# macOS host. Controls via `objc2-ui-kit`, the Rust `define_class!` factory
+# this plugin's iOS surface is UIKit (`objc2-ui-kit`), which doesn't exist
+# on macOS (the macOS arm is AppKit, in its own target block below; Mac
+# Catalyst stays unsupported); gating on `target_vendor = "apple"` would
+# try to link the `UIKit` framework into a macOS build and fail
+# (`ld: framework 'UIKit' not found`) — confirmed by
+# `cargo test -p frust-native-widgets` on a macOS host. Controls via `objc2-ui-kit`, the Rust `define_class!` factory
 # via `objc2`/`objc2-foundation` (no Swift factory
 # needed). Every objc2-family crate below is `default-features = false` +
 # an explicit feature list per CODE_STANDARDS (pulling the default set
@@ -200,6 +202,96 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
 # bytes for `CTFontManagerCreateFontDescriptorFromData` with no copy. Fresh
 # pin for the same reason as `objc2-core-text` above (already
 # transitively resolved; this promotes it to direct).
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFData",
+] }
+
+# macOS only: the AppKit arm (`src/appkit/`), hosted as opaque native
+# siblings by the desktop Mode-A platform-view host (`crates/frust-shell-macos`
+# resolves this plugin's `frust_plugin::desktop::DesktopViewFactory` by its
+# `view_type` string). Its own block rather than a widened iOS gate: the two
+# arms share no UI framework (UIKit vs AppKit), only the CoreText/
+# CoreFoundation rows at the bottom, which repeat the iOS block's rows
+# verbatim. No Mac Catalyst.
+#
+# Every objc2-family crate below is `default-features = false` + an explicit
+# feature list, for the same reason as the iOS block above (and the same
+# workspace-inheritance restriction on overriding `default-features`, which
+# is why the version literals repeat the root pins).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+# `NSObject`/`NSString`: the target-action class's superclass and the
+# control captions. `NSData`: `Image`'s `NSImage` payload. `NSGeometry` +
+# `objc2-core-foundation`: what makes `NSRect`/`NSPoint`/`CGFloat` usable at
+# all — both are type gates, not controls.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSString",
+    "NSData",
+    "NSGeometry",
+    "objc2-core-foundation",
+] }
+# objc2-app-kit 0.3.2 gates by SUPERCLASS and by member, not by class name,
+# so this is the whole macOS-arm list (six controls + theme ladder), not a
+# one-feature-per-class reading:
+# `NSView`/`NSResponder`/`NSControl`: every control's superclass chain
+# (`NSButton` alone needs all three). `NSButton`, `NSButtonCell`
+# (`NSButtonType`/`NSBezelStyle` and `setButtonType:`/`setBezelStyle:`),
+# `NSCell` (state/controlSize/imageScaling). `NSTextField`, `NSSwitch`,
+# `NSSlider` + `NSSliderCell`, `NSProgressIndicator`, `NSImageView` +
+# `NSImageCell`, `NSImage`: the other five controls. `NSColor`/`NSFont`:
+# the shared `Setter` surface (packed-ARGB colours, `TextSizeSp` via
+# `NSFont::systemFontOfSize` on `NSControl.setFont`). `NSAppearance`: theme
+# ladder L1. `NSGraphics`: `NSWindowOrderingMode` et al., matching
+# `frust-shell-macos`. `NSAccessibilityProtocols`:
+# `Setter::ContentDescription` — `NSView`'s `NSAccessibility` conformance
+# (`setAccessibilityLabel:`) is gated on it, the AppKit counterpart of the
+# iOS block's `UIAccessibility`. `objc2-quartz-core`: `NSView.layer`/
+# `setWantsLayer:` (corner radius, L2). `objc2-core-text`: the
+# `NSFont` <-> `CTFont` toll-free bridge (L3). `objc2-core-foundation`: the
+# `CGFloat` type gate every size/colour-taking member needs.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSView",
+    "NSResponder",
+    "NSControl",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSTextField",
+    "NSSwitch",
+    "NSSlider",
+    "NSSliderCell",
+    "NSProgressIndicator",
+    "NSImageView",
+    "NSImageCell",
+    "NSImage",
+    "NSColor",
+    "NSFont",
+    "NSAppearance",
+    "NSGraphics",
+    "NSAccessibilityProtocols",
+    "objc2-quartz-core",
+    "objc2-core-text",
+    "objc2-core-foundation",
+] }
+# Theme ladder L2: `NSView.layer` → `CALayer.cornerRadius`/`masksToBounds`/
+# `backgroundColor` (the last one a `CGColor`, hence `objc2-core-graphics`).
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+# Theme ladder L3 — identical to the iOS block's rows (see their comments).
+objc2-core-text = { version = "0.3", default-features = false, features = [
+    "std",
+    "CTFont",
+    "CTFontDescriptor",
+    "CTFontManager",
+] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "CFData",

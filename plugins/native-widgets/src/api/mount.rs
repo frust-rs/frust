@@ -285,8 +285,12 @@ impl<C: NativeComponent, Outer: 'static> View<Outer> for NativeComponentView<C> 
 // Gated on the host arm, not merely on `test` (the gate `crate::component`'s
 // own tests carry): these define a real component through the public trait,
 // whose `create` builds against the host stand-in context a platform build
-// replaces with the device-only types.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+// (macOS included, since it has a real AppKit arm) replaces with the
+// platform-only types.
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_os = "macos"))
+))]
 mod tests {
     use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, Widget};
     use kurbo::{Point, Size};

@@ -18,7 +18,8 @@
 //!    arm builds the `android.widget.*` view, hands each planned [`Setter`] to
 //!    `platform::apply` and retains/releases the global refs; the iOS arm builds
 //!    the UIKit view, applies the **same plan** through typed `objc2-ui-kit`
-//!    setters, and lets ARC own the references.
+//!    setters, and lets ARC own the references; the macOS arm (being built out
+//!    control by control, `Button` first) does the same over `objc2-app-kit`.
 //!
 //! Half 1 is shared verbatim — one `Props`, one `decode`, one `plan`, two arms —
 //! which is the point of the split: diff behaviour is asserted once, on a host,
@@ -1278,6 +1279,137 @@ pub(crate) mod platform {
     }
 }
 
+// --- the macOS half ---------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! Turning a [`Setter`] into a real AppKit call — the macOS mirror of the
+    //! iOS half above, and the only place in this crate's macOS arm that
+    //! reaches for a shared `objc2-app-kit` helper.
+    //!
+    //! # Per-control apply, like iOS
+    //!
+    //! AppKit has more of a spine than UIKit — every v1 control is an
+    //! `NSControl`, which owns `enabled` and `font` — but the caption still
+    //! differs by class (`NSButton.title` vs `NSTextField.stringValue`), so
+    //! each control applies its own plan against its own typed view (its
+    //! `#[cfg(target_os = "macos")] mod platform`), and this module holds only
+    //! the genuinely shared setters: `NSControl`'s enabled/font, `NSView`'s
+    //! accessibility label, and the one-time warnings.
+    //!
+    //! # Theme-ladder setters are placeholders here (TODO m1-04)
+    //!
+    //! Colours, tints, the themed background's corner radius and the Glyph
+    //! typefaces are the macOS theme ladder's work (L1 `NSAppearance`, L2
+    //! `NSColor`/`CALayer`, L3 CoreText). Until it lands, each has a named
+    //! helper below that **does nothing but log at debug level**, so a
+    //! control's `apply` already routes every planned [`Setter`] to its final
+    //! call site and the ladder only has to fill the bodies in. A control on
+    //! this arm therefore renders with AppKit's own stock colours and the
+    //! system font, at the planned text size.
+    //!
+    //! # Nothing here can fail
+    //!
+    //! Every function returns `()`, for the same reason as the iOS half: a
+    //! message send to a linked AppKit class has no exception channel and no
+    //! classloader to fail.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSAccessibility, NSControl, NSFont, NSView};
+    use objc2_foundation::NSString;
+
+    use super::Setter;
+    use crate::controls::typeface::Typeface;
+
+    /// `NSControl.enabled` — [`Setter::Enabled`]. Every v1 control is an
+    /// `NSControl`, so this takes the superclass and lets deref coercion do
+    /// the rest.
+    pub(crate) fn set_enabled(control: &NSControl, enabled: bool) {
+        control.setEnabled(enabled);
+    }
+
+    /// `NSView.accessibilityLabel` (the `NSAccessibility` protocol every
+    /// `NSView` conforms to) — [`Setter::ContentDescription`]'s AppKit
+    /// counterpart, read by VoiceOver exactly as TalkBack reads Android's
+    /// `contentDescription`. `None` clears it, so a control falls back to what
+    /// AppKit derives from its own content (a button's title).
+    ///
+    /// Reachable only with `objc2-app-kit`'s `NSAccessibilityProtocols`
+    /// feature, which `Cargo.toml` enables for exactly this member. Native
+    /// controls are exposed to VoiceOver by the platform itself, never through
+    /// frust's semantics pass (`crate`'s event-bypass note).
+    pub(crate) fn set_accessibility_label(view: &NSView, label: Option<&str>) {
+        let text = label.map(NSString::from_str);
+        view.setAccessibilityLabel(text.as_deref());
+    }
+
+    /// The system font at `size_sp` points — [`Setter::TextSizeSp`]. `sp` is
+    /// read as points, unscaled, for the same reason as the iOS half's
+    /// `system_font` (the value the theme asked for, not a platform scaling of
+    /// it).
+    pub(crate) fn system_font(size_sp: f32) -> Retained<NSFont> {
+        NSFont::systemFontOfSize(f64::from(size_sp))
+    }
+
+    /// `NSControl.font` — [`Setter::TextSizeSp`]'s apply for any control
+    /// whose text is its own cell's (`NSButton`, `NSTextField`).
+    pub(crate) fn set_text_size(control: &NSControl, size_sp: f32) {
+        control.setFont(Some(&system_font(size_sp)));
+    }
+
+    /// TODO(m1-04, theme ladder L2): [`Setter::TextColor`] — no-op with a
+    /// debug log until the ladder lands (module doc).
+    pub(crate) fn set_text_color(_control: &NSControl, argb: i32) {
+        theme_ladder_pending("TextColor", format_args!("{argb:#010x}"));
+    }
+
+    /// TODO(m1-04, theme ladder L2): [`Setter::BackgroundColor`] and the fill
+    /// half of [`Setter::ThemedBackground`] — no-op with a debug log until the
+    /// ladder lands (module doc).
+    pub(crate) fn set_background_color(_view: &NSView, argb: i32) {
+        theme_ladder_pending("BackgroundColor", format_args!("{argb:#010x}"));
+    }
+
+    /// TODO(m1-04, theme ladder L2): the corner-radius half of
+    /// [`Setter::ThemedBackground`] — no-op with a debug log until the ladder
+    /// lands (module doc).
+    pub(crate) fn set_corner_radius(_view: &NSView, radius_dp: f32) {
+        theme_ladder_pending("CornerRadius", format_args!("{radius_dp}"));
+    }
+
+    /// TODO(m1-04, theme ladder L2): the four tint setters
+    /// ([`Setter::ProgressTint`]/[`Setter::ThumbTint`]/[`Setter::TrackTint`]/
+    /// [`Setter::ImageTint`]) — no-op with a debug log until the ladder lands
+    /// (module doc).
+    pub(crate) fn set_tint(_view: &NSView, which: &'static str, argb: Option<i32>) {
+        theme_ladder_pending(which, format_args!("{argb:?}"));
+    }
+
+    /// TODO(m1-04, theme ladder L3): [`Setter::Typeface`] — no-op with a debug
+    /// log until the ladder lands (module doc); the control keeps the system
+    /// font at whatever size [`set_text_size`] applied.
+    pub(crate) fn set_typeface(_control: &NSControl, typeface: Typeface) {
+        theme_ladder_pending("Typeface", format_args!("{typeface:?}"));
+    }
+
+    /// The shared body of every theme-ladder placeholder above.
+    fn theme_ladder_pending(what: &str, value: std::fmt::Arguments<'_>) {
+        log::debug!(
+            "frust-native-widgets: macOS {what}({value}) not applied yet — the macOS theme ladder \
+             is pending"
+        );
+    }
+
+    /// A [`Setter`] a control's own `plan` never emits reached its macOS
+    /// `apply` — the iOS half's warning, for this arm.
+    pub(crate) fn warn_unexpected_setter(kind: &str, setter: &Setter<'_>) {
+        log::warn!(
+            "frust-native-widgets: control '{kind}' planned a setter its macOS arm does not \
+             implement ({setter:?}) — ignored"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,18 +1512,22 @@ mod tests {
 
     #[test]
     fn the_six_control_kinds_are_the_same_strings_both_platform_arms_register() {
-        // `crate::android::register_controls` and
-        // `crate::apple::register_controls` are each `#[cfg(target_os = ...)]`
-        // -gated, so no host test can call either. What a host CAN pin is the
-        // thing they both register *by*: these six `KIND` consts. Neither arm
-        // spells a kind literally (`crate::android`'s own registration note),
-        // so a drift in the wire vocabulary has to pass through here.
+        // `crate::android::register_controls`,
+        // `crate::apple::register_controls` and
+        // `crate::appkit::register_controls` are each
+        // `#[cfg(target_os = ...)]`-gated, so no host test can call any of the
+        // three. What a host CAN pin is the thing they all register *by*: these
+        // six `KIND` consts. No arm spells a kind literally
+        // (`crate::android`'s own registration note), so a drift in the wire
+        // vocabulary has to pass through here. (The macOS arm registers a
+        // subset of the table while it is being built out — `Button` first —
+        // and never a kind outside it.)
         //
         // The other half of "shared-Props parity" needs no assertion at all:
         // there is exactly ONE `Props` type per control, in this same module
-        // tree, used verbatim by both arms — same fields by construction, not
-        // by agreement. A second, per-platform Props definition is the thing
-        // this file's layout exists to prevent.
+        // tree, used verbatim by all three arms — same fields by construction,
+        // not by agreement. A second, per-platform Props definition is the
+        // thing this file's layout exists to prevent.
         let kinds = [
             button::KIND,
             label::KIND,

@@ -93,8 +93,14 @@ use super::theme::{self, ResolvedTheme};
 ///   class registers under. A mismatch is silent: the lookup returns nil, the
 ///   host takes its unresolvable-factory branch, and every native control on
 ///   iOS renders nothing.
-/// - **Anywhere else**: no factory exists; the Android spelling stands in so
-///   the constant is always defined.
+/// - **macOS**: the desktop registry key `crate::appkit::factory::VIEW_TYPE`
+///   (`"dev.frust.nativewidgets.FrustNativeControlFactory"`, the Android
+///   spelling), named here rather than repeated: the desktop Mode-A host
+///   resolves a slot's factory by looking this exact string up in
+///   `frust_plugin::desktop`'s registry, where the AppKit arm registered it.
+///   A mismatch would be just as silent as on iOS — no factory, an empty slot.
+/// - **Anywhere else** (Linux/Windows/web): no factory exists; the Android
+///   spelling stands in so the constant is always defined.
 ///
 /// `pub(super)` rather than private: the generic mounting builder
 /// ([`crate::api::mount`]) composes the same one factory these six do —
@@ -104,7 +110,9 @@ use super::theme::{self, ResolvedTheme};
 pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
 #[cfg(target_os = "ios")]
 pub(super) const VIEW_TYPE: &str = "FrustNativeControlFactory";
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
+pub(super) const VIEW_TYPE: &str = crate::appkit::factory::VIEW_TYPE;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
 
 /// This plugin's own per-widget-instance identity counter (module doc: "this

@@ -762,13 +762,89 @@ impl ComponentCtx<'_, '_, '_> {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// The macOS arm: the main-thread proof — AppKit's whole escape hatch, exactly
+/// as on iOS — plus, for now, an **interim** copy of the host stand-in's
+/// identity-based helpers instead of real `NSView` ones.
+///
+/// # Why the helpers are the host's shape, for now
+///
+/// This crate's one component, the non-default `demo-components` `DemoCard`
+/// (`crate::demo`), has three `mod platform` arms and the third is the host
+/// stand-in, cfg'd `not(any(android, ios))` — so a macOS build with the feature
+/// on (the playground's) compiles that stand-in, which is written against
+/// `record`/`root(u64)`/`add_child(u64, u64)`/`retain_child(u64)`. Keeping that
+/// same surface here is what keeps such a build compiling until the card's own
+/// AppKit arm lands; the composite then shows an empty (attachable) view — the
+/// recorded plan goes to the debug log, nothing is rendered. When the AppKit
+/// `DemoCard` arm lands, these four become the iOS mirror over `NSView`
+/// (`root(Retained<NSView>)`, `add_child(&NSView, &NSView)`,
+/// `retain_child(&NSView)`, backed by `crate::appkit::NativeCtx::add_child`)
+/// and [`NativeChild`] carries a `Retained<NSView>`.
+///
+/// No listener is attached to a component's views on this arm either
+/// ([`NativeComponent::on_event`]'s display-only scope holds on all three).
+#[cfg(target_os = "macos")]
+impl ComponentCtx<'_, '_, '_> {
+    /// The main-thread proof this call carries — what every `objc2-app-kit`
+    /// constructor demands, and the macOS arm's whole escape hatch (the
+    /// Objective-C runtime is globally reachable; there is no `Env` to thread).
+    pub fn mtm(&self) -> objc2::MainThreadMarker {
+        self.inner.mtm()
+    }
+
+    /// Interim (see this block's doc): log one would-be platform call at debug
+    /// level instead of recording it — there is no test sink on this arm.
+    pub fn record(&mut self, call: impl Into<String>) {
+        log::debug!(
+            "frust-native-widgets: macOS component stand-in call (not rendered): {}",
+            call.into()
+        );
+    }
+
+    /// Interim (see this block's doc): the slot's root is an empty `NSView`,
+    /// so the slot stays attachable and draws nothing; `identity` is only
+    /// logged.
+    pub fn root(&mut self, identity: u64) -> Option<NativeRoot> {
+        let mtm = self.inner.mtm();
+        self.record(format!("root {identity}"));
+        Some(NativeRoot(NativeView::new(
+            objc2_app_kit::NSView::new(mtm),
+            mtm,
+        )))
+    }
+
+    /// Interim (see this block's doc): log a would-be `addSubview`.
+    pub fn add_child(&mut self, parent: u64, child: u64) -> Option<()> {
+        self.record(format!("addChild {parent} <- {child}"));
+        Some(())
+    }
+
+    /// Interim (see this block's doc): a counted stand-in child handle, the
+    /// same one the host arm hands out.
+    pub fn retain_child(&mut self, identity: u64) -> Option<NativeChild> {
+        self.record(format!("retainChild {identity}"));
+        Some(NativeChild::new(identity))
+    }
+
+    /// The Apple counterpart of Android's local-frame wrapper: runs `f` and
+    /// nothing else — ARC leaves no reference table to bound — handing it this
+    /// very context so the error latch is shared, as on every arm.
+    pub fn with_local_frame<T>(
+        &mut self,
+        _capacity: usize,
+        f: impl FnOnce(&mut ComponentCtx<'_, '_, '_>) -> Option<T>,
+    ) -> Option<T> {
+        f(self)
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 impl ComponentCtx<'_, '_, '_> {
     /// Record one would-be platform call — the host stand-in's whole surface,
     /// so a component's create/update/dispose can be asserted by an ordinary
     /// `cargo test` on a machine with no JNI and no Objective-C runtime at
-    /// all. Compiled only on a non-mobile host; there is no native view to
-    /// build there.
+    /// all. Compiled only on a host with no platform arm; there is no native
+    /// view to build there.
     pub fn record(&mut self, call: impl Into<String>) {
         self.inner.record(call);
     }
@@ -855,7 +931,10 @@ impl NativeRoot {
 pub struct NativeChild(ChildHandle);
 
 /// [`NativeChild`]'s per-platform payload: a global reference on Android, an
-/// ARC retain on iOS, a counted stand-in on a non-mobile host.
+/// ARC retain on iOS, a counted stand-in on a non-mobile host — macOS included
+/// for now (the interim surface documented on its `ComponentCtx` block), and
+/// the reason the stand-in items below stay gated `not(any(android, ios))`
+/// rather than excluding macOS too.
 #[cfg(target_os = "android")]
 type ChildHandle = jni::refs::Global<jni::objects::JObject<'static>>;
 #[cfg(target_os = "ios")]
@@ -1070,16 +1149,18 @@ fn on_platform_main_thread() -> Option<bool> {
 }
 
 /// See the Android arm: `MainThreadMarker::new()` is `NSThread.isMainThread`,
-/// so this arm always has a definitive answer.
-#[cfg(target_os = "ios")]
+/// so both Apple arms (UIKit and AppKit — the desktop host dispatches on
+/// winit's event-loop thread, which is the process main thread) always have a
+/// definitive answer.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn on_platform_main_thread() -> Option<bool> {
     Some(objc2::MainThreadMarker::new().is_some())
 }
 
-/// See the Android arm: a desktop/CI host has no platform main thread to be
-/// wrong about — and no platform dispatch either — so the answer is always
-/// *unknown*.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// See the Android arm: a host with no platform arm (Linux/Windows/web) has no
+/// platform main thread to be wrong about — and no platform dispatch either —
+/// so the answer is always *unknown*.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn on_platform_main_thread() -> Option<bool> {
     None
 }
@@ -1516,24 +1597,25 @@ fn guard_pending_exception_off_context(op: &str) -> Option<NativeWidgetError> {
     })
 }
 
-/// The Apple arm has nothing to guard: there is no pending-exception channel
-/// between a component and the runtime here (an ObjC exception is not a return
-/// path — `crate::apple::factory`'s own contract answers a failed create with a
+/// The Apple arms (iOS and macOS) have nothing to guard: there is no
+/// pending-exception channel between a component and the runtime here (an ObjC
+/// exception is not a return path — `crate::apple::factory`'s and
+/// `crate::appkit::factory`'s contracts answer a failed create with a
 /// placeholder view instead), and no `Env` whose next call could be poisoned.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
     None
 }
 
 /// See the context-carrying arm above: this platform has nothing to guard.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn guard_pending_exception_off_context(_op: &str) -> Option<NativeWidgetError> {
     None
 }
 
 /// The host arm has no JNI to check, so it counts instead — see
 /// `dispatch_guard_count`.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
     DISPATCH_GUARDS.with(|guards| guards.set(guards.get() + 1));
     None
@@ -1542,13 +1624,13 @@ fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<
 /// The host arm of the context-free guard: it counts through the same tally, so
 /// the wiring bar covers all four dispatches and not just the three that carry
 /// a context.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn guard_pending_exception_off_context(_op: &str) -> Option<NativeWidgetError> {
     DISPATCH_GUARDS.with(|guards| guards.set(guards.get() + 1));
     None
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 thread_local! {
     /// How many times the dispatch-boundary guard ran on this thread — the
     /// host arm's stand-in for a check it cannot make, the same shape
@@ -1563,7 +1645,7 @@ thread_local! {
 
 /// How many times the dispatch-boundary exception guard has run on this
 /// thread.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 #[allow(dead_code)] // the guard's wiring bar: tests only, by design
 pub(crate) fn dispatch_guard_count() -> usize {
     DISPATCH_GUARDS.with(|guards| guards.get())
@@ -1753,9 +1835,12 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
 
 // Gated on the host arm, not merely on `test` (the same gate `crate::runtime`'s
 // own tests carry): these drive the public trait through the real runtime using
-// the host stand-in context, which a platform build replaces with the
-// device-only types.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+// the host stand-in context, which a platform build (macOS included, since it
+// has a real AppKit arm) replaces with the platform-only types.
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_os = "macos"))
+))]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::sync::{Mutex, Once};

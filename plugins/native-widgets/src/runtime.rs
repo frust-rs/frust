@@ -28,8 +28,10 @@
 //!
 //! The framework's `platform_view` slot resolves a `viewType` to exactly one
 //! factory class per platform — `FrustNativeControlFactory`, Kotlin on Android
-//! over this crate's three JNI exports (`crate::android`) and a Rust
-//! `define_class!` ObjC class on iOS (`crate::apple::factory`); see
+//! over this crate's three JNI exports (`crate::android`), a Rust
+//! `define_class!` ObjC class on iOS (`crate::apple::factory`), and a Rust
+//! `frust_plugin::desktop::DesktopViewFactory` on macOS
+//! (`crate::appkit::factory`, keyed by the same `viewType` string); see
 //! `docs/NATIVE_WIDGETS_ARCHITECTURE.md` for that one-factory shape and its
 //! frozen names. Which *control* a slot means rides in its `params_json`, under
 //! two reserved keys the api layer injects and this module reads back:
@@ -122,10 +124,12 @@ use crate::NativeWidgetError;
 use crate::events::EventPayload;
 use crate::registry::{Registry, SlotId};
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 pub(crate) use self::host::{NativeCtx, NativeView};
 #[cfg(target_os = "android")]
 pub(crate) use crate::android::{NativeCtx, NativeView};
+#[cfg(target_os = "macos")]
+pub(crate) use crate::appkit::{NativeCtx, NativeView};
 #[cfg(target_os = "ios")]
 pub(crate) use crate::apple::{NativeCtx, NativeView};
 
@@ -241,8 +245,10 @@ impl<'a> Params<'a> {
 /// post-frame poll can look the class up by name. A builder that degrades to
 /// its frust-drawn placeholder (`ResolvedSurfaceMode::RefusedTranslucent`)
 /// publishes no slot and never reaches here — correctly, since there is then
-/// no factory lookup to be ready for. The call is a `Once` behind an inlined
-/// no-op on every non-iOS target.
+/// no factory lookup to be ready for. The same holds on macOS, where the
+/// desktop host looks the factory up in `frust_plugin::desktop`'s registry by
+/// `view_type` on the first `Create` it drains. The call is a `Once` on iOS
+/// and macOS behind an inlined no-op on every other target.
 pub(crate) fn with_identity(kind: &str, slot_id: SlotId, body: &str) -> String {
     ensure_platform_factory();
     let mut out = String::with_capacity(body.len() + kind.len() + 48);
@@ -271,6 +277,12 @@ pub(crate) fn with_identity(kind: &str, slot_id: SlotId, body: &str) -> String {
 ///   `FrustViewHost` resolves by name via `NSClassFromString`. Idempotent; a
 ///   `Once` after the first call. See `crate::apple::factory`'s *Registration
 ///   is LAZY* for the ordering contract.
+/// - **macOS**: registers the AppKit arm's `DesktopViewFactory` with
+///   `frust_plugin::desktop::register_view_factory` under the api layer's
+///   `VIEW_TYPE` (`crate::appkit::ensure_registered`), which the desktop
+///   Mode-A host resolves on its first `Create` for one of this plugin's
+///   slots. The desktop registry is first-registration-wins, so the `Once`
+///   inside is what makes this safe to call on every encode.
 /// - **Android**: nothing to do. The factory is a Kotlin class the app module
 ///   already carries, found through the app classloader — it exists whether or
 ///   not Rust has run.
@@ -284,6 +296,8 @@ pub(crate) fn with_identity(kind: &str, slot_id: SlotId, body: &str) -> String {
 pub(crate) fn ensure_platform_factory() {
     #[cfg(target_os = "ios")]
     crate::apple::ensure_registered();
+    #[cfg(target_os = "macos")]
+    crate::appkit::ensure_registered();
 }
 
 /// Escape a string for embedding in a JSON string literal (the encoder half's
@@ -1161,6 +1175,8 @@ fn seeded_runtime() -> NativeRuntime {
     crate::android::register_controls(&mut runtime);
     #[cfg(target_os = "ios")]
     crate::apple::register_controls(&mut runtime);
+    #[cfg(target_os = "macos")]
+    crate::appkit::register_controls(&mut runtime);
     runtime
 }
 
@@ -1188,17 +1204,19 @@ pub(crate) fn with_runtime<T>(f: impl FnOnce(&mut NativeRuntime) -> T) -> Option
 
 // --- host stand-ins for the platform types ----------------------------------
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 pub(crate) mod host {
     //! Host stand-ins for the two platform-shaped types the runtime threads
     //! through untouched, so the whole dispatch/diff/lifecycle contract above
     //! is exercised by ordinary `cargo test` on a machine with no JNI and no
     //! Objective-C runtime at all.
     //!
-    //! Both mobile arms swap in a real pair — `crate::android`'s
-    //! `Env`-borrowing context plus its global-ref handle, and
-    //! `crate::apple`'s `MainThreadMarker` context plus its `Retained<UIView>`
-    //! handle — so this module is now the non-mobile hosts' arm only.
+    //! All three platform arms swap in a real pair — `crate::android`'s
+    //! `Env`-borrowing context plus its global-ref handle, `crate::apple`'s
+    //! `MainThreadMarker` context plus its `Retained<UIView>` handle, and
+    //! `crate::appkit`'s `MainThreadMarker` context plus its
+    //! `Retained<NSView>` handle — so this module is the arm-less hosts'
+    //! (Linux/Windows/web) only, and the tests below run there, not on macOS.
 
     use std::marker::PhantomData;
 
@@ -1239,8 +1257,11 @@ pub(crate) mod host {
 
 // Gated on the host arm, not merely on `test`: these exercise the runtime
 // through the [`host`] stand-ins above, which a platform build replaces with
-// the real (device-only) types.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+// the real (platform-only) types — macOS included, since it has a real arm.
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_os = "macos"))
+))]
 mod tests {
     use std::sync::Mutex;
 

@@ -1,22 +1,28 @@
 //! `frust-native-widgets`: render REAL platform widgets (Android `View`s /
-//! UIKit views) from pure Rust — `native_button("Save")`, `native_switch(...)`
-//! etc. compose the framework's `platform_view`
+//! UIKit views / AppKit views) from pure Rust — `native_button("Save")`,
+//! `native_switch(...)` etc. compose the framework's `platform_view`
 //! slots for placement, while this plugin creates and mutates the actual
 //! native views through direct, same-thread FFI: `with_jni_env` + hand-curated
 //! JNI bindings on Android, `objc2-ui-kit` on iOS (the factory itself a Rust
-//! `define_class!` class — zero Swift). This crate holds the
+//! `define_class!` class — zero Swift), and `objc2-app-kit` on macOS (a Rust
+//! `frust_plugin::desktop::DesktopViewFactory` the desktop Mode-A host
+//! resolves by `view_type`). This crate holds the
 //! retained-handle [`registry`] every control's create/update/dispose path is
 //! built over, the `runtime` those paths dispatch through, the six `controls`
 //! (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`) that
 //! runtime serves, the typed `events` vocabulary their listeners decode into,
-//! the app-facing `api` builders, and both platform arms' factory glue. Each
-//! control now carries **both** platform halves — a
-//! `#[cfg(target_os = "android")] mod platform` and a
-//! `#[cfg(target_os = "ios")] mod platform`, side by side in the same file,
+//! the app-facing `api` builders, and the three platform arms' factory glue.
+//! Each control carries one platform half per arm — a
+//! `#[cfg(target_os = "android")] mod platform`, a
+//! `#[cfg(target_os = "ios")] mod platform` and (so far only `Button`) a
+//! `#[cfg(target_os = "macos")] mod platform`, side by side in the same file,
 //! executing the same shared setter plan and
 //! reporting a tap/toggle/drag back to the app through the same event
-//! dispatch on both platforms (`crate::apple::events`'s Rust target-action
-//! object, mirroring Android's shared listener). The theme ladder's Apple
+//! dispatch on every platform (`crate::apple::events`'s and
+//! `crate::appkit::events`' Rust target-action objects, mirroring Android's
+//! shared listener). The macOS arm is being built out control by control:
+//! a kind it does not register yet gets the factory's empty dead-slot view.
+//! The theme ladder's Apple
 //! arm is also in: L1 (`crate::apple::theme`) pins brightness via
 //! `overrideUserInterfaceStyle` at control-creation time; L2 applies the
 //! same folded `Props` tokens through typed `objc2-ui-kit`/`CALayer`
@@ -57,7 +63,9 @@
 //! `plugins/native-widgets/platform/android/`, driven by this crate's four
 //! JNI exports; iOS: a Rust `define_class!` factory registered straight into
 //! the Objective-C runtime, `crate::apple::factory` — zero Swift, and target
-//! -action instead of a listener class). Which control a `platform_view` slot
+//! -action instead of a listener class; macOS: a Rust `DesktopViewFactory`
+//! registered with `frust_plugin::desktop`, `crate::appkit::factory`, plus one
+//! target-action class). Which control a `platform_view` slot
 //! means travels in that slot's `params_json`, under two reserved keys the api
 //! layer injects — the same payload that carries the differ's slot id across a
 //! factory contract that does not pass it.
@@ -86,7 +94,7 @@
 //! # Native-widget events bypass `RenderRoot::event`
 //!
 //! A native control's interaction is entirely platform-owned: a tap fires
-//! the platform's own listener (Android's `View.OnClickListener`, iOS
+//! the platform's own listener (Android's `View.OnClickListener`, iOS/macOS
 //! target-action), which this crate's plugin-private JNI/ObjC exports
 //! deliver straight into a registered Rust callback — never through
 //! `frust-core`'s `EventCtx`. That means every `frust-core`/`frust-widgets`
@@ -148,12 +156,19 @@ mod android;
 // (UIKit doesn't exist on macOS).
 #[cfg(target_os = "ios")]
 mod apple;
+// The macOS arm: ONE Rust `DesktopViewFactory` registered with
+// `frust_plugin::desktop` under the api layer's `VIEW_TYPE` (the desktop
+// Mode-A host resolves it by that string) plus ONE target-action class —
+// AppKit, not UIKit, so its own module rather than a widened `apple` gate.
+#[cfg(target_os = "macos")]
+mod appkit;
 // The six v1 controls. Compiled on every target on purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
-// `NativeWidget` impl (the JNI half) is `#[cfg(target_os = "android")]` —
-// which is also why the modules live here rather than under `android/`. The
-// `allow` matches `runtime`'s below: on a non-Android host the whole
-// props/plan surface has no caller outside the tests.
+// `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`
+// — which is also why the modules live here rather than under a platform
+// directory. The `allow` matches `runtime`'s below: on a host with no arm
+// (Linux/Windows/web) the whole props/plan surface has no caller outside the
+// tests, and the macOS arm does not serve every kind yet.
 #[allow(dead_code)]
 mod controls;
 // The typed event vocabulary (`EventPayload`) and the kind/detail codec every
@@ -163,11 +178,11 @@ mod controls;
 mod events;
 mod registry;
 // The runtime's surface is consumed by the platform arms — this crate's JNI
-// exports, the Apple `define_class!` factory, the six controls and their
-// listeners — plus its own host tests, which a plain (non-test) build does
-// not count. On a non-mobile host none of those arms compile, so much of the
-// surface is legitimately uncalled there; the attribute stays for that host
-// build rather than growing per-item `allow`s.
+// exports, the Apple `define_class!` factory, the macOS desktop factory, the
+// six controls and their listeners — plus its own host tests, which a plain
+// (non-test) build does not count. On a host with no platform arm none of
+// those compile, so much of the surface is legitimately uncalled there; the
+// attribute stays for that host build rather than growing per-item `allow`s.
 #[allow(dead_code)]
 mod runtime;
 
@@ -175,9 +190,12 @@ pub use registry::{Registry, SlotId};
 
 #[cfg(target_os = "android")]
 pub use registry::android::AndroidHandle;
-// iOS only — see `Cargo.toml`'s comment on why this crate's Apple arm gates
-// on `target_os = "ios"` rather than `target_vendor = "apple"` (no macOS/
-// AppKit backend; UIKit doesn't exist there).
+// One handle per Apple arm, each gated on its own `target_os` rather than
+// `target_vendor = "apple"` — see `Cargo.toml`'s comment on why (UIKit doesn't
+// exist on macOS): `AppKitHandle` (macOS, `Retained<NSView>`) and
+// `AppleHandle` (iOS, `Retained<UIView>`).
+#[cfg(target_os = "macos")]
+pub use registry::appkit::AppKitHandle;
 #[cfg(target_os = "ios")]
 pub use registry::apple::AppleHandle;
 
