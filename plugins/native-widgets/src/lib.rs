@@ -180,7 +180,7 @@ mod coretext;
 // — which is also why the modules live here rather than under a platform
 // directory. The `allow` matches `runtime`'s below: on a host with no arm
 // (Linux/Windows/web) the whole props/plan surface has no caller outside the
-// tests, and the macOS arm does not serve every kind yet.
+// tests.
 #[allow(dead_code)]
 mod controls;
 // The typed event vocabulary (`EventPayload`) and the kind/detail codec every

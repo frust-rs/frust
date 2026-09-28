@@ -54,11 +54,6 @@
 //! There is deliberately **no local-frame wrapper on this arm**, for the same
 //! ARC reason as iOS.
 
-// Mirrors `crate::apple::ctx`'s module-level allow: `add_child` lands here
-// before its first caller (the composite's macOS arm) exists, and the
-// attribute goes away once it does rather than growing per-item `allow`s.
-#![allow(dead_code)]
-
 use std::marker::PhantomData;
 
 use objc2::MainThreadMarker;

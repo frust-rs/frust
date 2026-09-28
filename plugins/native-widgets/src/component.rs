@@ -249,6 +249,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::NativeWidgetError;
+use crate::controls::DARK;
 use crate::events::EventPayload;
 use crate::registry::SlotId;
 use crate::runtime::{
@@ -1396,14 +1397,29 @@ pub(crate) fn forget(slot: SlotId) {
     with_staged(|staged| staged.remove(&slot));
 }
 
-/// The `params_json` a component slot's `platform_view` carries: the runtime's
-/// two identity keys plus the props generation [`publish`] returned, and
-/// nothing else — a component's real props never cross the wire.
-pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64) -> String {
+/// The `params_json` a component slot's `platform_view` carries: the
+/// runtime's two identity keys, the props generation [`publish`] returned,
+/// and the app's active brightness (theme ladder L1's [`DARK`] wire bit) —
+/// never a component's real props.
+///
+/// `dark` is the caller's to resolve (`crate::api::mount`'s `build_with_mode`
+/// reads it off the same `use_context::<Theme>()` the six builders'
+/// `ambient_theme_tokens` already does) — this module has no reactive
+/// context of its own. Carrying the bit directly on the wire, rather than
+/// folding it into a component's typed `Props` (which this crate
+/// deliberately never touches — `crate::api::mount`'s *What a component's
+/// builder does NOT carry*), means a brightness-only flip still changes
+/// `params_json` byte-for-byte, bumping `PlatformViewFrame::params_generation`
+/// and reaching `crate::appkit::theme`'s/`crate::apple::theme`'s shared
+/// `brightness_is_dark`, which both read this exact key straight off a
+/// slot's raw wire — unconditionally, for every registered kind, before any
+/// per-kind decode — the same mechanism the six built-in controls' own
+/// `params_for` already rides.
+pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64, dark: bool) -> String {
     crate::runtime::with_identity(
         kind,
         slot,
-        &format!("\"{PROPS_GENERATION_KEY}\":{generation}"),
+        &format!("\"{PROPS_GENERATION_KEY}\":{generation},\"{DARK}\":{dark}"),
     )
 }
 
@@ -2080,10 +2096,13 @@ mod tests {
 
     /// Publish `component` + `props` for `slot` and return the `params_json`
     /// its `platform_view` would carry — the exact sequence the app-facing
-    /// builder will run on every rebuild.
+    /// builder will run on every rebuild. Brightness is out of scope for
+    /// every test that calls this (`publish_bumps_the_generation_only_when_
+    /// the_props_change` exercises the `dark` bit directly instead), so it is
+    /// pinned to `false` here.
     fn mount(slot: SlotId, component: Gauge, props: GaugeProps) -> String {
         let generation = publish(slot, Rc::new(component), props);
-        component_params(GAUGE_KIND, slot, generation)
+        component_params(GAUGE_KIND, slot, generation, false)
     }
 
     #[test]
@@ -2413,6 +2432,23 @@ mod tests {
         assert_ne!(same, changed);
         assert!(changed.contains(PROPS_GENERATION_KEY));
 
+        // Theme ladder L1: `component_params` also carries the app's active
+        // brightness directly on the wire, not through the staged/diffed
+        // props above — so an unchanged republish with only the brightness
+        // flipped must still differ, and the flag round-trips exactly the
+        // way `crate::appkit::theme`'s/`crate::apple::theme`'s shared
+        // `brightness_is_dark` reads it back (`Params::flag(DARK)`, the same
+        // call both make).
+        let generation = publish(3, Rc::new(Gauge::new(&log, "c")), props("Disk", 2));
+        let light = component_params(GAUGE_KIND, 3, generation, false);
+        let dark = component_params(GAUGE_KIND, 3, generation, true);
+        assert_ne!(
+            light, dark,
+            "an unchanged props republish with a flipped brightness must still change the wire"
+        );
+        assert_eq!(Params::new(&light).flag(DARK), Some(false));
+        assert_eq!(Params::new(&dark).flag(DARK), Some(true));
+
         forget(3);
         // A fresh mount after teardown starts over at generation 0.
         assert_eq!(mount(3, Gauge::new(&log, "d"), props("Disk", 2)), first);
@@ -2432,7 +2468,7 @@ mod tests {
         register_component::<Gauge>(GAUGE_KIND);
         // Params for a slot whose staged entry was already reaped — the
         // replay-after-teardown case.
-        let params = component_params(GAUGE_KIND, 4, 0);
+        let params = component_params(GAUGE_KIND, 4, 0, false);
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
 
@@ -2869,7 +2905,7 @@ mod tests {
         // the runtime's own dispatch before any decode runs.
         let log = Rc::new(RefCell::new(Vec::new()));
         let generation = publish(70, Rc::new(Gauge::new(&log, "g")), props("CPU", 1));
-        let params = component_params("test-never-registered", 70, generation);
+        let params = component_params("test-never-registered", 70, generation, false);
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
@@ -2911,7 +2947,7 @@ mod tests {
                 title: "wrong kind".to_string(),
             },
         );
-        let params = component_params(GAUGE_KIND, 71, generation);
+        let params = component_params(GAUGE_KIND, 71, generation, false);
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
@@ -2941,7 +2977,7 @@ mod tests {
         // a different message and a different call.
         register_component::<Gauge>(GAUGE_KIND);
         let generation = publish(72, Rc::new(Twin), props("CPU", 1));
-        let params = component_params(GAUGE_KIND, 72, generation);
+        let params = component_params(GAUGE_KIND, 72, generation, false);
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
@@ -2981,7 +3017,7 @@ mod tests {
         );
 
         let generation = publish(73, Rc::new(Twin), props("CPU", 1));
-        let params = component_params(GAUGE_KIND, 73, generation);
+        let params = component_params(GAUGE_KIND, 73, generation, false);
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
         let error = with_runtime(|runtime| runtime.create(&mut ctx, &params))
@@ -3095,7 +3131,7 @@ mod tests {
                 title: title.to_string(),
             },
         );
-        component_params(CARD_KIND, slot, generation)
+        component_params(CARD_KIND, slot, generation, false)
     }
 
     #[test]

@@ -4,11 +4,12 @@ Render **real OS controls** from pure Rust — `native_button("Save")`,
 `native_label(...)`, `native_switch(checked)`, `native_slider(...)`,
 `native_progress(...)`, `native_image(bytes)` — composed straight into a
 frust `View` tree like any other widget. Each control is backed by a genuine
-Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`)
-or UIKit view (`UIButton`/`UILabel`/`UISwitch`/`UISlider`/`UIProgressView`/
-`UIImageView`), hosted as a **platform-view slot** (`docs/ARCHITECTURE.md`'s
-Platform-view flow) — frust paints nothing for it, the OS composites it in
-place.
+Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`),
+UIKit view (`UIButton`/`UILabel`/`UISwitch`/`UISlider`/`UIProgressView`/
+`UIImageView`), or AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/
+`NSSlider`/`NSProgressIndicator`/`NSImageView`), hosted as a **platform-view
+slot** (`docs/ARCHITECTURE.md`'s Platform-view flow) — frust paints nothing
+for it, the OS composites it in place.
 
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
@@ -28,14 +29,14 @@ not re-export it.
 
 Six controls, one Rust API, no Kotlin or Swift to write for any of them:
 
-| Builder | Android view | iOS view |
-|---|---|---|
-| `native_button(text)` | `Button` | `UIButton` |
-| `native_label(text)` | `TextView` | `UILabel` |
-| `native_switch(checked)` | `Switch` | `UISwitch` |
-| `native_slider(value, min, max)` | `SeekBar` | `UISlider` |
-| `native_progress(value, min, max)` | `ProgressBar` | `UIProgressView` |
-| `native_image(bytes)` | `ImageView` | `UIImageView` |
+| Builder | Android view | iOS view | macOS view |
+|---|---|---|---|
+| `native_button(text)` | `Button` | `UIButton` | `NSButton` |
+| `native_label(text)` | `TextView` | `UILabel` | `NSTextField` (label) |
+| `native_switch(checked)` | `Switch` | `UISwitch` | `NSSwitch` |
+| `native_slider(value, min, max)` | `SeekBar` | `UISlider` | `NSSlider` |
+| `native_progress(value, min, max)` | `ProgressBar` | `UIProgressView` | `NSProgressIndicator` |
+| `native_image(bytes)` | `ImageView` | `UIImageView` | `NSImageView` |
 
 …plus `native_component`, the generic mounting seam for a control this crate
 does not ship: `impl NativeComponent` (with your own typed `Props`) →
@@ -152,11 +153,15 @@ four export symbols changed — see §7 before you rebuild.
 
 ---
 
-## 4. iOS setup — nothing. Zero Swift, by design.
+## 4. iOS and macOS setup — nothing either
 
-iOS needs **no platform addition at all** beyond §2's Cargo dependency: no
-Swift package reference, no Xcode project edit, no `Info.plist` key. The
-factory that would be a Swift class on every other plugin's Apple arm is
+Neither Apple platform needs anything beyond §2's Cargo dependency: no Swift
+package reference, no Xcode project edit, no `Info.plist` key, and on macOS
+no explicit "install" call either.
+
+### iOS — zero Swift, by design
+
+The factory that would be a Swift class on every other plugin's Apple arm is
 instead a Rust `objc2` `define_class!` type, registered straight into the
 Objective-C runtime from this crate's own code and resolved by
 `NSClassFromString` under the bare runtime name `FrustNativeControlFactory`
@@ -164,6 +169,35 @@ Objective-C runtime from this crate's own code and resolved by
 package prefix — the opposite convention from Android's fully-qualified
 FQCN). This was proven out in Phase 0's spike 2 and has held for every
 control added since.
+
+### macOS — the desktop Mode-A host registers the factory lazily
+
+The desktop preview/bundle needs no app-side wiring either: this crate's
+AppKit factory (a Rust `frust_plugin::desktop::DesktopViewFactory`) registers
+itself with the shell's platform-view registry the first time any builder in
+this crate encodes a slot's params — there is nothing for your app to call.
+
+Two things differ from the mobile arms, both by design:
+
+- **The theme ladder follows the app, not the Mac.** Every control's
+  `NSAppearance` is pinned to the active `frust::Theme`'s brightness
+  (`DarkAqua`/`Aqua`), re-applied on every update — so a Mac running Dark
+  Mode still draws a Light-themed app's controls light, and vice versa.
+- **A handful of AppKit gaps are logged, not papered over**: `Fit::Cover`
+  has no true fill-and-crop on `NSImageView`, so it letterboxes like
+  `Fit::Contain` rather than cropping; a slider emits no drag-start/drag-end
+  event (AppKit target-action carries no gesture phase, only the final
+  value); `NSSwitch`'s track and `NSProgressIndicator`'s fill have no tint
+  API at all, so `thumbTint`/`trackTint`/`progressTint` on those two
+  controls are silent no-ops logged at debug (both still draw in the
+  system accent colour); `native_image`'s tint sets
+  `NSImageView.contentTintColor` directly — unlike Android/iOS, which need
+  the image marked a *template* first, macOS applies it to whatever
+  `NSImage` is already installed; and `native_image` decodes through
+  ImageIO, so a shell environment whose `DYLD_LIBRARY_PATH` shadows one of
+  ImageIO's private codec dylibs (e.g. Homebrew's `/opt/homebrew/lib` on a
+  machine with `libpng`/`libjpeg` installed) leaves every image slot empty
+  with one logged warning rather than decoding or crashing.
 
 ---
 

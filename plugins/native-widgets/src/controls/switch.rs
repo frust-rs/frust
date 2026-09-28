@@ -550,11 +550,13 @@ pub(crate) mod platform {
     //!
     //! # Tints and typeface
     //!
-    //! `NSSwitch` exposes no thumb or track colour of its own; both tints route
-    //! to the theme ladder's shared placeholder (`crate::controls::platform::
-    //! set_tint`, TODO m1-04) so the ladder decides the mapping in one place.
-    //! An `NSSwitch` renders no text, so [`Setter::Typeface`] is silently a
-    //! no-op — the iOS arm's reasoning, verbatim.
+    //! `NSSwitch` exposes no thumb or track colour of its own — it always
+    //! draws its "on" track in the system accent colour — so both
+    //! `thumbTint` and `trackTint` route through `crate::controls::platform::
+    //! set_tint`, which logs the no-op at debug rather than failing; both
+    //! still follow the app's brightness through L1. An `NSSwitch` renders
+    //! no text, so [`Setter::Typeface`] is silently a no-op — the iOS arm's
+    //! reasoning, verbatim.
 
     use objc2::rc::Retained;
     use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSSwitch};

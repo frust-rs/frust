@@ -550,10 +550,12 @@ pub(crate) mod platform {
     //!
     //! # Tints
     //!
-    //! Both route to the theme ladder's shared placeholder
-    //! (`crate::controls::platform::set_tint`, TODO m1-04): `NSSlider` has a
-    //! `trackFillColor` (the progress tint's natural home) but no thumb tint,
-    //! and the ladder owns that mapping.
+    //! `progressTint` maps to `NSSlider.trackFillColor` (theme ladder L2, the
+    //! progress tint's natural home) via `crate::controls::platform::
+    //! set_tint`. `thumbTint` has no AppKit counterpart — `NSSlider` exposes
+    //! no thumb colour of its own — so the same call no-ops it, logged at
+    //! debug rather than failing. Both still follow the app's brightness
+    //! through L1.
 
     use objc2::rc::Retained;
     use objc2_app_kit::NSSlider;

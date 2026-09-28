@@ -38,8 +38,8 @@
 //! | macOS | live: `NSProgressIndicator.setIndeterminate:` + `startAnimation:`/`stopAnimation:` on the same bar-style view |
 //! | iOS | **unsupported** — warns and no-ops (`UIProgressView` is determinate-only; its `platform` module doc) |
 //!
-//! The cross-platform route to a spinner is the shared spinner control
-//! (plan card c2-02), not this property on iOS.
+//! The cross-platform route to a spinner is the shared spinner control (a
+//! later control), not this property on iOS.
 
 use super::{
     BACKGROUND_COLOR, CONTENT_DESCRIPTION, INDETERMINATE, MAX, MIN, PROGRESS_TINT, Plan, Setter,
@@ -494,8 +494,14 @@ pub(crate) mod platform {
     //!
     //! # Tint and background
     //!
-    //! Both route to the theme ladder's shared placeholders
-    //! (`crate::controls::platform`, TODO m1-04).
+    //! Background routes through `crate::controls::platform::
+    //! set_background_color` (theme ladder L2: `wantsLayer` + a real
+    //! `CALayer.backgroundColor` write). Tint has no AppKit counterpart:
+    //! `NSProgressIndicator` exposes no tint property at all — it always
+    //! draws its fill in the system accent colour, and the one historical
+    //! knob, `controlTint`, is deprecated and deliberately never called —
+    //! so `platform::set_tint` logs the no-op at debug rather than failing.
+    //! Both still follow the app's brightness through L1.
 
     use objc2::rc::Retained;
     use objc2_app_kit::{NSProgressIndicator, NSProgressIndicatorStyle};

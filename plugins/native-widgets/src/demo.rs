@@ -674,12 +674,11 @@ mod platform {
     //!
     //! The background and the title's ink go through
     //! `crate::controls::platform`'s macOS `set_background_color`/
-    //! `set_text_color`, exactly as the iOS arm goes through that module's iOS
-    //! helpers — so the card re-themes the moment the macOS theme ladder (L2)
-    //! fills those helpers in, and until then renders in AppKit's stock
-    //! colours like the six controls do (each helper logs its skipped write at
-    //! debug level). The parent is made layer-backed here so the ladder's
-    //! `CALayer.backgroundColor` write has a layer to land on.
+    //! `set_text_color` — the same theme-ladder L2 setters the six controls'
+    //! own macOS arms call, a real `CALayer.backgroundColor`/`NSTextField.
+    //! textColor` write, not AppKit's stock colours — so the card re-themes
+    //! live exactly as they do. The parent is made layer-backed here so that
+    //! L2 write has a layer to land on.
 
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSButtonType, NSTextField, NSView,
@@ -966,10 +965,13 @@ mod tests {
 
     /// Publish `props` for `slot` and return the `params_json` its
     /// `platform_view` would carry — exactly what
-    /// `crate::api::native_component` runs on every rebuild.
+    /// `crate::api::native_component` runs on every rebuild. Brightness is
+    /// out of scope for this module's tests (`crate::api::mount`'s and
+    /// `crate::component`'s own tests cover the `dark` bit), so it is pinned
+    /// to `false`.
     fn mount(slot: SlotId, props: DemoCardProps) -> String {
         let generation = publish(slot, Rc::new(DemoCard), props);
-        component_params(DEMO_CARD_KIND, slot, generation)
+        component_params(DEMO_CARD_KIND, slot, generation, false)
     }
 
     #[test]

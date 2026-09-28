@@ -17,7 +17,14 @@
 //!
 //! [`apply_brightness`] picks `NSAppearanceNameDarkAqua` or
 //! `NSAppearanceNameAqua` from the same [`crate::controls::DARK`] wire bit the
-//! other two arms read ([`brightness_is_dark`]).
+//! other two arms read ([`brightness_is_dark`]) — carried not only by the six
+//! controls' own `params_for` (`crate::api::builders`) but by every
+//! `NativeComponent` slot's params too, folded in by
+//! `crate::component::component_params` from `crate::api::mount`'s
+//! `ambient_dark` (the same `use_context::<Theme>()` the six builders read).
+//! Without that, a component root such as `crate::demo::DemoCard` would carry
+//! no `dark` key at all and stay permanently pinned to the light appearance
+//! regardless of the app's theme.
 //!
 //! # Re-pinned on EVERY update, like iOS — never baked like Android
 //!
