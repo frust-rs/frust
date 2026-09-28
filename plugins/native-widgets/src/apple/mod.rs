@@ -81,7 +81,7 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 /// types under the same six `KIND` consts — never a literal here, which is
 /// what keeps the api layer's builders and both arms reading from one
 /// definition (`crate::controls::tests`'
-/// `the_six_control_kinds_are_the_same_strings_both_platform_arms_register`
+/// `the_six_control_kinds_are_the_same_strings_all_three_platform_arms_register`
 /// is the host-visible half of that pin).
 ///
 /// Registration stays explicit and central by design: `inventory`-style

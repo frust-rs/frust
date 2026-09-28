@@ -9,11 +9,10 @@
 //! process-global `view_type -> factory` table ([`factory`]), which
 //! `crates/frust-shell-macos`' desktop Mode-A host reads: a hosted control is
 //! an opaque AppKit sibling parented above winit's content view, positioned in
-//! logical points from the differ's rect. Read [`factory`]'s module doc for the
-//! retain accounting and the failure contract, [`events`]'s for the
-//! target-action attach/detach and per-slot retention, and [`theme`]'s for
-//! theme ladder L1 (`NSAppearance`), which wraps the factory rather than
-//! living inside it.
+//! logical points from the differ's rect. Read [`factory`]'s module doc for
+//! the retain accounting, the failure contract, and theme ladder L1
+//! (`NSAppearance`), applied inline on every create and update; [`events`]'s
+//! for the target-action attach/detach and per-slot retention.
 //!
 //! # Its own module, not a widened `apple` gate
 //!
@@ -41,24 +40,17 @@
 
 mod ctx;
 mod events;
-// `factory::ensure_registered` is superseded by `theme::ensure_registered`,
-// which registers the same factory wrapped in theme ladder L1
-// (`theme::ThemedFactory`) under the same view type; everything else in
-// `factory` stays live through that wrapper.
-#[expect(
-    dead_code,
-    reason = "factory::ensure_registered is superseded by theme::ensure_registered"
-)]
 pub(crate) mod factory;
-// Theme ladder L1: `NSAppearance` pinned per hosted view on create AND every
-// update, applied by the `DesktopViewFactory` wrapper this module registers.
-// L2/L3 need nothing here — their setters are `crate::controls::platform`'s
-// macOS half, and L3's CoreText half is the shared `crate::coretext`.
+// Theme ladder L1: `NSAppearance` pure helpers (`apply_brightness`,
+// `brightness_is_dark`); pinned per hosted view on create AND every update
+// from inside `factory` itself (`factory`'s own module doc). L2/L3 need
+// nothing here — their setters are `crate::controls::platform`'s macOS half,
+// and L3's CoreText half is the shared `crate::coretext`.
 mod theme;
 
 pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
-pub(crate) use theme::ensure_registered;
+pub(crate) use factory::ensure_registered;
 
 use crate::controls::{button, image, label, progress, slider, switch};
 use crate::runtime::NativeRuntime;
@@ -78,7 +70,7 @@ pub(crate) type NativeView = crate::registry::appkit::AppKitHandle;
 ///
 /// All six v1 controls, in the Android/iOS order, **line for line** — so the
 /// three arms register the same kind table (`crate::controls::tests`'
-/// `the_six_control_kinds_are_the_same_strings_both_platform_arms_register`
+/// `the_six_control_kinds_are_the_same_strings_all_three_platform_arms_register`
 /// is the host-visible half of that pin). A slot naming a kind outside it
 /// gets [`factory`]'s empty dead-slot view (`NativeWidgetError::UnknownControl`,
 /// logged once per create).

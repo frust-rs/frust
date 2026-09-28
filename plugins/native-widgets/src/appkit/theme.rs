@@ -25,7 +25,7 @@
 //! forcing it to be baked at construction the way Android's
 //! `createConfigurationContext` is. It is applied on create **and** on every
 //! `update_params`: `crate::apple::theme`'s on-device gate found the bug
-//! a create-only pin causes (p2-05) — a control culled off-screen and later
+//! a create-only pin causes — a control culled off-screen and later
 //! RECREATED adopts whatever brightness is current at recreate time while its
 //! never-culled siblings keep the one they were born under, so the two
 //! diverge (the reported repro drew a recreated switch's thumb
@@ -38,28 +38,22 @@
 //! not in any control's diffed `Props`, so a props-equal update can still
 //! carry a new brightness.
 //!
-//! # The call site: [`ThemedFactory`], one choke point for every slot
+//! # The call site: inside `AppKitFactory` itself, like iOS
 //!
-//! The iOS arm pins from inside its factory's typed `create_control`/
-//! `update_control`. This arm pins one layer out, in [`ThemedFactory`] — a
-//! [`DesktopViewFactory`] that forwards all three calls to
-//! [`AppKitFactory`] unchanged and then pins the view the call names (the one
-//! `create` just handed the host, or the one `update_params` was lent). That
-//! keeps L1 in this module alone and covers every slot the desktop host
-//! drives — the six controls, every `NativeComponent`, and a dead-slot
-//! placeholder alike (pinning an empty `NSView` is harmless). [`ensure_registered`]
-//! registers the wrapper, not the bare factory, under the same
-//! [`VIEW_TYPE`]; the host sees no difference.
+//! Both Apple arms now pin from inside the one factory: the iOS arm from its
+//! typed `create_control`/`update_control`, this arm from
+//! `crate::appkit::factory`'s `create`/`update_control`
+//! (`crate::appkit::factory`'s own module doc — *Theme ladder L1*). That
+//! covers every slot the desktop host drives — the six controls, every
+//! `NativeComponent`, and a dead-slot placeholder alike (pinning an empty
+//! `NSView` is harmless) — with no separate wrapper and no second
+//! registration: `crate::appkit::factory::ensure_registered` is the one
+//! registration function.
 
-use std::sync::{Arc, Once};
-
-use frust_plugin::desktop::{DesktopViewFactory, DesktopViewHandle, register_view_factory};
-use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSView,
 };
 
-use super::factory::{AppKitFactory, VIEW_TYPE};
 use crate::controls::DARK;
 use crate::runtime::Params;
 
@@ -103,64 +97,6 @@ pub(crate) fn apply_brightness(view: &NSView, dark: bool) {
     );
 }
 
-/// [`AppKitFactory`] with theme ladder L1 applied on the way out of `create`
-/// and `update_params` — module doc's *The call site*. Stateless, like the
-/// factory it wraps.
-pub(crate) struct ThemedFactory(AppKitFactory);
-
-impl DesktopViewFactory for ThemedFactory {
-    fn create(&self, params_json: &str) -> Option<DesktopViewHandle> {
-        let handle = self.0.create(params_json)?;
-        pin(&handle, params_json);
-        Some(handle)
-    }
-
-    fn update_params(&self, view: &DesktopViewHandle, params_json: &str) {
-        self.0.update_params(view, params_json);
-        pin(view, params_json);
-    }
-
-    fn dispose(&self, view: DesktopViewHandle) {
-        self.0.dispose(view);
-    }
-}
-
-/// Pin the view `handle` names to the params' brightness. A no-op off the
-/// main thread: the wrapped factory already declined/ignored that call (its
-/// own module doc), and `NSView` may not be touched there.
-fn pin(handle: &DesktopViewHandle, params_json: &str) {
-    if MainThreadMarker::new().is_none() {
-        return;
-    }
-    // SAFETY: `handle` is either the +1-retained `NSView` `create` just
-    // produced (still owned by the handle, not yet given to the host), or the
-    // host's lend of that same pointer for the duration of `update_params` —
-    // live for this whole call in both cases, and only ever an `NSView`
-    // (`crate::appkit::factory`'s *Retain accounting*). We are on the main
-    // thread (checked above), and the reference does not outlive this call.
-    let view = unsafe { &*handle.as_ptr().cast::<NSView>() };
-    apply_brightness(view, brightness_is_dark(params_json));
-}
-
-/// Register [`ThemedFactory`] with the desktop platform-view registry under
-/// [`VIEW_TYPE`], once per process — `crate::appkit::factory`'s own
-/// registration contract (lazy, `Once`, first-registration-wins, an
-/// `AlreadyRegistered` answer logged at debug), for the L1-wrapped factory.
-pub(crate) fn ensure_registered() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        match register_view_factory(VIEW_TYPE, Arc::new(ThemedFactory(AppKitFactory))) {
-            Ok(()) => log::info!(
-                "frust-native-widgets: registered the macOS desktop view factory for {VIEW_TYPE:?}"
-            ),
-            Err(error) => log::debug!(
-                "frust-native-widgets: macOS desktop view factory not registered ({error}) — the \
-                 incumbent keeps {VIEW_TYPE:?}"
-            ),
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,17 +115,5 @@ mod tests {
     fn an_absent_dark_flag_degrades_to_light() {
         let absent = with_identity("button", 1, "\"text\":\"hi\"");
         assert!(!brightness_is_dark(&absent));
-    }
-
-    #[test]
-    fn the_themed_factory_declines_off_the_main_thread_like_the_one_it_wraps() {
-        // Same shape as `crate::appkit::factory`'s off-main test: a `cargo
-        // test` worker is off the process's main thread, so the wrapped
-        // `create` declines and the wrapper must pass that `None` through
-        // without touching a view.
-        if MainThreadMarker::new().is_some() {
-            return;
-        }
-        assert!(ThemedFactory(AppKitFactory).create("{}").is_none());
     }
 }

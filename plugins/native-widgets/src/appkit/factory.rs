@@ -51,6 +51,35 @@
 //!   out, one release in, net zero. A dead-slot view has no instance, so its
 //!   reclaimed `Retained` is its last reference.
 //!
+//! # Theme ladder L1: pinned inline, on every create and every update
+//!
+//! `create` pins the finished view's `NSAppearance`
+//! ([`theme::apply_brightness`]) to the params' brightness before handing it
+//! to the host — on **both** the real control view and the dead-slot
+//! placeholder, in one place, since both converge on the same local `view`
+//! before [`into_handle`] runs. `update_params` re-pins the instance resolved
+//! by slot id (module doc's *Which call carries the slot id*), never through
+//! the lent [`DesktopViewHandle`]. `crate::appkit::theme`'s module doc is the
+//! reference account of why `NSView.appearance` is a per-view property with
+//! no "construct against a themed context" step, the same shape
+//! `crate::apple::theme` documents for `overrideUserInterfaceStyle`; this
+//! section states the operational rule this module enforces.
+//!
+//! The iOS arm's on-device gate found the bug a create-only pin causes: a
+//! control culled off-screen and later RECREATED adopts whatever brightness
+//! is current at recreate time, while its never-culled siblings keep the one
+//! they were born under — so the two diverge (the reported repro drew a
+//! recreated switch's thumb accent-on-accent, i.e. invisible). This arm pins
+//! on every update from the start rather than waiting to reproduce the same
+//! bug locally: re-pinning per update makes "which appearance is this
+//! control pinned to" a function of the CURRENT theme, not of when the
+//! control happened to be (re)created, and makes an in-place brightness
+//! toggle re-theme platform chrome live. `Unchanged` updates re-pin too:
+//! brightness lives on the wire, not in any control's diffed `Props`, so a
+//! props-equal update can still carry a new brightness. Do not "restore
+//! symmetry" with Android's construction-time bake — the asymmetry belongs to
+//! the platforms (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions).
+//!
 //! # The failure contract: an empty view, never a declined create
 //!
 //! The desktop host treats a declined create (`None`) as terminal for that
@@ -87,9 +116,9 @@ use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 
-use super::NativeCtx;
+use super::{NativeCtx, theme};
 use crate::NativeWidgetError;
-use crate::runtime::{self, UpdateOutcome};
+use crate::runtime::{self, Params, UpdateOutcome};
 
 /// The desktop `view_type` string this factory registers under — the key the
 /// host resolves a slot's factory by, and therefore the api layer's macOS
@@ -120,6 +149,11 @@ impl DesktopViewFactory for AppKitFactory {
                 dead_slot_view(mtm)
             }
         };
+        // Theme ladder L1, on both paths above (module doc's *Theme ladder
+        // L1*): the real control view and the dead-slot placeholder alike are
+        // still owned here as a `Retained<NSView>`, so no raw-pointer deref is
+        // needed — pin before `into_handle` consumes it.
+        theme::apply_brightness(&view, theme::brightness_is_dark(params_json));
         into_handle(view)
     }
 
@@ -219,10 +253,25 @@ fn create_control(mtm: MainThreadMarker, params: &str) -> Option<Retained<NSView
 }
 
 /// The typed half of `update_params`.
+///
+/// Theme ladder L1: re-pins the updated slot's view on every `Applied` or
+/// `Unchanged` outcome (module doc's *Theme ladder L1*), resolved through the
+/// runtime instance by slot id — the params' `identity()`, same as the
+/// dispose lookup resolves by view identity — never through the lent
+/// [`DesktopViewHandle`] the caller ignores (module doc's *Which call carries
+/// the slot id*).
 fn update_control(mtm: MainThreadMarker, params: &str) {
+    let dark = theme::brightness_is_dark(params);
     let outcome = runtime::with_runtime(|runtime| {
         let mut ctx = NativeCtx::new(mtm);
-        runtime.update_params(&mut ctx, params)
+        let result = runtime.update_params(&mut ctx, params);
+        if let Ok(UpdateOutcome::Applied | UpdateOutcome::Unchanged) = result
+            && let Ok((_, slot_id)) = Params::new(params).identity()
+            && let Some(instance) = runtime.instance(slot_id)
+        {
+            theme::apply_brightness(instance.view().view(mtm), dark);
+        }
+        result
     });
     match outcome {
         Some(Ok(UpdateOutcome::Applied | UpdateOutcome::Unchanged)) => {}
