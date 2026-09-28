@@ -4,17 +4,18 @@
 //! `platform_view` slot no matter how many children it grows. It proves the
 //! [`NativeComponent`] trait works end to end — define → register → mount →
 //! create → update → dispose, with a real native hierarchy under one slot —
-//! with real device coverage on both platforms.
+//! with real native coverage on all three platform arms (Android, iOS,
+//! macOS).
 //!
 //! # Why the demo lives in the plugin and not in an example app
 //!
 //! **An app crate cannot implement [`NativeComponent`] today.** `create` has
-//! to name `jni::objects::JObject` (Android) and `objc2-ui-kit`'s classes
-//! (iOS) *in the implementing crate*, and this plugin re-exports neither FFI
-//! crate (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an
+//! to name `jni::objects::JObject` (Android), `objc2-ui-kit`'s classes (iOS)
+//! or `objc2-app-kit`'s (macOS) *in the implementing crate*, and this plugin
+//! re-exports none of those FFI crates (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an
 //! `examples/*` app on `frust` plus plugin crates only — a raw FFI dependency
 //! is not among them). So the demo ships here, where both FFI crates are
-//! already dependencies and all three target gates already run in CI; a
+//! already dependencies and all three target gates already run; a
 //! consuming app merely turns the feature on, calls
 //! [`register_demo_components`], and mounts the result. This proves the
 //! trait works, not that a third-party app author can write one — they still
@@ -24,20 +25,21 @@
 //!
 //! # The subtree, and who lays it out
 //!
-//! | | Android | iOS | non-mobile host |
-//! |---|---|---|---|
-//! | parent | `android.widget.LinearLayout` (vertical) | `UIView`, children at explicit frames | a recorded identity |
-//! | title | `android.widget.TextView` | `UILabel` | a recorded identity |
-//! | two buttons | `android.widget.Button` | `UIButton` (`System`) | recorded identities |
+//! | | Android | iOS | macOS | host (Linux/Windows/web) |
+//! |---|---|---|---|---|
+//! | parent | `android.widget.LinearLayout` (vertical) | `UIView`, children at explicit frames | layer-backed `NSView`, children at explicit frames | a recorded identity |
+//! | title | `android.widget.TextView` | `UILabel` | `NSTextField` (`labelWithString:`) | a recorded identity |
+//! | two buttons | `android.widget.Button` | `UIButton` (`System`) | `NSButton` (push bezel) | recorded identities |
 //!
 //! **The platform lays this out, and frust deliberately does not know the
 //! children exist** (`crate::component`'s *A component owns its own native
 //! subtree*): frust's wire carries one rect for the whole card. Android's
-//! `LinearLayout` measures and stacks its own children; the iOS arm assigns
-//! each child an explicit frame inside [`DEMO_CARD_WIDTH`] x
-//! [`DEMO_CARD_HEIGHT`], because this crate deliberately pulls in neither
-//! `UIStackView` nor any constraint API (`crate::apple::ctx`'s *Frame-setting
-//! layout only*). Mount the slot at exactly that size.
+//! `LinearLayout` measures and stacks its own children; the two Apple arms
+//! assign each child an explicit frame inside [`DEMO_CARD_WIDTH`] x
+//! [`DEMO_CARD_HEIGHT`], because this crate deliberately pulls in neither a
+//! stack view nor any constraint API (`crate::apple::ctx`'s and
+//! `crate::appkit::ctx`'s *Frame-setting layout only*). Mount the slot at
+//! exactly that size.
 //!
 //! # One slot, four handles, and a counted teardown
 //!
@@ -49,15 +51,17 @@
 //! - the **parent** is kept as a [`NativeChild`] on every arm — `update` is
 //!   handed only the state, never the [`NativeRoot`] the runtime owns, so it
 //!   needs its own way back to set the card's background, and the background
-//!   is a `UIView`-level call on iOS so the cross-platform handle suffices;
-//! - the **three children** keep their concrete types on iOS
-//!   (`Retained<UILabel>`/`Retained<UIButton>` — the shape
+//!   is a view-level call on both Apple arms so the cross-platform handle
+//!   suffices;
+//! - the **three children** keep their concrete types on the Apple arms
+//!   (`Retained<UILabel>`/`Retained<UIButton>` on iOS,
+//!   `Retained<NSTextField>`/`Retained<NSButton>` on macOS — the shape
 //!   [`ComponentCtx::retain_child`]'s own doc says to reach for first, since
-//!   `setText:`/`setTitle:forState:` are not `UIView`-level calls) and stay
-//!   [`NativeChild`]s everywhere else.
+//!   the caption setters are not view-level calls) and stay [`NativeChild`]s
+//!   everywhere else.
 //!
 //! Dropping either kind **is** the release — `DeleteGlobalRef` on Android,
-//! `Retained`'s own `Drop` on iOS — so this module's own host test counts the
+//! `Retained`'s own `Drop` on iOS and macOS — so this module's own host test counts the
 //! live handles back to zero rather than assuming it.
 //!
 //! # No event wiring, and why
@@ -122,13 +126,13 @@ pub const DEMO_CARD_HEIGHT: f64 = 160.0;
 /// number that must NOT show up as extra frust slots (frust sees one).
 pub const DEMO_CARD_CHILDREN: usize = 3;
 
-// The four geometry constants below are read by the two platform arms (Android
-// takes them as view padding / minimum heights, iOS as explicit child frames)
-// and by this module's own size test. A non-mobile host build reads none of
-// them, hence the per-item `allow` rather than a module-level one — anything
+// The four geometry constants below are read by the three platform arms
+// (Android takes them as view padding / minimum heights, iOS and macOS as
+// explicit child frames) and by this module's own size test. A host build with
+// no platform arm (Linux/Windows/web) reads none of them, hence the per-item `allow` rather than a module-level one — anything
 // else falling dead here still warns.
-/// The card's inner padding (logical px): the iOS arm's explicit child frames
-/// inset by it, Android's `LinearLayout` takes it as view padding.
+/// The card's inner padding (logical px): the Apple arms' explicit child
+/// frames inset by it, Android's `LinearLayout` takes it as view padding.
 #[allow(dead_code)]
 const CARD_PADDING: f64 = 8.0;
 
@@ -210,21 +214,27 @@ pub struct DemoCardState {
     buttons: [ButtonHandle; 2],
 }
 
-/// The title label's handle: its concrete UIKit class on iOS (`setText:` and
-/// `setTextColor:` are not `UIView`-level calls), the cross-platform
-/// [`NativeChild`] everywhere else.
+/// The title label's handle: its concrete class on the Apple arms (`setText:`/
+/// `setStringValue:` and the text colour are not `UIView`/`NSView`-level
+/// calls), the cross-platform [`NativeChild`] everywhere else.
 #[cfg(target_os = "ios")]
 type LabelHandle = objc2::rc::Retained<objc2_ui_kit::UILabel>;
 /// See the iOS arm's alias of the same name.
-#[cfg(not(target_os = "ios"))]
+#[cfg(target_os = "macos")]
+type LabelHandle = objc2::rc::Retained<objc2_app_kit::NSTextField>;
+/// See the iOS arm's alias of the same name.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
 type LabelHandle = NativeChild;
 
 /// A button's handle — the same split, for the same reason, as [`LabelHandle`]
-/// (`setTitle:forState:` is `UIButton`'s own).
+/// (`setTitle:forState:` is `UIButton`'s own, `setTitle:` `NSButton`'s).
 #[cfg(target_os = "ios")]
 type ButtonHandle = objc2::rc::Retained<objc2_ui_kit::UIButton>;
 /// See the iOS arm's alias of the same name.
-#[cfg(not(target_os = "ios"))]
+#[cfg(target_os = "macos")]
+type ButtonHandle = objc2::rc::Retained<objc2_app_kit::NSButton>;
+/// See the iOS arm's alias of the same name.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
 type ButtonHandle = NativeChild;
 
 /// Register every component this module ships with the calling thread's
@@ -635,13 +645,188 @@ mod platform {
     }
 }
 
-// --- the non-mobile host stand-in --------------------------------------------
+// --- macOS -------------------------------------------------------------------
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
 mod platform {
-    //! The host arm: the same create/update/dispose *plan*, recorded rather
-    //! than executed, so an ordinary `cargo test` on a machine with no JNI and
-    //! no Objective-C runtime can assert both the plan and the paired release
+    //! The AppKit arm: a plain layer-backed `NSView` with an `NSTextField`
+    //! title and two `NSButton`s at explicit frames — the iOS arm's card,
+    //! control for control, built through the same [`ComponentCtx`] calls.
+    //!
+    //! No stack view, no constraints: the desktop host positions a slot's view
+    //! by assigning `frame` (`crate::appkit::ctx`'s *Frame-setting layout
+    //! only*), and a subtree that installed constraints would fight it.
+    //!
+    //! # Bottom-left origin, pinned to the top
+    //!
+    //! A plain `NSView` is **not** flipped (its origin is bottom-left, where
+    //! `UIView`'s is top-left), and flipping it would mean a subclass — a new
+    //! class this arm deliberately does not add. So [`row_frame`] computes the
+    //! iOS arm's top-down rows and converts each to AppKit's bottom-up `y`
+    //! inside [`DEMO_CARD_HEIGHT`], and every child carries a flexible
+    //! *bottom* margin (`NSViewMinYMargin`, a springs-and-struts autoresizing
+    //! mask — frame arithmetic AppKit does on resize, not an Auto Layout
+    //! constraint), so a host `setFrame:` that changes the card's height (a
+    //! clip shrinking the frame) keeps the rows anchored to the top edge, as
+    //! the iOS arm's top-left frames are by construction.
+    //!
+    //! # Colours ride the controls' own shared setters
+    //!
+    //! The background and the title's ink go through
+    //! `crate::controls::platform`'s macOS `set_background_color`/
+    //! `set_text_color`, exactly as the iOS arm goes through that module's iOS
+    //! helpers — so the card re-themes the moment the macOS theme ladder (L2)
+    //! fills those helpers in, and until then renders in AppKit's stock
+    //! colours like the six controls do (each helper logs its skipped write at
+    //! debug level). The parent is made layer-backed here so the ladder's
+    //! `CALayer.backgroundColor` write has a layer to land on.
+
+    use objc2_app_kit::{
+        NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSButtonType, NSTextField, NSView,
+    };
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    use super::{
+        BUTTON_HEIGHT, CARD_PADDING, DEMO_CARD_HEIGHT, DEMO_CARD_WIDTH, DemoCard, DemoCardProps,
+        DemoCardState, FRAME_CAPACITY, ROW_GAP, TITLE_HEIGHT,
+    };
+    use crate::component::{ComponentCtx, NativeComponent, NativeRoot};
+    use crate::controls::platform::{set_background_color, set_text_color};
+
+    impl NativeComponent for DemoCard {
+        type Props = DemoCardProps;
+        type State = DemoCardState;
+
+        fn create(
+            &self,
+            ctx: &mut ComponentCtx<'_, '_, '_>,
+            props: &Self::Props,
+        ) -> Option<(NativeRoot, Self::State)> {
+            // The frame wrapper does nothing under ARC (`crate::appkit::ctx`);
+            // it is kept so this arm reads exactly like the other two.
+            ctx.with_local_frame(FRAME_CAPACITY, |ctx| {
+                let mtm = ctx.mtm();
+                let parent = NSView::new(mtm);
+                parent.setFrame(NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(DEMO_CARD_WIDTH, DEMO_CARD_HEIGHT),
+                ));
+                parent.setWantsLayer(true);
+                set_background_color(&parent, props.background_argb);
+
+                let label = NSTextField::labelWithString(&NSString::from_str(&props.title), mtm);
+                set_text_color(&label, props.title_argb);
+                place(&label, 0);
+                ctx.add_child(&parent, &label)?;
+
+                let mut buttons = Vec::with_capacity(2);
+                for (row, caption) in [props.primary.as_str(), props.secondary.as_str()]
+                    .into_iter()
+                    .enumerate()
+                {
+                    // `crate::controls::button`'s macOS construction: a
+                    // momentary push button with the standard push bezel.
+                    let button = NSButton::new(mtm);
+                    button.setButtonType(NSButtonType::MomentaryPushIn);
+                    button.setBezelStyle(NSBezelStyle::Push);
+                    button.setTitle(&NSString::from_str(caption));
+                    place(&button, row + 1);
+                    ctx.add_child(&parent, &button)?;
+                    buttons.push(button);
+                }
+                let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
+
+                // The parent is the one handle kept in the cross-platform
+                // shape: it only ever needs `NSView`-level setters, where the
+                // three children need their own classes' (module doc).
+                let root = ctx.retain_child(&parent)?;
+                Some((
+                    ctx.root(parent)?,
+                    DemoCardState {
+                        root,
+                        label,
+                        buttons: [primary, secondary],
+                    },
+                ))
+            })
+        }
+
+        fn update(
+            &self,
+            ctx: &mut ComponentCtx<'_, '_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) {
+            let mtm = ctx.mtm();
+            if old.background_argb != new.background_argb {
+                set_background_color(state.root.view(mtm), new.background_argb);
+            }
+            if old.title != new.title {
+                state.label.setStringValue(&NSString::from_str(&new.title));
+            }
+            if old.title_argb != new.title_argb {
+                set_text_color(&state.label, new.title_argb);
+            }
+            let captions = [
+                (&old.primary, &new.primary),
+                (&old.secondary, &new.secondary),
+            ];
+            for (button, (was, now)) in state.buttons.iter().zip(captions) {
+                if was != now {
+                    button.setTitle(&NSString::from_str(now));
+                }
+            }
+        }
+
+        fn dispose(&self, _ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
+            // Nothing to detach (module doc's *No event wiring*): ARC releases
+            // the parent's `NativeChild` and the three typed children as
+            // `state` drops on return, and the runtime releases the
+            // `NativeRoot` immediately afterwards.
+            log::debug!(
+                "frust-native-widgets demo: card disposed, releasing {} retained handles",
+                state.buttons.len() + 2
+            );
+        }
+    }
+
+    /// Give `view` stacked row `row`'s frame and pin it to the card's top
+    /// edge (module doc's *Bottom-left origin, pinned to the top*).
+    fn place(view: &NSView, row: usize) {
+        view.setFrame(row_frame(row));
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+    }
+
+    /// The frame of stacked row `row` (0 = the title, 1/2 = the buttons) inside
+    /// the card's declared size — the iOS arm's top-down rows, converted to
+    /// AppKit's bottom-left origin. The whole of this arm's layout.
+    fn row_frame(row: usize) -> NSRect {
+        let width = DEMO_CARD_WIDTH - 2.0 * CARD_PADDING;
+        let (top, height) = match row {
+            0 => (CARD_PADDING, TITLE_HEIGHT),
+            n => (
+                CARD_PADDING
+                    + TITLE_HEIGHT
+                    + (n as f64) * ROW_GAP
+                    + ((n - 1) as f64) * BUTTON_HEIGHT,
+                BUTTON_HEIGHT,
+            ),
+        };
+        let y = DEMO_CARD_HEIGHT - top - height;
+        NSRect::new(NSPoint::new(CARD_PADDING, y), NSSize::new(width, height))
+    }
+}
+
+// --- the no-platform host stand-in -------------------------------------------
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+mod platform {
+    //! The host arm — Linux/Windows/web, the targets with no native-widgets
+    //! platform arm (macOS has the real AppKit arm above): the same
+    //! create/update/dispose *plan*, recorded rather than executed, so an
+    //! ordinary `cargo test` on a machine with no JNI and no Objective-C
+    //! runtime can assert both the plan and the paired release
     //! (`crate::component`'s host `ComponentCtx`).
 
     use super::{DemoCard, DemoCardProps, DemoCardState, FRAME_CAPACITY};
@@ -749,9 +934,14 @@ mod platform {
 
 // Gated on the host arm, not merely on `test` (the gate every other test module
 // in this crate carries): these drive the card through the real runtime using
-// the host stand-in context, which a platform build replaces with the
-// device-only types.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+// the host stand-in context, which a platform build — macOS included, since it
+// has the real AppKit arm — replaces with the platform-only types. So on a Mac
+// they are skipped, and they run on Linux/Windows hosts exactly as before; the
+// platform-neutral size check lives in `layout_tests` below and runs everywhere.
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_os = "macos"))
+))]
 mod tests {
     use std::rc::Rc;
 
@@ -916,10 +1106,18 @@ mod tests {
             assert_eq!(live_child_count(), 0, "cycle {slot} released everything");
         }
     }
+}
+
+// Platform-neutral: this checks only the Rust-side geometry constants every
+// arm lays out against, so it runs on every host — macOS included, where the
+// runtime-driving `tests` above are skipped.
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
 
     #[test]
     fn the_card_declares_a_slot_size_its_own_rows_fit_inside() {
-        // The iOS arm lays its children out at explicit frames, so a caller
+        // The Apple arms lay their children out at explicit frames, so a caller
         // mounting the slot at the published size must actually have room for
         // them — the checkable half of "look at the phone".
         let stacked = CARD_PADDING

@@ -14,14 +14,14 @@
 //! the app-facing `api` builders, and the three platform arms' factory glue.
 //! Each control carries one platform half per arm — a
 //! `#[cfg(target_os = "android")] mod platform`, a
-//! `#[cfg(target_os = "ios")] mod platform` and (so far only `Button`) a
+//! `#[cfg(target_os = "ios")] mod platform` and a
 //! `#[cfg(target_os = "macos")] mod platform`, side by side in the same file,
 //! executing the same shared setter plan and
 //! reporting a tap/toggle/drag back to the app through the same event
 //! dispatch on every platform (`crate::apple::events`'s and
 //! `crate::appkit::events`' Rust target-action objects, mirroring Android's
-//! shared listener). The macOS arm is being built out control by control:
-//! a kind it does not register yet gets the factory's empty dead-slot view.
+//! shared listener). The macOS arm registers all six kinds; its theme-ladder
+//! setters are still placeholders (`crate::controls::platform`'s macOS half).
 //! The theme ladder's Apple
 //! arm is also in: L1 (`crate::apple::theme`) pins brightness via
 //! `overrideUserInterfaceStyle` at control-creation time; L2 applies the
@@ -136,9 +136,13 @@ pub use component::{
 // The demo composite — ONE `NativeComponent` owning a real
 // native subtree, behind the NON-default `demo-components` feature (which
 // enables `frust-api` above, since a component is only mountable through that
-// facade glue). It lives in this crate rather than in an example app because an
-// app crate cannot implement the trait without raw `jni`/`objc2-ui-kit` deps of
-// its own; see the module's own doc for what that does and does not prove.
+// facade glue). Three real arms build it — Android (`LinearLayout` + `TextView`
+// + `Button`s), iOS (`UIView` + `UILabel` + `UIButton`s) and macOS (`NSView` +
+// `NSTextField` + `NSButton`s) — and a Linux/Windows/web host compiles a
+// recorded stand-in its host tests assert against. It lives in this crate
+// rather than in an example app because an app crate cannot implement the trait
+// without raw `jni`/`objc2-ui-kit`/`objc2-app-kit` deps of its own; see the
+// module's own doc for what that does and does not prove.
 #[cfg(feature = "demo-components")]
 pub mod demo;
 // Flat re-export, same convention as `api`/`component` above.

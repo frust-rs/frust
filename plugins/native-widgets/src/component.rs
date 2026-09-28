@@ -107,8 +107,8 @@
 //! native children — and ship it as ONE slot, which is what stops a composite
 //! from leaking three slots to the consuming app. Four calls on
 //! [`ComponentCtx`], which documents each, are the entire surface: build a
-//! child (`ComponentCtx::new_view`, or an `objc2-ui-kit` constructor off
-//! `ComponentCtx::mtm` — the one `#[cfg]`-gated pair), attach it
+//! child (`ComponentCtx::new_view`, or an `objc2-ui-kit`/`objc2-app-kit`
+//! constructor off `ComponentCtx::mtm` — the one `#[cfg]`-gated pair), attach it
 //! ([`ComponentCtx::add_child`]), keep talking to it
 //! ([`ComponentCtx::retain_child`] → [`NativeChild`]), and bound the JNI
 //! reference table ([`ComponentCtx::with_local_frame`], a no-op under ARC). The
@@ -127,10 +127,10 @@
 //! **Teardown releases children with the parent**, so peak global refs return
 //! to zero over a dispose cycle by construction: a merely *attached* child
 //! needs no handle at all (Android's `ViewGroup` holds its own strong
-//! reference, UIKit retains a subview) and dies with the parent, while a child
-//! you keep talking to lives in [`NativeComponent::State`] as a
+//! reference, UIKit and AppKit retain a subview) and dies with the parent,
+//! while a child you keep talking to lives in [`NativeComponent::State`] as a
 //! [`NativeChild`], whose `Drop` *is* the release (`DeleteGlobalRef` on
-//! Android, `Retained`'s own `Drop` on iOS). The leak bar is the six controls'
+//! Android, `Retained`'s own `Drop` on iOS and macOS). The leak bar is the six controls'
 //! own; `tests::a_component_builds_a_native_subtree_and_releases_every_child`
 //! counts refs rather than merely surviving the cycle.
 //!
@@ -762,24 +762,16 @@ impl ComponentCtx<'_, '_, '_> {
     }
 }
 
-/// The macOS arm: the main-thread proof — AppKit's whole escape hatch, exactly
-/// as on iOS — plus, for now, an **interim** copy of the host stand-in's
-/// identity-based helpers instead of real `NSView` ones.
+/// The macOS arm: the `NSView` twin of the iOS block above, method for method
+/// — the main-thread proof (AppKit's whole escape hatch, exactly as on iOS),
+/// `root`/`add_child`/`retain_child` over `Retained<NSView>`, and the same
+/// run-`f`-and-nothing-else local frame.
 ///
-/// # Why the helpers are the host's shape, for now
-///
-/// This crate's one component, the non-default `demo-components` `DemoCard`
-/// (`crate::demo`), has three `mod platform` arms and the third is the host
-/// stand-in, cfg'd `not(any(android, ios))` — so a macOS build with the feature
-/// on (the playground's) compiles that stand-in, which is written against
-/// `record`/`root(u64)`/`add_child(u64, u64)`/`retain_child(u64)`. Keeping that
-/// same surface here is what keeps such a build compiling until the card's own
-/// AppKit arm lands; the composite then shows an empty (attachable) view — the
-/// recorded plan goes to the debug log, nothing is rendered. When the AppKit
-/// `DemoCard` arm lands, these four become the iOS mirror over `NSView`
-/// (`root(Retained<NSView>)`, `add_child(&NSView, &NSView)`,
-/// `retain_child(&NSView)`, backed by `crate::appkit::NativeCtx::add_child`)
-/// and [`NativeChild`] carries a `Retained<NSView>`.
+/// `add_child` goes through `crate::appkit::NativeCtx::add_child`
+/// (`addSubview:`), the seam `crate::appkit::ctx`'s *Hierarchy* section keeps
+/// for exactly this caller. There is no host-style `record` here: this arm
+/// builds real views, and the `demo-components` `DemoCard` has its own AppKit
+/// `mod platform` (`crate::demo`).
 ///
 /// No listener is attached to a component's views on this arm either
 /// ([`NativeComponent::on_event`]'s display-only scope holds on all three).
@@ -792,43 +784,60 @@ impl ComponentCtx<'_, '_, '_> {
         self.inner.mtm()
     }
 
-    /// Interim (see this block's doc): log one would-be platform call at debug
-    /// level instead of recording it — there is no test sink on this arm.
-    pub fn record(&mut self, call: impl Into<String>) {
-        log::debug!(
-            "frust-native-widgets: macOS component stand-in call (not rendered): {}",
-            call.into()
-        );
-    }
-
-    /// Interim (see this block's doc): the slot's root is an empty `NSView`,
-    /// so the slot stays attachable and draws nothing; `identity` is only
-    /// logged.
-    pub fn root(&mut self, identity: u64) -> Option<NativeRoot> {
+    /// Take this slot's root view. ARC owns it from here — `Retained`'s own
+    /// `Drop` is the release, so there is no paired-delete discipline on this
+    /// arm.
+    ///
+    /// A typed view converts with objc2's own upcast, e.g.
+    /// `Retained::clone(&button).into_super().into_super()` for an `NSButton`
+    /// (`NSButton` → `NSControl` → `NSView`). Answers `Option` only so a
+    /// component reads the same on every platform (`let root =
+    /// ctx.root(view)?;`); this arm never latches here.
+    pub fn root(&mut self, view: objc2::rc::Retained<objc2_app_kit::NSView>) -> Option<NativeRoot> {
         let mtm = self.inner.mtm();
-        self.record(format!("root {identity}"));
-        Some(NativeRoot(NativeView::new(
-            objc2_app_kit::NSView::new(mtm),
-            mtm,
-        )))
+        Some(NativeRoot(NativeView::new(view, mtm)))
     }
 
-    /// Interim (see this block's doc): log a would-be `addSubview`.
-    pub fn add_child(&mut self, parent: u64, child: u64) -> Option<()> {
-        self.record(format!("addChild {parent} <- {child}"));
+    /// `parent.addSubview(child)` — attach one native child, the subtree call
+    /// (module doc's *A component owns its own native subtree*).
+    ///
+    /// AppKit retains a subview, so a child you never touch again needs no
+    /// handle of yours at all — it is released when the parent is. Answers
+    /// `Option` only so a component reads the same on every platform; this
+    /// arm never latches here.
+    ///
+    /// A typed view passes with objc2's own upcast, e.g. `&label` for a
+    /// `Retained<NSTextField>` derefs through `NSView`'s superclass chain.
+    pub fn add_child(
+        &mut self,
+        parent: &objc2_app_kit::NSView,
+        child: &objc2_app_kit::NSView,
+    ) -> Option<()> {
+        self.inner.add_child(parent, child);
         Some(())
     }
 
-    /// Interim (see this block's doc): a counted stand-in child handle, the
-    /// same one the host arm hands out.
-    pub fn retain_child(&mut self, identity: u64) -> Option<NativeChild> {
-        self.record(format!("retainChild {identity}"));
-        Some(NativeChild::new(identity))
+    /// Retain a child view as a [`NativeChild`] the component keeps in its
+    /// [`NativeComponent::State`], released when `State` drops (module doc's
+    /// *Teardown*).
+    ///
+    /// ARC already does this for any `Retained<T>` a component keeps itself,
+    /// with the child's own concrete type preserved — reach for that first.
+    /// This exists so a component that wants one `State` shape on every arm
+    /// can name [`NativeChild`] on this one too. Never latches.
+    pub fn retain_child(&mut self, view: &objc2_app_kit::NSView) -> Option<NativeChild> {
+        use objc2::Message as _;
+        Some(NativeChild(view.retain()))
     }
 
-    /// The Apple counterpart of Android's local-frame wrapper: runs `f` and
-    /// nothing else — ARC leaves no reference table to bound — handing it this
-    /// very context so the error latch is shared, as on every arm.
+    /// The Apple counterpart of Android's local-frame wrapper: it runs `f`
+    /// and nothing else.
+    ///
+    /// There is no reference table to bound here — a `Retained`'s own `Drop`
+    /// is the release (`crate::appkit::ctx`'s module doc) — so `capacity` is
+    /// accepted and ignored. Handing the closure this very context is what
+    /// makes the error latch shared, exactly as on the iOS arm: `failed()`
+    /// reads the same inside the frame as outside it on every arm.
     pub fn with_local_frame<T>(
         &mut self,
         _capacity: usize,
@@ -850,7 +859,7 @@ impl ComponentCtx<'_, '_, '_> {
     }
 
     /// Take a stand-in root view with the given identity — the host mirror of
-    /// the two platform arms' `root`, where `identity` plays the role
+    /// the three platform arms' `root`, where `identity` plays the role
     /// `Env::is_same_object` plays on Android (what a dispose resolves
     /// against).
     pub fn root(&mut self, identity: u64) -> Option<NativeRoot> {
@@ -858,7 +867,7 @@ impl ComponentCtx<'_, '_, '_> {
     }
 
     /// Record one would-be `addView`/`addSubview` — the host mirror of the
-    /// two platform arms' `add_child`, so a subtree's *plan* is assertable
+    /// three platform arms' `add_child`, so a subtree's *plan* is assertable
     /// (which child went under which parent, in what order) on a machine with
     /// no view hierarchy at all.
     pub fn add_child(&mut self, parent: u64, child: u64) -> Option<()> {
@@ -867,7 +876,7 @@ impl ComponentCtx<'_, '_, '_> {
     }
 
     /// Take a stand-in retained child handle — the host mirror of Android's
-    /// global reference and iOS's `Retained`.
+    /// global reference and the Apple arms' `Retained`.
     ///
     /// Live handles are counted process-thread-wide (this module's
     /// crate-private `live_child_count`), so a host test asserts the paired
@@ -901,7 +910,7 @@ impl ComponentCtx<'_, '_, '_> {
 
 /// The root native view a [`NativeComponent::create`] hands back — an opaque
 /// handle the runtime retains for the slot and releases on dispose (Android:
-/// the paired global-ref delete; iOS: ARC).
+/// the paired global-ref delete; iOS and macOS: ARC).
 ///
 /// Built only through [`ComponentCtx::root`], so the platform handle type
 /// itself never has to appear in a component's signature; a component that
@@ -921,7 +930,8 @@ impl NativeRoot {
 /// that child later (module doc's *A component owns its own native subtree*).
 ///
 /// Built only through [`ComponentCtx::retain_child`]. **Dropping it is the
-/// release** — `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS —
+/// release** — `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS and
+/// macOS —
 /// and `State` is dropped immediately after [`NativeComponent::dispose`]
 /// returns, so a child is released with its parent by construction rather
 /// than by remembering to.
@@ -931,15 +941,15 @@ impl NativeRoot {
 pub struct NativeChild(ChildHandle);
 
 /// [`NativeChild`]'s per-platform payload: a global reference on Android, an
-/// ARC retain on iOS, a counted stand-in on a non-mobile host — macOS included
-/// for now (the interim surface documented on its `ComponentCtx` block), and
-/// the reason the stand-in items below stay gated `not(any(android, ios))`
-/// rather than excluding macOS too.
+/// ARC retain on iOS (`UIView`) and macOS (`NSView`), a counted stand-in on a
+/// host with no platform arm (Linux/Windows/web).
 #[cfg(target_os = "android")]
 type ChildHandle = jni::refs::Global<jni::objects::JObject<'static>>;
 #[cfg(target_os = "ios")]
 type ChildHandle = objc2::rc::Retained<objc2_ui_kit::UIView>;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
+type ChildHandle = objc2::rc::Retained<objc2_app_kit::NSView>;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 type ChildHandle = HostChild;
 
 #[cfg(target_os = "android")]
@@ -962,7 +972,18 @@ impl NativeChild {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
+impl NativeChild {
+    /// The retained child, for the `objc2-app-kit` setters a component's
+    /// `update` calls on it. Takes the same main-thread proof
+    /// [`AppKitHandle::view`](crate::registry::appkit::AppKitHandle::view)
+    /// does — a typestate guard, not a runtime cost.
+    pub fn view(&self, _mtm: objc2::MainThreadMarker) -> &objc2_app_kit::NSView {
+        &self.0
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 impl NativeChild {
     /// A counted stand-in handle with the given identity.
     fn new(identity: u64) -> Self {
@@ -980,19 +1001,19 @@ impl NativeChild {
 /// dropped, exactly as Android's `Global` issues its `DeleteGlobalRef` — the
 /// leak bar `crate::registry`'s own `CountingHandle` established, one table
 /// over.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 pub(crate) struct HostChild {
     identity: u64,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 impl Drop for HostChild {
     fn drop(&mut self) {
         LIVE_CHILDREN.with(|live| live.set(live.get().saturating_sub(1)));
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 thread_local! {
     /// How many host stand-in child handles are alive on this thread — the
     /// mirror of ART's live-global-ref count ("52 at peak → 0 after the
@@ -1004,7 +1025,7 @@ thread_local! {
 
 /// How many retained subtree children are currently alive — the host arm's
 /// leak bar, which every create/dispose cycle must return to `0`.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 #[allow(dead_code)] // the leak bar's only caller is this module's own tests
 pub(crate) fn live_child_count() -> usize {
     LIVE_CHILDREN.with(|live| live.get())
