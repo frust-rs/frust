@@ -332,6 +332,125 @@ pub(crate) mod platform {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSTextField` and apply the same planned
+    //! setters the Android and iOS halves do.
+    //!
+    //! # `labelWithString:` already lands on `platform_default`
+    //!
+    //! Unlike `Button` (module doc's *A momentary push button with the push
+    //! bezel*) and `Image` (below), this control needs no construction-time
+    //! normalization: `NSTextField::labelWithString:` is documented to return
+    //! a field that is already non-editable, non-selectable, borderless
+    //! (`isBezeled` false) and paints no background (`drawsBackground`
+    //! false) — exactly [`LabelProps::platform_default`]'s empty/enabled
+    //! state, with nothing left for `create` to force before the diffed plan
+    //! runs. `create` still passes an empty string to the constructor rather
+    //! than `props.text` directly, so a non-empty caption plans through
+    //! [`Setter::Text`] like every other field, the same "one code path for
+    //! create and update" shape [`super`] documents.
+    //!
+    //! # One accepted platform difference: single line, not wrapping
+    //!
+    //! `labelWithString:` produces a **non-wrapping** field (Apple's own
+    //! doc), where a fresh Android `TextView` wraps to as many lines as its
+    //! box allows and the iOS arm normalizes `UILabel` to the same shape
+    //! (`numberOfLines = 0`, this file's iOS module doc). `LabelProps` has no
+    //! line-count field on any platform — the iOS fix targets UIKit's
+    //! constructor default directly, not a modelled property — and AppKit's
+    //! wrapping label is a *different* constructor
+    //! (`wrappingLabelWithString:`), not a post-construction flag this arm
+    //! can flip afterward without rebuilding the field. This control
+    //! therefore stays single-line on macOS for now: a real, accepted
+    //! per-platform capability difference (`docs/PLUGINS_CODE_STANDARDS.md`'s
+    //! "a platform capability gap is recorded per-platform" rule), not a
+    //! defect — worth a `docs/LIMITATIONS.md` entry, not a code fix here.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSTextField;
+    use objc2_foundation::NSString;
+
+    use super::{KIND, Label, LabelProps};
+    use crate::NativeWidgetError;
+    use crate::appkit::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live label's retained state — the same shape as `ButtonState`
+    /// (`button.rs`'s macOS arm): the typed view beside the runtime's own
+    /// `AppKitHandle` reference, needed here because `update` calls
+    /// `NSTextField`'s own `setStringValue:`/`setFont:`, which an untyped
+    /// `NSView` handle could not reach. No target — this control emits no
+    /// events (module doc, top of file).
+    pub(crate) struct LabelState {
+        view: Retained<NSTextField>,
+    }
+
+    impl NativeWidget for Label {
+        type Props = LabelProps;
+        type State = LabelState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            LabelProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            let plan = LabelProps::plan(&LabelProps::platform_default(props.slot), props);
+            apply_all(&view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((handle, LabelState { view }))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(&state.view, &LabelProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            _state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Display-only: nothing attached, and dropping the state releases
+            // its retain.
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — the same order contract the
+    /// other two arms keep.
+    fn apply_all(view: &NSTextField, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSTextField, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Text(text) => view.setStringValue(&NSString::from_str(text)),
+            Setter::Enabled(enabled) => platform::set_enabled(view, enabled),
+            Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
+            Setter::TextColor(argb) => platform::set_text_color(view, argb),
+            Setter::TextSizeSp(sp) => platform::set_text_size(view, sp),
+            Setter::Typeface(face) => platform::set_typeface(view, face),
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

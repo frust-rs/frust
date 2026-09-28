@@ -147,6 +147,39 @@ impl Fit {
             Self::Center => UIViewContentMode::Center,
         }
     }
+
+    /// The `NSImageScaling` this fit selects — the AppKit counterpart of
+    /// [`Self::content_mode`], but **not** a one-to-one mapping the way the
+    /// iOS one is:
+    ///
+    /// | [`Fit`] | `NSImageScaling` | Notes |
+    /// |---|---|---|
+    /// | [`Self::Contain`] | `ScaleProportionallyUpOrDown` | Aspect kept, fits inside the box, scales up or down as needed — AppKit's closest primitive to `FIT_CENTER`/`ScaleAspectFit`. |
+    /// | [`Self::Fill`] | `ScaleAxesIndependently` | Aspect ignored, fills the box on both axes — matches `FIT_XY`/`ScaleToFill` exactly. |
+    /// | [`Self::Center`] | `ScaleNone` | No scaling at all, centred by `NSImageView`'s own default `imageAlignment` — matches `CENTER`/`Center` exactly. |
+    /// | [`Self::Cover`] | `ScaleProportionallyUpOrDown` (same as [`Self::Contain`]) | **Degraded, not equivalent** — see below. |
+    ///
+    /// `NSImageScaling` has no "fill the box, keep aspect, crop the
+    /// overflow" case at all — `CENTER_CROP`/`ScaleAspectFill`'s exact
+    /// behaviour needs custom drawing this control does not do. [`Self::Cover`]
+    /// therefore degrades to the same letterboxed constant as
+    /// [`Self::Contain`] rather than silently stretching
+    /// (`ScaleAxesIndependently`) or leaving the image unscaled
+    /// (`ScaleNone`), both worse approximations of "fill" than a letterbox.
+    /// A real, accepted per-platform capability gap
+    /// (`docs/PLUGINS_CODE_STANDARDS.md`'s "a platform capability gap is
+    /// recorded per-platform, never corrected onto the platform that
+    /// doesn't have it" rule) — worth a `docs/LIMITATIONS.md` entry, not a
+    /// custom-drawing workaround here.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn image_scaling(self) -> objc2_app_kit::NSImageScaling {
+        use objc2_app_kit::NSImageScaling;
+        match self {
+            Self::Contain | Self::Cover => NSImageScaling::ScaleProportionallyUpOrDown,
+            Self::Fill => NSImageScaling::ScaleAxesIndependently,
+            Self::Center => NSImageScaling::ScaleNone,
+        }
+    }
 }
 
 /// The encoded bytes a slot should show, compared by **identity** (module
@@ -697,6 +730,170 @@ pub(crate) mod platform {
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(&state.view, label, mtm);
             }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSImageView` and apply the same planned
+    //! setters the Android and iOS halves do.
+    //!
+    //! # Two construction-time normalizations, one fewer than iOS
+    //!
+    //! 1. **`imageScaling`.** [`ImageProps::platform_default`] describes the
+    //!    fresh Android `ImageView` — `FIT_CENTER`, i.e. [`Fit::Contain`] —
+    //!    and the create plan diffs against that default, so a slot asking
+    //!    for the platform default plans **no** [`Setter::ScaleType`] at all.
+    //!    A fresh `NSImageView` scales differently
+    //!    (`NSImageScaling::ScaleProportionallyDown`, which never scales
+    //!    *up*), so `create` sets [`Fit::image_scaling`]'s value for the
+    //!    shared default explicitly, the same shape `image.rs`'s iOS module
+    //!    doc names (`slider.rs`'s "normalize in `create`, then diff against
+    //!    the shared default" shape).
+    //! 2. **`imageFrameStyle`.** A programmatically constructed
+    //!    `NSImageView` already frames nothing
+    //!    (`NSImageFrameStyle::None`), matching Android's borderless
+    //!    `ImageView` and iOS's borderless `UIImageView` — but pinned
+    //!    explicitly at `create` rather than left to whatever the
+    //!    constructor happens to default to, since no `Setter` names it (no
+    //!    `Props` field does either) and nothing else would re-assert it if
+    //!    a future AppKit release changed the constructor's own default.
+    //!
+    //! No `clipsToBounds` equivalent here: that iOS normalization exists to
+    //! stop [`Fit::Cover`]'s crop from spilling onto siblings, and this arm's
+    //! [`Fit::Cover`] degrades to a letterbox instead of a crop
+    //! ([`Fit::image_scaling`]'s doc) — there is no overflow to clip in the
+    //! first place.
+    //!
+    //! # No tint-needs-a-template-image indirection
+    //!
+    //! iOS's `ImageState` (this file's iOS `platform` module doc's *The tint
+    //! needs the image to be a template*) keeps the decoded
+    //! original around separately from the tinted view because
+    //! `UIImageView.tintColor` only affects a `UIImage` whose rendering mode
+    //! is `AlwaysTemplate`. `NSImageView.contentTintColor` (theme ladder L2,
+    //! pending — [`Setter::ImageTint`] below routes through the same
+    //! `platform::set_tint` placeholder every other control's tint setter
+    //! does) applies directly to whatever `NSImage` is already installed, no
+    //! rendering-mode swap needed, so this arm's state carries only the view
+    //! and the publish-table hold — no decoded-original/tinted-flag pair to
+    //! maintain.
+
+    use objc2::AnyThread;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSImage, NSImageFrameStyle, NSImageView};
+    use objc2_foundation::NSData;
+
+    use super::{Image, ImageProps, KIND, claim_bytes, release_bytes};
+    use crate::NativeWidgetError;
+    use crate::appkit::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::registry::SlotId;
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live image's retained state.
+    pub(crate) struct ImageState {
+        view: Retained<NSImageView>,
+        /// Which slot's publish-table hold this instance took in `create`
+        /// ([`claim_bytes`]) and gives back in `dispose` ([`release_bytes`]),
+        /// the same accounting the Android and iOS arms keep.
+        slot: SlotId,
+    }
+
+    impl NativeWidget for Image {
+        type Props = ImageProps;
+        type State = ImageState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            ImageProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSImageView::new(mtm);
+            let default = ImageProps::platform_default(props.slot);
+            // Module doc's *Two construction-time normalizations*. The fit is
+            // read off the shared default rather than named again here, so a
+            // change to `ImageProps::platform_default` cannot leave the
+            // normalization and the diff baseline disagreeing.
+            view.setImageScaling(default.fit.image_scaling());
+            view.setImageFrameStyle(NSImageFrameStyle::None);
+            let plan = ImageProps::plan(&default, props);
+            apply_all(&view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            // Claimed last, mirroring the other two arms: an earlier failure
+            // would return before taking a hold nothing would ever release.
+            claim_bytes(props.slot);
+            Ok((
+                handle,
+                ImageState {
+                    view,
+                    slot: props.slot,
+                },
+            ))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(&state.view, &ImageProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Give back this instance's hold on the slot's bytes; the payload
+            // is dropped only when the last holder is gone (the runtime
+            // creates a replacement *before* disposing what it replaced).
+            // Dropping the state then releases its retain.
+            release_bytes(state.slot);
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — the same order contract the
+    /// other two arms keep.
+    fn apply_all(view: &NSImageView, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSImageView, setter: &Setter<'_>) {
+        match *setter {
+            Setter::ImageBytes(bytes) => {
+                let image = bytes.as_slice().and_then(|raw| {
+                    NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(raw))
+                });
+                if image.is_none() && bytes.as_slice().is_some() {
+                    // `initWithData:` returning `None` is its own documented
+                    // contract for a payload it cannot read — a bad image
+                    // clears the view, it never kills the slot (the same
+                    // degrade `BitmapFactory.decodeByteArray`/
+                    // `UIImage.imageWithData:` get on the other two arms).
+                    log::warn!(
+                        "frust-native-widgets: macOS NSImage could not decode {} image byte(s) — \
+                         clearing the view",
+                        bytes.len()
+                    );
+                }
+                view.setImage(image.as_deref());
+            }
+            Setter::ScaleType(fit) => view.setImageScaling(fit.image_scaling()),
+            Setter::ImageTint(argb) => platform::set_tint(view, "ImageTint", argb),
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
             ref other => platform::warn_unexpected_setter(KIND, other),
         }
     }
