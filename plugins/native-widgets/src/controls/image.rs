@@ -780,6 +780,53 @@ pub(crate) mod platform {
     //! rendering-mode swap needed, so this arm's state carries only the view
     //! and the publish-table hold — no decoded-original/tinted-flag pair to
     //! maintain.
+    //!
+    //! # `DYLD_LIBRARY_PATH` can take ImageIO's codecs away
+    //!
+    //! ImageIO links its PNG/JPEG/TIFF/GIF/JPEG-2000/Radiance codecs as
+    //! private dylibs (`ImageIO.framework/Versions/A/Resources/libPng.dylib`
+    //! and five siblings, [`IMAGEIO_CODEC_LEAVES`]). dyld resolves every
+    //! install name by **leaf name** through `DYLD_LIBRARY_PATH` first, and
+    //! APFS compares names case-insensitively, so a directory holding
+    //! Homebrew's `libpng.dylib`/`libjpeg.dylib`/`libtiff.dylib`/
+    //! `libgif.dylib` (e.g. `/opt/homebrew/lib`) silently replaces ImageIO's
+    //! copies at launch. Every export of ImageIO's codec dylibs is
+    //! `__cg_`-prefixed (`__cg_png_create_read_struct`, …), which no
+    //! third-party build provides, so dyld binds those imports to its
+    //! missing-symbol sentinel `0xbad4007`. The process then runs normally
+    //! until the first decode: `-[NSImage initWithData:]` →
+    //! `CGImageSourceCopyPropertiesAtIndex` →
+    //! `PNGReadPlugin::InitializePluginData` branches to `0xbad4007`, and the
+    //! host dies with `SIGBUS` (`EXC_ARM_DA_ALIGN`, `pc = x16 = 0xbad4007`).
+    //! No ImageIO entry point avoids this: `NSBitmapImageRep` and a bare
+    //! `CGImageSource` crash the same way, with or without a running
+    //! `NSApplication`. `DYLD_FALLBACK_LIBRARY_PATH` is harmless, because it
+    //! is only consulted when the real path is missing, and ImageIO's codecs
+    //! are always in the shared cache.
+    //!
+    //! This happened for real: a `~/.zshenv` exporting
+    //! `DYLD_LIBRARY_PATH="/opt/homebrew/lib:…"` crashed every playground
+    //! `cargo run` launched straight from zsh as soon as its Image slot was
+    //! created. Launches through a SIP-protected binary (`nohup`, `env`)
+    //! never crashed, because dyld prunes `DYLD_*` for those, so the child
+    //! never inherits it. That is why the crash looked intermittent.
+    //!
+    //! A process in that state has no system image decoder at all, so
+    //! [`decode`] checks first ([`shadowed_codec`], once per process). It
+    //! mirrors dyld's own lookup: each `DYLD_LIBRARY_PATH` entry joined with
+    //! each codec leaf, then an existence check. On a hit it refuses the
+    //! ImageIO call and warns once, naming the shadowing file, instead of
+    //! letting the host crash. The view is left empty, which is the same
+    //! degrade an undecodable payload gets. An environment that still
+    //! *shows* `DYLD_*` belongs to a process dyld honoured it for: for a
+    //! restricted process (SIP platform binary, hardened runtime without the
+    //! `allow-dyld-environment-variables` entitlement) dyld prunes those
+    //! variables before `main`, so the check does not false-positive on a
+    //! hardened app.
+
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
 
     use objc2::AnyThread;
     use objc2::rc::Retained;
@@ -874,27 +921,140 @@ pub(crate) mod platform {
     fn apply(view: &NSImageView, setter: &Setter<'_>) {
         match *setter {
             Setter::ImageBytes(bytes) => {
-                let image = bytes.as_slice().and_then(|raw| {
-                    NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(raw))
-                });
-                if image.is_none() && bytes.as_slice().is_some() {
-                    // `initWithData:` returning `None` is its own documented
-                    // contract for a payload it cannot read — a bad image
-                    // clears the view, it never kills the slot (the same
-                    // degrade `BitmapFactory.decodeByteArray`/
-                    // `UIImage.imageWithData:` get on the other two arms).
-                    log::warn!(
-                        "frust-native-widgets: macOS NSImage could not decode {} image byte(s) — \
-                         clearing the view",
-                        bytes.len()
-                    );
-                }
+                let image = bytes.as_slice().and_then(decode);
                 view.setImage(image.as_deref());
             }
             Setter::ScaleType(fit) => view.setImageScaling(fit.image_scaling()),
             Setter::ImageTint(argb) => platform::set_tint(view, "ImageTint", argb),
             Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
             ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+
+    /// Decode `raw` into an `NSImage`, or `None` (with a warning) when there
+    /// is nothing to show. Never calls into ImageIO in a process whose codecs
+    /// `DYLD_LIBRARY_PATH` replaced (module doc), because there it would crash.
+    fn decode(raw: &[u8]) -> Option<Retained<NSImage>> {
+        if shadowed_codec().is_some() {
+            // Already warned, once, with the shadowing path.
+            return None;
+        }
+        let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(raw));
+        if image.is_none() {
+            // `initWithData:` returning `None` is its own documented
+            // contract for a payload it cannot read — a bad image
+            // clears the view, it never kills the slot (the same
+            // degrade `BitmapFactory.decodeByteArray`/
+            // `UIImage.imageWithData:` get on the other two arms).
+            log::warn!(
+                "frust-native-widgets: macOS NSImage could not decode {} image byte(s) — \
+                 clearing the view",
+                raw.len()
+            );
+        }
+        image
+    }
+
+    /// The leaf names of ImageIO's private codec dylibs
+    /// (`ImageIO.framework/Versions/A/Resources/*`, per `dyld_info
+    /// -dependents` on macOS 26). Every symbol they export is
+    /// `__cg_`-prefixed, so no same-named third-party dylib can stand in for
+    /// one (module doc).
+    const IMAGEIO_CODEC_LEAVES: [&str; 6] = [
+        "libPng.dylib",
+        "libJPEG.dylib",
+        "libTIFF.dylib",
+        "libGIF.dylib",
+        "libJP2.dylib",
+        "libRadiance.dylib",
+    ];
+
+    /// The file through which `DYLD_LIBRARY_PATH` replaced one of ImageIO's
+    /// codecs in this process, if any. dyld fixed the answer at launch, when
+    /// it bound ImageIO, so it is computed once, on the first decode, and
+    /// that is also when the warning is logged: once per process.
+    fn shadowed_codec() -> Option<&'static Path> {
+        static SHADOW: OnceLock<Option<PathBuf>> = OnceLock::new();
+        SHADOW
+            .get_or_init(|| {
+                let search = std::env::var_os("DYLD_LIBRARY_PATH")?;
+                let shadow = shadowing_file(&search, |candidate| candidate.is_file())?;
+                log::warn!(
+                    "frust-native-widgets: macOS Image slots stay empty — DYLD_LIBRARY_PATH \
+                     replaced ImageIO's private codec with {} (dyld matches library leaf names, \
+                     case-insensitively on APFS), leaving ImageIO's `__cg_*` imports unbound, so \
+                     any NSImage decode would crash the process (SIGBUS at 0xbad4007). Relaunch \
+                     without DYLD_LIBRARY_PATH to show images",
+                    shadow.display()
+                );
+                Some(shadow)
+            })
+            .as_deref()
+    }
+
+    /// dyld's `DYLD_LIBRARY_PATH` leaf-name lookup, restricted to
+    /// [`IMAGEIO_CODEC_LEAVES`]: the first `<entry>/<leaf>` that `exists`,
+    /// in search-path order. Empty entries are skipped. `exists` is injected
+    /// so the lookup can be tested without a filesystem; in production it is
+    /// `Path::is_file`, which on APFS matches case-insensitively, just as
+    /// dyld's own lookup does.
+    fn shadowing_file(search: &OsStr, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+        std::env::split_paths(search)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .flat_map(|dir| IMAGEIO_CODEC_LEAVES.iter().map(move |leaf| dir.join(leaf)))
+            .find(|candidate| exists(candidate))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::ffi::OsStr;
+        use std::path::Path;
+
+        use super::{IMAGEIO_CODEC_LEAVES, shadowing_file};
+
+        #[test]
+        fn a_search_path_without_a_codec_leaf_shadows_nothing() {
+            let search = OsStr::new("/opt/homebrew/lib:/usr/local/lib");
+            assert_eq!(shadowing_file(search, |_| false), None);
+        }
+
+        #[test]
+        fn the_first_entry_holding_a_codec_leaf_is_the_shadow() {
+            // `/opt/homebrew/lib/libpng.dylib` answers dyld's (and APFS's)
+            // case-insensitive lookup for `libPng.dylib`; the injected
+            // `exists` stands in for that filesystem behaviour.
+            let search = OsStr::new("/nothing/here::/opt/homebrew/lib:/usr/local/lib");
+            let found = shadowing_file(search, |candidate| {
+                candidate.parent() != Some(Path::new("/nothing/here"))
+                    && candidate
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|leaf| leaf.eq_ignore_ascii_case("libpng.dylib"))
+            });
+            assert_eq!(
+                found.as_deref(),
+                Some(Path::new("/opt/homebrew/lib/libPng.dylib"))
+            );
+        }
+
+        #[test]
+        fn an_empty_search_path_entry_is_skipped_not_read_as_the_working_directory() {
+            let found = shadowing_file(OsStr::new("::"), |candidate| {
+                candidate
+                    .parent()
+                    .is_none_or(|dir| dir.as_os_str().is_empty())
+            });
+            assert_eq!(found, None);
+        }
+
+        #[test]
+        fn every_codec_leaf_is_looked_up() {
+            for leaf in IMAGEIO_CODEC_LEAVES {
+                let found = shadowing_file(OsStr::new("/x"), |candidate| {
+                    candidate.file_name() == Some(OsStr::new(leaf))
+                });
+                assert_eq!(found, Some(Path::new("/x").join(leaf)));
+            }
         }
     }
 }

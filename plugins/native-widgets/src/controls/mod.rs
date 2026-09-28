@@ -1508,20 +1508,19 @@ mod tests {
         }
     }
 
-    // --- shared-Props parity: one kind table, two platform arms ------------
+    // --- shared-Props parity: one kind table, three platform arms ----------
 
     #[test]
-    fn the_six_control_kinds_are_the_same_strings_both_platform_arms_register() {
+    fn the_six_control_kinds_are_the_same_strings_all_three_platform_arms_register() {
         // `crate::android::register_controls`,
         // `crate::apple::register_controls` and
         // `crate::appkit::register_controls` are each
-        // `#[cfg(target_os = ...)]`-gated, so no host test can call any of the
+        // `#[cfg(target_os = ...)]`-gated, so no single host test can call all
         // three. What a host CAN pin is the thing they all register *by*: these
         // six `KIND` consts. No arm spells a kind literally
         // (`crate::android`'s own registration note), so a drift in the wire
-        // vocabulary has to pass through here. (The macOS arm registers a
-        // subset of the table while it is being built out — `Button` first —
-        // and never a kind outside it.)
+        // vocabulary has to pass through here. All three arms register all
+        // six kinds and never a kind outside the table.
         //
         // The other half of "shared-Props parity" needs no assertion at all:
         // there is exactly ONE `Props` type per control, in this same module
@@ -1540,8 +1539,8 @@ mod tests {
             kinds,
             ["button", "label", "switch", "slider", "progress", "image"],
             "the control kind strings are a shipped wire contract — the api \
-             layer's builders inject them and both platform arms register \
-             against them"
+             layer's builders inject them and all three platform arms \
+             register against them"
         );
         let mut unique = kinds.to_vec();
         unique.sort_unstable();
