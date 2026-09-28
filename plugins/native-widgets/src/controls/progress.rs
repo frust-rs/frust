@@ -29,6 +29,17 @@
 //! That style's own defaults (`indeterminate = false`, `[0, 100]`, at 0) are
 //! what [`ProgressProps::platform_default`] describes, and therefore what the
 //! create plan diffs against.
+//!
+//! # `indeterminate` per arm
+//!
+//! | arm | `Setter::Indeterminate` |
+//! |-----|-------------------------|
+//! | Android | live: the horizontal style carries both drawables (above) |
+//! | macOS | live: `NSProgressIndicator.setIndeterminate:` + `startAnimation:`/`stopAnimation:` on the same bar-style view |
+//! | iOS | **unsupported** — warns and no-ops (`UIProgressView` is determinate-only; its `platform` module doc) |
+//!
+//! The cross-platform route to a spinner is the shared spinner control
+//! (plan card c2-02), not this property on iOS.
 
 use super::{
     BACKGROUND_COLOR, CONTENT_DESCRIPTION, INDETERMINATE, MAX, MIN, PROGRESS_TINT, Plan, Setter,
@@ -441,6 +452,151 @@ pub(crate) mod platform {
                 platform::set_accessibility_label(&state.view, label, mtm);
             }
             ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSProgressIndicator` and apply the same
+    //! planned setters the Android and iOS halves do. Display-only, like both
+    //! of them: no target, no events.
+    //!
+    //! # A real range, like Android — no fraction mirror
+    //!
+    //! Unlike `UIProgressView` (a bare `[0.0, 1.0]` fraction, which is why the
+    //! iOS arm mirrors the range in its state), `NSProgressIndicator` owns
+    //! `minValue`/`maxValue`/`doubleValue`. So [`Setter::Max`] and
+    //! [`Setter::Progress`] each map to one setter, exactly as on Android:
+    //! `maxValue = span`, `doubleValue = offset`, with `minValue` pinned at 0
+    //! (the shared platform-space mapping — `slider.rs`' module doc).
+    //!
+    //! # Construction-time normalization
+    //!
+    //! A fresh `NSProgressIndicator` is a bar, `[0, 100]` at 0 — but
+    //! **indeterminate** (AppKit's documented default), where
+    //! [`ProgressProps::platform_default`] is determinate. `create` therefore
+    //! pins the style, clears `indeterminate` and restates the range before the
+    //! diffed create plan runs, so a plan that sets no [`Setter::Indeterminate`]
+    //! really does leave a determinate bar (`label.rs`' module doc names this
+    //! shape).
+    //!
+    //! # `indeterminate` is implemented here
+    //!
+    //! Unlike the iOS arm (warn + no-op), `NSProgressIndicator` does both modes
+    //! on one view: [`Setter::Indeterminate`]`(true)` sets `indeterminate` and
+    //! starts its animation (an indeterminate bar that is not animating draws
+    //! as a static empty track); `(false)` stops the animation first, then
+    //! clears the flag. The value setters keep landing while the bar is
+    //! indeterminate — the shared plan's "the value is kept current behind a
+    //! spinner" contract — so flipping back shows the right position at once.
+    //! `dispose` stops a running animation before the view is released.
+    //!
+    //! # Tint and background
+    //!
+    //! Both route to the theme ladder's shared placeholders
+    //! (`crate::controls::platform`, TODO m1-04).
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSProgressIndicator, NSProgressIndicatorStyle};
+
+    use super::{KIND, Progress, ProgressProps};
+    use crate::NativeWidgetError;
+    use crate::appkit::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live progress bar's retained state.
+    pub(crate) struct ProgressState {
+        /// The indicator, kept typed for its own range/animation setters.
+        view: Retained<NSProgressIndicator>,
+    }
+
+    impl NativeWidget for Progress {
+        type Props = ProgressProps;
+        type State = ProgressState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            ProgressProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSProgressIndicator::new(mtm);
+            let default = ProgressProps::platform_default(props.slot);
+            // Module doc's *Construction-time normalization*: land exactly on
+            // the shared default before the diffed plan runs.
+            view.setStyle(NSProgressIndicatorStyle::Bar);
+            view.setIndeterminate(default.indeterminate);
+            view.setMinValue(0.0);
+            view.setMaxValue(f64::from(default.span()));
+            view.setDoubleValue(f64::from(default.progress()));
+            let plan = ProgressProps::plan(&default, props);
+            apply_all(&view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super(), mtm);
+            Ok((handle, ProgressState { view }))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(&state.view, &ProgressProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Display-only: nothing attached. A running indeterminate
+            // animation is stopped before dropping `state` releases the view.
+            if state.view.isIndeterminate() {
+                set_indeterminate(&state.view, false);
+            }
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — max before progress.
+    fn apply_all(view: &NSProgressIndicator, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSProgressIndicator, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Max(span) => view.setMaxValue(f64::from(span)),
+            Setter::Progress(progress) => view.setDoubleValue(f64::from(progress)),
+            Setter::Indeterminate(indeterminate) => set_indeterminate(view, indeterminate),
+            Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
+            Setter::ProgressTint(argb) => platform::set_tint(view, "ProgressTint", argb),
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+
+    /// Switch `view` between determinate and an animating indeterminate bar
+    /// (module doc's *`indeterminate` is implemented here*).
+    fn set_indeterminate(view: &NSProgressIndicator, indeterminate: bool) {
+        if indeterminate {
+            view.setIndeterminate(true);
+            // SAFETY: `startAnimation:` takes an unused `sender` (`id`), for
+            // which nil is the documented argument; objc2 marks it `unsafe`
+            // only because an `AnyObject` parameter is untyped.
+            unsafe { view.startAnimation(None) };
+        } else {
+            // SAFETY: as `startAnimation:` above — nil `sender`, unused.
+            unsafe { view.stopAnimation(None) };
+            view.setIndeterminate(false);
         }
     }
 }

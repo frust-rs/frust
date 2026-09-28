@@ -17,22 +17,44 @@
 //! use. Adding a control never adds a second class — the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
 //!
-//! Only the click arm ([`EVENT_KIND_CLICK`], `Button`) exists yet; the
-//! toggle/value arms join [`detail_for`] when their controls land on this arm.
+//! Three arms, one per interactive control ([`detail_for`]):
+//!
+//! | kind | control | payload read off `sender` |
+//! |------|---------|---------------------------|
+//! | [`EVENT_KIND_CLICK`] | `NSButton` | none (`0`) |
+//! | [`EVENT_KIND_TOGGLED`] | `NSSwitch` | `state` → [`pack_bool`] |
+//! | [`EVENT_KIND_VALUE_CHANGED`] | `NSSlider` | `doubleValue` → [`pack_value_changed`] |
+//!
+//! # Drag start/end are never emitted on macOS
+//!
+//! The iOS arm reports a slider's gesture edges from two extra UIKit control
+//! events (`TouchDown` → [`EVENT_KIND_DRAG_START`], `TouchUpInside|Outside` →
+//! [`EVENT_KIND_DRAG_END`]), and Android from `onStart/StopTrackingTouch`.
+//! AppKit target-action has no counterpart: an `NSSlider` with `continuous`
+//! set sends its ONE action on every drag step, and the action carries no
+//! phase. Recovering the edges would mean inspecting `NSApp.currentEvent`'s
+//! type inside the action or overriding `NSSliderCell`'s tracking methods —
+//! an `NSEvent` dependency and a second class, neither of which this arm
+//! takes on. So **`DragStart`/`DragEnd` are never emitted on macOS**, and
+//! never synthesized from the value stream either (a guessed gesture edge is
+//! worse than an honest absence); an app that needs them gets them on the
+//! two mobile arms only. [`detail_for`] refuses both kinds, so a target
+//! mis-wired with one logs and drops rather than reporting a fabricated edge.
 //!
 //! # Kind/detail parity is automatic, not re-derived
 //!
 //! Every control's macOS `on_event` calls the exact same decode function its
 //! Android and iOS counterparts do (`crate::events::decode_click` for
-//! `Button`), so parity falls out of one shared decoder per control rather
-//! than being asserted here.
+//! `Button`, `crate::controls::switch::decode_toggled` for `Switch`,
+//! `crate::controls::slider::decode_event` for `Slider`), so parity falls out
+//! of one shared decoder per control rather than being asserted here.
 //!
 //! # Target retention: explicit, per slot, in the control's own `State`
 //!
 //! `NSControl.target` is a **weak** (unretained) property — AppKit never
 //! retains a control's target — so production must retain it explicitly for
 //! exactly the slot's lifetime. That retention lives in each control's own
-//! `State` (`ButtonState::target`), not in
+//! `State` (`ButtonState`/`SwitchState`/`SliderState`'s `target`), not in
 //! [`crate::registry::appkit::AppKitHandle`], for the reason
 //! `crate::apple::events`' module doc gives: `State` is dropped by
 //! `Instance::dispose`, which releases the target in the same step as the
@@ -43,10 +65,16 @@
 //! # No echo guard here
 //!
 //! AppKit sends a control's action for user interaction, not for a
-//! programmatic `setState:`/`setDoubleValue:`, so no action this class ever
-//! receives is an echo of `update`; should one ever be, the protection is
-//! `crate::runtime::with_runtime`'s re-entrancy drop, not anything built here
-//! (`crate::controls`' module doc).
+//! programmatic `setState:`/`setDoubleValue:` (the action is sent from the
+//! control's own mouse/keyboard tracking), so no action this class ever
+//! receives is an echo of `update`'s controlled-component write-back
+//! (`crate::controls::switch`'s module doc). Should one ever be — a
+//! `setState:` issued while `frustAction:` is still on the stack re-entering
+//! it — the protection is `crate::runtime::with_runtime`'s re-entrancy drop:
+//! `update` runs inside that borrow, so a nested action finds it held, gets
+//! `None` back, and is dropped before any `on_event` or app callback runs (the
+//! `Ok(None)` arm of [`FrustNativeControlTarget`]'s dispatch). Nothing is
+//! built here for it, and there is no per-instance suppression flag to latch.
 //!
 //! # No unwind across FFI
 //!
@@ -74,9 +102,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::NSControl;
+use objc2_app_kit::{NSControl, NSControlStateValue, NSControlStateValueOn, NSSwitch};
 
-use crate::events::EVENT_KIND_CLICK;
+use crate::events::{
+    EVENT_KIND_CLICK, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_value_changed,
+};
+#[cfg(doc)]
+use crate::events::{EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START};
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent};
 
@@ -173,7 +205,8 @@ impl FrustNativeControlTarget {
             let Some(detail) = detail_for(kind, sender) else {
                 log::warn!(
                     "frust-native-widgets: macOS action for slot {slot} carries kind {kind}, which \
-                     this arm does not encode yet — event dropped"
+                     this arm does not encode (or whose sender is not the control that kind reads) \
+                     — event dropped"
                 );
                 return Some(());
             };
@@ -201,28 +234,71 @@ impl FrustNativeControlTarget {
 
 /// The `detail` payload for one firing of `kind`, read off `sender` where the
 /// kind's payload lives on the control — `None` for a kind this arm does not
-/// encode yet.
+/// encode (the drag edges — module doc), or when the payload's source is
+/// missing (a nil `sender`, or a toggle whose sender is not an `NSSwitch`).
 ///
 /// A click carries none (`crate::events::decode_click` reads only the kind),
 /// so `sender` is unused for it; the toggle/value kinds read the sender's
-/// `state`/`doubleValue` through the same `crate::events` `pack_*` codecs.
+/// `state`/`doubleValue` through the same `crate::events` `pack_*` codecs the
+/// Android listener and the iOS target use.
 fn detail_for(kind: i32, sender: Option<&NSControl>) -> Option<i64> {
-    let _ = sender;
     match kind {
         EVENT_KIND_CLICK => Some(0),
+        EVENT_KIND_TOGGLED => {
+            // `state` is `NSSwitch`'s own member (AppKit keeps it on the
+            // cell-backed classes, not on `NSControl`), so the sender is
+            // downcast rather than messaged blind.
+            let any: &AnyObject = sender?;
+            let switch = any.downcast_ref::<NSSwitch>()?;
+            Some(pack_bool(is_on(switch.state())))
+        }
+        // `from_user` is unconditionally `true`, for the reason the iOS arm's
+        // `handleSliderValueChanged:` gives: AppKit never sends the action for
+        // a programmatic `setDoubleValue:` (module doc's *No echo guard*), so
+        // every firing here is a genuine user drag.
+        EVENT_KIND_VALUE_CHANGED => Some(pack_value_changed(
+            platform_value(sender?.doubleValue()),
+            true,
+        )),
         _ => None,
     }
 }
 
+/// An `NSSwitch` `state` as the toggled payload's boolean: on is
+/// `NSControlStateValueOn`; anything else (off, and the mixed state an
+/// `NSSwitch` never takes) is off.
+fn is_on(state: NSControlStateValue) -> bool {
+    state == NSControlStateValueOn
+}
+
+/// An `NSSlider` `doubleValue` as the **platform-space** integer
+/// [`pack_value_changed`] carries.
+///
+/// Already platform-space: the slider's `create` pins `minValue` at `0` and
+/// `maxValue` at the app's span (`crate::controls::slider`'s macOS module
+/// doc), so no `min` is subtracted here — `crate::controls::slider::decode_event`
+/// adds it back identically on all three arms. Rounded to the nearest integer
+/// (not truncated), matching the iOS arm: a continuous slider stops between
+/// integers, and the nearest one is the user's intended stop. The `as` cast
+/// saturates and maps NaN to `0`, so no AppKit value can wrap.
+fn platform_value(double_value: f64) -> i32 {
+    double_value.round() as i32
+}
+
 // This module is `#[cfg(target_os = "macos")]`-gated (via `crate::appkit`),
-// and constructing the target needs a `MainThreadMarker`, which no `cargo
-// test` worker thread ever holds — so the ObjC half is compile-checked
-// (`cargo check --target aarch64-apple-darwin`) and exercised by the macOS
-// playground gate. The one pure function here is host-run below.
+// and constructing the target (or any `NSControl` sender) needs a
+// `MainThreadMarker`, which no `cargo test` worker thread ever holds — so the
+// ObjC half is compile-checked (`cargo check --target aarch64-apple-darwin`)
+// and exercised by the macOS playground gate. The pure functions here are
+// host-run below (on a macOS host, where this module compiles).
 #[cfg(test)]
 mod tests {
+    use objc2_app_kit::{NSControlStateValueMixed, NSControlStateValueOff};
+
     use super::*;
-    use crate::events::{EVENT_KIND_TOGGLED, decode_click};
+    use crate::events::{
+        EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, decode_click, unpack_bool, unpack_value_changed,
+    };
 
     #[test]
     fn a_click_packs_no_detail_and_decodes_through_the_shared_decoder() {
@@ -238,7 +314,35 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_this_arm_does_not_encode_yet_is_refused_not_zeroed() {
+    fn the_drag_edges_are_refused_never_synthesized() {
+        // Module doc's *Drag start/end are never emitted on macOS*.
+        assert_eq!(detail_for(EVENT_KIND_DRAG_START, None), None);
+        assert_eq!(detail_for(EVENT_KIND_DRAG_END, None), None);
+    }
+
+    #[test]
+    fn a_payload_kind_with_no_sender_is_refused_not_zeroed() {
+        // A zeroed toggle would read as "off" and a zeroed value as "0" —
+        // both plausible, both fabricated.
         assert_eq!(detail_for(EVENT_KIND_TOGGLED, None), None);
+        assert_eq!(detail_for(EVENT_KIND_VALUE_CHANGED, None), None);
+    }
+
+    #[test]
+    fn only_the_on_state_is_on() {
+        assert!(unpack_bool(pack_bool(is_on(NSControlStateValueOn))));
+        assert!(!is_on(NSControlStateValueOff));
+        assert!(!is_on(NSControlStateValueMixed));
+    }
+
+    #[test]
+    fn a_slider_value_rounds_to_the_nearest_platform_space_integer() {
+        assert_eq!(platform_value(0.0), 0);
+        assert_eq!(platform_value(41.49), 41);
+        assert_eq!(platform_value(41.5), 42);
+        assert_eq!(platform_value(99.9), 100);
+        assert_eq!(platform_value(f64::NAN), 0, "NaN never wraps");
+        let packed = pack_value_changed(platform_value(7.6), true);
+        assert_eq!(unpack_value_changed(packed), (8, true));
     }
 }

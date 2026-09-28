@@ -45,7 +45,7 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
-use crate::controls::{button, image, label};
+use crate::controls::{button, image, label, progress, slider, switch};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on macOS exactly the registry's
@@ -61,15 +61,20 @@ pub(crate) type NativeView = crate::registry::appkit::AppKitHandle;
 /// mirror of `crate::apple::register_controls`, by the same shared `KIND`
 /// consts (never a literal).
 ///
-/// `Button`, `Label`, `Image` so far (m1-01, m1-02), in the same Android/iOS
-/// order — `switch`, `slider`, `progress` join between `label` and `image`
-/// in m1-03, so the three arms end up registering the same kind table; until
-/// then a slot naming one of the three still-missing kinds gets [`factory`]'s
-/// empty dead-slot view (`NativeWidgetError::UnknownControl`, logged once per
-/// create).
+/// All six v1 controls, in the Android/iOS order, **line for line** — so the
+/// three arms register the same kind table (`crate::controls::tests`'
+/// `the_six_control_kinds_are_the_same_strings_both_platform_arms_register`
+/// is the host-visible half of that pin). A slot naming a kind outside it
+/// gets [`factory`]'s empty dead-slot view (`NativeWidgetError::UnknownControl`,
+/// logged once per create).
+///
+/// Registration stays explicit and central for the reason
+/// `crate::apple::register_controls` gives (no link-time discovery).
 pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<button::Button>(button::KIND);
     runtime.register::<label::Label>(label::KIND);
-    // switch::Switch, slider::Slider, progress::Progress join here (m1-03).
+    runtime.register::<switch::Switch>(switch::KIND);
+    runtime.register::<slider::Slider>(slider::KIND);
+    runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
 }

@@ -89,6 +89,16 @@
 //! Android's synchronous echo is. Whether it bites at all is **proven on
 //! device separately**, not asserted here.
 //!
+//! # And on macOS, the same way
+//!
+//! The AppKit arm (`NSSwitch`) is the iOS shape again: seam 1 is the same
+//! shared [`SwitchProps::plan`], driven through `setState:`; seam 2 is again
+//! *expected to be empty*, because AppKit sends a control's action from its
+//! own mouse/keyboard tracking and not for a programmatic `setState:`
+//! (`crate::appkit::events`' *No echo guard*) — and, should a `setState:`
+//! ever re-enter `frustAction:`, the same `with_runtime` re-entrancy drop
+//! catches it one layer up. No macOS-specific echo machinery either.
+//!
 //! **v1 limitation, deliberate:** an app that *rejects* a toggle (reports the
 //! same value back) produces no props change at all, so `update` never runs
 //! and the platform's flip stands until the next differing params.
@@ -512,6 +522,156 @@ pub(crate) mod platform {
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(view, label, mtm);
             }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSSwitch` and apply the same planned setters
+    //! the Android and iOS halves do — with no echo guard of its own (module
+    //! doc's *And on macOS, the same way*).
+    //!
+    //! # A fresh `NSSwitch` already is `platform_default`
+    //!
+    //! `NSSwitch::new` (a zero-frame `initWithFrame:`) is off
+    //! (`NSControlStateValueOff`) and enabled, which is exactly
+    //! [`SwitchProps::platform_default`] — so, like `Label`'s macOS arm, no
+    //! construction-time normalization precedes the diffed create plan.
+    //!
+    //! # Toggles are platform-owned, through the one target class
+    //!
+    //! `create` attaches a [`FrustNativeControlTarget`] with
+    //! [`EVENT_KIND_TOGGLED`]; its `frustAction:` reads the sender's `state`
+    //! and packs it with [`crate::events::pack_bool`], and `on_event` decodes
+    //! it through the SAME [`decode_toggled`] the other two arms call — which
+    //! is also what records the write-back drift signal (`observed`).
+    //!
+    //! # Tints and typeface
+    //!
+    //! `NSSwitch` exposes no thumb or track colour of its own; both tints route
+    //! to the theme ladder's shared placeholder (`crate::controls::platform::
+    //! set_tint`, TODO m1-04) so the ladder decides the mapping in one place.
+    //! An `NSSwitch` renders no text, so [`Setter::Typeface`] is silently a
+    //! no-op — the iOS arm's reasoning, verbatim.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSSwitch};
+
+    use super::{KIND, Switch, SwitchProps, decode_toggled};
+    use crate::NativeWidgetError;
+    use crate::appkit::{FrustNativeControlTarget, NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::events::{EVENT_KIND_TOGGLED, EventPayload};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
+
+    /// A live switch's retained state — the iOS arm's shape.
+    pub(crate) struct SwitchState {
+        /// The switch, kept typed: `update` needs `NSSwitch`'s own
+        /// `setState:`, which the runtime's `NSView` handle could not reach.
+        view: Retained<NSSwitch>,
+        /// The target `create` attached. `NSControl.target` is weak, so this
+        /// field is its only retain (`crate::appkit::events`' *Target
+        /// retention*); released with the rest of `State` on dispose.
+        target: Retained<FrustNativeControlTarget>,
+        /// The value the platform last reported through its action, or `None`
+        /// while the user has never touched it — [`SwitchProps::plan`]'s
+        /// write-back drift signal, identical in meaning to the other two
+        /// arms' field of the same name. Written from
+        /// [`NativeWidget::on_event`] via [`decode_toggled`].
+        observed: Option<bool>,
+    }
+
+    impl NativeWidget for Switch {
+        type Props = SwitchProps;
+        type State = SwitchState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            SwitchProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSSwitch::new(mtm);
+            let plan = SwitchProps::plan(&SwitchProps::platform_default(props.slot), props, None);
+            apply_all(&view, &plan);
+            // Attached after the initial plan, matching the other two arms'
+            // create order: an initial `checked: true` can never reach the
+            // runtime as an event, even in principle.
+            let target =
+                FrustNativeControlTarget::attach(mtm, &view, props.slot, EVENT_KIND_TOGGLED);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((
+                handle,
+                SwitchState {
+                    view,
+                    target,
+                    observed: None,
+                },
+            ))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            // `observed` is the drift branch's input: a toggle the app refused
+            // plans `Setter::Checked` even though `old.checked == new.checked`,
+            // and `setState:` below snaps the switch back.
+            let plan = SwitchProps::plan(old, new, state.observed);
+            apply_all(&state.view, &plan);
+            // The platform now matches the app again. Cleared unconditionally,
+            // as on iOS: nothing on this arm can fail, so there is no
+            // half-applied plan to keep a drift signal alive for.
+            state.observed = None;
+            Ok(())
+        }
+
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_toggled(&mut state.observed, event)
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Detach so a stray in-flight toggle can't reach a torn-down slot;
+            // dropping `state` afterwards releases the target's only retain.
+            state.target.detach(&state.view);
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back.
+    fn apply_all(view: &NSSwitch, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSSwitch, setter: &Setter<'_>) {
+        match *setter {
+            // `setState:` sends no action (module doc) — the write-back's
+            // snap-back is a plain property write.
+            Setter::Checked(checked) => view.setState(if checked {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            }),
+            Setter::Enabled(enabled) => platform::set_enabled(view, enabled),
+            Setter::ThumbTint(argb) => platform::set_tint(view, "ThumbTint", argb),
+            Setter::TrackTint(argb) => platform::set_tint(view, "TrackTint", argb),
+            // An `NSSwitch` renders no text (module doc's *Tints and typeface*).
+            Setter::Typeface(_) => {}
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
             ref other => platform::warn_unexpected_setter(KIND, other),
         }
     }

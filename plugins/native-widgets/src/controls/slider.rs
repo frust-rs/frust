@@ -37,6 +37,13 @@
 //! (`SeekBar`'s `onProgressRefresh` override) is synchronous-only too, on
 //! every supported API level.
 //!
+//! # Drag edges are a two-arm feature
+//!
+//! [`EVENT_KIND_DRAG_START`]/[`EVENT_KIND_DRAG_END`] reach [`decode_event`]
+//! from Android and iOS only. The macOS arm emits value changes alone —
+//! AppKit target-action carries no gesture phase, and nothing synthesizes one
+//! (this file's macOS `platform` module doc).
+//!
 //! # No explicit background
 //!
 //! Unlike `Label`/`ProgressBar`, `SliderProps` deliberately carries no
@@ -496,6 +503,180 @@ pub(crate) mod platform {
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(view, label, mtm);
             }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSSlider` and apply the same planned setters
+    //! the Android and iOS halves do — controlled exactly like `Switch`, with
+    //! no echo guard of its own (`switch.rs`'s module doc, *And on macOS*).
+    //!
+    //! # Platform space, like iOS
+    //!
+    //! `NSSlider` has a real `minValue`, as `UISlider` has `minimumValue`, and
+    //! this arm declines it for the iOS arm's reason (that module's *The
+    //! `[0, span]` mapping still applies*): the shared plan already emits
+    //! [`Setter::Max`] as the span and [`Setter::Progress`] as the offset, and
+    //! [`decode_event`] adds `min` back. So the slider is pinned at
+    //! `minValue = 0`, `maxValue = span`, and its `doubleValue` is
+    //! platform-space by construction — which is why
+    //! `crate::appkit::events`' value arm subtracts nothing.
+    //!
+    //! # Construction-time normalization
+    //!
+    //! A fresh `NSSlider` is `[0.0, 1.0]` at `0.0`, not the `[0, 100]` at 0
+    //! [`SliderProps::platform_default`] describes — the iOS arm's exact
+    //! problem, with the same fix: `create` normalizes the range before running
+    //! the shared create plan, so a span of exactly
+    //! [`super::PLATFORM_DEFAULT_MAX`] (which plans no [`Setter::Max`]) does not
+    //! keep AppKit's 1.0 ceiling. It also pins the two behaviours this arm
+    //! depends on rather than inheriting them: `continuous` (the action fires on
+    //! every drag step, not only on mouse-up — the value stream the app's
+    //! controlled write-back runs on) and horizontal orientation (a zero-frame
+    //! slider's orientation is otherwise inferred from a frame the host sets
+    //! only later).
+    //!
+    //! # Which event kinds this arm emits
+    //!
+    //! [`EVENT_KIND_VALUE_CHANGED`] only, on every drag step, with `from_user`
+    //! always `true`. **`DragStart`/`DragEnd` are never emitted on macOS**:
+    //! AppKit target-action carries no gesture phase, and this arm does not
+    //! synthesize one (`crate::appkit::events`' *Drag start/end are never
+    //! emitted on macOS*). [`decode_event`] still decodes both kinds, for the
+    //! other two arms.
+    //!
+    //! # Tints
+    //!
+    //! Both route to the theme ladder's shared placeholder
+    //! (`crate::controls::platform::set_tint`, TODO m1-04): `NSSlider` has a
+    //! `trackFillColor` (the progress tint's natural home) but no thumb tint,
+    //! and the ladder owns that mapping.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSSlider;
+
+    use super::{KIND, Slider, SliderProps, decode_event};
+    use crate::NativeWidgetError;
+    use crate::appkit::{FrustNativeControlTarget, NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::events::{EVENT_KIND_VALUE_CHANGED, EventPayload};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
+
+    /// A live slider's retained state — the iOS arm's shape.
+    pub(crate) struct SliderState {
+        /// The slider, kept typed for `NSSlider`'s own range setters.
+        view: Retained<NSSlider>,
+        /// The target `create` attached — its only retain (`NSControl.target`
+        /// is weak; `crate::appkit::events`' *Target retention*).
+        target: Retained<FrustNativeControlTarget>,
+        /// The app-space range floor as of the last applied props — `on_event`
+        /// is never handed `Props`, and [`decode_event`] needs `min` to map a
+        /// platform-space report back to app space.
+        min: i32,
+        /// The **platform-space** value the platform last reported, or `None`
+        /// while the user has never dragged it — [`SliderProps::plan`]'s
+        /// write-back drift signal. Written from [`NativeWidget::on_event`]
+        /// via [`decode_event`].
+        observed: Option<i32>,
+    }
+
+    impl NativeWidget for Slider {
+        type Props = SliderProps;
+        type State = SliderState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            SliderProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSSlider::new(mtm);
+            let default = SliderProps::platform_default(props.slot);
+            // Module doc's *Construction-time normalization*. The ceiling is
+            // read off the shared default so the normalization and the diff
+            // baseline cannot disagree; the floor is structurally 0 (platform
+            // space).
+            view.setVertical(false);
+            view.setContinuous(true);
+            view.setMinValue(0.0);
+            view.setMaxValue(f64::from(default.span()));
+            view.setDoubleValue(f64::from(default.progress()));
+            let plan = SliderProps::plan(&default, props, None);
+            apply_all(&view, &plan);
+            // Attached after the normalization and the initial plan, matching
+            // the other two arms' create order.
+            let target =
+                FrustNativeControlTarget::attach(mtm, &view, props.slot, EVENT_KIND_VALUE_CHANGED);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((
+                handle,
+                SliderState {
+                    view,
+                    target,
+                    min: props.min,
+                    observed: None,
+                },
+            ))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            // `observed` feeds the drift branch: a drag the app refused plans
+            // `Setter::Progress` even when the app's value did not change, and
+            // `setDoubleValue:` below drives the knob back.
+            let plan = SliderProps::plan(old, new, state.observed);
+            apply_all(&state.view, &plan);
+            // Cleared unconditionally — see `switch.rs`'s macOS `update`.
+            state.observed = None;
+            state.min = new.min;
+            Ok(())
+        }
+
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_event(&mut state.observed, state.min, event)
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Detach so a stray in-flight drag can't reach a torn-down slot;
+            // dropping `state` afterwards releases the target's only retain.
+            state.target.detach(&state.view);
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — max before progress, the
+    /// order the shared plan already guarantees (module doc, top of file).
+    fn apply_all(view: &NSSlider, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSSlider, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Max(span) => view.setMaxValue(f64::from(span)),
+            // `setDoubleValue:` sends no action (`crate::appkit::events`' *No
+            // echo guard*) — the write-back is a plain property write.
+            Setter::Progress(progress) => view.setDoubleValue(f64::from(progress)),
+            Setter::Enabled(enabled) => platform::set_enabled(view, enabled),
+            Setter::ProgressTint(argb) => platform::set_tint(view, "ProgressTint", argb),
+            Setter::ThumbTint(argb) => platform::set_tint(view, "ThumbTint", argb),
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
             ref other => platform::warn_unexpected_setter(KIND, other),
         }
     }
