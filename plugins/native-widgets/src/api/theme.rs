@@ -57,15 +57,16 @@
 //! The `System` arm publishes the empty payload rather than any fallback
 //! bytes, and that is load-bearing. The *platform* halves latch their FIRST
 //! published pair ([`crate::android::fonts::set_glyph_bytes`], mirrored on
-//! iOS), so any non-empty pair crossing the seam before a design system is
-//! installed would permanently latch those bytes: the design system's later,
-//! real publish would register correctly host-side (this module's own
-//! `ResolvedTheme`/props) but the platform half would never re-register the
-//! device-side font object, and the device would keep rendering the latched
-//! faces. With `System` publishing `&[]`, a no-extension resolve produces the
-//! empty pair `(&[], &[])`, [`publish_font_bytes`] skips it entirely (its own
-//! empty-pair short-circuit), and nothing latches — so a design system
-//! installed afterward gets the first real publish and registers correctly.
+//! iOS and macOS by `crate::coretext`), so any non-empty pair crossing the
+//! seam before a design system is installed would permanently latch those
+//! bytes: the design system's later, real publish would register correctly
+//! host-side (this module's own `ResolvedTheme`/props) but the platform half
+//! would never re-register the device-side font object, and the device would
+//! keep rendering the latched faces. With `System` publishing `&[]`, a
+//! no-extension resolve produces the empty pair `(&[], &[])`,
+//! [`publish_font_bytes`] skips it entirely (its own empty-pair
+//! short-circuit), and nothing latches — so a design system installed
+//! afterward gets the first real publish and registers correctly.
 //!
 //! **Half-filled extension, one real slot + one `System` slot** (e.g. a
 //! design system that only overrides the button face): the published pair
@@ -414,10 +415,20 @@ fn set_platform_font_bytes(button: &'static [u8], body: &'static [u8]) {
     crate::apple::fonts::set_glyph_bytes(button, body);
 }
 
-/// No other platform backend reads the published bytes at all (desktop
-/// preview, wasm) — a no-op here rather than a platform-module reference
-/// neither configuration can compile.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// macOS half of the same publish (theme ladder L3) — straight into
+/// `crate::coretext`, the CoreText module both Apple arms share (the iOS
+/// call above reaches the very same function through its
+/// `crate::apple::fonts` re-export), so the macOS half latches its first
+/// published pair exactly like iOS.
+#[cfg(target_os = "macos")]
+fn set_platform_font_bytes(button: &'static [u8], body: &'static [u8]) {
+    crate::coretext::set_glyph_bytes(button, body);
+}
+
+/// No other platform backend reads the published bytes at all (Linux/Windows
+/// desktop, wasm) — a no-op here rather than a platform-module reference
+/// none of those configurations can compile.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn set_platform_font_bytes(_button: &'static [u8], _body: &'static [u8]) {}
 
 #[cfg(test)]

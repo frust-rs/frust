@@ -10,8 +10,10 @@
 //! `crates/frust-shell-macos`' desktop Mode-A host reads: a hosted control is
 //! an opaque AppKit sibling parented above winit's content view, positioned in
 //! logical points from the differ's rect. Read [`factory`]'s module doc for the
-//! retain accounting and the failure contract, and [`events`]'s for the
-//! target-action attach/detach and per-slot retention.
+//! retain accounting and the failure contract, [`events`]'s for the
+//! target-action attach/detach and per-slot retention, and [`theme`]'s for
+//! theme ladder L1 (`NSAppearance`), which wraps the factory rather than
+//! living inside it.
 //!
 //! # Its own module, not a widened `apple` gate
 //!
@@ -39,11 +41,24 @@
 
 mod ctx;
 mod events;
+// `factory::ensure_registered` is superseded by `theme::ensure_registered`,
+// which registers the same factory wrapped in theme ladder L1
+// (`theme::ThemedFactory`) under the same view type; everything else in
+// `factory` stays live through that wrapper.
+#[expect(
+    dead_code,
+    reason = "factory::ensure_registered is superseded by theme::ensure_registered"
+)]
 pub(crate) mod factory;
+// Theme ladder L1: `NSAppearance` pinned per hosted view on create AND every
+// update, applied by the `DesktopViewFactory` wrapper this module registers.
+// L2/L3 need nothing here — their setters are `crate::controls::platform`'s
+// macOS half, and L3's CoreText half is the shared `crate::coretext`.
+mod theme;
 
 pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
-pub(crate) use factory::ensure_registered;
+pub(crate) use theme::ensure_registered;
 
 use crate::controls::{button, image, label, progress, slider, switch};
 use crate::runtime::NativeRuntime;

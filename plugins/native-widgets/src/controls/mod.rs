@@ -426,7 +426,8 @@ pub(crate) fn plan_color<'a>(
 /// `(red, green, blue, alpha)` order every Apple colour constructor takes.
 ///
 /// Platform-neutral and host-tested on purpose, even though only the Apple
-/// arm calls it ([`platform::ui_color`] on iOS): the packing convention is
+/// arms call it (`platform::ui_color` on iOS, `platform::ns_color` and the
+/// layer's `CGColor` on macOS): the packing convention is
 /// *this crate's wire format*, not UIKit's, so it is worth pinning where a
 /// plain `cargo test` can see it. The Android arm needs no counterpart —
 /// its colour setters take the packed int verbatim.
@@ -1295,18 +1296,62 @@ pub(crate) mod platform {
     //! each control applies its own plan against its own typed view (its
     //! `#[cfg(target_os = "macos")] mod platform`), and this module holds only
     //! the genuinely shared setters: `NSControl`'s enabled/font, `NSView`'s
-    //! accessibility label, and the one-time warnings.
+    //! accessibility label, the theme ladder's L2/L3 setters, and the
+    //! warnings. Theme ladder L1 (`NSAppearance`) is not a [`Setter`] at all —
+    //! it rides the raw wire, applied per view by `crate::appkit::theme`.
     //!
-    //! # Theme-ladder setters are placeholders here (TODO m1-04)
+    //! # The theme ladder's AppKit mapping (L2/L3)
     //!
-    //! Colours, tints, the themed background's corner radius and the Glyph
-    //! typefaces are the macOS theme ladder's work (L1 `NSAppearance`, L2
-    //! `NSColor`/`CALayer`, L3 CoreText). Until it lands, each has a named
-    //! helper below that **does nothing but log at debug level**, so a
-    //! control's `apply` already routes every planned [`Setter`] to its final
-    //! call site and the ladder only has to fill the bodies in. A control on
-    //! this arm therefore renders with AppKit's own stock colours and the
-    //! system font, at the planned text size.
+    //! The shared setters take the superclass a control arm hands them
+    //! (`&NSControl`/`&NSView`), so the ones whose AppKit property lives on a
+    //! specific class resolve it with an `isKindOfClass:` downcast. What each
+    //! planned [`Setter`] becomes here, per `crate::api::theme`'s fold:
+    //!
+    //! | Setter | Class | AppKit call |
+    //! |---|---|---|
+    //! | [`Setter::TextColor`] | `NSTextField` (`Label`'s `body_text`) | `textColor` |
+    //! | [`Setter::TextColor`] | `NSButton` (`Button`'s `on_accent_fill`) | `contentTintColor` |
+    //! | [`Setter::BackgroundColor`] / fill of [`Setter::ThemedBackground`] | any `NSView` | `wantsLayer` + `layer.backgroundColor` (an sRGB `CGColor`) |
+    //! | the same, additionally | `NSButton` (`Button`'s `accent_fill`) | `bezelColor` |
+    //! | radius of [`Setter::ThemedBackground`] | any `NSView` | `layer.cornerRadius` + `masksToBounds` |
+    //! | [`Setter::ProgressTint`] | `NSSlider` (`accent_fill`) | `trackFillColor` |
+    //! | [`Setter::ImageTint`] | `NSImageView` | `contentTintColor` |
+    //! | [`Setter::TextSizeSp`] / [`Setter::Typeface`] | `NSControl` | `font` (one immutable `NSFont`, see *Size and face* below) |
+    //!
+    //! **No AppKit API, so no call** (logged at debug, never a failure):
+    //! `NSSwitch` exposes neither a thumb nor a track colour
+    //! ([`Setter::ThumbTint`]/[`Setter::TrackTint`]) — it draws its "on" track
+    //! in the system accent colour; `NSSlider` has no thumb colour
+    //! ([`Setter::ThumbTint`]); `NSProgressIndicator` has no tint property at
+    //! all ([`Setter::ProgressTint`]) — AppKit draws its fill in the system
+    //! accent colour, and the one historical knob, `controlTint`, is
+    //! deprecated and deliberately never called. All three still follow the
+    //! app's brightness through L1. This is the plugin's documented
+    //! "representative subset" policy (`docs/PLUGINS_CODE_STANDARDS.md`),
+    //! recorded per platform rather than papered over.
+    //!
+    //! `contentTintColor` is documented by AppKit's header as applying to
+    //! *borderless* buttons, while `Button`'s arm builds a push-bezel button;
+    //! the button's accent therefore rides `bezelColor` (the push bezel's own
+    //! fill) plus the layer fill, and the title colour is best-effort.
+    //!
+    //! `radius_dp` applies to `CALayer.cornerRadius` directly as points:
+    //! AppKit's coordinate space is already density-independent, the same
+    //! reasoning as the iOS half's `set_corner_radius`.
+    //!
+    //! # Size and face: one `NSFont`, derived from the control's own font
+    //!
+    //! `NSFont`, like `UIFont`, bakes family and point size into one immutable
+    //! object, so [`Setter::TextSizeSp`] and [`Setter::Typeface`] cannot be two
+    //! independent property writes. Where the iOS half keeps a `FontState` in
+    //! each control's `State`, this half reads the missing half back off the
+    //! control's CURRENT font — the one object that always reflects the last
+    //! write of either setter: [`set_text_size`] keeps the current face (a
+    //! registered Glyph face is re-sized with `CTFontCreateCopyWithAttributes`,
+    //! which copies the in-memory font rather than looking it up by name) and
+    //! [`set_typeface`] keeps the current point size. So either setter alone
+    //! leaves the other's last value intact, in either order, with no state
+    //! beside the view.
     //!
     //! # Nothing here can fail
     //!
@@ -1315,11 +1360,31 @@ pub(crate) mod platform {
     //! classloader to fail.
 
     use objc2::rc::Retained;
-    use objc2_app_kit::{NSAccessibility, NSControl, NSFont, NSView};
+    use objc2_app_kit::{
+        NSAccessibility, NSButton, NSColor, NSControl, NSFont, NSImageView, NSProgressIndicator,
+        NSSlider, NSSwitch, NSTextField, NSView,
+    };
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_graphics::CGColor;
+    use objc2_core_text::CTFont;
     use objc2_foundation::NSString;
 
-    use super::Setter;
+    use super::{Setter, argb_channels};
     use crate::controls::typeface::Typeface;
+
+    /// A packed ARGB colour as an sRGB [`NSColor`] (see
+    /// [`super::argb_channels`]) — the channels are `CGFloat`s, `f64` on every
+    /// 64-bit Mac this arm builds for.
+    pub(crate) fn ns_color(argb: i32) -> Retained<NSColor> {
+        let (red, green, blue, alpha) = argb_channels(argb);
+        NSColor::colorWithSRGBRed_green_blue_alpha(red, green, blue, alpha)
+    }
+
+    /// The same colour as an sRGB [`CGColor`], for `CALayer.backgroundColor`.
+    fn cg_color(argb: i32) -> CFRetained<CGColor> {
+        let (red, green, blue, alpha) = argb_channels(argb);
+        CGColor::new_srgb(red, green, blue, alpha)
+    }
 
     /// `NSControl.enabled` — [`Setter::Enabled`]. Every v1 control is an
     /// `NSControl`, so this takes the superclass and lets deref coercion do
@@ -1343,61 +1408,204 @@ pub(crate) mod platform {
         view.setAccessibilityLabel(text.as_deref());
     }
 
-    /// The system font at `size_sp` points — [`Setter::TextSizeSp`]. `sp` is
-    /// read as points, unscaled, for the same reason as the iOS half's
-    /// `system_font` (the value the theme asked for, not a platform scaling of
-    /// it).
+    /// The system font at `size_sp` points. `sp` is read as points, unscaled,
+    /// for the same reason as the iOS half's `system_font` (the value the
+    /// theme asked for, not a platform scaling of it).
     pub(crate) fn system_font(size_sp: f32) -> Retained<NSFont> {
         NSFont::systemFontOfSize(f64::from(size_sp))
     }
 
-    /// `NSControl.font` — [`Setter::TextSizeSp`]'s apply for any control
-    /// whose text is its own cell's (`NSButton`, `NSTextField`).
+    /// `NSControl.font` at a new size — [`Setter::TextSizeSp`]'s apply for any
+    /// control whose text is its own cell's (`NSButton`, `NSTextField`). Keeps
+    /// the control's current face (module doc's *Size and face*).
     pub(crate) fn set_text_size(control: &NSControl, size_sp: f32) {
-        control.setFont(Some(&system_font(size_sp)));
+        let font = font_at_size(control.font().as_deref(), size_sp);
+        control.setFont(Some(font.as_ns_font()));
     }
 
-    /// TODO(m1-04, theme ladder L2): [`Setter::TextColor`] — no-op with a
-    /// debug log until the ladder lands (module doc).
-    pub(crate) fn set_text_color(_control: &NSControl, argb: i32) {
-        theme_ladder_pending("TextColor", format_args!("{argb:#010x}"));
-    }
-
-    /// TODO(m1-04, theme ladder L2): [`Setter::BackgroundColor`] and the fill
-    /// half of [`Setter::ThemedBackground`] — no-op with a debug log until the
-    /// ladder lands (module doc).
-    pub(crate) fn set_background_color(_view: &NSView, argb: i32) {
-        theme_ladder_pending("BackgroundColor", format_args!("{argb:#010x}"));
-    }
-
-    /// TODO(m1-04, theme ladder L2): the corner-radius half of
-    /// [`Setter::ThemedBackground`] — no-op with a debug log until the ladder
-    /// lands (module doc).
-    pub(crate) fn set_corner_radius(_view: &NSView, radius_dp: f32) {
-        theme_ladder_pending("CornerRadius", format_args!("{radius_dp}"));
-    }
-
-    /// TODO(m1-04, theme ladder L2): the four tint setters
-    /// ([`Setter::ProgressTint`]/[`Setter::ThumbTint`]/[`Setter::TrackTint`]/
-    /// [`Setter::ImageTint`]) — no-op with a debug log until the ladder lands
-    /// (module doc).
-    pub(crate) fn set_tint(_view: &NSView, which: &'static str, argb: Option<i32>) {
-        theme_ladder_pending(which, format_args!("{argb:?}"));
-    }
-
-    /// TODO(m1-04, theme ladder L3): [`Setter::Typeface`] — no-op with a debug
-    /// log until the ladder lands (module doc); the control keeps the system
-    /// font at whatever size [`set_text_size`] applied.
-    pub(crate) fn set_typeface(_control: &NSControl, typeface: Typeface) {
-        theme_ladder_pending("Typeface", format_args!("{typeface:?}"));
-    }
-
-    /// The shared body of every theme-ladder placeholder above.
-    fn theme_ladder_pending(what: &str, value: std::fmt::Arguments<'_>) {
+    /// `NSControl.font` in a new face — [`Setter::Typeface`] (theme ladder
+    /// L3). Keeps the control's current point size (module doc's *Size and
+    /// face*); a control with no font yet starts from AppKit's own
+    /// `systemFontSize`, the size a fresh control's cell already renders at.
+    pub(crate) fn set_typeface(control: &NSControl, typeface: Typeface) {
+        let size_sp = control
+            .font()
+            .map_or_else(NSFont::systemFontSize, |font| font.pointSize())
+            as f32;
+        let font = resolve_font(typeface, size_sp);
         log::debug!(
-            "frust-native-widgets: macOS {what}({value}) not applied yet — the macOS theme ladder \
-             is pending"
+            "frust-native-widgets: macOS L3 typeface {typeface:?} at {size_sp}pt -> {}",
+            font.as_ns_font().fontName()
         );
+        control.setFont(Some(font.as_ns_font()));
+    }
+
+    /// [`Setter::TextColor`] (theme ladder L2): `NSTextField.textColor`, or
+    /// `NSButton.contentTintColor` (module doc's table and its
+    /// borderless-only caveat). Any other class has no text colour of its own.
+    pub(crate) fn set_text_color(control: &NSControl, argb: i32) {
+        let color = ns_color(argb);
+        if let Some(field) = control.downcast_ref::<NSTextField>() {
+            field.setTextColor(Some(&color));
+        } else if let Some(button) = control.downcast_ref::<NSButton>() {
+            button.setContentTintColor(Some(&color));
+        } else {
+            no_appkit_api("TextColor", "this control has no text colour of its own");
+            return;
+        }
+        log::debug!("frust-native-widgets: macOS L2 text colour {argb:#010x}");
+    }
+
+    /// [`Setter::BackgroundColor`] and the fill half of
+    /// [`Setter::ThemedBackground`] (theme ladder L2): the view's backing
+    /// layer's `backgroundColor`, making the view layer-backed first; on an
+    /// `NSButton` also its push bezel's `bezelColor` (module doc's table).
+    pub(crate) fn set_background_color(view: &NSView, argb: i32) {
+        view.setWantsLayer(true);
+        match view.layer() {
+            Some(layer) => layer.setBackgroundColor(Some(&cg_color(argb))),
+            None => no_appkit_api("BackgroundColor", "the view has no backing layer"),
+        }
+        if let Some(button) = view.downcast_ref::<NSButton>() {
+            button.setBezelColor(Some(&ns_color(argb)));
+        }
+        log::debug!("frust-native-widgets: macOS L2 background {argb:#010x}");
+    }
+
+    /// The corner-radius half of [`Setter::ThemedBackground`] (theme ladder
+    /// L2): `layer.cornerRadius` + `masksToBounds`, in points (module doc).
+    pub(crate) fn set_corner_radius(view: &NSView, radius_dp: f32) {
+        view.setWantsLayer(true);
+        match view.layer() {
+            Some(layer) => {
+                layer.setCornerRadius(f64::from(radius_dp));
+                layer.setMasksToBounds(radius_dp > 0.0);
+            }
+            None => no_appkit_api("CornerRadius", "the view has no backing layer"),
+        }
+    }
+
+    /// The four tint setters ([`Setter::ProgressTint`]/[`Setter::ThumbTint`]/
+    /// [`Setter::TrackTint`]/[`Setter::ImageTint`], named by `which`) — the
+    /// module doc's table: `NSSlider`'s progress tint is `trackFillColor`,
+    /// `NSImageView`'s tint is `contentTintColor`, and every other pairing has
+    /// no AppKit API. `None` passes `nil`, restoring AppKit's own colour — the
+    /// clearable contract [`Setter::ProgressTint`] documents.
+    pub(crate) fn set_tint(view: &NSView, which: &'static str, argb: Option<i32>) {
+        let color = argb.map(ns_color);
+        if let Some(slider) = view.downcast_ref::<NSSlider>() {
+            if which != "ProgressTint" {
+                return no_appkit_api(which, "NSSlider has no thumb colour");
+            }
+            slider.setTrackFillColor(color.as_deref());
+        } else if let Some(image) = view.downcast_ref::<NSImageView>() {
+            if which != "ImageTint" {
+                return no_appkit_api(which, "NSImageView has only a content tint");
+            }
+            image.setContentTintColor(color.as_deref());
+        } else if view.downcast_ref::<NSSwitch>().is_some() {
+            return no_appkit_api(
+                which,
+                "NSSwitch has no thumb or track colour (it draws in the system accent colour)",
+            );
+        } else if view.downcast_ref::<NSProgressIndicator>().is_some() {
+            return no_appkit_api(
+                which,
+                "NSProgressIndicator has no tint (the system accent colour; controlTint is \
+                 deprecated and not used)",
+            );
+        } else {
+            return no_appkit_api(which, "this view has no tint property");
+        }
+        log::debug!("frust-native-widgets: macOS L2 {which}({argb:?})");
+    }
+
+    /// A planned setter AppKit has no property for on this class — module
+    /// doc's *No AppKit API* list. Debug level: it is a documented platform
+    /// gap, not a defect, and a theme flip would otherwise warn per control.
+    fn no_appkit_api(what: &str, why: &str) {
+        log::debug!("frust-native-widgets: macOS {what} not applied — {why}");
+    }
+
+    /// A resolved [`NSFont`], from either the system font or a registered
+    /// Glyph face — the macOS twin of the iOS half's `ResolvedFont`, unified
+    /// behind [`Self::as_ns_font`] so a caller never branches on which arm it
+    /// got (theme ladder L3).
+    ///
+    /// [`Self::Glyph`] holds a **sized** `CTFont`, bridged to `NSFont` via
+    /// `objc2-app-kit`'s `AsRef<NSFont> for CTFont` — a toll-free bridge (the
+    /// same underlying object, not a cast), gated by this crate's
+    /// `objc2-core-text` feature on `objc2-app-kit` (`Cargo.toml`).
+    pub(crate) enum ResolvedFont {
+        /// [`system_font`] — [`Typeface::System`], or the degrade target of a
+        /// Glyph resolution failure.
+        System(Retained<NSFont>),
+        /// A registered Glyph face, sized for this call.
+        Glyph(CFRetained<CTFont>),
+    }
+
+    impl ResolvedFont {
+        /// Borrow this as a `&NSFont`, whichever arm it is — every AppKit
+        /// setter this crate calls (`NSControl.setFont:`) takes exactly this.
+        pub(crate) fn as_ns_font(&self) -> &NSFont {
+            match self {
+                Self::System(font) => font,
+                Self::Glyph(font) => font.as_ref(),
+            }
+        }
+    }
+
+    /// Resolve `typeface` to a real [`NSFont`] at `size_sp` points — the
+    /// macOS half of theme ladder L3, the iOS half's `resolve_font` over the
+    /// same shared `crate::coretext` descriptor cache: [`Typeface::System`] is
+    /// the system font; a Glyph face resolves through its cached
+    /// `CTFontDescriptor`, degrading to the system font (with that module's
+    /// one-time warning) on any failure.
+    pub(crate) fn resolve_font(typeface: Typeface, size_sp: f32) -> ResolvedFont {
+        match crate::coretext::descriptor_for(typeface) {
+            Some(descriptor) => {
+                // SAFETY: `descriptor` is a live `CTFontDescriptor` owned for
+                // this call (`descriptor_for` hands back a fresh `CFRetained`
+                // clone); `size_sp` is a finite point size and the null matrix
+                // is `CTFontCreateWithFontDescriptor`'s documented "identity
+                // matrix" default.
+                let font = unsafe {
+                    CTFont::with_font_descriptor(&descriptor, f64::from(size_sp), std::ptr::null())
+                };
+                ResolvedFont::Glyph(font)
+            }
+            None => ResolvedFont::System(system_font(size_sp)),
+        }
+    }
+
+    /// `current` re-sized to `size_sp` points, keeping its face — module
+    /// doc's *Size and face*. The system font (or no font at all) resolves
+    /// through [`system_font`], exactly as before the ladder existed; any
+    /// other face — in practice a registered Glyph face — is copied at the new
+    /// size with `CTFontCreateCopyWithAttributes`, which works from the font
+    /// object itself, so an in-memory face that was never registered by name
+    /// survives the resize.
+    fn font_at_size(current: Option<&NSFont>, size_sp: f32) -> ResolvedFont {
+        match current {
+            Some(font) if !is_system_face(font) => {
+                let face: &CTFont = font.as_ref();
+                // SAFETY: `face` is the live `CTFont` behind `font` (toll-free
+                // bridged) for this call; the null matrix and `None`
+                // attributes are `CTFontCreateCopyWithAttributes`'s documented
+                // "keep the original's" defaults, and the point size is finite.
+                let sized = unsafe {
+                    face.copy_with_attributes(f64::from(size_sp), std::ptr::null(), None)
+                };
+                ResolvedFont::Glyph(sized)
+            }
+            _ => ResolvedFont::System(system_font(size_sp)),
+        }
+    }
+
+    /// Whether `font` is AppKit's system face (family compared with the
+    /// system font's own), the only non-Glyph face this arm ever installs.
+    fn is_system_face(font: &NSFont) -> bool {
+        font.familyName() == system_font(0.0).familyName()
     }
 
     /// A [`Setter`] a control's own `plan` never emits reached its macOS
@@ -1407,6 +1615,58 @@ pub(crate) mod platform {
             "frust-native-widgets: control '{kind}' planned a setter its macOS arm does not \
              implement ({setter:?}) — ignored"
         );
+    }
+
+    // `NSFont`/`CTFont`/`NSColor` are not main-thread-only, so the L2 colour
+    // and L3 size/face logic runs on a plain `cargo test` worker; everything
+    // that needs a live `NSView` is exercised by the playground gate instead.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// ONE test, on purpose: AppKit's font system initializes lazily, and
+        /// two `cargo test` workers touching it concurrently off the main
+        /// thread were observed to get `Helvetica` back from
+        /// `systemFontOfSize:` on one of them (roughly 1 run in 4 with these
+        /// cases split across tests). Production only ever calls this on the
+        /// main thread; keeping every `NSFont` call here on one worker makes
+        /// the test deterministic without claiming otherwise.
+        #[test]
+        fn l3_resizes_keep_the_face_and_faces_keep_the_size() {
+            // The system face re-sizes as the system font.
+            let resized = font_at_size(Some(&system_font(13.0)), 21.0);
+            assert!(matches!(resized, ResolvedFont::System(_)));
+            assert_eq!(resized.as_ns_font().pointSize(), 21.0);
+            assert!(is_system_face(resized.as_ns_font()));
+
+            // No font yet: the system font at the requested size.
+            let fresh = font_at_size(None, 15.0);
+            assert!(matches!(fresh, ResolvedFont::System(_)));
+            assert_eq!(fresh.as_ns_font().pointSize(), 15.0);
+
+            // `Typeface::System` is the system font at the given size.
+            let system = resolve_font(Typeface::System, 17.0);
+            assert!(matches!(system, ResolvedFont::System(_)));
+            assert_eq!(system.as_ns_font().pointSize(), 17.0);
+
+            // A fixed-pitch face stands in for a registered Glyph face: both
+            // are "not the system face", so both take the CTFont-copy path,
+            // keeping their family across the resize.
+            if let Some(mono) = NSFont::userFixedPitchFontOfSize(11.0) {
+                let resized = font_at_size(Some(&mono), 24.0);
+                assert!(matches!(resized, ResolvedFont::Glyph(_)));
+                assert_eq!(resized.as_ns_font().pointSize(), 24.0);
+                assert_eq!(resized.as_ns_font().familyName(), mono.familyName());
+                assert!(!is_system_face(resized.as_ns_font()));
+            }
+        }
+
+        #[test]
+        fn argb_becomes_the_matching_srgb_colour() {
+            let color = ns_color(0x80FF_0000_u32 as i32);
+            assert!((color.alphaComponent() - 128.0 / 255.0).abs() < 1e-6);
+            assert!((color.redComponent() - 1.0).abs() < 1e-6);
+        }
     }
 }
 

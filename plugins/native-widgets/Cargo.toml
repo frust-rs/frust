@@ -285,6 +285,18 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = [
     "objc2-core-foundation",
     "objc2-core-graphics",
 ] }
+# Theme ladder L2: `CALayer.backgroundColor` takes a `CGColor`, and the
+# feature above only makes that SETTER reachable — building the colour
+# (`CGColor::new_srgb`, i.e. `CGColorCreateSRGB`) needs the type's own crate,
+# so it is named directly here rather than reached through `objc2-app-kit`'s
+# `objc2-core-graphics` feature (`NSColor.CGColor`), which would compile in
+# every CoreGraphics-gated AppKit member for one conversion. Already resolved
+# transitively at this version (`objc2-quartz-core`'s own edge); this only
+# promotes it to direct, like `objc2-core-text` below.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGColor",
+] }
 # Theme ladder L3 — identical to the iOS block's rows (see their comments).
 objc2-core-text = { version = "0.3", default-features = false, features = [
     "std",

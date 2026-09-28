@@ -20,16 +20,16 @@
 //! reporting a tap/toggle/drag back to the app through the same event
 //! dispatch on every platform (`crate::apple::events`'s and
 //! `crate::appkit::events`' Rust target-action objects, mirroring Android's
-//! shared listener). The macOS arm registers all six kinds; its theme-ladder
-//! setters are still placeholders (`crate::controls::platform`'s macOS half).
-//! The theme ladder's Apple
-//! arm is also in: L1 (`crate::apple::theme`) pins brightness via
-//! `overrideUserInterfaceStyle` at control-creation time; L2 applies the
-//! same folded `Props` tokens through typed `objc2-ui-kit`/`CALayer`
-//! setters, including a themed background's corner radius; L3
-//! (`crate::apple::fonts`) resolves the embedded Glyph faces to a real
-//! `CTFont` via CoreText, degrading to the system font (one logged warning)
-//! on any resolution failure.
+//! shared listener). The macOS arm registers all six kinds.
+//! The theme ladder's two Apple arms are in: L1 pins brightness per view
+//! (`crate::apple::theme`'s `overrideUserInterfaceStyle`,
+//! `crate::appkit::theme`'s `NSAppearance`), re-pinned on every update; L2
+//! applies the same folded `Props` tokens through typed
+//! `objc2-ui-kit`/`objc2-app-kit`/`CALayer` setters, including a themed
+//! background's corner radius; L3 (`crate::coretext`, shared by both arms)
+//! resolves the embedded Glyph faces to a real `CTFont` via CoreText,
+//! degrading to the system font (one logged warning) on any resolution
+//! failure.
 //!
 //! # One factory, one listener, N controls
 //!
@@ -166,6 +166,14 @@ mod apple;
 // AppKit, not UIKit, so its own module rather than a widened `apple` gate.
 #[cfg(target_os = "macos")]
 mod appkit;
+// Theme ladder L3's CoreText half — descriptor-from-bytes, the first-publish
+// latch and its caches — shared by both Apple arms: it touches neither UIKit
+// nor AppKit, so it sits beside them rather than inside `apple` (which stays
+// iOS-only, see above). Its only caller of `set_glyph_bytes` is the
+// `frust-api` feature's `api::theme`, hence the `allow` without that feature.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
+mod coretext;
 // The six v1 controls. Compiled on every target on purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
 // `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`
