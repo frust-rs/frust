@@ -58,13 +58,21 @@ cache boundary made visible in two counters.
 ### 6.3 — From glyphs to pixels
 
 Read `crates/frust-engine/src/compile/mod.rs`'s `compile_glyph_run` function
-(≈1514–1591): the sink maps each `frust_scene::GlyphRun` to a set of `RunRoute`
-entries that classify glyphs into strips (atlas, color, fallback) and route
-them through the glyph atlas for coordinate and outline caching. The engine
-handles both shape complexity — outlines ride the atlas's own coverage —
-and atlas pressure — color glyphs and uncacheable large runs render direct
-to the frame. Note what's here: no rasterization — the engine ships outlines
-and positions. (COLR glyph faces never reach the atlas; see `crates/frust-engine/tests/atlas_churn.rs`'s `a_colour_face_never_reaches_the_atlas_and_its_glyphs_still_draw` test. Color glyphs draw as outlines via `crates/frust-engine/src/text/color.rs`'s layer recombination.)
+(≈1514–1591): the route for the whole run was already decided before this walk,
+by `classify_runs`, and arrives here as one `route: Option<RunRoute>` — there
+are exactly two variants (`crates/frust-engine/src/text/atlas_policy.rs`
+≈650–655): `RunRoute::Atlas(AtlasRun)` (settled: every glyph samples a cached
+slot in the glyph atlas) and `RunRoute::Outline(OutlineReason)` (drawn as
+outline strips, for the stated reason). One run takes one route, never a
+per-glyph mix of the two. An outline run does not leave the CPU as bare
+outlines and positions for the GPU to rasterize — glifo drives
+`EngineGlyphSink` (`crates/frust-engine/src/text/backend.rs`), which itself
+rasterizes it into strips through the compiler's own `StripGenerator`, the
+same machinery every other draw goes through. (COLR glyph faces never reach
+the atlas; see `crates/frust-engine/tests/atlas_churn.rs`'s
+`a_colour_face_never_reaches_the_atlas_and_its_glyphs_still_draw` test. Color
+glyphs draw as outlines via `crates/frust-engine/src/text/color.rs`'s layer
+recombination.)
 
 ### 6.4 — One theme-contract gotcha worth meeting early
 

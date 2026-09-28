@@ -96,8 +96,17 @@ after lab 2 and before lab 3.
    **The rule people get wrong:** a View rebuild cascades to **every child, every frame**.
    `rebuild_children_positional` rebuilds every common-index child whatever the flags say, and
    `docs/CORE_ARCHITECTURE.md` says "there is no per-component skipping". The flags are ORed upward
-   purely as a **report**. The only pass they gate is the whole-tree `RenderRoot::layout`, and only
-   in a shell that reads them. The contract is rebuild → layout *iff*
+   purely as a **report**. Inside a run, the only pass they gate is the whole-tree
+   `RenderRoot::layout`, and only in a shell that reads them — but flags left *undrained* by a
+   rebuild are also read a second way, before that decision is even made: mobile's whole-frame gate
+   takes pending flags as one of its Run/Skip inputs. `FrameInputs::change_flags_pending`
+   (`crates/frust-shell-common/src/frame_gate.rs` ≈292, ORed into `any_set` ≈343) is filled from
+   `RenderRoot::has_pending_change_flags()` (`crates/frust-core/src/app.rs` ≈1122) by both mobile
+   shells (`crates/frust-shell-android/src/app/frame.rs` ≈250,
+   `crates/frust-shell-ios/src/app/frame.rs` ≈203; lab 7 lists it among the gate inputs). So there
+   are two consumers, not one: the frame gate reads pending flags on Android and iOS to decide
+   whether the frame runs at all, and, inside a run that does happen, the layout skip reads the
+   drained flags on Android only. The contract is rebuild → layout *iff*
    `take_change_flags().needs_layout()` (or first frame/resize) → always paint
    (`crates/frust-shell-common/src/frame_gate.rs` module doc ≈26–38; `app_tree.rs`'s
    `drive_frame` ≈914). Android wires it (`frame.rs` ≈422). iOS drains and drops the flags, and

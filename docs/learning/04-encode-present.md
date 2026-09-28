@@ -84,11 +84,14 @@ was already there.
 
 - `crates/frust-engine/src/renderer.rs`'s `EngineRenderer::encode` — the single function that
   walks a `CompiledFrame` into GPU passes — is where this repo hands control to the strip
-  pipeline. Nine WGSL files in `crates/frust-engine/shaders/` compile to five programs — `strip`, 
-  `clear`, `copy`, `filter`, `unpremultiply` — with three binding-free preludes (`helpers`, 
-  `filters_blur`, `filters_drop_shadow`) prepended at compile time. See [lab 13](13-engine-schedule-and-passes.md) 
-  idea 4 for the full inventory and why preludes that declare no `@group`/`@binding` globals can 
-  be safely prepended without disturbing bind-group layouts.
+  pipeline. Nine WGSL files live in `crates/frust-engine/shaders/`: five compile to runtime
+  programs — `strip`, `clear`, `copy`, `filter`, `unpremultiply` — three are binding-free preludes
+  (`helpers`, `filters_blur`, `filters_drop_shadow`) prepended to those at compile time, and the
+  ninth, `blend.wgsl`, is a ported compose-and-mix module compiled only by
+  `crates/frust-engine/tests/layers.rs` — no runtime pipeline uses it. See
+  [lab 13](13-engine-schedule-and-passes.md) idea 4 for the full inventory and why preludes that
+  declare no `@group`/`@binding` globals can be safely prepended without disturbing bind-group
+  layouts.
 - The pipeline cache (`frust-gpu::pipeline_cache`) is Vulkan-only and fingerprinted per adapter; on
   your Mac it's a silent no-op. File it away for Android cold-start work.
 - This is the hand-off point: the next six chapters take the engine apart piece by piece —

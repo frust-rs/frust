@@ -98,8 +98,14 @@ seams from above; this lab goes down into the substrate and runs its tests.
      `write_buffer`. It grows by `next_power_of_two` and never shrinks.
    - Recording. `CommandBuffer` is the single-submit contract: a renderer records only, never
      submits, and holds no borrow past return. Whoever records first owns the depth clear, and
-     later passes load (`LessEqual`, far plane 1.0). Glyph-atlas uploads are the one sanctioned
-     own-encoder submit.
+     later passes load (`LessEqual`, far plane 1.0). There are two sanctioned own-encoder submits,
+     both committed ahead of the scene pass: growing the image atlas
+     (`AtlasArray::ensure_layers`, `crates/frust-engine/src/gpu/atlas.rs` ≈331–360) and replaying a
+     dirty glyph-atlas page — the same module's own doc comment (≈83–86) names both, calling the
+     growth copy "the same one `AtlasArray::ensure_layers` already takes" as its glyph-atlas
+     carve-out. `frust-gpu`'s `encoder.rs` doc comment (≈46–50) still calls glyph-atlas upload "the
+     one carve-out", singular — that line predates the image-atlas exception and is stale
+     (pre-existing), not something this lab restates as current.
    - Readback and timing. `HeadlessTarget::read_back` strips wgpu's row padding. `TimestampRing`
      uses `timestamp_writes` at pass boundaries only, because in-pass timestamps are unavailable on
      tile-based mobile GPUs. It is inert without `TIMESTAMP_QUERY`, and `abandon_frame` handles a
