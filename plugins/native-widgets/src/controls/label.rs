@@ -337,35 +337,40 @@ pub(crate) mod platform {
     //! The macOS half: build an `NSTextField` and apply the same planned
     //! setters the Android and iOS halves do.
     //!
-    //! # `labelWithString:` already lands on `platform_default`
+    //! # One construction-time normalization: a wrapping label
     //!
-    //! Unlike `Button` (module doc's *A momentary push button with the push
-    //! bezel*) and `Image` (below), this control needs no construction-time
-    //! normalization: `NSTextField::labelWithString:` is documented to return
-    //! a field that is already non-editable, non-selectable, borderless
-    //! (`isBezeled` false) and paints no background (`drawsBackground`
-    //! false) — exactly [`LabelProps::platform_default`]'s empty/enabled
-    //! state, with nothing left for `create` to force before the diffed plan
-    //! runs. `create` still passes an empty string to the constructor rather
-    //! than `props.text` directly, so a non-empty caption plans through
-    //! [`Setter::Text`] like every other field, the same "one code path for
-    //! create and update" shape [`super`] documents.
+    //! `NSTextField::labelWithString:` produces a **non-wrapping** field
+    //! (Apple's own header doc: "Creates a non-wrapping, non-editable,
+    //! non-selectable text field..."), where a fresh Android `TextView`
+    //! wraps to as many lines as its box allows and the iOS arm normalizes
+    //! `UILabel` to the same shape (`numberOfLines = 0`, this file's iOS
+    //! module doc). Wrapping is not a post-construction flag this arm can
+    //! flip afterward without rebuilding the field — AppKit exposes it only
+    //! as a *different* convenience constructor,
+    //! `NSTextField::wrappingLabelWithString:`, documented to return a field
+    //! that "wrap[s]" (Apple's header doc: "Creates a wrapping,
+    //! non-editable, selectable text field..."). `create` calls that
+    //! constructor instead, bringing the fresh view into the wrapping
+    //! behaviour `LabelProps` already describes (no line-count field on any
+    //! platform, the same reason the iOS fix targets `UILabel`'s own default
+    //! rather than a modelled property) — the same normalize-then-diff shape
+    //! [`super`]'s per-arm guidance and the iOS module doc above describe.
     //!
-    //! # One accepted platform difference: single line, not wrapping
-    //!
-    //! `labelWithString:` produces a **non-wrapping** field (Apple's own
-    //! doc), where a fresh Android `TextView` wraps to as many lines as its
-    //! box allows and the iOS arm normalizes `UILabel` to the same shape
-    //! (`numberOfLines = 0`, this file's iOS module doc). `LabelProps` has no
-    //! line-count field on any platform — the iOS fix targets UIKit's
-    //! constructor default directly, not a modelled property — and AppKit's
-    //! wrapping label is a *different* constructor
-    //! (`wrappingLabelWithString:`), not a post-construction flag this arm
-    //! can flip afterward without rebuilding the field. This control
-    //! therefore stays single-line on macOS for now: a real, accepted
-    //! per-platform capability difference (`docs/PLUGINS_CODE_STANDARDS.md`'s
-    //! "a platform capability gap is recorded per-platform" rule), not a
-    //! defect — worth a `docs/LIMITATIONS.md` entry, not a code fix here.
+    //! That header doc also names the one side effect the swap introduces:
+    //! `wrappingLabelWithString:` is documented **selectable**, where
+    //! `labelWithString:` is documented non-selectable — confirmed against a
+    //! live `NSTextField` on this arm's own `objc2-app-kit` version
+    //! (`isEditable`/`isBezeled`/`drawsBackground` read `false` on both
+    //! constructors; only `isSelectable` differs, `false` then `true`).
+    //! `LabelProps::platform_default` has no field for text selectability
+    //! either, so `create` calls `setSelectable(false)` on the fresh view
+    //! right after construction, the same "normalize what the constructor
+    //! got wrong, then run the diffed plan" shape — leaving nothing else for
+    //! `create` to force before the plan runs. `create` still passes an
+    //! empty string to the constructor rather than `props.text` directly, so
+    //! a non-empty caption plans through [`Setter::Text`] like every other
+    //! field, the same "one code path for create and update" shape [`super`]
+    //! documents.
 
     use objc2::rc::Retained;
     use objc2_app_kit::NSTextField;
@@ -401,7 +406,12 @@ pub(crate) mod platform {
             props: &Self::Props,
         ) -> Result<(NativeView, Self::State), NativeWidgetError> {
             let mtm = ctx.mtm();
-            let view = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            let view = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+            // Module doc: `wrappingLabelWithString:` is documented (and
+            // confirmed live) selectable, unlike `labelWithString:` and
+            // unlike `LabelProps::platform_default` — undo that one side
+            // effect before the diffed plan runs.
+            view.setSelectable(false);
             let plan = LabelProps::plan(&LabelProps::platform_default(props.slot), props);
             apply_all(&view, &plan);
             let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
