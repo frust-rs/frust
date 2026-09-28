@@ -28,7 +28,7 @@ the mechanism working in this repo.
    correctly too, under `frust-engine` (`docs/DEVELOPMENT.md` → Known Issues).
 5. Never run `cargo test -p frust-engine` bare, and never
    `--test proptest_strips` on its own — name a narrower `--test <file>` (or
-   `--lib <module>`) target instead, the way the engine chapters (11–15) do.
+   `--lib <module>`) target instead, the way the engine chapters (11–15) do (the repository's verify gate is the deliberate exception — see the prerequisite).
    Why: the strip proptest (`tests/proptest_strips.rs`) has twice exhausted
    memory on random inputs during workspace gates (a ~35 GB RSS OOM kill on
    2026-09-08 and a 187 GB allocation abort on 2026-09-26, both recorded in
@@ -40,12 +40,16 @@ the mechanism working in this repo.
 ## Prerequisite (one-time)
 
 ```bash
-cargo build --workspace --locked && cargo test --workspace   # the repo's verify gate
-(cd benchmarks/frust_bench && cargo run)                      # your primary lab vehicle
+cargo build --workspace --locked                       # everything the labs need, built once
+cargo test --workspace --exclude frust-engine          # the verify gate minus the engine crate
+cargo test -p frust-engine --test compile_rects_paths  # the engine, scoped (see rule 5)
+(cd benchmarks/frust_bench && cargo run)               # your primary lab vehicle
 ```
 
 If `frust_bench` opens a window full of physics-driven gradient bubbles (the
 S1 scenario, which runs by default) with an FPS meter, you're ready.
+
+The repository's own verify gate is the bare `cargo test --workspace` (`docs/DEVELOPMENT.md`); it includes the strip proptest, so run it only on a host with tens of GB to spare — rule 5 is why this curriculum scopes the engine crate.
 
 ## The pipeline, end to end (the map you'll fill in)
 

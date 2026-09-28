@@ -47,19 +47,22 @@ beneath it in the scene (the platform-view hole-punch's sole v1 producer) ·
 `Path{path, style, brush, transform}` — fill or stroke an arbitrary vector
 path (e.g. an arc), under a transform ·
 `ShaderQuad{program, dest, transform, time}` — a fragment-shader-filled rect
-(the shader-showcase pre-pass). Both it and `SceneTexture` (below) lower
-through `crates/frust-engine/src/compile/external.rs`'s `encode_scene_texture`/
-`ExternalExtents`: an id with no bound texture yet
-(`ExternalSkip::Unregistered`) is reported once at warning then at debug per
-id, and a resolved draw is always composited blended, never claimed opaque —
-see [14-engine-paints-images-filters.md](14-engine-paints-images-filters.md) ·
+(the shader-showcase pre-pass). It lowers through
+`crates/frust-engine/src/compile/mod.rs` — see `note_shader_quad_culled`
+(≈2060) for debug-level logging when the pre-pass deliberately culled it (the
+quad is off-screen), and `note_shader_quad_unrendered` (≈2020) for once-per-
+process warning when the pre-pass never ran or the shader failed to compile.
+A resolved draw is always composited blended, never claimed opaque — see
+[14-engine-paints-images-filters.md](14-engine-paints-images-filters.md) ·
 `PushSnapshot{key, rect, alpha, scale, transform}` — marks the start of a
 cacheable "snapshot" bracket; `alpha`/`scale` are presentation parameters
 applied to the whole bracketed body, not baked into its own commands ·
 `PopSnapshot` — pop the most recently pushed snapshot bracket ·
 `SceneTexture{id, dest, transform}` — draw an externally owned GPU texture,
-scaled to fill `dest`, under a transform; an unregistered `id` draws nothing
-(see `ShaderQuad` above)
+scaled to fill `dest`, under a transform; lowers through
+`crates/frust-engine/src/compile/external.rs`. An unregistered `id` draws
+nothing — see `note_unregistered` (≈218) for once-per-id warning (first
+sighting) then debug-level logging (later sightings)
 
 That's the entire drawing vocabulary of the framework. Every button, every
 page transition, every emoji ends up as a sequence of these.
