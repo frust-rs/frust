@@ -2,18 +2,19 @@
 //! wired straight into the SAME `(kind, detail)` runtime dispatch Android's
 //! `FrustNativeListener` feeds.
 //!
-//! # One class, five actions — the Android mirror
+//! # One class, six actions — the Android mirror
 //!
 //! Android's `dev.frust.nativewidgets.FrustNativeListener` implements every
 //! listener interface a v1 control needs (`OnClickListener`/
 //! `OnCheckedChangeListener`/`OnSeekBarChangeListener`) on ONE class, with one
 //! method per callback. [`FrustNativeControlTarget`] is the same shape for
-//! UIKit target-action: one class, five action selectors
+//! UIKit target-action: one class, six action selectors
 //! ([`Self::handle_click`], [`Self::handle_switch_value_changed`],
 //! [`Self::handle_slider_value_changed`], [`Self::handle_slider_drag_start`],
-//! [`Self::handle_slider_drag_end`]), and a control wires only the ones it
-//! needs via [`Self::attach_button`]/[`Self::attach_switch`]/
-//! [`Self::attach_slider`] — exactly as Android attaches the shared listener
+//! [`Self::handle_slider_drag_end`], [`Self::handle_segment_value_changed`]),
+//! and a control wires only the ones it needs via [`Self::attach_button`]/
+//! [`Self::attach_switch`]/[`Self::attach_slider`]/[`Self::attach_segmented`]
+//! — exactly as Android attaches the shared listener
 //! only as the one interface a given control implements. Adding a control
 //! never adds a second target class, matching the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
@@ -76,7 +77,7 @@
 //!
 //! # No echo guard here, either
 //!
-//! None of the five actions below needs one. Every action UIKit ever sends
+//! None of the six actions below needs one. Every action UIKit ever sends
 //! here is genuinely user-caused: Apple's UIControl guidance is *"As a rule
 //! UIKit does not send events when programmatic changes are made to
 //! controls"*, and `switch.rs`'s module doc is the full account (the two
@@ -121,11 +122,11 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 #[cfg(feature = "frust-api")]
 use objc2_ui_kit::UIView;
-use objc2_ui_kit::{UIButton, UIControl, UIControlEvents, UISlider, UISwitch};
+use objc2_ui_kit::{UIButton, UIControl, UIControlEvents, UISegmentedControl, UISlider, UISwitch};
 
 use crate::events::{
-    EVENT_KIND_CLICK, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_TOGGLED,
-    EVENT_KIND_VALUE_CHANGED, pack_bool, pack_value_changed,
+    EVENT_KIND_CLICK, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_SELECTION,
+    EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_index, pack_value_changed,
 };
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent};
@@ -210,6 +211,19 @@ define_class!(
         #[unsafe(method(handleSliderDragEnd:))]
         fn handle_slider_drag_end(&self, _sender: &UISlider) {
             self.dispatch(EVENT_KIND_DRAG_END, 0, "handleSliderDragEnd:");
+        }
+
+        /// `Segmented`'s `ValueChanged` action → [`EVENT_KIND_SELECTION`].
+        /// Reads the requested segment straight off the sender's
+        /// `selectedSegmentIndex` and packs it with [`pack_index`] — the
+        /// signed `NSInteger` verbatim, so a `UISegmentedControlNoSegment`
+        /// (`-1`) report survives the wire and decodes to no event
+        /// (`crate::controls::segmented::decode_event`). Every firing is a
+        /// genuine user tap (module doc's *No echo guard*).
+        #[unsafe(method(handleSegmentValueChanged:))]
+        fn handle_segment_value_changed(&self, sender: &UISegmentedControl) {
+            let detail = pack_index(sender.selectedSegmentIndex());
+            self.dispatch(EVENT_KIND_SELECTION, detail, "handleSegmentValueChanged:");
         }
     }
 );
@@ -368,6 +382,32 @@ impl FrustNativeControlTarget {
             view,
             sel!(handleSliderDragEnd:),
             UIControlEvents::TouchUpInside | UIControlEvents::TouchUpOutside,
+        );
+    }
+
+    /// Build a target for `slot` and wire it as `view`'s `ValueChanged`
+    /// action — `Segmented`'s whole selection-attach (Apple-arm-only control,
+    /// `crate::controls::APPLE_KINDS`).
+    pub(crate) fn attach_segmented(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UISegmentedControl,
+    ) -> Retained<Self> {
+        let target = Self::new(mtm, slot);
+        target.add(
+            view,
+            sel!(handleSegmentValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+        target
+    }
+
+    /// [`Self::attach_segmented`]'s inverse — called from `Segmented::dispose`.
+    pub(crate) fn detach_segmented(&self, view: &UISegmentedControl) {
+        self.remove(
+            view,
+            sel!(handleSegmentValueChanged:),
+            UIControlEvents::ValueChanged,
         );
     }
 

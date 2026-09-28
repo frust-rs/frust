@@ -56,7 +56,8 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
-use crate::controls::{button, image, label, progress, slider, spinner, switch};
+use crate::controls::{APPLE_KINDS, SHARED_KINDS};
+use crate::controls::{button, image, label, progress, segmented, slider, spinner, switch};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on Apple that is exactly the
@@ -72,17 +73,19 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 
 /// Register every control kind this backend serves, once, when the thread's
 /// runtime is first touched (`crate::runtime`'s `seeded_runtime`) — the Apple
-/// mirror of `crate::android::register_controls`, **line for line**.
+/// mirror of `crate::android::register_controls`, **line for line** for the
+/// shared kinds, then the Apple-only ones.
 ///
-/// The seven controls live in the shared `crate::controls`, where the
-/// props/plan half is platform-neutral and host-tested and only the platform
-/// half is a per-target `mod platform` inside each control file (the
-/// Android arm, the Apple one). So the two backends register the same seven
-/// types under the same seven `KIND` consts — never a literal here, which is
-/// what keeps the api layer's builders and both arms reading from one
-/// definition (`crate::controls::tests`'
-/// `the_seven_control_kinds_are_the_same_strings_all_three_platform_arms_register`
-/// is the host-visible half of that pin).
+/// The controls live in the shared `crate::controls`, where the props/plan
+/// half is platform-neutral and host-tested and only the platform half is a
+/// per-target `mod platform` inside each control file. So every backend
+/// registers by the same `KIND` consts — never a literal here — and by two
+/// tables: `crate::controls::SHARED_KINDS` (all three arms) then
+/// `crate::controls::APPLE_KINDS` (iOS + macOS only; `Segmented`). The
+/// `debug_assert!` below checks this registration against both tables at
+/// runtime; `crate::controls::tests`'
+/// `every_register_controls_registers_exactly_its_kind_tables` is the
+/// host-visible half, reading all three arms' sources.
 ///
 /// Registration stays explicit and central by design: `inventory`-style
 /// link-time discovery is banned here, which matters even more on this
@@ -96,4 +99,14 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
     runtime.register::<spinner::Spinner>(spinner::KIND);
+    // The Apple-only kinds (`crate::controls::APPLE_KINDS`), after the shared
+    // table — Android registers none of these.
+    runtime.register::<segmented::Segmented>(segmented::KIND);
+    debug_assert!(
+        SHARED_KINDS
+            .iter()
+            .chain(&APPLE_KINDS)
+            .all(|kind| runtime.is_registered(kind)),
+        "register_controls drifted from crate::controls::SHARED_KINDS/APPLE_KINDS"
+    );
 }

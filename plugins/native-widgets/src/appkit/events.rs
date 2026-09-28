@@ -17,13 +17,14 @@
 //! use. Adding a control never adds a second class — the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
 //!
-//! Three arms, one per interactive control ([`detail_for`]):
+//! Four arms, one per interactive control ([`detail_for`]):
 //!
 //! | kind | control | payload read off `sender` |
 //! |------|---------|---------------------------|
 //! | [`EVENT_KIND_CLICK`] | `NSButton` | none (`0`) |
 //! | [`EVENT_KIND_TOGGLED`] | `NSSwitch` | `state` → [`pack_bool`] |
 //! | [`EVENT_KIND_VALUE_CHANGED`] | `NSSlider` | `doubleValue` → [`pack_value_changed`] |
+//! | [`EVENT_KIND_SELECTION`] | `NSSegmentedControl` | `selectedSegment` → [`pack_index`] |
 //!
 //! A public `NativeComponent` reaches the same class through
 //! `FrustNativeControlTarget::attach_view` (called by
@@ -53,8 +54,10 @@
 //! Every control's macOS `on_event` calls the exact same decode function its
 //! Android and iOS counterparts do (`crate::events::decode_click` for
 //! `Button`, `crate::controls::switch::decode_toggled` for `Switch`,
-//! `crate::controls::slider::decode_event` for `Slider`), so parity falls out
-//! of one shared decoder per control rather than being asserted here.
+//! `crate::controls::slider::decode_event` for `Slider`, and
+//! `crate::controls::segmented::decode_event` for the Apple-only
+//! `Segmented`, shared with iOS alone), so parity falls out of one shared
+//! decoder per control rather than being asserted here.
 //!
 //! # Target retention: explicit, per slot, in the control's own `State`
 //!
@@ -111,10 +114,13 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 #[cfg(feature = "frust-api")]
 use objc2_app_kit::NSView;
-use objc2_app_kit::{NSControl, NSControlStateValue, NSControlStateValueOn, NSSwitch};
+use objc2_app_kit::{
+    NSControl, NSControlStateValue, NSControlStateValueOn, NSSegmentedControl, NSSwitch,
+};
 
 use crate::events::{
-    EVENT_KIND_CLICK, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_value_changed,
+    EVENT_KIND_CLICK, EVENT_KIND_SELECTION, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED,
+    pack_bool, pack_index, pack_value_changed,
 };
 #[cfg(doc)]
 use crate::events::{EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START};
@@ -301,12 +307,14 @@ impl FrustNativeControlTarget {
 /// The `detail` payload for one firing of `kind`, read off `sender` where the
 /// kind's payload lives on the control — `None` for a kind this arm does not
 /// encode (the drag edges — module doc), or when the payload's source is
-/// missing (a nil `sender`, or a toggle whose sender is not an `NSSwitch`).
+/// missing (a nil `sender`, or a toggle/selection whose sender is not an
+/// `NSSwitch`/`NSSegmentedControl`).
 ///
 /// A click carries none (`crate::events::decode_click` reads only the kind),
-/// so `sender` is unused for it; the toggle/value kinds read the sender's
-/// `state`/`doubleValue` through the same `crate::events` `pack_*` codecs the
-/// Android listener and the iOS target use.
+/// so `sender` is unused for it; the toggle/value/selection kinds read the
+/// sender's `state`/`doubleValue`/`selectedSegment` through the same
+/// `crate::events` `pack_*` codecs the Android listener and the iOS target
+/// use.
 fn detail_for(kind: i32, sender: Option<&NSControl>) -> Option<i64> {
     match kind {
         EVENT_KIND_CLICK => Some(0),
@@ -326,6 +334,15 @@ fn detail_for(kind: i32, sender: Option<&NSControl>) -> Option<i64> {
             platform_value(sender?.doubleValue()),
             true,
         )),
+        EVENT_KIND_SELECTION => {
+            // `selectedSegment` is `NSSegmentedControl`'s own member, so the
+            // sender is downcast like the toggle's. Packed signed and
+            // verbatim: a `-1` (no segment) report crosses the wire and is
+            // refused by the shared decoder, not here.
+            let any: &AnyObject = sender?;
+            let segmented = any.downcast_ref::<NSSegmentedControl>()?;
+            Some(pack_index(segmented.selectedSegment()))
+        }
         _ => None,
     }
 }
@@ -392,6 +409,7 @@ mod tests {
         // both plausible, both fabricated.
         assert_eq!(detail_for(EVENT_KIND_TOGGLED, None), None);
         assert_eq!(detail_for(EVENT_KIND_VALUE_CHANGED, None), None);
+        assert_eq!(detail_for(EVENT_KIND_SELECTION, None), None);
     }
 
     #[test]

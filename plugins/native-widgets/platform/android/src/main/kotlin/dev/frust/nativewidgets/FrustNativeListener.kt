@@ -87,5 +87,15 @@ class FrustNativeListener(private val slotId: Long) :
         const val KIND_DRAG_START = 4
         /** `SeekBar.OnSeekBarChangeListener.onStopTrackingTouch`. */
         const val KIND_DRAG_END = 5
+        /**
+         * A segmented control's selection (the Rust side's
+         * `EVENT_KIND_SELECTION`, `detail` = the signed segment index).
+         * **Never emitted on Android in this build**: the segmented control
+         * has no Android arm yet (its builder renders a refusal banner
+         * there), so this listener implements no interface that reports it.
+         * The constant exists so this table and the Rust one stay the same
+         * table — append-only, never renumbered.
+         */
+        const val KIND_SELECTION = 6
     }
 }

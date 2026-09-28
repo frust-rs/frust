@@ -150,6 +150,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `startAnimating`/`stopAnimating`, `hidesWhenStopped`, `color`) — pulls in
 # `objc2-foundation`'s `NSCoder` feature transitively (its own `Cargo.toml`),
 # already satisfied by feature unification, no explicit addition needed here.
+# `UISegmentedControl`: `Segmented`'s class (`insertSegmentWithTitle:atIndex:
+# animated:`/`removeAllSegments`, `selectedSegmentIndex`, `momentary`,
+# `selectedSegmentTintColor`) — an Apple-arm-only control, the eighth class.
+# Pulls in `objc2-foundation`'s `NSArray`/`NSAttributedString`/`NSDictionary`
+# features transitively (its own `Cargo.toml`) — features only, no new crate.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -163,6 +168,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIImage",
     "UIImageView",
     "UIActivityIndicatorView",
+    "UISegmentedControl",
     "UIColor",
     "UIFont",
     "UIAccessibility",
@@ -263,6 +269,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `setWantsLayer:` (corner radius, L2). `objc2-core-text`: the
 # `NSFont` <-> `CTFont` toll-free bridge (L3). `objc2-core-foundation`: the
 # `CGFloat` type gate every size/colour-taking member needs.
+# `NSSegmentedControl` + `NSSegmentedCell`: `Segmented`'s class and its cell
+# (`segmentCount`/`setLabel:forSegment:`, `selectedSegment`, `trackingMode`,
+# `segmentDistribution`, `selectedSegmentBezelColor`) — an Apple-arm-only
+# control, so the pair has no Android counterpart.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSView",
@@ -276,6 +286,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSSlider",
     "NSSliderCell",
     "NSProgressIndicator",
+    "NSSegmentedControl",
+    "NSSegmentedCell",
     "NSImageView",
     "NSImageCell",
     "NSImage",

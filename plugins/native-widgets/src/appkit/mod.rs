@@ -52,7 +52,8 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
-use crate::controls::{button, image, label, progress, slider, spinner, switch};
+use crate::controls::{APPLE_KINDS, SHARED_KINDS};
+use crate::controls::{button, image, label, progress, segmented, slider, spinner, switch};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on macOS exactly the registry's
@@ -68,12 +69,13 @@ pub(crate) type NativeView = crate::registry::appkit::AppKitHandle;
 /// mirror of `crate::apple::register_controls`, by the same shared `KIND`
 /// consts (never a literal).
 ///
-/// All seven v1 controls, in the Android/iOS order, **line for line** — so
-/// the three arms register the same kind table (`crate::controls::tests`'
-/// `the_seven_control_kinds_are_the_same_strings_all_three_platform_arms_register`
-/// is the host-visible half of that pin). A slot naming a kind outside it
-/// gets [`factory`]'s empty dead-slot view (`NativeWidgetError::UnknownControl`,
-/// logged once per create).
+/// The shared kinds (`crate::controls::SHARED_KINDS`) in the Android/iOS
+/// order, **line for line**, then the Apple-only ones
+/// (`crate::controls::APPLE_KINDS`) exactly as iOS registers them — checked by
+/// the `debug_assert!` below, and host-side by `crate::controls::tests`'
+/// `every_register_controls_registers_exactly_its_kind_tables`. A slot naming
+/// a kind outside both gets [`factory`]'s empty dead-slot view
+/// (`NativeWidgetError::UnknownControl`, logged once per create).
 ///
 /// Registration stays explicit and central for the reason
 /// `crate::apple::register_controls` gives (no link-time discovery).
@@ -85,4 +87,14 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
     runtime.register::<spinner::Spinner>(spinner::KIND);
+    // The Apple-only kinds (`crate::controls::APPLE_KINDS`), after the shared
+    // table — Android registers none of these.
+    runtime.register::<segmented::Segmented>(segmented::KIND);
+    debug_assert!(
+        SHARED_KINDS
+            .iter()
+            .chain(&APPLE_KINDS)
+            .all(|kind| runtime.is_registered(kind)),
+        "register_controls drifted from crate::controls::SHARED_KINDS/APPLE_KINDS"
+    );
 }

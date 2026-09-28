@@ -18,7 +18,7 @@
 //! | Token | `ColorScheme`/`ShapeScale`/`TypeScale` source | Controls |
 //! |---|---|---|
 //! | `accent_ink` | `scheme().primary` | `Switch`/`Slider` thumb tint, `Spinner` tint |
-//! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint |
+//! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint, `Segmented` selected-segment tint (`UISegmentedControl.selectedSegmentTintColor` on iOS, `NSSegmentedControl.selectedSegmentBezelColor` on macOS; no Android arm) |
 //! | `on_accent_fill` | `scheme().on_primary_container` | `Button` text colour |
 //! | `body_text` | `scheme().on_surface` | `Label` text colour |
 //! | `surface_bg` | `scheme().surface` | `Label`/`ProgressBar` background (explicit — see *Explicit backgrounds* below for why `Switch`/`Slider` are deliberately excluded) |

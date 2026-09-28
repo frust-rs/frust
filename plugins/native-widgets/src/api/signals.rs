@@ -1,11 +1,11 @@
 //! Events-as-signals: wraps a decoded [`EventPayload`] into the plain,
 //! parameter-shaped callback an app supplies to a builder's `.on_press`/
-//! `.on_toggle`/`.on_change` — the seam
+//! `.on_toggle`/`.on_change`/`.on_select` — the seam
 //! [`crate::runtime::NativeRuntime::set_callback`] invokes on the platform
 //! main thread.
 //!
 //! Wrapping lives here, once per control kind, rather than inline in
-//! `builders.rs`'s six `Component::build` impls, so each one reads as
+//! `builders.rs`'s `Component::build` impls, so each one reads as
 //! "encode params, register the callback" without repeating the
 //! match-and-forward boilerplate.
 //!
@@ -69,6 +69,19 @@ pub(super) fn on_value_changed(handler: Arc<dyn Fn(i32) + Send + Sync>) -> Event
     })
 }
 
+/// Wrap a segmented control's selection handler: fires only on
+/// [`EventPayload::Selected`], with the **requested** segment index — the
+/// app confirms it by feeding it back as `selected` (controlled, like
+/// [`on_toggled`]). A platform "no segment" report never reaches here
+/// (`crate::controls::segmented::decode_event` drops it).
+pub(super) fn on_selected(handler: Arc<dyn Fn(usize) + Send + Sync>) -> EventCallback {
+    Arc::new(move |payload| {
+        if let EventPayload::Selected(index) = payload {
+            handler(index);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +128,19 @@ mod tests {
         cb(EventPayload::DragEnd);
 
         assert_eq!(*seen.lock().unwrap(), vec![42]);
+    }
+
+    #[test]
+    fn on_selected_forwards_the_requested_index_only() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let cb = on_selected(Arc::new(move |index| recorder.lock().unwrap().push(index)));
+
+        cb(EventPayload::Selected(2));
+        cb(EventPayload::Toggled(true));
+        cb(EventPayload::Click);
+        cb(EventPayload::Selected(0));
+
+        assert_eq!(*seen.lock().unwrap(), vec![2, 0]);
     }
 }

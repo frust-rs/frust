@@ -34,8 +34,12 @@
 //! together" comments; nothing previously failed if they drifted, and drift
 //! misroutes events silently (e.g. a slider drag decoding as a click).
 //!
-//! [`kind_constants_match_between_kotlin_and_rust`] pins the five `KIND_*`/
-//! `EVENT_KIND_*` pairs. [`value_changed_bit_packing_matches_between_kotlin_and_rust`]
+//! [`kind_constants_match_between_kotlin_and_rust`] pins every `KIND_*`/
+//! `EVENT_KIND_*` pair, whatever the table's length — including `SELECTION`
+//! (6), which is appended on BOTH sides even though only the Apple arms emit
+//! it (a Rust-only kind would fail the name-set comparison), and which
+//! [`the_appended_selection_kind_is_six_on_both_sides`] pins by value.
+//! [`value_changed_bit_packing_matches_between_kotlin_and_rust`]
 //! pins the packing contract's mask/shift **values** (not their literal
 //! text — Kotlin's `0xFFFFFFFFL`/`shl 32` and Rust's `0xFFFF_FFFF`/`<< 32`
 //! are never textually identical, so the two sides are compared as parsed
@@ -200,6 +204,33 @@ fn kind_constants_match_between_kotlin_and_rust() {
             "KIND_{name} = {kotlin_value} in {KOTLIN_LISTENER_PATH} but EVENT_KIND_{name} = \
              {rust_value} in {RUST_EVENTS_PATH} — these two tables must be edited together, or a \
              control's events silently misroute (e.g. a slider drag decoding as a click)"
+        );
+    }
+}
+
+#[test]
+fn the_appended_selection_kind_is_six_on_both_sides() {
+    let kotlin_kinds = parse_kotlin_kind_constants(&read(KOTLIN_LISTENER_PATH));
+    let rust_kinds = parse_rust_event_kind_constants(&read(RUST_EVENTS_PATH));
+    // Append-only: the five shipped kinds keep 1-5 and SELECTION takes the
+    // next free code, on both sides.
+    for (name, value) in [
+        ("CLICK", 1),
+        ("TOGGLED", 2),
+        ("VALUE_CHANGED", 3),
+        ("DRAG_START", 4),
+        ("DRAG_END", 5),
+        ("SELECTION", 6),
+    ] {
+        assert_eq!(
+            kotlin_kinds.get(name),
+            Some(&value),
+            "KIND_{name} in {KOTLIN_LISTENER_PATH} must stay {value} (append-only table)"
+        );
+        assert_eq!(
+            rust_kinds.get(name),
+            Some(&value),
+            "EVENT_KIND_{name} in {RUST_EVENTS_PATH} must stay {value} (append-only table)"
         );
     }
 }

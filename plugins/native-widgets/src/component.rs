@@ -1692,6 +1692,10 @@ impl NativeEvent {
             ),
             EventPayload::DragStart => (EVENT_KIND_DRAG_START, 0),
             EventPayload::DragEnd => (EVENT_KIND_DRAG_END, 0),
+            EventPayload::Selected(index) => (
+                crate::events::EVENT_KIND_SELECTION,
+                crate::events::pack_index(index as isize),
+            ),
         };
         Self { kind, detail }
     }

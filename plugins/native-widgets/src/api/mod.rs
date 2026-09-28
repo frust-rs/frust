@@ -25,20 +25,21 @@
 //! The public form is a different trait entirely:
 //! [`crate::component::NativeComponent`], with `&self` methods, already-typed
 //! `Props` the app constructs directly, no `decode_props` step and no `Result`
-//! returns. The seven builders here keep riding the internal trait's wire
+//! returns. The eight builders here keep riding the internal trait's wire
 //! (`params_json` in, `EventPayload` callbacks out) unchanged — bridging the
 //! public trait onto the same runtime (`crate::component::Bridge`) is what let
 //! that stay true.
 //!
 //! # Two builder families, one slot shape
 //!
-//! The seven built-in controls above are one family; [`native_component`] is
+//! The eight built-in controls above are one family (`native_segmented` on
+//! iOS/macOS only — a compile-time refusal banner elsewhere); [`native_component`] is
 //! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (another plugin's
 //! included — an app crate cannot implement one; see that trait's own doc)
-//! into the same single `platform_view` slot, reusing the seven's
+//! into the same single `platform_view` slot, reusing the eight's
 //! own factory constant, slot counter, sizing rule and refusal placeholder.
-//! It is what closes *define → register → mount*; the seven are deliberately
+//! It is what closes *define → register → mount*; the eight are deliberately
 //! not rewritten to route through it (see `src/api/mount.rs`'s module doc).
 //!
 //! # One `platform_view` slot per control
@@ -64,8 +65,9 @@ mod theme;
 
 pub use builders::{
     NativeButtonView, NativeImageFit, NativeImageView, NativeLabelView, NativeProgressView,
-    NativeSliderView, NativeSpinnerSize, NativeSpinnerView, NativeSwitchView, native_button,
-    native_image, native_label, native_progress, native_slider, native_spinner, native_switch,
+    NativeSegmentedView, NativeSliderView, NativeSpinnerSize, NativeSpinnerView, NativeSwitchView,
+    native_button, native_image, native_label, native_progress, native_segmented, native_slider,
+    native_spinner, native_switch,
 };
 pub use mount::{NativeComponentView, native_component};
 

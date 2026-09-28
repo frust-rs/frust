@@ -1,5 +1,6 @@
-//! The seven v1 controls — `Button`, `Label`, `Switch`, `Slider`,
-//! `ProgressBar`, `Image`, `Spinner` — each an internal
+//! The v1 controls — seven shared (`Button`, `Label`, `Switch`, `Slider`,
+//! `ProgressBar`, `Image`, `Spinner`) plus the Apple-arm-only `Segmented`
+//! ([`APPLE_KINDS`]) — each an internal
 //! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
 //! setter on the main thread.
@@ -39,8 +40,8 @@
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
-//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters |
-//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by) |
+//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`] |
+//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment) |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
 //! **Per-frame guidance:** ~500 [`Tier::Cheap`] setters per frame ≈ 0.4 ms and
@@ -109,6 +110,7 @@ pub(crate) mod button;
 pub(crate) mod image;
 pub(crate) mod label;
 pub(crate) mod progress;
+pub(crate) mod segmented;
 pub(crate) mod slider;
 pub(crate) mod spinner;
 pub(crate) mod switch;
@@ -123,6 +125,33 @@ use crate::runtime::Params;
 use self::image::{Fit, ImageBytes};
 use self::spinner::SizeClass;
 use self::typeface::Typeface;
+
+// --- the kind tables ----------------------------------------------------------
+//
+// Which control kinds each platform arm registers, as two tables rather than
+// one: a control is either SHARED (all three arms carry a `NativeWidget` impl)
+// or APPLE-only (iOS + macOS; the builder renders a refusal banner on every
+// other target — `crate::api::builders`). Every arm's `register_controls`
+// registers exactly its tables, in this order — pinned host-side by
+// `tests::every_register_controls_registers_exactly_its_kind_tables`, and on
+// the two Apple arms additionally checked at runtime (a `debug_assert!` loop
+// over both tables in their `register_controls`).
+
+/// The kinds all three platform arms (Android, iOS, macOS) register.
+pub(crate) const SHARED_KINDS: [&str; 7] = [
+    button::KIND,
+    label::KIND,
+    switch::KIND,
+    slider::KIND,
+    progress::KIND,
+    image::KIND,
+    spinner::KIND,
+];
+
+/// The kinds only the two Apple arms (iOS, macOS) register — Android has no
+/// `NativeWidget` impl for these yet, and its builder path renders the
+/// refusal banner instead of a slot.
+pub(crate) const APPLE_KINDS: [&str; 1] = [segmented::KIND];
 
 // --- the params wire keys ---------------------------------------------------
 //
@@ -363,6 +392,36 @@ pub(crate) enum Setter<'a> {
     /// `spinner.rs`'s module doc's *`animating`* section for why the
     /// Android mapping is a visibility toggle rather than a start/stop call.
     Animating(bool),
+
+    /// Replace a segmented control's whole segment list —
+    /// `UISegmentedControl.removeAllSegments` + one
+    /// `insertSegmentWithTitle:atIndex:animated:` per label /
+    /// `NSSegmentedControl.segmentCount` + one `setLabel:forSegment:` per
+    /// label — **[`Tier::Relayout`]**: the segment widths are re-measured.
+    /// `Segmented`-only and Apple-only (no Android arm — `segmented.rs`'s
+    /// module doc). Wholesale, never per-segment: a label list changes at
+    /// interaction rate, and one replace keeps the plan trivially correct
+    /// across inserts/removals. Always followed by
+    /// [`Self::SelectedSegment`] in the same plan, because replacing the
+    /// segments resets the platform's selection.
+    Segments(&'a [String]),
+
+    /// `UISegmentedControl.selectedSegmentIndex` /
+    /// `NSSegmentedControl.selectedSegment` — **[`Tier::Cheap`]**. `None`
+    /// writes the platforms' shared "no segment" sentinel (`-1`). The
+    /// controlled-component write-back setter of `Segmented`, the
+    /// [`Self::Checked`] of this control.
+    SelectedSegment(Option<usize>),
+
+    /// `UISegmentedControl.momentary` / `NSSegmentedControl.trackingMode`
+    /// (`Momentary` vs `SelectOne`) — **[`Tier::Cheap`]**. `Segmented`-only.
+    Momentary(bool),
+
+    /// `UISegmentedControl.selectedSegmentTintColor` /
+    /// `NSSegmentedControl.selectedSegmentBezelColor` — **[`Tier::Cheap`]**,
+    /// the same nullable-clearable shape as [`Self::ProgressTint`] (nil
+    /// restores the platform's own selected-segment colour). `Segmented`-only.
+    SegmentTint(Option<i32>),
 }
 
 impl Setter<'_> {
@@ -375,7 +434,8 @@ impl Setter<'_> {
             | Self::ScaleType(_)
             | Self::ThemedBackground { .. }
             | Self::Typeface(_)
-            | Self::SizeClass(_) => Tier::Relayout,
+            | Self::SizeClass(_)
+            | Self::Segments(_) => Tier::Relayout,
             Self::ImageBytes(_) => Tier::Decode,
             Self::Enabled(_)
             | Self::TextColor(_)
@@ -389,7 +449,10 @@ impl Setter<'_> {
             | Self::TrackTint(_)
             | Self::ImageTint(_)
             | Self::SpinnerTint(_)
-            | Self::Animating(_) => Tier::Cheap,
+            | Self::Animating(_)
+            | Self::SelectedSegment(_)
+            | Self::Momentary(_)
+            | Self::SegmentTint(_) => Tier::Cheap,
         }
     }
 }
@@ -928,6 +991,20 @@ pub(crate) mod platform {
                 // with, so reaching here means a genuine post-create change,
                 // which this arm cannot honour.
                 warn_size_class_unsupported(size_class);
+                Ok(())
+            }
+            // `Segmented`'s four setters: that control has no Android arm
+            // (`crate::controls::APPLE_KINDS`; `segmented.rs`'s module doc),
+            // so no control this arm registers ever plans one. Reaching here
+            // is a plan/apply drift bug — warned, never a dead slot.
+            Setter::Segments(_)
+            | Setter::SelectedSegment(_)
+            | Setter::Momentary(_)
+            | Setter::SegmentTint(_) => {
+                log::warn!(
+                    "frust-native-widgets: an Android control planned a segmented-control \
+                     setter ({setter:?}), which this arm does not implement — ignored"
+                );
                 Ok(())
             }
         }
@@ -1779,6 +1856,9 @@ mod tests {
             Setter::ThumbTint(None),
             Setter::TrackTint(None),
             Setter::ImageTint(None),
+            Setter::SelectedSegment(Some(1)),
+            Setter::Momentary(true),
+            Setter::SegmentTint(None),
         ];
         for setter in cheap {
             assert_eq!(setter.tier(), Tier::Cheap, "{setter:?}");
@@ -1794,6 +1874,7 @@ mod tests {
                 radius_dp: 6.0,
             },
             Setter::Typeface(Typeface::GlyphMono),
+            Setter::Segments(&[]),
         ];
         for setter in relayout {
             assert_eq!(setter.tier(), Tier::Relayout, "{setter:?}");
@@ -1858,36 +1939,22 @@ mod tests {
         }
     }
 
-    // --- shared-Props parity: one kind table, three platform arms ----------
+    // --- shared-Props parity: two kind tables, three platform arms ---------
 
     #[test]
-    fn the_seven_control_kinds_are_the_same_strings_all_three_platform_arms_register() {
-        // `crate::android::register_controls`,
-        // `crate::apple::register_controls` and
-        // `crate::appkit::register_controls` are each
-        // `#[cfg(target_os = ...)]`-gated, so no single host test can call all
-        // three. What a host CAN pin is the thing they all register *by*: these
-        // seven `KIND` consts. No arm spells a kind literally
+    fn the_kind_tables_are_the_shipped_wire_strings() {
+        // What every arm registers *by*: [`SHARED_KINDS`] (all three arms) and
+        // [`APPLE_KINDS`] (iOS + macOS only). No arm spells a kind literally
         // (`crate::android`'s own registration note), so a drift in the wire
-        // vocabulary has to pass through here. All three arms register all
-        // seven kinds and never a kind outside the table.
+        // vocabulary has to pass through here.
         //
         // The other half of "shared-Props parity" needs no assertion at all:
         // there is exactly ONE `Props` type per control, in this same module
-        // tree, used verbatim by all three arms — same fields by construction,
-        // not by agreement. A second, per-platform Props definition is the
-        // thing this file's layout exists to prevent.
-        let kinds = [
-            button::KIND,
-            label::KIND,
-            switch::KIND,
-            slider::KIND,
-            progress::KIND,
-            image::KIND,
-            spinner::KIND,
-        ];
+        // tree, used verbatim by every arm that registers it — same fields by
+        // construction, not by agreement. A second, per-platform Props
+        // definition is the thing this file's layout exists to prevent.
         assert_eq!(
-            kinds,
+            SHARED_KINDS,
             [
                 "button", "label", "switch", "slider", "progress", "image", "spinner"
             ],
@@ -1895,10 +1962,75 @@ mod tests {
              layer's builders inject them and all three platform arms \
              register against them"
         );
-        let mut unique = kinds.to_vec();
+        assert_eq!(
+            APPLE_KINDS,
+            ["segmented"],
+            "the Apple-arm-only kinds are a shipped wire contract too"
+        );
+        let mut unique: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
+        let total = unique.len();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), kinds.len(), "two controls share a kind");
+        assert_eq!(
+            unique.len(),
+            total,
+            "two controls share a kind (or a kind sits in both tables)"
+        );
+    }
+
+    /// The kind every `runtime.register::<…>(<module>::KIND)` line in `source`
+    /// names, in file order — resolved through the same `KIND` consts the
+    /// tables hold, never a literal.
+    fn registered_kinds(source: &str, file: &str) -> Vec<&'static str> {
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("runtime.register::<"))
+            .map(|line| {
+                let module = line
+                    .split_once(">(")
+                    .and_then(|(_, arg)| arg.strip_suffix("::KIND);"))
+                    .unwrap_or_else(|| panic!("{file}: unparsed registration line {line:?}"));
+                match module {
+                    "button" => button::KIND,
+                    "label" => label::KIND,
+                    "switch" => switch::KIND,
+                    "slider" => slider::KIND,
+                    "progress" => progress::KIND,
+                    "image" => image::KIND,
+                    "spinner" => spinner::KIND,
+                    "segmented" => segmented::KIND,
+                    other => panic!(
+                        "{file}: registers `{other}::KIND`, a module this test does not know"
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_register_controls_registers_exactly_its_kind_tables() {
+        // `crate::android::register_controls`, `crate::apple::register_controls`
+        // and `crate::appkit::register_controls` are each
+        // `#[cfg(target_os = ...)]`-gated, so no single host test can CALL all
+        // three — but every host can READ all three. Each arm must register
+        // exactly its tables, in table order, line for line: Android the
+        // shared kinds only (an Apple-only kind registered there would be a
+        // control with no Android `NativeWidget` impl — it would not even
+        // compile), the two Apple arms the shared kinds then the Apple ones.
+        let shared: Vec<&str> = SHARED_KINDS.to_vec();
+        let apple: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
+        for (file, source, expected) in [
+            ("android/mod.rs", include_str!("../android/mod.rs"), &shared),
+            ("apple/mod.rs", include_str!("../apple/mod.rs"), &apple),
+            ("appkit/mod.rs", include_str!("../appkit/mod.rs"), &apple),
+        ] {
+            assert_eq!(
+                &registered_kinds(source, file),
+                expected,
+                "{file}'s register_controls drifted from SHARED_KINDS/APPLE_KINDS"
+            );
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
-//! The seven app-facing builders: `native_button`/
+//! The eight app-facing builders: `native_button`/
 //! `native_label`/`native_switch`/`native_slider`/`native_progress`/
-//! `native_image`/`native_spinner`, each composing exactly one
-//! [`platform_view`] slot behind this crate's one Android factory (the "N
-//! controls = N slots" envelope).
+//! `native_image`/`native_spinner`/`native_segmented`, each composing exactly
+//! one [`platform_view`] slot behind this crate's one factory per platform
+//! (the "N controls = N slots" envelope) — `native_segmented` only on iOS and
+//! macOS; elsewhere it renders the refusal banner at compile time
+//! ([`SEGMENTED_ARM`]).
 //!
 //! # Retained identity via `Component`, not a hand-rolled `Widget`
 //!
@@ -68,11 +70,11 @@ use crate::controls::{
     INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TINT,
     TRACK_TINT, TYPEFACE, VALUE,
 };
-use crate::controls::{button, image, label, progress, slider, spinner, switch};
+use crate::controls::{button, image, label, progress, segmented, slider, spinner, switch};
 use crate::registry::SlotId;
 use crate::runtime::{escape, with_identity, with_runtime};
 
-use super::signals::{on_click, on_toggled, on_value_changed};
+use super::signals::{on_click, on_selected, on_toggled, on_value_changed};
 use super::theme::{self, ResolvedTheme};
 
 /// The one factory class every control resolves through, per platform.
@@ -104,7 +106,7 @@ use super::theme::{self, ResolvedTheme};
 ///   spelling stands in so the constant is always defined.
 ///
 /// `pub(super)` rather than private: the generic mounting builder
-/// ([`crate::api::mount`]) composes the same one factory these seven do —
+/// ([`crate::api::mount`]) composes the same one factory these eight do —
 /// a public component is served by the same runtime, so it must resolve
 /// through the same class.
 #[cfg(target_os = "android")]
@@ -188,12 +190,27 @@ pub(super) fn placeholder<State: 'static>(
     control: &str,
 ) -> AnyView<State> {
     warn_refusal_once();
-    let banner: AnyView<State> = any(RefusalBanner {
-        label: format!("Native {control} unavailable"),
-        description: "the host declared a translucent surface but the platform refused it — \
-                      rendering a frust placeholder instead of an invisible native slot."
+    banner_placeholder(
+        size,
+        format!("Native {control} unavailable"),
+        "the host declared a translucent surface but the platform refused it — rendering a \
+         frust placeholder instead of an invisible native slot."
             .to_string(),
-    });
+    )
+}
+
+/// The sized, slot-clipped [`RefusalBanner`] itself, with caller-chosen
+/// wording — [`placeholder`]'s body, shared with the compile-time
+/// no-platform-arm fallback ([`NativeSegmentedView`] on Android, see
+/// [`SEGMENTED_ARM`]), which refuses for a different reason and so says a
+/// different thing. Logging is the caller's: each refusal reason logs once
+/// under its own `Once`.
+fn banner_placeholder<State: 'static>(
+    size: Option<(f64, f64)>,
+    label: String,
+    description: String,
+) -> AnyView<State> {
+    let banner: AnyView<State> = any(RefusalBanner { label, description });
     let sized = SizedBox(size.map(|(w, _)| w), size.map(|(_, h)| h)).child(banner);
     any(ClipToSlot { child: any(sized) })
 }
@@ -556,7 +573,7 @@ fn ambient_theme_tokens() -> Option<ResolvedTheme> {
 /// boundary rather than pulling in `serde` (`docs/CODE_STANDARDS.md`'s
 /// Language Idioms; `crate::runtime::Params`/`with_identity` are the
 /// reader/identity-encoder halves this writes the *body* half for). Only the
-/// handful of primitive field shapes the seven controls need.
+/// handful of primitive field shapes the eight controls need.
 struct ParamsBody(String);
 
 impl ParamsBody {
@@ -1336,6 +1353,214 @@ impl Component for NativeSpinnerView {
 }
 
 // ============================================================================
+// Segmented
+// ============================================================================
+
+/// Whether this build's platform arm registers the segmented control — the
+/// crate's first **compile-time** platform gate on a builder. `Segmented` is
+/// in `crate::controls::APPLE_KINDS`: iOS and macOS carry a `NativeWidget`
+/// impl, Android does not (decision D2 — `crate::controls::segmented`'s module
+/// doc), and neither does any host target. Where it is `false`,
+/// [`NativeSegmentedView`] renders the frust-drawn refusal banner
+/// ([`RefusalBanner`], via [`banner_placeholder`]) instead of publishing a slot
+/// no registered kind could serve — a visible, screen-reader-announced
+/// refusal rather than the factory's silent empty dead-slot view.
+///
+/// A `cfg`-selected constant rather than `cfg`'d code paths so both branches
+/// compile, and are host-tested ([`NativeSegmentedView::build_for_arm`]), on
+/// every target.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+const SEGMENTED_ARM: bool = true;
+/// See the Apple-arm definition above: no segmented arm on Android (D2) or on
+/// any host target.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+const SEGMENTED_ARM: bool = false;
+
+/// The banner's visible label on a target with no segmented arm.
+const SEGMENTED_UNAVAILABLE_LABEL: &str = "Native segmented control unavailable";
+
+/// The banner's explanation on a target with no segmented arm — names the
+/// missing Android arm and where it is tracked.
+const SEGMENTED_UNAVAILABLE_DESCRIPTION: &str = "native_segmented has no Android arm in this \
+     build (the framework has no segmented control; a Material-backed Android arm is a \
+     follow-up plan) — rendering a frust placeholder instead of an empty native slot.";
+
+/// Log the no-segmented-arm fallback exactly once, crate-wide.
+static SEGMENTED_NO_ARM_LOGGED: Once = Once::new();
+
+fn warn_no_segmented_arm_once() {
+    SEGMENTED_NO_ARM_LOGGED.call_once(|| {
+        log::warn!(
+            "frust-native-widgets: native_segmented is an iOS/macOS-only control in this build \
+             (no Android arm yet — a Material-backed one is a follow-up plan); rendering the \
+             frust-drawn refusal banner instead of a native slot"
+        );
+    });
+}
+
+/// A real segmented control rendered from pure Rust — `UISegmentedControl` on
+/// iOS/iPadOS, `NSSegmentedControl` on macOS, and a frust-drawn refusal banner
+/// everywhere else (Android included: see [`SEGMENTED_ARM`]). A
+/// **controlled** component, like [`NativeSwitchView`]: the app owns
+/// `selected`, and a tap only ever arrives through [`Self::on_select`] as a
+/// *requested* index. Build one with [`native_segmented`].
+#[derive(Clone)]
+pub struct NativeSegmentedView {
+    labels: Vec<String>,
+    selected: usize,
+    enabled: bool,
+    momentary: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_select: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+}
+
+/// A native segmented control over `labels`, with the app-owned `selected`
+/// segment — see [`NativeSegmentedView`]. An out-of-range `selected` shows no
+/// selection rather than failing; at most 64 segments are shown
+/// (`crate::controls::segmented::MAX_SEGMENTS`).
+pub fn native_segmented(labels: Vec<String>, selected: usize) -> NativeSegmentedView {
+    NativeSegmentedView {
+        labels,
+        selected,
+        enabled: true,
+        momentary: false,
+        content_description: None,
+        size: None,
+        on_select: None,
+    }
+}
+
+impl NativeSegmentedView {
+    /// `UIControl.enabled` / `NSControl.enabled` — default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Momentary tracking: a tap flashes its segment and reports it through
+    /// [`Self::on_select`] without leaving it selected (a toolbar of
+    /// actions rather than a choice). Default `false`.
+    pub fn momentary(mut self, momentary: bool) -> Self {
+        self.momentary = momentary;
+        self
+    }
+
+    /// The VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the *requested* segment index on a user tap — the app
+    /// confirms (or rejects) it by feeding `selected` back through the next
+    /// build, the controlled-component contract every interactive frust
+    /// widget follows. Never fires on a target with no segmented arm.
+    pub fn on_select(mut self, handler: impl Fn(usize) + Send + Sync + 'static) -> Self {
+        self.on_select = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_fill` in
+    /// as the selected segment's tint — see [`NativeButtonView::params_for`]'s
+    /// doc for why it's threaded explicitly, and
+    /// `crate::controls::segmented`'s module doc for the per-arm property.
+    /// The labels ride flat `segmentCount` + `segment<i>` keys (that module
+    /// doc's *The labels ride flat params*).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(segmented::SEGMENT_COUNT, self.labels.len());
+        for (index, label) in self.labels.iter().enumerate() {
+            body.push_str(&segmented::segment_key(index), label);
+        }
+        body.push_raw(segmented::SELECTED, self.selected);
+        body.push_raw(segmented::MOMENTARY, self.momentary);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_fill);
+        }
+        with_identity(segmented::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        self.build_for_arm(slot, mode, tokens, SEGMENTED_ARM)
+    }
+
+    /// [`Self::build_with_mode`] with the platform-arm gate threaded as a
+    /// parameter, so a host test can drive both branches on any target.
+    ///
+    /// No arm → the unavailable banner, before anything else: the refusal is
+    /// structural, whatever the surface mode, and no callback is registered
+    /// (no event could ever arrive for it).
+    fn build_for_arm(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+        arm_available: bool,
+    ) -> AnyView<SlotId> {
+        if !arm_available {
+            warn_no_segmented_arm_once();
+            return banner_placeholder(
+                self.size,
+                SEGMENTED_UNAVAILABLE_LABEL.to_string(),
+                SEGMENTED_UNAVAILABLE_DESCRIPTION.to_string(),
+            );
+        }
+        if mode.translucency_refused() {
+            return placeholder(self.size, "SegmentedControl");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_select) = self.on_select.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_selected(on_select)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "segmented control".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeSegmentedView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc — `Segmented` registers a
+        // callback via `Self::on_select`, so it needs the same
+        // `pending_callbacks` reaper (a harmless no-op on a target with no
+        // arm, where nothing is ever registered).
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
 // Image
 // ============================================================================
 
@@ -1541,6 +1766,7 @@ impl_native_view!(NativeSliderView);
 impl_native_view!(NativeProgressView);
 impl_native_view!(NativeImageView);
 impl_native_view!(NativeSpinnerView);
+impl_native_view!(NativeSegmentedView);
 
 #[cfg(test)]
 mod tests {
@@ -1648,6 +1874,114 @@ mod tests {
              \"sizeClass\":\"large\",\"enabled\":true,\"contentDescription\":\"loading\",\
              \"dark\":false}"
         );
+    }
+
+    #[test]
+    fn segmented_params_snapshot() {
+        let view = native_segmented(vec!["Day".into(), "Week \"W\"".into()], 1)
+            .momentary(true)
+            .content_description("range");
+        assert_eq!(
+            view.params_for(8, None),
+            "{\"__frustControl\":\"segmented\",\"__frustSlot\":8,\"segmentCount\":2,\
+             \"segment0\":\"Day\",\"segment1\":\"Week \\\"W\\\"\",\"selected\":1,\
+             \"momentary\":true,\"enabled\":true,\"contentDescription\":\"range\",\
+             \"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn segmented_params_round_trip_through_the_control_decoder() {
+        use crate::controls::segmented::SegmentedProps;
+        use crate::runtime::Params;
+
+        let view = native_segmented(vec!["A".into(), "B".into(), "C".into()], 2).enabled(false);
+        let raw = view.params_for(8, Some(dark_tokens()));
+        let props = SegmentedProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.labels, vec!["A", "B", "C"]);
+        assert_eq!(props.selected, Some(2));
+        assert!(!props.enabled);
+        assert!(!props.momentary);
+        assert_eq!(props.tint, Some(dark_tokens().accent_fill as i32));
+    }
+
+    #[test]
+    fn the_segmented_arm_gate_is_exactly_the_apple_targets() {
+        assert_eq!(
+            SEGMENTED_ARM,
+            cfg!(any(target_os = "ios", target_os = "macos")),
+            "Android (decision D2) and every host target render the banner"
+        );
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("Android"));
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("follow-up"));
+    }
+
+    #[test]
+    fn segmented_without_a_platform_arm_paints_the_banner_and_publishes_no_slot() {
+        // Every surface mode, including the ones a native slot would render
+        // in: with no arm, the refusal is structural.
+        for mode in [
+            ResolvedSurfaceMode::Unknown,
+            ResolvedSurfaceMode::Opaque,
+            ResolvedSurfaceMode::Translucent,
+            ResolvedSurfaceMode::RefusedTranslucent,
+        ] {
+            let view = native_segmented(vec!["A".into(), "B".into()], 0)
+                .size(240.0, 60.0)
+                .build_for_arm(3, mode, None, false);
+            let mut element = build_any(view);
+            let mut text_ctx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+            let laid = element.layout(&mut lctx, &BoxConstraints::tight(Size::new(240.0, 60.0)));
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+            assert!(
+                pctx.take_platform_views().is_empty(),
+                "{mode:?}: no arm must publish no native platform_view frame"
+            );
+            assert!(
+                rec.glyph_runs >= 2,
+                "{mode:?}: the banner's label and description must paint, saw {} runs",
+                rec.glyph_runs
+            );
+        }
+    }
+
+    #[test]
+    fn segmented_with_a_platform_arm_publishes_one_interactive_slot() {
+        let view = native_segmented(vec!["A".into(), "B".into()], 1).size(200.0, 32.0);
+        let expected_params = view.params_for(4, None);
+        let built = view.build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let mut lctx = LayoutCtx::new();
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(200.0, 32.0)));
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(200.0, 32.0));
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a segmented slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn segmented_with_an_arm_still_honours_the_translucency_refusal() {
+        let view = native_segmented(vec!["A".into()], 0).build_for_arm(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+            true,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(120.0, 32.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
     }
 
     // --- theme ladder L2: token folding, one snapshot per colour-bearing

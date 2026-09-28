@@ -19,7 +19,12 @@
 //! [`EventPayload`] straight into a signal write, which is what wakes
 //! exactly one frust frame.
 //!
-//! # One listener, five kinds, no JSON
+//! # One listener, six kinds, no JSON
+//!
+//! Kinds 1-5 are emitted on Android; the sixth,
+//! [`EVENT_KIND_SELECTION`], is appended for the Apple-arm-only segmented
+//! control and is emitted only by the two Apple target classes today (its
+//! Kotlin twin exists purely to keep the shared table whole).
 //!
 //! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,
@@ -66,6 +71,16 @@ pub(crate) const EVENT_KIND_VALUE_CHANGED: i32 = 3;
 pub(crate) const EVENT_KIND_DRAG_START: i32 = 4;
 /// `SeekBar.OnSeekBarChangeListener.onStopTrackingTouch` — `detail` unused.
 pub(crate) const EVENT_KIND_DRAG_END: i32 = 5;
+/// A segmented control's `ValueChanged` action (`UISegmentedControl` on iOS,
+/// `NSSegmentedControl`'s action on macOS) — `detail` packs the reported
+/// segment index, see [`pack_index`]/[`unpack_index`].
+///
+/// **Appended, Apple-arm-only in this build.** Kotlin's `KIND_SELECTION`
+/// carries the same value so the two tables stay one table
+/// (`tests/kotlin_conformance.rs`), but no Android listener ever emits it:
+/// the segmented control has no Android arm yet (`crate::controls::segmented`'s
+/// module doc).
+pub(crate) const EVENT_KIND_SELECTION: i32 = 6;
 
 // --- the typed vocabulary the app-facing api wraps into a signal -----------
 
@@ -103,6 +118,10 @@ pub(crate) enum EventPayload {
     DragStart,
     /// `Slider`'s drag gesture ended (`onStopTrackingTouch`).
     DragEnd,
+    /// A segmented control reported this segment as the **requested**
+    /// selection — controlled, like [`Self::Toggled`]: the app confirms it by
+    /// feeding the index back as props (`crate::controls::segmented`).
+    Selected(usize),
 }
 
 // --- the detail codec -------------------------------------------------------
@@ -132,6 +151,23 @@ pub(crate) fn unpack_value_changed(detail: i64) -> (i32, bool) {
     let platform_value = (detail & 0xFFFF_FFFF) as i32;
     let from_user = (detail >> 32) & 1 != 0;
     (platform_value, from_user)
+}
+
+/// Pack a platform-reported segment index into `detail` —
+/// [`EVENT_KIND_SELECTION`]'s whole payload. **Layout: the whole 64-bit
+/// `detail` is the platform's own signed index, sign-extended** — no mask, no
+/// flag bits (unlike [`pack_value_changed`]). Taking the signed `NSInteger`
+/// verbatim keeps the platforms' "no segment selected" sentinel
+/// (`UISegmentedControlNoSegment`, `-1` on both Apple arms) representable, so
+/// [`unpack_index`] can refuse it rather than a caller having to guess.
+pub(crate) fn pack_index(platform_index: isize) -> i64 {
+    platform_index as i64
+}
+
+/// [`pack_index`]'s inverse: the reported segment, or `None` for a negative
+/// (no-selection) report — which carries no requested segment to deliver.
+pub(crate) fn unpack_index(detail: i64) -> Option<usize> {
+    usize::try_from(detail).ok()
 }
 
 /// Decode an [`EVENT_KIND_CLICK`] firing — `Button`'s whole event surface,
@@ -169,6 +205,37 @@ mod tests {
             assert_eq!(decoded_value, value);
             assert_eq!(decoded_from_user, from_user);
         }
+    }
+
+    #[test]
+    fn a_segment_index_round_trips_and_no_selection_decodes_to_none() {
+        for index in [0usize, 1, 7, 63] {
+            assert_eq!(
+                unpack_index(pack_index(index as isize)),
+                Some(index),
+                "index {index}"
+            );
+        }
+        // `UISegmentedControlNoSegment` / `NSSegmentedControl`'s `-1`.
+        assert_eq!(unpack_index(pack_index(-1)), None);
+        assert_eq!(unpack_index(i64::MIN), None);
+    }
+
+    #[test]
+    fn the_kind_table_is_append_only() {
+        // Kinds 1-5 are shipped wire values; SELECTION is appended after
+        // them, never renumbered into the middle.
+        assert_eq!(
+            [
+                EVENT_KIND_CLICK,
+                EVENT_KIND_TOGGLED,
+                EVENT_KIND_VALUE_CHANGED,
+                EVENT_KIND_DRAG_START,
+                EVENT_KIND_DRAG_END,
+                EVENT_KIND_SELECTION,
+            ],
+            [1, 2, 3, 4, 5, 6]
+        );
     }
 
     #[test]
