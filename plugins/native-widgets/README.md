@@ -2,14 +2,17 @@
 
 Render **real OS controls** from pure Rust — `native_button("Save")`,
 `native_label(...)`, `native_switch(checked)`, `native_slider(...)`,
-`native_progress(...)`, `native_image(bytes)` — composed straight into a
-frust `View` tree like any other widget. Each control is backed by a genuine
-Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`),
-UIKit view (`UIButton`/`UILabel`/`UISwitch`/`UISlider`/`UIProgressView`/
-`UIImageView`), or AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/
-`NSSlider`/`NSProgressIndicator`/`NSImageView`), hosted as a **platform-view
-slot** (`docs/ARCHITECTURE.md`'s Platform-view flow) — frust paints nothing
-for it, the OS composites it in place.
+`native_progress(...)`, `native_image(bytes)`, `native_spinner(animating)` —
+composed straight into a frust `View` tree like any other widget. Each
+control is backed by a genuine Android `View`
+(`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`/a
+circular-style `ProgressBar`), UIKit view (`UIButton`/`UILabel`/`UISwitch`/
+`UISlider`/`UIProgressView`/`UIImageView`/`UIActivityIndicatorView`), or
+AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/`NSSlider`/
+`NSProgressIndicator`/`NSImageView`/an `NSProgressIndicator` in its
+`Spinning` style), hosted as a **platform-view slot**
+(`docs/ARCHITECTURE.md`'s Platform-view flow) — frust paints nothing for it,
+the OS composites it in place.
 
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
@@ -27,7 +30,7 @@ not re-export it.
 
 ## 1. What you get
 
-Six controls, one Rust API, no Kotlin or Swift to write for any of them:
+Seven controls, one Rust API, no Kotlin or Swift to write for any of them:
 
 | Builder | Android view | iOS view | macOS view |
 |---|---|---|---|
@@ -37,15 +40,16 @@ Six controls, one Rust API, no Kotlin or Swift to write for any of them:
 | `native_slider(value, min, max)` | `SeekBar` | `UISlider` | `NSSlider` |
 | `native_progress(value, min, max)` | `ProgressBar` | `UIProgressView` | `NSProgressIndicator` |
 | `native_image(bytes)` | `ImageView` | `UIImageView` | `NSImageView` |
+| `native_spinner(animating)` | `ProgressBar` (circular style) | `UIActivityIndicatorView` | `NSProgressIndicator` (`Spinning` style) |
 
 …plus `native_component`, the generic mounting seam for a control this crate
 does not ship: `impl NativeComponent` (with your own typed `Props`) →
 `register_component::<C>(KIND)` → `native_component(KIND, c, props)`, mounted
-through the same one factory and the same runtime the six builders use, with
-no per-component Kotlin or Swift anywhere in it. See the `api::mount` module
-docs.
+through the same one factory and the same runtime the seven builders use,
+with no per-component Kotlin or Swift anywhere in it. See the `api::mount`
+module docs.
 
-A component hears its own views the way the six builders do: it attaches the
+A component hears its own views the way the seven builders do: it attaches the
 platform's one listener to any view it built with
 `ComponentCtx::attach_listener(view, ListenerKinds::CLICK)` (or `TOGGLED` /
 `VALUE_CHANGED`), its `NativeComponent::on_event` receives each event, and
@@ -61,7 +65,7 @@ native_component(KIND, MyCard, props)
 > **One limit on that seam — read it before you plan around it.** An app
 > crate cannot implement `NativeComponent` today (it needs raw
 > `jni`/`objc2-ui-kit` dependencies this crate does not re-export). It is
-> spelled out in §5, and does not apply to the six builders above.
+> spelled out in §5, and does not apply to the seven builders above.
 
 Every control follows frust's **controlled-component** convention where the
 platform allows it: a switch/slider reports the *requested* value through its
@@ -199,9 +203,11 @@ Two things differ from the mobile arms, both by design:
   `Fit::Contain` rather than cropping; a slider emits no drag-start/drag-end
   event (AppKit target-action carries no gesture phase, only the final
   value); `NSSwitch`'s track and `NSProgressIndicator`'s fill have no tint
-  API at all, so `thumbTint`/`trackTint`/`progressTint` on those two
-  controls are silent no-ops logged at debug (both still draw in the
-  system accent colour); `native_image`'s tint marks the image as a template and sets
+  API at all, so `thumbTint`/`trackTint`/`progressTint` on `native_switch`/
+  `native_progress` — and the spinner's own tint on `native_spinner`, which
+  also draws through `NSProgressIndicator` — are silent no-ops logged at
+  debug (all three still draw in the system accent colour);
+  `native_image`'s tint marks the image as a template and sets
   `NSImageView.contentTintColor` — a silhouette in the tint colour, like Android's SRC_IN and iOS's template rendering — and clearing
   the tint restores the original image; and `native_image` decodes through
   ImageIO, so a shell environment whose `DYLD_LIBRARY_PATH` shadows one of
@@ -245,7 +251,7 @@ Two things differ from the mobile arms, both by design:
   only implementor in this repo is this crate's own non-default
   `demo-components` composite. Closing the gap (re-exporting a curated
   view-construction surface, or the FFI crates themselves) is a separate,
-  unscheduled decision. The six builders in §1 are unaffected: they are
+  unscheduled decision. The seven builders in §1 are unaffected: they are
   ordinary Rust calls needing no FFI dependency of yours.
 - **A `NativeComponent`'s events come only from listeners it attached.**
   `ComponentCtx::attach_listener` binds the platform's one listener class to

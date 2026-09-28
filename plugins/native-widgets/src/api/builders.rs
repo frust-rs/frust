@@ -1,7 +1,8 @@
-//! The six app-facing builders: `native_button`/
+//! The seven app-facing builders: `native_button`/
 //! `native_label`/`native_switch`/`native_slider`/`native_progress`/
-//! `native_image`, each composing exactly one [`platform_view`] slot behind
-//! this crate's one Android factory (the "N controls = N slots" envelope).
+//! `native_image`/`native_spinner`, each composing exactly one
+//! [`platform_view`] slot behind this crate's one Android factory (the "N
+//! controls = N slots" envelope).
 //!
 //! # Retained identity via `Component`, not a hand-rolled `Widget`
 //!
@@ -64,10 +65,10 @@ use kurbo::{Size, Vec2};
 
 use crate::controls::{
     BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
-    INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TRACK_TINT,
-    TYPEFACE, VALUE,
+    INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TINT,
+    TRACK_TINT, TYPEFACE, VALUE,
 };
-use crate::controls::{button, image, label, progress, slider, switch};
+use crate::controls::{button, image, label, progress, slider, spinner, switch};
 use crate::registry::SlotId;
 use crate::runtime::{escape, with_identity, with_runtime};
 
@@ -103,7 +104,7 @@ use super::theme::{self, ResolvedTheme};
 ///   spelling stands in so the constant is always defined.
 ///
 /// `pub(super)` rather than private: the generic mounting builder
-/// ([`crate::api::mount`]) composes the same one factory these six do —
+/// ([`crate::api::mount`]) composes the same one factory these seven do —
 /// a public component is served by the same runtime, so it must resolve
 /// through the same class.
 #[cfg(target_os = "android")]
@@ -555,7 +556,7 @@ fn ambient_theme_tokens() -> Option<ResolvedTheme> {
 /// boundary rather than pulling in `serde` (`docs/CODE_STANDARDS.md`'s
 /// Language Idioms; `crate::runtime::Params`/`with_identity` are the
 /// reader/identity-encoder halves this writes the *body* half for). Only the
-/// handful of primitive field shapes the six controls need.
+/// handful of primitive field shapes the seven controls need.
 struct ParamsBody(String);
 
 impl ParamsBody {
@@ -1200,6 +1201,141 @@ impl Component for NativeProgressView {
 }
 
 // ============================================================================
+// Spinner
+// ============================================================================
+
+/// How large the spinner renders — the public mirror of
+/// `crate::controls::spinner::SizeClass`, which stays `pub(crate)`. iOS has
+/// no distinct small style (`UIActivityIndicatorView.Style` offers only
+/// `.medium`/`.large`), so [`Self::Small`] renders the same as
+/// [`Self::Medium`] on that one arm — see `crate::controls::spinner`'s
+/// module doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeSpinnerSize {
+    /// The smallest stock size. Degrades to [`Self::Medium`] on iOS.
+    Small,
+    /// The platform's own default circular spinner size.
+    #[default]
+    Medium,
+    /// The largest stock size.
+    Large,
+}
+
+impl NativeSpinnerSize {
+    /// The wire spelling `crate::controls::spinner::SizeClass::from_wire`
+    /// decodes.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+}
+
+/// A real indeterminate activity indicator rendered from pure Rust —
+/// display-only (no listener, no `.interactive()`). Build one with
+/// [`native_spinner`].
+#[derive(Clone)]
+pub struct NativeSpinnerView {
+    animating: bool,
+    size_class: NativeSpinnerSize,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+}
+
+/// A native spinner, animating or not — see [`NativeSpinnerView`].
+pub fn native_spinner(animating: bool) -> NativeSpinnerView {
+    NativeSpinnerView {
+        animating,
+        size_class: NativeSpinnerSize::default(),
+        enabled: true,
+        content_description: None,
+        size: None,
+    }
+}
+
+impl NativeSpinnerView {
+    /// The spinner's size — see [`NativeSpinnerSize`].
+    pub fn size_class(mut self, size_class: NativeSpinnerSize) -> Self {
+        self.size_class = size_class;
+        self
+    }
+
+    /// `View.setEnabled` — Android only; the other two arms have no
+    /// `enabled` property on this control at all (`crate::controls::spinner`'s
+    /// module doc's *`enabled`* section). Default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack/VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_ink` in
+    /// as the spinner's tint — see [`NativeButtonView::params_for`]'s doc
+    /// for why it's threaded explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(spinner::ANIMATING, self.animating);
+        body.push_str(spinner::SIZE_CLASS, self.size_class.wire());
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+        }
+        with_identity(spinner::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Spinner");
+        }
+        let params = self.params_for(slot, tokens);
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "spinner".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeSpinnerView {
+    type State = SlotId;
+
+    // No `on_cleanup` here: the spinner is display-only and never calls
+    // `set_callback` — see `NativeLabelView::init`'s doc.
+    fn init(&self) -> SlotId {
+        next_local_slot()
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
 // Image
 // ============================================================================
 
@@ -1404,6 +1540,7 @@ impl_native_view!(NativeSwitchView);
 impl_native_view!(NativeSliderView);
 impl_native_view!(NativeProgressView);
 impl_native_view!(NativeImageView);
+impl_native_view!(NativeSpinnerView);
 
 #[cfg(test)]
 mod tests {
@@ -1496,6 +1633,19 @@ mod tests {
         assert_eq!(
             view.params_for(900, 42, None),
             "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"cover\",\
+             \"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn spinner_params_snapshot() {
+        let view = native_spinner(true)
+            .size_class(NativeSpinnerSize::Large)
+            .content_description("loading");
+        assert_eq!(
+            view.params_for(6, None),
+            "{\"__frustControl\":\"spinner\",\"__frustSlot\":6,\"animating\":true,\
+             \"sizeClass\":\"large\",\"enabled\":true,\"contentDescription\":\"loading\",\
              \"dark\":false}"
         );
     }
@@ -1636,6 +1786,20 @@ mod tests {
             view.params_for(900, 42, Some(dark_tokens())),
             "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"contain\",\
              \"dark\":true}"
+        );
+    }
+
+    #[test]
+    fn spinner_folds_accent_ink_as_its_tint() {
+        let view = native_spinner(false);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(6, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"spinner\",\"__frustSlot\":6,\"animating\":false,\
+                 \"sizeClass\":\"medium\",\"enabled\":true,\"dark\":true,\"tint\":{}}}",
+                tokens.accent_ink
+            )
         );
     }
 

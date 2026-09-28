@@ -121,8 +121,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `UIView`: the retained-handle registry (`AppleHandle` wraps a
 # `Retained<UIView>`, the type every control view specializes to).
 # `UIButton`/`UIControl`/`UILabel`/`UIResponder` + `UISwitch`/`UISlider`/
-# `UIProgressView`/`UIImage`/`UIImageView`: the v1 control set's six classes
-# and the `UIImage` payload one of them decodes. `UIColor`/`UIFont`: the shared property surface every control's
+# `UIProgressView`/`UIImage`/`UIImageView`/`UIActivityIndicatorView`: the v1
+# control set's seven classes and the `UIImage` payload one of them decodes.
+# `UIColor`/`UIFont`: the shared property surface every control's
 # `Setter` plan applies through (packed-ARGB colours, `TextSizeSp`).
 # `UIAccessibility`: `Setter::ContentDescription`'s
 # `NSObject.accessibilityLabel` category — the VoiceOver counterpart of
@@ -145,6 +146,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `objc2-core-text`: L3's typeface resolution — `objc2-ui-kit`'s
 # `AsRef<UIFont> for CTFont` / `AsRef<CTFont> for UIFont` toll-free-bridge
 # impls (`UIFont.rs`) are gated on this same feature name.
+# `UIActivityIndicatorView`: `Spinner`'s class (`initWithActivityIndicatorStyle:`,
+# `startAnimating`/`stopAnimating`, `hidesWhenStopped`, `color`) — pulls in
+# `objc2-foundation`'s `NSCoder` feature transitively (its own `Cargo.toml`),
+# already satisfied by feature unification, no explicit addition needed here.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -157,6 +162,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIProgressView",
     "UIImage",
     "UIImageView",
+    "UIActivityIndicatorView",
     "UIColor",
     "UIFont",
     "UIAccessibility",
@@ -234,14 +240,19 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "objc2-core-foundation",
 ] }
 # objc2-app-kit 0.3.2 gates by SUPERCLASS and by member, not by class name,
-# so this is the whole macOS-arm list (six controls + theme ladder), not a
+# so this is the whole macOS-arm list (seven controls + theme ladder), not a
 # one-feature-per-class reading:
 # `NSView`/`NSResponder`/`NSControl`: every control's superclass chain
 # (`NSButton` alone needs all three). `NSButton`, `NSButtonCell`
 # (`NSButtonType`/`NSBezelStyle` and `setButtonType:`/`setBezelStyle:`),
-# `NSCell` (state/controlSize/imageScaling). `NSTextField`, `NSSwitch`,
-# `NSSlider` + `NSSliderCell`, `NSProgressIndicator`, `NSImageView` +
-# `NSImageCell`, `NSImage`: the other five controls. `NSColor`/`NSFont`:
+# `NSCell` (state/controlSize/imageScaling — `controlSize`/`NSControlSize`
+# is also `Spinner`'s live size-class setter, declared directly on
+# `NSProgressIndicator` itself rather than inherited from `NSControl`, which
+# this control is not). `NSTextField`, `NSSwitch`, `NSSlider` +
+# `NSSliderCell`, `NSProgressIndicator`, `NSImageView` + `NSImageCell`,
+# `NSImage`: the other five class groups, covering the other six controls —
+# `NSProgressIndicator` alone backs two (`ProgressBar`'s `Bar` style and
+# `Spinner`'s `Spinning` style), no new class needed. `NSColor`/`NSFont`:
 # the shared `Setter` surface (packed-ARGB colours, `TextSizeSp` via
 # `NSFont::systemFontOfSize` on `NSControl.setFont`). `NSAppearance`: theme
 # ladder L1. `NSGraphics`: `NSWindowOrderingMode` et al., matching

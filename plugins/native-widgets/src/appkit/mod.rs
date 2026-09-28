@@ -52,7 +52,7 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
-use crate::controls::{button, image, label, progress, slider, switch};
+use crate::controls::{button, image, label, progress, slider, spinner, switch};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on macOS exactly the registry's
@@ -68,9 +68,9 @@ pub(crate) type NativeView = crate::registry::appkit::AppKitHandle;
 /// mirror of `crate::apple::register_controls`, by the same shared `KIND`
 /// consts (never a literal).
 ///
-/// All six v1 controls, in the Android/iOS order, **line for line** — so the
-/// three arms register the same kind table (`crate::controls::tests`'
-/// `the_six_control_kinds_are_the_same_strings_all_three_platform_arms_register`
+/// All seven v1 controls, in the Android/iOS order, **line for line** — so
+/// the three arms register the same kind table (`crate::controls::tests`'
+/// `the_seven_control_kinds_are_the_same_strings_all_three_platform_arms_register`
 /// is the host-visible half of that pin). A slot naming a kind outside it
 /// gets [`factory`]'s empty dead-slot view (`NativeWidgetError::UnknownControl`,
 /// logged once per create).
@@ -84,4 +84,5 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<slider::Slider>(slider::KIND);
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
+    runtime.register::<spinner::Spinner>(spinner::KIND);
 }

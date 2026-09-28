@@ -8,9 +8,9 @@
 //! `frust_plugin::desktop::DesktopViewFactory` the desktop Mode-A host
 //! resolves by `view_type`). This crate holds the
 //! retained-handle [`registry`] every control's create/update/dispose path is
-//! built over, the `runtime` those paths dispatch through, the six `controls`
-//! (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`) that
-//! runtime serves, the typed `events` vocabulary their listeners decode into,
+//! built over, the `runtime` those paths dispatch through, the seven
+//! `controls` (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`,
+//! `Spinner`) that runtime serves, the typed `events` vocabulary their listeners decode into,
 //! the app-facing `api` builders, and the three platform arms' factory glue.
 //! Each control carries one platform half per arm — a
 //! `#[cfg(target_os = "android")] mod platform`, a
@@ -20,7 +20,7 @@
 //! reporting a tap/toggle/drag back to the app through the same event
 //! dispatch on every platform (`crate::apple::events`'s and
 //! `crate::appkit::events`' Rust target-action objects, mirroring Android's
-//! shared listener). The macOS arm registers all six kinds.
+//! shared listener). The macOS arm registers all seven kinds.
 //! The theme ladder's two Apple arms are in: L1 pins brightness per view
 //! (`crate::apple::theme`'s `overrideUserInterfaceStyle`,
 //! `crate::appkit::theme`'s `NSAppearance`), re-pinned on every update; L2
@@ -37,7 +37,7 @@
 //! that holds for **your** components too: `NativeComponent` is the public
 //! trait a plugin author implements to drive a native view (or view
 //! hierarchy) from pure Rust, registered with `register_component` and served
-//! by the very same runtime, factory and listener as the six built-in
+//! by the very same runtime, factory and listener as the seven built-in
 //! controls (see the `component` module's own doc for the lifecycle contract;
 //! it ships with the `frust-api` feature, like the builders above).
 //!
@@ -49,13 +49,13 @@
 //! plugin authors, not app authors (the only implementor here is this crate's
 //! own non-default `demo-components` composite).
 //!
-//! A component hears its own views the way the six controls do: it attaches
-//! the platform's one listener to any view it built (root or child) with
-//! `ComponentCtx::attach_listener`, the listener is bound to the slot's own id
-//! by the context (never handed to the component), and the event reaches
-//! `NativeComponent::on_event` through the same slot-id routing — whose answer
-//! the app hears on `NativeComponentView::on_event`, the six builders'
-//! events-as-signals idiom (the `component` module doc's *Listener
+//! A component hears its own views the way the seven controls do: it
+//! attaches the platform's one listener to any view it built (root or child)
+//! with `ComponentCtx::attach_listener`, the listener is bound to the slot's
+//! own id by the context (never handed to the component), and the event
+//! reaches `NativeComponent::on_event` through the same slot-id routing —
+//! whose answer the app hears on `NativeComponentView::on_event`, the seven
+//! builders' events-as-signals idiom (the `component` module doc's *Listener
 //! attachment*).
 //!
 //! Every control is a Rust
@@ -177,7 +177,7 @@ mod appkit;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
 mod coretext;
-// The six v1 controls. Compiled on every target on purpose: each control's
+// The seven v1 controls. Compiled on every target on purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
 // `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`
 // — which is also why the modules live here rather than under a platform
@@ -194,7 +194,7 @@ mod events;
 mod registry;
 // The runtime's surface is consumed by the platform arms — this crate's JNI
 // exports, the Apple `define_class!` factory, the macOS desktop factory, the
-// six controls and their listeners — plus its own host tests, which a plain
+// seven controls and their listeners — plus its own host tests, which a plain
 // (non-test) build does not count. On a host with no platform arm none of
 // those compile, so much of the surface is legitimately uncalled there; the
 // attribute stays for that host build rather than growing per-item `allow`s.

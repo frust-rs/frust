@@ -56,7 +56,7 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
-use crate::controls::{button, image, label, progress, slider, switch};
+use crate::controls::{button, image, label, progress, slider, spinner, switch};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on Apple that is exactly the
@@ -74,14 +74,14 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 /// runtime is first touched (`crate::runtime`'s `seeded_runtime`) — the Apple
 /// mirror of `crate::android::register_controls`, **line for line**.
 ///
-/// The six controls live in the shared `crate::controls`, where the
+/// The seven controls live in the shared `crate::controls`, where the
 /// props/plan half is platform-neutral and host-tested and only the platform
 /// half is a per-target `mod platform` inside each control file (the
-/// Android arm, the Apple one). So the two backends register the same six
-/// types under the same six `KIND` consts — never a literal here, which is
+/// Android arm, the Apple one). So the two backends register the same seven
+/// types under the same seven `KIND` consts — never a literal here, which is
 /// what keeps the api layer's builders and both arms reading from one
 /// definition (`crate::controls::tests`'
-/// `the_six_control_kinds_are_the_same_strings_all_three_platform_arms_register`
+/// `the_seven_control_kinds_are_the_same_strings_all_three_platform_arms_register`
 /// is the host-visible half of that pin).
 ///
 /// Registration stays explicit and central by design: `inventory`-style
@@ -95,4 +95,5 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<slider::Slider>(slider::KIND);
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
+    runtime.register::<spinner::Spinner>(spinner::KIND);
 }

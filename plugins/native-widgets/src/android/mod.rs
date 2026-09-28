@@ -116,7 +116,7 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use ctx::run_jni;
 
 use crate::NativeWidgetError;
-use crate::controls::{button, image, label, progress, slider, switch};
+use crate::controls::{button, image, label, progress, slider, spinner, switch};
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent, NativeRuntime, UpdateOutcome};
 
@@ -143,6 +143,7 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<slider::Slider>(slider::KIND);
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
+    runtime.register::<spinner::Spinner>(spinner::KIND);
 }
 
 // --- exports: FrustNativeControlFactory -------------------------------------

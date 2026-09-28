@@ -1,5 +1,6 @@
-//! The six v1 controls — `Button`, `Label`, `Switch`, `Slider`, `ProgressBar`,
-//! `Image` — each an internal [`NativeWidget`](crate::runtime::NativeWidget)
+//! The seven v1 controls — `Button`, `Label`, `Switch`, `Slider`,
+//! `ProgressBar`, `Image`, `Spinner` — each an internal
+//! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
 //! setter on the main thread.
 //!
@@ -38,8 +39,8 @@
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
-//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], the four tint setters |
-//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`] |
+//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters |
+//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by) |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
 //! **Per-frame guidance:** ~500 [`Tier::Cheap`] setters per frame ≈ 0.4 ms and
@@ -109,6 +110,7 @@ pub(crate) mod image;
 pub(crate) mod label;
 pub(crate) mod progress;
 pub(crate) mod slider;
+pub(crate) mod spinner;
 pub(crate) mod switch;
 pub(crate) mod typeface;
 
@@ -119,6 +121,7 @@ use crate::registry::SlotId;
 use crate::runtime::Params;
 
 use self::image::{Fit, ImageBytes};
+use self::spinner::SizeClass;
 use self::typeface::Typeface;
 
 // --- the params wire keys ---------------------------------------------------
@@ -292,6 +295,15 @@ pub(crate) enum Setter<'a> {
     /// same shape as [`Self::ProgressTint`].
     ImageTint(Option<i32>),
 
+    /// `ProgressBar.setIndeterminateTintList(ColorStateList)` /
+    /// `UIActivityIndicatorView.color` / `NSProgressIndicator` (no AppKit
+    /// tint property at all, logged and no-op'd — `spinner.rs`'s module
+    /// doc) — **[`Tier::Cheap`]**, same nullable-clearable shape as
+    /// [`Self::ProgressTint`]. Named separately from the other four tints
+    /// rather than reusing one of them: `Spinner` is its own control with
+    /// its own wire key and its own Android setter name.
+    SpinnerTint(Option<i32>),
+
     /// `ImageView.setScaleType(ImageView.ScaleType)` —
     /// **[`Tier::Relayout`]**: the platform requests a layout on every change.
     ScaleType(Fit),
@@ -335,6 +347,22 @@ pub(crate) enum Setter<'a> {
     /// explicit choice and the registration-failure degrade path
     /// (`crate::android::fonts`'s module doc) land on the exact same call.
     Typeface(Typeface),
+
+    /// `UIActivityIndicatorView.style` / `NSProgressIndicator.controlSize` —
+    /// **[`Tier::Relayout`]**: a style/size swap re-measures the view.
+    /// `Spinner`-only. `android.widget.ProgressBar` has no live equivalent
+    /// at all — the size is baked in at construction, so this setter reaches
+    /// that arm only on a genuine post-create change and is
+    /// warned-and-ignored there (`spinner.rs`'s module doc's *`size_class`*
+    /// section).
+    SizeClass(SizeClass),
+
+    /// `View.setVisibility(int)` / `UIActivityIndicatorView.startAnimating`/
+    /// `stopAnimating` / `NSProgressIndicator.startAnimation:`/
+    /// `stopAnimation:` — **[`Tier::Cheap`]**. `Spinner`-only; see
+    /// `spinner.rs`'s module doc's *`animating`* section for why the
+    /// Android mapping is a visibility toggle rather than a start/stop call.
+    Animating(bool),
 }
 
 impl Setter<'_> {
@@ -346,7 +374,8 @@ impl Setter<'_> {
             | Self::BackgroundColor(_)
             | Self::ScaleType(_)
             | Self::ThemedBackground { .. }
-            | Self::Typeface(_) => Tier::Relayout,
+            | Self::Typeface(_)
+            | Self::SizeClass(_) => Tier::Relayout,
             Self::ImageBytes(_) => Tier::Decode,
             Self::Enabled(_)
             | Self::TextColor(_)
@@ -358,7 +387,9 @@ impl Setter<'_> {
             | Self::ProgressTint(_)
             | Self::ThumbTint(_)
             | Self::TrackTint(_)
-            | Self::ImageTint(_) => Tier::Cheap,
+            | Self::ImageTint(_)
+            | Self::SpinnerTint(_)
+            | Self::Animating(_) => Tier::Cheap,
         }
     }
 }
@@ -464,7 +495,7 @@ pub(crate) mod platform {
     //! signature is compile-time checked by `jni_sig!` rather than asserted
     //! in a `# Safety` comment.
 
-    use std::sync::OnceLock;
+    use std::sync::{Once, OnceLock};
 
     use jni::objects::{JClass, JMethodID, JObject, JValue};
     use jni::signature::{MethodSignature, Primitive, ReturnType};
@@ -472,7 +503,7 @@ pub(crate) mod platform {
     use jni::sys::jvalue;
     use jni::{jni_sig, jni_str};
 
-    use super::{Plan, Setter};
+    use super::{Plan, Setter, SizeClass};
     use crate::NativeWidgetError;
     use crate::android::NativeCtx;
 
@@ -509,9 +540,12 @@ pub(crate) mod platform {
     /// (`NativeCtx`'s local-frame discipline).
     pub(crate) const FRAME_CAPACITY: usize = 16;
 
-    /// The hot setters' cached method ids (module doc). One table for all six
-    /// controls: it is seeded on the first control creation of any kind and
-    /// costs five class loads plus six `GetMethodID`s, once per process.
+    /// The hot setters' cached method ids (module doc). One table for all
+    /// seven controls (`Spinner` reaches it only through the shared
+    /// `Setter::Enabled` arm every control already rode — it adds no new
+    /// hot class or method of its own): it is seeded on the first control
+    /// creation of any kind and costs five class loads plus six
+    /// `GetMethodID`s, once per process.
     struct HotMethods {
         /// `android.view.View.setEnabled(boolean)`.
         set_enabled: JMethodID,
@@ -877,6 +911,25 @@ pub(crate) mod platform {
                     ),
                 }
             }
+            Setter::SpinnerTint(argb) => {
+                tint_list(ctx, view, jni_str!("setIndeterminateTintList"), argb)
+            }
+            Setter::Animating(animating) => ctx.call_void(
+                view,
+                jni_str!("setVisibility"),
+                jni_sig!("(I)V"),
+                &[JValue::Int(if animating { 0 } else { 4 })],
+            ),
+            Setter::SizeClass(size_class) => {
+                // `spinner.rs`'s module doc's *`size_class`* section: a
+                // `ProgressBar`'s spinner size is baked in at construction on
+                // this arm alone — a Setter this control's own `create`
+                // already avoided emitting for the size it was just built
+                // with, so reaching here means a genuine post-create change,
+                // which this arm cannot honour.
+                warn_size_class_unsupported(size_class);
+                Ok(())
+            }
         }
     }
 
@@ -913,6 +966,23 @@ pub(crate) mod platform {
             jni_sig!("(Landroid/content/res/ColorStateList;)V"),
             &[JValue::Object(&list)],
         )
+    }
+
+    /// One-time warning that [`Setter::SizeClass`] has no live Android
+    /// equivalent — see `crate::controls::spinner`'s module doc's
+    /// *`size_class`* section for why an indeterminate `ProgressBar`'s
+    /// spinner size is baked into the style it was constructed with and
+    /// cannot be swapped without rebuilding the view.
+    fn warn_size_class_unsupported(size_class: SizeClass) {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            log::warn!(
+                "frust-native-widgets: Android's indeterminate ProgressBar bakes its spinner \
+                 size into the style it was constructed with (progressBarStyleSmall/-Normal/\
+                 -Large), so a later sizeClass change to {size_class:?} is not applied — the \
+                 spinner keeps showing the size it was created at"
+            );
+        });
     }
 
     /// `BitmapFactory.decodeByteArray(bytes, 0, bytes.len())`.
@@ -1791,16 +1861,16 @@ mod tests {
     // --- shared-Props parity: one kind table, three platform arms ----------
 
     #[test]
-    fn the_six_control_kinds_are_the_same_strings_all_three_platform_arms_register() {
+    fn the_seven_control_kinds_are_the_same_strings_all_three_platform_arms_register() {
         // `crate::android::register_controls`,
         // `crate::apple::register_controls` and
         // `crate::appkit::register_controls` are each
         // `#[cfg(target_os = ...)]`-gated, so no single host test can call all
         // three. What a host CAN pin is the thing they all register *by*: these
-        // six `KIND` consts. No arm spells a kind literally
+        // seven `KIND` consts. No arm spells a kind literally
         // (`crate::android`'s own registration note), so a drift in the wire
         // vocabulary has to pass through here. All three arms register all
-        // six kinds and never a kind outside the table.
+        // seven kinds and never a kind outside the table.
         //
         // The other half of "shared-Props parity" needs no assertion at all:
         // there is exactly ONE `Props` type per control, in this same module
@@ -1814,10 +1884,13 @@ mod tests {
             slider::KIND,
             progress::KIND,
             image::KIND,
+            spinner::KIND,
         ];
         assert_eq!(
             kinds,
-            ["button", "label", "switch", "slider", "progress", "image"],
+            [
+                "button", "label", "switch", "slider", "progress", "image", "spinner"
+            ],
             "the control kind strings are a shipped wire contract — the api \
              layer's builders inject them and all three platform arms \
              register against them"
