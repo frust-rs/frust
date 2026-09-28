@@ -25,6 +25,13 @@
 //! | [`EVENT_KIND_TOGGLED`] | `NSSwitch` | `state` → [`pack_bool`] |
 //! | [`EVENT_KIND_VALUE_CHANGED`] | `NSSlider` | `doubleValue` → [`pack_value_changed`] |
 //!
+//! A public `NativeComponent` reaches the same class through
+//! `FrustNativeControlTarget::attach_view` (called by
+//! `crate::component::ComponentCtx::attach_listener`) — one kind per control,
+//! the slot id supplied by the component's context and never seen by the
+//! component, the target retained in the component's `ListenerHandle`, whose
+//! `Drop` clears the control's target/action while they are still its own.
+//!
 //! # Drag start/end are never emitted on macOS
 //!
 //! The iOS arm reports a slider's gesture edges from two extra UIKit control
@@ -102,6 +109,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+#[cfg(feature = "frust-api")]
+use objc2_app_kit::NSView;
 use objc2_app_kit::{NSControl, NSControlStateValue, NSControlStateValueOn, NSSwitch};
 
 use crate::events::{
@@ -194,6 +203,63 @@ impl FrustNativeControlTarget {
         unsafe {
             control.setTarget(None);
             control.setAction(None);
+        }
+    }
+
+    /// [`Self::attach`] for the public `NativeComponent` path
+    /// (`crate::component::ComponentCtx::attach_listener`): `view` is any view
+    /// the component built, checked to be an `NSControl` (the only AppKit class
+    /// with a target/action pair) — and, for [`EVENT_KIND_TOGGLED`], an
+    /// `NSSwitch`, since [`detail_for`] reads the toggled payload off one and
+    /// would drop every event from anything else. `slot` comes from the
+    /// component's context, so the component never holds it.
+    ///
+    /// Answers the target (the caller's to retain — `NSControl.target` is
+    /// weak) and the control, retained so the caller can detach later
+    /// ([`Self::detach_if_current`]); a mismatch answers `Err` naming it, with
+    /// nothing attached.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn attach_view(
+        mtm: MainThreadMarker,
+        view: &NSView,
+        slot: SlotId,
+        kind: i32,
+    ) -> Result<(Retained<Self>, Retained<NSControl>), String> {
+        use objc2::Message as _;
+
+        let any: &AnyObject = view;
+        let control = any.downcast_ref::<NSControl>().ok_or_else(|| {
+            "macOS attach_listener: the view is not an NSControl, so it has no target/action \
+             pair to attach to"
+                .to_string()
+        })?;
+        if kind == EVENT_KIND_TOGGLED && any.downcast_ref::<NSSwitch>().is_none() {
+            return Err(
+                "macOS attach_listener: TOGGLED reads an NSSwitch's state, and this control is \
+                 no NSSwitch"
+                    .into(),
+            );
+        }
+        let target = Self::attach(mtm, control, slot, kind);
+        Ok((target, control.retain()))
+    }
+
+    /// Clear `control`'s target/action **only while they are still this
+    /// target's** — the detach a component's `ListenerHandle` runs on drop.
+    ///
+    /// Unlike the six controls' unconditional [`Self::detach`], a component
+    /// may re-attach the same control (a fresh handle replacing an old one in
+    /// its state); dropping the old handle must not clear the new target, so
+    /// this compares identities first.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn detach_if_current(&self, control: &NSControl) {
+        let current = control.target();
+        let ours: &AnyObject = self;
+        if current
+            .as_deref()
+            .is_some_and(|target| std::ptr::eq(target, ours))
+        {
+            self.detach(control);
         }
     }
 

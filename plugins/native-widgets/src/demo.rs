@@ -58,37 +58,44 @@
 //!   `Retained<NSTextField>`/`Retained<NSButton>` on macOS — the shape
 //!   [`ComponentCtx::retain_child`]'s own doc says to reach for first, since
 //!   the caption setters are not view-level calls) and stay [`NativeChild`]s
-//!   everywhere else.
+//!   everywhere else;
+//! - the primary button's **click listener** is kept as a [`ListenerHandle`]
+//!   (*Event wiring*, below) — its own counted release on the host arm.
 //!
 //! Dropping either kind **is** the release — `DeleteGlobalRef` on Android,
 //! `Retained`'s own `Drop` on iOS and macOS — so this module's own host test counts the
 //! live handles back to zero rather than assuming it.
 //!
-//! # No event wiring, and why
+//! # Event wiring: the primary button reports its clicks
 //!
-//! The two buttons are **display-only**: they show the platform's own press
-//! feedback and report nothing back. That is not a choice this card made —
-//! **no production path attaches a listener** to a [`NativeComponent`] in
-//! this build, its root as much as its children, so **no [`NativeComponent`]
-//! can receive events in this build**, and there is no supported way to
-//! arrange one. [`NativeComponent::on_event`] owns the full reasoning; the
-//! short version is that attaching this crate's shared
-//! `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's id, and
-//! a component is never handed one (`create` receives `&self`, a
-//! [`ComponentCtx`] and its props).
+//! The **primary** button attaches the platform's one listener for
+//! [`ListenerKinds::CLICK`] through [`ComponentCtx::attach_listener`] —
+//! `FrustNativeListener` on Android, `FrustNativeControlTarget` on iOS and
+//! macOS — bound by the context to this card's own slot id, which the card
+//! never sees. Each click reaches [`NativeComponent::on_event`], which
+//! forwards it to the app's
+//! [`NativeComponentView::on_event`](crate::api::NativeComponentView::on_event)
+//! hook; the app counts it and hands the count back as
+//! [`DemoCardProps::presses`], which the card shows on the primary button's
+//! own caption — a native tap moving a native readout through one full
+//! round trip (native → Rust → signal → rebuild → props diff → native
+//! setter), the same loop the six built-in controls close.
 //!
-//! **The platform escape hatch is not a way around that.**
-//! `ComponentCtx::env`/`ComponentCtx::mtm` hand out the raw platform, but
-//! neither yields an event route: on Android the only listener class is that
-//! same `FrustNativeListener`, so a component could only feed its constructor
-//! a *fabricated* slot id — which would deliver the event to a **different
-//! slot**, a correctness bug rather than a workaround. On iOS the target type
-//! (`FrustNativeControlTarget`) is crate-private, but a plugin author who
-//! already depends on `objc2-ui-kit` could `define_class!` their own target
-//! and call `addTarget:action:`; what they still cannot do is route it back
-//! through [`NativeComponent::on_event`], because a component is never
-//! handed its own slot id. Write a component as display-only until the
-//! attach half ships.
+//! The **secondary** button stays unwired on purpose. A listener reports its
+//! slot and its event family, not which child fired: a click is
+//! `(KIND_CLICK, 0)` whichever view it came from, so two children attached for
+//! the same family are indistinguishable in `on_event`. A component that needs
+//! to tell children apart gives each a family of its own, or mounts them as
+//! separate slots. The [`ListenerHandle`] lives in [`DemoCardState`] and is
+//! detached in `dispose`, mirroring the built-in `Button`'s own teardown.
+//!
+//! **The platform escape hatch is not how events arrive.**
+//! `ComponentCtx::env`/`ComponentCtx::mtm` still hand out the raw platform,
+//! but a listener a component builds itself carries no route back into
+//! [`NativeComponent::on_event`] — only one attached through the context is
+//! bound to the slot — and an Android `FrustNativeListener` built by hand with
+//! a guessed id would, at best, be dropped by the slot's attached-family gate
+//! and, at worst, deliver into whichever slot that number means.
 //!
 //! # The feature gate
 //!
@@ -99,13 +106,13 @@
 //! (`Cargo.toml`'s own comment; `cargo tree -p frust-native-widgets
 //! --no-default-features -e normal`).
 
-use crate::component::{NativeChild, register_component};
+use crate::component::{ListenerHandle, NativeChild, register_component};
 
 // Named by this module's doc links only; the three per-arm `platform` modules
 // below import what they actually call. Without the import the links would have
 // to be spelled as full `crate::component::…` paths in every doc comment here.
 #[allow(unused_imports)]
-use crate::component::{ComponentCtx, NativeComponent, NativeRoot};
+use crate::component::{ComponentCtx, ListenerKinds, NativeComponent, NativeRoot};
 
 /// The kind string [`DemoCard`] registers under — namespaced so it can never
 /// collide with the six built-in control kinds (`button`, `label`, …), which
@@ -168,13 +175,18 @@ const FRAME_CAPACITY: usize = 16;
 /// native_component(DEMO_CARD_KIND, DemoCard, DemoCardProps { /* … */ })
 ///     .size(DEMO_CARD_WIDTH, DEMO_CARD_HEIGHT)
 ///     .interactive()
+///     .on_event(move |event| {
+///         if event.is_click() {
+///             presses.set(presses.get_untracked() + 1);
+///         }
+///     })
 /// ```
 ///
-/// A unit struct because this card carries no app callbacks — see the module
-/// doc's *No event wiring*. A component that did would hold its closures here,
-/// on `&self`, and reach them from [`NativeComponent::on_event`] — which
-/// receives no events in this build (no production path attaches a listener; see
-/// that method's own doc and the module doc's *No event wiring* for why).
+/// A unit struct because this card carries no app callbacks of its own: its
+/// [`NativeComponent::on_event`] forwards the primary button's clicks, and the
+/// app's `.on_event` hook is where they are counted (the module doc's *Event
+/// wiring*). A component that wanted to act on an event itself would hold its
+/// closures here, on `&self`, and reach them from `on_event`.
 pub struct DemoCard;
 
 /// Everything [`DemoCard`] is told, as one Rust-diffed value.
@@ -198,6 +210,18 @@ pub struct DemoCardProps {
     pub background_argb: i32,
     /// The title label's ink, packed ARGB (see [`Self::background_argb`]).
     pub title_argb: i32,
+    /// How many primary-button clicks the app has counted — shown on the
+    /// primary button's own caption (`"{primary} ({presses})"`, see
+    /// [`Self::primary_caption`]), so a click moves a native readout once the
+    /// app hands the new count back (the module doc's *Event wiring*).
+    pub presses: u32,
+}
+
+impl DemoCardProps {
+    /// The primary button's caption: the app's text plus the press count.
+    pub fn primary_caption(&self) -> String {
+        format!("{} ({})", self.primary, self.presses)
+    }
 }
 
 /// [`DemoCard`]'s retained per-slot state — the module doc's *One slot, four
@@ -212,6 +236,9 @@ pub struct DemoCardState {
     label: LabelHandle,
     /// The two buttons, in declaration order (primary, secondary).
     buttons: [ButtonHandle; 2],
+    /// The primary button's click listener (the module doc's *Event wiring*),
+    /// detached in `dispose` and released with the state.
+    listener: ListenerHandle,
 }
 
 /// The title label's handle: its concrete class on the Apple arms (`setText:`/
@@ -274,7 +301,7 @@ mod platform {
         BUTTON_HEIGHT, CARD_PADDING, DemoCard, DemoCardProps, DemoCardState, FRAME_CAPACITY,
         ROW_GAP, TITLE_HEIGHT,
     };
-    use crate::component::{ComponentCtx, NativeComponent, NativeRoot};
+    use crate::component::{ComponentCtx, ListenerKinds, NativeComponent, NativeEvent, NativeRoot};
 
     /// The framework classes this card builds — never a support/material one:
     /// this plugin never assumes an app dependency it did not ship
@@ -325,14 +352,24 @@ mod platform {
                 ctx.add_child(&parent, &label)?;
 
                 let mut buttons = Vec::with_capacity(2);
-                for caption in [props.primary.as_str(), props.secondary.as_str()] {
+                let mut listener = None;
+                for (row, caption) in [props.primary_caption(), props.secondary.clone()]
+                    .into_iter()
+                    .enumerate()
+                {
                     let button = ctx.new_view(BUTTON)?;
-                    set_text(ctx, &button, caption)?;
+                    set_text(ctx, &button, &caption)?;
                     call_int(ctx, &button, jni_str!("setMinHeight"), px(BUTTON_HEIGHT))?;
                     ctx.add_child(&parent, &button)?;
+                    // The primary button's click listener (module doc's *Event
+                    // wiring*) — attached while its local reference is live.
+                    if row == 0 {
+                        listener = Some(ctx.attach_listener(&button, ListenerKinds::CLICK)?);
+                    }
                     buttons.push(ctx.retain_child(&button)?);
                 }
                 let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
+                let listener = listener?;
 
                 // Deliberate double retain: `retain_child(&parent)`
                 // below and `ctx.root(&parent)` two lines down each allocate
@@ -357,6 +394,7 @@ mod platform {
                         root,
                         label,
                         buttons: [primary, secondary],
+                        listener,
                     },
                 ))
             })
@@ -392,24 +430,40 @@ mod platform {
                 );
             }
             let captions = [
-                (&old.primary, &new.primary),
-                (&old.secondary, &new.secondary),
+                (old.primary_caption(), new.primary_caption()),
+                (old.secondary.clone(), new.secondary.clone()),
             ];
             for (button, (was, now)) in state.buttons.iter().zip(captions) {
                 if was != now {
-                    set_text(ctx, button.as_object(), now);
+                    set_text(ctx, button.as_object(), &now);
                 }
             }
         }
 
-        fn dispose(&self, _ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
-            // Nothing to detach — the card attaches no listeners (module doc's
-            // *No event wiring*). Dropping `state` as this returns releases the
-            // parent's and the three children's global references; the runtime
-            // pair-deletes the `NativeRoot`'s immediately afterwards.
+        fn on_event(
+            &self,
+            _state: &mut Self::State,
+            _props: &Self::Props,
+            event: NativeEvent,
+        ) -> Option<NativeEvent> {
+            // The primary button's click is the one event this card attached
+            // for (module doc's *Event wiring*); forward it to the app's hook.
+            event.is_click().then_some(event)
+        }
+
+        fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
+            // `setOnClickListener(null)` first, exactly as the built-in
+            // `Button`'s own teardown does. Dropping the rest of `state` as
+            // this returns releases the parent's and the three children's
+            // global references; the runtime pair-deletes the `NativeRoot`'s
+            // immediately afterwards.
+            let DemoCardState {
+                listener, buttons, ..
+            } = state;
+            ctx.detach_listener(listener);
             log::debug!(
                 "frust-native-widgets demo: card disposed, releasing {} retained handles",
-                state.buttons.len() + 2
+                buttons.len() + 2
             );
         }
     }
@@ -526,7 +580,7 @@ mod platform {
         BUTTON_HEIGHT, CARD_PADDING, DEMO_CARD_HEIGHT, DEMO_CARD_WIDTH, DemoCard, DemoCardProps,
         DemoCardState, FRAME_CAPACITY, ROW_GAP, TITLE_HEIGHT,
     };
-    use crate::component::{ComponentCtx, NativeComponent, NativeRoot};
+    use crate::component::{ComponentCtx, ListenerKinds, NativeComponent, NativeEvent, NativeRoot};
     use crate::controls::platform::{set_background_color, set_label_text_color, ui_color};
 
     impl NativeComponent for DemoCard {
@@ -556,13 +610,13 @@ mod platform {
                 ctx.add_child(&parent, &label)?;
 
                 let mut buttons = Vec::with_capacity(2);
-                for (row, caption) in [props.primary.as_str(), props.secondary.as_str()]
+                for (row, caption) in [props.primary_caption(), props.secondary.clone()]
                     .into_iter()
                     .enumerate()
                 {
                     let button = UIButton::buttonWithType(UIButtonType::System, mtm);
                     button.setTitle_forState(
-                        Some(&NSString::from_str(caption)),
+                        Some(&NSString::from_str(&caption)),
                         UIControlState::Normal,
                     );
                     button.setFrame(row_frame(row + 1));
@@ -570,6 +624,10 @@ mod platform {
                     buttons.push(button);
                 }
                 let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
+                // The primary button's click target (module doc's *Event
+                // wiring*): `TouchUpInside`, retained by the handle, since
+                // UIKit holds a control's targets weakly.
+                let listener = ctx.attach_listener(&primary, ListenerKinds::CLICK)?;
 
                 // The parent is the one handle kept in the cross-platform
                 // shape: it only ever needs `UIView`-level setters, where the
@@ -581,6 +639,7 @@ mod platform {
                         root,
                         label,
                         buttons: [primary, secondary],
+                        listener,
                     },
                 ))
             })
@@ -604,25 +663,40 @@ mod platform {
                 set_label_text_color(&state.label, &ui_color(new.title_argb));
             }
             let captions = [
-                (&old.primary, &new.primary),
-                (&old.secondary, &new.secondary),
+                (old.primary_caption(), new.primary_caption()),
+                (old.secondary.clone(), new.secondary.clone()),
             ];
             for (button, (was, now)) in state.buttons.iter().zip(captions) {
                 if was != now {
                     button
-                        .setTitle_forState(Some(&NSString::from_str(now)), UIControlState::Normal);
+                        .setTitle_forState(Some(&NSString::from_str(&now)), UIControlState::Normal);
                 }
             }
         }
 
-        fn dispose(&self, _ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
-            // Nothing to detach (module doc's *No event wiring*): ARC releases
-            // the parent's `NativeChild` and the three typed children as
-            // `state` drops on return, and the runtime releases the
-            // `NativeRoot` immediately afterwards.
+        fn on_event(
+            &self,
+            _state: &mut Self::State,
+            _props: &Self::Props,
+            event: NativeEvent,
+        ) -> Option<NativeEvent> {
+            // See the Android arm: the primary's click, forwarded.
+            event.is_click().then_some(event)
+        }
+
+        fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
+            // The primary's target-action pair is removed first (the handle's
+            // detach — the built-in `Button`'s own teardown order); ARC then
+            // releases the parent's `NativeChild` and the three typed children
+            // as the rest of `state` drops on return, and the runtime releases
+            // the `NativeRoot` immediately afterwards.
+            let DemoCardState {
+                listener, buttons, ..
+            } = state;
+            ctx.detach_listener(listener);
             log::debug!(
                 "frust-native-widgets demo: card disposed, releasing {} retained handles",
-                state.buttons.len() + 2
+                buttons.len() + 2
             );
         }
     }
@@ -689,7 +763,7 @@ mod platform {
         BUTTON_HEIGHT, CARD_PADDING, DEMO_CARD_HEIGHT, DEMO_CARD_WIDTH, DemoCard, DemoCardProps,
         DemoCardState, FRAME_CAPACITY, ROW_GAP, TITLE_HEIGHT,
     };
-    use crate::component::{ComponentCtx, NativeComponent, NativeRoot};
+    use crate::component::{ComponentCtx, ListenerKinds, NativeComponent, NativeEvent, NativeRoot};
     use crate::controls::platform::{set_background_color, set_text_color};
 
     impl NativeComponent for DemoCard {
@@ -719,7 +793,7 @@ mod platform {
                 ctx.add_child(&parent, &label)?;
 
                 let mut buttons = Vec::with_capacity(2);
-                for (row, caption) in [props.primary.as_str(), props.secondary.as_str()]
+                for (row, caption) in [props.primary_caption(), props.secondary.clone()]
                     .into_iter()
                     .enumerate()
                 {
@@ -728,12 +802,16 @@ mod platform {
                     let button = NSButton::new(mtm);
                     button.setButtonType(NSButtonType::MomentaryPushIn);
                     button.setBezelStyle(NSBezelStyle::Push);
-                    button.setTitle(&NSString::from_str(caption));
+                    button.setTitle(&NSString::from_str(&caption));
                     place(&button, row + 1);
                     ctx.add_child(&parent, &button)?;
                     buttons.push(button);
                 }
                 let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
+                // The primary button's click target (module doc's *Event
+                // wiring*): the `NSButton`'s one target/action pair, retained
+                // by the handle, since `NSControl.target` is weak.
+                let listener = ctx.attach_listener(&primary, ListenerKinds::CLICK)?;
 
                 // The parent is the one handle kept in the cross-platform
                 // shape: it only ever needs `NSView`-level setters, where the
@@ -745,6 +823,7 @@ mod platform {
                         root,
                         label,
                         buttons: [primary, secondary],
+                        listener,
                     },
                 ))
             })
@@ -768,24 +847,39 @@ mod platform {
                 set_text_color(&state.label, new.title_argb);
             }
             let captions = [
-                (&old.primary, &new.primary),
-                (&old.secondary, &new.secondary),
+                (old.primary_caption(), new.primary_caption()),
+                (old.secondary.clone(), new.secondary.clone()),
             ];
             for (button, (was, now)) in state.buttons.iter().zip(captions) {
                 if was != now {
-                    button.setTitle(&NSString::from_str(now));
+                    button.setTitle(&NSString::from_str(&now));
                 }
             }
         }
 
-        fn dispose(&self, _ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
-            // Nothing to detach (module doc's *No event wiring*): ARC releases
-            // the parent's `NativeChild` and the three typed children as
-            // `state` drops on return, and the runtime releases the
-            // `NativeRoot` immediately afterwards.
+        fn on_event(
+            &self,
+            _state: &mut Self::State,
+            _props: &Self::Props,
+            event: NativeEvent,
+        ) -> Option<NativeEvent> {
+            // See the Android arm: the primary's click, forwarded.
+            event.is_click().then_some(event)
+        }
+
+        fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
+            // The primary's target/action is cleared first (the handle's
+            // detach — the built-in `Button`'s own teardown order); ARC then
+            // releases the parent's `NativeChild` and the three typed children
+            // as the rest of `state` drops on return, and the runtime releases
+            // the `NativeRoot` immediately afterwards.
+            let DemoCardState {
+                listener, buttons, ..
+            } = state;
+            ctx.detach_listener(listener);
             log::debug!(
                 "frust-native-widgets demo: card disposed, releasing {} retained handles",
-                state.buttons.len() + 2
+                buttons.len() + 2
             );
         }
     }
@@ -829,7 +923,7 @@ mod platform {
     //! (`crate::component`'s host `ComponentCtx`).
 
     use super::{DemoCard, DemoCardProps, DemoCardState, FRAME_CAPACITY};
-    use crate::component::{ComponentCtx, NativeComponent, NativeRoot};
+    use crate::component::{ComponentCtx, ListenerKinds, NativeComponent, NativeEvent, NativeRoot};
 
     impl NativeComponent for DemoCard {
         type Props = DemoCardProps;
@@ -852,13 +946,14 @@ mod platform {
                 ctx.add_child(parent, label)?;
 
                 let mut buttons = Vec::with_capacity(2);
-                for caption in [props.primary.as_str(), props.secondary.as_str()] {
+                for caption in [props.primary_caption(), props.secondary.clone()] {
                     let button = next_identity();
                     ctx.record(format!("card button {button} '{caption}'"));
                     ctx.add_child(parent, button)?;
                     buttons.push(ctx.retain_child(button)?);
                 }
                 let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
+                let listener = ctx.attach_listener(primary.identity(), ListenerKinds::CLICK)?;
 
                 let root = ctx.retain_child(parent)?;
                 let label = ctx.retain_child(label)?;
@@ -868,6 +963,7 @@ mod platform {
                         root,
                         label,
                         buttons: [primary, secondary],
+                        listener,
                     },
                 ))
             })
@@ -902,8 +998,8 @@ mod platform {
                 ));
             }
             let captions = [
-                (&old.primary, &new.primary),
-                (&old.secondary, &new.secondary),
+                (old.primary_caption(), new.primary_caption()),
+                (old.secondary.clone(), new.secondary.clone()),
             ];
             for (button, (was, now)) in state.buttons.iter().zip(captions) {
                 if was != now {
@@ -912,11 +1008,27 @@ mod platform {
             }
         }
 
+        fn on_event(
+            &self,
+            _state: &mut Self::State,
+            _props: &Self::Props,
+            event: NativeEvent,
+        ) -> Option<NativeEvent> {
+            event.is_click().then_some(event)
+        }
+
         fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
+            let DemoCardState {
+                root,
+                buttons,
+                listener,
+                ..
+            } = state;
+            ctx.detach_listener(listener);
             ctx.record(format!(
                 "card dispose {} with {} retained handles",
-                state.root.identity(),
-                state.buttons.len() + 2
+                root.identity(),
+                buttons.len() + 2
             ));
         }
     }
@@ -945,7 +1057,9 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::component::{component_params, forget, live_child_count, publish, staged_count};
+    use crate::component::{
+        component_params, forget, live_child_count, live_listener_count, publish, staged_count,
+    };
     use crate::registry::SlotId;
     use crate::runtime::{DisposeOutcome, NativeCtx as PlatformCtx, UpdateOutcome, with_runtime};
 
@@ -960,6 +1074,7 @@ mod tests {
             secondary: "Dismiss".to_string(),
             background_argb: 0x1122_3344,
             title_argb: -1,
+            presses: 0,
         }
     }
 
@@ -1026,6 +1141,11 @@ mod tests {
             live_child_count(),
             0,
             "every retained handle was released with the card"
+        );
+        assert_eq!(
+            live_listener_count(),
+            0,
+            "the primary's click listener was released with the card"
         );
         assert_eq!(staged_count(), 0);
 
@@ -1106,7 +1226,80 @@ mod tests {
             .expect("the thread's runtime");
             forget(slot);
             assert_eq!(live_child_count(), 0, "cycle {slot} released everything");
+            assert_eq!(
+                live_listener_count(),
+                0,
+                "cycle {slot} released its listener"
+            );
         }
+    }
+
+    #[test]
+    fn a_primary_click_reaches_the_hook_and_the_count_moves_the_caption() {
+        // The card's whole event loop, below the frust rebuild: the primary
+        // button's attached listener fires → the card forwards the click →
+        // the slot callback (what `.on_event` registers) hears it → the app's
+        // next rebuild hands the count back → the primary caption moves.
+        use std::sync::{Arc, Mutex};
+
+        use crate::events::EventPayload;
+        use crate::runtime::NativeEvent as WireEvent;
+
+        register_demo_components();
+        let heard: Arc<Mutex<Vec<EventPayload>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&heard);
+
+        let params = mount(73, props("Tap", "Play"));
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.set_callback(
+                    73,
+                    Arc::new(move |payload| recorder.lock().unwrap().push(payload)),
+                );
+                runtime.create(&mut ctx, &params).unwrap();
+                assert_eq!(live_listener_count(), 1, "the primary listens");
+
+                runtime.on_event(73, WireEvent { kind: 1, detail: 0 });
+
+                let counted = mount(
+                    73,
+                    DemoCardProps {
+                        presses: 1,
+                        ..props("Tap", "Play")
+                    },
+                );
+                assert_eq!(
+                    runtime.update_params(&mut ctx, &counted).unwrap(),
+                    UpdateOutcome::Applied
+                );
+                assert_eq!(runtime.dispose_slot(&mut ctx, 73), DisposeOutcome::Disposed);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(73);
+
+        assert_eq!(*heard.lock().unwrap(), vec![EventPayload::Click]);
+        let primary = calls
+            .iter()
+            .find(|call| call.starts_with("card button ") && call.ends_with("'Play (0)'"))
+            .and_then(|call| call.split(' ').nth(2))
+            .expect("the primary button, captioned with its count")
+            .to_string();
+        assert!(
+            calls.contains(&format!("attachListener {primary} click")),
+            "the click listener went on the PRIMARY button: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("card caption {primary} -> 'Play (1)'")),
+            "the new count reached the primary's caption: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("detachListener {primary} click")),
+            "dispose detached it: {calls:?}"
+        );
+        assert_eq!(live_listener_count(), 0);
     }
 }
 

@@ -113,7 +113,10 @@
 //! is where a reader meets a composite — one component owning a whole native
 //! hierarchy frust does not lay out. [`composite_block`] mounts
 //! `frust_native_widgets::DemoCard`: a parent view with a title label and two
-//! buttons under it, published as **one** `platform_view` slot.
+//! buttons under it, published as **one** `platform_view` slot. Its Primary
+//! button reports clicks back through the mounted view's `.on_event` hook, the
+//! six builders' events-as-signals idiom — the `Composite presses:` readout and
+//! the Primary caption both count them.
 //!
 //! The card itself ships inside the plugin (behind its non-default
 //! `demo-components` feature), **not here**: implementing
@@ -298,6 +301,10 @@ local_sig!(slider_refused_sig, u32, 0);
 // native slot, and `Total live: 6` is a gate constant every device gate has
 // keyed on (module doc's *Exactly six native slots at rest*).
 local_sig!(composite_visible_sig, bool, false);
+// How many clicks the composite's native Primary button has reported — written
+// by the card's `.on_event` hook, handed back to the card as
+// `DemoCardProps::presses` and shown in [`composite_block`]'s readout.
+local_sig!(composite_presses_sig, u32, 0);
 // GATE HARNESS state — see [`gate_harness_block`]'s doc comment.
 local_sig!(cycle_target_sig, u32, 0); // 0 == no cycler run started yet
 local_sig!(stress_visible_sig, bool, false); // 50-slot stress toggle, off by default
@@ -733,7 +740,18 @@ fn ensure_demo_registered() {
 /// device rather than only at create time. The two colours come from the active
 /// [`Theme`], so the header/page brightness toggle re-themes the card through
 /// the same `UpdateParams` diff as every other control here.
-fn composite_demo(title: String, background: Color, ink: Color) -> AnyView<PlaygroundState> {
+///
+/// `presses` closes the event round trip: the card's Primary button attaches
+/// the platform's one listener, the card forwards each click, and the
+/// `.on_event` hook below bumps [`composite_presses_sig`] — the six builders'
+/// events-as-signals idiom — whose new value comes straight back here as the
+/// `presses` prop the card shows on the Primary caption.
+fn composite_demo(
+    title: String,
+    background: Color,
+    ink: Color,
+    presses: u32,
+) -> AnyView<PlaygroundState> {
     any(native_component(
         DEMO_CARD_KIND,
         DemoCard,
@@ -743,11 +761,18 @@ fn composite_demo(title: String, background: Color, ink: Color) -> AnyView<Playg
             secondary: "Dismiss".to_string(),
             background_argb: argb(background),
             title_argb: argb(ink),
+            presses,
         },
     )
     .size(DEMO_CARD_WIDTH, DEMO_CARD_HEIGHT)
     .interactive()
-    .semantics_label("Native composite card"))
+    .semantics_label("Native composite card")
+    .on_event(|event| {
+        if event.is_click() {
+            let sig = composite_presses_sig();
+            sig.set(sig.get_untracked() + 1);
+        }
+    }))
 }
 
 /// The composite's toggle + (when on) the card itself — the module doc's
@@ -765,7 +790,11 @@ fn composite_demo(title: String, background: Color, ink: Color) -> AnyView<Playg
 /// would shift every later child's position on every toggle, diffing each
 /// against a different widget type. The hidden branch returns a zero-height
 /// placeholder instead of nothing, closing that cascade at negligible cost.
-fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<PlaygroundState>> {
+fn composite_block(
+    visible: bool,
+    slider_value: i32,
+    presses: u32,
+) -> Vec<FlexChild<PlaygroundState>> {
     let intro = block(vec![
         inflexible(label(
             "Native composite \u{2014} one component, one slot, three native children",
@@ -786,17 +815,19 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<Playground
              UpdateParams diff as the six controls.",
         )),
         gap(6.0),
-        // The card's own copy explains the architecture but never
-        // told a device tester the buttons do nothing when tapped — confirmed
-        // on a real OnePlus 9 (press feedback, no effect). Wording matches
-        // `plugins/native-widgets/src/demo.rs`'s "No event wiring, and why"
-        // section, the canonical phrasing for this fact.
+        // Tells a device tester what each button does when tapped — wording
+        // matches `plugins/native-widgets/src/demo.rs`'s "Event wiring"
+        // section, the canonical account of it.
         inflexible(caption(
-            "The Primary and Dismiss buttons below are DISPLAY-ONLY: you'll see the platform's \
-             own press feedback, and nothing else happens. In this build, no production path \
-             attaches a listener to a `NativeComponent`, so they cannot receive events \u{2014} \
-             that's not a bug in this card, it's a deferred gap (`plugins/native-widgets/src/demo.rs`'s \u{201c}No event wiring, and why\u{201d}).",
+            "Tap Primary: the card attached the platform's one listener to that native button, \
+             so the click travels native \u{2192} the component's `on_event` \u{2192} this page's \
+             `.on_event` hook \u{2192} a signal, and the new count comes back as a prop \u{2014} \
+             both the readout below and the Primary caption itself advance by exactly 1. \
+             Dismiss is deliberately left unwired (a click reports its slot, not which child \
+             fired), so it shows the platform's own press feedback and nothing else.",
         )),
+        gap(4.0),
+        inflexible(caption(format!("Composite presses: {presses}"))),
         gap(6.0),
         inflexible(any(button(
             if visible {
@@ -840,6 +871,7 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<Playground
             format!("Composite \u{2014} slider {slider_value}"),
             scheme.surface_container,
             scheme.on_surface,
+            presses,
         ))])
     } else {
         gap(0.0)
@@ -1154,6 +1186,9 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // The composite toggle — tracked for the same reason as the gate
     // harness's own reads below.
     let composite_visible = composite_visible_sig().get();
+    // Tracked for the same reason: the card's native Primary click writes this
+    // from the platform listener, outside any frust event pass.
+    let composite_presses = composite_presses_sig().get();
 
     // GATE HARNESS — tracked `.get()`s so a button tap (a
     // signal write) wakes the page even while it's otherwise idle (0fps at
@@ -1335,7 +1370,11 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // outlives the harness (which may be deleted), and a person turning it
     // on scrolls straight down into the `Total live:` readout that proves it
     // cost exactly one slot.
-    children.extend(composite_block(composite_visible, slider_value));
+    children.extend(composite_block(
+        composite_visible,
+        slider_value,
+        composite_presses,
+    ));
     children.extend(gate_harness_block(
         live_count,
         cycle_target,

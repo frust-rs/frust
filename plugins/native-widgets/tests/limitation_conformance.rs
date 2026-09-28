@@ -1,45 +1,41 @@
-//! Source-scan conformance test for the two documented limitations of the
-//! public `NativeComponent` seam: **one list, kept honest in both
-//! directions.**
+//! Source-scan conformance test for the documented limitation of the public
+//! `NativeComponent` seam: **one list, kept honest in both directions.**
 //!
 //! # Read this if you are the author who makes a limitation stop being true
 //!
 //! An earlier review found an *incomplete routing*: two true facts about this
 //! plugin were asserted in some files and contradicted in others. The fix
-//! wrote the same claim into nine places, which closed the defect and left the
-//! mirror-image hazard: **when someone wires listener attachment, whoever does
-//! it must find and update every surface, or this repo ends up documenting a
-//! limitation it no longer has.** That is what this file exists to prevent.
+//! wrote each claim into every place that needed it, which closed the defect
+//! and left the mirror-image hazard: **when a claim stops being true, whoever
+//! makes it false must find and update every surface, or this repo ends up
+//! documenting a limitation it no longer has.** That is what this file exists
+//! to prevent — and it has done it once already: the second claim ("a
+//! component is display-only — no production path attaches a listener") was
+//! retired by exactly the procedure below when `ComponentCtx::attach_listener`
+//! landed, and its entry is gone from [`LIMITATIONS`].
 //!
-//! So, when you make one of these claims false:
+//! So, when you make the remaining claim false:
 //!
 //! 1. Run this test. It fails once per listed surface whose canonical marker
 //!    you have not yet rewritten, naming each file — that failure list *is*
 //!    your worklist.
 //! 2. Rewrite every one of them, then delete that limitation's entry from
-//!    [`LIMITATIONS`] below (delete the whole file once both are gone —
+//!    [`LIMITATIONS`] below (delete the whole file once the last one is gone —
 //!    a list of zero claims proves nothing).
 //! 3. Update the one surface this scan deliberately cannot see, by hand:
-//!    `examples/glyph-catalog/src/pages/native_widgets.rs`. This crate's tests
-//!    do not reach into `examples/**` — a deliberate boundary, see
-//!    `tests/kotlin_conformance.rs`'s own module doc — so nothing enforces
-//!    that page, which is exactly why it is named here. **Search it for both
-//!    claims and rewrite whatever states the one you just made false**, rather
-//!    than trusting a description of what it says: the previous version of
-//!    this step described that file instead, and was stale one commit later.
-//!    Search *short* fragments (`production path`, `app crate cannot`), never
-//!    a whole marker from [`LIMITATIONS`] — those captions are Rust string
-//!    literals whose `\` line continuations can split a marker mid-phrase,
-//!    which neither `grep` nor [`normalized`] sees through; that is the shape
-//!    the display-only caption has today. It states **both** claims, in two
-//!    adjacent `composite_block` captions.
-//!
-//! Do **not** narrow the marker set or shorten the site list to make this
-//! green. A list that no longer matches the tree is the failure mode this test
-//! is about; the bare-`dev.frust` allowlist went vacuous earlier in this phase
-//! for exactly the missing half of it
-//! (`crates/frust-drive/tests/plugin_package_conformance.rs`'s own liveness
-//! guard is the remedy that came out of that).
+//!    `examples/playground/src/pages/native_widgets.rs` (the native-widgets
+//!    page lives in the playground until a later phase moves it — follow it
+//!    if it has moved). This crate's tests do not reach into `examples/**` — a
+//!    deliberate boundary, see `tests/kotlin_conformance.rs`'s own module doc
+//!    — so nothing enforces that page, which is exactly why it is named here.
+//!    **Search it for the claim and rewrite whatever states it**, rather than
+//!    trusting a description of what it says: an earlier version of this step
+//!    described that file instead, and was stale one commit later (and a later
+//!    one named a page that had since moved). Search *short* fragments
+//!    (`app crate cannot`), never a whole marker from [`LIMITATIONS`] — those
+//!    captions are Rust string literals whose `\` line continuations can split
+//!    a marker mid-phrase, which neither `grep` nor [`normalized`] sees
+//!    through. Today the FFI wall is stated in one `composite_block` caption.
 //!
 //! # The idiom, and the precedents
 //!
@@ -55,25 +51,13 @@
 //! actually fire") and an **unlisted hit fails**
 //! (`surface_mode_conformance`'s ban direction).
 //!
-//! # What is actually true about the two claims
+//! # What is actually true about the claim
 //!
-//! The markers below are phrased the way they are on purpose:
-//!
-//! - **The FFI wall** is unconditional: implementing `NativeComponent` means
-//!   naming `jni::objects::JObject`/`objc2-ui-kit` types in the implementing
-//!   crate, and this plugin re-exports neither FFI crate.
-//! - **Display-only** is *scoped*, not absolute: no **production path**
-//!   attaches a listener to a component-built view, so overriding `on_event`
-//!   has no effect. It is NOT "can never fire" — `NativeRuntime::on_event`
-//!   routes on the slot id alone, and Android's `nativeOnEvent` export
-//!   validates only that the incoming `jlong` is non-negative
-//!   (`SlotId::try_from`), so a listener carrying a *fabricated*
-//!   non-negative id that names a live component's slot is delivered like any
-//!   other — a misroute rather than a route, which is exactly why
-//!   `src/demo.rs` warns against fabricating one. A future edit that
-//!   "simplifies" a listed surface back to the absolute is a regression this
-//!   test cannot catch; the marker keeps the *claim* present, not its
-//!   precision.
+//! **The FFI wall** is unconditional: implementing `NativeComponent` means
+//! naming `jni::objects::JObject`/`objc2-ui-kit` types in the implementing
+//! crate, and this plugin re-exports neither FFI crate. A future edit that
+//! "softens" a listed surface is a regression this test cannot catch; the
+//! marker keeps the *claim* present, not its precision.
 //!
 //! # Scan scope
 //!
@@ -89,8 +73,8 @@
 //!
 //! A substring scan over whitespace-normalized text, not a parser (the same
 //! scope note every precedent above carries). Two consequences worth knowing:
-//! a marker phrase interrupted by markup (`no **production path attaches**`)
-//! is not seen, and a surface that keeps its marker while rewording the claim
+//! a marker phrase interrupted by markup (`app **crate cannot**`) is not
+//! seen, and a surface that keeps its marker while rewording the claim
 //! around it still passes. [`normalized`] is what lets a marker span a
 //! hard-wrapped line — `docs/DEVELOPMENT.md` genuinely wraps "an app / crate
 //! cannot implement that trait" mid-phrase — and its own behaviour is pinned
@@ -129,7 +113,7 @@ struct Limitation {
     /// rather than only that a string went missing.
     claim: &'static str,
     /// The canonical phrases that count as stating the claim. A surface
-    /// satisfies the limitation by carrying **any** of them (the nine surfaces
+    /// satisfies the limitation by carrying **any** of them (the listed surfaces
     /// word the same fact differently — a crate doc, a trait doc, a README
     /// bullet and a Module Structure table row cannot share one sentence), and
     /// every phrase must be lowercase, since [`normalized`] lowercases what it
@@ -161,46 +145,17 @@ const FFI_WALL_SITES: &[&str] = &[
     "plugins/native-widgets/src/runtime.rs",
 ];
 
-/// A component is display-only — the scoped "no production path attaches"
-/// claim (see the module doc for why the scope is load-bearing).
-const DISPLAY_ONLY_MARKERS: &[&str] = &[
-    "no production path attaches",
-    "can receive events in this build",
-];
-
-/// Seven surfaces state the display-only claim. `docs/DEVELOPMENT.md` is
-/// absent on purpose — it documents the feature gate, not the event gap — and
-/// `src/api/mod.rs` likewise states only the FFI wall.
-const DISPLAY_ONLY_SITES: &[&str] = &[
-    "docs/NATIVE_WIDGETS_ARCHITECTURE.md",
-    "plugins/native-widgets/README.md",
-    "plugins/native-widgets/src/api/mount.rs",
-    "plugins/native-widgets/src/component.rs",
-    "plugins/native-widgets/src/demo.rs",
-    "plugins/native-widgets/src/lib.rs",
-    "plugins/native-widgets/src/runtime.rs",
-];
-
-/// The two limitations this scan pins. **Delete an entry when its claim stops
-/// being true** — see the module doc's numbered instruction.
-const LIMITATIONS: &[Limitation] = &[
-    Limitation {
-        name: "app-crate FFI wall",
-        claim: "an app crate cannot implement `NativeComponent` (it needs raw \
+/// The limitation this scan pins (the display-only entry was retired with
+/// `ComponentCtx::attach_listener` — module doc). **Delete an entry when its
+/// claim stops being true** — see the module doc's numbered instruction.
+const LIMITATIONS: &[Limitation] = &[Limitation {
+    name: "app-crate FFI wall",
+    claim: "an app crate cannot implement `NativeComponent` (it needs raw \
                 `jni`/`objc2-ui-kit` deps this plugin does not re-export), so the practical \
                 audience is plugin authors",
-        markers: FFI_WALL_MARKERS,
-        sites: FFI_WALL_SITES,
-    },
-    Limitation {
-        name: "display-only component",
-        claim: "no production path attaches a listener to a component-built view, so \
-                overriding `NativeComponent::on_event` has no effect in this build (a deferred \
-                Phase 4 gap)",
-        markers: DISPLAY_ONLY_MARKERS,
-        sites: DISPLAY_ONLY_SITES,
-    },
-];
+    markers: FFI_WALL_MARKERS,
+    sites: FFI_WALL_SITES,
+}];
 
 /// Recurse `dir` collecting `.rs` files. Panics loudly on an unreadable
 /// directory (`print_free_cores.rs`'s own `walk` does the same): a swallowed
@@ -334,11 +289,11 @@ fn every_listed_surface_still_states_its_limitation() {
     assert!(
         failures.is_empty(),
         "{} listed surface(s) no longer state their limitation as expected.\n\n{}\n\nIf you are \
-         mid-way through making a claim FALSE (Phase 4 wiring listener attachment, say), this \
-         list is your worklist: fix every surface for that limitation, THEN delete its entry \
-         from LIMITATIONS in tests/limitation_conformance.rs — never the other way round, and \
-         never a partial pass, which is precisely the incomplete routing this test exists to \
-         prevent. The two claims, for reference:\n{}",
+         mid-way through making a claim FALSE (re-exporting a curated view-construction \
+         surface, say), this list is your worklist: fix every surface for that limitation, THEN \
+         delete its entry from LIMITATIONS in tests/limitation_conformance.rs — never the other \
+         way round, and never a partial pass, which is precisely the incomplete routing this \
+         test exists to prevent. The claims, for reference:\n{}",
         failures.len(),
         failures.join("\n"),
         LIMITATIONS
@@ -426,9 +381,9 @@ fn the_scan_sees_through_comment_prefixes_and_line_wrapping() {
 
     // The same, wrapped inside a `//!` crate doc, and inside a `>` blockquote
     // with markdown emphasis around (not inside) the phrase.
-    let wrapped_doc_comment = "//! composite). And **a component is\n\
-                               //! display-only**: no production path attaches a listener\n";
-    assert!(normalized(wrapped_doc_comment).contains("no production path attaches"));
+    let wrapped_doc_comment = "//! composite). And **an app\n\
+                               //! crate cannot** implement the trait\n";
+    assert!(normalized(wrapped_doc_comment).contains("app crate cannot"));
     assert!(normalized("> **An app crate cannot** implement it\n").contains("app crate cannot"));
 
     // Prefix stripping and whitespace collapsing, exactly.

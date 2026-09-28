@@ -41,20 +41,22 @@
 //! controls (see the `component` module's own doc for the lifecycle contract;
 //! it ships with the `frust-api` feature, like the builders above).
 //!
-//! Two limits that doc states in full, repeated here because they decide
+//! One limit that doc states in full, repeated here because it decides
 //! whether the trait is for you at all. **An app crate cannot implement it
 //! today**: `create` has to name `jni::objects::JObject` on Android and
 //! `objc2-ui-kit`'s classes on iOS *in the implementing crate*, and this
 //! plugin re-exports neither FFI crate, so the practical audience today is
 //! plugin authors, not app authors (the only implementor here is this crate's
-//! own non-default `demo-components` composite). And **a component is
-//! display-only**: no production path attaches a listener to a view a
-//! component built — its root as much as its children — so overriding
-//! `NativeComponent::on_event` has no effect in this build, a deliberately
-//! deferred gap. Deliberately *not* "can never fire": the dispatch
-//! half is real and routes on the slot id alone, so a listener built with a
-//! **fabricated** id that happens to name a live component's slot still lands
-//! in the trait method — a misroute, not a route (see that method's own doc).
+//! own non-default `demo-components` composite).
+//!
+//! A component hears its own views the way the six controls do: it attaches
+//! the platform's one listener to any view it built (root or child) with
+//! `ComponentCtx::attach_listener`, the listener is bound to the slot's own id
+//! by the context (never handed to the component), and the event reaches
+//! `NativeComponent::on_event` through the same slot-id routing — whose answer
+//! the app hears on `NativeComponentView::on_event`, the six builders'
+//! events-as-signals idiom (the `component` module doc's *Listener
+//! attachment*).
 //!
 //! Every control is a Rust
 //! `NativeWidget` impl registered under a kind string in the plugin-internal
@@ -130,7 +132,8 @@ pub mod component;
 // Flat re-export, same convention as `api` above.
 #[cfg(feature = "frust-api")]
 pub use component::{
-    ComponentCtx, NativeChild, NativeComponent, NativeEvent, NativeRoot, register_component,
+    ComponentCtx, ListenerHandle, ListenerKinds, NativeChild, NativeComponent, NativeEvent,
+    NativeRoot, register_component,
 };
 
 // The demo composite — ONE `NativeComponent` owning a real

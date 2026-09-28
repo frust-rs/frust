@@ -18,6 +18,15 @@
 //! never adds a second target class, matching the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
 //!
+//! A public `NativeComponent` reaches the same class through
+//! `FrustNativeControlTarget::attach_component` (called by
+//! `crate::component::ComponentCtx::attach_listener`), which wires the same
+//! selector/event pairs for whichever families the component asks for, onto
+//! any control it built. The component's context supplies the slot id, so a
+//! component never holds one; its target lives in the component's
+//! `ListenerHandle`, whose `Drop` runs `detach_component` — the same
+//! retention and detach discipline as below, one owner over.
+//!
 //! # Kind/detail parity is automatic, not re-derived
 //!
 //! Every action below packs its payload through the SAME primitive codec
@@ -110,6 +119,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+#[cfg(feature = "frust-api")]
+use objc2_ui_kit::UIView;
 use objc2_ui_kit::{UIButton, UIControl, UIControlEvents, UISlider, UISwitch};
 
 use crate::events::{
@@ -136,9 +147,12 @@ define_class!(
     impl FrustNativeControlTarget {
         /// `Button`'s `TouchUpInside` action → [`EVENT_KIND_CLICK`], `detail`
         /// unused — the same shape as `crate::events::decode_click`'s whole
-        /// input.
+        /// input. Typed `UIControl` rather than `UIButton` because a
+        /// component may click-attach any control
+        /// ([`Self::attach_component`]); the sender is never read, and an
+        /// object argument's encoding is the same either way.
         #[unsafe(method(handleClick:))]
-        fn handle_click(&self, _sender: &UIButton) {
+        fn handle_click(&self, _sender: &UIControl) {
             self.dispatch(EVENT_KIND_CLICK, 0, "handleClick:");
         }
 
@@ -355,6 +369,117 @@ impl FrustNativeControlTarget {
             sel!(handleSliderDragEnd:),
             UIControlEvents::TouchUpInside | UIControlEvents::TouchUpOutside,
         );
+    }
+
+    /// Build a target for `slot` and wire it onto `view` for whichever of the
+    /// three families are asked — the public `NativeComponent` path's attach
+    /// (`crate::component::ComponentCtx::attach_listener`), which supplies
+    /// `slot` from the component's context so the component never sees it.
+    ///
+    /// Each family is wired exactly as the matching built-in control wires
+    /// itself: `click` → [`Self::attach_button`]'s `TouchUpInside`,
+    /// `toggled` → [`Self::attach_switch`]'s `ValueChanged`,
+    /// `value_changed` → [`Self::attach_slider`]'s three pairs.
+    ///
+    /// `view` is checked **before** anything is attached, because two of the
+    /// action methods read their payload straight off the sender: `toggled`
+    /// needs a `UISwitch` (`isOn`) and `value_changed` a `UISlider`
+    /// (`value`), and `click` needs at least a `UIControl` to add a target
+    /// to. A mismatch answers `Err` naming it, with nothing wired.
+    ///
+    /// Answers the target (the caller's to retain — targets are held weakly)
+    /// and the control, retained so the caller can detach later
+    /// ([`Self::detach_component`]).
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn attach_component(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UIView,
+        click: bool,
+        toggled: bool,
+        value_changed: bool,
+    ) -> Result<(Retained<Self>, Retained<UIControl>), String> {
+        use objc2::Message as _;
+
+        let any: &AnyObject = view;
+        let control = any.downcast_ref::<UIControl>().ok_or_else(|| {
+            "iOS attach_listener: the view is not a UIControl, so no target-action can be \
+             attached to it"
+                .to_string()
+        })?;
+        if toggled && any.downcast_ref::<UISwitch>().is_none() {
+            return Err(
+                "iOS attach_listener: TOGGLED reads a UISwitch's isOn, and this control is no \
+                 UISwitch"
+                    .into(),
+            );
+        }
+        if value_changed && any.downcast_ref::<UISlider>().is_none() {
+            return Err(
+                "iOS attach_listener: VALUE_CHANGED reads a UISlider's value, and this control \
+                 is no UISlider"
+                    .into(),
+            );
+        }
+        let target = Self::new(mtm, slot);
+        target.wire(control, click, toggled, value_changed, true);
+        Ok((target, control.retain()))
+    }
+
+    /// [`Self::attach_component`]'s inverse: remove every target-action pair
+    /// it added for the same families. Removing a pair that is not there is a
+    /// documented UIKit no-op, so this is safe to run twice.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn detach_component(
+        &self,
+        control: &UIControl,
+        click: bool,
+        toggled: bool,
+        value_changed: bool,
+    ) {
+        self.wire(control, click, toggled, value_changed, false);
+    }
+
+    /// Add (`attach`) or remove every `(selector, events)` pair the requested
+    /// families mean — the one table [`Self::attach_component`] and
+    /// [`Self::detach_component`] share, so the two can never disagree.
+    #[cfg(feature = "frust-api")]
+    fn wire(
+        &self,
+        control: &UIControl,
+        click: bool,
+        toggled: bool,
+        value_changed: bool,
+        attach: bool,
+    ) {
+        let mut pairs: Vec<(Sel, UIControlEvents)> = Vec::with_capacity(5);
+        if click {
+            pairs.push((sel!(handleClick:), UIControlEvents::TouchUpInside));
+        }
+        if toggled {
+            pairs.push((
+                sel!(handleSwitchValueChanged:),
+                UIControlEvents::ValueChanged,
+            ));
+        }
+        if value_changed {
+            pairs.push((
+                sel!(handleSliderValueChanged:),
+                UIControlEvents::ValueChanged,
+            ));
+            pairs.push((sel!(handleSliderDragStart:), UIControlEvents::TouchDown));
+            pairs.push((
+                sel!(handleSliderDragEnd:),
+                UIControlEvents::TouchUpInside | UIControlEvents::TouchUpOutside,
+            ));
+        }
+        for (action, events) in pairs {
+            if attach {
+                self.add(control, action, events);
+            } else {
+                self.remove(control, action, events);
+            }
+        }
     }
 }
 

@@ -18,11 +18,13 @@
 //! wall), reaching this trait through the one `crate::component::Bridge<C>` impl
 //! with already-typed props staged beside the wire. Registry, props diff gate, event routing and disposal
 //! are therefore the *same* guarantees for both — the point of bridging rather
-//! than growing a second runtime. The event half is unobservable through the
-//! public trait today (nothing attaches a listener to a component-built view)
-//! but not unreachable: [`NativeRuntime::on_event`] keys on the slot id alone,
-//! so a fabricated id naming a live component's slot is delivered like any
-//! other.
+//! than growing a second runtime. That includes the event half: a component
+//! attaches the same one platform listener to a view it built
+//! (`crate::component::ComponentCtx::attach_listener`, bound to the slot's
+//! own id), and [`NativeRuntime::on_event`] routes its events to the bridge
+//! exactly as it routes a built-in control's, the bridge's answer riding the
+//! same per-slot callback table ([`NativeRuntime::set_callback`]) the app-facing
+//! mount builder registers into.
 //!
 //! # The generic-factory contract
 //!
@@ -1019,11 +1021,13 @@ impl NativeRuntime {
     /// to that slot's view; Android's `nativeOnEvent` export validates only
     /// that the incoming `jlong` is non-negative before it gets here
     /// (`crate::android`'s `validate_event_slot_id` → `SlotId::try_from`).
-    /// That is why the *display-only* claim about a public component
-    /// (`crate::component::NativeComponent::on_event`) is scoped to "no
-    /// production path attaches a listener" rather than "can never fire": a
-    /// fabricated id lands here indistinguishably from a real one, which is a
-    /// misroute (`crate::demo`'s own warning), not a supported route.
+    /// A public component's slot adds one gate of its own past this point:
+    /// `crate::component`'s bridge delivers only the event families the
+    /// component itself attached a listener for
+    /// (`crate::component::ComponentCtx::attach_listener`), so a fabricated id
+    /// naming a component that attached nothing stops there; one naming a slot
+    /// that did attach that family is indistinguishable from the real
+    /// listener, for components and the six controls alike.
     ///
     /// **Bypasses `RenderRoot::event` entirely** (crate doc): this is a
     /// platform interaction surfacing as a callback, never a frust pointer

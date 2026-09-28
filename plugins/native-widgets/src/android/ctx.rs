@@ -368,7 +368,9 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     /// [`Self::set_on_seek_bar_change_listener`] (whichever interface the
     /// control needs), and retain it in the control's
     /// [`NativeView`](crate::android::NativeView) `extra` list so it is
-    /// pair-deleted with the view.
+    /// pair-deleted with the view. A `NativeComponent` reaches the same
+    /// constructor through [`Self::attach_listener`], never with an id of its
+    /// own.
     ///
     /// # Errors
     /// [`NativeWidgetError::Platform`] when the class is missing from the app
@@ -439,6 +441,70 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
             jni_sig!("(Landroid/widget/SeekBar$OnSeekBarChangeListener;)V"),
             &[JValue::Object(listener)],
         )
+    }
+
+    /// `new FrustNativeListener(slot_id)` set on `view` as each requested
+    /// interface — `setOnClickListener` (`click`, any `View`),
+    /// `setOnCheckedChangeListener` (`checked_change`, a `CompoundButton`) and
+    /// `setOnSeekBarChangeListener` (`seek_bar_change`, a `SeekBar`) — then
+    /// one global reference to `view`, which the caller keeps to detach later.
+    ///
+    /// The **public** `NativeComponent` path's attach
+    /// (`crate::component::ComponentCtx::attach_listener`): the same one
+    /// listener class and the same setters the six controls use, with the slot
+    /// id supplied by the component's context rather than by a control's
+    /// props — it never reaches the component. The view holds the listener
+    /// itself, so no reference to the listener is kept.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the listener class is missing,
+    /// its constructor throws, or a setter throws — typically
+    /// `NoSuchMethodError` for an interface `view`'s class does not have. A
+    /// setter that already ran before the failing one stays set.
+    pub(crate) fn attach_listener(
+        &mut self,
+        view: &JObject<'_>,
+        slot_id: SlotId,
+        click: bool,
+        checked_change: bool,
+        seek_bar_change: bool,
+    ) -> Result<Global<JObject<'static>>, NativeWidgetError> {
+        let listener = self.new_listener(slot_id)?;
+        if click {
+            self.set_on_click_listener(view, &listener)?;
+        }
+        if checked_change {
+            self.set_on_checked_change_listener(view, &listener)?;
+        }
+        if seek_bar_change {
+            self.set_on_seek_bar_change_listener(view, &listener)?;
+        }
+        self.retain(view)
+    }
+
+    /// [`Self::attach_listener`]'s inverse: set each requested interface back
+    /// to `null` on `view`.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when a setter throws.
+    pub(crate) fn detach_listener(
+        &mut self,
+        view: &JObject<'_>,
+        click: bool,
+        checked_change: bool,
+        seek_bar_change: bool,
+    ) -> Result<(), NativeWidgetError> {
+        let none = JObject::null();
+        if click {
+            self.set_on_click_listener(view, &none)?;
+        }
+        if checked_change {
+            self.set_on_checked_change_listener(view, &none)?;
+        }
+        if seek_bar_change {
+            self.set_on_seek_bar_change_listener(view, &none)?;
+        }
+        Ok(())
     }
 
     /// Run `f` inside a pushed JNI local frame, so the references it creates

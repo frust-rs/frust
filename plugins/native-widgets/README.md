@@ -45,12 +45,23 @@ through the same one factory and the same runtime the six builders use, with
 no per-component Kotlin or Swift anywhere in it. See the `api::mount` module
 docs.
 
-> **Two limits on that seam — read them before you plan around it.** An app
+A component hears its own views the way the six builders do: it attaches the
+platform's one listener to any view it built with
+`ComponentCtx::attach_listener(view, ListenerKinds::CLICK)` (or `TOGGLED` /
+`VALUE_CHANGED`), its `NativeComponent::on_event` receives each event, and
+whatever that answers reaches the app on the mounted view's `.on_event(...)`
+hook — the same events-as-signals idiom as `.on_press`:
+
+```rust
+native_component(KIND, MyCard, props)
+    .interactive()
+    .on_event(move |event| if event.is_click() { taps.set(taps.get_untracked() + 1) })
+```
+
+> **One limit on that seam — read it before you plan around it.** An app
 > crate cannot implement `NativeComponent` today (it needs raw
-> `jni`/`objc2-ui-kit` dependencies this crate does not re-export), and a
-> component's native view is **display-only** — no production path attaches a
-> listener to it, so overriding `on_event` has no effect. Both are spelled out
-> in §5, and neither applies to the six builders above.
+> `jni`/`objc2-ui-kit` dependencies this crate does not re-export). It is
+> spelled out in §5, and does not apply to the six builders above.
 
 Every control follows frust's **controlled-component** convention where the
 platform allows it: a switch/slider reports the *requested* value through its
@@ -236,25 +247,18 @@ Two things differ from the mobile arms, both by design:
   view-construction surface, or the FFI crates themselves) is a separate,
   unscheduled decision. The six builders in §1 are unaffected: they are
   ordinary Rust calls needing no FFI dependency of yours.
-- **A `NativeComponent` is display-only — overriding `on_event` has no effect
-  in this build.** The dispatch half is wired and unit-tested (runtime →
-  bridge → trait method), but no production path attaches a platform listener
-  to a view a component built — its root as much as its children — because
-  both listener objects are constructed from a slot id `ComponentCtx` never
-  exposes, and the mounting builder registers no callback. It is a
-  deliberately deferred **Phase 4** gap. Deliberately *not* phrased as "can
-  never fire", and the difference matters if you go looking for a workaround:
-  the runtime routes an event on the slot id alone, and Android's
-  `nativeOnEvent` export rejects only a *negative* id, so a listener you
-  construct yourself with a fabricated non-negative id that happens to name a
-  live component's slot **is** delivered — into whichever slot that number
-  currently means, which is a misroute rather than a route, since a component
-  is never told its own id. iOS leaves no such opening at all: the target
-  class is crate-private and this plugin exports no C symbol. Marking a
-  component `.interactive()` still routes touches to the native view, so it
-  behaves natively (a button highlights) — it just reports nothing back to
-  Rust. The six built-in controls are unaffected: their `on_press`/`on_change`
-  callbacks fire normally (§1).
+- **A `NativeComponent`'s events come only from listeners it attached.**
+  `ComponentCtx::attach_listener` binds the platform's one listener class to
+  the component's own slot id — which the context never hands the component —
+  and the runtime's bridge delivers only the event families the slot attached,
+  so a view the component attached nothing to still behaves natively (a
+  button highlights) but reports nothing. Two children attached for the same
+  family are indistinguishable in `on_event`: a click carries its slot, not
+  which child fired, so give each child its own family or its own slot. On
+  macOS an `NSControl` carries one target/action pair, so it takes exactly one
+  family (`CLICK`, `TOGGLED` or `VALUE_CHANGED`), and AppKit reports no drag
+  edges. The listener is released when the `ListenerHandle` the component
+  keeps in its state drops.
 
 ---
 
