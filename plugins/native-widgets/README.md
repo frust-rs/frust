@@ -190,10 +190,9 @@ Two things differ from the mobile arms, both by design:
   value); `NSSwitch`'s track and `NSProgressIndicator`'s fill have no tint
   API at all, so `thumbTint`/`trackTint`/`progressTint` on those two
   controls are silent no-ops logged at debug (both still draw in the
-  system accent colour); `native_image`'s tint sets
-  `NSImageView.contentTintColor` directly — unlike Android/iOS, which need
-  the image marked a *template* first, macOS applies it to whatever
-  `NSImage` is already installed; and `native_image` decodes through
+  system accent colour); `native_image`'s tint marks the image as a template and sets
+  `NSImageView.contentTintColor` — a silhouette in the tint colour, like Android's SRC_IN and iOS's template rendering — and clearing
+  the tint restores the original image; and `native_image` decodes through
   ImageIO, so a shell environment whose `DYLD_LIBRARY_PATH` shadows one of
   ImageIO's private codec dylibs (e.g. Homebrew's `/opt/homebrew/lib` on a
   machine with `libpng`/`libjpeg` installed) leaves every image slot empty
