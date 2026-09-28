@@ -767,19 +767,34 @@ pub(crate) mod platform {
     //! ([`Fit::image_scaling`]'s doc) — there is no overflow to clip in the
     //! first place.
     //!
-    //! # No tint-needs-a-template-image indirection
+    //! # The tint needs a template image, like iOS — but no re-derived copy
     //!
-    //! iOS's `ImageState` (this file's iOS `platform` module doc's *The tint
-    //! needs the image to be a template*) keeps the decoded
-    //! original around separately from the tinted view because
-    //! `UIImageView.tintColor` only affects a `UIImage` whose rendering mode
-    //! is `AlwaysTemplate`. `NSImageView.contentTintColor` (theme ladder L2,
-    //! pending — [`Setter::ImageTint`] below routes through the same
-    //! `platform::set_tint` placeholder every other control's tint setter
-    //! does) applies directly to whatever `NSImage` is already installed, no
-    //! rendering-mode swap needed, so this arm's state carries only the view
-    //! and the publish-table hold — no decoded-original/tinted-flag pair to
-    //! maintain.
+    //! `NSImageView.contentTintColor` (theme ladder L2) is documented by
+    //! AppKit's header as "a tint color to be used when rendering
+    //! **template** image content" (`objc2-app-kit` 0.3.2's generated
+    //! `NSImageView.rs:221`) — set it on an ordinary, non-template image and
+    //! it has no visible effect at all, exactly the pitfall this file's iOS
+    //! `platform` module doc names (*The tint needs the image to be a
+    //! template*). An earlier version of this doc claimed AppKit needed no
+    //! such indirection; that was wrong, and the false claim is why a
+    //! monochrome icon tinted for a dark theme stayed black on macOS while
+    //! Android and iOS both rendered the tint correctly.
+    //!
+    //! Unlike `UIImage.imageWithRenderingMode:`, though,
+    //! `NSImage.isTemplate`/`setTemplate:` is a **mutable property of the
+    //! same `NSImage` object**, not a rendering-mode wrapper around a second,
+    //! separately-allocated backing store — so this arm never needs iOS's
+    //! decoded-original/re-derived-copy pair. [`ImageState`] instead keeps
+    //! the decoded [`NSImage`] and a `tinted` flag: applying a tint calls
+    //! `setTemplate(true)` on the installed image before `contentTintColor`
+    //! is set (`platform::set_tint`, `controls/mod.rs`); clearing it calls
+    //! `setTemplate(false)` and clears `contentTintColor`, restoring the
+    //! image's original, untinted rendering — the same restore Android's
+    //! `setImageTintList(null)` and iOS's `imageWithRenderingMode:
+    //! .automatic` give back. A bytes change re-applies the *current*
+    //! `tinted` flag to the freshly decoded image ([`next_tinted`]) rather
+    //! than leaving it at AppKit's own default, so a tint set before a bytes
+    //! swap is not silently lost when the new image installs.
     //!
     //! # `DYLD_LIBRARY_PATH` can take ImageIO's codecs away
     //!
@@ -848,6 +863,14 @@ pub(crate) mod platform {
         /// ([`claim_bytes`]) and gives back in `dispose` ([`release_bytes`]),
         /// the same accounting the Android and iOS arms keep.
         slot: SlotId,
+        /// The decoded image currently installed on [`Self::view`], kept so a
+        /// tint change can re-apply `setTemplate` to it without re-decoding
+        /// (module doc's *The tint needs a template image*).
+        image: Option<Retained<NSImage>>,
+        /// Whether a tint colour is currently set — the value [`apply`]
+        /// passes to `setTemplate` for both the currently installed image
+        /// and any freshly decoded one.
+        tinted: bool,
     }
 
     impl NativeWidget for Image {
@@ -871,19 +894,20 @@ pub(crate) mod platform {
             // normalization and the diff baseline disagreeing.
             view.setImageScaling(default.fit.image_scaling());
             view.setImageFrameStyle(NSImageFrameStyle::None);
+            let mut state = ImageState {
+                view,
+                slot: props.slot,
+                image: None,
+                tinted: false,
+            };
             let plan = ImageProps::plan(&default, props);
-            apply_all(&view, &plan);
-            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            apply_all(&mut state, &plan);
+            let handle =
+                NativeView::new(Retained::clone(&state.view).into_super().into_super(), mtm);
             // Claimed last, mirroring the other two arms: an earlier failure
             // would return before taking a hold nothing would ever release.
             claim_bytes(props.slot);
-            Ok((
-                handle,
-                ImageState {
-                    view,
-                    slot: props.slot,
-                },
-            ))
+            Ok((handle, state))
         }
 
         fn update(
@@ -892,7 +916,7 @@ pub(crate) mod platform {
             old: &Self::Props,
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
-            apply_all(&state.view, &ImageProps::plan(old, new));
+            apply_all(state, &ImageProps::plan(old, new));
             Ok(())
         }
 
@@ -911,23 +935,64 @@ pub(crate) mod platform {
 
     /// Execute a whole [`Plan`], front to back — the same order contract the
     /// other two arms keep.
-    fn apply_all(view: &NSImageView, plan: &Plan<'_>) {
+    fn apply_all(state: &mut ImageState, plan: &Plan<'_>) {
         for setter in plan {
-            apply(view, setter);
+            apply(state, setter);
         }
     }
 
-    /// Execute one planned property write against `view`.
-    fn apply(view: &NSImageView, setter: &Setter<'_>) {
+    /// Execute one planned property write against `state`'s view.
+    ///
+    /// Takes the whole state, not just the view, because a bytes change
+    /// needs the *existing* tint state to mark the freshly decoded image
+    /// template (module doc's *The tint needs a template image*), and a tint
+    /// change needs the currently installed image to mark — the same shape
+    /// the iOS arm's `apply` uses for the same reason.
+    fn apply(state: &mut ImageState, setter: &Setter<'_>) {
+        // `Setter::ImageTint` is the only setter that changes `tinted`;
+        // every other setter (crucially `Setter::ImageBytes`) leaves it
+        // exactly as it was, so a bytes change never silently clears an
+        // active tint (see `next_tinted`'s tests).
+        state.tinted = next_tinted(state.tinted, setter);
         match *setter {
             Setter::ImageBytes(bytes) => {
                 let image = bytes.as_slice().and_then(decode);
-                view.setImage(image.as_deref());
+                if let Some(image) = &image {
+                    // Re-apply the current tint state to the freshly decoded
+                    // image: AppKit's template flag lives on the `NSImage`
+                    // object itself, so a new decode starts over and would
+                    // otherwise revert to an untinted rendering even while a
+                    // tint is still active (module doc).
+                    image.setTemplate(state.tinted);
+                }
+                state.view.setImage(image.as_deref());
+                state.image = image;
             }
-            Setter::ScaleType(fit) => view.setImageScaling(fit.image_scaling()),
-            Setter::ImageTint(argb) => platform::set_tint(view, "ImageTint", argb),
-            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
+            Setter::ScaleType(fit) => state.view.setImageScaling(fit.image_scaling()),
+            Setter::ImageTint(argb) => {
+                if let Some(image) = &state.image {
+                    image.setTemplate(state.tinted);
+                }
+                platform::set_tint(&state.view, "ImageTint", argb);
+            }
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(&state.view, label);
+            }
             ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+
+    /// The next value of [`ImageState::tinted`] after applying `setter` —
+    /// [`Setter::ImageTint`] recomputes it from the new tint value; every
+    /// other setter, in particular [`Setter::ImageBytes`], leaves it
+    /// untouched. Pulled out as a pure function — no `NSImage`/`NSImageView`
+    /// involved — so the state transition Deliverable 1 fixes (a bytes
+    /// change while a tint is active must not clear it) is host-testable
+    /// without AppKit; see the tests below.
+    fn next_tinted(current: bool, setter: &Setter<'_>) -> bool {
+        match *setter {
+            Setter::ImageTint(argb) => argb.is_some(),
+            _ => current,
         }
     }
 
@@ -1010,7 +1075,53 @@ pub(crate) mod platform {
         use std::ffi::OsStr;
         use std::path::Path;
 
-        use super::{IMAGEIO_CODEC_LEAVES, shadowing_file};
+        use super::super::ImageBytes;
+        use super::{IMAGEIO_CODEC_LEAVES, next_tinted, shadowing_file};
+        use crate::controls::Setter;
+
+        // --- `next_tinted` — the macOS ImageTint-renders-through-a-template
+        // -- fix's state transition (Deliverable 4), host-testable without
+        // -- an `NSImageView`. ---------------------------------------------
+
+        #[test]
+        fn an_image_tint_setter_recomputes_tinted_from_the_new_colour() {
+            assert!(next_tinted(false, &Setter::ImageTint(Some(128))));
+            assert!(!next_tinted(true, &Setter::ImageTint(None)));
+        }
+
+        #[test]
+        fn an_image_bytes_setter_never_changes_the_tinted_flag() {
+            let empty = ImageBytes::empty();
+            assert!(
+                !next_tinted(false, &Setter::ImageBytes(&empty)),
+                "untinted stays untinted across a bytes change"
+            );
+            assert!(
+                next_tinted(true, &Setter::ImageBytes(&empty)),
+                "a bytes change alone must not clear an active tint"
+            );
+        }
+
+        #[test]
+        fn a_tint_survives_a_bytes_change_that_follows_it() {
+            // The exact review finding this task fixes: tint, then swap the
+            // bytes — the tint must still be active so the freshly decoded
+            // image is marked template.
+            let empty = ImageBytes::empty();
+            let tinted = next_tinted(false, &Setter::ImageTint(Some(128)));
+            assert!(tinted);
+            let after_bytes = next_tinted(tinted, &Setter::ImageBytes(&empty));
+            assert!(after_bytes, "the tint must persist across the bytes swap");
+        }
+
+        #[test]
+        fn clearing_the_tint_after_a_bytes_change_still_untints() {
+            let empty = ImageBytes::empty();
+            let tinted = next_tinted(false, &Setter::ImageTint(Some(128)));
+            let after_bytes = next_tinted(tinted, &Setter::ImageBytes(&empty));
+            let cleared = next_tinted(after_bytes, &Setter::ImageTint(None));
+            assert!(!cleared);
+        }
 
         #[test]
         fn a_search_path_without_a_codec_leaf_shadows_nothing() {

@@ -1315,7 +1315,7 @@ pub(crate) mod platform {
     //! | the same, additionally | `NSButton` (`Button`'s `accent_fill`) | `bezelColor` |
     //! | radius of [`Setter::ThemedBackground`] | any `NSView` | `layer.cornerRadius` + `masksToBounds` |
     //! | [`Setter::ProgressTint`] | `NSSlider` (`accent_fill`) | `trackFillColor` |
-    //! | [`Setter::ImageTint`] | `NSImageView` | `contentTintColor` |
+    //! | [`Setter::ImageTint`] | `NSImageView` | `contentTintColor` on a template image — clearing restores the original, untinted image (`controls::image`'s macOS module doc) |
     //! | [`Setter::TextSizeSp`] / [`Setter::Typeface`] | `NSControl` | `font` (one immutable `NSFont`, see *Size and face* below) |
     //!
     //! **No AppKit API, so no call** (logged at debug, never a failure):
@@ -1491,6 +1491,13 @@ pub(crate) mod platform {
     /// `NSImageView`'s tint is `contentTintColor`, and every other pairing has
     /// no AppKit API. `None` passes `nil`, restoring AppKit's own colour — the
     /// clearable contract [`Setter::ProgressTint`] documents.
+    ///
+    /// For `ImageTint`, `contentTintColor` only renders when the installed
+    /// image is a template (`NSImageView.rs:221`'s doc,
+    /// `controls::image`'s macOS module doc) — the caller (`controls::image`)
+    /// marks the image template *before* calling here, so this function reads
+    /// that state back rather than assuming the colour landed, and logs
+    /// accordingly instead of always claiming "applied".
     pub(crate) fn set_tint(view: &NSView, which: &'static str, argb: Option<i32>) {
         let color = argb.map(ns_color);
         if let Some(slider) = view.downcast_ref::<NSSlider>() {
@@ -1498,11 +1505,24 @@ pub(crate) mod platform {
                 return no_appkit_api(which, "NSSlider has no thumb colour");
             }
             slider.setTrackFillColor(color.as_deref());
-        } else if let Some(image) = view.downcast_ref::<NSImageView>() {
+        } else if let Some(image_view) = view.downcast_ref::<NSImageView>() {
             if which != "ImageTint" {
                 return no_appkit_api(which, "NSImageView has only a content tint");
             }
-            image.setContentTintColor(color.as_deref());
+            image_view.setContentTintColor(color.as_deref());
+            let applied =
+                argb.is_some() && image_view.image().is_some_and(|image| image.isTemplate());
+            log::debug!(
+                "frust-native-widgets: macOS L2 ImageTint({argb:?}) {}",
+                if argb.is_none() {
+                    "cleared — restored the original, untinted image"
+                } else if applied {
+                    "applied (template image)"
+                } else {
+                    "contentTintColor set, but no template image is installed — no visible tint"
+                }
+            );
+            return;
         } else if view.downcast_ref::<NSSwitch>().is_some() {
             return no_appkit_api(
                 which,
