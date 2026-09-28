@@ -11,7 +11,7 @@ seams from above; this lab goes down into the substrate and runs its tests.
 > **Two `TierCaps`.** `frust_gpu::TierCaps` (`crates/frust-gpu/src/caps.rs`) is the probed record
 > this lab is about; `frust_render::TierCaps` (`crates/frust-render/src/tier.rs`, root re-export) is
 > a different two-field struct (`downlevel_flags`, `adapter_name`) feeding only `engine_support`
-> (open minor act_000001a0633d50b7). A bare `TierCaps` here means the `frust-gpu` one.
+> (an open minor finding). A bare `TierCaps` here means the `frust-gpu` one.
 
 ## Where it lives
 
@@ -136,8 +136,8 @@ seams from above; this lab goes down into the substrate and runs its tests.
 
 ## Experiments
 
-All GPU-free unless marked; set a per-worktree `CARGO_TARGET_DIR` (e.g.
-`/data/cache/target-wt-t2-07`). A `--lib <name>` filter is a substring match (`surface` also picks
+All GPU-free unless marked; set a per-worktree `CARGO_TARGET_DIR=<your-target-dir>` (any
+directory works; the worktree's separate cache avoids test-binary residency issues). A `--lib <name>` filter is a substring match (`surface` also picks
 up lifecycle/lint/pipeline tests naming it), so read each result's module prefix.
 
 ### 16.1 — Caps without a GPU

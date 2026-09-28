@@ -114,8 +114,8 @@ texture, an offscreen shader target). This lab reads each resource and runs its 
      `frame_demands` collapses every quad of one program into one demand (largest extent per axis,
      first quad's time) and, when an extent was supplied with `set_frame_target_extent`, drops
      quads entirely off-target (`quad_is_culled`, skipped inside a snapshot bracket). frust-render's
-     `SurfaceRenderer` builds the pass but never calls that setter today (open minor
-     act_000001a064935774), so on the live path off-screen quads still get targets. The GPU half is
+     `SurfaceRenderer` builds the pass but never calls that setter today (an open minor finding),
+     so on the live path off-screen quads still get targets. The GPU half is
      `frust_gpu::effects::ShaderEffects`: lazy per-program pipeline seeded from the persisted
      pipeline cache, a fullscreen-triangle pass viewport-confined to the exact requested size,
      targets keyed by `quantized_target_key` (rounded up to the 256 px pool quantum),

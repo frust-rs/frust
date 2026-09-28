@@ -58,18 +58,22 @@ cache boundary made visible in two counters.
 ### 6.3 — From glyphs to pixels
 
 Read `crates/frust-engine/src/compile/mod.rs`'s `compile_glyph_run` function
-(≈1514–1591): the route for the whole run was already decided before this walk,
-by `classify_runs`, and arrives here as one `route: Option<RunRoute>` — there
-are exactly two variants (`crates/frust-engine/src/text/atlas_policy.rs`
-≈650–655): `RunRoute::Atlas(AtlasRun)` (settled: every glyph samples a cached
-slot in the glyph atlas) and `RunRoute::Outline(OutlineReason)` (drawn as
-outline strips, for the stated reason). One run takes one route, never a
-per-glyph mix of the two. An outline run does not leave the CPU as bare
-outlines and positions for the GPU to rasterize — glifo drives
+(≈1514–1591): the route for each run is one `route: Option<RunRoute>` —
+exactly two variants (`crates/frust-engine/src/text/atlas_policy.rs`
+≈650–655): `RunRoute::Atlas(AtlasRun)` or `RunRoute::Outline(OutlineReason)`.
+This route is decided once per run, per frame, by `classify_runs` in the
+collect phase (≈1413 in `compile/mod.rs`) and re-tested by `admit_run` when the
+run is drawn (≈1492, called from `take_run_route`); it can only narrow an Atlas
+route to Outline, never the reverse. On an Atlas route, glyphs sample the glyph
+atlas, but a glyph the atlas had no room for still draws as an outline — so the
+pixel path differs per glyph (see `atlas_policy.rs` ≈683–686 and ≈713–715), not
+one route per run for every glyph. See [`15-engine-text.md`](15-engine-text.md)
+idea 1 for the route narrowing at draw time. An outline run does not leave the
+CPU as bare outlines and positions for the GPU to rasterize — glifo drives
 `EngineGlyphSink` (`crates/frust-engine/src/text/backend.rs`), which itself
-rasterizes it into strips through the compiler's own `StripGenerator`, the
-same machinery every other draw goes through. (COLR glyph faces never reach
-the atlas; see `crates/frust-engine/tests/atlas_churn.rs`'s
+rasterizes it into strips through the compiler's own `StripGenerator`, the same
+machinery every other draw goes through. (COLR glyph faces never reach the
+atlas; see `crates/frust-engine/tests/atlas_churn.rs`'s
 `a_colour_face_never_reaches_the_atlas_and_its_glyphs_still_draw` test. Color
 glyphs draw as outlines via `crates/frust-engine/src/text/color.rs`'s layer
 recombination.)

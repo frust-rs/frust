@@ -32,8 +32,10 @@ the mechanism working in this repo.
    Why: the strip proptest (`tests/proptest_strips.rs`) has twice exhausted
    memory on random inputs during workspace gates (a ~35 GB RSS OOM kill on
    2026-09-08 and a 187 GB allocation abort on 2026-09-26, both recorded in
-   the project's review ledger, both still open); `docs/RENDER_DEVELOPMENT.md`'s
-   frust-engine test arm carries the same caveat.
+   the project's external review tracker (not reproduced in this repository),
+   both still open); this learner rule is stricter than `docs/RENDER_DEVELOPMENT.md`'s
+   guidance, which offers conditional scoping on hosts without spare memory or when
+   iterating.
 
 ## Prerequisite (one-time)
 
@@ -83,7 +85,7 @@ chapter 8.
 - **Engine track** (4, 11, 12, 13, 14, 6, 15, 16, then 5 as history) — how
   `frust-engine` turns a `Scene` into strips, rounds and GPU passes, plus its
   paint/image/filter and text pipelines and the `frust-gpu` substrate below
-  it: lab 6 revisited before lab 15's atlas-vs-outline routing, then the
+  it: lab 6 before lab 15's atlas-vs-outline routing, then the
   historical vello internals (lab 5) read last, once you already know the
   architecture that replaced it.
 - **Platform & measurement track** (7, 8, 9) — the mobile frame gate,

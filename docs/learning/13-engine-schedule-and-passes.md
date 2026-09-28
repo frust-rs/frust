@@ -87,10 +87,10 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    `FRUST_ENGINE_NO_DEPTH=1` (`config::depth_disabled`, read once per process) is consulted at
    `let depth_enabled` (≈1072): the scratch builder never splits opaque spans out (`split_opaque`
    ≈2619), pass (b) disappears, and every instance goes through the surface rounds' blended pass
-   in painter order via `StripAlpha` instead of `StripDepthAlpha`. Measured fact, filed as open
-   observation `act_000001a07429cd3f`: a plain frame records **three** full-screen surface passes —
-   the empty clear, the opaque pass with `LoadOp::Load`, and the round with `LoadOp::Load`. That
-   is how the code is written today; do not "fix" it from this chapter.
+   in painter order via `StripAlpha` instead of `StripDepthAlpha`. A measured observation recorded
+   outside the repo: a plain frame records **three** full-screen surface passes — the empty clear,
+   the opaque pass with `LoadOp::Load`, and the round with `LoadOp::Load`. That is how the code is
+   written today; do not "fix" it from this chapter.
 
 4. **Nine WGSL files, five programs, nine pipelines.** `crates/frust-engine/shaders/` holds nine
    files, and the code treats them in three different ways:

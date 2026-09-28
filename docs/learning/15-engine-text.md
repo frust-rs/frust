@@ -75,14 +75,13 @@ decides — once per run, per frame — whether its glyphs are *sampled from the
    half-painted. Hinting is split: `SceneCompiler::for_caps` sets `hint_text = !is_mobile_tier(caps)`
    (`new` defaults to `false`), and glifo hints only under a positive uniform scale on top of that.
 
-4. **What it costs.** Atlas hits save rasterization, not the walk: open measurement
-   act_000001a07572829c (a Zabin action item, quoted here, not re-run in this lab) found glyph
-   lowering at 87–92% of the compile walk on text-heavy scenes even with every glyph an atlas hit.
-   The counter is `CompileSpans::glyphs`, lapped around each `Command::GlyphRun` arm — a **subset**
-   of `walk`, left out of `CompileSpans::total`. It reads non-zero only in a `perf-trace` build,
-   where `EncodeTrace` logs (at `info`) one `frust-perf enc` line per 60 frames in
-   `ENCODE_TRACE_COLUMNS` order: compare `glyphs_us` with `walk_us`, and read `glyph_draws=` /
-   `atlas_glyphs=` for how many glyphs drew and how many sampled the atlas.
+4. **What it costs.** Atlas hits save rasterization, not the walk: a measured finding recorded
+   outside the repo found glyph lowering at 87–92% of the compile walk on text-heavy scenes even
+   with every glyph an atlas hit. The counter is `CompileSpans::glyphs`, lapped around each
+   `Command::GlyphRun` arm — a **subset** of `walk`, left out of `CompileSpans::total`. It reads
+   non-zero only in a `perf-trace` build, where `EncodeTrace` logs (at `info`) one `frust-perf enc`
+   line per 60 frames in `ENCODE_TRACE_COLUMNS` order: compare `glyphs_us` with `walk_us`, and read
+   `glyph_draws=` / `atlas_glyphs=` for how many glyphs drew and how many sampled the atlas.
 
 ## Experiments
 
