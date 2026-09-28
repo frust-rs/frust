@@ -27,12 +27,12 @@ executors (see "The render-thread split" below):
 | Animation continuation | `decision.request_redraw` → `window.request_redraw()` | `app_handler.rs` ≈2899–2900 |
 | Mid-frame signal write | `scope.is_dirty()` → `request_redraw()` | `app_handler.rs` ≈2910–2911 |
 | Handoff to executor | `self.executor.submit_frame(&window, &mut self.scene, ...)` | `app_handler.rs` ≈2935 |
-| **Encode** | `renderer.encode(render_cx, scene, base_color)` (→ [`SurfaceRenderer::encode`], `renderer.rs` ≈858) | `render.rs` ≈834–835 |
+| **Encode** | `renderer.encode(render_cx, scene, base_color)` (→ [`SurfaceRenderer::encode`], `crates/frust-render/src/renderer.rs` ≈858) | `render.rs` ≈834–835 |
 | **Acquire** | `renderer.acquire(render_cx)` (→ [`SurfaceRenderer::acquire`], `renderer.rs` ≈951) | `render.rs` ≈844–846 |
 | **Submit** | `renderer.submit(render_cx)` (→ [`SurfaceRenderer::submit`], `renderer.rs` ≈1064) | `render.rs` ≈855–857 |
 | Record timings | `frame_stats.record(FramePasses::from_split(ui_spans, RenderSpans {..}))` | `render.rs` ≈880 |
 
-`SurfaceRenderer::present` (`renderer.rs` ≈927) still exists as a combined
+`SurfaceRenderer::present` (`crates/frust-render/src/renderer.rs` ≈927) still exists as a combined
 acquire+submit convenience wrapper — kept for a caller (a test, or
 `SurfaceRenderer::render` ≈831, its own thin `encode`+`present` wrapper) that
 wants present timed as one span. The desktop frame loop doesn't call it: it

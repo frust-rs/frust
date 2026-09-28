@@ -84,10 +84,11 @@ was already there.
 
 - `crates/frust-engine/src/renderer.rs`'s `EngineRenderer::encode` — the single function that
   walks a `CompiledFrame` into GPU passes — is where this repo hands control to the strip
-  pipeline. `crates/frust-engine/shaders/` (eight pass shaders — `strip`, `clear`, `copy`,
-  `blend`, `filter`, `filters_blur`, `filters_drop_shadow`, `unpremultiply` — plus a `helpers.wgsl`
-  prelude `crates/frust-engine/src/gpu/shader_src.rs` prepends at load time) is short enough to
-  read cold from here if you want to go straight to the GPU side.
+  pipeline. Nine WGSL files in `crates/frust-engine/shaders/` compile to five programs — `strip`, 
+  `clear`, `copy`, `filter`, `unpremultiply` — with three binding-free preludes (`helpers`, 
+  `filters_blur`, `filters_drop_shadow`) prepended at compile time. See [lab 13](13-engine-schedule-and-passes.md) 
+  idea 4 for the full inventory and why preludes that declare no `@group`/`@binding` globals can 
+  be safely prepended without disturbing bind-group layouts.
 - The pipeline cache (`frust-gpu::pipeline_cache`) is Vulkan-only and fingerprinted per adapter; on
   your Mac it's a silent no-op. File it away for Android cold-start work.
 - This is the hand-off point: the next six chapters take the engine apart piece by piece —
