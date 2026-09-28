@@ -55,6 +55,9 @@ pub mod pages;
 // page's FTL messages need `NUMBER`/`DATETIME` (see [`setup_i18n`]).
 frust_i18n::locales!("locales");
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
 };
@@ -62,14 +65,124 @@ use frust::authoring::{
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    Align, Alignment, AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get,
-    GetUntracked, MotionScheme, NavigatorController, Padding, PageTransition, RwSignal, Set, Stack,
-    Theme, TransitionSpec, View, any, button, deep_links, flexible, icon, icons, inflexible,
-    navigator, safe_area, scroll_view, set_app_theme, text,
+    Align, Alignment, AnyView, Axis, Brightness, Color, Component, DeepLink, EdgeInsets, FlexView,
+    Get, GetUntracked, MotionScheme, NavigatorController, Padding, PageTransition, RwSignal, Set,
+    SizedBox, Stack, Theme, TransitionSpec, Update, View, any, button, deep_links, flexible, icon,
+    icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, text,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
 use pages::SECTION_LABELS;
+
+// ---------------------------------------------------------------------------
+// Deep-link routing — pure parse/plan functions plus the small root-mounted
+// `deep_link_router` component that applies them (see module docs' third
+// paragraph and the [`deep_link_router`] doc comment below).
+// ---------------------------------------------------------------------------
+
+/// The scheme+host prefix every routed deep link starts with; anything else
+/// (a different scheme, a different host) is not a section deep link and is
+/// ignored — see [`parse_section_deep_link`].
+const SECTION_DEEP_LINK_PREFIX: &str = "frustplay://section/";
+
+/// Extract the `<label>` segment from a `frustplay://section/<label>[/...]`
+/// URL. Tolerates a trailing slash (and any further path/query/fragment,
+/// unchanged from the original inline parser) by taking everything up to the
+/// first `/`, `?`, or `#`. Returns `None` for a non-matching scheme/host or an
+/// empty label — this crate does not percent-decode the label (the original
+/// inline parser did not either, and `SECTION_LABELS` are all plain ASCII
+/// words that never need it).
+fn parse_section_deep_link(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix(SECTION_DEEP_LINK_PREFIX)?;
+    let label = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if label.is_empty() { None } else { Some(label) }
+}
+
+/// The effect a delivered [`DeepLink`] resolves to, as decided by
+/// [`plan_deep_link`] — applied by [`deep_link_router`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeepLinkAction {
+    /// Navigate to `index` (a valid [`pages::section_index_for`] result);
+    /// `auto_run_db_smoke` is true exactly when `index` is the DB section, so
+    /// the DB page auto-runs its smoke test once on arrival.
+    GoToSection {
+        index: usize,
+        auto_run_db_smoke: bool,
+    },
+    /// The link named a `frustplay://section/<label>` URL, but `<label>`
+    /// matched no [`pages::SECTION_LABELS`] entry — carries the raw label for
+    /// the toast/log message.
+    UnknownLabel(String),
+}
+
+/// Decide what (if anything) a delivered `link` should do, given the
+/// sequence of the last delivery already applied. Dedupes on
+/// [`DeepLink::sequence`] — a monotonic per-delivery counter — rather than
+/// comparing URL text, so two deliveries of an *identical* URL are still two
+/// separate applications, while a rebuild re-observing the same delivery is a
+/// no-op. Returns `None` when the delivery was already applied, or when the
+/// URL is not a `frustplay://section/<label>` link at all (silently ignored,
+/// matching the original inline parser: a link this app does not route is
+/// not this router's business).
+fn plan_deep_link(link: &DeepLink, last_applied: Option<u64>) -> Option<DeepLinkAction> {
+    if last_applied == Some(link.sequence) {
+        return None;
+    }
+    let label = parse_section_deep_link(&link.url)?;
+    match pages::section_index_for(label) {
+        Some(index) => {
+            let db_index = pages::section_index_for("db").unwrap_or(usize::MAX);
+            Some(DeepLinkAction::GoToSection {
+                index,
+                auto_run_db_smoke: index == db_index,
+            })
+        }
+        None => Some(DeepLinkAction::UnknownLabel(label.to_string())),
+    }
+}
+
+/// A small root-mounted component, sited beside [`toast_overlay`] in
+/// [`home_page`]'s layer stack, that owns the deep-link seam end to end: the
+/// single TRACKED read of `frust::deep_links().latest.get()` (the same
+/// idiom `pages/url_launcher.rs`'s page uses — `frust-reactive` has no effect
+/// API, so a `TrackedScope` re-running this builder on change *is* the
+/// reactive seam), planning via [`plan_deep_link`], applying the result to
+/// `state`, and recording the delivery's sequence in
+/// [`PlaygroundState::last_applied_sequence`] so a later rebuild that
+/// re-observes the same delivery is a no-op. Renders nothing (a zero-size
+/// [`SizedBox`]) — it exists purely for its side effect on `state`.
+fn deep_link_router(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+    if let Some(link) = deep_links().latest.get() {
+        let last_applied = state.last_applied_sequence.get();
+        if let Some(action) = plan_deep_link(&link, last_applied) {
+            match action {
+                DeepLinkAction::GoToSection {
+                    index,
+                    auto_run_db_smoke,
+                } => {
+                    state.section.set(index);
+                    state.reverse.set(false);
+                    if auto_run_db_smoke {
+                        state.auto_run_db_smoke.set(true);
+                    }
+                    log::info!(
+                        "playground deep-link: section {} -> {}",
+                        SECTION_LABELS[index],
+                        index
+                    );
+                }
+                DeepLinkAction::UnknownLabel(label) => {
+                    state.toasts.update(|queue| {
+                        queue.push(format!("Unknown section '{label}' in deep link"))
+                    });
+                    log::warn!("playground deep-link: section {} unknown", label);
+                }
+            }
+        }
+        state.last_applied_sequence.set(Some(link.sequence));
+    }
+    any(SizedBox(Some(0.0), Some(0.0)))
+}
 
 // ---------------------------------------------------------------------------
 // AppBackground — the Mode B root background layer (see the module docs'
@@ -160,13 +273,36 @@ pub struct PlaygroundState {
     /// `MotionScheme::reduce_motion` push the app-bar reduce-motion toggle
     /// drives, so every convention-following widget collapses for free.
     pub animations_enabled: RwSignal<bool>,
-    /// Tracks the last applied deep-link URL to guard against re-applying the
-    /// same link on unrelated rebuilds. None means no link has been applied yet.
-    pub last_deep_link_url: std::cell::RefCell<Option<String>>,
-    /// Flag set by a deep-link arrival targeting the DB section; consumed once
-    /// by the DB page to auto-run its smoke test. Initialized false; set true by
-    /// the deep-link handler, cleared by the page function after spawning.
-    pub auto_run_db_smoke: RwSignal<bool>,
+    /// The [`DeepLink::sequence`] of the last delivery [`deep_link_router`]
+    /// applied, guarding against re-applying the same delivery on an
+    /// unrelated rebuild. `None` means no delivery has been applied yet.
+    /// Compared against `sequence` rather than the URL text so two
+    /// deliveries of an identical URL are still two applications (see
+    /// [`plan_deep_link`]). A plain `Cell` (not `Rc`-wrapped): only
+    /// [`deep_link_router`] ever touches it, and it always runs against the
+    /// same `state` [`home_page`] was itself called with — never the
+    /// second-level clone made for a section page (see `auto_run_db_smoke`'s
+    /// doc comment just below for the case where that distinction matters).
+    pub last_applied_sequence: Cell<Option<u64>>,
+    /// Flag set by [`deep_link_router`] on a deep-link arrival targeting the
+    /// DB section; consumed once by the DB page to auto-run its smoke test.
+    /// Initialized false; set true by the router, cleared by the page
+    /// function after spawning (debug builds only — see
+    /// `pages/database.rs::page`).
+    ///
+    /// `Rc<Cell<bool>>`, not a bare `Cell`: [`PlaygroundState`] is cloned by
+    /// value (`#[derive(Clone)]` above), and `home_page` clones it *again*
+    /// (`let handles = state.clone();`) before handing that second clone to
+    /// `pages::current`/`database::page` — a bare `Cell<bool>` would clone
+    /// its *current value*, not its identity, so a write from
+    /// [`deep_link_router`] (using `home_page`'s own `state`) would be
+    /// invisible to `database::page` (reading the second-level clone). The
+    /// other reactive fields above dodge this because `RwSignal` is `Copy`
+    /// over an opaque signal id, not a value — cloning it clones a
+    /// reference, not the referent. `Rc` reproduces exactly that sharing for
+    /// a value nothing needs to *track*, without paying for an unused
+    /// signal subscription.
+    pub auto_run_db_smoke: Rc<Cell<bool>>,
 }
 
 impl PlaygroundState {
@@ -181,8 +317,8 @@ impl PlaygroundState {
             toasts: RwSignal::new(Vec::new()),
             nav: NavigatorController::new(),
             animations_enabled: RwSignal::new(true),
-            last_deep_link_url: std::cell::RefCell::new(None),
-            auto_run_db_smoke: RwSignal::new(false),
+            last_applied_sequence: Cell::new(None),
+            auto_run_db_smoke: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -325,38 +461,6 @@ fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
 /// rebuild (the navigator re-invokes its page builder), so the signal reads
 /// here subscribe the shell to section/brightness/toast changes.
 fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    // Read the deep-links signal to handle cold-start and warm deep links.
-    // Parse `frustplay://section/<label>` format and navigate to the section.
-    let links = deep_links();
-    let current_link_url = links.latest.get().map(|link| link.url.clone());
-
-    if let Some(ref url) = current_link_url {
-        // Avoid re-applying the same link on unrelated rebuilds.
-        let last_url = state.last_deep_link_url.borrow().clone();
-        if last_url.as_ref() != Some(url) {
-            // Parse frustplay://section/<label>
-            // Format: frustplay://section/<label>[/...]
-            if let Some(rest) = url.strip_prefix("frustplay://section/") {
-                // Extract the label (first path segment after the scheme and host)
-                let label = rest.split(['/', '?', '#']).next().unwrap_or("");
-                if !label.is_empty() {
-                    if let Some(index) = pages::section_index_for(label) {
-                        state.section.set(index);
-                        state.reverse.set(false);
-                        if index == pages::section_index_for("db").unwrap_or(usize::MAX) {
-                            state.auto_run_db_smoke.set(true);
-                        }
-                        log::info!("playground deep-link: section {} -> {}", label, index);
-                        *state.last_deep_link_url.borrow_mut() = Some(url.clone());
-                    } else {
-                        log::info!("playground deep-link: section {} unknown", label);
-                        *state.last_deep_link_url.borrow_mut() = Some(url.clone());
-                    }
-                }
-            }
-        }
-    }
-
     let section = state.section.get();
     let reverse = state.reverse.get();
     let pending = state.toasts.get();
@@ -414,7 +518,11 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .unwrap_or_else(frust_material::baseline)
         .scheme()
         .surface;
-    let mut layers = vec![any(AppBackground(background_color)), any(column)];
+    let mut layers = vec![
+        any(AppBackground(background_color)),
+        any(column),
+        deep_link_router(state),
+    ];
     if !pending.is_empty() {
         layers.push(toast_overlay(&pending));
     }
@@ -498,3 +606,113 @@ frust::app!(
         frust::set_default_theme(frust_material::baseline());
     }
 );
+
+#[cfg(test)]
+mod deep_link_tests {
+    use super::*;
+
+    fn link(url: &str, sequence: u64) -> DeepLink {
+        DeepLink {
+            url: url.to_string(),
+            sequence,
+        }
+    }
+
+    #[test]
+    fn happy_path_db_label_navigates_and_auto_runs_smoke() {
+        let db_index = pages::section_index_for("db").expect("db is a known section");
+        let action = plan_deep_link(&link("frustplay://section/db", 1), None);
+        assert_eq!(
+            action,
+            Some(DeepLinkAction::GoToSection {
+                index: db_index,
+                auto_run_db_smoke: true,
+            })
+        );
+    }
+
+    #[test]
+    fn happy_path_other_label_navigates_without_auto_run() {
+        let camera_index = pages::section_index_for("camera").expect("camera is a known section");
+        let action = plan_deep_link(&link("frustplay://section/camera", 1), None);
+        assert_eq!(
+            action,
+            Some(DeepLinkAction::GoToSection {
+                index: camera_index,
+                auto_run_db_smoke: false,
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_label_yields_unknown_label_action() {
+        let action = plan_deep_link(&link("frustplay://section/nonexistent", 1), None);
+        assert_eq!(
+            action,
+            Some(DeepLinkAction::UnknownLabel("nonexistent".to_string()))
+        );
+    }
+
+    #[test]
+    fn wrong_scheme_or_host_is_ignored() {
+        assert_eq!(
+            plan_deep_link(&link("https://section/db", 1), None),
+            None,
+            "wrong scheme"
+        );
+        assert_eq!(
+            plan_deep_link(&link("frustplay://other/db", 1), None),
+            None,
+            "wrong host"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_after_label_still_resolves() {
+        let db_index = pages::section_index_for("db").expect("db is a known section");
+        let action = plan_deep_link(&link("frustplay://section/db/", 1), None);
+        assert_eq!(
+            action,
+            Some(DeepLinkAction::GoToSection {
+                index: db_index,
+                auto_run_db_smoke: true,
+            })
+        );
+    }
+
+    #[test]
+    fn repeated_identical_url_with_new_sequence_is_applied_again() {
+        let db_index = pages::section_index_for("db").expect("db is a known section");
+        let first = link("frustplay://section/db", 1);
+        let first_action = plan_deep_link(&first, None);
+        assert!(first_action.is_some(), "first delivery must apply");
+
+        // Same URL text, but a NEW sequence — must be applied again even
+        // though `last_applied` now reflects the first delivery.
+        let second = link("frustplay://section/db", 2);
+        let second_action = plan_deep_link(&second, Some(first.sequence));
+        assert_eq!(
+            second_action,
+            Some(DeepLinkAction::GoToSection {
+                index: db_index,
+                auto_run_db_smoke: true,
+            }),
+            "an identical URL with a new sequence must be applied again"
+        );
+    }
+
+    #[test]
+    fn same_sequence_is_not_reapplied() {
+        let delivered = link("frustplay://section/db", 5);
+        let action = plan_deep_link(&delivered, Some(delivered.sequence));
+        assert_eq!(
+            action, None,
+            "a delivery whose sequence matches `last_applied` must be a no-op"
+        );
+    }
+
+    #[test]
+    fn parse_section_deep_link_rejects_empty_label() {
+        assert_eq!(parse_section_deep_link("frustplay://section/"), None);
+    }
+}

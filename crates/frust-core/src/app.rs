@@ -1782,7 +1782,6 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // reason: the theme is lent immutably into each context while other
         // fields of `self` are written.
         let theme = self.theme.as_deref();
-        let insets = self.insets;
         let presented_frames = self.presented_frames;
         let surface_translucent = self.surface_translucent;
         let hover_active = self.hover_active;
@@ -1801,7 +1800,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             let mut ctx = PaintCtx::new(entry.window_rect.origin(), entry.window_rect.size());
             ctx.set_frame_time(frame_time);
             ctx.set_theme(theme);
-            ctx.set_window_insets(insets);
+            ctx.set_window_insets(entry.insets);
             ctx.set_presented_frames(presented_frames);
             ctx.set_translucent(surface_translucent);
             // Seeded from the root's own mirrors exactly as the root pod's
@@ -7557,6 +7556,7 @@ mod tests {
                     outside_tap: surface.spec.outside_tap,
                     window_rect: surface.spec.rect,
                     pod: std::rc::Rc::clone(&surface.pod),
+                    insets: ctx.window_insets(),
                 });
             }
         }

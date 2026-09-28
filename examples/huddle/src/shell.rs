@@ -165,15 +165,16 @@ impl Tab {
 /// destination records it in `tab` (the highlight) and drives the router to
 /// that tab's route.
 ///
-/// The Material bar is returned unwrapped: after the `.safe_area(bool)` port,
-/// it self-insets its bottom per the self-sizing chrome rule
-/// (docs/CODE_STANDARDS.md), consuming the window inset in its own layout and
-/// painting surface_container through the gesture area. Cupertino's tab bar
-/// does not yet self-inset (its home-indicator handing is noted as
-/// shell-future work in plugins/cupertino/src/tabbar.rs), so it is wrapped in
-/// [`safe_area`] with `top` disabled to clear the system gesture/nav bar
-/// while leaving top-padding untouched (the bar sits directly under the
-/// tab-shell's content). Glyph nav bar is similarly wrapped for now.
+/// The Material and Glyph bars self-inset the bottom per the self-sizing
+/// chrome rule (docs/CODE_STANDARDS.md). Both are wrapped in `safe_area`
+/// with `top(false)` to clear the system gesture/nav bar while leaving
+/// top-padding untouched, and `bottom(false)` to respect horizontal
+/// display-cutout insets (the bar self-paints its own bottom inset, so the
+/// safe area leaves it unconsumed). The bar paints surface_container through
+/// the gesture area and cutout bands. Cupertino's tab bar does not yet
+/// self-inset (its home-indicator handing is noted as shell-future work in
+/// plugins/cupertino/src/tabbar.rs), so it remains wrapped with `top(false)`
+/// only.
 pub fn bottom_bar(
     design: DesignLanguage,
     nav: Rc<RouterDeepLinks<HuddleState>>,
@@ -181,7 +182,7 @@ pub fn bottom_bar(
 ) -> AnyView<HuddleState> {
     let selected = tab.get().index();
     match design {
-        DesignLanguage::Material3 => any(navigation_bar::<HuddleState, _>(
+        DesignLanguage::Material3 => any(safe_area(navigation_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
                 .map(|t| nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))
@@ -192,7 +193,9 @@ pub fn bottom_bar(
                 tab.set(t);
                 nav.router().go(t.route());
             },
-        )),
+        ))
+        .top(false)
+        .bottom(false)),
         // `glyph_nav_bar`'s (items, selected, on_select(index)) shape is the
         // same controlled-index contract `navigation_bar`/`cupertino_tab_bar`
         // use above, so it fits this shell's tab model directly.
@@ -224,7 +227,7 @@ pub fn bottom_bar(
         .top(false)),
         _ => {
             // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(navigation_bar::<HuddleState, _>(
+            any(safe_area(navigation_bar::<HuddleState, _>(
                 Tab::ALL
                     .iter()
                     .map(|t| {
@@ -238,6 +241,8 @@ pub fn bottom_bar(
                     nav.router().go(t.route());
                 },
             ))
+            .top(false)
+            .bottom(false))
         }
     }
 }

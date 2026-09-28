@@ -17,9 +17,9 @@ use std::rc::Rc;
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, DiscardScene, FrameTime, InspectNode, LayoutCtx,
-    PaintCtx, PaintScene, RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets,
+    PaintCtx, PaintScene, RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets, any,
 };
-use frust_widgets::{EdgeInsets, safe_area};
+use frust_widgets::{EdgeInsets, overlay_portal, safe_area};
 use kurbo::{Point, Size};
 
 // -- Fixture ---------------------------------------------------------------
@@ -291,5 +291,48 @@ fn paint_time_insets_match_layout_time_insets() {
         paint_seen(&nested).padding(),
         WindowEdgeInsets::new(0.0, 0.0, 0.0, 40.0),
         "a bottom edge neither safe area consumed reaches the painted child"
+    );
+}
+
+// -- (f) an overlay-floated pod carries its owner's consumed insets ----------
+
+/// A pod floated through an [`frust_widgets::OverlaySlot`] from inside a
+/// `safe_area` is laid out under the owner's *consumed* insets — and must be
+/// painted under the same value, not the raw root insets the root seeds the
+/// main tree's own paint pass with. Mirrors
+/// [`paint_time_insets_match_layout_time_insets`] but through the overlay
+/// portal instead of a plain child.
+#[test]
+fn overlay_floated_pod_is_painted_under_the_owners_consumed_insets() {
+    let record = Record::default();
+    // The owner's own on-screen content; unrecorded — only the floated pod's
+    // insets are under test here.
+    let owner_content = Record::default();
+    let root_insets = WindowInsets::new(
+        WindowEdgeInsets::new(0.0, 40.0, 0.0, 24.0),
+        WindowEdgeInsets::ZERO,
+    );
+
+    run(
+        &mut |_: &mut ()| {
+            safe_area(overlay_portal(probe(&owner_content)).overlay(Some(any(probe(&record)))))
+        },
+        root_insets,
+    );
+
+    let layout = layout_seen(&record);
+    let paint = paint_seen(&record);
+    assert_eq!(
+        layout.padding(),
+        WindowEdgeInsets::ZERO,
+        "the floated pod is laid out inside the safe_area's consumed scope"
+    );
+    assert_eq!(
+        paint, layout,
+        "paint-time insets for a floated pod must agree with its layout-time insets"
+    );
+    assert_ne!(
+        paint, root_insets,
+        "a floated pod must not be painted under the raw, unconsumed root insets"
     );
 }

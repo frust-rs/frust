@@ -44,7 +44,7 @@
 # Usage:
 #   scripts/testing/android-smoke.sh [--serial SERIAL] [--keep] [--repo PATH]
 #                                     [--leg template|playground|all]
-#                                     [--target-platform CSV]
+#                                     [--target-platform CSV] [--full-logcat]
 #
 #   --serial SERIAL       adb serial of the target device. Defaults to
 #                          $ANDROID_SERIAL, else the single device `adb devices`
@@ -65,21 +65,33 @@
 #                          A phone typically wants `android-arm64`; an x86_64
 #                          emulator wants `android-x64`. The target must be
 #                          installed via `rustup target add`.
+#   --full-logcat         Keeps the unfiltered device-wide logcat instead of
+#                          the default filtered tag list (frust:V, AndroidRuntime,
+#                          etc.). Useful for emulator and CI runs. Can also be
+#                          set via $ANDROID_SMOKE_FULL_LOGCAT=1.
 #
 # Cleanup and artifacts:
 #   - The scratch scaffold (leg "template") is created under `mktemp -d` and
-#     removed via `trap cleanup EXIT` on normal exit (unless `--keep` is given).
-#     The trap runs on all exit paths, including `exit 3` from failed build/install
-#     steps, so the scratch directory is always cleaned unless explicitly kept.
+#     removed at the end of the leg (unless `--keep` is given). The trap
+#     cleanup EXIT handles removal on all exit paths, including `exit 3` from
+#     failed build/install steps, so the scratch directory is always cleaned
+#     unless explicitly kept.
+#   - All temporary files created by mktemp (build logs, doctor logs, etc.) are
+#     tracked in a TEMP_FILES array and removed via the cleanup trap on exit.
 #   - Artifacts (logcat dumps and visual-probe PNGs) are written to
 #     $ARTIFACTS_DIR, which defaults to `$REPO_ROOT/build/android-smoke`.
 #     Override via the $ANDROID_SMOKE_ARTIFACTS_DIR environment variable.
-#     The build/ directory is git-ignored; artifacts persist across runs.
+#     The build/ directory is git-ignored; artifacts from previous runs are
+#     cleared before each run.
 #   - Each leg's logcat (`logcat-template.log` / `logcat-playground.log`) is
 #     dumped at the end of the leg on pass AND on assertion failure, and also
 #     when `adb install` or `adb shell am start` fails (exit 3) — in that case
 #     adb's own output is echoed to stderr first, so an install/launch failure
 #     never leaves the run without diagnostics.
+#   - By default, logcat output is filtered to app lines only (frust:V
+#     AndroidRuntime:E DEBUG:I ActivityManager:I libc:F). Pass --full-logcat
+#     or set ANDROID_SMOKE_FULL_LOGCAT=1 to keep the unfiltered device-wide
+#     logcat for emulator/CI runs.
 #
 # Toolchain notes:
 #   - Requires `adb`, `cargo-ndk`, a JDK 17+ (via $JAVA_HOME or PATH), and
@@ -134,10 +146,11 @@ SERIAL="${ANDROID_SERIAL:-}"
 KEEP=0
 LEG="all"
 TARGET_PLATFORM="${ANDROID_SMOKE_TARGET_PLATFORM:-}"
+FULL_LOGCAT="${ANDROID_SMOKE_FULL_LOGCAT:-0}"
 
 usage() {
   cat <<'EOF' >&2
-Usage: android-smoke.sh [--serial SERIAL] [--keep] [--leg template|playground|all] [--repo PATH] [--target-platform CSV]
+Usage: android-smoke.sh [--serial SERIAL] [--keep] [--leg template|playground|all] [--repo PATH] [--target-platform CSV] [--full-logcat]
 EOF
 }
 
@@ -179,6 +192,10 @@ while [ $# -gt 0 ]; do
       TARGET_PLATFORM="$2"
       shift 2
       ;;
+    --full-logcat)
+      FULL_LOGCAT=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -206,19 +223,31 @@ REPO_ROOT="$(cd "$REPO_ROOT" >/dev/null 2>&1 && pwd)"
 ARTIFACTS_DIR="${ANDROID_SMOKE_ARTIFACTS_DIR:-$REPO_ROOT/build/android-smoke}"
 mkdir -p "$ARTIFACTS_DIR"
 
-# Confirm build/android-smoke is git-ignored
-if ! git -C "$REPO_ROOT" check-ignore "$ARTIFACTS_DIR" >/dev/null 2>&1; then
-  echo "warning: $ARTIFACTS_DIR is not git-ignored; artifacts may be committed" >&2
+# Clear artifacts from previous runs
+rm -f "$ARTIFACTS_DIR"/logcat-*.log "$ARTIFACTS_DIR"/*.png
+
+# Confirm build/android-smoke is git-ignored (only if in-tree)
+REPO_ABS="$(cd "$REPO_ROOT" && pwd -P)"
+ARTIFACTS_ABS="$(cd "$ARTIFACTS_DIR" && pwd -P)"
+if [[ "$ARTIFACTS_ABS" = "$REPO_ABS"* ]]; then
+  # Directory is inside the repo tree
+  if ! git -C "$REPO_ROOT" check-ignore "$ARTIFACTS_DIR" >/dev/null 2>&1; then
+    echo "warning: $ARTIFACTS_DIR is not git-ignored; artifacts may be committed" >&2
+  fi
 fi
 
 # --- Scratch cleanup on exit ---------------------------------------------------
 
 SCRATCH=""
+TEMP_FILES=()
 
 cleanup() {
   if [ -n "$SCRATCH" ] && [ "$KEEP" -eq 0 ] && [ -d "$SCRATCH" ]; then
     rm -rf "$SCRATCH"
   fi
+  for tmpfile in "${TEMP_FILES[@]}"; do
+    [ -f "$tmpfile" ] && rm -f "$tmpfile"
+  done
 }
 
 trap cleanup EXIT
@@ -304,20 +333,27 @@ adb_shell_am_start() {
   fi
 }
 
-# Dumps full logcat to a file. Best-effort: skipped (with a note) when the
-# device is not reachable — `adb logcat` blocks indefinitely waiting for a
-# missing device, which would turn an install/launch failure into a hang —
-# and bounded by `timeout` where that binary exists (Linux; macOS lacks it).
+# Dumps logcat to a file. By default filters to app-relevant lines only
+# (frust:V AndroidRuntime:E DEBUG:I ActivityManager:I libc:F). Pass
+# --full-logcat or set ANDROID_SMOKE_FULL_LOGCAT=1 to keep the unfiltered
+# device-wide logcat. Best-effort: skipped (with a note) when the device is
+# not reachable — `adb logcat` blocks indefinitely waiting for a missing
+# device, which would turn an install/launch failure into a hang — and bounded
+# by `timeout` where that binary exists (Linux; macOS lacks it).
 dump_logcat() {
   local serial="$1" outfile="$2"
   if ! adb -s "$serial" get-state >/dev/null 2>&1; then
     note "device $serial not reachable; skipping logcat dump to $outfile"
     return 0
   fi
+  local -a logcat_args=(-d -s frust:V AndroidRuntime:E DEBUG:I ActivityManager:I libc:F)
+  if [ "$FULL_LOGCAT" = "1" ]; then
+    logcat_args=(-d)
+  fi
   if command -v timeout >/dev/null 2>&1; then
-    timeout 60 adb -s "$serial" logcat -d >"$outfile" 2>/dev/null || true
+    timeout 60 adb -s "$serial" logcat "${logcat_args[@]}" >"$outfile" 2>/dev/null || true
   else
-    adb -s "$serial" logcat -d >"$outfile" 2>/dev/null || true
+    adb -s "$serial" logcat "${logcat_args[@]}" >"$outfile" 2>/dev/null || true
   fi
 }
 
@@ -398,6 +434,7 @@ cli() {
 # absolute APK path parsed from the CLI's own `Built: <path>` line (the last
 # such line, in case a future flag ever produces more than one).
 # Forwards --target-platform $TARGET_PLATFORM when set.
+# The caller must register build_log in TEMP_FILES; build_apk runs in a subshell.
 build_apk() {
   local project_dir="$1" build_log="$2"
   local -a build_args=(build apk --debug)
@@ -629,6 +666,12 @@ run_leg_template() {
 
   adb -s "$serial" shell am force-stop "$package" >/dev/null 2>&1 || true
   adb -s "$serial" uninstall "$package" >/dev/null 2>&1 || true
+
+  # Clean up scratch directory at the end of this leg unless --keep was given
+  if [ "$KEEP" -eq 0 ]; then
+    rm -rf "$SCRATCH"
+    SCRATCH=""
+  fi
 }
 
 # --- Leg: playground ---------------------------------------------------------
@@ -639,6 +682,7 @@ run_leg_playground() {
 
   project_dir="$REPO_ROOT/examples/playground"
   build_log="$(mktemp)"
+  TEMP_FILES+=("$build_log")
 
   echo "== leg playground: building the debug APK ==" >&2
   apk="$(build_apk "$project_dir" "$build_log")"
@@ -676,7 +720,6 @@ run_leg_playground() {
 
   dump_logcat "$serial" "$LEG_LOGCAT"
 
-  rm -f "$build_log"
   # Deliberately left installed per the header's leave-it-installed policy.
 }
 
@@ -688,10 +731,17 @@ require_jdk
 require_cargo_ndk
 
 DOCTOR_LOG="$(mktemp)"
+TEMP_FILES+=("$DOCTOR_LOG")
 run_doctor_backstop "$DOCTOR_LOG"
-rm -f "$DOCTOR_LOG"
 
 resolve_serial
+
+# Check device reachability before any build steps
+device_state="$(adb -s "$SERIAL" get-state 2>&1 || true)"
+if [ "$device_state" != "device" ]; then
+  fail_usage "device $SERIAL is not reachable (adb get-state: $device_state)"
+fi
+
 echo "using device: $SERIAL" >&2
 
 if [ "$LEG" = "template" ] || [ "$LEG" = "all" ]; then

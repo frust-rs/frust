@@ -690,6 +690,7 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             outside_tap: self.outside_tap,
             window_rect: self.window_rect,
             pod: Rc::clone(pod),
+            insets: ctx.window_insets(),
         });
     }
 

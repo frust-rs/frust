@@ -91,8 +91,9 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
 }
 
 /// Resolve a section index from its label via `frustplay://section/<label>`
-/// deep links. Matches case-insensitively against SECTION_LABELS (e.g. "db",
-/// "DB", "Keys" all resolve to the database section).
+/// deep links. Matches case-insensitively against SECTION_LABELS (e.g. "db"/
+/// "DB" resolve to index 10, the database section; "keys"/"Keys" resolve to
+/// index 5, the on-screen-keyboard/IME section).
 ///
 /// Returns `Some(index)` for a recognized label, or `None` for an unknown one.
 pub fn section_index_for(label: &str) -> Option<usize> {

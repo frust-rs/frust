@@ -30,7 +30,11 @@
 //! / [`PaintCtx::with_window_insets`](crate::widget::PaintCtx::with_window_insets).
 //! Descendants then read zero padding on the consumed edges, so a self-insetting
 //! widget nested inside a `SafeArea` does not inset a second time. Outside such
-//! a scope the value is the single root-seeded one.
+//! a scope the value is the single root-seeded one. A pod floated through the
+//! overlay portal carries its owner's consumed view along in its
+//! [`OverlayEntry`](crate::overlay::OverlayEntry), so the same guarantee — a
+//! paint-time read agrees with the layout-time one — holds for floated content
+//! too, even though the root paints it from a separate pass.
 
 /// Per-edge inset amounts, in logical pixels.
 ///

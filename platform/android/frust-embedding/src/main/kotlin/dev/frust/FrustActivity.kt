@@ -151,7 +151,6 @@ open class FrustActivity : ComponentActivity() {
         // surfaceCreated -> native init) is measurable from the same
         // logcat stream. No other behavior change.
         Log.i("frust", "frust-perf activity-create")
-        WindowCompat.setDecorFitsSystemWindows(window, false)
         // The embedding is app-name-agnostic, so the native library is loaded
         // here (Flutter's `FlutterJNI.loadLibrary(context)` shape) instead of
         // from a static initializer inside FrustSurfaceView — strictly before
