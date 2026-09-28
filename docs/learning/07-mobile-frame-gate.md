@@ -7,28 +7,34 @@ decides `Run` or `Skip` from an OR-list of dirtiness signals, and a `Skip`
 does zero rebuild/layout/paint/encode work. This lab reads the gate, then
 flips its kill switch on a device and measures the difference.
 
-Requires a physical device for the fun parts (iOS Simulator can't render
-under the vello 0.9 pin; Apple-Silicon Android emulators need
-`-gpu swiftshader` — `docs/DEVELOPMENT.md` Known Issues).
+Requires a physical device for the fun parts. In the engine era the iOS Simulator renders
+correctly — `frust-engine` needs neither `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION`
+(`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`, `crates/frust-render/src/tier.rs`, is deliberately empty), though
+its Metal validation misreports its own uniform-buffer alignment (`docs/DEVELOPMENT.md` Known
+Issues). An Apple-Silicon Android emulator's hardware GPU path segfaults inside its
+gfxstream/MoltenVK Vulkan driver during adapter enumeration — `crates/frust-gpu/src/context.rs`'s
+`is_android_emulator` detects it and strips the `DEBUG`/`VALIDATION` instance flags to keep bring-up
+alive; a physical device, or booting with `-gpu swiftshader` (software Vulkan), sidesteps the crash
+outright (`docs/DEVELOPMENT.md` Known Issues).
 
 ## Where it lives
 
 | Thing | File | Anchor |
 |---|---|---|
-| `FrameGate::decide` — the OR-list | `crates/frust-shell-common/src/frame_gate.rs` | ≈257–272 |
-| `FrameInputs` — all twelve signals | same | ≈109–157 |
-| Kill switch `FRUST_NO_FRAME_GATE` | same | ≈63, 285–300 |
-| Android entry: `nativeOnFrame` JNI → `app.frame()` | `crates/frust-shell-android/src/jni_glue.rs` ≈742 → `app.rs` ≈776 |
-| Android gate consult | `crates/frust-shell-android/src/app/frame.rs` | ≈277 |
-| Android **layout skip within a Run** (`needs_layout \|\| force_layout`) | same | ≈246, 367–378 |
-| iOS entry: `frust_render_frame` (from `CADisplayLink`, ns timestamp) | `crates/frust-shell-ios/src/lib.rs` ≈157 → `ffi_glue.rs` ≈410 → `app.rs` ≈642 |
-| iOS gate consult (early-return skips the whole frame) | `crates/frust-shell-ios/src/app.rs` | ≈763 |
-| iOS `FrameTime::from_nanos(timestamp_ns)` | same | ≈865 |
-| `AppTree` type erasure (how a non-generic FFI handle drives any app) | `crates/frust-shell-common/src/app_tree.rs` | ≈1–28 |
-| `PointerResampler` + `FRUST_NO_RESAMPLE` | `crates/frust-shell-common/src/resample.rs` | ≈54, 121–156 |
+| `FrameGate::decide` — the OR-list | `crates/frust-shell-common/src/frame_gate.rs` | ≈509 |
+| `FrameInputs` — all twelve signals | same | ≈216–330 |
+| Kill switch `FRUST_NO_FRAME_GATE` | same | ≈89 (const), ≈436 (`FrameGate::new`) |
+| Android entry: `nativeOnFrame` JNI → `app.frame()` | `crates/frust-shell-android/src/jni_glue.rs` → `.../app/frame.rs` | ≈1471 → ≈60 |
+| Android gate consult | `crates/frust-shell-android/src/app/frame.rs` | ≈311 |
+| Android **layout skip within a Run** (`needs_layout \|\| force_layout`) | same | ≈276 (`force_layout`), ≈422–428 |
+| iOS entry: `frust_render_frame` (from `CADisplayLink`, ns timestamp) | `crates/frust-shell-ios/src/lib.rs` → `ffi_glue.rs` → `app/frame.rs` | ≈202 → ≈1249 → ≈48 |
+| iOS gate consult (early-return skips the whole frame) | `crates/frust-shell-ios/src/app/frame.rs` | ≈260 |
+| iOS `FrameTime::from_nanos(timestamp_ns)` | same | ≈255 |
+| `AppTree` type erasure (how a non-generic FFI handle drives any app) | `crates/frust-shell-common/src/app_tree.rs` | ≈1–30 |
+| `PointerResampler` + `FRUST_NO_RESAMPLE` | `crates/frust-shell-common/src/resample.rs` | ≈54, ≈125 |
 
 The twelve `FrameInputs` fields (read them with the doc comments —
-`frame_gate.rs` ≈109–157): `signals_dirty`, `events_since_last_frame`,
+`frame_gate.rs` ≈216–330): `signals_dirty`, `events_since_last_frame`,
 `pointer_capture_active`, `focus_or_ime_changed`, `last_needs_frame`,
 `last_needs_frame_paced_only`, `change_flags_pending`, `deferred_callbacks_pending`,
 `theme_or_appearance_changed`, `surface_changed_or_resized`, `a11y_action_performed`,
@@ -41,7 +47,7 @@ must-run** — over-running wastes a frame; over-skipping drops real work.
 
 Precision worth keeping: **both** platforms gate whole frames identically.
 The platform *difference* is inside a `Run`: Android additionally skips the
-layout pass unless `needs_layout || force_layout` (≈367–378); iOS currently
+layout pass unless `needs_layout || force_layout` (≈422–428); iOS currently
 relayouts on every `Run` (the finer skip isn't wired there yet). Don't
 conflate the two skips.
 
@@ -91,17 +97,17 @@ FRUST_NO_RESAMPLE=1 frust run -d <device-id>
 ```
 
 Judder during slow drags is the raw, off-phase touch delivery the resampler
-exists to hide. Then read `resample.rs` ≈121–156 — it's pure logic, fully
+exists to hide. Then read `resample.rs` ≈125–156 — it's pure logic, fully
 unit-tested on desktop.
 
 ### 7.4 — Trace one frame across the FFI
 
 Pick Android. Read, in order, with the files open side by side:
 Kotlin `Choreographer` callback (generated app / huddle's `android/` dir) →
-`nativeOnFrame` (`jni_glue.rs` ≈742) → `AppHandle::frame` (`app.rs` ≈776) →
-gate (≈903) → rebuild → conditional layout (≈976) → paint → encode/present.
+`nativeOnFrame` (`jni_glue.rs` ≈1471) → `AndroidAppHandle::frame` (`app/frame.rs` ≈60) →
+gate (≈311) → rebuild (≈394) → conditional layout (≈428) → paint (≈468) → encode/present (≈505).
 It's the same chapter-3 loop wearing a JNI coat — the type-erased `AppTree`
-(≈1–28 in `app_tree.rs`) is what lets one exported symbol drive *your*
+(≈1–30 in `app_tree.rs`) is what lets one exported symbol drive *your*
 `State` type.
 
 ## What to notice before moving on

@@ -139,6 +139,7 @@ split as `frust-gpu`, mandatory on a multi-adapter host:
 ```bash
 # Host-only arm, no GPU/environment needed:
 cargo test -p frust-engine
+# includes tests/proptest_strips.rs — see the memory caveat below on a constrained host
 
 # Host-only arm with perf-trace instrumentation tests:
 cargo test -p frust-engine --features perf-trace
@@ -154,6 +155,12 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
 # Diagnostic only — never a gate:
 cargo bench -p frust-engine -- --quick
 ```
+
+The host-only arm's `tests/proptest_strips.rs` has twice exhausted host memory on random inputs
+(2026-09-08 OOM at ~35 GB RSS; 2026-09-26 a 187 GB allocation abort) and is tracked as an open
+engine finding; on a host without tens of GB to spare, or when iterating, run it scoped instead —
+`cargo test -p frust-engine --test <file>` or `cargo test -p frust-engine --lib <path>` — which is
+how the `docs/learning` labs invoke it.
 
 Engine-owned instrumentation — the `frust-perf img`/`frust-perf atlas`/`frust-perf enc` counter lines
 and the `EncodeTrace` type — compiles only under the `perf-trace` feature (an island, absent entirely

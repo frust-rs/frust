@@ -171,12 +171,14 @@ frust::run(Counter).unwrap();
 
 [`docs/learning/`](docs/learning/README.md) is a hands-on, lab-based
 curriculum for understanding how Frust turns a `View` into pixels — from
-the display list through the widget paint seam, the frame loop, the
-frust-engine/wgpu encode-present path, text shaping, the mobile frame gate, and
-the measurement tooling. Every chapter anchors to real files in this repo
-and ends with runnable experiments (build a scene by hand, break the S1
-bubble-chart benchmark scenario on purpose, trace a frame with
-`FRUST_TRACE=1`), plus a
+the display list, the widget-tree machinery, and the widget paint seam,
+through the frame loop and the frust-engine/wgpu encode-present path (its
+compiler, its scheduler and passes, its paint/image/filter and text
+pipelines, and the `frust-gpu` substrate underneath), to text shaping, the
+mobile frame gate, and the measurement tooling. Every chapter anchors to
+real files in this repo and ends with runnable experiments (build a scene
+by hand, break the S1 bubble-chart benchmark scenario on purpose, trace a
+frame with `FRUST_TRACE=1`), plus a
 verified watchlist of talks and university lectures for the theory —
 after you've seen the mechanism working.
 

@@ -5,7 +5,7 @@ pixels the **OS** drew. `frust-native-widgets` renders six real platform
 controls — `Button`/`Label`/`Switch`/`Slider`/`ProgressBar`/`Image`, a genuine
 `android.widget.Switch`, a genuine `UISwitch` — driven entirely from Rust:
 positioned by frust's layout, themed by frust's `Theme`, reporting taps into
-frust's signals, never entering the vello encoder or `RenderRoot::event`. This
+frust's signals, never entering the engine's scene compiler or `RenderRoot::event`. This
 lab follows one control from a builder call to a tapped native view, then asks
 how React Native and Flutter answer the same question (very differently, and
 both answers cost more).
@@ -30,7 +30,7 @@ numbers: labs 1–8's line anchors drift, names don't.
 | The differ (paint frames → commands) | `crates/frust-shell-common/src/platform_view.rs` | `PlatformViewState::ingest`, `ViewCommand`, `EPSILON_PX`, `HIDE_AFTER_MISSING_FRAMES`, `DISPOSE_AFTER_MISSING_FRAMES`, `FramePairing` |
 | Declared vs resolved surface mode | `crates/frust-shell-common/src/surface_mode.rs` | `declare_host_translucent_surface`, `resolved_surface_mode`, `ResolvedSurfaceMode` |
 | Whether a surface actually resolved translucent | `crates/frust-gpu/src/surface.rs` | `resolve_alpha_mode`, `ConfiguredSurface::resolved_translucent` |
-| The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-engine/src/compile/` | `PlatformViewWidget::paint`, `clear::punch_rect`, `schedule::cut_at`, `shield` |
+| The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-engine/src/compile/clear.rs` → `crates/frust-engine/src/schedule/mod.rs` | `PlatformViewWidget::paint`, `clear::punch_rect`, `schedule::cut_at`, `shield` |
 | Host-side factory resolution | `platform/android/frust-embedding/…/FrustViewHost.kt` · `platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
 | A plugin author's own native subtree | `plugins/native-widgets/src/component.rs` | `NativeComponent`, `ComponentCtx`, `register_component`, `native_component` |
 | The device-gate vehicle | `examples/playground/src/pages/native_widgets.rs` | `page`, `theme_toggle_demo`, `gate_harness_block` |
@@ -153,11 +153,16 @@ at surface creation by the generated host glue (`FRUST_TRANSLUCENT_SURFACE` /
 - **Mode B** — translucent surface, native siblings *below* it. Now frust owns
   every touch, and the slot must **actively** clear its rect
   (`PaintScene::clear_rect`, gated on `PaintCtx::is_translucent`) so the hole
-  survives an opaque app backdrop painted underneath. At encode time that is a
-  layer with `Compose::DestOut` and an opaque fill — `dst' = dst·(1−src.a)`,
-  pixel-exact at antialiased edges. Deliberately *not* `Compose::Clear`: vello
-  0.9 applies Clear at 16-px tile granularity and bleeds the punch up to 15 px
-  past an unaligned edge.
+  survives an opaque app backdrop painted underneath. The engine hoists that
+  `ClearRect` to the frame root and lowers it to destination-out coverage —
+  `dst' = dst·(1−src.a)` — issued through the dedicated `StripDestOut`/
+  `StripDepthDestOut` GPU pipelines and their `DEST_OUT_BLEND` blend state
+  (`crates/frust-engine/src/gpu/pipelines.rs`), weighted by the punch's own
+  antialiased coverage so a pixel-aligned edge lands pixel-exact. Deliberately
+  *not* a whole-tile clear op: a tile-granularity clear bleeds the punch past a
+  tile-unaligned rectangle edge, which destination-out's per-pixel weighting
+  avoids (`crates/frust-engine/src/compile/clear.rs`'s module docs spell out
+  the hoisting and the reasoning).
 
 Mode B also arbitrates input. An `interactive()` slot (`Button`, `Switch`,
 `Slider`) hands a touch-DOWN inside its rect to the native sibling — *except*
@@ -283,7 +288,7 @@ one-frame create-timing dance.
 
 | | React Native (Fabric) | Flutter | Frust |
 |---|---|---|---|
-| Rendering model | Native views are the primitives | Self-drawn (Skia/Impeller) | Self-drawn (vello/wgpu) |
+| Rendering model | Native views are the primitives | Self-drawn (Skia/Impeller) | Self-drawn (frust-engine/wgpu) |
 | Native-widget mechanism | The whole tree; synchronous UI-thread mount from a C++ shadow tree | PlatformView: texture capture, hybrid composition, or a per-view Surface | OS sibling view over/under the GPU surface; Rust-side differ emits create/update/dispose |
 | Known costs | Tree isn't 1:1 (view flattening, text collapsing); JSI/UI-thread coupling | Mode zoo, per-frame copies or thread merging, `SurfaceView` z-order surprises | Mode B needs a translucent surface (refusable); input arbitration is explicit; lazy iOS class registration must be forced a frame early |
 
@@ -310,7 +315,7 @@ what a real device would spend an FFI crossing per control per frame on.
 cargo test -p frust-shell-common platform_view
 ```
 
-41 tests, all pure logic. Set `EPSILON_PX` to `0.0` and watch
+46 tests, all pure logic. Set `EPSILON_PX` to `0.0` and watch
 `sub_epsilon_rect_change_emits_nothing` fail — that's every sub-pixel scroll
 frame becoming a native-side `Update`. Set `DISPOSE_AFTER_MISSING_FRAMES` to `2`
 and read `a_merely_culled_slot_is_never_disposed_by_the_retire_path`: you just
