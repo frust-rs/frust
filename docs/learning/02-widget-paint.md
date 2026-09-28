@@ -10,12 +10,12 @@ reader.
 
 | Thing | File | Anchor |
 |---|---|---|
-| `Widget` trait — `layout`/`paint`/`event`/`semantics` | `crates/frust-core/src/widget.rs` | ≈796–834 |
-| `RecordingScene` — GPU-free paint-assertion fake | `crates/frust-core/src/widget.rs` | ≈1162–1174 |
-| Smallest real paint impl: `Icon` (scaled `BezPath` fill) | `crates/frust-widgets/src/icon.rs` | ≈298–311 |
-| Animation-driven repaint: `LoadingIndicator` | `crates/frust-widgets/src/material/loading_indicator.rs` | ≈161, 200, 214 |
+| `Widget` trait — `layout`/`paint`/`event`/`semantics` | `crates/frust-core/src/widget.rs` | ≈2015–2051 |
+| `RecordingScene` — GPU-free paint-assertion fake | `crates/frust-core/src/widget.rs` | ≈3102–3124 |
+| Smallest real paint impl: `Icon` (scaled `BezPath` fill) | `crates/frust-widgets/src/icon.rs` | ≈321–342 |
+| Animation-driven repaint: `LoadingIndicator` | `plugins/material/src/loading_indicator.rs` | ≈402, 419, 458 |
 | Full custom canvas: the S1 bubble chart | `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs` | whole file |
-| Custom widgets in an *app* (escape hatch) | `examples/huddle/src/ui/{fill_box,swipeable,sheet,toast}.rs` | see `examples/huddle/Cargo.toml` ≈47–61 |
+| Custom widgets in an *app* (escape hatch) | `examples/huddle/src/ui/{fill_box,swipeable,sheet,toast}.rs` | see `examples/huddle/Cargo.toml` ≈22–35 |
 
 The signatures you implement:
 
@@ -31,12 +31,12 @@ up. Paint receives the `PaintScene` you met in chapter 1.
 
 ## The animation contract (learn it once, here)
 
-`LoadingIndicator::paint` (≈200) calls a private `step(ctx.frame_time())`,
-which calls `self.timer.advance(now)` (≈161) on its `AnimationController`;
-while the animation is live it calls `ctx.request_frame_paced()` (≈214),
-**not** the bare `request_frame()` — a perpetually-looping morph is exactly
-the decorative case `request_frame_paced()` exists for. That's the entire
-scheme:
+`LoadingIndicatorWidget::paint` (≈419, in `plugins/material/src/loading_indicator.rs`)
+calls a private `step(ctx.frame_time())` (≈429), which calls
+`self.cycle_timer.advance(now)` (≈403) on its `AnimationController`; while the
+animation is live it calls `ctx.request_frame_paced()` (≈458), **not** the
+bare `request_frame()` — a perpetually-looping morph is exactly the
+decorative case `request_frame_paced()` exists for. That's the entire scheme:
 
 - **No timers.** Time enters only as `PaintCtx::frame_time()` (shell-fed;
   `Instant::now()` is banned in core/widgets — `docs/CODE_STANDARDS.md`).
@@ -70,7 +70,11 @@ Then edit `chart.rs` and re-run after each change:
 
 1. Find the bubble fill and swap the radial gradient for a solid
    `Brush::Solid` — how does the FPS readout move? (You just measured
-   gradient cost at the vello fine-raster stage.)
+   gradient cost at the engine's strip fragment shader
+   (`crates/frust-engine/shaders/strip.wgsl`), which evaluates paints per
+   fragment from encoded paint records
+   (`crates/frust-engine/src/gpu/paint_texture.rs`) —
+   [14-engine-paints-images-filters.md](14-engine-paints-images-filters.md).)
 2. Multiply the bubble count (see `physics.rs`, seed/count constants). At
    what count does your machine drop below 60? Below 30?
 3. Find where the widget requests the next frame and comment it out. The
@@ -79,7 +83,7 @@ Then edit `chart.rs` and re-run after each change:
 
 ### 2.2 — Assert paint output with zero GPU
 
-`RecordingScene` (`crates/frust-core/src/widget.rs` ≈1162) implements
+`RecordingScene` (`crates/frust-core/src/widget.rs` ≈3102) implements
 `PaintScene` by pushing `(origin, size)` / `(origin, text)` tuples into
 `Vec`s. Find an existing test using it (search `RecordingScene` in
 `widget.rs`'s test module), then write one against any `frust-widgets`
@@ -90,9 +94,9 @@ widget: build it, `layout` it with tight constraints, `paint` it into a
 ### 2.3 — Write a widget from scratch
 
 Huddle documents the exact pattern for app-local custom widgets — read the
-escape-hatch comment in `examples/huddle/Cargo.toml` (≈47–61), then pick the
+escape-hatch comment in `examples/huddle/Cargo.toml` (≈22–35), then pick the
 smallest model: `examples/huddle/src/ui/fill_box.rs` (a rounded-rect
-`View`/`Widget` pair in ~150 lines).
+`View`/`Widget` pair in ~200 lines).
 
 Build a `Sparkline` widget in `frust_bench` or huddle:
 
@@ -108,8 +112,9 @@ contract — i.e., everything chapter 1's commands needed a producer for.
 
 ## What to notice before moving on
 
-- `Icon::paint` is 14 lines and half of them are the `Affine::scale` from
-  design-box to layout size. Real widgets are mostly *geometry math*, not
+- `IconWidget::paint` (`crates/frust-widgets/src/icon.rs` ≈321–342) is barely
+  20 lines, and most of them are the `Affine::scale`/centering math from
+  design-box to laid-out size. Real widgets are mostly *geometry math*, not
   API ceremony.
-- Nothing you wrote touched vello or wgpu. Chapter 4 shows where your
-  commands cross that line.
+- Nothing you wrote touched `frust-engine` or wgpu. Chapter 4 shows where
+  your commands cross that line.
