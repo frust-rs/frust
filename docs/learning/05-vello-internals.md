@@ -16,7 +16,8 @@ machine by an earlier, unrelated build. Read it like any other dependency.
 
 ## Where it lives (on this machine, not in this workspace's lockfile)
 
-Registry root: `/Users/ed/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`
+Registry root: `~/.cargo/registry/src/<index-hash>/` (the hash segment, e.g.
+`index.crates.io-1949cf8c6b5b557f`, is a per-machine registry-index id — yours will differ)
 
 | Crate | Path | What's in it |
 |---|---|---|

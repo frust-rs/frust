@@ -10,15 +10,16 @@ pipeline), not a choice between several. This lab reads the seams and then flips
 
 | Thing | File | Anchor |
 |---|---|---|
-| `RenderContext` — the wgpu instance/device, created lazily | `crates/frust-gpu/src/context.rs` | ≈130–260 |
+| `RenderContext` — the wgpu instance/device, created lazily | `crates/frust-gpu/src/context.rs` | ≈136 |
 | `ConfiguredSurface` / `SurfaceFactory` / surface lifecycle | `crates/frust-gpu/src/surface.rs`, `lifecycle.rs` | — |
-| Persisted pipeline-cache framing (`frame`/`unframe` + adapter fingerprint) | `crates/frust-gpu/src/pipeline_cache.rs` | ≈30–96 |
-| `choose_engine_render_path` — which of the two engine arms a surface takes | `crates/frust-render/src/context.rs` | ≈152–163 |
-| `create_engine_surface` — configures a surface, checks capability, picks the arm | `crates/frust-render/src/context.rs` | ≈480–573 |
-| `engine_support`/`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` — the (empty) capability gate | `crates/frust-render/src/tier.rs` | ≈37–101 |
-| `SurfaceRenderer::on_surface_created()`/`submit()` — per-frame encode/present | `crates/frust-render/src/renderer.rs` | ≈435– |
-| `SceneCompiler::compile` — `Scene` → `CompiledFrame` (strips/draws/paints) | `crates/frust-engine/src/compile/mod.rs` | ≈276, ≈526 |
-| `EngineRenderer::encode`/`encode_traced` — records the frame's rounds into the caller's encoder | `crates/frust-engine/src/renderer.rs` | ≈581–680 |
+| Persisted pipeline-cache framing (`frame`/`unframe` + adapter fingerprint) | `crates/frust-gpu/src/pipeline_cache.rs` | ≈56/≈75 |
+| `choose_engine_render_path` — which of the two engine arms a surface takes | `crates/frust-render/src/context.rs` | ≈152 |
+| `create_engine_surface` — configures a surface, checks capability, picks the arm | `crates/frust-render/src/context.rs` | ≈480 |
+| `engine_support`/`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` — the (empty) capability gate | `crates/frust-render/src/tier.rs` | ≈113/≈50 |
+| `SurfaceRenderer::submit` — per-frame encode/present | `crates/frust-render/src/renderer.rs` | ≈1064 |
+| `SceneCompiler::compile` — `Scene` → `CompiledFrame` (strips/draws/paints) | `crates/frust-engine/src/compile/mod.rs` | ≈737 |
+| `EngineRenderer::encode`/`encode_traced`/`record_frame` — records the frame's rounds into the caller's encoder | `crates/frust-engine/src/renderer.rs` | ≈993/≈1036/≈1542 |
+| `GpuStrip` — one strip's GPU-ready draw data | `crates/frust-engine/src/gpu/strips.rs` | ≈108 |
 
 ## The three ideas
 
@@ -62,7 +63,7 @@ now a parse error).
 ### 4.3 — The GPU smoke test is your headless playground
 
 ```bash
-cargo test -p frust-render -- --ignored
+cargo test -p frust-render --test gpu_smoke -- --ignored
 ```
 
 Read `crates/frust-render/tests/gpu_smoke.rs`: it builds a scene, encodes through
@@ -74,15 +75,24 @@ shell in the way.
 ### 4.4 — See the engine's own noise
 
 `FRUST_LOG=debug cargo run` (`benchmarks/frust_bench`) surfaces wgpu's own log lines the desktop
-logger normally passes through unfiltered (`crates/frust-shell-desktop/src/logger.rs`) — that
-logger's known-noisy-message carve-out was written for vello's own log target and is vestigial
-now: nothing logs under that target any more.
+logger normally passes through unfiltered (`crates/frust-shell-desktop/src/logger.rs`) — the
+logger applies no target-based filtering at all (its `enabled()` only checks level; see the
+`targets_are_never_suppressed` test in that file), so `debug` simply widens the level filter that
+was already there.
 
 ## What to notice before moving on
 
 - `crates/frust-engine/src/renderer.rs`'s `EngineRenderer::encode` — the single function that
   walks a `CompiledFrame` into GPU passes — is where this repo hands control to the strip
-  pipeline. `crates/frust-engine/shaders/` (nine WGSL files) is short enough to read cold from
-  here if you want to go straight to the GPU side.
+  pipeline. `crates/frust-engine/shaders/` (eight pass shaders — `strip`, `clear`, `copy`,
+  `blend`, `filter`, `filters_blur`, `filters_drop_shadow`, `unpremultiply` — plus a `helpers.wgsl`
+  prelude `crates/frust-engine/src/gpu/shader_src.rs` prepends at load time) is short enough to
+  read cold from here if you want to go straight to the GPU side.
 - The pipeline cache (`frust-gpu::pipeline_cache`) is Vulkan-only and fingerprinted per adapter; on
   your Mac it's a silent no-op. File it away for Android cold-start work.
+- This is the hand-off point: the next six chapters take the engine apart piece by piece —
+  [11-engine-compiler.md](11-engine-compiler.md) (`Scene` → `CompiledFrame`, strips, fast-rect,
+  depth, refusal), [12-engine-clips-layers-punch.md](12-engine-clips-layers-punch.md),
+  [13-engine-schedule-and-passes.md](13-engine-schedule-and-passes.md) (rounds/pages, pass order,
+  the shaders above, `FRUST_ENGINE_NO_DEPTH`), [14-engine-paints-images-filters.md](14-engine-paints-images-filters.md),
+  [15-engine-text.md](15-engine-text.md), and [16-gpu-substrate.md](16-gpu-substrate.md).
