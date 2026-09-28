@@ -276,10 +276,7 @@ unification. Separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 plain (non-feature-gated) dependencies of `frust-render`, so their host-only tests already ride
 `cargo test --workspace`; their adapter-pinned real-GPU arms are separate `--ignored` commands — see
 [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s GPU Substrate / Golden Oracle Tests sections.
-`frust-native-widgets`' `demo-components` is a composite `NativeComponent` demo of real JNI/UIKit
-view construction, shipped inside the plugin rather than in `examples/playground` (which merely
-switches it on) because an app crate cannot implement that trait without raw `jni`/`objc2-ui-kit`
-deps the plugin does not re-export; the mobile compile gates below are its only build.
+`frust-native-widgets`' `demo-components` is a composite `NativeComponent` demo of real JNI/UIKit/AppKit view construction, shipped inside the plugin rather than in `examples/playground` (which merely switches it on) because an app crate cannot implement that trait without raw `jni`/`objc2-ui-kit`/`objc2-app-kit` deps the plugin does not re-export; the mobile compile gates below are its only build, plus its own macOS darwin-target tripwire ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s objc2 pin row). Separately, `frust-native-widgets`' own shared runtime/component/mount/demo-lifecycle host tests compile only on a host with **no** platform arm (`#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]`) — so a macOS `cargo test --workspace` run silently skips roughly 50 of them (runtime 26, component 21, `api::mount` 3, demo 3), and Linux/Windows/web are what actually exercise that dispatch/diff/lifecycle contract; see [TESTING.md](TESTING.md).
 `frust-database`'s `engine-turso` needs its own gate (`cargo test -p frust-database --features
 engine-turso`, libclang required), and `devtools` (the in-app debug service,
 [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) the same shape: `cargo test -p
@@ -584,9 +581,11 @@ every physical device, are unaffected).
 
 ### Android release build may not pick up `--define`
 
-A `--release` Android build threads `--define`s into the `cargo ndk` compile via Gradle's
-`environment(...)`, but has been observed to drop them (e.g. `FRUST_TRACE=1` missing from the
-artifact). Workaround: export the same key/value pairs in the build shell first.
+A `--release` Android build threads `--define`s into the `cargo ndk` compile via Gradle's `environment(...)`, but has been observed to drop them (e.g. `FRUST_TRACE=1` missing from the artifact). Workaround: export the same key/value pairs in the build shell first.
+
+### macOS `DYLD_LIBRARY_PATH` shadows ImageIO's codecs, crashing any image decode
+
+A `DYLD_LIBRARY_PATH` naming a directory that also holds Homebrew's `libpng`/`libjpeg`/`libtiff`/`libgif` dylibs (e.g. `/opt/homebrew/lib`) makes dyld replace ImageIO's own private PNG/JPEG/TIFF/GIF/JPEG-2000/Radiance codec dylibs by leaf-name match — case-insensitive on APFS — leaving ImageIO's `__cg_*`-prefixed imports unbound; a bare `cargo run` then SIGBUSes at `0xbad4007` on the first image decode (`-[NSImage initWithData:]`/`CGImageSourceCopyPropertiesAtIndex`), no `NSApplication` required to trigger it, and `DYLD_FALLBACK_LIBRARY_PATH` does not help (only consulted when the real path is missing). `frust-native-widgets`' macOS `Image` control checks for the shadow first and degrades to an empty view plus one warning instead of crashing (`plugins/native-widgets/src/controls/image.rs`'s `shadowed_codec`); nothing else in this repo guards against it. A launcher whose dyld prunes `DYLD_*` (`nohup`, `env`, any SIP-protected binary) never reproduces it, which is why the symptom can look intermittent from an interactive shell that exports the variable globally. Fix: do not export `DYLD_LIBRARY_PATH` in a shell profile; scope it per-invocation, or strip it with `env -u DYLD_LIBRARY_PATH <cmd>`.
 
 ### Bitmap-strike color emoji do not render on the engine (COLR emoji do)
 

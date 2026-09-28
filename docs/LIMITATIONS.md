@@ -2591,8 +2591,11 @@ Phase C task 03 completion summary, Doc Updates Needed.
 **Observed**: `plugins/native-widgets`' typeface resolution (theme ladder L3) is extension-first,
 per slot, and re-publishes host-side (`api::theme`'s `PublishGuard`) whenever the active
 (button, body) face pair changes — including a live design-system swap. The *platform* halves do
-not follow: Android's `set_glyph_bytes` is a `OnceLock::set`, and both Android and iOS additionally
-cache each resolved face object process-wide once registration succeeds, so only the *first*
+not follow: Android's `set_glyph_bytes` is a `OnceLock::set`, caching each resolved face object
+process-wide once registration succeeds; iOS and macOS share one `coretext.rs` module (`apple`'s
+`fonts` is a re-export of it, so the two Apple arms cannot drift from each other) with the same
+`OnceLock`-published-bytes/cached-descriptor shape, just thread-local rather than process-wide for
+the descriptor cache (`CTFontDescriptor` is not `Sync`). On all three platforms, only the *first*
 (button, body) pair a process ever publishes actually reaches a native `Button`/`Label`/`Switch`.
 A later design-system swap re-publishes the new bytes from the host side with no error, but the
 platform keeps rendering the first system's faces until the process relaunches.
@@ -2625,8 +2628,9 @@ hardware — this entry covers both the swap gap and that outstanding device gat
 
 **Evidence**: `plugins/native-widgets/src/api/theme.rs`'s module doc ("Publishing: last-pair-wins,
 not once-per-process" and "System publishes nothing"); `plugins/native-widgets/src/android/fonts.rs`
-and `plugins/native-widgets/src/apple/fonts.rs` module docs (`OnceLock`/process-wide and
-thread-local cache notes).
+module doc (`OnceLock`/process-wide cache notes); `plugins/native-widgets/src/coretext.rs`'s module
+doc (the shared-module rationale and the thread-local descriptor cache, consumed identically by
+`crate::apple::fonts`' iOS re-export and `crate::appkit`'s macOS call sites).
 
 ---
 
@@ -2660,6 +2664,71 @@ hardware.
 `placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size` and
 `a_refused_slot_still_publishes_no_platform_view_frame_through_the_clip_wrapper` tests (`cargo test
 -p native-widgets`, host-only).
+
+---
+
+### `native-widgets-macos-image-cover-letterboxes` — `Fit::Cover` degrades to a letterbox on macOS instead of cropping
+
+**Observed**: `native_image`'s `Fit::Cover` means "fill the box, keep aspect, crop the overflow" —
+Android's `ScaleType.CENTER_CROP` and iOS's `UIViewContentMode.ScaleAspectFill` (plus a
+`clipsToBounds` normalization) both implement it exactly. `NSImageScaling` has no equivalent
+constant: the only scale-and-keep-aspect option, `ScaleProportionallyUpOrDown`, fits the whole
+image inside the box rather than cropping the overflow. The macOS arm maps `Fit::Cover` to that
+same constant it uses for `Fit::Contain`, so a `Cover`-fit image on macOS is letterboxed (visible
+background around the shorter axis) rather than cropped to fill — the only one of the four `Fit`
+variants where macOS's rendered result differs from Android's and iOS's.
+
+**Why accepted**: a real crop-and-fill needs custom drawing (`NSImageScaling` has no primitive for
+it), which this control does not do — a platform capability gap recorded per-platform rather than
+corrected onto the platform that lacks it (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions).
+
+**Evidence**: `plugins/native-widgets/src/controls/image.rs`'s `Fit::image_scaling` doc and its
+`NSImageScaling` mapping table (the `Fit::Cover` row explicitly marked "Degraded, not equivalent").
+
+---
+
+### `native-widgets-macos-slider-no-drag-edges` — `DragStart`/`DragEnd` are never emitted by `native_slider` on macOS
+
+**Observed**: Android (`onStart/StopTrackingTouch`) and iOS (`TouchDown`/`TouchUpInside|Outside`
+UIKit control events) both report a slider drag's gesture edges; macOS's `NSSlider` target-action
+has no counterpart — an `NSControl` sends its one action on every drag step with no phase
+information, so `FrustNativeControlTarget::detail_for` refuses `EVENT_KIND_DRAG_START`/
+`EVENT_KIND_DRAG_END` outright rather than guessing one from the value stream. `native_slider` on
+macOS therefore only ever delivers `ValueChanged` events; an app whose slider handler relies on
+`DragStart`/`DragEnd` (e.g. to suspend other work while scrubbing) sees no signal at all on macOS.
+
+**Why accepted**: recovering the edges would need inspecting `NSApp.currentEvent`'s type inside the
+action or overriding `NSSliderCell`'s tracking methods — a new `NSEvent` dependency and a second
+target-action class — and a synthesized edge from the value stream alone would be a guess, worse
+than an honest absence.
+
+**Evidence**: `plugins/native-widgets/src/appkit/events.rs`'s module doc ("Drag start/end are never
+emitted on macOS") and its `the_drag_edges_are_refused_never_synthesized` test;
+`plugins/native-widgets/src/controls/slider.rs`'s macOS `platform` module doc ("Which event kinds
+this arm emits").
+
+---
+
+### `native-widgets-macos-imageio-dyld-shadow` — `native_image` silently shows nothing when the host process's ImageIO codecs are DYLD-shadowed
+
+**Observed**: when the running process's `DYLD_LIBRARY_PATH` has replaced one of ImageIO's private
+codec dylibs (see [DEVELOPMENT.md](DEVELOPMENT.md)'s Known Issues for the mechanism and the
+developer-side fix), `native_image`'s macOS arm detects the shadow once and refuses every later
+`NSImage` decode rather than crashing the process: the slot's view is left empty, and exactly one
+process-wide warning names the shadowing file. An app has no API-level way to detect this
+degrade — it looks identical to an ordinary undecodable-payload result, the same empty-view
+degrade every arm already gives a bad image (`BitmapFactory.decodeByteArray`/`UIImage.imageWithData:`
+failing return the same clear-and-warn outcome) — so a QA pass on a contaminated dev machine can
+read as "images don't work" with no code-level cause.
+
+**Why accepted**: the alternative is letting the process SIGBUS on first decode, which is strictly
+worse; fixing the shadow is a developer-environment problem outside this plugin's own control
+(`DEVELOPMENT.md`'s workaround), and the degrade-not-crash contract matches every other undecodable-
+payload case this control already handles.
+
+**Evidence**: `plugins/native-widgets/src/controls/image.rs`'s macOS `platform` module doc
+("`DYLD_LIBRARY_PATH` can take ImageIO's codecs away") and its `shadowed_codec`/`shadowing_file`
+functions and their host tests.
 
 ---
 
