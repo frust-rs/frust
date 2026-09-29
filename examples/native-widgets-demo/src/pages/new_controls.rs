@@ -144,6 +144,7 @@ fn spinner_block(animating: bool) -> Vec<FlexChildS> {
             },
             "Display-only. Toggle it: both columns stop and start together.",
             CellFit::Natural,
+            PAIR_CELL_W,
             44.0,
             any(native_spinner(animating)
                 .content_description("Native spinner")
@@ -182,6 +183,7 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
             },
             "Controlled: a tap reports the requested segment; the app feeds it back.",
             CellFit::Stretch,
+            PAIR_CELL_W,
             32.0,
             any(native_segmented(labels.clone(), selected)
                 .content_description(description)
@@ -241,6 +243,7 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
             "Glyph has no stepper: the drawn column is two baseline buttons over the same \
              step/wrap arithmetic.",
             CellFit::Natural,
+            PAIR_CELL_W,
             36.0,
             any(native_stepper(value, STEPPER_MIN, STEPPER_MAX)
                 .step(step)
@@ -273,11 +276,11 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
     ]
 }
 
-/// The date picker: compact in a pair, or inline full-width — always built
-/// through [`pair_row`], at the same [`FlexChildS`] position, so a
-/// compact/inline switch never changes the concrete view type
-/// `AnyView::rebuild` walks at that position (only the `height` and `style`
-/// *values* differ). A version that instead swapped in a differently shaped
+/// The date picker: compact (140×40pt in a pair) or inline (300×330pt in the same
+/// pair structure) — always built through [`pair_row`], at the same [`FlexChildS`]
+/// position, so a compact/inline switch never changes the concrete view type
+/// `AnyView::rebuild` walks at that position (only the `width`, `height`, and
+/// `style` *values* differ). A version that instead swapped in a differently shaped
 /// tree per mode (the picker bare in one branch, wrapped in a pair's `row`
 /// in the other) tore the native picker down and rebuilt it on every
 /// toggle: `AnyView::rebuild` compares the *inner* boxed view's concrete
@@ -286,20 +289,23 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
 /// differently-shaped child at the same position is a teardown + rebuild,
 /// never an in-place update. Kept structurally stable instead, the style
 /// switch reaches the mounted picker as a single in-place
-/// `Setter::DatePickerStyle` update.
+/// `Setter::DatePickerStyle` update; on Android, the constructor-baked mode
+/// changes only on a remount — the structural stability fix preserves the
+/// ability to detect and suppress those rebuilds for this native type.
 fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
     let style = if inline {
         NativeDatePickerStyle::Inline
     } else {
         NativeDatePickerStyle::Compact
     };
+    let w = if inline { 300.0 } else { PAIR_CELL_W };
     let h = if inline { 330.0 } else { 40.0 };
     let picker = any(native_date_picker(value)
         .min(date_min())
         .max(date_max())
         .style(style)
         .content_description("Native date picker")
-        .size(PAIR_CELL_W, h)
+        .size(w, h)
         .on_change(|requested| {
             bump(date_events_sig());
             date_sig().set(requested);
@@ -321,6 +327,7 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
         classes,
         note,
         CellFit::Natural,
+        w,
         h,
         picker,
         readout(format_date(value)),

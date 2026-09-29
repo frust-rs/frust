@@ -346,11 +346,13 @@ pub fn cell(fit: CellFit, w: f64, h: f64, content: AnyView<S>) -> AnyView<S> {
 /// One comparison row: `title`, the per-platform native-class caption, a
 /// `note`, then the REAL platform control on the left and its frust-drawn
 /// counterpart on the right, in cells of exactly the same size.
+#[allow(clippy::too_many_arguments)]
 pub fn pair_row(
     title: &str,
     classes: NativeClasses,
     note: &str,
     fit: CellFit,
+    width: f64,
     height: f64,
     native: AnyView<S>,
     drawn: AnyView<S>,
@@ -363,9 +365,9 @@ pub fn pair_row(
         inflexible(caption(note)),
         gap(6.0),
         inflexible(row(vec![
-            inflexible(cell(fit, PAIR_CELL_W, height, native)),
+            inflexible(cell(fit, width, height, native)),
             gap_h(PAIR_GAP),
-            inflexible(cell(fit, PAIR_CELL_W, height, drawn)),
+            inflexible(cell(fit, width, height, drawn)),
         ])),
     ])
 }
