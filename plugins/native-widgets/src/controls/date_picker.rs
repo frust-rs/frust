@@ -4,6 +4,10 @@
 //! A **shared** control: it sits in [`super::SHARED_KINDS`] and all three
 //! arms register it.
 //!
+//! Date clamping is centralized in [`DatePickerProps::effective_date`], which
+//! computes the app's date clamped into the arm's resolved range; both
+//! `create` and `plan` use this single clamp implementation.
+//!
 //! Eight properties: the date, its optional `[min, max]` range, the
 //! presentation style, enabled, a tint, a text colour, and the accessibility
 //! label. [`Setter::Date`], [`Setter::Enabled`], [`Setter::DatePickerTint`],
@@ -432,7 +436,7 @@ impl DatePickerProps {
     ) -> Plan<'a> {
         let (new_min, new_max) = bounds.effective_range(new.min, new.max);
         let (old_min, old_max) = bounds.effective_range(old.min, old.max);
-        let clamped_date = new.date.map(|date| date.clamp(new_min, new_max));
+        let clamped_date = new.effective_date(bounds);
         warn_if_clamped(new, new_min, new_max, clamped_date, bounds);
 
         let mut plan = Plan::new();
@@ -1826,31 +1830,195 @@ mod tests {
     }
 
     #[test]
-    fn effective_date_equals_the_date_setter_in_plan() {
-        let props = decode(&format!(
-            "{},{}",
-            field(DATE, date(2150, 6, 1)),
-            field(MIN_DATE, date(2050, 1, 1))
-        ));
-        let effective = props.effective_date(android_bounds());
-        let plan = DatePickerProps::plan(
-            &DatePickerProps::platform_default(5),
-            &props,
-            None,
-            android_bounds(),
-        );
-        // The Date setter in the plan should be for the effective date
-        let date_setter = plan.iter().find_map(|s| {
-            if let Setter::Date(d) = s {
-                Some(*d)
-            } else {
-                None
-            }
-        });
-        assert_eq!(
-            date_setter, effective,
-            "plan's Date setter matches effective_date"
-        );
+    fn effective_date_equals_the_date_setter_in_plan_table_driven() {
+        // Test structure: (bounds_name, bounds, min, max, date, description)
+        // Each case tests both dates inside and outside the effective range.
+        struct TestCase {
+            name: &'static str,
+            bounds: Bounds,
+            min: Option<CivilDate>,
+            max: Option<CivilDate>,
+            date_in_range: CivilDate,
+            date_out_of_range: CivilDate,
+        }
+
+        let test_cases = vec![
+            // Android bounds cases
+            TestCase {
+                name: "android_no_bounds",
+                bounds: android_bounds(),
+                min: None,
+                max: None,
+                date_in_range: date(2026, 6, 1),
+                date_out_of_range: date(2150, 6, 1), // above ceiling
+            },
+            TestCase {
+                name: "android_min_only",
+                bounds: android_bounds(),
+                min: Some(date(2050, 1, 1)),
+                max: None,
+                date_in_range: date(2050, 6, 1),
+                date_out_of_range: date(1950, 6, 1), // below min
+            },
+            TestCase {
+                name: "android_max_only",
+                bounds: android_bounds(),
+                min: None,
+                max: Some(date(2050, 12, 31)),
+                date_in_range: date(2050, 6, 1),
+                date_out_of_range: date(2150, 6, 1), // above max
+            },
+            TestCase {
+                name: "android_both_explicit",
+                bounds: android_bounds(),
+                min: Some(date(2050, 1, 1)),
+                max: Some(date(2050, 12, 31)),
+                date_in_range: date(2050, 6, 1),
+                date_out_of_range: date(2150, 6, 1), // above max
+            },
+            TestCase {
+                name: "android_floor_collapsed",
+                bounds: android_bounds(),
+                min: Some(date(2150, 1, 1)), // above ceiling, collapses to ceiling
+                max: None,
+                date_in_range: date(2100, 12, 31), // at the collapsed floor/ceiling
+                date_out_of_range: date(2026, 6, 1), // below the collapsed range
+            },
+            // Apple bounds cases
+            TestCase {
+                name: "apple_no_bounds",
+                bounds: Bounds::APPLE,
+                min: None,
+                max: None,
+                date_in_range: date(2026, 6, 1),
+                date_out_of_range: date(9999, 12, 31), // at the ceiling (still in range for Apple)
+            },
+            TestCase {
+                name: "apple_min_only",
+                bounds: Bounds::APPLE,
+                min: Some(date(2050, 1, 1)),
+                max: None,
+                date_in_range: date(2050, 6, 1),
+                date_out_of_range: date(1950, 6, 1), // below min
+            },
+            TestCase {
+                name: "apple_max_only",
+                bounds: Bounds::APPLE,
+                min: None,
+                max: Some(date(2050, 12, 31)),
+                date_in_range: date(2050, 6, 1),
+                date_out_of_range: date(2150, 6, 1), // above max
+            },
+            TestCase {
+                name: "apple_both_explicit",
+                bounds: Bounds::APPLE,
+                min: Some(date(2050, 1, 1)),
+                max: Some(date(2050, 12, 31)),
+                date_in_range: date(2050, 6, 1),
+                date_out_of_range: date(2150, 6, 1), // above max
+            },
+            TestCase {
+                name: "apple_floor_collapsed",
+                bounds: Bounds::APPLE,
+                min: Some(date(2150, 1, 1)), // inverted with max below
+                max: Some(date(2050, 12, 31)),
+                date_in_range: date(2050, 12, 31), // at the collapsed floor/ceiling
+                date_out_of_range: date(2026, 6, 1), // below the collapsed range
+            },
+        ];
+
+        for tc in test_cases {
+            // Test date inside effective range
+            let props_in = decode(&format!(
+                "{}{}{}",
+                tc.min
+                    .map(|m| format!("\"minDate\":{},", wire(m)))
+                    .unwrap_or_default(),
+                tc.max
+                    .map(|m| format!("\"maxDate\":{},", wire(m)))
+                    .unwrap_or_default(),
+                field(DATE, tc.date_in_range)
+            ));
+
+            let effective_in = props_in.effective_date(tc.bounds);
+            let plan_in = DatePickerProps::plan(
+                &DatePickerProps::platform_default(5),
+                &props_in,
+                None,
+                tc.bounds,
+            );
+
+            let date_setter_in = plan_in.iter().find_map(|s| {
+                if let Setter::Date(d) = s {
+                    Some(*d)
+                } else {
+                    None
+                }
+            });
+
+            assert_eq!(
+                date_setter_in, effective_in,
+                "{}: plan's Date setter matches effective_date for date inside range",
+                tc.name
+            );
+
+            // Test date outside effective range (gets clamped)
+            let props_out = decode(&format!(
+                "{}{}{}",
+                tc.min
+                    .map(|m| format!("\"minDate\":{},", wire(m)))
+                    .unwrap_or_default(),
+                tc.max
+                    .map(|m| format!("\"maxDate\":{},", wire(m)))
+                    .unwrap_or_default(),
+                field(DATE, tc.date_out_of_range)
+            ));
+
+            let effective_out = props_out.effective_date(tc.bounds);
+            let plan_out = DatePickerProps::plan(
+                &DatePickerProps::platform_default(5),
+                &props_out,
+                None,
+                tc.bounds,
+            );
+
+            let date_setter_out = plan_out.iter().find_map(|s| {
+                if let Setter::Date(d) = s {
+                    Some(*d)
+                } else {
+                    None
+                }
+            });
+
+            assert_eq!(
+                date_setter_out, effective_out,
+                "{}: plan's Date setter matches effective_date for date outside range (clamped)",
+                tc.name
+            );
+
+            // Test that unchanged date from old props does not emit a Date setter
+            let old_with_date = decode(&format!(
+                "{}{}{}",
+                tc.min
+                    .map(|m| format!("\"minDate\":{},", wire(m)))
+                    .unwrap_or_default(),
+                tc.max
+                    .map(|m| format!("\"maxDate\":{},", wire(m)))
+                    .unwrap_or_default(),
+                field(DATE, tc.date_in_range)
+            ));
+            let new_with_same_date = old_with_date.clone();
+
+            let plan_unchanged =
+                DatePickerProps::plan(&old_with_date, &new_with_same_date, None, tc.bounds);
+
+            let has_date_setter = plan_unchanged.iter().any(|s| matches!(s, Setter::Date(_)));
+            assert!(
+                !has_date_setter,
+                "{}: unchanged date should not emit Date setter",
+                tc.name
+            );
+        }
     }
 
     // --- events ---------------------------------------------------------
