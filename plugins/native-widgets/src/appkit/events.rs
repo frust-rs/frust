@@ -17,7 +17,7 @@
 //! use. Adding a control never adds a second class — the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
 //!
-//! Four arms ([`detail_for`]) — one per interactive control, except
+//! Five arms ([`detail_for`]) — one per interactive control, except
 //! [`EVENT_KIND_VALUE_CHANGED`], which `Slider` and `Stepper` share: both
 //! read the sender's `doubleValue` generically off `&NSControl`, with no
 //! per-class check, so a value-committing control this arm attaches gets the
@@ -29,6 +29,7 @@
 //! | [`EVENT_KIND_TOGGLED`] | `NSSwitch` | `state` → [`pack_bool`] |
 //! | [`EVENT_KIND_VALUE_CHANGED`] | `NSSlider` / `NSStepper` | `doubleValue` → [`pack_value_changed`] |
 //! | [`EVENT_KIND_SELECTION`] | `NSSegmentedControl` | `selectedSegment` → [`pack_index`] |
+//! | [`EVENT_KIND_DATE`] | `NSDatePicker` | `dateValue` → civil date → [`pack_date`] |
 //!
 //! A public `NativeComponent` reaches the same class through
 //! `FrustNativeControlTarget::attach_view` (called by
@@ -60,8 +61,10 @@
 //! `Button`, `crate::controls::switch::decode_toggled` for `Switch`,
 //! `crate::controls::slider::decode_event` for `Slider`,
 //! `crate::controls::segmented::decode_event` for the Apple-only
-//! `Segmented`, and `crate::controls::stepper::decode_event` for the
+//! `Segmented`, `crate::controls::stepper::decode_event` for the
 //! Apple-only `Stepper` (the two Apple-only decoders shared with iOS alone),
+//! and `crate::controls::date_picker::decode_event` for `DatePicker`, shared
+//! by all three arms),
 //! so parity falls out of one shared decoder per control rather than being
 //! asserted here.
 //!
@@ -121,12 +124,14 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 #[cfg(feature = "frust-api")]
 use objc2_app_kit::NSView;
 use objc2_app_kit::{
-    NSControl, NSControlStateValue, NSControlStateValueOn, NSSegmentedControl, NSSwitch,
+    NSControl, NSControlStateValue, NSControlStateValueOn, NSDatePicker, NSSegmentedControl,
+    NSSwitch,
 };
 
+use crate::controls::date_picker::foundation::civil_date;
 use crate::events::{
-    EVENT_KIND_CLICK, EVENT_KIND_SELECTION, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED,
-    pack_bool, pack_index, pack_value_changed,
+    EVENT_KIND_CLICK, EVENT_KIND_DATE, EVENT_KIND_SELECTION, EVENT_KIND_TOGGLED,
+    EVENT_KIND_VALUE_CHANGED, pack_bool, pack_date, pack_index, pack_value_changed,
 };
 #[cfg(doc)]
 use crate::events::{EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START};
@@ -313,14 +318,15 @@ impl FrustNativeControlTarget {
 /// The `detail` payload for one firing of `kind`, read off `sender` where the
 /// kind's payload lives on the control — `None` for a kind this arm does not
 /// encode (the drag edges — module doc), or when the payload's source is
-/// missing (a nil `sender`, or a toggle/selection whose sender is not an
-/// `NSSwitch`/`NSSegmentedControl`).
+/// missing (a nil `sender`, or a toggle/selection/date whose sender is not
+/// an `NSSwitch`/`NSSegmentedControl`/`NSDatePicker`, or a date outside the
+/// representable 0001-9999 range).
 ///
 /// A click carries none (`crate::events::decode_click` reads only the kind),
-/// so `sender` is unused for it; the toggle/value/selection kinds read the
-/// sender's `state`/`doubleValue`/`selectedSegment` through the same
-/// `crate::events` `pack_*` codecs the Android listener and the iOS target
-/// use.
+/// so `sender` is unused for it; the toggle/value/selection/date kinds read
+/// the sender's `state`/`doubleValue`/`selectedSegment`/`dateValue` through
+/// the same `crate::events` `pack_*` codecs the Android listener and the iOS
+/// target use.
 fn detail_for(kind: i32, sender: Option<&NSControl>) -> Option<i64> {
     match kind {
         EVENT_KIND_CLICK => Some(0),
@@ -348,6 +354,14 @@ fn detail_for(kind: i32, sender: Option<&NSControl>) -> Option<i64> {
             let any: &AnyObject = sender?;
             let segmented = any.downcast_ref::<NSSegmentedControl>()?;
             Some(pack_index(segmented.selectedSegment()))
+        }
+        EVENT_KIND_DATE => {
+            // `dateValue` is `NSDatePicker`'s own member; converted through
+            // the SAME Gregorian mapping the control's setters and the iOS
+            // target use (`crate::controls::date_picker::foundation`).
+            let any: &AnyObject = sender?;
+            let picker = any.downcast_ref::<NSDatePicker>()?;
+            Some(pack_date(civil_date(&picker.dateValue())?))
         }
         _ => None,
     }
@@ -416,6 +430,7 @@ mod tests {
         assert_eq!(detail_for(EVENT_KIND_TOGGLED, None), None);
         assert_eq!(detail_for(EVENT_KIND_VALUE_CHANGED, None), None);
         assert_eq!(detail_for(EVENT_KIND_SELECTION, None), None);
+        assert_eq!(detail_for(EVENT_KIND_DATE, None), None);
     }
 
     #[test]

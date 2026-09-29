@@ -1,5 +1,6 @@
-//! The v1 controls — seven shared (`Button`, `Label`, `Switch`, `Slider`,
-//! `ProgressBar`, `Image`, `Spinner`) plus the two Apple-arm-only controls,
+//! The v1 controls — eight shared (`Button`, `Label`, `Switch`, `Slider`,
+//! `ProgressBar`, `Image`, `Spinner`, `DatePicker`) plus the two
+//! Apple-arm-only controls,
 //! `Segmented` and `Stepper` ([`APPLE_KINDS`]) — each an internal
 //! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
@@ -40,8 +41,8 @@
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
-//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`] (`Slider`/`Stepper`), [`Setter::Max`] (`Slider`/`Stepper`), [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`], [`Setter::Step`], [`Setter::Wraps`], [`Setter::StepperTint`] |
-//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment) |
+//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`] (`Slider`/`Stepper`), [`Setter::Max`] (`Slider`/`Stepper`), [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`], [`Setter::Step`], [`Setter::Wraps`], [`Setter::StepperTint`]; not independently measured, tiered by shape: [`Setter::Date`] (`DatePicker.updateDate`, the controlled value write — `Progress`'s class), [`Setter::DatePickerTint`], [`Setter::DatePickerTextColor`] |
+//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment), [`Setter::MinDate`]/[`Setter::MaxDate`] (not independently measured — a range change repopulates a calendar's month pages/year list), [`Setter::DatePickerStyle`] (a presentation swap rebuilds the picker's layout; Apple-only in effect — Android warns and ignores) |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
 //! **Per-frame guidance:** ~500 [`Tier::Cheap`] setters per frame ≈ 0.4 ms and
@@ -107,6 +108,7 @@
 //! there is nothing to reinstate.
 
 pub(crate) mod button;
+pub(crate) mod date_picker;
 pub(crate) mod image;
 pub(crate) mod label;
 pub(crate) mod progress;
@@ -123,6 +125,7 @@ use crate::NativeWidgetError;
 use crate::registry::SlotId;
 use crate::runtime::Params;
 
+use self::date_picker::{CivilDate, DatePickerStyle};
 use self::image::{Fit, ImageBytes};
 use self::spinner::SizeClass;
 use self::typeface::Typeface;
@@ -139,7 +142,7 @@ use self::typeface::Typeface;
 // over both tables in their `register_controls`).
 
 /// The kinds all three platform arms (Android, iOS, macOS) register.
-pub(crate) const SHARED_KINDS: [&str; 7] = [
+pub(crate) const SHARED_KINDS: [&str; 8] = [
     button::KIND,
     label::KIND,
     switch::KIND,
@@ -147,6 +150,7 @@ pub(crate) const SHARED_KINDS: [&str; 7] = [
     progress::KIND,
     image::KIND,
     spinner::KIND,
+    date_picker::KIND,
 ];
 
 /// The kinds only the two Apple arms (iOS, macOS) register — Android has no
@@ -163,7 +167,9 @@ pub(crate) const APPLE_KINDS: [&str; 2] = [segmented::KIND, stepper::KIND];
 pub(crate) const TEXT: &str = "text";
 /// `"enabled"` — `View.setEnabled`; defaults to `true` when absent.
 pub(crate) const ENABLED: &str = "enabled";
-/// `"textColor"` — packed ARGB (see [`color`]).
+/// `"textColor"` — packed ARGB (see [`color`]). `DatePicker` decodes it
+/// into its own [`Setter::DatePickerTextColor`] rather than
+/// [`Setter::TextColor`], whose Android arm assumes a `TextView`.
 pub(crate) const TEXT_COLOR: &str = "textColor";
 /// `"textSizeSp"` — text size in scale-independent pixels.
 pub(crate) const TEXT_SIZE_SP: &str = "textSizeSp";
@@ -195,8 +201,9 @@ pub(crate) const THUMB_TINT: &str = "thumbTint";
 /// `"trackTint"` — packed ARGB, `null`-able.
 pub(crate) const TRACK_TINT: &str = "trackTint";
 /// `"tint"` — packed ARGB, `null`-able: `Image`'s tint, `Segmented`'s
-/// selected-segment tint ([`Setter::SegmentTint`]), and `Stepper`'s tint
-/// ([`Setter::StepperTint`]) all ride this one wire key — each decodes it
+/// selected-segment tint ([`Setter::SegmentTint`]), `Stepper`'s tint
+/// ([`Setter::StepperTint`]) and `DatePicker`'s tint
+/// ([`Setter::DatePickerTint`]) all ride this one wire key — each decodes it
 /// into its own typed `Setter`, so the shared key never implies a shared
 /// apply.
 pub(crate) const TINT: &str = "tint";
@@ -463,6 +470,43 @@ pub(crate) enum Setter<'a> {
     /// tint property" branch), the same documented-gap shape as
     /// [`Self::ThumbTint`] on `NSSlider`.
     StepperTint(Option<i32>),
+
+    /// `DatePicker.updateDate` / `UIDatePicker.setDate:` /
+    /// `NSDatePicker.setDateValue:` — **[`Tier::Cheap`]**: the controlled
+    /// value write of `DatePicker`, the [`Self::Progress`] of that control.
+    /// Must be planned *after* [`Self::MinDate`]/[`Self::MaxDate`] in the
+    /// same plan — every platform clamps the date to the current range.
+    Date(CivilDate),
+
+    /// `DatePicker.setMinDate` / `UIDatePicker.minimumDate` /
+    /// `NSDatePicker.minDate` — **[`Tier::Relayout`]**. `None` restores the
+    /// platform's own floor (Android's 1900-01-01, nil on Apple).
+    MinDate(Option<CivilDate>),
+
+    /// `DatePicker.setMaxDate` / `UIDatePicker.maximumDate` /
+    /// `NSDatePicker.maxDate` — **[`Tier::Relayout`]**, the ceiling twin of
+    /// [`Self::MinDate`] (Android's own default: 2100-12-31).
+    MaxDate(Option<CivilDate>),
+
+    /// `UIDatePicker.preferredDatePickerStyle` /
+    /// `NSDatePicker.datePickerStyle` (+ `presentsCalendarOverlay`) —
+    /// **[`Tier::Relayout`]**. Android bakes the mode into the constructor
+    /// style, so there this setter reaches `apply` only on a genuine
+    /// post-create change and is warned-and-ignored (`date_picker.rs`'s
+    /// module doc — [`Self::SizeClass`]'s exact shape).
+    DatePickerStyle(DatePickerStyle),
+
+    /// `UIDatePicker.tintColor` — **[`Tier::Cheap`]**, the same
+    /// nullable-clearable shape as [`Self::ProgressTint`]. `NSDatePicker` and
+    /// Android's `DatePicker` expose no tint at all — logged and no-op'd.
+    DatePickerTint(Option<i32>),
+
+    /// `NSDatePicker.textColor` — **[`Tier::Cheap`]**; `None` restores
+    /// `NSColor.controlTextColor`. Its own variant rather than
+    /// [`Self::TextColor`], whose Android arm is a cached
+    /// `TextView.setTextColor` a `DatePicker` does not have; UIKit and
+    /// Android expose no public picker text colour — logged and no-op'd.
+    DatePickerTextColor(Option<i32>),
 }
 
 impl Setter<'_> {
@@ -476,7 +520,10 @@ impl Setter<'_> {
             | Self::ThemedBackground { .. }
             | Self::Typeface(_)
             | Self::SizeClass(_)
-            | Self::Segments(_) => Tier::Relayout,
+            | Self::Segments(_)
+            | Self::MinDate(_)
+            | Self::MaxDate(_)
+            | Self::DatePickerStyle(_) => Tier::Relayout,
             Self::ImageBytes(_) => Tier::Decode,
             Self::Enabled(_)
             | Self::TextColor(_)
@@ -496,7 +543,10 @@ impl Setter<'_> {
             | Self::SegmentTint(_)
             | Self::Step(_)
             | Self::Wraps(_)
-            | Self::StepperTint(_) => Tier::Cheap,
+            | Self::StepperTint(_)
+            | Self::Date(_)
+            | Self::DatePickerTint(_)
+            | Self::DatePickerTextColor(_) => Tier::Cheap,
         }
     }
 }
@@ -648,9 +698,9 @@ pub(crate) mod platform {
     pub(crate) const FRAME_CAPACITY: usize = 16;
 
     /// The hot setters' cached method ids (module doc). One table for all
-    /// seven controls (`Spinner` reaches it only through the shared
-    /// `Setter::Enabled` arm every control already rode — it adds no new
-    /// hot class or method of its own): it is seeded on the first control
+    /// eight Android controls (`Spinner` and `DatePicker` reach it only
+    /// through the shared `Setter::Enabled` arm every control already rode —
+    /// neither adds a hot class or method of its own): it is seeded on the first control
     /// creation of any kind and costs five class loads plus six
     /// `GetMethodID`s, once per process.
     struct HotMethods {
@@ -1061,6 +1111,22 @@ pub(crate) mod platform {
                 log::warn!(
                     "frust-native-widgets: an Android control planned a stepper-control setter \
                      ({setter:?}), which this arm does not implement — ignored"
+                );
+                Ok(())
+            }
+            // `DatePicker`'s own six setters are applied by that control's
+            // own Android `apply` (`date_picker.rs`), which forwards only the
+            // shared `Enabled`/`ContentDescription` here — so reaching this
+            // arm is a plan/apply drift bug, warned like the groups above.
+            Setter::Date(_)
+            | Setter::MinDate(_)
+            | Setter::MaxDate(_)
+            | Setter::DatePickerStyle(_)
+            | Setter::DatePickerTint(_)
+            | Setter::DatePickerTextColor(_) => {
+                log::warn!(
+                    "frust-native-widgets: a date-picker setter ({setter:?}) reached the shared \
+                     Android apply instead of date_picker.rs's own — ignored"
                 );
                 Ok(())
             }
@@ -1919,6 +1985,9 @@ mod tests {
             Setter::Step(1),
             Setter::Wraps(true),
             Setter::StepperTint(None),
+            Setter::Date(CivilDate::MIN),
+            Setter::DatePickerTint(None),
+            Setter::DatePickerTextColor(Some(1)),
         ];
         for setter in cheap {
             assert_eq!(setter.tier(), Tier::Cheap, "{setter:?}");
@@ -1935,6 +2004,9 @@ mod tests {
             },
             Setter::Typeface(Typeface::GlyphMono),
             Setter::Segments(&[]),
+            Setter::MinDate(None),
+            Setter::MaxDate(Some(CivilDate::MAX)),
+            Setter::DatePickerStyle(DatePickerStyle::Inline),
         ];
         for setter in relayout {
             assert_eq!(setter.tier(), Tier::Relayout, "{setter:?}");
@@ -2016,7 +2088,14 @@ mod tests {
         assert_eq!(
             SHARED_KINDS,
             [
-                "button", "label", "switch", "slider", "progress", "image", "spinner"
+                "button",
+                "label",
+                "switch",
+                "slider",
+                "progress",
+                "image",
+                "spinner",
+                "date_picker"
             ],
             "the control kind strings are a shipped wire contract — the api \
              layer's builders inject them and all three platform arms \
@@ -2059,6 +2138,7 @@ mod tests {
                     "progress" => progress::KIND,
                     "image" => image::KIND,
                     "spinner" => spinner::KIND,
+                    "date_picker" => date_picker::KIND,
                     "segmented" => segmented::KIND,
                     "stepper" => stepper::KIND,
                     other => panic!(

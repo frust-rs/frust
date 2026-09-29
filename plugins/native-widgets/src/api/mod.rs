@@ -25,16 +25,17 @@
 //! The public form is a different trait entirely:
 //! [`crate::component::NativeComponent`], with `&self` methods, already-typed
 //! `Props` the app constructs directly, no `decode_props` step and no `Result`
-//! returns. The nine builders here keep riding the internal trait's wire
+//! returns. The ten builders here keep riding the internal trait's wire
 //! (`params_json` in, `EventPayload` callbacks out) unchanged — bridging the
 //! public trait onto the same runtime (`crate::component::Bridge`) is what let
 //! that stay true.
 //!
 //! # Two builder families, one slot shape
 //!
-//! The nine built-in controls above are one family (`native_segmented`/
+//! The ten built-in controls above are one family (`native_segmented`/
 //! `native_stepper` on iOS/macOS only — a compile-time refusal banner
-//! elsewhere); [`native_component`] is
+//! elsewhere; `native_date_picker` on all three arms, reporting a
+//! [`CivilDate`]); [`native_component`] is
 //! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (another plugin's
 //! included — an app crate cannot implement one; see that trait's own doc)
@@ -64,11 +65,17 @@ mod mount;
 mod signals;
 mod theme;
 
+/// The date value `native_date_picker` shows and reports — defined beside the
+/// control (`crate::controls::date_picker`) because the platform-agnostic
+/// event vocabulary carries it too, and re-exported here as the builder's
+/// public vocabulary.
+pub use crate::controls::date_picker::CivilDate;
 pub use builders::{
-    NativeButtonView, NativeImageFit, NativeImageView, NativeLabelView, NativeProgressView,
-    NativeSegmentedView, NativeSliderView, NativeSpinnerSize, NativeSpinnerView, NativeStepperView,
-    NativeSwitchView, native_button, native_image, native_label, native_progress, native_segmented,
-    native_slider, native_spinner, native_stepper, native_switch,
+    NativeButtonView, NativeDatePickerStyle, NativeDatePickerView, NativeImageFit, NativeImageView,
+    NativeLabelView, NativeProgressView, NativeSegmentedView, NativeSliderView, NativeSpinnerSize,
+    NativeSpinnerView, NativeStepperView, NativeSwitchView, native_button, native_date_picker,
+    native_image, native_label, native_progress, native_segmented, native_slider, native_spinner,
+    native_stepper, native_switch,
 };
 pub use mount::{NativeComponentView, native_component};
 

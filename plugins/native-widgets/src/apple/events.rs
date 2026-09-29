@@ -2,19 +2,22 @@
 //! wired straight into the SAME `(kind, detail)` runtime dispatch Android's
 //! `FrustNativeListener` feeds.
 //!
-//! # One class, seven actions — the Android mirror
+//! # One class, eight actions — the Android mirror
 //!
 //! Android's `dev.frust.nativewidgets.FrustNativeListener` implements every
 //! listener interface a v1 control needs (`OnClickListener`/
-//! `OnCheckedChangeListener`/`OnSeekBarChangeListener`) on ONE class, with one
+//! `OnCheckedChangeListener`/`OnSeekBarChangeListener`/
+//! `OnDateChangedListener`) on ONE class, with one
 //! method per callback. [`FrustNativeControlTarget`] is the same shape for
-//! UIKit target-action: one class, seven action selectors
+//! UIKit target-action: one class, eight action selectors
 //! ([`Self::handle_click`], [`Self::handle_switch_value_changed`],
 //! [`Self::handle_slider_value_changed`], [`Self::handle_slider_drag_start`],
 //! [`Self::handle_slider_drag_end`], [`Self::handle_segment_value_changed`],
-//! [`Self::handle_stepper_value_changed`]), and a control wires only the ones
+//! [`Self::handle_stepper_value_changed`],
+//! [`Self::handle_date_value_changed`]), and a control wires only the ones
 //! it needs via [`Self::attach_button`]/[`Self::attach_switch`]/
-//! [`Self::attach_slider`]/[`Self::attach_segmented`]/[`Self::attach_stepper`]
+//! [`Self::attach_slider`]/[`Self::attach_segmented`]/[`Self::attach_stepper`]/
+//! [`Self::attach_date_picker`]
 //! — exactly as Android attaches the shared listener
 //! only as the one interface a given control implements. Adding a control
 //! never adds a second target class, matching the crate's "ONE generic
@@ -135,12 +138,15 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 #[cfg(feature = "frust-api")]
 use objc2_ui_kit::UIView;
 use objc2_ui_kit::{
-    UIButton, UIControl, UIControlEvents, UISegmentedControl, UISlider, UIStepper, UISwitch,
+    UIButton, UIControl, UIControlEvents, UIDatePicker, UISegmentedControl, UISlider, UIStepper,
+    UISwitch,
 };
 
+use crate::controls::date_picker::foundation::civil_date;
 use crate::events::{
-    EVENT_KIND_CLICK, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_SELECTION,
-    EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_index, pack_value_changed,
+    EVENT_KIND_CLICK, EVENT_KIND_DATE, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START,
+    EVENT_KIND_SELECTION, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_date,
+    pack_index, pack_value_changed,
 };
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent};
@@ -263,6 +269,28 @@ define_class!(
                 detail,
                 "handleStepperValueChanged:",
             );
+        }
+
+        /// `DatePicker`'s `ValueChanged` action → [`EVENT_KIND_DATE`].
+        ///
+        /// Reads the requested date straight off the sender's `date`,
+        /// converts it to a civil date through the shared Gregorian mapping
+        /// (`crate::controls::date_picker::foundation`, the one the control's
+        /// own setters use) and packs it with [`pack_date`]. A date outside
+        /// the representable range (a BC era, a year past 9999) has no
+        /// civil date to report and is dropped with a debug line rather than
+        /// fabricated. Every firing is a genuine user pick (module doc's *No
+        /// echo guard*).
+        #[unsafe(method(handleDateValueChanged:))]
+        fn handle_date_value_changed(&self, sender: &UIDatePicker) {
+            let Some(date) = civil_date(&sender.date()) else {
+                log::debug!(
+                    "frust-native-widgets: slot {} picked a date outside 0001-9999 — dropped",
+                    self.slot()
+                );
+                return;
+            };
+            self.dispatch(EVENT_KIND_DATE, pack_date(date), "handleDateValueChanged:");
         }
     }
 );
@@ -474,6 +502,33 @@ impl FrustNativeControlTarget {
         self.remove(
             view,
             sel!(handleStepperValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+    }
+
+    /// Build a target for `slot` and wire it as `view`'s `ValueChanged`
+    /// action — `DatePicker`'s whole date-attach (a shared control; its
+    /// Android twin is `FrustNativeListener`'s `OnDateChangedListener`).
+    pub(crate) fn attach_date_picker(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UIDatePicker,
+    ) -> Retained<Self> {
+        let target = Self::new(mtm, slot);
+        target.add(
+            view,
+            sel!(handleDateValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+        target
+    }
+
+    /// [`Self::attach_date_picker`]'s inverse — called from
+    /// `DatePicker::dispose`.
+    pub(crate) fn detach_date_picker(&self, view: &UIDatePicker) {
+        self.remove(
+            view,
+            sel!(handleDateValueChanged:),
             UIControlEvents::ValueChanged,
         );
     }

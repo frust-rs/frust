@@ -58,7 +58,7 @@ pub(crate) use factory::ensure_registered;
 
 use crate::controls::{APPLE_KINDS, SHARED_KINDS};
 use crate::controls::{
-    button, image, label, progress, segmented, slider, spinner, stepper, switch,
+    button, date_picker, image, label, progress, segmented, slider, spinner, stepper, switch,
 };
 use crate::runtime::NativeRuntime;
 
@@ -102,6 +102,7 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
     runtime.register::<spinner::Spinner>(spinner::KIND);
+    runtime.register::<date_picker::DatePicker>(date_picker::KIND);
     // The Apple-only kinds (`crate::controls::APPLE_KINDS`), after the shared
     // table — Android registers none of these.
     runtime.register::<segmented::Segmented>(segmented::KIND);

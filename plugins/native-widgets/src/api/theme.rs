@@ -17,10 +17,10 @@
 //!
 //! | Token | `ColorScheme`/`ShapeScale`/`TypeScale` source | Controls |
 //! |---|---|---|
-//! | `accent_ink` | `scheme().primary` | `Switch`/`Slider` thumb tint, `Spinner` tint, `Stepper` tint (`UIStepper.tintColor` only — `NSStepper` exposes no tint property at all, logged and no-op'd, `crate::controls::stepper`'s module doc's *Tint* section) |
+//! | `accent_ink` | `scheme().primary` | `Switch`/`Slider` thumb tint, `Spinner` tint, `Stepper` tint (`UIStepper.tintColor` only — `NSStepper` exposes no tint property at all, logged and no-op'd, `crate::controls::stepper`'s module doc's *Tint* section), `DatePicker` tint (`UIDatePicker.tintColor` only — `NSDatePicker` has no tint property and Android's `DatePicker` no tint API at all, both logged and no-op'd, `crate::controls::date_picker`'s module doc's *Theme* section) |
 //! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint, `Segmented` selected-segment tint (`UISegmentedControl.selectedSegmentTintColor` on iOS, `NSSegmentedControl.selectedSegmentBezelColor` on macOS; no Android arm) |
 //! | `on_accent_fill` | `scheme().on_primary_container` | `Button` text colour |
-//! | `body_text` | `scheme().on_surface` | `Label` text colour |
+//! | `body_text` | `scheme().on_surface` | `Label` text colour, `DatePicker` text colour (`NSDatePicker.textColor` only — UIKit exposes no public `UIDatePicker` text colour and Android's `DatePicker` no colour API; both logged and no-op'd. `UIDatePicker`'s brightness still follows the theme through `overrideUserInterfaceStyle`, re-pinned on every update by `crate::apple`'s theme module, and Android's through L1's night-qualified construction `Context`) |
 //! | `surface_bg` | `scheme().surface` | `Label`/`ProgressBar` background (explicit — see *Explicit backgrounds* below for why `Switch`/`Slider` are deliberately excluded) |
 //! | `corner_radius_dp` | `shape.small` | `Button` background (via a `GradientDrawable`) |
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |

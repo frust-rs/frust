@@ -1,6 +1,7 @@
-//! The nine app-facing builders: `native_button`/
+//! The ten app-facing builders: `native_button`/
 //! `native_label`/`native_switch`/`native_slider`/`native_progress`/
-//! `native_image`/`native_spinner`/`native_segmented`/`native_stepper`, each
+//! `native_image`/`native_spinner`/`native_date_picker`/`native_segmented`/
+//! `native_stepper`, each
 //! composing exactly one [`platform_view`] slot behind this crate's one
 //! factory per platform (the "N controls = N slots" envelope) —
 //! `native_segmented`/`native_stepper` only on iOS and macOS; elsewhere each
@@ -66,6 +67,7 @@ use frust_core::{
 };
 use kurbo::{Size, Vec2};
 
+use crate::controls::date_picker::{self, CivilDate};
 use crate::controls::{
     BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
     INDETERMINATE, MAX, MIN, PROGRESS_TINT, STEP, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TINT,
@@ -77,7 +79,7 @@ use crate::controls::{
 use crate::registry::SlotId;
 use crate::runtime::{escape, with_identity, with_runtime};
 
-use super::signals::{on_click, on_selected, on_toggled, on_value_changed};
+use super::signals::{on_click, on_date, on_selected, on_toggled, on_value_changed};
 use super::theme::{self, ResolvedTheme};
 
 /// The one factory class every control resolves through, per platform.
@@ -1356,6 +1358,196 @@ impl Component for NativeSpinnerView {
 }
 
 // ============================================================================
+// Date picker
+// ============================================================================
+
+/// How [`NativeDatePickerView`] presents itself — the public mirror of
+/// `crate::controls::date_picker::DatePickerStyle`, which stays `pub(crate)`.
+///
+/// | Style | Android | iOS | macOS |
+/// |---|---|---|---|
+/// | [`Self::Compact`] | spinner mode | `.compact` | text field + stepper, calendar overlay on click |
+/// | [`Self::Wheels`] | spinner mode | `.wheels` | text field + stepper (AppKit has no wheels) |
+/// | [`Self::Inline`] | calendar mode | `.inline` | clock-and-calendar |
+///
+/// Android fixes the mode when the picker is created: a later style change
+/// is not applied there (logged once) — see `crate::controls::date_picker`'s
+/// module doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeDatePickerStyle {
+    /// The smallest footprint the platform offers.
+    #[default]
+    Compact,
+    /// Spinning wheels.
+    Wheels,
+    /// A full, always-visible calendar.
+    Inline,
+}
+
+impl NativeDatePickerStyle {
+    /// The wire spelling `crate::controls::date_picker::DatePickerStyle`
+    /// decodes.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Wheels => "wheels",
+            Self::Inline => "inline",
+        }
+    }
+}
+
+/// A real DATE-mode picker (no time) rendered from pure Rust —
+/// `android.widget.DatePicker`, `UIDatePicker`, `NSDatePicker`. Controlled,
+/// like [`NativeSwitchView`]: the app owns `date`, and a pick only ever
+/// arrives through [`Self::on_change`] as a *requested* [`CivilDate`] the app
+/// confirms by feeding it back. Build one with [`native_date_picker`].
+#[derive(Clone)]
+pub struct NativeDatePickerView {
+    date: CivilDate,
+    min: Option<CivilDate>,
+    max: Option<CivilDate>,
+    style: NativeDatePickerStyle,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_change: Option<Arc<dyn Fn(CivilDate) + Send + Sync>>,
+}
+
+/// A native date picker showing `date` — see [`NativeDatePickerView`].
+pub fn native_date_picker(date: CivilDate) -> NativeDatePickerView {
+    NativeDatePickerView {
+        date,
+        min: None,
+        max: None,
+        style: NativeDatePickerStyle::default(),
+        enabled: true,
+        content_description: None,
+        size: None,
+        on_change: None,
+    }
+}
+
+impl NativeDatePickerView {
+    /// The earliest selectable date — default: the platform's own floor. A
+    /// `date` before it is shown (and reported) as `min`; a `max` before it
+    /// collapses the range to the single day `min`.
+    pub fn min(mut self, min: CivilDate) -> Self {
+        self.min = Some(min);
+        self
+    }
+
+    /// The latest selectable date — default: the platform's own ceiling. A
+    /// `date` after it is shown (and reported) as `max`.
+    pub fn max(mut self, max: CivilDate) -> Self {
+        self.max = Some(max);
+        self
+    }
+
+    /// The presentation — see [`NativeDatePickerStyle`]. Default
+    /// [`NativeDatePickerStyle::Compact`].
+    pub fn style(mut self, style: NativeDatePickerStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// `View.setEnabled` / `UIControl.enabled` / `NSControl.enabled` —
+    /// default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack/VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the **requested** date when the user picks one. Feed it
+    /// back as the builder's `date` to accept it; keep the old one to refuse
+    /// it (the picker snaps back on the next differing params).
+    pub fn on_change(mut self, handler: impl Fn(CivilDate) + Send + Sync + 'static) -> Self {
+        self.on_change = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_ink` in as
+    /// the tint and `body_text` as the text colour — see
+    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
+    /// explicitly, and `crate::api::theme`'s mapping table for which arm
+    /// honours which (Android's `DatePicker` honours neither).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(date_picker::DATE, date_picker::wire(self.date));
+        if let Some(min) = self.min {
+            body.push_raw(date_picker::MIN_DATE, date_picker::wire(min));
+        }
+        if let Some(max) = self.max {
+            body.push_raw(date_picker::MAX_DATE, date_picker::wire(max));
+        }
+        body.push_str(date_picker::STYLE, self.style.wire());
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+            body.push_raw(TEXT_COLOR, t.body_text);
+        }
+        with_identity(date_picker::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Date picker");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_change) = self.on_change.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_date(on_change)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "date picker".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeDatePickerView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc — the picker registers a
+        // callback via `Self::on_change`, so it needs the same
+        // `pending_callbacks` reaper.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
 // Segmented
 // ============================================================================
 
@@ -1983,6 +2175,7 @@ impl_native_view!(NativeSliderView);
 impl_native_view!(NativeProgressView);
 impl_native_view!(NativeImageView);
 impl_native_view!(NativeSpinnerView);
+impl_native_view!(NativeDatePickerView);
 impl_native_view!(NativeSegmentedView);
 impl_native_view!(NativeStepperView);
 
@@ -2092,6 +2285,86 @@ mod tests {
              \"sizeClass\":\"large\",\"enabled\":true,\"contentDescription\":\"loading\",\
              \"dark\":false}"
         );
+    }
+
+    fn civil(year: i32, month: u8, day: u8) -> CivilDate {
+        CivilDate::new(year, month, day).expect("a real date")
+    }
+
+    #[test]
+    fn date_picker_params_snapshot() {
+        let view = native_date_picker(civil(2026, 9, 29))
+            .min(civil(2026, 1, 1))
+            .max(civil(2026, 12, 31))
+            .style(NativeDatePickerStyle::Inline)
+            .content_description("due date");
+        assert_eq!(
+            view.params_for(12, None),
+            format!(
+                "{{\"__frustControl\":\"date_picker\",\"__frustSlot\":12,\"date\":{},\
+                 \"minDate\":{},\"maxDate\":{},\"style\":\"inline\",\"enabled\":true,\
+                 \"contentDescription\":\"due date\",\"dark\":false}}",
+                (2026 << 16) | (9 << 8) | 29,
+                (2026 << 16) | (1 << 8) | 1,
+                (2026 << 16) | (12 << 8) | 31,
+            )
+        );
+    }
+
+    #[test]
+    fn date_picker_params_round_trip_through_the_control_decoder() {
+        use crate::controls::date_picker::DatePickerProps;
+        use crate::runtime::Params;
+
+        let view = native_date_picker(civil(2024, 2, 29))
+            .min(civil(2000, 1, 1))
+            .style(NativeDatePickerStyle::Wheels)
+            .enabled(false);
+        let raw = view.params_for(12, Some(dark_tokens()));
+        let props = DatePickerProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.date, Some(civil(2024, 2, 29)));
+        assert_eq!(props.min, Some(civil(2000, 1, 1)));
+        assert_eq!(props.max, None);
+        assert!(!props.enabled);
+        assert_eq!(props.tint, Some(dark_tokens().accent_ink as i32));
+        assert_eq!(props.text_color, Some(dark_tokens().body_text as i32));
+    }
+
+    #[test]
+    fn date_picker_publishes_one_interactive_slot_on_every_target() {
+        // A shared control: no compile-time arm gate, unlike
+        // `native_segmented`/`native_stepper`.
+        let view = native_date_picker(civil(2026, 9, 29)).size(320.0, 216.0);
+        let expected_params = view.params_for(4, None);
+        let built = view.build_with_mode(4, ResolvedSurfaceMode::Opaque, None);
+        let mut element = build_any(built);
+        let mut lctx = LayoutCtx::new();
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(320.0, 216.0)));
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(320.0, 216.0));
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a date picker slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn date_picker_honours_the_translucency_refusal() {
+        let view = native_date_picker(civil(2026, 9, 29)).build_with_mode(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(320.0, 216.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
     }
 
     #[test]
@@ -2478,6 +2751,23 @@ mod tests {
                 "{{\"__frustControl\":\"stepper\",\"__frustSlot\":6,\"value\":0,\"min\":0,\
                  \"max\":10,\"step\":1,\"wraps\":false,\"enabled\":true,\"dark\":true,\"tint\":{}}}",
                 tokens.accent_ink
+            )
+        );
+    }
+
+    #[test]
+    fn date_picker_folds_accent_ink_tint_and_body_text_colour() {
+        let view = native_date_picker(civil(2026, 9, 29));
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(6, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"date_picker\",\"__frustSlot\":6,\"date\":{},\
+                 \"style\":\"compact\",\"enabled\":true,\"dark\":true,\"tint\":{},\
+                 \"textColor\":{}}}",
+                (2026 << 16) | (9 << 8) | 29,
+                tokens.accent_ink,
+                tokens.body_text
             )
         );
     }

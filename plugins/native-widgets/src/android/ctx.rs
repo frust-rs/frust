@@ -64,6 +64,7 @@ use jni::strings::JNIStr;
 use jni::{Env, jni_sig, jni_str};
 
 use crate::NativeWidgetError;
+use crate::controls::date_picker::CivilDate;
 use crate::registry::SlotId;
 
 /// The generic listener class every interactive control attaches
@@ -365,8 +366,8 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     /// `new FrustNativeListener(slot_id)` — the ONE generic listener class
     /// (`crate::android`'s contract table). Attach it with
     /// [`Self::set_on_click_listener`]/[`Self::set_on_checked_change_listener`]/
-    /// [`Self::set_on_seek_bar_change_listener`] (whichever interface the
-    /// control needs), and retain it in the control's
+    /// [`Self::set_on_seek_bar_change_listener`]/[`Self::init_date_picker`]
+    /// (whichever interface the control needs), and retain it in the control's
     /// [`NativeView`](crate::android::NativeView) `extra` list so it is
     /// pair-deleted with the view. A `NativeComponent` reaches the same
     /// constructor through [`Self::attach_listener`], never with an id of its
@@ -439,6 +440,57 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
             view,
             jni_str!("setOnSeekBarChangeListener"),
             jni_sig!("(Landroid/widget/SeekBar$OnSeekBarChangeListener;)V"),
+            &[JValue::Object(listener)],
+        )
+    }
+
+    /// `DatePicker.init(year, monthOfYear, dayOfMonth, listener)` — the date
+    /// picker's initial date **and** its `OnDateChangedListener` attach in
+    /// one framework call (`init` sets the date before it stores the
+    /// listener, so the initial date never reaches the listener).
+    ///
+    /// `date` is a 1-based [`CivilDate`]; the 0-based `monthOfYear`
+    /// `DatePicker` wants is derived here, the one place this helper's
+    /// callers never have to think about it.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws.
+    pub(crate) fn init_date_picker(
+        &mut self,
+        view: &JObject<'_>,
+        date: CivilDate,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(
+            view,
+            jni_str!("init"),
+            jni_sig!("(IIILandroid/widget/DatePicker$OnDateChangedListener;)V"),
+            &[
+                JValue::Int(date.year),
+                JValue::Int(i32::from(date.month) - 1),
+                JValue::Int(i32::from(date.day)),
+                JValue::Object(listener),
+            ],
+        )
+    }
+
+    /// `DatePicker.setOnDateChangedListener(listener)` (API 26, inside this
+    /// plugin's `minSdk = 26` floor) — the date picker's detach: pass
+    /// `&JObject::null()`. The attach itself goes through
+    /// [`Self::init_date_picker`], which sets the initial date in the same
+    /// call.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws.
+    pub(crate) fn set_on_date_changed_listener(
+        &mut self,
+        view: &JObject<'_>,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(
+            view,
+            jni_str!("setOnDateChangedListener"),
+            jni_sig!("(Landroid/widget/DatePicker$OnDateChangedListener;)V"),
             &[JValue::Object(listener)],
         )
     }

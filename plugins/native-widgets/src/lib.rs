@@ -9,8 +9,9 @@
 //! resolves by `view_type`). This crate holds the
 //! retained-handle [`registry`] every control's create/update/dispose path is
 //! built over, the `runtime` those paths dispatch through, the `controls` —
-//! seven shared (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`,
-//! `Spinner`) plus the two iOS/macOS-only ones (`Segmented`, `Stepper`) —
+//! eight shared (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`,
+//! `Spinner`, `DatePicker`) plus the two iOS/macOS-only ones (`Segmented`,
+//! `Stepper`) —
 //! that runtime serves, the typed `events` vocabulary their listeners decode
 //! into, the app-facing `api` builders, and the three platform arms' factory
 //! glue. Each shared control carries one platform half per arm (`Segmented`/
@@ -180,7 +181,7 @@ mod appkit;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
 mod coretext;
-// The v1 controls (seven shared + the two Apple-only ones, `Segmented` and
+// The v1 controls (eight shared + the two Apple-only ones, `Segmented` and
 // `Stepper`). Compiled on every target on purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
 // `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`

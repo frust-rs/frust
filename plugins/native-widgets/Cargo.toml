@@ -112,11 +112,24 @@ objc2 = { workspace = true }
 # this crate *names* `NSData` in its own source, so it is requested here
 # explicitly rather than relied on as a side effect of someone else's
 # feature list.
+# `NSDate`/`NSCalendar`/`NSLocale`: `DatePicker`'s `NSDate` <-> civil-date
+# mapping (`crate::controls::date_picker::foundation`, shared with the macOS
+# arm): a Gregorian `NSCalendar` builds the date from an `NSDateComponents`
+# and reads year/month/day back with `component:fromDate:`. There is NO
+# `NSDateComponents` feature — that class is generated under `NSCalendar`
+# (`NSDateComponentsFormatter` is a different, unrelated feature). `NSLocale`
+# is what the `UIDatePicker`/`NSCalendar` locale members are gated on; the
+# `objc2-ui-kit/UIDatePicker` feature below turns all three on transitively,
+# but this crate names the first two in its own source, so they are
+# requested here explicitly (the same rule as `NSData` above).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
     "NSString",
     "NSData",
+    "NSDate",
+    "NSCalendar",
+    "NSLocale",
 ] }
 # `UIView`: the retained-handle registry (`AppleHandle` wraps a
 # `Retained<UIView>`, the type every control view specializes to).
@@ -160,6 +173,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `UIColor` feature already enabled below) — the ninth class, Apple-arm-only
 # like `UISegmentedControl`. Needs no feature of its own beyond `UIColor`
 # (already requested for the shared tint bridge).
+# `UIDatePicker`: `DatePicker`'s class (`datePickerMode`,
+# `preferredDatePickerStyle`, `date`/`minimumDate`/`maximumDate`,
+# `tintColor` via the shared `UIColor`) — the tenth class, and a SHARED
+# control (all three arms). Pulls in `objc2-foundation`'s `NSCalendar`/
+# `NSDate`/`NSLocale` features transitively — features only, no new crate.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -175,6 +193,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIActivityIndicatorView",
     "UISegmentedControl",
     "UIStepper",
+    "UIDatePicker",
     "UIColor",
     "UIFont",
     "UIAccessibility",
@@ -243,11 +262,17 @@ objc2 = { workspace = true }
 # control captions. `NSData`: `Image`'s `NSImage` payload. `NSGeometry` +
 # `objc2-core-foundation`: what makes `NSRect`/`NSPoint`/`CGFloat` usable at
 # all — both are type gates, not controls.
+# `NSDate`/`NSCalendar`/`NSLocale`: `DatePicker`'s `NSDate` <-> civil-date
+# mapping, identical to the iOS block's rows (see their comment — including
+# why there is no `NSDateComponents` feature to request).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
     "NSString",
     "NSData",
+    "NSDate",
+    "NSCalendar",
+    "NSLocale",
     "NSGeometry",
     "objc2-core-foundation",
 ] }
@@ -284,6 +309,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # from `NSControl`) — an Apple-arm-only control like `NSSegmentedControl`.
 # No `NSStepperCell` needed: nothing this crate calls on `Stepper` requires a
 # member the generated `NSStepper` impl gates behind that feature.
+# `NSDatePicker` + `NSDatePickerCell`: `DatePicker`'s class (`dateValue`,
+# `minDate`/`maxDate`, `textColor`, `presentsCalendarOverlay`) and the cell
+# feature its style/mode/elements members and enums (`NSDatePickerStyle`,
+# `NSDatePickerMode`, `NSDatePickerElementFlags`) are gated on — unlike
+# `NSStepper`, the cell feature IS needed here.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSView",
@@ -300,6 +330,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSSegmentedControl",
     "NSSegmentedCell",
     "NSStepper",
+    "NSDatePicker",
+    "NSDatePickerCell",
     "NSImageView",
     "NSImageCell",
     "NSImage",

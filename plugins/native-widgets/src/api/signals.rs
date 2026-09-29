@@ -1,6 +1,7 @@
 //! Events-as-signals: wraps a decoded [`EventPayload`] into the plain,
 //! parameter-shaped callback an app supplies to a builder's `.on_press`/
-//! `.on_toggle`/`.on_change`/`.on_select` — the seam
+//! `.on_toggle`/`.on_change`/`.on_select` (a date picker's `.on_change`
+//! included) — the seam
 //! [`crate::runtime::NativeRuntime::set_callback`] invokes on the platform
 //! main thread.
 //!
@@ -25,6 +26,7 @@
 
 use std::sync::Arc;
 
+use crate::controls::date_picker::CivilDate;
 use crate::events::EventPayload;
 
 /// The callback shape [`crate::runtime::NativeRuntime::set_callback`] stores
@@ -78,6 +80,19 @@ pub(super) fn on_selected(handler: Arc<dyn Fn(usize) + Send + Sync>) -> EventCal
     Arc::new(move |payload| {
         if let EventPayload::Selected(index) = payload {
             handler(index);
+        }
+    })
+}
+
+/// Wrap a date picker's change handler: fires only on
+/// [`EventPayload::Date`], with the **requested** civil date — the app
+/// confirms it by feeding it back as `date` (controlled, like
+/// [`on_toggled`]). A report that is not a real date never reaches here
+/// (`crate::events::unpack_date` refuses it).
+pub(super) fn on_date(handler: Arc<dyn Fn(CivilDate) + Send + Sync>) -> EventCallback {
+    Arc::new(move |payload| {
+        if let EventPayload::Date(date) = payload {
+            handler(date);
         }
     })
 }
@@ -142,5 +157,23 @@ mod tests {
         cb(EventPayload::Selected(0));
 
         assert_eq!(*seen.lock().unwrap(), vec![2, 0]);
+    }
+
+    #[test]
+    fn on_date_forwards_the_requested_date_only() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let cb = on_date(Arc::new(move |date| recorder.lock().unwrap().push(date)));
+
+        let picked = CivilDate::new(2026, 10, 3).unwrap();
+        cb(EventPayload::Date(picked));
+        cb(EventPayload::Selected(1));
+        cb(EventPayload::ValueChanged {
+            value: 3,
+            from_user: true,
+        });
+        cb(EventPayload::Date(CivilDate::MIN));
+
+        assert_eq!(*seen.lock().unwrap(), vec![picked, CivilDate::MIN]);
     }
 }

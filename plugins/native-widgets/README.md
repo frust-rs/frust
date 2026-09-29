@@ -3,16 +3,16 @@
 Render **real OS controls** from pure Rust — `native_button("Save")`,
 `native_label(...)`, `native_switch(checked)`, `native_slider(...)`,
 `native_progress(...)`, `native_image(bytes)`, `native_spinner(animating)`,
-`native_segmented(labels, selected)` (iOS/macOS only),
+`native_date_picker(date)`, `native_segmented(labels, selected)` (iOS/macOS only),
 `native_stepper(value, min, max)` (iOS/macOS only) — composed straight
 into a frust `View` tree like any other widget. Each control is backed by a
 genuine Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`/a
-circular-style `ProgressBar`), UIKit view (`UIButton`/`UILabel`/`UISwitch`/
-`UISlider`/`UIProgressView`/`UIImageView`/`UIActivityIndicatorView`/
+circular-style `ProgressBar`/`DatePicker`), UIKit view (`UIButton`/`UILabel`/`UISwitch`/
+`UISlider`/`UIProgressView`/`UIImageView`/`UIActivityIndicatorView`/`UIDatePicker`/
 `UISegmentedControl`/`UIStepper`), or
 AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/`NSSlider`/
 `NSProgressIndicator`/`NSImageView`/an `NSProgressIndicator` in its
-`Spinning` style/`NSSegmentedControl`/`NSStepper`), hosted as a **platform-view slot**
+`Spinning` style/`NSDatePicker`/`NSSegmentedControl`/`NSStepper`), hosted as a **platform-view slot**
 (`docs/ARCHITECTURE.md`'s Platform-view flow) — frust paints nothing for it,
 the OS composites it in place.
 
@@ -32,7 +32,7 @@ not re-export it.
 
 ## 1. What you get
 
-Nine controls, one Rust API, no Kotlin or Swift to write for any of them:
+Ten controls, one Rust API, no Kotlin or Swift to write for any of them:
 
 | Builder | Android view | iOS view | macOS view |
 |---|---|---|---|
@@ -43,6 +43,7 @@ Nine controls, one Rust API, no Kotlin or Swift to write for any of them:
 | `native_progress(value, min, max)` | `ProgressBar` | `UIProgressView` | `NSProgressIndicator` |
 | `native_image(bytes)` | `ImageView` | `UIImageView` | `NSImageView` |
 | `native_spinner(animating)` | `ProgressBar` (circular style) | `UIActivityIndicatorView` | `NSProgressIndicator` (`Spinning` style) |
+| `native_date_picker(date)` | `DatePicker` | `UIDatePicker` (date mode) | `NSDatePicker` (year/month/day) |
 | `native_segmented(labels, selected)` | **none — renders a refusal banner** (see below) | `UISegmentedControl` | `NSSegmentedControl` (select-one) |
 | `native_stepper(value, min, max)` | **none — renders a refusal banner** (see below) | `UIStepper` | `NSStepper` |
 
@@ -67,6 +68,23 @@ clamping. The control wears the theme's `accent_ink` as its tint on iOS only
 — `NSStepper` has no tint property AppKit exposes at all, so the fold is a
 silent no-op there, logged at debug (same shape as the AppKit tint gaps in §4
 below).
+
+`native_date_picker` picks a **date only** (no time) and is controlled like
+`native_switch`: `.on_change(|date| …)` reports the *requested* `CivilDate`
+(`{ year, month, day }`, month 1-based, validated — build one with
+`CivilDate::new(2026, 9, 29)`), and the app confirms it by feeding it back
+as `date`. `.min(date)`/`.max(date)` bound the range (a `date` outside it is
+shown and reported clamped), and `.style(NativeDatePickerStyle::…)` picks the
+presentation: `Compact` (default — iOS's compact button, a macOS text field
+with a click-to-open calendar, Android's spinner mode), `Wheels` (iOS wheels,
+the macOS text field and stepper, Android's spinner mode) or `Inline` (an
+always-visible calendar on all three). Android fixes the mode when the picker
+is created, so a later `.style(…)` change applies on iOS/macOS only (logged
+once on Android). The picker wears the theme's `accent_ink` as its tint on iOS
+and the theme's body-text colour as its text colour on macOS; Android's
+`DatePicker` has no tint or text-colour API — its colours come only from the
+(light/dark) theme it is built against — and `NSDatePicker` has no tint, so
+those folds are silent no-ops, logged at debug.
 
 …plus `native_component`, the generic mounting seam for a control this crate
 does not ship: `impl NativeComponent` (with your own typed `Props`) →
@@ -232,7 +250,9 @@ Two things differ from the mobile arms, both by design:
   API at all, so `thumbTint`/`trackTint`/`progressTint` on `native_switch`/
   `native_progress` — the spinner's own tint on `native_spinner`, which
   also draws through `NSProgressIndicator` — and `native_stepper`'s tint,
-  since `NSStepper` exposes no tint property either, are silent no-ops
+  since `NSStepper` exposes no tint property either — and `native_date_picker`'s
+  tint, `NSDatePicker` having none (its calendar draws in the system accent
+  colour) — are silent no-ops
   logged at debug (`NSSwitch`/`NSProgressIndicator` still draw in the system
   accent colour regardless; `NSStepper`'s own `-`/`+` glyphs simply keep
   their default appearance);

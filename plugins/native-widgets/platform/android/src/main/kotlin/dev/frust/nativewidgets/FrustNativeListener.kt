@@ -28,12 +28,14 @@ package dev.frust.nativewidgets
 
 import android.view.View
 import android.widget.CompoundButton
+import android.widget.DatePicker
 import android.widget.SeekBar
 
 class FrustNativeListener(private val slotId: Long) :
     View.OnClickListener,
     CompoundButton.OnCheckedChangeListener,
-    SeekBar.OnSeekBarChangeListener {
+    SeekBar.OnSeekBarChangeListener,
+    DatePicker.OnDateChangedListener {
 
     /** `detail` is unused (0) for a click. */
     override fun onClick(v: View) {
@@ -69,6 +71,20 @@ class FrustNativeListener(private val slotId: Long) :
         nativeOnEvent(slotId, KIND_DRAG_END, 0L)
     }
 
+    /**
+     * `detail` packs the reported date as `year << 16 | month << 8 | day`,
+     * with `month` **1-based** — `DatePicker` reports `monthOfYear` 0-based
+     * (the `java.util.Calendar` convention), so 1 is added here, and only
+     * here. See the Rust side's `pack_date`/`unpack_date` in
+     * `plugins/native-widgets/src/events.rs`, which also validates the date.
+     */
+    override fun onDateChanged(view: DatePicker, year: Int, monthOfYear: Int, dayOfMonth: Int) {
+        val detail = ((year.toLong() and 0xFFFFL) shl 16) or
+            (((monthOfYear + 1).toLong() and 0xFFL) shl 8) or
+            (dayOfMonth.toLong() and 0xFFL)
+        nativeOnEvent(slotId, KIND_DATE, detail)
+    }
+
     private external fun nativeOnEvent(slotId: Long, kind: Int, detail: Long)
 
     private companion object {
@@ -97,5 +113,11 @@ class FrustNativeListener(private val slotId: Long) :
          * table — append-only, never renumbered.
          */
         const val KIND_SELECTION = 6
+        /**
+         * `DatePicker.OnDateChangedListener.onDateChanged` (the Rust side's
+         * `EVENT_KIND_DATE`, `detail` = the packed civil date). Appended
+         * after `KIND_SELECTION` — append-only, never renumbered.
+         */
+        const val KIND_DATE = 7
     }
 }

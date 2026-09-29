@@ -1696,6 +1696,10 @@ impl NativeEvent {
                 crate::events::EVENT_KIND_SELECTION,
                 crate::events::pack_index(index as isize),
             ),
+            EventPayload::Date(date) => (
+                crate::events::EVENT_KIND_DATE,
+                crate::events::pack_date(date),
+            ),
         };
         Self { kind, detail }
     }
