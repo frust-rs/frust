@@ -2755,7 +2755,7 @@ either control either; the compile-time refusal covers every non-Apple target un
 and their source-scanning parity test; `plugins/native-widgets/src/controls/segmented.rs`'s and
 `stepper.rs`'s module docs ("No Android arm (decision D2)" / "No Android arm (the same shape as
 decision D2)"); `plugins/native-widgets/src/api/builders.rs`'s `SEGMENTED_ARM`/`STEPPER_ARM`
-compile-time constants and `banner_placeholder`; `plugins/native-widgets/README.md`'s "Ten
+compile-time constants and `banner_placeholder`; `plugins/native-widgets/README.md`'s "Eleven
 controls" table.
 
 ---
@@ -2893,15 +2893,29 @@ class doc, `armed`, and `disarm()`.
 
 ---
 
-### `native-widgets-alert-drop-leaves-platform-ui` — dropping a `Presentation` frees the Busy slot but leaves the platform alert on screen
+### `native-widgets-alert-drop-leaves-platform-ui` — dropping a `Presentation` frees the Busy slot but leaves the platform alert or sheet on screen
 
-**Observed**: dropping `Presentation<T>` releases the process-wide Busy slot (a new request may present at once) but does not dismiss the platform alert; it stays on screen until the next request displaces it (the displacing arm takes it down first) or the user answers it, and that answer is discarded because nothing is listening.
+**Observed**: dropping `Presentation<T>` releases the process-wide Busy slot (a new request — alert or sheet — may present at once) but does not dismiss the live platform UI. An alert stays on screen until the next request displaces it (the displacing arm takes it down first) or the user answers it, and that answer is discarded because nothing is listening. A sheet behaves the same way: dropping its future frees the slot, not the sheet, so a newer request (of either kind) can find the older sheet still live; a displaced sheet is taken down first and the new presentation is shown from that dismissal's completion, and a displaced presentation of another kind takes itself down through its own arm with the sheet presenting right behind that call.
 
-**Applies to**: any caller that drops the future returned by `show_native_alert` (or the request behind `show_native_alert_into`) without calling `dismiss`, on all three arms.
+**Applies to**: any caller that drops the future returned by `show_native_alert` (or the request behind `show_native_alert_into`) without calling `dismiss`, on all three alert arms; the same holds for `show_native_sheet` (or `show_native_sheet_into`) on its one arm, iOS/iPadOS.
 
 **Why accepted**: documented module contract (`present/mod.rs`: dropping the future frees only this module's bookkeeping); tearing down live platform UI from a dropped future would need arm-specific plumbing for a case the API already covers with `dismiss`.
 
-**Evidence**: `plugins/native-widgets/src/present/mod.rs` module doc; `apple_alert.rs` / `appkit_alert.rs` / `android_alert.rs` *A displaced presentation* sections.
+**Evidence**: `plugins/native-widgets/src/present/mod.rs` module doc; `apple_alert.rs` / `appkit_alert.rs` / `android_alert.rs` and `apple_sheet.rs`'s *A displaced presentation* sections.
+
+---
+
+### `native-sheet-ipad-regular-width-detents` — a page sheet in a regular-width iPad window ignores detents
+
+**Observed**: UIKit presents a page sheet in a regular-width iPad window as a centered form sheet at a fixed size, not at any of its configured detents; only an edge-attached presentation — compact width, or compact height with `prefersEdgeAttachedInCompactHeight` — rests at its detents. The arm configures `sheetPresentationController.detents` regardless (they take effect the moment the window turns compact — Slide Over, Split View) and never fakes parity between the two idioms.
+
+**Applies to**: `show_native_sheet`/`show_native_sheet_into` on iPadOS whenever the presenting window is in regular width (full-screen or a large Split View pane).
+
+**Why accepted**: the API never promises detent parity across idioms; it is a UIKit presentation-controller rule, not a bug this crate's arm can route around without abandoning `UISheetPresentationController` (and the page-sheet chrome that comes with it) for a hand-built modal.
+
+**Evidence**: `plugins/native-widgets/src/present/apple_sheet.rs`'s module doc, *iPad in regular width ignores detents*; `plugins/native-widgets/src/present/mod.rs`'s `Detent` doc.
+
+**Workaround**: none — design sheet content to read well at both a compact edge-attached presentation and a regular-width centered form sheet; never rely on detent changes firing on an iPad in regular width.
 
 ---
 

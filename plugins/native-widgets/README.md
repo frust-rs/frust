@@ -33,7 +33,7 @@ not re-export it.
 
 ## 1. What you get
 
-Ten controls, one Rust API, no Kotlin or Swift to write for any of them:
+Eleven controls, one Rust API, no Kotlin or Swift to write for any of them:
 
 | Builder | Android view | iOS view | macOS view |
 |---|---|---|---|
@@ -82,8 +82,11 @@ carries a stable app-chosen `TabId`, a title, an icon — `TabIcon::AppleSymbol`
 `.selected_icon(…)`, a `.badge(…)` and `.enabled(false)`. `.on_select(|id| …)`
 reports the *requested* tab: route there and feed the id back as `selected`
 (controlled, like `native_segmented`). `.on_reselect(|id| …)` fires when the
-user taps the tab already showing — the conventional "scroll to top / pop to
-root". The bar sizes itself to 49pt plus the window's bottom safe-area inset,
+tab the app last confirmed was tapped again — the conventional "scroll to
+top / pop to root" — not merely the one UIKit is highlighting: a tap you
+reject (no write-back) retapped still reports as another `.on_select`, even
+though the OS has already moved the highlight to it. The bar sizes itself to
+49pt plus the window's bottom safe-area inset,
 so its background runs under the home indicator: put it last in a `Column`
 docked to the bottom edge, and if you wrap it in `frust::safe_area` for
 horizontal cutouts use `.top(false).bottom(false)` (the way `examples/huddle`
