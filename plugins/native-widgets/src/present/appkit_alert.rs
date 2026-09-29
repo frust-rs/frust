@@ -32,6 +32,13 @@
 //! carry the Cancel role ([`AlertSpec::validate`]), so this is never
 //! ambiguous.
 //!
+//! Pressing Return resolves `AlertOutcome::Action(id)` for the first action,
+//! and pressing Escape resolves `AlertOutcome::Action(id)` for the
+//! Cancel-role action. Since macOS sheets have no click-away dismissal
+//! (unlike iPad popovers), this arm never produces a bare `Cancelled` —
+//! the only way to get `Dismissed` is via [`super::dismiss`] or a call
+//! before presentation started.
+//!
 //! # Resolution
 //!
 //! Every path resolves the presentation by first taking its live entry back
@@ -84,6 +91,17 @@
 //! callback this arm can see; the presentation then stays pending until
 //! [`super::dismiss`] resolves it `Dismissed` or its caller drops the
 //! future.
+//!
+//! # Command-Q termination
+//!
+//! When the user presses ⌘Q to quit the application while a sheet is
+//! presented, the sheet's completion handler never fires — AppKit terminates
+//! the process before the handler runs. As a result, `HostLost` is *not*
+//! required for a clean quit: a caller that drops its [`super::Presentation`]
+//! without waiting for an outcome, or lets a future go unresolved, will
+//! still exit cleanly even when an alert is live on screen. To ensure
+//! responsive quit behavior, do not require `HostLost` or `Dismissed` for
+//! shutdown logic.
 //!
 //! # `unsafe`
 //!
