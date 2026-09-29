@@ -2791,6 +2791,79 @@ unwired because "two children attached for the same family are indistinguishable
 
 ---
 
+### `native-widgets-android-date-picker-range` — Android's `DatePicker` resolves a missing bound to its own 1900–2100 range and clamps into it; the Apple arms do not
+
+**Observed**: `android.widget.DatePicker`'s documented default and usable range is 1900-01-01
+through 2100-12-31 (`date_picker.rs`'s Android `platform::BOUNDS`, built from `PLATFORM_MIN`/
+`PLATFORM_MAX`). A missing `min`/`max` resolves to that range on Android and to this crate's own
+unbounded `CivilDate::MIN`/`CivilDate::MAX` on iOS/macOS (`Bounds::APPLE`). At plan time
+(`Bounds::effective_range`, called from `DatePickerProps::plan`), an explicit bound outside the
+calling arm's own range — or a date outside the resolved range — is clamped into it, never left to
+reach a platform setter as an out-of-range or inverted pair; `warn_if_clamped` logs one warning per
+`plan` call naming the slot, the clamped values, and the arm's range. Because this clamp is
+arm-resolved rather than the platform-agnostic clamp `DatePickerProps::decode` already applies to an
+explicit `min > max`, an app that sets, say, a minimum date after 2100 gets a single-day range on
+Android (the floor collapses onto the ceiling) while iOS/macOS honour the same value unclamped.
+
+**Applies to**: `native_date_picker`'s `min`/`max` builders (`NativeDatePickerView::min`/`max`) on
+Android specifically; iOS and macOS resolve the same bounds unbounded.
+
+**Why accepted**: the range is the framework's own — `DatePicker`'s calendar/spinner presentation
+sizes itself from `max - min` — and never handing it an inverted or out-of-range pair is the safe,
+Apple-first contract this crate commits to elsewhere (module doc's *Range*): clamp to what the
+platform will actually hold rather than asking it to reject or silently reinterpret an illegal
+range.
+
+**Evidence**: `plugins/native-widgets/src/controls/date_picker.rs` — `Bounds::APPLE`, the Android
+`platform::BOUNDS`/`PLATFORM_MIN`/`PLATFORM_MAX`, `Bounds::effective_range`, `DatePickerProps::plan`,
+`warn_if_clamped`, the module doc's *Range* section, and the tests
+`an_explicit_min_above_androids_ceiling_clamps_the_bound_and_the_date`,
+`an_explicit_max_below_androids_floor_clamps_the_bound`, and
+`the_same_out_of_androids_range_bounds_are_not_clamped_on_apple`; `plugins/native-widgets/src/api/builders.rs`'s
+`NativeDatePickerView::min`/`max` rustdoc.
+
+**Workaround**: keep app-supplied bounds inside 1900-01-01..2100-12-31 where Android matters.
+
+---
+
+### `native-widgets-android-component-listener-disarm` — releasing a `NativeComponent`'s `ListenerHandle` on Android disarms the listener object, not the view's interface
+
+**Observed**: Android's `View.setOn*Listener` setters each hold exactly one listener, replace it
+outright, and expose no getter — so a release can never confirm it still holds the listener it
+created, and nulling the interface could silently wipe a newer listener a later
+`ComponentCtx::attach_listener` call set on the same view. `ListenerHandle`'s Android `Drop` (and
+the equivalent explicit `ComponentCtx::detach_listener`) therefore never calls a `setOn*Listener`
+setter: it obtains a JNI env from the process VM, checks for a pending Java exception first
+(skipping the disarm and logging if one is pending, since no JNI call is safe with one pending), and
+otherwise calls `FrustNativeListener.disarm()` through `NativeCtx::disarm_listener` — flipping that
+one instance's `@Volatile armed` flag, which every overridden callback checks before reporting —
+then releases both global references regardless of the outcome. A disarmed instance is left set on
+the view: it stays there, inert, until a later `attach_listener` call replaces it or the view itself
+is destroyed. The one place nulling a listener interface remains is `android/ctx.rs`'s
+`unwind_partial_attach`, reached only from inside the same `attach_listener` call that just set
+those interfaces synchronously moments earlier — nothing else can have replaced them in between, so
+nulling is identity-safe there and nowhere else.
+
+**Applies to**: any `NativeComponent` implementor on Android calling `ComponentCtx::attach_listener`
+more than once for the same view, or relying on `detach_listener`/a handle's drop to stop a listener
+from ever firing again on the platform side. The disarm mechanism itself is exercised on a device
+gate, not by a host-only `cargo test` — the host arm's `ListenerInner` stand-in has no `armed` flag
+to disarm.
+
+**Why accepted**: the alternative — nulling the view's interface on release — is exactly the
+regression a review caught: it can wipe a newer listener a later attach already installed. The cost
+of disarming instead is one inert Java listener object per released handle, kept alive by the
+view's listener field — not by any JNI global reference, both of which the drop releases — until a
+later attach replaces it or the view is destroyed.
+
+**Evidence**: `plugins/native-widgets/src/component.rs` — `ListenerHandle`'s doc, the Android
+`ListenerInner` struct, and `impl Drop for ListenerHandle` under `target_os = "android"`;
+`plugins/native-widgets/src/android/ctx.rs`'s `disarm_listener` and `unwind_partial_attach`;
+`plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativeListener.kt`'s
+class doc, `armed`, and `disarm()`.
+
+---
+
 ### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
 
 **Observed**: `examples/design-system-sample`'s widgets each carry a `semantics` impl, and the
