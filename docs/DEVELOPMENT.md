@@ -97,12 +97,10 @@ Under an override, `build/rust` stays empty by design — every Frust tool resol
 That is the manual visual gate for rendering/interaction/theme/navigation/text-input changes (no
 automated pixel-diff test yet, so a person must look at the window) — including the check that a
 background-thread wake (e.g. a timer-driven completion) renders content with zero mouse movement,
-not only on an input-triggered redraw. `examples/huddle`'s own verify gate (`cargo test` plus
-clippy, from its own directory) is part of *Test* below. **Design-system install gate.** Huddle's
-appearance settings expose a four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph
-dark+light check (desktop, Android, iOS) plus a reduced-motion pass round out that manual gate — no
-automated check exists for either. A shell with no design system installed falls back to
-`Theme::neutral()`.
+not only on an input-triggered redraw. **Design-system install gate.** Huddle's appearance settings
+expose a four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check
+(desktop, Android, iOS) plus a reduced-motion pass round out that manual gate — no automated check
+exists for either. A shell with no design system installed falls back to `Theme::neutral()`.
 
 **shadcn gallery.** `cargo run -p shadcn-demo` (a root-workspace member, so no standalone gate)
 opens the `frust-shadcn` catalog's desktop gallery, the same manual-visual-gate shape as huddle's.
@@ -255,6 +253,8 @@ Additionally run:
 (cd examples/huddle && cargo test && cargo clippy --all-targets -- -D warnings) \
   && (cd examples/playground && cargo test \
         && cargo clippy --all-targets -- -D warnings && cargo fmt --check) \
+  && (cd examples/native-widgets-demo && cargo test \
+        && cargo clippy --all-targets -- -D warnings && cargo fmt --check) \
   && (cd examples/design-system-sample && cargo test \
         && cargo clippy --all-targets -- -D warnings && cargo fmt --check) \
   && (cd examples/material3-demo && cargo test \
@@ -262,7 +262,7 @@ Additionally run:
   && (cd plugins/clean-signals-frust && cargo test && cargo clippy --all-targets -- -D warnings)
 ```
 
-All five gate from their own directory rather than `-p` from the repo root, being standalone
+All six gate from their own directory rather than `-p` from the repo root, being standalone
 workspaces excluded from the root one (*Version-Pin Policy*) — the same shape `examples/shadertoy`,
 `examples/glyph-catalog`, `examples/web-gallery` and `examples/web-spike` gate under, per their own
 READMEs (the latter two against the wasm32 target). `huddle` and `clean-signals-frust` git+rev-pin
@@ -276,7 +276,7 @@ unification. Separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 plain (non-feature-gated) dependencies of `frust-render`, so their host-only tests already ride
 `cargo test --workspace`; their adapter-pinned real-GPU arms are separate `--ignored` commands — see
 [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s GPU Substrate / Golden Oracle Tests sections.
-`frust-native-widgets`' `demo-components` is a composite `NativeComponent` demo of real JNI/UIKit/AppKit view construction, shipped inside the plugin rather than in `examples/playground` (which merely switches it on) because an app crate cannot implement that trait without raw `jni`/`objc2-ui-kit`/`objc2-app-kit` deps the plugin does not re-export; the mobile compile gates below are its only build, plus its own macOS darwin-target tripwire ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s objc2 pin row). Separately, `frust-native-widgets`' own shared runtime/component/mount/demo-lifecycle host tests compile only on a host with **no** platform arm (`#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]`) — so a macOS `cargo test --workspace` run silently skips roughly 50 of them (runtime 26, component 21, `api::mount` 3, demo 3), and Linux/Windows/web are what actually exercise that dispatch/diff/lifecycle contract; see [TESTING.md](TESTING.md).
+`frust-native-widgets`' `demo-components` is a composite `NativeComponent` demo of real JNI/UIKit/AppKit view construction, shipped inside the plugin rather than in `examples/native-widgets-demo` (whose Composite page merely switches it on) because an app crate cannot implement that trait without raw `jni`/`objc2-ui-kit`/`objc2-app-kit` deps the plugin does not re-export; the mobile compile gates below are its only build, plus its own macOS darwin-target tripwire ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s objc2 pin row). Separately, `frust-native-widgets`' own shared runtime/component/mount/demo-lifecycle host tests compile only on a host with **no** platform arm (`#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]`) — so a macOS `cargo test --workspace` run silently skips roughly 50 of them (runtime 26, component 21, `api::mount` 3, demo 3), and Linux/Windows/web are what actually exercise that dispatch/diff/lifecycle contract; see [TESTING.md](TESTING.md).
 `frust-database`'s `engine-turso` needs its own gate (`cargo test -p frust-database --features
 engine-turso`, libclang required), and `devtools` (the in-app debug service,
 [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) the same shape: `cargo test -p

@@ -276,13 +276,10 @@ for any future value crossing this boundary.
 `frust-widgets`/`frust-core` directly instead of the facade.
 
 **GOOD:** depend on `frust::authoring` only (`frust`, `default-features = false`), and file a gap
-against `authoring` instead. The historical Cargo-feature-unification hazard this anti-pattern used
-to warn about (one `features = ["glyph"]` line silently turning a catalog back on for every
-dependent app) no longer applies — `frust` carries no catalog cargo feature at all; the three
-built-ins are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
+against `authoring` instead. `frust` carries no catalog cargo feature at all — the three built-ins
+are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
 Design-System Plugins). `design-system-sample`'s `cargo tree -e features -i frust -p sample-app`
-gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) now proves out-of-tree resolution realism rather than
-a catalog-off contract.
+gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) proves out-of-tree resolution realism.
 
 ### Printing directly from a `frust-drive` build/run core
 
@@ -520,10 +517,10 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
   `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
   those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
-  Version-Pin Policy). Mechanically enforced
-  across `benchmarks/frust_bench` and the four in-repo example apps by
-  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt
-  ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
+  Version-Pin Policy). Mechanically enforced across `benchmarks/frust_bench` and the five
+  in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
+  `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
+  the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
