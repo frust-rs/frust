@@ -66,8 +66,11 @@
 //! takes each arm's own [`Bounds`] and orders the two range setters against
 //! the values the platform will *actually* hold: the bound that *widens*
 //! the range (compared with `Bounds`-resolved ceilings, never a
-//! platform-agnostic assumption) is written first, so the platform never
-//! passes through an inverted range either. A range change also re-asserts
+//! platform-agnostic assumption) is written first. If a `None` bound
+//! resolves inverted on one arm (e.g. an app sets min to 2150-01-01 with no
+//! max on Android, where the ceiling is 2100-12-31), a warning is logged
+//! and the inverted range is handed to the platform's own setter, whose
+//! exception or clamp is the authority. A range change also re-asserts
 //! [`Setter::Date`], because narrowing a range can move the platform's
 //! date.
 //!
@@ -379,14 +382,23 @@ impl DatePickerProps {
         observed: Option<CivilDate>,
         bounds: Bounds,
     ) -> Plan<'a> {
-        // Belt-and-braces on top of the decode-time clamp (module doc's
-        // *Range*): a request this arm cannot ever resolve to a valid
-        // `floor <= ceiling` range on ITS OWN platform is a decode-side or
-        // app-side bug, not something the ordering below can paper over.
-        debug_assert!(
-            bounds.resolve_min(new.min) <= bounds.resolve_ceiling(new.max),
-            "a date-picker range must never resolve inverted on the platform it targets"
-        );
+        // A range that resolves inverted for this platform is handed to the
+        // platform as-is (module doc's *Range*): the platform's own setter
+        // guards (Android's exception, or the framework's clamp) are the
+        // authority. Log a warning so operators can diagnose app-side bounds
+        // that are valid on one arm but inverted on another.
+        let resolved_min = bounds.resolve_min(new.min);
+        let resolved_ceiling = bounds.resolve_ceiling(new.max);
+        if resolved_min > resolved_ceiling {
+            log::warn!(
+                "frust-native-widgets: date_picker slot {} has a resolved range \
+                 {}..{} that is inverted for this platform — handing to the \
+                 platform's own setter to resolve",
+                new.slot,
+                resolved_min,
+                resolved_ceiling
+            );
+        }
         let mut plan = Plan::new();
         if old.style != new.style {
             plan.push(Setter::DatePickerStyle(new.style));
@@ -1549,6 +1561,19 @@ mod tests {
              — a widen, so the ceiling moves first; the two arms disagree \
              on order for the exact same props"
         );
+    }
+
+    #[test]
+    fn planning_with_an_inverted_resolved_range_does_not_panic() {
+        // An app setting min to 2150-01-01 with no max is valid API input
+        // on Apple (ceiling 9999-12-31) but resolves inverted on Android
+        // (ceiling 2100-12-31). The plan should not panic and should emit
+        // the MinDate setter (no MaxDate since max didn't change from None).
+        let old = DatePickerProps::platform_default(7);
+        let new = decode(&field(MIN_DATE, date(2150, 1, 1)));
+        let plan = DatePickerProps::plan(&old, &new, None, android_bounds());
+        // The warning is logged but the plan proceeds with the setter.
+        assert_eq!(plan, vec![Setter::MinDate(Some(date(2150, 1, 1)))]);
     }
 
     #[test]
