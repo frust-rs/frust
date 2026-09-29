@@ -236,6 +236,86 @@ fn page_text_colors_track_brightness() {
     }
 }
 
+/// Every page publishes exactly its documented at-rest number of native
+/// `platform_view` slots ([`pages::AT_REST_SLOTS`], resolved for the target
+/// this test runs on) at both viewport sizes and on a second frame — the
+/// structural half of each page's "expected at rest" readout. A builder that
+/// renders a refusal banner on this target publishes no slot, so the count
+/// also pins which families refuse here.
+#[test]
+fn every_page_publishes_its_documented_at_rest_slot_count() {
+    for (section, label) in SECTION_LABELS.iter().enumerate() {
+        for (w, h) in SIZES {
+            let (_owner, theme) = setup_with_theme(Brightness::Dark);
+            let mut tcx = TextContext::new();
+            let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
+                RenderRoot::new();
+            root.set_theme(Box::new(theme));
+            let mut state = NativeWidgetsDemoState::new();
+            let mut logic = |s: &mut NativeWidgetsDemoState| pages::current(section, s);
+            let expected = pages::at_rest_slots(section);
+            for t_ms in [0, 16] {
+                let (scene, _outcome) = frame_at_size(
+                    &mut root,
+                    &mut logic,
+                    &mut state,
+                    &mut tcx,
+                    Size::new(w, h),
+                    t_ms,
+                );
+                assert_eq!(
+                    root.platform_view_frames().len(),
+                    expected,
+                    "section {section} ({label}) at {w}x{h}, frame at {t_ms} ms: published \
+                     native slots must equal the documented at-rest count",
+                );
+                assert!(
+                    scene.text_runs > 0 && scene.rounded + scene.fills > 0,
+                    "section {section} ({label}) paints text and chrome at {w}x{h}",
+                );
+            }
+        }
+    }
+}
+
+/// [`pages::common::anchor_probe`] records the window-space rect its child
+/// was painted at — the value the Alerts page hands an action sheet as its
+/// anchor — accumulated through ancestors' offsets, and transparent to the
+/// child's own size.
+#[test]
+fn anchor_probe_records_the_painted_window_rect() {
+    use frust::{Axis, EdgeInsets, FlexView, Padding, SizedBox, inflexible};
+    use native_widgets_demo::pages::common::{anchor_probe, anchor_rect};
+
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
+        RenderRoot::new();
+    let mut state = NativeWidgetsDemoState::new();
+    let mut logic = |_: &mut NativeWidgetsDemoState| {
+        any(Padding(
+            EdgeInsets::all(20.0),
+            FlexView::new(
+                Axis::Vertical,
+                vec![
+                    inflexible(SizedBox(Some(10.0), Some(40.0))),
+                    inflexible(anchor_probe(
+                        "smoke.anchor",
+                        SizedBox(Some(120.0), Some(44.0)),
+                    )),
+                ],
+            ),
+        ))
+    };
+    frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    let anchor = anchor_rect("smoke.anchor").expect("the probe painted");
+    assert_eq!(
+        (anchor.x, anchor.y, anchor.width, anchor.height),
+        (20.0, 60.0, 120.0, 44.0),
+        "origin = padding + the sibling above; size = the child's own",
+    );
+}
+
 #[test]
 fn out_of_range_section_falls_back() {
     let _owner = setup();

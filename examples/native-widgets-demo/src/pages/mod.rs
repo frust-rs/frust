@@ -1,10 +1,19 @@
-//! The section pages, one per native-widget family, in
-//! [`SECTION_LABELS`](crate::SECTION_LABELS) order.
+//! The section pages, one module per [`SECTION_LABELS`](crate::SECTION_LABELS)
+//! entry, plus [`common`] (the chrome and helpers they share):
 //!
-//! Every section is a placeholder today — it renders its label and a
-//! one-line summary of the family it will catalog. Each family's page lands
-//! as its own module here, replacing that section's [`placeholder`] arm in
-//! [`current`].
+//! | Label | Module | Demonstrates |
+//! |---|---|---|
+//! | Controls | [`controls`] | the six base builders beside frust-drawn peers, write-back, theme toggle |
+//! | macOS | [`macos`] | the AppKit arm: class map, documented AppKit gaps, a live `Cover`/`Contain` image pair |
+//! | New | [`new_controls`] | spinner, segmented, stepper, date picker |
+//! | Alerts | [`alerts`] | native alerts + an anchored action sheet, Busy, programmatic dismiss |
+//! | TabBar | [`tab_bar`] | a bare native tab bar driving a page-local index |
+//! | Sheet | [`sheet`] | the native page sheet: detents, grabber, non-dismissible, programmatic control |
+//! | Composite | [`composite`] | the plugin's `DemoCard` composite and its events, behind a toggle |
+//! | Stress | [`stress`] | the live-slot readout, mount/unmount cycler and 50-slot stress toggle |
+//!
+//! Each page states its documented at-rest native-slot count in its header
+//! ([`common::AT_REST_SLOTS`]).
 //!
 //! # Page-fn contract (fixed across every section)
 //!
@@ -27,66 +36,51 @@
 //!   compare them in one frame.
 //!
 //! **Reactivity rule** (see `docs/CODE_STANDARDS.md`): a page's `build` may
-//! only *read* signals; every write happens in an event handler.
+//! only *read* signals; every write happens in an event handler — a frust
+//! `on_*` callback or a native control's listener.
 
-use frust::{AnyView, Axis, EdgeInsets, FlexView, Padding, SizedBox, Theme, any, inflexible, text};
+pub mod alerts;
+pub mod common;
+pub mod composite;
+pub mod controls;
+pub mod macos;
+pub mod new_controls;
+pub mod sheet;
+pub mod stress;
+pub mod tab_bar;
+
+use frust::AnyView;
 
 use crate::{NativeWidgetsDemoState, SECTION_LABELS};
+
+pub use common::{AT_REST_SLOTS, at_rest_slots};
 
 /// One-line summary per section, index-aligned with
 /// [`SECTION_LABELS`](crate::SECTION_LABELS) — what each page catalogs.
 pub const SECTION_SUMMARIES: [&str; SECTION_LABELS.len()] = [
     "The six base controls - button, label, switch, slider, progress, image - \
      native beside frust-drawn.",
-    "The same controls as AppKit views on macOS.",
+    "The AppKit arm: which class each builder mounts on macOS and the gaps it documents.",
     "Spinner, segmented control, stepper and date picker.",
-    "Native alert and action sheet.",
+    "Native alerts and an anchored action sheet.",
     "The native tab bar (UITabBar on iOS/iPadOS).",
     "The native page sheet (UISheetPresentationController on iOS/iPadOS).",
     "A native component subtree and its events.",
-    "A 50-slot stress harness of native controls.",
+    "Live-slot readout, mount/unmount cycler and a 50-slot stress toggle.",
 ];
 
 /// Dispatch to the page for `section`, falling back to the first section for
 /// any out-of-range index (defensive — the navigation only ever yields a
 /// valid index).
 pub fn current(section: usize, state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
-    let section = if section < SECTION_LABELS.len() {
-        section
-    } else {
-        0
-    };
-    placeholder(section, state)
-}
-
-/// Page padding, logical px.
-const PAGE_PADDING_PX: f64 = 16.0;
-
-/// Gap between the placeholder's heading and its summary, logical px.
-const HEADING_GAP_PX: f64 = 8.0;
-
-/// A section awaiting its catalog: the label as a theme-accented heading over
-/// the section summary (theme `on_surface`) and a muted status line. Every
-/// color resolves from the live theme, so it tracks the brightness toggle.
-fn placeholder(section: usize, _state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
-    let theme = frust::use_context::<Theme>().unwrap_or_else(frust_glyph::baseline);
-    let scheme = theme.scheme();
-    let accent = scheme.primary;
-    let muted = scheme.on_surface_variant;
-
-    any(Padding(
-        EdgeInsets::all(PAGE_PADDING_PX),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(text(SECTION_LABELS[section]).size(22.0).color(accent))),
-                inflexible(any(SizedBox(None, Some(HEADING_GAP_PX)))),
-                inflexible(any(text(SECTION_SUMMARIES[section]).size(14.0))),
-                inflexible(any(SizedBox(None, Some(HEADING_GAP_PX)))),
-                inflexible(any(text("This page's catalog is not built yet.")
-                    .size(12.0)
-                    .color(muted))),
-            ],
-        ),
-    ))
+    match section {
+        1 => macos::page(state),
+        2 => new_controls::page(state),
+        3 => alerts::page(state),
+        4 => tab_bar::page(state),
+        5 => sheet::page(state),
+        6 => composite::page(state),
+        7 => stress::page(state),
+        _ => controls::page(state),
+    }
 }

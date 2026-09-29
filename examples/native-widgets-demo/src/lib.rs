@@ -81,6 +81,24 @@ pub fn section_index_for(label: &str) -> Option<usize> {
         .position(|&s| s.eq_ignore_ascii_case(label))
 }
 
+/// The debug-only environment variable naming the section to open at launch
+/// (a [`SECTION_LABELS`] entry, case-insensitive) — the desktop shell has no
+/// launch-time deep link, so this is how a scripted `cargo run` reaches a
+/// page without input automation. Unset, empty or unknown: ignored (section
+/// 0). Read once in [`NativeWidgetsDemoApp`]'s `init`, and only in debug
+/// builds.
+pub const SECTION_ENV_VAR: &str = "FRUST_DEMO_SECTION";
+
+/// The section a [`SECTION_ENV_VAR`] value selects: `None` when unset, blank
+/// or not a known label (surrounding whitespace ignored).
+pub fn section_from_env_value(value: Option<&str>) -> Option<usize> {
+    let label = value?.trim();
+    if label.is_empty() {
+        return None;
+    }
+    section_index_for(label)
+}
+
 // ---------------------------------------------------------------------------
 // Deep-link routing — pure parse/plan functions plus the small root-mounted
 // `deep_link_router` component that applies them (copied from
@@ -443,7 +461,15 @@ impl Component for NativeWidgetsDemoApp {
     type State = NativeWidgetsDemoState;
 
     fn init(&self) -> NativeWidgetsDemoState {
-        NativeWidgetsDemoState::new()
+        let state = NativeWidgetsDemoState::new();
+        // Debug builds only: a launch-time section for scripted desktop runs
+        // (see `SECTION_ENV_VAR`). Release builds never read the environment.
+        #[cfg(debug_assertions)]
+        if let Some(index) = section_from_env_value(std::env::var(SECTION_ENV_VAR).ok().as_deref())
+        {
+            state.section.set(index);
+        }
+        state
     }
 
     fn build(&self, state: &mut NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
@@ -566,6 +592,16 @@ mod deep_link_tests {
             parse_section_deep_link("native-widgets-demo://section/"),
             None
         );
+    }
+
+    #[test]
+    fn section_env_value_selects_a_known_label_only() {
+        let stress = section_index_for("Stress").expect("Stress is a known section");
+        assert_eq!(section_from_env_value(Some("stress")), Some(stress));
+        assert_eq!(section_from_env_value(Some("  Stress\n")), Some(stress));
+        assert_eq!(section_from_env_value(Some("nope")), None);
+        assert_eq!(section_from_env_value(Some("")), None);
+        assert_eq!(section_from_env_value(None), None);
     }
 
     #[test]
