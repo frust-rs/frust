@@ -90,8 +90,8 @@ in reverse too: tap back on the tab the app still confirms and that retap
 fires `.on_reselect`, even though the OS's own highlight had just moved to
 the rejected tab a moment before, not to the one you tapped back — an app
 that pops to root on `.on_reselect` should feed the confirmed selection back
-promptly so its highlight and `selected` never keep diverging. The bar sizes itself to
-49pt plus the window's bottom safe-area inset,
+promptly so its highlight and `selected` never keep diverging. The bar
+sizes itself to 49pt plus the window's bottom safe-area inset,
 so its background runs under the home indicator: put it last in a `Column`
 docked to the bottom edge, and if you wrap it in `frust::safe_area` for
 horizontal cutouts use `.top(false).bottom(false)` (the way `examples/huddle`
