@@ -69,15 +69,16 @@ off this index — read this plus the one that covers what you are touching:
     `unsafe impl Send/Sync` (serial-queue confinement, one `# Safety` note), and
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1** — a +0
     borrow proved unhonourable across the FFI boundary).
-  - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked`
-    for hot per-frame property setters, confined to one `# Safety`-documented helper
-    (`call_void_cached`, `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule)
-    with a per-call-site note pairing the cached id to its class/signature; cold setters use
-    the checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend
-    closes objc2's nullability-unannotated `unsafe` (not a memory-safety claim) behind
-    **safe** property wrappers, each `// SAFETY:`-noted at its one call site; the same arm's
-    `define_class!`/`extern_protocol!` factory/event-target registration and
-    `addTarget:action:` attach/detach are the other confined sites.
+  - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked` for hot
+    per-frame property setters, confined to one `# Safety`-documented helper (`call_void_cached`,
+    `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule); cold setters use the
+    checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend closes objc2's
+    nullability-unannotated `unsafe` (not a memory-safety claim) behind **safe** property wrappers,
+    each `// SAFETY:`-noted at its call site; the arm's `define_class!`/`extern_protocol!`
+    factory/event-target registration and `addTarget:action:` attach/detach are its other sites. Its
+    presentation arms add `apple_host::on_main`'s `MainThreadMarker::new_unchecked()`, proving
+    the `dispatch2` main-queue bounce, and `apple_alert`/`apple_sheet`/`appkit_alert`'s
+    `define_class!` controller and `block2` handlers — each `SAFETY`-noted.
   - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the
     Swift glue's singleton by runtime-only class name (no generated binding for it), plus two
     completion blocks (`RcBlock`) receiving raw `NSString` pointers whose validity only the
