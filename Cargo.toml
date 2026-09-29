@@ -55,6 +55,11 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # create` scaffold once it had to run on Android and iOS devices — its
 # `[profile.*]` blocks only take effect in a workspace root. Gate it from its
 # own directory (see its README).
+# examples/native-widgets-demo (the native-widgets showcase and device-gate
+# vehicle) is standalone for glyph-catalog's reason: a full `frust create`
+# scaffold (Android/iOS/macOS) whose hand-synced `[profile.*]` blocks only take
+# effect in a workspace root, and whose generated Android/iOS projects resolve
+# a project-local build dir. Gate it from its own directory (see its README).
 # plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
@@ -62,7 +67,7 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # examples/web-spike (web-shell plan Phase 0) is a throwaway standalone
 # workspace that compiles the engine graph for wasm32 with its own target
 # and RUSTFLAGS; it must never be absorbed by the `examples/*` glob.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
+exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "examples/native-widgets-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
