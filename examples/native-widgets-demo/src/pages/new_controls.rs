@@ -34,7 +34,7 @@ use frust_native_widgets::{
 
 use super::common::{
     CellFit, NativeClasses, PAIR_CELL_W, S, block, bump, caption, chip, gap, gap_h, local_sig,
-    page_column, page_header, pair_row, readout, row,
+    page_column, page_header, pair_row, pair_row_sized, readout, row,
 };
 
 /// This page's index in [`SECTION_LABELS`](crate::SECTION_LABELS).
@@ -144,7 +144,6 @@ fn spinner_block(animating: bool) -> Vec<FlexChildS> {
             },
             "Display-only. Toggle it: both columns stop and start together.",
             CellFit::Natural,
-            PAIR_CELL_W,
             44.0,
             any(native_spinner(animating)
                 .content_description("Native spinner")
@@ -183,7 +182,6 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
             },
             "Controlled: a tap reports the requested segment; the app feeds it back.",
             CellFit::Stretch,
-            PAIR_CELL_W,
             32.0,
             any(native_segmented(labels.clone(), selected)
                 .content_description(description)
@@ -243,7 +241,6 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
             "Glyph has no stepper: the drawn column is two baseline buttons over the same \
              step/wrap arithmetic.",
             CellFit::Natural,
-            PAIR_CELL_W,
             36.0,
             any(native_stepper(value, STEPPER_MIN, STEPPER_MAX)
                 .step(step)
@@ -277,7 +274,7 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
 }
 
 /// The date picker: compact (140×40pt in a pair) or inline (300×330pt in the same
-/// pair structure) — always built through [`pair_row`], at the same [`FlexChildS`]
+/// pair structure) — always built through [`pair_row_sized`], at the same [`FlexChildS`]
 /// position, so a compact/inline switch never changes the concrete view type
 /// `AnyView::rebuild` walks at that position (only the `width`, `height`, and
 /// `style` *values* differ). A version that instead swapped in a differently shaped
@@ -322,7 +319,7 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
     };
     let note = "Glyph has no date picker: the drawn column is a Text readout of the confirmed \
                 date. Range 2026-01-01..=2027-12-31.";
-    let mut rows = vec![pair_row(
+    let mut rows = vec![pair_row_sized(
         title,
         classes,
         note,

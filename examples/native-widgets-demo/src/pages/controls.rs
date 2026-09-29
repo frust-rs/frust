@@ -358,7 +358,6 @@ pub fn page(state: &S) -> AnyView<S> {
             },
             "Native taps feed `Taps:`; the drawn one counts separately.",
             CellFit::Stretch,
-            PAIR_CELL_W,
             PAIR_BUTTON_H,
             button_native(),
             button_drawn(),
@@ -372,7 +371,6 @@ pub fn page(state: &S) -> AnyView<S> {
             },
             "A platform label against frust's own shaped text, same box.",
             CellFit::Stretch,
-            PAIR_CELL_W,
             PAIR_LABEL_H,
             label_native(),
             label_drawn(),
@@ -387,7 +385,6 @@ pub fn page(state: &S) -> AnyView<S> {
             "One shared value. Natural size, not stretched \u{2014} a platform Switch draws \
              its graphic at the right edge of an over-wide frame.",
             CellFit::Natural,
-            PAIR_CELL_W,
             PAIR_SWITCH_H,
             switch_native(checked, rejecting, switch_refused),
             switch_drawn(checked),
@@ -401,7 +398,6 @@ pub fn page(state: &S) -> AnyView<S> {
             },
             "One shared value, `0..=100` native / `0.0..=1.0` drawn. Drag either.",
             CellFit::Stretch,
-            PAIR_CELL_W,
             PAIR_SLIDER_H,
             slider_native(slider_value, rejecting, slider_refused),
             slider_drawn(slider_value),
@@ -416,7 +412,6 @@ pub fn page(state: &S) -> AnyView<S> {
             "Display-only on both sides \u{2014} one drag drives native \u{2192} signal \
              \u{2192} native and \u{2192} drawn.",
             CellFit::Stretch,
-            PAIR_CELL_W,
             PAIR_PROGRESS_H,
             progress_native(slider_value),
             progress_drawn(slider_value),
@@ -431,7 +426,6 @@ pub fn page(state: &S) -> AnyView<S> {
             "The same embedded PNG bytes, cover-fit: platform decoder vs frust's own. macOS \
              letterboxes Cover instead of cropping.",
             CellFit::Natural,
-            PAIR_CELL_W,
             PAIR_IMAGE,
             image_native(),
             image_drawn(),

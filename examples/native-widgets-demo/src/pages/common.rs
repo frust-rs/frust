@@ -346,8 +346,32 @@ pub fn cell(fit: CellFit, w: f64, h: f64, content: AnyView<S>) -> AnyView<S> {
 /// One comparison row: `title`, the per-platform native-class caption, a
 /// `note`, then the REAL platform control on the left and its frust-drawn
 /// counterpart on the right, in cells of exactly the same size.
-#[allow(clippy::too_many_arguments)]
 pub fn pair_row(
+    title: &str,
+    classes: NativeClasses,
+    note: &str,
+    fit: CellFit,
+    height: f64,
+    native: AnyView<S>,
+    drawn: AnyView<S>,
+) -> FlexChild<S> {
+    pair_row_sized(
+        title,
+        classes,
+        note,
+        fit,
+        PAIR_CELL_W,
+        height,
+        native,
+        drawn,
+    )
+}
+
+/// One comparison row with explicit cell width: `title`, the per-platform native-class caption, a
+/// `note`, then the REAL platform control on the left and its frust-drawn
+/// counterpart on the right, in cells of exactly the same size.
+#[allow(clippy::too_many_arguments)]
+pub fn pair_row_sized(
     title: &str,
     classes: NativeClasses,
     note: &str,
