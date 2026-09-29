@@ -19,7 +19,7 @@
 //! | events | decoded into the crate's typed `EventPayload` | the [`NativeEvent`] pair from a listener the component attached ([`ComponentCtx::attach_listener`]), answered with the event (if any) the app's `.on_event` hook receives |
 //! | context | the platform's own `NativeCtx` | the opaque [`ComponentCtx`] wrapper |
 //!
-//! The six v1 controls are **not** ported onto it: they stay internal
+//! The built-in controls are **not** ported onto it: they stay internal
 //! `NativeWidget` impls, and this module **bridges** to them through
 //! `Bridge<C>` (crate-private), one `NativeWidget` impl generic over every
 //! public component, so both kinds reach the same runtime, registry, props diff
@@ -54,7 +54,7 @@
 //!    attached.** A component attaches the platform's one listener to any view
 //!    it built — root or child — with [`ComponentCtx::attach_listener`], and
 //!    from then on that view's clicks/toggles/value changes reach
-//!    [`NativeComponent::on_event`] through the same slot-id routing the six
+//!    [`NativeComponent::on_event`] through the same slot-id routing the
 //!    built-in controls use (*Listener attachment*, below). A slot that
 //!    attached nothing for an event's family never reaches the method at all.
 //!    A native interaction bypasses `RenderRoot::event` entirely: no
@@ -68,8 +68,8 @@
 //!    from the staging table on **every** dispatch, not only when props changed
 //!    (`BridgeState::refresh_component`): the diff gate skips `update` on an
 //!    equal-props rebuild, so anything less would run a stale rebuild's closures
-//!    ([`NativeComponent::dispose`]). The six controls decode `params_json` and
-//!    never read this table.
+//!    ([`NativeComponent::dispose`]). The built-in controls decode `params_json`
+//!    and never read this table.
 //! 6. **`dispose` is best-effort-prompt, and may be late** — below.
 //!
 //! # Three design decisions this trait settles
@@ -88,12 +88,12 @@
 //! `inventory`-style link-time auto-registration stays **banned**, being exactly
 //! the mechanism that fails silently in a stripped, LTO'd device build.
 //! Registration is **first-wins** — a kind already registered, including any of
-//! the six built-in controls (which the backend registers when the thread's
+//! the built-in controls (which the backend registers when the thread's
 //! runtime is first touched), is refused with a warning rather than replaced, so
 //! a third-party kind can never shadow a shipped one.
 //!
-//! **3. Disposal promptness** is **exactly the guarantee the six controls get,
-//! and no more**: the framework's `retire()` (driven from the mounting widget's
+//! **3. Disposal promptness** is **exactly the guarantee the built-in controls
+//! get, and no more**: the framework's `retire()` (driven from the mounting widget's
 //! teardown) is the prompt primary path, and the differ's missing-frame streak
 //! is the backstop. That streak only advances on gate-`Run` frames, so on an
 //! idle screen a `dispose` can arrive many frames late — or after a replacement
@@ -109,21 +109,23 @@
 //! There is still exactly **one listener class per platform** — Android's
 //! `dev.frust.nativewidgets.FrustNativeListener`, and each Apple arm's
 //! `FrustNativeControlTarget` — and a component reaches it the same way the
-//! six controls do, through one call: [`ComponentCtx::attach_listener`], given
-//! the view and the [`ListenerKinds`] to wire (click, toggled, value changed).
-//! The context constructs the listener bound to **this slot's own id**, which
-//! it knows privately and never hands to the component, so a component cannot
-//! route an event anywhere but home. It answers a [`ListenerHandle`] the
-//! component keeps in its [`NativeComponent::State`]; dropping it with the
-//! state is the release (and, on the two Apple arms, the target-action
-//! detach), and [`ComponentCtx::detach_listener`] detaches explicitly.
+//! built-in controls do, through one call: [`ComponentCtx::attach_listener`],
+//! given the view and the [`ListenerKinds`] to wire (click, toggled, value
+//! changed). The context constructs the listener bound to **this slot's own
+//! id**, which it knows privately and never hands to the component, so a
+//! component cannot route an event anywhere but home. It answers a
+//! [`ListenerHandle`] the component keeps in its [`NativeComponent::State`];
+//! dropping it with the state is the release **on every arm** — the platform
+//! interfaces/target-action pairs it set are cleared first, then whatever
+//! reference it held is released — and [`ComponentCtx::detach_listener`]
+//! detaches explicitly (the same release, run early instead of at drop).
 //!
-//! The dispatch then runs the path the six controls already use: the platform
-//! listener fires on the main thread, `crate::runtime`'s `on_event` routes it
-//! by slot id to this module's `Bridge`, which hands the [`NativeEvent`] (and
-//! the component's own state and last-applied props) to
-//! [`NativeComponent::on_event`]. Whatever event that answers rides the six
-//! controls' `EventPayload` callback table to the app's
+//! The dispatch then runs the path the built-in controls already use: the
+//! platform listener fires on the main thread, `crate::runtime`'s `on_event`
+//! routes it by slot id to this module's `Bridge`, which hands the
+//! [`NativeEvent`] (and the component's own state and last-applied props) to
+//! [`NativeComponent::on_event`]. Whatever event that answers rides the
+//! built-in controls' `EventPayload` callback table to the app's
 //! [`NativeComponentView::on_event`](crate::api::NativeComponentView::on_event)
 //! hook — the events-as-signals idiom, unchanged. The bridge remembers which
 //! [`ListenerKinds`] the slot attached and drops any other family before the
@@ -160,8 +162,8 @@
 //! reference, UIKit and AppKit retain a subview) and dies with the parent,
 //! while a child you keep talking to lives in [`NativeComponent::State`] as a
 //! [`NativeChild`], whose `Drop` *is* the release (`DeleteGlobalRef` on
-//! Android, `Retained`'s own `Drop` on iOS and macOS). The leak bar is the six controls'
-//! own; `tests::a_component_builds_a_native_subtree_and_releases_every_child`
+//! Android, `Retained`'s own `Drop` on iOS and macOS). The leak bar is the built-in
+//! controls' own; `tests::a_component_builds_a_native_subtree_and_releases_every_child`
 //! counts refs rather than merely surviving the cycle.
 //!
 //! # Props travel beside the wire, not on it
@@ -308,7 +310,7 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 ///
 /// Implement this for a plain marker/config type, register it once under a
 /// kind string ([`register_component`]), and the same runtime that serves this
-/// crate's six built-in controls will serve yours: one generic platform
+/// crate's built-in controls will serve yours: one generic platform
 /// factory, one generic listener, **no per-component Kotlin or Swift, ever**.
 ///
 /// Read the module doc first — it is the lifecycle contract (when each method
@@ -409,7 +411,7 @@ pub trait NativeComponent: 'static {
     /// for. The listener is the platform's one shared class, bound to this
     /// slot's own id by the context — the component never sees the id, so it
     /// cannot route anything but home — and its events reach this method
-    /// through the runtime's slot-id routing, the path the six built-in
+    /// through the runtime's slot-id routing, the path the built-in
     /// controls' events take. An event whose family this slot never attached
     /// (a stray, or a hand-built Android listener carrying this slot's number)
     /// is dropped at the bridge and never reaches this method.
@@ -428,7 +430,7 @@ pub trait NativeComponent: 'static {
     ///
     /// # The answer
     ///
-    /// `Some(event)` forwards that event to the app's hook (the six builders'
+    /// `Some(event)` forwards that event to the app's hook (the builders'
     /// events-as-signals idiom: the hook typically writes a signal, which wakes
     /// exactly one frust frame); `None` swallows it. The answer need not be
     /// the event that arrived — a component may translate one kind into
@@ -665,16 +667,17 @@ impl ComponentCtx<'_, '_, '_> {
     /// [`NativeComponent::on_event`] and nowhere else.
     ///
     /// Keep the returned [`ListenerHandle`] in your
-    /// [`NativeComponent::State`]: it holds one global reference to `view`,
-    /// released when the state drops (the view itself holds the listener).
+    /// [`NativeComponent::State`]: its `Drop` nulls exactly `kinds` off `view`
+    /// and releases the global reference it holds to it (this arm's `Drop`,
+    /// [`ListenerHandle`]'s own doc).
     ///
     /// Latches and answers `None` when `kinds` is empty, the listener class
     /// cannot be loaded, or a setter throws — typically
     /// [`ListenerKinds::TOGGLED`]/[`ListenerKinds::VALUE_CHANGED`] asked of a
     /// view that is no `CompoundButton`/`SeekBar` (`NoSuchMethodError`). A
-    /// failure part-way can leave an interface already set, but the slot
-    /// routes only the families of an attach that completed, so a stray event
-    /// from it is dropped before [`NativeComponent::on_event`].
+    /// failure part-way is unwound before this answers `None`: whatever
+    /// setter already succeeded is nulled again first (`NativeCtx`'s own
+    /// `attach_listener`), so no stray interface survives it.
     pub fn attach_listener(
         &mut self,
         view: &jni::objects::JObject<'_>,
@@ -704,25 +707,21 @@ impl ComponentCtx<'_, '_, '_> {
         }
     }
 
-    /// Detach what `handle` attached — `setOn…Listener(null)` for each
-    /// interface it set — and release it: the explicit form of dropping the
-    /// handle, for a component that stops listening while its view lives on
-    /// (or that detaches in `dispose`, as the six controls do). Latches and
-    /// answers `None` when a setter throws; the handle is released either way.
+    /// Detach what `handle` attached and release it — the explicit spelling
+    /// of dropping the handle, whose `Drop` already nulls the interfaces it
+    /// set and releases the global reference (this arm's `Drop`, matching iOS
+    /// and macOS below). For a component that stops listening while its view
+    /// lives on, or that detaches in `dispose`, as the built-in controls do.
+    ///
+    /// Consuming `handle` here is what makes a double detach impossible: a
+    /// `ListenerHandle`'s fields cannot be moved out of it individually once
+    /// it carries a `Drop` impl, so this — like the two Apple arms — can only
+    /// ever run the release once, through `Drop` itself, never twice against
+    /// the same global reference. Never latches: a detach failure logs from
+    /// inside the `Drop` instead, which has no context to latch onto.
     pub fn detach_listener(&mut self, handle: ListenerHandle) -> Option<()> {
-        let ListenerHandle { kinds, inner } = handle;
-        match self.inner.detach_listener(
-            &inner.view,
-            kinds.contains(ListenerKinds::CLICK),
-            kinds.contains(ListenerKinds::TOGGLED),
-            kinds.contains(ListenerKinds::VALUE_CHANGED),
-        ) {
-            Ok(()) => Some(()),
-            Err(error) => {
-                self.latch(error);
-                None
-            }
-        }
+        drop(handle);
+        Some(())
     }
 
     /// Run `f` inside a pushed JNI local frame, so every local reference it
@@ -915,7 +914,7 @@ impl ComponentCtx<'_, '_, '_> {
     /// [`ListenerKinds::TOGGLED`] a `UISwitch`'s `ValueChanged`;
     /// [`ListenerKinds::VALUE_CHANGED`] a `UISlider`'s `ValueChanged` plus its
     /// `TouchDown`/`TouchUpInside|TouchUpOutside` drag edges — exactly the
-    /// wiring the six controls use. The target is bound to this slot's id,
+    /// wiring the built-in controls use. The target is bound to this slot's id,
     /// which this context never hands you.
     ///
     /// UIKit holds a control's targets **weakly**, so the returned
@@ -1236,7 +1235,7 @@ impl ComponentCtx<'_, '_, '_> {
 /// Built only through [`ComponentCtx::root`], so the platform handle type
 /// itself never has to appear in a component's signature; a component that
 /// wants to keep talking to its own view retains a second, typed reference in
-/// its [`NativeComponent::State`], exactly as the six built-in controls do.
+/// its [`NativeComponent::State`], exactly as the built-in controls do.
 pub struct NativeRoot(NativeView);
 
 impl NativeRoot {
@@ -1461,14 +1460,27 @@ impl std::fmt::Debug for ListenerKinds {
 /// [`ComponentCtx::attach_listener`] — keep it in your
 /// [`NativeComponent::State`].
 ///
-/// **Dropping it is the release**, and `State` is dropped immediately after
-/// [`NativeComponent::dispose`] returns, so a listener is released with the
-/// view it listens to by construction: on Android the handle's global
-/// reference to the view is deleted (the view itself holds the listener and
-/// dies with the subtree); on iOS and macOS the target-action pairs it added
-/// are removed from the control first — its target is held weakly by UIKit and
-/// AppKit, so this handle is the target's only strong reference — and then the
-/// target is released. [`ComponentCtx::detach_listener`] is the explicit form.
+/// **Dropping it is the release, on every arm**, and `State` is dropped
+/// immediately after [`NativeComponent::dispose`] returns, so a listener is
+/// released with the view it listens to by construction: on Android the
+/// interfaces this handle attached are nulled off the view first (obtaining a
+/// JNI env from the process VM, since a `Drop` carries no context of its own —
+/// see the impl below), then the handle's global reference to the view is
+/// deleted; on iOS and macOS the target-action pairs it added are removed
+/// from the control first — its target is held weakly by UIKit and AppKit, so
+/// this handle is the target's only strong reference — and then the target is
+/// released. [`ComponentCtx::detach_listener`] is the explicit form on every
+/// arm: dropping the handle early rather than waiting for `State` to go.
+///
+/// Every arm's `Drop` runs on the main thread by construction — a handle
+/// lives in a component's `State`, which the runtime drops there
+/// (`crate::component`'s module doc, *Every method here runs on the platform
+/// main thread*). A handle dropped off it would race whatever the main
+/// thread is doing to the same view/control concurrently, which nothing here
+/// guards against; on Android the JNI env is reachable from any attached
+/// thread regardless (see the impl below), so a background drop would not
+/// fail loudly — it would silently mutate a `View` that only the main thread
+/// may touch.
 #[must_use = "a dropped ListenerHandle releases its listener at once — keep it in State"]
 pub struct ListenerHandle {
     kinds: ListenerKinds,
@@ -1486,7 +1498,8 @@ impl ListenerHandle {
 #[cfg(target_os = "android")]
 struct ListenerInner {
     /// A global reference to the view the listener was set on — what
-    /// [`ComponentCtx::detach_listener`] clears the listener off.
+    /// [`ComponentCtx::detach_listener`] (and this handle's own `Drop`) clear
+    /// the listener interfaces off before releasing.
     view: jni::refs::Global<jni::objects::JObject<'static>>,
 }
 
@@ -1515,10 +1528,68 @@ struct ListenerInner {
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 type ListenerInner = HostListener;
 
-/// The two Apple arms detach on drop: the platform holds the target weakly,
-/// so releasing it while still attached would leave a control whose action
-/// has nowhere to go. Runs on the main thread by construction — a handle
-/// lives in a component's `State`, which the runtime drops there.
+/// Android's counterpart to the two Apple arms below: a `Drop` carries no
+/// `Env` of its own (unlike every other call in this module, which runs
+/// inside a JNI export's own frame), so this obtains one from the process VM
+/// the same way the context-free dispatch-boundary guard does
+/// (`frust_plugin::android::vm` +
+/// [`with_top_local_frame`](jni::JavaVM::with_top_local_frame), module doc's
+/// *Dispatch-boundary exception guard*), then nulls exactly this handle's
+/// `kinds` off the view through the same setters `NativeCtx::detach_listener`
+/// (`crate::android::ctx`) uses for every other caller, and lets the `Global`
+/// go.
+///
+/// A `Drop` that cannot reach an env — no platform handles installed yet, or
+/// the VM cannot supply one — logs at `warn` and still releases the global
+/// reference: the view is left with a stale listener interface in that case
+/// (Bridge's per-slot family gate still refuses the event, since the slot
+/// that attached it is already gone), never a panic. Same for a setter that
+/// throws while nulling: logged, not propagated — a `Drop` has no `Result` to
+/// return it through.
+#[cfg(target_os = "android")]
+impl Drop for ListenerHandle {
+    fn drop(&mut self) {
+        let vm = match frust_plugin::android::vm() {
+            Ok(vm) => vm,
+            Err(error) => {
+                log::warn!(
+                    "frust-native-widgets: ListenerHandle drop ({kinds}) could not reach a JNI \
+                     env ({error}) — the view keeps its listener interface(s) set; releasing only \
+                     the global reference to it",
+                    kinds = self.kinds
+                );
+                return;
+            }
+        };
+        let kinds = self.kinds;
+        let view = &self.inner.view;
+        let outcome = vm.with_top_local_frame(|env| {
+            let mut ctx = PlatformCtx::detached(env);
+            Ok::<Result<(), NativeWidgetError>, jni::errors::Error>(ctx.detach_listener(
+                view,
+                kinds.contains(ListenerKinds::CLICK),
+                kinds.contains(ListenerKinds::TOGGLED),
+                kinds.contains(ListenerKinds::VALUE_CHANGED),
+            ))
+        });
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) failed nulling the view's \
+                 listener interface(s): {error}"
+            ),
+            Err(error) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) could not reach a JNI env: \
+                 {error}"
+            ),
+        }
+    }
+}
+
+/// The two Apple arms detach on drop too: the platform holds the target
+/// weakly, so releasing it while still attached would leave a control whose
+/// action has nowhere to go. Runs on the main thread by construction — a
+/// handle lives in a component's `State`, which the runtime drops there.
 #[cfg(target_os = "ios")]
 impl Drop for ListenerHandle {
     fn drop(&mut self) {
@@ -1659,7 +1730,7 @@ impl NativeEvent {
         }
     }
 
-    /// This event in the six controls' typed [`EventPayload`] vocabulary —
+    /// This event in the built-in controls' typed [`EventPayload`] vocabulary —
     /// the table a component's answer rides to the app's hook
     /// (`crate::api::mount`). `None` for a kind that vocabulary has no word
     /// for, which the bridge then drops.
@@ -1712,7 +1783,7 @@ impl NativeEvent {
 ///
 /// Call it once, from app or plugin init, **on the platform main thread**.
 /// Returns whether the registration was accepted: **first-wins**, so a `kind`
-/// already taken — including the six built-in control kinds this build's
+/// already taken — including the built-in control kinds this build's
 /// backend registers itself — is refused with a warning rather than replaced.
 ///
 /// # A wrong-thread call is refused, not silently accepted
@@ -2040,7 +2111,7 @@ pub(crate) fn forget(slot: SlotId) {
 /// never a component's real props.
 ///
 /// `dark` is the caller's to resolve (`crate::api::mount`'s `build_with_mode`
-/// reads it off the same `use_context::<Theme>()` the six builders'
+/// reads it off the same `use_context::<Theme>()` the builders'
 /// `ambient_theme_tokens` already does) — this module has no reactive
 /// context of its own. Carrying the bit directly on the wire, rather than
 /// folding it into a component's typed `Props` (which this crate
@@ -2050,7 +2121,7 @@ pub(crate) fn forget(slot: SlotId) {
 /// and reaching `crate::appkit::theme`'s/`crate::apple::theme`'s shared
 /// `brightness_is_dark`, which both read this exact key straight off a
 /// slot's raw wire — unconditionally, for every registered kind, before any
-/// per-kind decode — the same mechanism the six built-in controls' own
+/// per-kind decode — the same mechanism the built-in controls' own
 /// `params_for` already rides.
 pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64, dark: bool) -> String {
     crate::runtime::with_identity(
@@ -2138,7 +2209,7 @@ fn staged_component<C: NativeComponent>(slot: SlotId) -> Result<Rc<C>, StagedMis
 /// One internal `NativeWidget` impl standing in for **every** public
 /// [`NativeComponent`] — the module doc's bridge.
 ///
-/// Never instantiated: like the six controls' own marker types it exists only
+/// Never instantiated: like the built-in controls' own marker types it exists only
 /// to name a vtable ([`register_component`] registers `Bridge<C>`, and the
 /// runtime's dispatch table holds the monomorphised shims).
 pub(crate) struct Bridge<C>(PhantomData<fn() -> C>);
@@ -2480,10 +2551,10 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
     /// it, only the families the component itself asked for arrive. (A
     /// fabricated id naming a slot that *did* attach that family is still
     /// indistinguishable from the real listener — the runtime asks nothing
-    /// about which object fired, for components and the six controls alike.)
+    /// about which object fired, for components and the built-in controls alike.)
     ///
-    /// **The answer:** [`NativeComponent::on_event`]'s, mapped into the six
-    /// controls' `EventPayload` vocabulary so it rides their callback table to
+    /// **The answer:** [`NativeComponent::on_event`]'s, mapped into the
+    /// built-in controls' `EventPayload` vocabulary so it rides their callback table to
     /// the app's hook (`crate::api::mount`). A kind that vocabulary has no word
     /// for is dropped and logged.
     ///
@@ -2632,7 +2703,7 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// A component defined **outside the six** — the whole point of the
+    /// A component defined **outside the built-in controls** — the whole point of the
     /// acceptance bar: it implements nothing but the public
     /// [`NativeComponent`] trait, using only the public [`ComponentCtx`]/
     /// [`NativeRoot`]/[`NativeEvent`] surface, exactly as a third-party crate
@@ -2816,7 +2887,7 @@ mod tests {
     }
 
     #[test]
-    fn a_component_outside_the_six_lives_the_whole_lifecycle() {
+    fn a_component_outside_the_built_in_controls_lives_the_whole_lifecycle() {
         // The acceptance bar: create → update → event → dispose, driven
         // by the real runtime through the public trait alone.
         let log = Rc::new(RefCell::new(Vec::new()));
@@ -2976,10 +3047,10 @@ mod tests {
         );
     }
 
-    /// A control shaped exactly like the six built-ins: an **internal**
+    /// A control shaped exactly like the built-in ones: an **internal**
     /// `NativeWidget`, props decoded out of `params_json`, no staging table
     /// involved. Its only job here is to prove the two trait families share one
-    /// dispatch table, since the real six compile on device targets only.
+    /// dispatch table, since the real built-in controls compile on device targets only.
     struct LegacyControl;
 
     #[derive(Clone, Debug, PartialEq)]
@@ -3033,7 +3104,7 @@ mod tests {
     #[test]
     fn a_public_component_and_an_internal_widget_share_one_dispatch_table() {
         // The bridge's actual claim (module doc): a public `NativeComponent`
-        // is not a second runtime beside the six controls' — it is the same
+        // is not a second runtime beside the built-in controls' — it is the same
         // registry, the same diff gate, the same disposal path, dispatched by
         // kind. Both families live side by side here, in one runtime, with no
         // cross-talk.
@@ -4342,8 +4413,8 @@ mod listener_tests {
     #[test]
     fn every_payload_round_trips_through_the_public_pair() {
         // The component answer's ride to the app hook: NativeEvent →
-        // EventPayload (the six's callback table) → NativeEvent (the hook's
-        // parameter). A lossy leg would hand the app something other than
+        // EventPayload (the built-in controls' callback table) → NativeEvent
+        // (the hook's parameter). A lossy leg would hand the app something other than
         // what the component answered.
         for payload in [
             EventPayload::Click,

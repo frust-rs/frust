@@ -11,7 +11,7 @@
 //! # Two kinds of implementation, one dispatch table
 //!
 //! [`NativeWidget`] has two families of impl and everything below serves both
-//! identically: the **six built-in controls** (`crate::controls`), whose props
+//! identically: the **built-in controls** (`crate::controls`), whose props
 //! arrive decoded from the slot's `params_json`, and every **public
 //! [`NativeComponent`](crate::component::NativeComponent)** a plugin author
 //! writes (an app crate cannot implement one — see that trait's doc for the FFI
@@ -524,7 +524,7 @@ pub(crate) struct NativeEvent {
 /// `component::Bridge<C>`. Keeping the two separate is what lets the wire-facing
 /// half here (a `decode_props` step, `Result` returns, an `EventPayload`
 /// callback channel) keep evolving without breaking a third-party impl — and it
-/// is why the six controls did not have to move when the public
+/// is why the built-in controls did not have to move when the public
 /// trait landed.
 ///
 /// The methods are associated functions, not `&self` methods: a registration
@@ -876,7 +876,7 @@ impl NativeRuntime {
     /// between it and [`Self::register`].
     ///
     /// A third-party [`NativeComponent`](crate::component::NativeComponent)
-    /// must not be able to shadow one of the six built-in controls (or another
+    /// must not be able to shadow one of the built-in controls (or another
     /// plugin's component) by claiming a kind string already taken: the
     /// backend registers its own kinds when the thread's runtime is first
     /// touched ([`seeded_runtime`]), so a collision here is either a
@@ -1027,7 +1027,7 @@ impl NativeRuntime {
     /// (`crate::component::ComponentCtx::attach_listener`), so a fabricated id
     /// naming a component that attached nothing stops there; one naming a slot
     /// that did attach that family is indistinguishable from the real
-    /// listener, for components and the six controls alike.
+    /// listener, for components and the built-in controls alike.
     ///
     /// **Bypasses `RenderRoot::event` entirely** (crate doc): this is a
     /// platform interaction surfacing as a callback, never a frust pointer

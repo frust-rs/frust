@@ -2,7 +2,7 @@
 //! [`native_component`] turns a registered
 //! [`NativeComponent`](crate::component::NativeComponent) plus its typed
 //! `Props` into a frust [`View`], composing exactly the one `platform_view`
-//! slot [`crate::api::builders`]' six controls compose by hand.
+//! slot [`crate::api::builders`]' built-in controls compose by hand.
 //!
 //! # Why this exists
 //!
@@ -29,9 +29,9 @@
 //! view it built (`ComponentCtx::attach_listener`), and whatever its
 //! `NativeComponent::on_event` answers reaches the hook below.
 //!
-//! # Events: the six builders' idiom, one hook
+//! # Events: the builders' idiom, one hook
 //!
-//! [`NativeComponentView::on_event`] is the component counterpart of the six
+//! [`NativeComponentView::on_event`] is the component counterpart of the
 //! builders' `.on_press`/`.on_toggle`/`.on_change`: the handler fires on the
 //! platform main thread with each [`NativeEvent`] the component answers, and
 //! writing an `RwSignal` from inside it wakes exactly one frust frame
@@ -40,36 +40,36 @@
 //! `set_callback` for this slot on every rebuild (a registration made before
 //! the native `create` arrives is parked, and the instance is born with it),
 //! and `Component::init` registers the `forget_pending_callback` reaper beside
-//! the staging table's. The component's answer rides the six's `EventPayload`
-//! table and is handed back here as the public pair
+//! the staging table's. The component's answer rides the built-in controls'
+//! `EventPayload` table and is handed back here as the public pair
 //! (`NativeEvent::from_payload`), so the hook sees exactly what the component
 //! answered.
 //!
-//! # It reuses the six's plumbing rather than re-deriving it
+//! # It reuses the built-in controls' plumbing rather than re-deriving it
 //!
 //! Everything load-bearing here is `crate::api::builders`' own, imported
 //! rather than copied: the one factory [`VIEW_TYPE`], the private slot
 //! counter ([`next_local_slot`], so a component and a built-in control can
 //! never collide on an id), [`resolve_size`]'s no-measure sizing rule, and
 //! [`placeholder`] — the refusal fallback *and* its clip wrapper. The two
-//! tests that pin the refusal contract for the six
+//! tests that pin the refusal contract for the built-in controls
 //! (`a_refused_slot_publishes_no_platform_view_frame` and its clip-wrapper
 //! sibling) therefore describe this path too, and
 //! [`tests::a_refused_component_slot_publishes_no_platform_view_frame`]
 //! asserts it directly.
 //!
-//! **The six are deliberately NOT rewritten to route through here** (a
-//! standing decision, unchanged): their whole wire is `params_json` decoded
-//! inside an internal `NativeWidget`, while a component's props are typed
-//! Rust values staged beside the wire — one builder cannot be both without
-//! changing six shipped files whose "behaviour must not change" guarantee
-//! rests on their code not moving. Sharing the *helpers* buys the reuse
-//! without the risk.
+//! **The built-in controls are deliberately NOT rewritten to route through
+//! here** (a standing decision, unchanged): their whole wire is
+//! `params_json` decoded inside an internal `NativeWidget`, while a
+//! component's props are typed Rust values staged beside the wire — one
+//! builder cannot be both without changing every already-shipped control
+//! file, whose "behaviour must not change" guarantee rests on their code not
+//! moving. Sharing the *helpers* buys the reuse without the risk.
 //!
 //! # What a component's builder does NOT carry
 //!
-//! No L2/L3 theme folding (`crate::api::theme`'s ladder is the six controls'
-//! wire-side mechanism; a component's props are typed, so an app reads
+//! No L2/L3 theme folding (`crate::api::theme`'s ladder is the built-in
+//! controls' wire-side mechanism; a component's props are typed, so an app reads
 //! `use_context::<Theme>()` itself and puts whatever it wants in them). Events
 //! are carried — through the one [`NativeComponentView::on_event`] hook above,
 //! never through `crate::api::signals`' per-control wrappers, whose
@@ -77,7 +77,7 @@
 //!
 //! **L1 (brightness) is the one exception, and it rides the wire, not a
 //! component's typed props.** [`ambient_dark`] resolves the same
-//! `use_context::<Theme>()` the six builders' own `ambient_theme_tokens`
+//! `use_context::<Theme>()` the builders' own `ambient_theme_tokens`
 //! reads, and [`component_api::component_params`] folds the result straight
 //! into the identity payload every registered kind's params already carry.
 //! It has to: `crate::appkit::theme`'s and `crate::apple::theme`'s per-view
@@ -133,7 +133,7 @@ use super::theme;
 /// ```
 ///
 /// The returned view is a [`View<Outer>`](View) for every outer app-state
-/// type, exactly like the six built-in builders.
+/// type, exactly like the built-in builders.
 pub fn native_component<C: NativeComponent>(
     kind: &'static str,
     component: C,
@@ -208,7 +208,7 @@ impl<C: NativeComponent> NativeComponentView<C> {
     }
 
     /// Fires on the platform main thread with every [`NativeEvent`] the
-    /// component's [`NativeComponent::on_event`] answers — the six builders'
+    /// component's [`NativeComponent::on_event`] answers — the builders'
     /// events-as-signals idiom (write an `RwSignal` from inside for the
     /// one-frame wake; the module doc's *Events*).
     ///
@@ -247,8 +247,8 @@ impl<C: NativeComponent> NativeComponentView<C> {
         if mode.translucency_refused() {
             // Before publishing anything: a refused slot mounts no native
             // view, so it must stage no props and trigger no factory lookup
-            // either (the six take exactly this branch, in exactly this
-            // order).
+            // either (the built-in controls take exactly this branch, in
+            // exactly this order).
             return placeholder(self.size, self.kind);
         }
         // Stage this rebuild's component value and props beside the wire, and
@@ -262,10 +262,11 @@ impl<C: NativeComponent> NativeComponentView<C> {
         let generation =
             component_api::publish(slot, Rc::clone(&self.component), self.props.clone());
         let params = component_api::component_params(self.kind, slot, generation, dark);
-        // The six builders' registration, the same shape: every rebuild, after
+        // The builders' registration, the same shape: every rebuild, after
         // the refusal branch, parked until the native `create` arrives (module
-        // doc's *Events*). The component's answer arrives as the six's
-        // `EventPayload` and is handed back as the public pair it started as.
+        // doc's *Events*). The component's answer arrives as the built-in
+        // controls' `EventPayload` and is handed back as the public pair it
+        // started as.
         if let Some(handler) = self.on_event.clone() {
             with_runtime(|runtime| {
                 runtime.set_callback(
@@ -327,7 +328,7 @@ impl<C: NativeComponent> Component for NativeComponentView<C> {
 /// [`NativeComponentView::build_with_mode`] needs so
 /// `crate::appkit::theme`'s/`crate::apple::theme`'s shared
 /// `brightness_is_dark` — which read this same key off a slot's raw params
-/// unconditionally, for every registered kind, not only the six built-in
+/// unconditionally, for every registered kind, not only the built-in
 /// controls — see the app's real brightness rather than always finding the
 /// key absent.
 fn ambient_dark() -> bool {
@@ -390,8 +391,8 @@ mod tests {
     use crate::component::{ComponentCtx, NativeRoot, register_component};
     use crate::runtime::{DisposeOutcome, NativeCtx as PlatformCtx, with_runtime};
 
-    /// A component defined **outside the six**, implementing nothing but the
-    /// public trait — a third-party crate's shape exactly.
+    /// A component defined **outside the built-in controls**, implementing
+    /// nothing but the public trait — a third-party crate's shape exactly.
     struct Meter;
 
     #[derive(Clone, Debug, PartialEq)]
@@ -454,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn a_component_defined_outside_the_six_mounts_and_publishes_exactly_one_slot() {
+    fn a_component_defined_outside_the_built_in_controls_mounts_and_publishes_exactly_one_slot() {
         // The acceptance bar: define → register → mount → create,
         // end to end, through the public surface alone.
         assert!(register_component::<Meter>(METER_KIND));
@@ -641,7 +642,7 @@ mod tests {
 
     #[test]
     fn a_refused_component_slot_publishes_no_platform_view_frame() {
-        // The refusal contract the six are pinned to
+        // The refusal contract the built-in controls are pinned to
         // (`a_refused_slot_publishes_no_platform_view_frame` and its
         // clip-wrapper sibling), asserted for the generic path — which
         // degrades through the very same `placeholder`.

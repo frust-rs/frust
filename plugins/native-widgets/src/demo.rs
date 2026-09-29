@@ -79,7 +79,7 @@
 //! [`DemoCardProps::presses`], which the card shows on the primary button's
 //! own caption — a native tap moving a native readout through one full
 //! round trip (native → Rust → signal → rebuild → props diff → native
-//! setter), the same loop the six built-in controls close.
+//! setter), the same loop the built-in controls close.
 //!
 //! The **secondary** button stays unwired on purpose. A listener reports its
 //! slot and its event family, not which child fired: a click is
@@ -115,7 +115,7 @@ use crate::component::{ListenerHandle, NativeChild, register_component};
 use crate::component::{ComponentCtx, ListenerKinds, NativeComponent, NativeRoot};
 
 /// The kind string [`DemoCard`] registers under — namespaced so it can never
-/// collide with the six built-in control kinds (`button`, `label`, …), which
+/// collide with the built-in control kinds (`button`, `label`, …), which
 /// this crate's backend registers first and which registration is first-wins
 /// about.
 pub const DEMO_CARD_KIND: &str = "frust.demo.card";
@@ -230,7 +230,7 @@ pub struct DemoCardState {
     /// A second reference to the card's own parent view: `update` is handed
     /// only the state, never the [`NativeRoot`] the runtime holds, so the card
     /// needs its own way back in order to set the background. The same shape
-    /// the six built-in controls' own states use, one tier up.
+    /// the built-in controls' own states use, one tier up.
     root: NativeChild,
     /// The title label.
     label: LabelHandle,
@@ -748,7 +748,7 @@ mod platform {
     //!
     //! The background and the title's ink go through
     //! `crate::controls::platform`'s macOS `set_background_color`/
-    //! `set_text_color` — the same theme-ladder L2 setters the six controls'
+    //! `set_text_color` — the same theme-ladder L2 setters the built-in controls'
     //! own macOS arms call, a real `CALayer.backgroundColor`/`NSTextField.
     //! textColor` write, not AppKit's stock colours — so the card re-themes
     //! live exactly as they do. The parent is made layer-backed here so that

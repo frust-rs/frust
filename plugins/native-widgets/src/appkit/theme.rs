@@ -17,11 +17,11 @@
 //!
 //! [`apply_brightness`] picks `NSAppearanceNameDarkAqua` or
 //! `NSAppearanceNameAqua` from the same [`crate::controls::DARK`] wire bit the
-//! other two arms read ([`brightness_is_dark`]) — carried not only by the six
-//! controls' own `params_for` (`crate::api::builders`) but by every
+//! other two arms read ([`brightness_is_dark`]) — carried not only by the
+//! built-in controls' own `params_for` (`crate::api::builders`) but by every
 //! `NativeComponent` slot's params too, folded in by
 //! `crate::component::component_params` from `crate::api::mount`'s
-//! `ambient_dark` (the same `use_context::<Theme>()` the six builders read).
+//! `ambient_dark` (the same `use_context::<Theme>()` the builders read).
 //! Without that, a component root such as `crate::demo::DemoCard` would carry
 //! no `dark` key at all and stay permanently pinned to the light appearance
 //! regardless of the app's theme.
@@ -51,7 +51,7 @@
 //! typed `create_control`/`update_control`, this arm from
 //! `crate::appkit::factory`'s `create`/`update_control`
 //! (`crate::appkit::factory`'s own module doc — *Theme ladder L1*). That
-//! covers every slot the desktop host drives — the six controls, every
+//! covers every slot the desktop host drives — the built-in controls, every
 //! `NativeComponent`, and a dead-slot placeholder alike (pinning an empty
 //! `NSView` is harmless) — with no separate wrapper and no second
 //! registration: `crate::appkit::factory::ensure_registered` is the one

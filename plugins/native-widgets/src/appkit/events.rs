@@ -264,7 +264,7 @@ impl FrustNativeControlTarget {
     /// Clear `control`'s target/action **only while they are still this
     /// target's** — the detach a component's `ListenerHandle` runs on drop.
     ///
-    /// Unlike the six controls' unconditional [`Self::detach`], a component
+    /// Unlike the built-in controls' unconditional [`Self::detach`], a component
     /// may re-attach the same control (a fresh handle replacing an old one in
     /// its state); dropping the old handle must not clear the new target, so
     /// this compares identities first.

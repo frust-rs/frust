@@ -92,7 +92,7 @@
 //!
 //! # No echo guard here, either
 //!
-//! None of the six actions below needs one. Every action UIKit ever sends
+//! None of the eight actions below needs one. Every action UIKit ever sends
 //! here is genuinely user-caused: Apple's UIControl guidance is *"As a rule
 //! UIKit does not send events when programmatic changes are made to
 //! controls"*, and `switch.rs`'s module doc is the full account (the two

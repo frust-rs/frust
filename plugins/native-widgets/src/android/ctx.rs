@@ -46,7 +46,7 @@
 //! Class lookups still work on those paths — the cached loader outlives the
 //! call that seeded it.
 
-// This module is the *whole* helper surface the six controls, their
+// This module is the *whole* helper surface the built-in controls, their
 // listeners, and the public `NativeComponent` surface build on.
 // Most of it now has a caller on Android; one item (`set_enabled`) stays
 // genuinely unused until a control needs the checked path rather than the
@@ -503,16 +503,25 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     ///
     /// The **public** `NativeComponent` path's attach
     /// (`crate::component::ComponentCtx::attach_listener`): the same one
-    /// listener class and the same setters the six controls use, with the slot
-    /// id supplied by the component's context rather than by a control's
-    /// props — it never reaches the component. The view holds the listener
-    /// itself, so no reference to the listener is kept.
+    /// listener class and the same setters the built-in controls use, with
+    /// the slot id supplied by the component's context rather than by a
+    /// control's props — it never reaches the component. The view holds the
+    /// listener itself, so no reference to the listener is kept.
+    ///
+    /// A setter that throws after an earlier one succeeded is unwound before
+    /// this returns: [`Self::detach_listener`] nulls exactly the interfaces
+    /// that were already set, best effort, so no stray interface survives a
+    /// part-way failure (this method's `# Errors`). The slot the caller
+    /// tracks (`ComponentCtx`'s `attached`, a control's own registry entry)
+    /// never learns of an attach that returned `Err`, so an unwind failure
+    /// only means a listener the runtime already considers absent stays
+    /// wired a little longer — logged, not propagated, since propagating it
+    /// would replace the original failure with a less informative one.
     ///
     /// # Errors
     /// [`NativeWidgetError::Platform`] when the listener class is missing,
     /// its constructor throws, or a setter throws — typically
-    /// `NoSuchMethodError` for an interface `view`'s class does not have. A
-    /// setter that already ran before the failing one stays set.
+    /// `NoSuchMethodError` for an interface `view`'s class does not have.
     pub(crate) fn attach_listener(
         &mut self,
         view: &JObject<'_>,
@@ -522,23 +531,69 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
         seek_bar_change: bool,
     ) -> Result<Global<JObject<'static>>, NativeWidgetError> {
         let listener = self.new_listener(slot_id)?;
+
+        let mut click_set = false;
+        let mut checked_change_set = false;
+
         if click {
             self.set_on_click_listener(view, &listener)?;
+            click_set = true;
         }
         if checked_change {
-            self.set_on_checked_change_listener(view, &listener)?;
+            if let Err(error) = self.set_on_checked_change_listener(view, &listener) {
+                self.unwind_partial_attach(view, click_set, checked_change_set, &error);
+                return Err(error);
+            }
+            checked_change_set = true;
         }
         if seek_bar_change {
-            self.set_on_seek_bar_change_listener(view, &listener)?;
+            if let Err(error) = self.set_on_seek_bar_change_listener(view, &listener) {
+                self.unwind_partial_attach(view, click_set, checked_change_set, &error);
+                return Err(error);
+            }
         }
         self.retain(view)
     }
 
+    /// [`Self::attach_listener`]'s failure unwind: null whatever it had
+    /// already set (`click_set`/`checked_change_set`) through the same
+    /// [`Self::detach_listener`] the explicit detach path and
+    /// [`crate::component::ListenerHandle`]'s Android `Drop` both call —
+    /// one function nulling the three interfaces everywhere this crate needs
+    /// to, so the setter list is written once.
+    ///
+    /// `original` is what the caller returns either way; a failure nulling
+    /// one of these interfaces is logged rather than replacing it, since the
+    /// setter that actually threw is the more useful of the two errors.
+    fn unwind_partial_attach(
+        &mut self,
+        view: &JObject<'_>,
+        click_set: bool,
+        checked_change_set: bool,
+        original: &NativeWidgetError,
+    ) {
+        if let Err(unwind_error) = self.detach_listener(view, click_set, checked_change_set, false)
+        {
+            log::warn!(
+                "android native-widgets: attach_listener failed ({original}) and unwinding the \
+                 interface(s) it had already set also failed: {unwind_error}"
+            );
+        }
+    }
+
     /// [`Self::attach_listener`]'s inverse: set each requested interface back
-    /// to `null` on `view`.
+    /// to `null` on `view`. Shared by three callers: the explicit detach path
+    /// (`crate::component::ComponentCtx::detach_listener`, a control's own
+    /// `dispose`), [`Self::unwind_partial_attach`]'s part-way-failure unwind,
+    /// and the Android arm of [`crate::component::ListenerHandle`]'s `Drop`,
+    /// which is what makes a handle dropped without an explicit detach null
+    /// the interfaces it holds too (`ListenerHandle`'s own doc) rather than
+    /// only deleting the global reference to the view.
     ///
     /// # Errors
-    /// [`NativeWidgetError::Platform`] when a setter throws.
+    /// [`NativeWidgetError::Platform`] when a setter throws. A setter that
+    /// already ran before the failing one stays nulled; only the later ones
+    /// are skipped.
     pub(crate) fn detach_listener(
         &mut self,
         view: &JObject<'_>,
