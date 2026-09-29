@@ -79,9 +79,15 @@
 //!
 //! A caller that drops its [`super::Presentation`] frees the Busy slot but
 //! not the sheet on screen, so a newer request can find the older alert
-//! still live. It is taken down first through the same immediate-resolve
-//! path [`super::dismiss`] uses — its `Dismissed` outcome goes to the
-//! dropped receiver and is discarded — before the new alert presents.
+//! still live. `start` takes it down **first**, through the same
+//! immediate-resolve path [`super::dismiss`] uses (its `Dismissed` outcome
+//! goes to the dropped receiver and is discarded) — end the old sheet, then
+//! discover the new presentation's anchor, then build and present it. This
+//! order matters: while a sheet is attached, AppKit makes its panel the key
+//! (and often the main) window, so discovering the anchor before ending the
+//! old sheet risks anchoring the new alert on a panel about to close. See
+//! `apple_host`'s module doc's *Host discovery* for the anchor side of this
+//! (it never resolves to a sheet either, as a second line of defense).
 //!
 //! # Not observed
 //!
@@ -125,7 +131,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSString};
 
 use super::apple_host::{
-    LivePresentation, dismiss_live, install_live, on_main, presenting_anchor, take_live_as,
+    LivePresentation, dismiss_live, install_live, on_main, presenting_anchor, take_live_any,
+    take_live_as,
 };
 use super::{ActionRole, AlertHost, AlertOutcome, AlertSpec, PresentError, Sender};
 
@@ -151,22 +158,25 @@ impl AlertHost for Host {
     }
 }
 
-/// The main-queue half of a request: discover the presenting window, build
-/// the alert, park it as the live entry (taking down a displaced one, if
-/// any), then present it.
+/// The main-queue half of a request: take down any displaced live entry
+/// first (module doc's *A displaced presentation*), discover the presenting
+/// window, build the alert, park it as the live entry, then present it.
 fn start(mtm: MainThreadMarker, spec: AlertSpec, tx: Sender<AlertOutcome>, generation: u64) {
+    if let Some(displaced) = take_live_any(mtm) {
+        displaced.dismiss(mtm);
+    }
     let Some(window) = presenting_anchor(mtm) else {
         tx.send(Err(PresentError::NoHost));
         return;
     };
     let live = LiveAlert::build(mtm, &spec, tx, generation, window);
-    match install_live(mtm, generation, Box::new(live)) {
-        None => present_live(mtm, generation),
-        Some(displaced) => {
-            displaced.dismiss(mtm);
-            present_live(mtm, generation);
-        }
+    if let Some(unexpected) = install_live(mtm, generation, Box::new(live)) {
+        // Nothing else can have claimed the slot between the take above and
+        // here on this main-queue turn; dismiss defensively rather than
+        // leaking a second live entry if that invariant ever changes.
+        unexpected.dismiss(mtm);
     }
+    present_live(mtm, generation);
 }
 
 /// Present the live entry for `generation`. A no-op when the entry is gone

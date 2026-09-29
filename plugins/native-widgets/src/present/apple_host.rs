@@ -15,7 +15,13 @@
 //!   UIKit refuses a presentation from a controller that is itself presenting
 //!   something. The scene walk is `frust-auth-session`'s `anchor_window`.
 //! - **macOS** — the key window, else the main window, else the first
-//!   visible window: a window-modal sheet needs a window on screen.
+//!   visible window — but never a sheet: a window-modal sheet needs a window
+//!   on screen to attach to, and while a sheet is presented AppKit makes its
+//!   panel the key window (often the main window too), so a key or main
+//!   window that `isSheet()` resolves through its `sheetParent()` instead —
+//!   only when that parent is itself still visible — and the "first visible
+//!   window" fallback considers a non-sheet window outright. The pure
+//!   decision behind this is [`resolve_sheet`], unit-tested in this module.
 //!
 //! `None` means [`PresentError::NoHost`](super::PresentError::NoHost): the
 //! app has no UI to present over yet (a request during launch, before the
@@ -120,9 +126,57 @@ pub(crate) fn presenting_anchor(mtm: MainThreadMarker) -> Option<Retained<Presen
 #[cfg(target_os = "macos")]
 pub(crate) fn presenting_anchor(mtm: MainThreadMarker) -> Option<Retained<PresentingAnchor>> {
     let app = NSApplication::sharedApplication(mtm);
-    app.keyWindow()
-        .or_else(|| app.mainWindow())
-        .or_else(|| app.windows().iter().find(|window| window.isVisible()))
+    non_sheet_anchor(app.keyWindow())
+        .or_else(|| non_sheet_anchor(app.mainWindow()))
+        .or_else(|| {
+            app.windows()
+                .iter()
+                .find(|window| window.isVisible() && !window.isSheet())
+        })
+}
+
+/// Resolve `window` to a usable, non-sheet anchor — itself when it is not a
+/// sheet, else its sheet parent when that parent is still visible, else
+/// nothing (this tier has no candidate; the caller tries the next one). The
+/// pure decision is [`resolve_sheet`].
+#[cfg(target_os = "macos")]
+fn non_sheet_anchor(window: Option<Retained<NSWindow>>) -> Option<Retained<NSWindow>> {
+    let window = window?;
+    let is_sheet = window.isSheet();
+    let parent = is_sheet.then(|| window.sheetParent()).flatten();
+    match resolve_sheet(is_sheet, parent.as_ref().map(|p| p.isVisible())) {
+        SheetResolution::Itself => Some(window),
+        SheetResolution::Parent => parent,
+        SheetResolution::None => None,
+    }
+}
+
+/// The never-a-sheet resolution rule itself (module doc's *Host discovery*),
+/// pulled out as a pure function of two facts so it runs under test without
+/// an `NSWindow`: a non-sheet is used as-is; a sheet is used only through a
+/// parent that is itself visible; anything else has no usable candidate.
+#[cfg(target_os = "macos")]
+fn resolve_sheet(is_sheet: bool, parent_is_visible: Option<bool>) -> SheetResolution {
+    if !is_sheet {
+        SheetResolution::Itself
+    } else if parent_is_visible == Some(true) {
+        SheetResolution::Parent
+    } else {
+        SheetResolution::None
+    }
+}
+
+/// [`resolve_sheet`]'s answer.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SheetResolution {
+    /// Not a sheet — use the window itself.
+    Itself,
+    /// A sheet whose parent is visible — use the parent instead.
+    Parent,
+    /// A sheet with no usable parent (none, or not visible) — this tier has
+    /// no candidate.
+    None,
 }
 
 /// The window of a foreground-active window scene (key window first),
@@ -196,6 +250,20 @@ pub(crate) fn install_live(
     })
 }
 
+/// Take the live entry out unconditionally, regardless of generation —
+/// unlike [`take_live`]/[`take_live_as`], which only ever take *their own*
+/// presentation. For an arm that must take a displaced presentation down
+/// **before** it can be mistaken for something else: macOS's `start` calls
+/// this ahead of [`presenting_anchor`], since an attached sheet becomes the
+/// key (and often main) window while it is up (module doc's *Host
+/// discovery*). Only the macOS arm needs this; the iOS arm re-discovers its
+/// anchor from the displaced alert's own dismissal completion instead (see
+/// `apple_alert`'s module doc's *A displaced presentation*).
+#[cfg(target_os = "macos")]
+pub(crate) fn take_live_any(_mtm: MainThreadMarker) -> Option<Box<dyn LivePresentation>> {
+    LIVE.with(|live| live.borrow_mut().take().map(|entry| entry.presentation))
+}
+
 /// Take the live entry out, but only if it is still `generation`'s.
 pub(crate) fn take_live(
     _mtm: MainThreadMarker,
@@ -241,4 +309,29 @@ pub(crate) fn dismiss_live(generation: u64) {
             presentation.dismiss(mtm);
         }
     });
+}
+
+/// [`resolve_sheet`]'s macOS-only decision, isolated from `NSWindow` — see
+/// the module doc's *Host discovery*.
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{SheetResolution, resolve_sheet};
+
+    #[test]
+    fn a_non_sheet_resolves_to_itself_whatever_the_parent_fact_says() {
+        assert_eq!(resolve_sheet(false, None), SheetResolution::Itself);
+        assert_eq!(resolve_sheet(false, Some(false)), SheetResolution::Itself);
+        assert_eq!(resolve_sheet(false, Some(true)), SheetResolution::Itself);
+    }
+
+    #[test]
+    fn a_sheet_resolves_to_its_visible_parent() {
+        assert_eq!(resolve_sheet(true, Some(true)), SheetResolution::Parent);
+    }
+
+    #[test]
+    fn a_sheet_with_no_visible_parent_has_no_candidate() {
+        assert_eq!(resolve_sheet(true, None), SheetResolution::None);
+        assert_eq!(resolve_sheet(true, Some(false)), SheetResolution::None);
+    }
 }
