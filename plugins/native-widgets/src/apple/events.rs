@@ -2,22 +2,34 @@
 //! wired straight into the SAME `(kind, detail)` runtime dispatch Android's
 //! `FrustNativeListener` feeds.
 //!
-//! # One class, six actions — the Android mirror
+//! # One class, seven actions — the Android mirror
 //!
 //! Android's `dev.frust.nativewidgets.FrustNativeListener` implements every
 //! listener interface a v1 control needs (`OnClickListener`/
 //! `OnCheckedChangeListener`/`OnSeekBarChangeListener`) on ONE class, with one
 //! method per callback. [`FrustNativeControlTarget`] is the same shape for
-//! UIKit target-action: one class, six action selectors
+//! UIKit target-action: one class, seven action selectors
 //! ([`Self::handle_click`], [`Self::handle_switch_value_changed`],
 //! [`Self::handle_slider_value_changed`], [`Self::handle_slider_drag_start`],
-//! [`Self::handle_slider_drag_end`], [`Self::handle_segment_value_changed`]),
-//! and a control wires only the ones it needs via [`Self::attach_button`]/
-//! [`Self::attach_switch`]/[`Self::attach_slider`]/[`Self::attach_segmented`]
+//! [`Self::handle_slider_drag_end`], [`Self::handle_segment_value_changed`],
+//! [`Self::handle_stepper_value_changed`]), and a control wires only the ones
+//! it needs via [`Self::attach_button`]/[`Self::attach_switch`]/
+//! [`Self::attach_slider`]/[`Self::attach_segmented`]/[`Self::attach_stepper`]
 //! — exactly as Android attaches the shared listener
 //! only as the one interface a given control implements. Adding a control
 //! never adds a second target class, matching the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
+//!
+//! [`Self::handle_stepper_value_changed`] is its own action rather than a
+//! reuse of [`Self::handle_slider_value_changed`], even though both report
+//! [`EVENT_KIND_VALUE_CHANGED`] off a `value`-named property: `UISlider.value`
+//! is a `float`-returning selector and `UIStepper.value` a `double`-returning
+//! one, and the Rust binding [`Self::handle_slider_value_changed`] is typed
+//! against reads that return type off the wire via `msg_send!`'s ABI —
+//! calling it against a real `UIStepper` sender would read the wrong bit
+//! width off the return register. Same wire shape, same kind, genuinely
+//! different sender type — `crate::controls::stepper`'s module doc names the
+//! shared shape.
 //!
 //! A public `NativeComponent` reaches the same class through
 //! `FrustNativeControlTarget::attach_component` (called by
@@ -122,7 +134,9 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 #[cfg(feature = "frust-api")]
 use objc2_ui_kit::UIView;
-use objc2_ui_kit::{UIButton, UIControl, UIControlEvents, UISegmentedControl, UISlider, UISwitch};
+use objc2_ui_kit::{
+    UIButton, UIControl, UIControlEvents, UISegmentedControl, UISlider, UIStepper, UISwitch,
+};
 
 use crate::events::{
     EVENT_KIND_CLICK, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_SELECTION,
@@ -224,6 +238,31 @@ define_class!(
         fn handle_segment_value_changed(&self, sender: &UISegmentedControl) {
             let detail = pack_index(sender.selectedSegmentIndex());
             self.dispatch(EVENT_KIND_SELECTION, detail, "handleSegmentValueChanged:");
+        }
+
+        /// `Stepper`'s `ValueChanged` action → [`EVENT_KIND_VALUE_CHANGED`].
+        ///
+        /// `sender.value()` is already **platform-space**, the identical
+        /// shape [`Self::handle_slider_value_changed`] documents
+        /// (`crate::controls::stepper`'s module doc's *The `[0, span]`
+        /// mapping, exactly as `Slider`'s*): `create` pins `minimumValue` at
+        /// `0` and `maximumValue` at the app's span, so no `min` of its own;
+        /// `crate::controls::stepper::decode_event` adds it back identically
+        /// on both Apple arms. A genuinely separate action from the slider's
+        /// (module doc's top-level note) because `UIStepper.value` returns a
+        /// `double`, not the `float` `UISlider.value` returns — reusing the
+        /// slider's binding would read the wrong return width. `from_user` is
+        /// unconditionally `true` for the same reason
+        /// [`Self::handle_slider_value_changed`] gives: UIKit never sends
+        /// `ValueChanged` for a programmatic `setValue:`.
+        #[unsafe(method(handleStepperValueChanged:))]
+        fn handle_stepper_value_changed(&self, sender: &UIStepper) {
+            let detail = pack_value_changed(sender.value().round() as i32, true);
+            self.dispatch(
+                EVENT_KIND_VALUE_CHANGED,
+                detail,
+                "handleStepperValueChanged:",
+            );
         }
     }
 );
@@ -407,6 +446,34 @@ impl FrustNativeControlTarget {
         self.remove(
             view,
             sel!(handleSegmentValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+    }
+
+    /// Build a target for `slot` and wire it as `view`'s `ValueChanged`
+    /// action — `Stepper`'s whole value-attach (Apple-arm-only control,
+    /// `crate::controls::APPLE_KINDS`). No drag-edge pair, unlike
+    /// [`Self::attach_slider`]: a stepper has no drag gesture to report
+    /// (`crate::controls::stepper`'s module doc's *No drag events*).
+    pub(crate) fn attach_stepper(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UIStepper,
+    ) -> Retained<Self> {
+        let target = Self::new(mtm, slot);
+        target.add(
+            view,
+            sel!(handleStepperValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+        target
+    }
+
+    /// [`Self::attach_stepper`]'s inverse — called from `Stepper::dispose`.
+    pub(crate) fn detach_stepper(&self, view: &UIStepper) {
+        self.remove(
+            view,
+            sel!(handleStepperValueChanged:),
             UIControlEvents::ValueChanged,
         );
     }

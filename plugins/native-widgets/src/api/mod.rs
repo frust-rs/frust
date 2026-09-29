@@ -25,15 +25,16 @@
 //! The public form is a different trait entirely:
 //! [`crate::component::NativeComponent`], with `&self` methods, already-typed
 //! `Props` the app constructs directly, no `decode_props` step and no `Result`
-//! returns. The eight builders here keep riding the internal trait's wire
+//! returns. The nine builders here keep riding the internal trait's wire
 //! (`params_json` in, `EventPayload` callbacks out) unchanged — bridging the
 //! public trait onto the same runtime (`crate::component::Bridge`) is what let
 //! that stay true.
 //!
 //! # Two builder families, one slot shape
 //!
-//! The eight built-in controls above are one family (`native_segmented` on
-//! iOS/macOS only — a compile-time refusal banner elsewhere); [`native_component`] is
+//! The nine built-in controls above are one family (`native_segmented`/
+//! `native_stepper` on iOS/macOS only — a compile-time refusal banner
+//! elsewhere); [`native_component`] is
 //! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (another plugin's
 //! included — an app crate cannot implement one; see that trait's own doc)
@@ -65,9 +66,9 @@ mod theme;
 
 pub use builders::{
     NativeButtonView, NativeImageFit, NativeImageView, NativeLabelView, NativeProgressView,
-    NativeSegmentedView, NativeSliderView, NativeSpinnerSize, NativeSpinnerView, NativeSwitchView,
-    native_button, native_image, native_label, native_progress, native_segmented, native_slider,
-    native_spinner, native_switch,
+    NativeSegmentedView, NativeSliderView, NativeSpinnerSize, NativeSpinnerView, NativeStepperView,
+    NativeSwitchView, native_button, native_image, native_label, native_progress, native_segmented,
+    native_slider, native_spinner, native_stepper, native_switch,
 };
 pub use mount::{NativeComponentView, native_component};
 

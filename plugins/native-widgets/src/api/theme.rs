@@ -17,7 +17,7 @@
 //!
 //! | Token | `ColorScheme`/`ShapeScale`/`TypeScale` source | Controls |
 //! |---|---|---|
-//! | `accent_ink` | `scheme().primary` | `Switch`/`Slider` thumb tint, `Spinner` tint |
+//! | `accent_ink` | `scheme().primary` | `Switch`/`Slider` thumb tint, `Spinner` tint, `Stepper` tint (`UIStepper.tintColor` only — `NSStepper` exposes no tint property at all, logged and no-op'd, `crate::controls::stepper`'s module doc's *Tint* section) |
 //! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint, `Segmented` selected-segment tint (`UISegmentedControl.selectedSegmentTintColor` on iOS, `NSSegmentedControl.selectedSegmentBezelColor` on macOS; no Android arm) |
 //! | `on_accent_fill` | `scheme().on_primary_container` | `Button` text colour |
 //! | `body_text` | `scheme().on_surface` | `Label` text colour |

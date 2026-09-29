@@ -53,7 +53,9 @@ pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
 use crate::controls::{APPLE_KINDS, SHARED_KINDS};
-use crate::controls::{button, image, label, progress, segmented, slider, spinner, switch};
+use crate::controls::{
+    button, image, label, progress, segmented, slider, spinner, stepper, switch,
+};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on macOS exactly the registry's
@@ -90,6 +92,7 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     // The Apple-only kinds (`crate::controls::APPLE_KINDS`), after the shared
     // table — Android registers none of these.
     runtime.register::<segmented::Segmented>(segmented::KIND);
+    runtime.register::<stepper::Stepper>(stepper::KIND);
     debug_assert!(
         SHARED_KINDS
             .iter()

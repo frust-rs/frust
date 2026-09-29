@@ -17,13 +17,17 @@
 //! use. Adding a control never adds a second class — the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
 //!
-//! Four arms, one per interactive control ([`detail_for`]):
+//! Four arms ([`detail_for`]) — one per interactive control, except
+//! [`EVENT_KIND_VALUE_CHANGED`], which `Slider` and `Stepper` share: both
+//! read the sender's `doubleValue` generically off `&NSControl`, with no
+//! per-class check, so a value-committing control this arm attaches gets the
+//! same read regardless of which one it is:
 //!
 //! | kind | control | payload read off `sender` |
 //! |------|---------|---------------------------|
 //! | [`EVENT_KIND_CLICK`] | `NSButton` | none (`0`) |
 //! | [`EVENT_KIND_TOGGLED`] | `NSSwitch` | `state` → [`pack_bool`] |
-//! | [`EVENT_KIND_VALUE_CHANGED`] | `NSSlider` | `doubleValue` → [`pack_value_changed`] |
+//! | [`EVENT_KIND_VALUE_CHANGED`] | `NSSlider` / `NSStepper` | `doubleValue` → [`pack_value_changed`] |
 //! | [`EVENT_KIND_SELECTION`] | `NSSegmentedControl` | `selectedSegment` → [`pack_index`] |
 //!
 //! A public `NativeComponent` reaches the same class through
@@ -54,10 +58,12 @@
 //! Every control's macOS `on_event` calls the exact same decode function its
 //! Android and iOS counterparts do (`crate::events::decode_click` for
 //! `Button`, `crate::controls::switch::decode_toggled` for `Switch`,
-//! `crate::controls::slider::decode_event` for `Slider`, and
+//! `crate::controls::slider::decode_event` for `Slider`,
 //! `crate::controls::segmented::decode_event` for the Apple-only
-//! `Segmented`, shared with iOS alone), so parity falls out of one shared
-//! decoder per control rather than being asserted here.
+//! `Segmented`, and `crate::controls::stepper::decode_event` for the
+//! Apple-only `Stepper` (the two Apple-only decoders shared with iOS alone),
+//! so parity falls out of one shared decoder per control rather than being
+//! asserted here.
 //!
 //! # Target retention: explicit, per slot, in the control's own `State`
 //!

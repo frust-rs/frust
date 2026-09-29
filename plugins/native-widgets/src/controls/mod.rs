@@ -1,6 +1,6 @@
 //! The v1 controls — seven shared (`Button`, `Label`, `Switch`, `Slider`,
-//! `ProgressBar`, `Image`, `Spinner`) plus the Apple-arm-only `Segmented`
-//! ([`APPLE_KINDS`]) — each an internal
+//! `ProgressBar`, `Image`, `Spinner`) plus the two Apple-arm-only controls,
+//! `Segmented` and `Stepper` ([`APPLE_KINDS`]) — each an internal
 //! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
 //! setter on the main thread.
@@ -40,7 +40,7 @@
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
-//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`] |
+//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`] (`Slider`/`Stepper`), [`Setter::Max`] (`Slider`/`Stepper`), [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`], [`Setter::Step`], [`Setter::Wraps`], [`Setter::StepperTint`] |
 //! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment) |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
@@ -113,6 +113,7 @@ pub(crate) mod progress;
 pub(crate) mod segmented;
 pub(crate) mod slider;
 pub(crate) mod spinner;
+pub(crate) mod stepper;
 pub(crate) mod switch;
 pub(crate) mod typeface;
 
@@ -151,7 +152,7 @@ pub(crate) const SHARED_KINDS: [&str; 7] = [
 /// The kinds only the two Apple arms (iOS, macOS) register — Android has no
 /// `NativeWidget` impl for these yet, and its builder path renders the
 /// refusal banner instead of a slot.
-pub(crate) const APPLE_KINDS: [&str; 1] = [segmented::KIND];
+pub(crate) const APPLE_KINDS: [&str; 2] = [segmented::KIND, stepper::KIND];
 
 // --- the params wire keys ---------------------------------------------------
 //
@@ -179,6 +180,12 @@ pub(crate) const VALUE: &str = "value";
 pub(crate) const MIN: &str = "min";
 /// `"max"` — the app-space range ceiling.
 pub(crate) const MAX: &str = "max";
+/// `"step"` — `Stepper`'s increment ([`Setter::Step`]); a plain delta, never
+/// offset by [`MIN`] (unlike [`VALUE`]/[`MAX`]) since a step size is
+/// invariant to where the range starts.
+pub(crate) const STEP: &str = "step";
+/// `"wraps"` — `Stepper`'s wrap-at-the-bounds flag ([`Setter::Wraps`]).
+pub(crate) const WRAPS: &str = "wraps";
 /// `"indeterminate"` — `ProgressBar`'s spinner mode.
 pub(crate) const INDETERMINATE: &str = "indeterminate";
 /// `"progressTint"` — packed ARGB, `null`-able (see [`Setter::ProgressTint`]).
@@ -187,7 +194,11 @@ pub(crate) const PROGRESS_TINT: &str = "progressTint";
 pub(crate) const THUMB_TINT: &str = "thumbTint";
 /// `"trackTint"` — packed ARGB, `null`-able.
 pub(crate) const TRACK_TINT: &str = "trackTint";
-/// `"tint"` — `Image`'s packed ARGB tint, `null`-able.
+/// `"tint"` — packed ARGB, `null`-able: `Image`'s tint, `Segmented`'s
+/// selected-segment tint ([`Setter::SegmentTint`]), and `Stepper`'s tint
+/// ([`Setter::StepperTint`]) all ride this one wire key — each decodes it
+/// into its own typed `Setter`, so the shared key never implies a shared
+/// apply.
 pub(crate) const TINT: &str = "tint";
 /// `"fit"` — `Image`'s scale-type hint (see [`Fit`]).
 pub(crate) const FIT: &str = "fit";
@@ -288,17 +299,25 @@ pub(crate) enum Setter<'a> {
     /// re-entrancy tolerance exists to drop (module doc).
     Checked(bool),
 
-    /// `ProgressBar.setProgress(int)` — **[`Tier::Cheap`]**. Platform-space:
-    /// already offset by the app's `min` (see [`slider`]).
+    /// `ProgressBar.setProgress(int)` / `UIStepper.setValue:` /
+    /// `NSStepper.setDoubleValue:` — **[`Tier::Cheap`]**. Platform-space:
+    /// already offset by the app's `min` (see [`slider`]). `Stepper` reuses
+    /// this exact variant rather than a control-specific one: its own
+    /// `[0, span]` mapping is [`slider`]'s, verbatim (`stepper`'s module
+    /// doc), and both Apple arms' setter selectors are the same ones
+    /// [`slider`]'s own `apply` already calls (`setValue:`/`setDoubleValue:`)
+    /// — a new variant would only rename an identical write.
     ///
     /// Must be planned *after* [`Self::Max`] in the same plan — the platform
     /// clamps progress to the current max, so raising both in the other order
     /// silently truncates the value.
     Progress(i32),
 
-    /// `ProgressBar.setMax(int)` — **[`Tier::Cheap`]**. Platform-space span
+    /// `ProgressBar.setMax(int)` / `UIStepper.setMaximumValue:` /
+    /// `NSStepper.setMaxValue:` — **[`Tier::Cheap`]**. Platform-space span
     /// (`max - min`), since `SeekBar.setMin` needs API 26 and this crate's
-    /// floor is 24.
+    /// floor is 24. Reused by `Stepper` for the same reason [`Self::Progress`]
+    /// documents.
     Max(i32),
 
     /// `ProgressBar.setIndeterminate(boolean)` — **[`Tier::Cheap`]**: swaps
@@ -422,6 +441,28 @@ pub(crate) enum Setter<'a> {
     /// the same nullable-clearable shape as [`Self::ProgressTint`] (nil
     /// restores the platform's own selected-segment colour). `Segmented`-only.
     SegmentTint(Option<i32>),
+
+    /// `UIStepper.setStepValue:` / `NSStepper.setIncrement:` —
+    /// **[`Tier::Cheap`]**. `Stepper`-only and Apple-only (no Android arm —
+    /// `stepper.rs`'s module doc). A plain delta, never offset by the app's
+    /// `min` — see [`super::STEP`].
+    Step(i32),
+
+    /// `UIStepper.setWraps:` / `NSStepper.setValueWraps:` —
+    /// **[`Tier::Cheap`]**. `Stepper`-only and Apple-only.
+    Wraps(bool),
+
+    /// `UIStepper.tintColor` — **[`Tier::Cheap`]**, the same
+    /// nullable-clearable shape as [`Self::ProgressTint`]. `Stepper`-only and
+    /// Apple-only; named separately from the other tint setters rather than
+    /// reusing one, the same reason [`Self::SpinnerTint`] gives: `Stepper` has
+    /// its own wire key reader (via the shared [`super::TINT`] key) and its
+    /// own Apple setter name, shared with no other control's apply.
+    /// `NSStepper` exposes no tint property at all — logged and no-op'd
+    /// (`crate::controls::platform::set_tint`'s generic "this view has no
+    /// tint property" branch), the same documented-gap shape as
+    /// [`Self::ThumbTint`] on `NSSlider`.
+    StepperTint(Option<i32>),
 }
 
 impl Setter<'_> {
@@ -452,7 +493,10 @@ impl Setter<'_> {
             | Self::Animating(_)
             | Self::SelectedSegment(_)
             | Self::Momentary(_)
-            | Self::SegmentTint(_) => Tier::Cheap,
+            | Self::SegmentTint(_)
+            | Self::Step(_)
+            | Self::Wraps(_)
+            | Self::StepperTint(_) => Tier::Cheap,
         }
     }
 }
@@ -1004,6 +1048,19 @@ pub(crate) mod platform {
                 log::warn!(
                     "frust-native-widgets: an Android control planned a segmented-control \
                      setter ({setter:?}), which this arm does not implement — ignored"
+                );
+                Ok(())
+            }
+            // `Stepper`'s own three setters — the same shape as the segmented
+            // group above: `Stepper` has no Android arm either
+            // (`crate::controls::APPLE_KINDS`; `stepper.rs`'s module doc), so
+            // no control this arm registers ever plans one. Its shared
+            // `Setter::Max`/`Setter::Progress` reuse is handled by those
+            // variants' own arms above and never reaches here.
+            Setter::Step(_) | Setter::Wraps(_) | Setter::StepperTint(_) => {
+                log::warn!(
+                    "frust-native-widgets: an Android control planned a stepper-control setter \
+                     ({setter:?}), which this arm does not implement — ignored"
                 );
                 Ok(())
             }
@@ -1859,6 +1916,9 @@ mod tests {
             Setter::SelectedSegment(Some(1)),
             Setter::Momentary(true),
             Setter::SegmentTint(None),
+            Setter::Step(1),
+            Setter::Wraps(true),
+            Setter::StepperTint(None),
         ];
         for setter in cheap {
             assert_eq!(setter.tier(), Tier::Cheap, "{setter:?}");
@@ -1964,7 +2024,7 @@ mod tests {
         );
         assert_eq!(
             APPLE_KINDS,
-            ["segmented"],
+            ["segmented", "stepper"],
             "the Apple-arm-only kinds are a shipped wire contract too"
         );
         let mut unique: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
@@ -2000,6 +2060,7 @@ mod tests {
                     "image" => image::KIND,
                     "spinner" => spinner::KIND,
                     "segmented" => segmented::KIND,
+                    "stepper" => stepper::KIND,
                     other => panic!(
                         "{file}: registers `{other}::KIND`, a module this test does not know"
                     ),

@@ -3,15 +3,16 @@
 Render **real OS controls** from pure Rust — `native_button("Save")`,
 `native_label(...)`, `native_switch(checked)`, `native_slider(...)`,
 `native_progress(...)`, `native_image(bytes)`, `native_spinner(animating)`,
-`native_segmented(labels, selected)` (iOS/macOS only) — composed straight
+`native_segmented(labels, selected)` (iOS/macOS only),
+`native_stepper(value, min, max)` (iOS/macOS only) — composed straight
 into a frust `View` tree like any other widget. Each control is backed by a
 genuine Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`/a
 circular-style `ProgressBar`), UIKit view (`UIButton`/`UILabel`/`UISwitch`/
 `UISlider`/`UIProgressView`/`UIImageView`/`UIActivityIndicatorView`/
-`UISegmentedControl`), or
+`UISegmentedControl`/`UIStepper`), or
 AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/`NSSlider`/
 `NSProgressIndicator`/`NSImageView`/an `NSProgressIndicator` in its
-`Spinning` style/`NSSegmentedControl`), hosted as a **platform-view slot**
+`Spinning` style/`NSSegmentedControl`/`NSStepper`), hosted as a **platform-view slot**
 (`docs/ARCHITECTURE.md`'s Platform-view flow) — frust paints nothing for it,
 the OS composites it in place.
 
@@ -31,7 +32,7 @@ not re-export it.
 
 ## 1. What you get
 
-Seven controls, one Rust API, no Kotlin or Swift to write for any of them:
+Nine controls, one Rust API, no Kotlin or Swift to write for any of them:
 
 | Builder | Android view | iOS view | macOS view |
 |---|---|---|---|
@@ -43,18 +44,29 @@ Seven controls, one Rust API, no Kotlin or Swift to write for any of them:
 | `native_image(bytes)` | `ImageView` | `UIImageView` | `NSImageView` |
 | `native_spinner(animating)` | `ProgressBar` (circular style) | `UIActivityIndicatorView` | `NSProgressIndicator` (`Spinning` style) |
 | `native_segmented(labels, selected)` | **none — renders a refusal banner** (see below) | `UISegmentedControl` | `NSSegmentedControl` (select-one) |
+| `native_stepper(value, min, max)` | **none — renders a refusal banner** (see below) | `UIStepper` | `NSStepper` |
 
-`native_segmented` is **iOS/iPadOS and macOS only** in this release.
-Android's framework has no segmented control — the stock one is Material's
-`MaterialButtonToggleGroup`, and this plugin never assumes a Material/AndroidX
-dependency your app did not add — so on Android (and on every desktop-preview
-host) the builder is resolved **at compile time** to the same frust-drawn
-warning banner the translucency-refused fallback uses, naming the missing arm,
-rather than an empty slot. A Material-backed Android arm is a follow-up plan.
-It is controlled like `native_switch`: `.on_select(|index| …)` reports the
-*requested* segment, and the app confirms it by feeding `selected` back;
-`.momentary(true)` makes a tap flash its segment instead of selecting it. The
-selected segment wears the theme's `accent_fill`.
+`native_segmented` and `native_stepper` are **iOS/iPadOS and macOS only** in
+this release. Android's framework has no segmented control — the stock one is
+Material's `MaterialButtonToggleGroup` — and no increment/decrement stepper
+control either; this plugin never assumes a Material/AndroidX dependency your
+app did not add — so on Android (and on every desktop-preview host) each
+builder is resolved **at compile time** to the same frust-drawn warning
+banner the translucency-refused fallback uses, naming the missing arm, rather
+than an empty slot. A Material-backed segmented Android arm and a composite
+stepper Android arm (two `ImageButton`s plus a `TextView`) are both follow-up
+plans. `native_segmented` is controlled like `native_switch`:
+`.on_select(|index| …)` reports the *requested* segment, and the app confirms
+it by feeding `selected` back; `.momentary(true)` makes a tap flash its
+segment instead of selecting it. The selected segment wears the theme's
+`accent_fill`. `native_stepper` is controlled like `native_slider`:
+`.on_change(|value| …)` reports the *requested* value on a tap, and the app
+confirms it by feeding `value` back; `.step(n)` sets the increment (default
+`1`) and `.wraps(true)` wraps the value from `max` back to `min` instead of
+clamping. The control wears the theme's `accent_ink` as its tint on iOS only
+— `NSStepper` has no tint property AppKit exposes at all, so the fold is a
+silent no-op there, logged at debug (same shape as the AppKit tint gaps in §4
+below).
 
 …plus `native_component`, the generic mounting seam for a control this crate
 does not ship: `impl NativeComponent` (with your own typed `Props`) →
@@ -218,9 +230,12 @@ Two things differ from the mobile arms, both by design:
   event (AppKit target-action carries no gesture phase, only the final
   value); `NSSwitch`'s track and `NSProgressIndicator`'s fill have no tint
   API at all, so `thumbTint`/`trackTint`/`progressTint` on `native_switch`/
-  `native_progress` — and the spinner's own tint on `native_spinner`, which
-  also draws through `NSProgressIndicator` — are silent no-ops logged at
-  debug (all three still draw in the system accent colour);
+  `native_progress` — the spinner's own tint on `native_spinner`, which
+  also draws through `NSProgressIndicator` — and `native_stepper`'s tint,
+  since `NSStepper` exposes no tint property either, are silent no-ops
+  logged at debug (`NSSwitch`/`NSProgressIndicator` still draw in the system
+  accent colour regardless; `NSStepper`'s own `-`/`+` glyphs simply keep
+  their default appearance);
   `native_image`'s tint marks the image as a template and sets
   `NSImageView.contentTintColor` — a silhouette in the tint colour, like Android's SRC_IN and iOS's template rendering — and clearing
   the tint restores the original image; and `native_image` decodes through

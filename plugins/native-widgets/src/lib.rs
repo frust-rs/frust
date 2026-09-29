@@ -10,11 +10,12 @@
 //! retained-handle [`registry`] every control's create/update/dispose path is
 //! built over, the `runtime` those paths dispatch through, the `controls` —
 //! seven shared (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`,
-//! `Spinner`) plus the iOS/macOS-only `Segmented` — that runtime serves, the
-//! typed `events` vocabulary their listeners decode into,
-//! the app-facing `api` builders, and the three platform arms' factory glue.
-//! Each shared control carries one platform half per arm (`Segmented` has no
-//! Android half — its builder renders a refusal banner there) — a
+//! `Spinner`) plus the two iOS/macOS-only ones (`Segmented`, `Stepper`) —
+//! that runtime serves, the typed `events` vocabulary their listeners decode
+//! into, the app-facing `api` builders, and the three platform arms' factory
+//! glue. Each shared control carries one platform half per arm (`Segmented`/
+//! `Stepper` have no Android half — their builders render a refusal banner
+//! there) — a
 //! `#[cfg(target_os = "android")] mod platform`, a
 //! `#[cfg(target_os = "ios")] mod platform` and a
 //! `#[cfg(target_os = "macos")] mod platform`, side by side in the same file,
@@ -179,8 +180,8 @@ mod appkit;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
 mod coretext;
-// The v1 controls (seven shared + the Apple-only `Segmented`). Compiled on
-// every target on purpose: each control's
+// The v1 controls (seven shared + the two Apple-only ones, `Segmented` and
+// `Stepper`). Compiled on every target on purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
 // `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`
 // — which is also why the modules live here rather than under a platform

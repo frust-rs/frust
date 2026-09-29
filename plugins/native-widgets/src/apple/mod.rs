@@ -57,7 +57,9 @@ pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
 use crate::controls::{APPLE_KINDS, SHARED_KINDS};
-use crate::controls::{button, image, label, progress, segmented, slider, spinner, switch};
+use crate::controls::{
+    button, image, label, progress, segmented, slider, spinner, stepper, switch,
+};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on Apple that is exactly the
@@ -81,7 +83,8 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 /// per-target `mod platform` inside each control file. So every backend
 /// registers by the same `KIND` consts — never a literal here — and by two
 /// tables: `crate::controls::SHARED_KINDS` (all three arms) then
-/// `crate::controls::APPLE_KINDS` (iOS + macOS only; `Segmented`). The
+/// `crate::controls::APPLE_KINDS` (iOS + macOS only; `Segmented`,
+/// `Stepper`). The
 /// `debug_assert!` below checks this registration against both tables at
 /// runtime; `crate::controls::tests`'
 /// `every_register_controls_registers_exactly_its_kind_tables` is the
@@ -102,6 +105,7 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     // The Apple-only kinds (`crate::controls::APPLE_KINDS`), after the shared
     // table — Android registers none of these.
     runtime.register::<segmented::Segmented>(segmented::KIND);
+    runtime.register::<stepper::Stepper>(stepper::KIND);
     debug_assert!(
         SHARED_KINDS
             .iter()

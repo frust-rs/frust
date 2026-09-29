@@ -155,6 +155,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `selectedSegmentTintColor`) — an Apple-arm-only control, the eighth class.
 # Pulls in `objc2-foundation`'s `NSArray`/`NSAttributedString`/`NSDictionary`
 # features transitively (its own `Cargo.toml`) — features only, no new crate.
+# `UIStepper`: `Stepper`'s class (`minimumValue`/`maximumValue`/`stepValue`/
+# `value`/`wraps`/`autorepeat`, `tintColor` via the `UIView`-inherited
+# `UIColor` feature already enabled below) — the ninth class, Apple-arm-only
+# like `UISegmentedControl`. Needs no feature of its own beyond `UIColor`
+# (already requested for the shared tint bridge).
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -169,6 +174,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIImageView",
     "UIActivityIndicatorView",
     "UISegmentedControl",
+    "UIStepper",
     "UIColor",
     "UIFont",
     "UIAccessibility",
@@ -273,6 +279,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # (`segmentCount`/`setLabel:forSegment:`, `selectedSegment`, `trackingMode`,
 # `segmentDistribution`, `selectedSegmentBezelColor`) — an Apple-arm-only
 # control, so the pair has no Android counterpart.
+# `NSStepper`: `Stepper`'s class (`minValue`/`maxValue`/`increment`/
+# `valueWraps`/`autorepeat`, plus `doubleValue`/`setDoubleValue:` inherited
+# from `NSControl`) — an Apple-arm-only control like `NSSegmentedControl`.
+# No `NSStepperCell` needed: nothing this crate calls on `Stepper` requires a
+# member the generated `NSStepper` impl gates behind that feature.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSView",
@@ -288,6 +299,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSProgressIndicator",
     "NSSegmentedControl",
     "NSSegmentedCell",
+    "NSStepper",
     "NSImageView",
     "NSImageCell",
     "NSImage",
