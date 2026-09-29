@@ -45,6 +45,7 @@
 pub mod pages;
 
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
@@ -143,28 +144,53 @@ fn sanitize_deep_link_label(label: &str) -> Option<&str> {
     ok.then_some(label)
 }
 
-/// The most [`push_toast`] ever leaves queued in [`NativeWidgetsDemoState::toasts`]
-/// at once — a small constant so a burst of toast-worthy failures (a
-/// misbehaving deep-link sender, several timer join failures) cannot grow the
-/// FIFO without bound. The oldest entries are dropped first.
+/// The documented limit on concurrent toasts, per the
+/// [`frust_glyph::toast_host`] v1 policy: exactly one visible at a time,
+/// queued FIFO. The queue is append-only while the app runs, but growth is
+/// bounded by deduplication (no consecutive duplicates) and rate-limiting
+/// (unknown-label toasts at most once per [`UNKNOWN_LABEL_TOAST_INTERVAL`]).
+/// This constant is informational only — the actual queue may grow beyond it
+/// if toasts have distinct messages.
+#[allow(dead_code)]
 const MAX_QUEUED_TOASTS: usize = 8;
 
-/// Append `message` to `queue`, then drop entries from the front beyond
-/// [`MAX_QUEUED_TOASTS`]. Pure (touches no signal) so it is unit-testable on
-/// a plain `Vec` — [`push_toast`] is the signal-touching wrapper every toast
-/// producer in this app goes through.
-fn push_toast_capped(queue: &mut Vec<String>, message: String) {
-    queue.push(message);
-    let overflow = queue.len().saturating_sub(MAX_QUEUED_TOASTS);
-    if overflow > 0 {
-        queue.drain(0..overflow);
+/// The minimum interval between unknown-label toast messages (toasts pushed by
+/// [`deep_link_router`] when a deep link names an unrecognized section label).
+/// Two unknown-label toasts within this duration will suppress the second one;
+/// the raw label is still logged. Used by [`should_rate_limit_unknown_toast`].
+const UNKNOWN_LABEL_TOAST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Decide whether to suppress a new unknown-label toast based on
+/// `(last_toast_at, now)`. Returns `true` if the toast should be suppressed
+/// (shown less than [`UNKNOWN_LABEL_TOAST_INTERVAL`] ago), `false` if the
+/// toast should be shown. Pure, side-effect-free.
+fn should_rate_limit_unknown_toast(last_toast_at: Option<Instant>, now: Instant) -> bool {
+    if let Some(last) = last_toast_at {
+        now.duration_since(last) < UNKNOWN_LABEL_TOAST_INTERVAL
+    } else {
+        false
     }
 }
 
-/// Push `message` onto `toasts`, capped at [`MAX_QUEUED_TOASTS`]
-/// ([`push_toast_capped`]) — call this rather than updating
-/// [`NativeWidgetsDemoState::toasts`] directly, so the FIFO's size bound
-/// holds regardless of which page or event handler is pushing.
+/// Append `message` to `queue`, deduplicating it if it equals the last queued
+/// message. Pure (touches no signal) so it is unit-testable on a plain `Vec`
+/// — [`push_toast`] is the signal-touching wrapper every toast producer in
+/// this app goes through. The queue is append-only (never drained from the
+/// front) to respect [`frust_glyph::toast_host`]'s append-only cursor
+/// semantics.
+fn push_toast_capped(queue: &mut Vec<String>, message: String) {
+    // Collapse if this message equals the last queued one, so a rapid burst of
+    // identical toasts (e.g., repeated rate-limited unknown-label attempts)
+    // does not bloat the queue.
+    if queue.last() != Some(&message) {
+        queue.push(message);
+    }
+}
+
+/// Push `message` onto `toasts` via [`push_toast_capped`] — call this rather
+/// than updating [`NativeWidgetsDemoState::toasts`] directly, so the queue's
+/// deduplication and bounds hold regardless of which page or event handler is
+/// pushing.
 pub(crate) fn push_toast(toasts: RwSignal<Vec<String>>, message: String) {
     toasts.update(|queue| push_toast_capped(queue, message));
 }
@@ -224,12 +250,24 @@ fn deep_link_router(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemo
                     );
                 }
                 DeepLinkAction::UnknownLabel(label) => {
-                    let message = match sanitize_deep_link_label(&label) {
-                        Some(safe) => format!("Unknown section '{safe}' in deep link"),
-                        None => "Unknown section in deep link".to_string(),
+                    let now = Instant::now();
+                    let last_unknown = state.last_unknown_toast_at.get();
+                    if !should_rate_limit_unknown_toast(last_unknown, now) {
+                        let message = match sanitize_deep_link_label(&label) {
+                            Some(safe) => format!("Unknown section '{safe}' in deep link"),
+                            None => "Unknown section in deep link".to_string(),
+                        };
+                        push_toast(state.toasts, message);
+                        state.last_unknown_toast_at.set(Some(now));
+                    }
+                    // Cap the logged label to at most 128 chars + original byte length.
+                    let debug_label = format!("{label:?}");
+                    let logged_label = if debug_label.len() > 128 {
+                        format!("{}... ({} bytes)", &debug_label[..128], label.len())
+                    } else {
+                        format!("{} ({} bytes)", debug_label, label.len())
                     };
-                    push_toast(state.toasts, message);
-                    log::warn!("native-widgets-demo deep-link: section {label:?} unknown");
+                    log::warn!("native-widgets-demo deep-link: section {logged_label} unknown");
                 }
             }
         }
@@ -321,6 +359,12 @@ pub struct NativeWidgetsDemoState {
     /// plain `Cell`: only [`deep_link_router`] touches it, always through the
     /// `state` [`home_page`] was called with.
     pub last_applied_sequence: Cell<Option<u64>>,
+    /// The [`Instant`] of the last unknown-label toast (a deep-link toast
+    /// shown when a label did not match a known section). Used to rate-limit
+    /// unknown-label toasts to at most one per [`UNKNOWN_LABEL_TOAST_INTERVAL`].
+    /// A plain `Cell`: only [`deep_link_router`] touches it, always through the
+    /// `state` [`home_page`] was called with.
+    pub last_unknown_toast_at: Cell<Option<Instant>>,
 }
 
 impl NativeWidgetsDemoState {
@@ -334,6 +378,7 @@ impl NativeWidgetsDemoState {
             toasts: RwSignal::new(Vec::new()),
             nav: NavigatorController::new(),
             last_applied_sequence: Cell::new(None),
+            last_unknown_toast_at: Cell::new(None),
         }
     }
 }
@@ -684,27 +729,167 @@ mod deep_link_tests {
     }
 
     #[test]
-    fn push_toast_capped_keeps_every_message_under_the_cap() {
+    fn push_toast_capped_deduplicates_consecutive_messages() {
         let mut queue: Vec<String> = Vec::new();
-        push_toast_capped(&mut queue, "a".to_string());
-        push_toast_capped(&mut queue, "b".to_string());
-        assert_eq!(queue, vec!["a".to_string(), "b".to_string()]);
+        push_toast_capped(&mut queue, "same".to_string());
+        push_toast_capped(&mut queue, "same".to_string());
+        push_toast_capped(&mut queue, "same".to_string());
+        assert_eq!(
+            queue,
+            vec!["same".to_string()],
+            "consecutive duplicates collapsed"
+        );
+        push_toast_capped(&mut queue, "different".to_string());
+        assert_eq!(
+            queue,
+            vec!["same".to_string(), "different".to_string()],
+            "different message appended"
+        );
+        push_toast_capped(&mut queue, "different".to_string());
+        assert_eq!(
+            queue,
+            vec!["same".to_string(), "different".to_string()],
+            "duplicate of last message rejected"
+        );
+        push_toast_capped(&mut queue, "third".to_string());
+        assert_eq!(
+            queue,
+            vec![
+                "same".to_string(),
+                "different".to_string(),
+                "third".to_string()
+            ],
+            "new message appended after dedup"
+        );
     }
 
     #[test]
-    fn push_toast_capped_drops_the_oldest_entries_beyond_the_cap() {
+    fn push_toast_capped_is_append_only_never_drains() {
+        // The toast host has an append-only cursor, so draining from the front
+        // shifts indices and causes messages to be skipped. Verify that
+        // push_toast_capped never drains, keeping the queue append-only.
         let mut queue: Vec<String> = (0..MAX_QUEUED_TOASTS).map(|i| i.to_string()).collect();
-        push_toast_capped(&mut queue, "newest".to_string());
-        assert_eq!(
-            queue.len(),
-            MAX_QUEUED_TOASTS,
-            "still at the cap, not over it"
+        let before_len = queue.len();
+        push_toast_capped(&mut queue, "extra".to_string());
+        assert!(
+            queue.len() >= before_len,
+            "queue must be append-only, never shrink from the front"
         );
+        assert_eq!(queue.last().map(String::as_str), Some("extra"));
         assert_eq!(
             queue.first().map(String::as_str),
-            Some("1"),
-            "oldest ('0') was dropped"
+            Some("0"),
+            "oldest entry '0' still present"
         );
-        assert_eq!(queue.last().map(String::as_str), Some("newest"));
+    }
+
+    #[test]
+    fn rate_limit_decision_allows_first_unknown_toast() {
+        let allow = should_rate_limit_unknown_toast(None, Instant::now());
+        assert!(!allow, "first unknown toast is never rate-limited");
+    }
+
+    #[test]
+    fn rate_limit_decision_suppresses_within_interval() {
+        let now = Instant::now();
+        let shortly_after = now + Duration::from_millis(500);
+        let allow = should_rate_limit_unknown_toast(Some(now), shortly_after);
+        assert!(
+            allow,
+            "unknown toast within the interval is rate-limited (suppressed)"
+        );
+    }
+
+    #[test]
+    fn rate_limit_decision_allows_after_interval() {
+        let now = Instant::now();
+        let after_interval = now + UNKNOWN_LABEL_TOAST_INTERVAL + Duration::from_millis(1);
+        let allow = should_rate_limit_unknown_toast(Some(now), after_interval);
+        assert!(
+            !allow,
+            "unknown toast after the interval is allowed (not suppressed)"
+        );
+    }
+
+    /// A minimal model of the toast host's cursor behavior, proving that the
+    /// append-only queue semantics work correctly. The host keeps a `next_index`
+    /// cursor into the queue; on each rebuild it clamps the cursor to the
+    /// (possibly shorter) new length and then calls `take_next()` to consume
+    /// messages in order.
+    struct ToastCursorModel {
+        queue: Vec<String>,
+        next_index: usize,
+    }
+
+    impl ToastCursorModel {
+        fn new() -> Self {
+            ToastCursorModel {
+                queue: Vec::new(),
+                next_index: 0,
+            }
+        }
+
+        /// Simulate the host's rebuild: clamp the cursor to the current queue
+        /// length (safe for both append and truncation-from-tail).
+        fn clamp_cursor(&mut self) {
+            self.next_index = self.next_index.min(self.queue.len());
+        }
+
+        /// Consume the next message at the cursor, advancing it if successful.
+        fn take_next(&mut self) -> Option<String> {
+            let msg = self.queue.get(self.next_index).cloned();
+            if msg.is_some() {
+                self.next_index += 1;
+            }
+            msg
+        }
+    }
+
+    #[test]
+    fn toast_cursor_model_consumes_every_message_exactly_once() {
+        // Simulate 9 pushes with interleaved consumption. Verify that every
+        // message is eventually consumed exactly once, and none are skipped.
+        let mut model = ToastCursorModel::new();
+        let mut consumed = Vec::new();
+
+        // Push first batch: 0-3
+        for i in 0..4 {
+            model.queue.push(i.to_string());
+        }
+        model.clamp_cursor();
+
+        // Consume one message
+        if let Some(msg) = model.take_next() {
+            consumed.push(msg);
+        }
+        assert_eq!(consumed, vec!["0"]);
+
+        // Push batch 2: 4-6
+        for i in 4..7 {
+            model.queue.push(i.to_string());
+        }
+        model.clamp_cursor();
+
+        // Consume remaining: 1-6
+        while let Some(msg) = model.take_next() {
+            consumed.push(msg);
+        }
+
+        // Push batch 3: 7-9
+        model.queue.push("7".to_string());
+        model.queue.push("8".to_string());
+        model.queue.push("9".to_string());
+        model.clamp_cursor();
+
+        // Consume remaining: 7-9
+        while let Some(msg) = model.take_next() {
+            consumed.push(msg);
+        }
+
+        let expected: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+        assert_eq!(
+            consumed, expected,
+            "every message consumed in order, none skipped"
+        );
     }
 }

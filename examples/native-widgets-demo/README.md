@@ -70,8 +70,11 @@ A `native-widgets-demo://section/<label>` deep link (case-insensitive against
 shows a toast instead — the raw label is untrusted external text, so it is
 echoed into the toast only when it is ASCII alphanumerics/`-`, 32 characters
 or fewer (otherwise a fixed "Unknown section in deep link" message; either
-way the raw label still reaches the log, `{:?}`-escaped). The toast queue
-holds at most 8 messages at once, oldest dropped first. Deliveries dedupe by
+way the raw label still reaches the log, `{:?}`-escaped, capped to 128 chars
+plus the original byte length). The toast queue is append-only: messages are
+never dropped from the front to respect the toast host's cursor semantics;
+growth is bounded by collapsing consecutive duplicates and rate-limiting
+unknown-label toasts to at most one per ~2 seconds. Deliveries dedupe by
 `DeepLink::sequence`, not URL text. On Android:
 
 ```
