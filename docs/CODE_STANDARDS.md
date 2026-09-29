@@ -18,8 +18,7 @@ off this index — read this plus the one that covers what you are touching:
   instead: bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`.
   `frust-shell-web`'s frame waker in particular needs no sanctioned zone of its own: it is a
   capture-nothing closure over a `thread_local` `EventLoopProxy` slot
-  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`), chosen over
-  the Phase-0 probe's `unsafe impl Send + Sync` precedent. The
+  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`). The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
   in one function/module with a `# Safety` doc comment stating the caller contract:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
@@ -208,12 +207,17 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
   resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate, leaves
   rects and clips in **logical points** (no physical conversion, unlike the mobile FFI boundary), and
   treats `on_platform_views_suspended` as remove-not-hide — the surface-recreate replay is the way back.
+- **A desktop-hosted `NSControl` owns its input; `interactive` means nothing there.** AppKit's
+  responder chain routes it, so `frust-shell-macos`' Mode-A host ignores `interactive` and shields —
+  add no shielding or hit-test forwarding for `plugins/native-widgets/src/appkit/`'s controls.
 - **Mode B paint contract: an unpainted region is a window, not a compositor bug.** `platform_view`
   punches its own slot rect automatically; any other chrome region a Mode B host leaves unpainted shows
   raw OS content — pair translucency with an opaque app-root background (the `AppBackground` precedent).
 - **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is OS-routed
   through the host's own view hierarchy, not `EventCtx` — there is no hit-test/dispatch seam for a
   hosted view; don't add pointer handling to `PlatformViewWidget`.
+- **A modal is never a slot.** An alert or sheet is host-owned, imperatively requested modal UI — no
+  `platform_view` slot, rect or Mode, and no slot inside it (`plugins/native-widgets/src/present/mod.rs`).
 
 ## GPU / Render-Engine Rules
 

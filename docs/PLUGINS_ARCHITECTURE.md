@@ -87,7 +87,7 @@ preview or a `frust build macos|windows|linux`. See
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
 | `glyph` / `material` / `cupertino` / `shadcn` / `beui` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
-| `native-widgets` (NATIVE_WIDGETS unit) | macOS-native only | an AppKit control arm (the eight shared controls plus `Segmented`/`Stepper`, hosted through `frust-shell-macos`'s Mode-A native-view host) and native alerts (`NSAlert` window sheets, presented independently of that host), desktop preview and bundle alike; Linux and Windows have no native-view host of their own, so native-widgets is unsupported there (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
+| `native-widgets` (NATIVE_WIDGETS unit) | macOS-native only | an AppKit control arm (the eight shared controls plus `Segmented`/`Stepper`, hosted through `frust-shell-macos`'s Mode-A native-view host) and native alerts (`NSAlert` window sheets, presented independently of that host), desktop preview and bundle alike; the iOS-only `native_tab_bar` renders its refusal banner and `show_native_sheet` answers `PresentError::Unsupported` on macOS; Linux and Windows have no native-view host of their own, so native-widgets is unsupported there (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
 
 ## Layer Dependencies
 
