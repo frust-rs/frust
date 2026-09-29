@@ -2621,6 +2621,12 @@ gap — the empty slot resolves to `System` in that same resolve, so nothing eve
 half to register bytes for it; the gap only resurfaces if a *later* resolve wants real bytes for
 that same slot, which is the ordinary swap case above.
 
+**Applies to**: the platform halves of the typeface ladder on Android, iOS, **and macOS** — the
+AppKit arm resolves L3 through the same `coretext.rs` module the iOS arm re-exports
+(`plugins/native-widgets/src/appkit/mod.rs`'s module doc, "L3's CoreText half is the shared
+`crate::coretext`"), so a mid-process design-system swap latches on macOS exactly as it does on
+iOS.
+
 **Why accepted**: widening the platform halves to re-register on a swap is a platform-side change
 with its own device gate, not a host-side one — deferred rather than blocking this feature.
 **Also owed**: custom-face rendering (either system's) has never been exercised on real Android/iOS
@@ -2732,7 +2738,7 @@ functions and their host tests.
 
 ---
 
-### `native-widgets-segmented-stepper-apple-only` — `native_segmented`/`native_stepper` exist on iOS and macOS only
+### `native-widgets-segmented-stepper-apple-only` — `native_segmented`/`native_stepper` exist on iOS and macOS only, and decision D2 refuses `native_tab_bar`/`show_native_sheet` on Android too
 
 **Observed**: `native_segmented` and `native_stepper` are registered in `APPLE_KINDS`
 (`plugins/native-widgets/src/controls/mod.rs`), not `SHARED_KINDS` — neither control has an
@@ -2745,18 +2751,94 @@ framework has no segmented control (the stock option, `MaterialButtonToggleGroup
 AndroidX/Material dependency this chartered leaf plugin never assumes an app added) and no
 increment/decrement stepper control either.
 
+`native_tab_bar` is the same decision, one arm narrower: it is registered in `IOS_ONLY_KINDS`, not
+`APPLE_KINDS` (macOS has no bottom-tab-bar idiom either —
+`plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *No macOS arm, no Android arm
+(decision D2)*), and `NativeTabBarView`'s own compile-time gate (`TAB_BAR_ARM`,
+`plugins/native-widgets/src/api/builders.rs`) renders the same `RefusalBanner` everywhere but iOS,
+naming both the missing idiom and decision D2. `show_native_sheet`/`show_native_sheet_into` refuse
+for the same reason at runtime instead of compile time: the sheet arm exists only on iOS
+(`present::apple_sheet`), and every other target — Android included — resolves through
+`present::mod.rs`'s own `UnsupportedSheet`, answering `PresentError::Unsupported`.
+
 **Why accepted**: a Material-backed segmented Android arm and a composite stepper Android arm (two
 `ImageButton`s plus a `TextView`) are both named follow-up plans, not v1 scope — building either
 means taking on the Material/AndroidX dependency this plugin's leaf-plugin charter
 (`docs/PLUGINS_CODE_STANDARDS.md`) currently avoids entirely. No Linux/Windows/web arm exists for
-either control either; the compile-time refusal covers every non-Apple target uniformly.
+either control either; the compile-time refusal covers every non-Apple target uniformly. The same
+reasoning covers `native_tab_bar` (no `BottomNavigationView` dependency either) and the sheet arm
+(no `BottomSheetDialog`/`NSPopover` arm yet — `present/mod.rs`'s module doc's *Platform arms*
+names both as follow-up work).
 
-**Evidence**: `plugins/native-widgets/src/controls/mod.rs`'s `SHARED_KINDS`/`APPLE_KINDS` tables
-and their source-scanning parity test; `plugins/native-widgets/src/controls/segmented.rs`'s and
+**Evidence**: `plugins/native-widgets/src/controls/mod.rs`'s `SHARED_KINDS`/`APPLE_KINDS`/
+`IOS_ONLY_KINDS` tables and their source-scanning parity test;
+`plugins/native-widgets/src/controls/segmented.rs`'s and
 `stepper.rs`'s module docs ("No Android arm (decision D2)" / "No Android arm (the same shape as
-decision D2)"); `plugins/native-widgets/src/api/builders.rs`'s `SEGMENTED_ARM`/`STEPPER_ARM`
-compile-time constants and `banner_placeholder`; `plugins/native-widgets/README.md`'s "Eleven
-controls" table.
+decision D2)"); `plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *No macOS arm, no
+Android arm (decision D2)*; `plugins/native-widgets/src/api/builders.rs`'s `SEGMENTED_ARM`/
+`STEPPER_ARM`/`TAB_BAR_ARM` compile-time constants and `banner_placeholder`;
+`plugins/native-widgets/src/present/mod.rs`'s `UnsupportedSheet` and its module doc's *Platform
+arms* section; `plugins/native-widgets/README.md`'s "Eleven controls" table.
+
+---
+
+### `native-tab-bar-bare-no-liquid-glass` — `native_tab_bar` is a bare `UITabBar`, so it never gets iPadOS 18+'s top placement or the Liquid Glass scroll-edge effect
+
+**Observed**: `native_tab_bar` builds and drives a bare `UITabBar` directly from Rust —
+deliberately never a `UITabBarController` (decision D5,
+`plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *A bare bar, never a
+`UITabBarController`*): frust owns screen ownership and routing, so the bar reports a tap and
+nothing more. iPadOS 18's top-placed tab bar and the floating glass bar both live on
+`UITabBarController`'s adaptive presentation, which a bare `UITabBar` has no access to — on iPadOS
+this control stays a bottom bar with no Liquid Glass regardless of OS version, exactly as
+`plugins/native-widgets/README.md`'s tab-bar paragraph already states. The delegate wiring
+(`UITabBarDelegate.tabBar:didSelectItem:` on the one target class,
+`plugins/native-widgets/src/apple/events.rs`) is the whole surface UIKit gives a bare bar —
+nothing there can opt into the controller-level chrome either.
+
+**Applies to**: `native_tab_bar` on iPadOS, every OS version; the bar always renders at the bottom,
+never atop content, and never gains the translucent glass material a `UITabBarController` gets
+automatically on iPadOS 18+/26.
+
+**Why accepted**: adopting `UITabBarController` to get the adaptive placement would hand it screen
+and navigation ownership frust's own `Router` already owns (module doc's decision D5) — the whole
+reason this control is a bare bar in the first place. Nothing about the bare-bar shape can be
+patched onto the controller-only chrome without reversing that decision.
+
+**Evidence**: `plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *A bare bar, never a
+`UITabBarController` (decision D5)*; `plugins/native-widgets/README.md`'s tab-bar paragraph ("On
+iPadOS the bare bar stays at the bottom and gets no Liquid Glass — the iPadOS 18 top tab bar and
+the floating glass bar are `UITabBarController` features");
+`plugins/native-widgets/src/apple/events.rs`'s `UITabBarDelegate`/`tabBar:didSelectItem:` wiring.
+
+---
+
+### `native-keyboard-focus-via-full-keyboard-access` — a hosted iOS control is keyboard-focusable only when Full Keyboard Access is on
+
+**Observed**: every standard UIKit control this plugin hosts
+(`plugins/native-widgets/src/apple/factory.rs`'s `createView` builds each one straight from
+`objc2-ui-kit` — `UIButton`/`UILabel`/`UISwitch`/`UISlider`/`UIProgressView`/`UIImageView`/
+`UIActivityIndicatorView`/`UIDatePicker`/`UISegmentedControl`/`UIStepper`/`UITabBar`) is left
+exactly as UIKit vends it: the plugin does not override `canBecomeFocused` (or any other
+`UIFocusEnvironment`/`UIFocusItem` method) anywhere in `apple/factory.rs` or any
+`src/controls/*.rs` platform arm. UIKit's own default is that a standard control answers
+`canBecomeFocused` `true` — and so becomes reachable by a hardware keyboard's Tab traversal, a
+Made-for-iPhone game controller's D-pad, or Switch Control — only when the user has Full Keyboard
+Access on (Settings → Accessibility → Keyboards → Full Keyboard Access, or a connected keyboard's
+own toggle); it is off by default. Nothing in this crate's create/update/dispose path asks about or
+changes that setting.
+
+**Applies to**: every control this plugin hosts on iOS/iPadOS when Full Keyboard Access is off —
+the platform default. macOS's AppKit arm is a separate focus model this entry does not cover.
+
+**Why accepted**: this is UIKit's own accessibility contract, not a gap this plugin introduces —
+`canBecomeFocused`'s Full-Keyboard-Access gate is Apple's, and this plugin's controls behave
+exactly like the same controls in a plain UIKit app that never overrides it either.
+
+**Evidence**: absence, honestly cited — `plugins/native-widgets/src/apple/factory.rs` and every
+`plugins/native-widgets/src/controls/*.rs` platform arm carry no `canBecomeFocused` override, no
+`becomeFirstResponder` override, and no `UIFocus*` conformance anywhere in the crate (`git grep
+canBecomeFocused` under `plugins/native-widgets/src` finds nothing on this base).
 
 ---
 
@@ -2895,7 +2977,9 @@ class doc, `armed`, and `disarm()`.
 
 ### `native-widgets-alert-drop-leaves-platform-ui` — dropping a `Presentation` frees the Busy slot but leaves the platform alert or sheet on screen
 
-**Observed**: dropping `Presentation<T>` releases the process-wide Busy slot (a new request — alert or sheet — may present at once) but does not dismiss the live platform UI. An alert stays on screen until the next request displaces it (the displacing arm takes it down first) or the user answers it, and that answer is discarded because nothing is listening. A sheet behaves the same way: dropping its future frees the slot, not the sheet, so a newer request (of either kind) can find the older sheet still live; a displaced sheet is taken down first and the new presentation is shown from that dismissal's completion, and a displaced presentation of another kind takes itself down through its own arm with the sheet presenting right behind that call.
+**Observed**: dropping `Presentation<T>` releases the process-wide Busy slot (a new request — alert or sheet — may present at once) but does not dismiss the live platform UI. An alert stays on screen until the next request displaces it (the displacing arm takes it down first) or the user answers it, and that answer is discarded because nothing is listening. A sheet behaves the same way: dropping its future frees the slot, not the sheet, so a newer request (of either kind) can find the older sheet still live; whatever its kind, a displaced presentation goes down through the shared `LivePresentation::dismiss` seam and the successor presents from that dismissal's completion (`apple_host.rs`'s *The live-presentation guard*; `apple_sheet.rs`'s *A displaced presentation*).
+
+A mid-interactive-dismissal race is accepted rather than closed: a successor request arriving while the user's swipe is still animating a displaced sheet away resolves it at once (`DisplacedAction::ResolveAndContinue`, `apple_host.rs`) without waiting for that animation, so the successor's own presentation attempt can find UIKit still mid-transition and resolve `PresentError::NoHost` instead of showing; and if the user's swipe is then cancelled, the old sheet is back on screen with no live entry to answer it — removable only by another swipe, not by a further programmatic `dismiss` — accepted, a Phase 7 device-gate observable.
 
 **Applies to**: any caller that drops the future returned by `show_native_alert` (or the request behind `show_native_alert_into`) without calling `dismiss`, on all three alert arms; the same holds for `show_native_sheet` (or `show_native_sheet_into`) on its one arm, iOS/iPadOS.
 
@@ -6291,7 +6375,8 @@ it (`docs/CODE_STANDARDS.md`'s Platform-View Conventions).
 **Evidence**: the macOS host's own z-order strategy (`addSubview:positioned:
 relativeTo:` above winit's content view, nothing made translucent anywhere)
 and the desktop host passing no shield rects. Runtime confirmation on a Mac
-is owed with the video-player device gate.
+is owed with the video-player device gate. macOS native-widgets demo gate:
+(pending — filled by the Phase 7 macOS gate).
 
 ---
 

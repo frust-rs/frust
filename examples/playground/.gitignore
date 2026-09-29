@@ -36,5 +36,5 @@ android/app/src/main/jniLibs/
 android/local.properties
 
 # Kotlin daemon's per-project cache, created by any `./gradlew compile*Kotlin`
-# (the Kotlin gate any camera/native-widgets change has to run). Build output.
+# (the Kotlin gate any camera change has to run). Build output.
 .kotlin/
