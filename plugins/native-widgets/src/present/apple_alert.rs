@@ -78,10 +78,15 @@
 //! # A displaced presentation
 //!
 //! A caller that drops its [`super::Presentation`] frees the Busy slot but
-//! not the alert on screen, so a newer request can find the older alert
-//! still live. It is taken down first — its `Dismissed` outcome goes to the
-//! dropped receiver and is discarded — and the new alert is presented from
-//! its dismissal completion, from a freshly discovered anchor.
+//! not the presentation on screen, so a newer request (of either kind) can
+//! find an older alert or sheet still live. Whatever its kind, it goes down
+//! through the shared [`super::apple_host::LivePresentation::dismiss`]
+//! seam — its own `Dismissed`/`Dismissed(Programmatic)` outcome goes to the
+//! dropped receiver and is discarded — and this alert presents from that
+//! dismissal's completion, from a freshly discovered anchor. A displaced
+//! entry already mid-dismissal for some other reason resolves and hands
+//! over from that same completion, never re-parked under its own
+//! generation ([`super::apple_host::displaced_action`]).
 //!
 //! # Not observed
 //!
@@ -102,7 +107,6 @@
 #[cfg(not(target_os = "ios"))]
 compile_error!("the UIKit alert arm targets iOS only");
 
-use std::any::Any;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
@@ -120,7 +124,8 @@ use objc2_ui_kit::{
 };
 
 use super::apple_host::{
-    LivePresentation, dismiss_live, install_live, on_main, presenting_anchor, take_live_as,
+    AfterDismiss, DisplacedAction, LivePresentation, dismiss_live, displaced_action, install_live,
+    on_main, presenting_anchor, take_live_as,
 };
 use super::{
     ActionRole, AlertHost, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, PresentError, Sender,
@@ -128,9 +133,6 @@ use super::{
 
 /// An action's handler block — UIKit's `void (^)(UIAlertAction *)`.
 type ActionHandler = RcBlock<dyn Fn(NonNull<UIAlertAction>)>;
-
-/// What runs once a displaced presentation's dismissal has finished.
-type AfterDismiss = Box<dyn FnOnce(MainThreadMarker)>;
 
 /// The iOS host: `super::AlertHost` over `UIAlertController`.
 pub(crate) struct Host;
@@ -183,18 +185,10 @@ fn start(mtm: MainThreadMarker, spec: AlertSpec, tx: Sender<AlertOutcome>, gener
         None => present_live(mtm, generation, anchor),
         Some(displaced) => {
             let then: AfterDismiss = Box::new(move |mtm| present_live(mtm, generation, anchor));
-            if (&*displaced as &dyn Any).is::<LiveAlert>() {
-                // Checked just above, so the downcast cannot fail.
-                let displaced: Box<dyn Any> = displaced;
-                if let Ok(alert) = displaced.downcast::<LiveAlert>() {
-                    alert.take_down(mtm, Some(then));
-                }
-            } else {
-                // Another presentation kind takes itself down through its
-                // own arm; this one presents right behind that call.
-                displaced.dismiss(mtm);
-                then(mtm);
-            }
+            // Whatever kind `displaced` is, its own `dismiss` takes it down
+            // and runs `then` from that dismissal's completion (module
+            // doc's *A displaced presentation*).
+            displaced.dismiss(mtm, Some(then));
         }
     }
 }
@@ -258,7 +252,7 @@ fn present_live(mtm: MainThreadMarker, generation: u64, anchor: Option<AnchorRec
     // Re-parked under the same generation, which nothing else can have
     // claimed during this main-queue turn.
     if let Some(unexpected) = install_live(mtm, generation, live) {
-        unexpected.dismiss(mtm);
+        unexpected.dismiss(mtm, None);
     }
 }
 
@@ -370,30 +364,10 @@ impl LiveAlert {
 
     /// Take the alert down programmatically, resolving `Dismissed` once
     /// UIKit's dismissal completes, then run `then` (a displaced alert's
-    /// successor).
+    /// successor) — [`displaced_action`] decides which once the alert is
+    /// confirmed on screen; not on screen at all always resolves and hands
+    /// off at once, with nothing to wait for.
     fn take_down(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>) {
-        if self.controller.isBeingDismissed() {
-            match then {
-                // UIKit is already dismissing it for a user's tap, whose
-                // handler resolves it next; a programmatic dismiss loses
-                // that race.
-                None => {
-                    let generation = self.generation;
-                    if let Some(unexpected) = install_live(mtm, generation, self) {
-                        unexpected.dismiss(mtm);
-                    }
-                }
-                // A displaced alert already on its way out: a second
-                // dismissal would be ignored (and its completion never
-                // run), so resolve it now and let the successor present —
-                // or resolve `NoHost` if UIKit refuses mid-transition.
-                Some(then) => {
-                    self.finish(Ok(AlertOutcome::Dismissed));
-                    then(mtm);
-                }
-            }
-            return;
-        }
         let Some(presenter) = self.controller.presentingViewController() else {
             // Not on screen (never presented, or removed without a
             // callback): nothing to wait for.
@@ -404,25 +378,48 @@ impl LiveAlert {
             return;
         };
 
-        let pending = Cell::new(Some((self, then)));
-        let completion = RcBlock::new(move || {
-            guarded("dismissal completion", || {
-                let Some((live, then)) = pending.take() else {
-                    return;
-                };
-                live.finish(Ok(AlertOutcome::Dismissed));
-                if let (Some(then), Some(mtm)) = (then, MainThreadMarker::new()) {
+        match displaced_action(self.controller.isBeingDismissed(), then.is_some()) {
+            DisplacedAction::Repark => {
+                // UIKit is already dismissing it for a user's tap, whose
+                // handler resolves it next; a programmatic dismiss loses
+                // that race.
+                let generation = self.generation;
+                if let Some(unexpected) = install_live(mtm, generation, self) {
+                    unexpected.dismiss(mtm, None);
+                }
+            }
+            DisplacedAction::ResolveAndContinue => {
+                // A displaced alert already on its way out: a second
+                // dismissal would be ignored (and its completion never
+                // run), so resolve it now and let the successor present —
+                // or resolve `NoHost` if UIKit refuses mid-transition.
+                self.finish(Ok(AlertOutcome::Dismissed));
+                if let Some(then) = then {
                     then(mtm);
                 }
-            });
-        });
-        presenter.dismissViewControllerAnimated_completion(true, Some(&completion));
+            }
+            DisplacedAction::CloseThenContinue => {
+                let pending = Cell::new(Some((self, then)));
+                let completion = RcBlock::new(move || {
+                    guarded("dismissal completion", || {
+                        let Some((live, then)) = pending.take() else {
+                            return;
+                        };
+                        live.finish(Ok(AlertOutcome::Dismissed));
+                        if let (Some(then), Some(mtm)) = (then, MainThreadMarker::new()) {
+                            then(mtm);
+                        }
+                    });
+                });
+                presenter.dismissViewControllerAnimated_completion(true, Some(&completion));
+            }
+        }
     }
 }
 
 impl LivePresentation for LiveAlert {
-    fn dismiss(self: Box<Self>, mtm: MainThreadMarker) {
-        self.take_down(mtm, None);
+    fn dismiss(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>) {
+        self.take_down(mtm, then);
     }
 }
 

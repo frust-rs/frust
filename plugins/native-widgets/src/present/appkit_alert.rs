@@ -81,13 +81,19 @@
 //! not the sheet on screen, so a newer request can find the older alert
 //! still live. `start` takes it down **first**, through the same
 //! immediate-resolve path [`super::dismiss`] uses (its `Dismissed` outcome
-//! goes to the dropped receiver and is discarded) — end the old sheet, then
-//! discover the new presentation's anchor, then build and present it. This
-//! order matters: while a sheet is attached, AppKit makes its panel the key
-//! (and often the main) window, so discovering the anchor before ending the
-//! old sheet risks anchoring the new alert on a panel about to close. See
-//! `apple_host`'s module doc's *Host discovery* for the anchor side of this
-//! (it never resolves to a sheet either, as a second line of defense).
+//! goes to the dropped receiver and is discarded, `then: None` since this
+//! arm still discovers the anchor and presents right here in `start`) — end
+//! the old sheet, then discover the new presentation's anchor, then build
+//! and present it. This order matters: while a sheet is attached, AppKit
+//! makes its panel the key (and often the main) window, so discovering the
+//! anchor before ending the old sheet risks anchoring the new alert on a
+//! panel about to close. See `apple_host`'s module doc's *Host discovery*
+//! for the anchor side of this (it never resolves to a sheet either, as a
+//! second line of defense). [`super::apple_host::LivePresentation::dismiss`]'s
+//! `then` continuation exists for iOS's cross-kind hand-off
+//! (`apple_alert`/`apple_sheet`); this arm's own sheet ends synchronously,
+//! so `LiveAlert::dismiss` still never needs one from `start` — only
+//! future-proofing for a macOS caller that one day passes it a `Some`.
 //!
 //! # Not observed
 //!
@@ -131,8 +137,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSString};
 
 use super::apple_host::{
-    LivePresentation, dismiss_live, install_live, on_main, presenting_anchor, take_live_any,
-    take_live_as,
+    AfterDismiss, LivePresentation, dismiss_live, install_live, on_main, presenting_anchor,
+    take_live_any, take_live_as,
 };
 use super::{ActionRole, AlertHost, AlertOutcome, AlertSpec, PresentError, Sender};
 
@@ -163,7 +169,10 @@ impl AlertHost for Host {
 /// window, build the alert, park it as the live entry, then present it.
 fn start(mtm: MainThreadMarker, spec: AlertSpec, tx: Sender<AlertOutcome>, generation: u64) {
     if let Some(displaced) = take_live_any(mtm) {
-        displaced.dismiss(mtm);
+        // No continuation: this arm still discovers the anchor and
+        // presents right here, sequentially, once `dismiss` returns (module
+        // doc's *A displaced presentation*).
+        displaced.dismiss(mtm, None);
     }
     let Some(window) = presenting_anchor(mtm) else {
         tx.send(Err(PresentError::NoHost));
@@ -174,7 +183,7 @@ fn start(mtm: MainThreadMarker, spec: AlertSpec, tx: Sender<AlertOutcome>, gener
         // Nothing else can have claimed the slot between the take above and
         // here on this main-queue turn; dismiss defensively rather than
         // leaking a second live entry if that invariant ever changes.
-        unexpected.dismiss(mtm);
+        unexpected.dismiss(mtm, None);
     }
     present_live(mtm, generation);
 }
@@ -191,7 +200,7 @@ fn present_live(mtm: MainThreadMarker, generation: u64) {
     // Re-parked under the same generation, which nothing else can have
     // claimed during this main-queue turn.
     if let Some(unexpected) = install_live(mtm, generation, live) {
-        unexpected.dismiss(mtm);
+        unexpected.dismiss(mtm, None);
     }
 }
 
@@ -310,14 +319,20 @@ impl LiveAlert {
 }
 
 impl LivePresentation for LiveAlert {
-    /// Resolve `Dismissed` at once (module doc's *Resolution*), then close
-    /// the sheet — its eventual completion callback finds nothing left to
-    /// resolve.
-    fn dismiss(self: Box<Self>, _mtm: MainThreadMarker) {
+    /// Resolve `Dismissed` at once (module doc's *Resolution*), close the
+    /// sheet — its eventual completion callback finds nothing left to
+    /// resolve — then run `then`, if given: a macOS sheet ends
+    /// synchronously (`endSheet:`), so the successor can present in this
+    /// same call, never racing an animation (module doc's *A displaced
+    /// presentation*).
+    fn dismiss(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>) {
         let window = Retained::clone(&self.window);
         let sheet = self.alert.window();
         self.finish(Ok(AlertOutcome::Dismissed));
         window.endSheet(&sheet);
+        if let Some(then) = then {
+            then(mtm);
+        }
     }
 }
 

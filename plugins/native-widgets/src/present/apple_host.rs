@@ -207,15 +207,80 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
     fallback
 }
 
+/// What runs once a displaced presentation's dismissal has finished — the
+/// successor's own presentation step. See [`LivePresentation::dismiss`].
+pub(crate) type AfterDismiss = Box<dyn FnOnce(MainThreadMarker)>;
+
 /// Everything one live presentation keeps alive until its outcome — see the
 /// module doc's *The live-presentation guard*. Implemented by each
 /// presentation arm over its own state (controller, blocks, delegate,
 /// sender).
 pub(crate) trait LivePresentation: Any {
-    /// Take the platform UI down programmatically and resolve the
-    /// presentation's dismissed outcome. Runs on the main thread, with the
-    /// entry already out of [`LIVE`].
-    fn dismiss(self: Box<Self>, mtm: MainThreadMarker);
+    /// Take the platform UI down and resolve the presentation's dismissed
+    /// outcome. Runs on the main thread, with the entry already out of
+    /// [`LIVE`].
+    ///
+    /// `then`, when given, is a displacing presentation's own presentation
+    /// step. An implementation must never park itself back under its old
+    /// generation while `then` is `Some` — the entry is already gone and a
+    /// newer one is about to take its place — and must run `then` exactly
+    /// once: after its platform UI has finished dismissing, or immediately
+    /// when nothing was ever on screen. `then` is `None` for a genuinely
+    /// programmatic dismissal ([`dismiss_live`]), where an implementation
+    /// may still re-park itself if the platform is already dismissing it
+    /// for some other reason — a race this call lost. See
+    /// [`displaced_action`] for the shared decision an implementation's
+    /// `take_down` typically makes once its platform UI is confirmed on
+    /// screen.
+    fn dismiss(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>);
+}
+
+/// [`LivePresentation::dismiss`]'s three-way decision once a presentation is
+/// confirmed on screen — see [`displaced_action`], the pure function behind
+/// it.
+///
+/// Only the iOS arms' `take_down` (`apple_alert`, `apple_sheet`) call this
+/// outside its own tests today — the macOS arm's sheet ends synchronously,
+/// so it never needs the decision (`appkit_alert`'s module doc's *A
+/// displaced presentation*). Kept here, rather than duplicated per iOS arm,
+/// so the pure decision runs under `cargo test` on any host.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DisplacedAction {
+    /// The platform is already mid-dismissal for some other reason and
+    /// nothing is waiting on the outcome: re-park under the same
+    /// generation and let that other dismissal resolve it — a programmatic
+    /// dismiss that lost this race.
+    Repark,
+    /// Either the platform is already mid-dismissal with a successor
+    /// waiting (a second dismissal call would be ignored, and its own
+    /// completion never run), or there is nothing left to wait for at all:
+    /// resolve the outcome now and hand off to the continuation at once.
+    ResolveAndContinue,
+    /// On screen and not already leaving: ask the platform to dismiss it,
+    /// resolve from that dismissal's own completion, and hand off to the
+    /// continuation from there — never racing the animation.
+    CloseThenContinue,
+}
+
+/// The decision behind [`DisplacedAction`], pulled out as a pure function of
+/// two facts so it runs under test without a `UIViewController`/`NSAlert`:
+/// whether the platform is already mid-dismissal for some other reason
+/// (`is_being_dismissed`, asked before this call touches anything), and
+/// whether a successor presentation is waiting on the outcome
+/// (`has_continuation`, i.e. `then.is_some()`). A presentation confirmed
+/// **not** on screen at all answers `ResolveAndContinue` directly, without
+/// calling this — see each arm's `take_down`.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub(crate) fn displaced_action(
+    is_being_dismissed: bool,
+    has_continuation: bool,
+) -> DisplacedAction {
+    match (is_being_dismissed, has_continuation) {
+        (true, false) => DisplacedAction::Repark,
+        (true, true) => DisplacedAction::ResolveAndContinue,
+        (false, _) => DisplacedAction::CloseThenContinue,
+    }
 }
 
 /// One live presentation, tagged with its generation.
@@ -306,7 +371,7 @@ pub(crate) fn take_live_as<P: LivePresentation>(
 pub(crate) fn dismiss_live(generation: u64) {
     on_main(move |mtm| {
         if let Some(presentation) = take_live(mtm, generation) {
-            presentation.dismiss(mtm);
+            presentation.dismiss(mtm, None);
         }
     });
 }
@@ -333,5 +398,38 @@ mod tests {
     fn a_sheet_with_no_visible_parent_has_no_candidate() {
         assert_eq!(resolve_sheet(true, None), SheetResolution::None);
         assert_eq!(resolve_sheet(true, Some(false)), SheetResolution::None);
+    }
+}
+
+/// [`displaced_action`]'s decision, tested independent of any platform
+/// object — see [`LivePresentation::dismiss`]'s doc for what each answer
+/// means to a `take_down`.
+#[cfg(test)]
+mod displaced_action_tests {
+    use super::{DisplacedAction, displaced_action};
+
+    #[test]
+    fn already_dismissing_with_nothing_waiting_reparks() {
+        assert_eq!(displaced_action(true, false), DisplacedAction::Repark);
+    }
+
+    #[test]
+    fn already_dismissing_with_a_continuation_resolves_and_continues_at_once() {
+        assert_eq!(
+            displaced_action(true, true),
+            DisplacedAction::ResolveAndContinue
+        );
+    }
+
+    #[test]
+    fn not_yet_dismissing_always_closes_then_continues() {
+        assert_eq!(
+            displaced_action(false, false),
+            DisplacedAction::CloseThenContinue
+        );
+        assert_eq!(
+            displaced_action(false, true),
+            DisplacedAction::CloseThenContinue
+        );
     }
 }

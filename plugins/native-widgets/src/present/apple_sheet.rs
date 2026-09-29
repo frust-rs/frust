@@ -71,7 +71,12 @@
 //! - **[`super::SheetHandle::dismiss`] / [`super::dismiss`]** — the same
 //!   self-dismissal, resolving `Dismissed(Programmatic)` from its
 //!   completion. A dismiss arriving while UIKit is already dismissing the
-//!   sheet for the user leaves it to the user's path.
+//!   sheet for the user (an interactive swipe in progress) records itself
+//!   as pending instead of racing it: if the swipe completes,
+//!   `presentationControllerDidDismiss:` resolves it as the user's; if the
+//!   swipe is cancelled, `viewDidAppear:` (which UIKit calls again once the
+//!   sheet is fully back) retries the dismiss, so the request is never
+//!   silently dropped.
 //! - **The host going away** — the scene disconnecting
 //!   (`UISceneDidDisconnectNotification` for the presenting window's scene),
 //!   or the sheet disappearing with no presenter left (the app tore down the
@@ -106,17 +111,19 @@
 //! # A displaced presentation
 //!
 //! As in the alert arm: a caller dropping its future frees the Busy slot,
-//! not the sheet, so a newer request (of either kind) can find the older UI
-//! still live. A displaced sheet is taken down first and the new sheet is
-//! presented from that dismissal's completion; a displaced presentation of
-//! another kind takes itself down through its own arm and the sheet
-//! presents right behind that call.
+//! not the presentation, so a newer request (of either kind) can find an
+//! older alert or sheet still live. Whatever its kind, it goes down through
+//! the shared [`super::apple_host::LivePresentation::dismiss`] seam and this
+//! sheet presents from that dismissal's completion, from a freshly
+//! discovered anchor — a displaced entry already mid-dismissal for some
+//! other reason resolves and hands over from that same completion, never
+//! re-parked under its own generation ([`super::apple_host::displaced_action`]).
 //!
 //! # `unsafe`
 //!
 //! Each site carries its own `SAFETY` comment: the controller's `init` and
-//! its `viewDidDisappear:` super call; the sheet presentation controller's
-//! weak `setDelegate:`; each button's weak
+//! its `viewDidDisappear:`/`viewDidAppear:` super calls; the sheet
+//! presentation controller's weak `setDelegate:`; each button's weak
 //! `addTarget:action:forControlEvents:`; `UIView.setTintColor:` (an
 //! unannotated-nullability setter); a custom detent resolver's borrow of its
 //! context pointer; reading UIKit's extern constants (the medium/large
@@ -127,7 +134,6 @@
 #[cfg(not(target_os = "ios"))]
 compile_error!("the UIKit sheet arm targets iOS only");
 
-use std::any::Any;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
@@ -156,7 +162,8 @@ use objc2_ui_kit::{
 };
 
 use super::apple_host::{
-    LivePresentation, dismiss_live, install_live, on_main, presenting_anchor, take_live_as,
+    AfterDismiss, DisplacedAction, LivePresentation, dismiss_live, displaced_action, install_live,
+    on_main, presenting_anchor, take_live_as,
 };
 use super::{
     ActionRole, Detent, DismissReason, PresentError, Sender, SheetHost, SheetOutcome, SheetSpec,
@@ -183,9 +190,6 @@ type DetentResolver = RcBlock<
         NonNull<ProtocolObject<dyn UISheetPresentationControllerDetentResolutionContext>>,
     ) -> CGFloat,
 >;
-
-/// What runs once a displaced sheet's dismissal has finished.
-type AfterDismiss = Box<dyn FnOnce(MainThreadMarker)>;
 
 /// The iOS host: `super::SheetHost` over `UISheetPresentationController`.
 pub(crate) struct Host;
@@ -303,18 +307,10 @@ fn start(mtm: MainThreadMarker, spec: SheetSpec, tx: Sender<SheetOutcome>, gener
         None => present_live(mtm, generation),
         Some(displaced) => {
             let then: AfterDismiss = Box::new(move |mtm| present_live(mtm, generation));
-            if (&*displaced as &dyn Any).is::<LiveSheet>() {
-                // Checked just above, so the downcast cannot fail.
-                let displaced: Box<dyn Any> = displaced;
-                if let Ok(sheet) = displaced.downcast::<LiveSheet>() {
-                    sheet.take_down(mtm, Some(then));
-                }
-            } else {
-                // Another presentation kind takes itself down through its
-                // own arm; this one presents right behind that call.
-                displaced.dismiss(mtm);
-                then(mtm);
-            }
+            // Whatever kind `displaced` is, its own `dismiss` takes it down
+            // and runs `then` from that dismissal's completion (module
+            // doc's *A displaced presentation*).
+            displaced.dismiss(mtm, Some(then));
         }
     }
 }
@@ -360,7 +356,7 @@ fn present_live(mtm: MainThreadMarker, generation: u64) {
 /// during this main-queue turn (anything that was is taken down).
 fn park(mtm: MainThreadMarker, generation: u64, live: Box<LiveSheet>) {
     if let Some(unexpected) = install_live(mtm, generation, live) {
-        unexpected.dismiss(mtm);
+        unexpected.dismiss(mtm, None);
     }
 }
 
@@ -427,6 +423,7 @@ impl LiveSheet {
                     .map(|detent| (*detent, identifier(*detent).to_string()))
                     .collect(),
                 on_detent: spec.detent_listener(),
+                pending_dismiss: Cell::new(false),
             },
         );
         controller.setView(Some(&content_view(mtm, spec, &controller)));
@@ -546,12 +543,21 @@ impl LiveSheet {
         presenter.dismissViewControllerAnimated_completion(true, Some(&completion));
     }
 
-    /// Take the sheet down programmatically → `Dismissed(Programmatic)`.
+    /// Take the sheet down programmatically → `Dismissed(Programmatic)`, or
+    /// re-park it if the platform is already taking it down for some other
+    /// reason and nothing is waiting on this one ([`displaced_action`]) —
+    /// module doc's *Resolution*'s `SheetHandle::dismiss` entry.
     fn take_down(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>) {
-        if then.is_none() && self.controller.isBeingDismissed() {
-            // UIKit is already dismissing it for the user, whose
-            // `presentationControllerDidDismiss:` resolves it next; a
-            // programmatic dismiss loses that race.
+        if displaced_action(self.controller.isBeingDismissed(), then.is_some())
+            == DisplacedAction::Repark
+        {
+            // UIKit is already dismissing it — for the user's swipe, still
+            // in progress — whose `presentationControllerDidDismiss:`
+            // resolves it next if the gesture completes; a programmatic
+            // dismiss loses that race. Record it as pending so a cancelled
+            // swipe (UIKit calls `viewDidAppear:` again) retries it instead
+            // of silently dropping the request.
+            self.controller.ivars().pending_dismiss.set(true);
             let generation = self.generation;
             park(mtm, generation, self);
             return;
@@ -565,8 +571,8 @@ impl LiveSheet {
 }
 
 impl LivePresentation for LiveSheet {
-    fn dismiss(self: Box<Self>, mtm: MainThreadMarker) {
-        self.take_down(mtm, None);
+    fn dismiss(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>) {
+        self.take_down(mtm, then);
     }
 }
 
@@ -740,6 +746,11 @@ struct SheetIvars {
     /// the identifier UIKit reports it by.
     detents: Vec<(Detent, String)>,
     on_detent: Option<Arc<dyn Fn(Detent) + Send + Sync>>,
+    /// Set when a programmatic dismiss ([`LiveSheet::take_down`]) loses its
+    /// race against an interactive swipe already in progress; retried once
+    /// from `viewDidAppear:`, which UIKit calls again if the swipe is
+    /// cancelled (module doc's *Resolution*'s `SheetHandle::dismiss` entry).
+    pending_dismiss: Cell<bool>,
 }
 
 define_class!(
@@ -856,6 +867,30 @@ define_class!(
             let generation = self.ivars().generation;
             guarded("scene disconnect", || {
                 resolve(generation, Ok(SheetOutcome::HostLost));
+            });
+        }
+
+        /// The sheet is back on screen — including a cancelled interactive
+        /// swipe bringing it back. Retries a programmatic dismiss that lost
+        /// its race against that swipe ([`LiveSheet::take_down`]); a no-op
+        /// otherwise, including the sheet's own first appearance.
+        #[unsafe(method(viewDidAppear:))]
+        fn view_did_appear(&self, animated: bool) {
+            // SAFETY: forwarding the same selector with its one `BOOL`
+            // argument to `UIViewController`'s implementation, which UIKit
+            // requires an override to call.
+            let _: () = unsafe { msg_send![super(self), viewDidAppear: animated] };
+            if !self.ivars().pending_dismiss.replace(false) {
+                return;
+            }
+            let generation = self.ivars().generation;
+            guarded("pending dismiss retry", || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                if let Some(live) = take_live_as::<LiveSheet>(mtm, generation) {
+                    live.take_down(mtm, None);
+                }
             });
         }
     }
