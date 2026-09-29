@@ -52,6 +52,14 @@
 //! — N controls = N slots, within the differ's design envelope (a
 //! shared-container optimization is future work).
 //!
+//! # Native presentations — not a slot
+//!
+//! [`show_native_alert`] / [`show_native_alert_into`] are the app-facing
+//! front door to `crate::present`: an alert is an imperative request
+//! answered by one outcome, never a `platform_view` slot. The `_into` form
+//! writes that outcome into an `RwSignal`, the same events-as-signals idiom
+//! the builders' `on_...` callbacks follow, spawned on `frust::spawn_local`.
+//!
 //! # Theme ladder L2
 //!
 //! Each builder's `Component::build` reads the active theme
@@ -62,6 +70,7 @@
 
 mod builders;
 mod mount;
+mod present;
 mod signals;
 mod theme;
 
@@ -78,6 +87,10 @@ pub use builders::{
     native_stepper, native_switch,
 };
 pub use mount::{NativeComponentView, native_component};
+/// The app-facing native-alert entry points over `crate::present`: an
+/// awaitable form and an events-as-signals form — see the `present`
+/// submodule doc.
+pub use present::{show_native_alert, show_native_alert_into};
 
 /// Make sure this build's platform factory exists before the host can look it
 /// up — **optional**: every builder already does this for you.

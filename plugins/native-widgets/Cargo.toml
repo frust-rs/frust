@@ -128,6 +128,9 @@ objc2 = { workspace = true }
 # `windows` (an `NSArray`) — all three also reached transitively through
 # `objc2-ui-kit`'s `UIApplication`/`UIScene`/`UIWindowScene` features below,
 # named here because this crate names them in its own source.
+# `NSNotification`: `NSNotificationCenter`, through which the alert arm
+# (`src/present/apple_alert.rs`) observes its scene disconnecting
+# (`UISceneDidDisconnectNotification`) to report the host lost.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
@@ -139,6 +142,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSSet",
     "NSEnumerator",
+    "NSNotification",
 ] }
 # `UIView`: the retained-handle registry (`AppleHandle` wraps a
 # `Retained<UIView>`, the type every control view specializes to).

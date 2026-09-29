@@ -35,20 +35,30 @@
 //!
 //! # Platform arms
 //!
-//! `AlertHost` is the seam, selected by `cfg`: `apple_host` (iOS + macOS —
-//! host discovery, the main-queue hop and the live-presentation guard),
-//! `android_host` (the `dev.frust.nativewidgets.FrustNativePresenter` Kotlin
-//! object that tracks the resumed `Activity`, its one `nativeOnOutcome`
-//! callback and the live-presentation guard) and `unsupported` (every other
-//! target: [`PresentError::Unsupported`]). Until a platform's alert arm is
-//! built on its host module, that host still discovers the presenting host
-//! — [`PresentError::NoHost`] when there is none — and answers
-//! [`PresentError::Unsupported`] otherwise.
+//! `AlertHost` is the seam, selected by `cfg` per OS:
+//!
+//! - **iOS/iPadOS** — `apple_alert`: a `UIAlertController` (alert or action
+//!   sheet, an iPad action sheet anchored as a popover) built over
+//!   `apple_host`'s shared helpers.
+//! - **macOS** — `apple_host`'s own placeholder host (see below).
+//! - **Android** — `android_host` (the
+//!   `dev.frust.nativewidgets.FrustNativePresenter` Kotlin object that
+//!   tracks the resumed `Activity`, its one `nativeOnOutcome` callback and
+//!   the live-presentation guard).
+//! - **Every other target** — `unsupported`: [`PresentError::Unsupported`].
+//!
+//! `apple_host` holds what both Apple arms share: host discovery, the
+//! main-queue hop and the live-presentation guard. Until a platform's alert
+//! arm is built on its host module (macOS, Android today), that host still
+//! discovers the presenting host — [`PresentError::NoHost`] when there is
+//! none — and answers [`PresentError::Unsupported`] otherwise.
 
 mod oneshot;
 
 #[cfg(target_os = "android")]
 mod android_host;
+#[cfg(target_os = "ios")]
+mod apple_alert;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 mod apple_host;
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
@@ -56,7 +66,9 @@ mod unsupported;
 
 #[cfg(target_os = "android")]
 use android_host::Host as PlatformHost;
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(target_os = "ios")]
+use apple_alert::Host as PlatformHost;
+#[cfg(target_os = "macos")]
 use apple_host::Host as PlatformHost;
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 use unsupported::Host as PlatformHost;
@@ -216,6 +228,29 @@ pub enum AlertStyle {
 
 /// A rectangle in logical points of the presenting window's coordinate
 /// space, origin top-left — where an action sheet's popover points from.
+///
+/// # Getting one
+///
+/// frust's logical pixels **are** view points on iOS (`frust-shell-ios`'s
+/// touch/IME contract: logical points pass through with no scale division),
+/// and the default shell's frust view fills its window, so any rect frust
+/// reports in window space is already an anchor, unconverted:
+///
+/// - **A native control's slot** — the rect a `platform_view` slot publishes
+///   each paint (`PlatformViewFrame::rect`, the absolute painted rect the
+///   platform view is positioned from) is exactly where the control sits;
+///   anchor a "more actions" sheet on the button that opened it.
+/// - **A frust widget** — its window-space rect: an overlay surface's
+///   `window_rect()`, or the origin a layout you control accumulates down to
+///   the widget plus its size.
+/// - **A point** — a zero-size rect at a tap location (the popover arrow
+///   points at the point).
+///
+/// The iOS arm converts it into the presenting controller's view with
+/// `convertRect:fromView:nil` (window base coordinates), so it also holds
+/// when that controller's view is not full-window (a form sheet). A rect
+/// outside the window is passed to UIKit as-is; UIKit clamps the popover
+/// onto the screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AnchorRect {
     /// Left edge.
@@ -327,6 +362,21 @@ impl<T> Presentation<T> {
     /// host refusal).
     pub fn handle(&self) -> Option<PresentationHandle> {
         self.handle
+    }
+
+    /// Take the error a request refused before anything was presented
+    /// (no [`Self::handle`]) resolves with, without polling — what an adapter
+    /// that must answer synchronously (the `api` layer's signal adapter)
+    /// reports. `None` for an accepted request, or once taken; a taken
+    /// refusal is not delivered again by polling.
+    #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
+    pub(crate) fn take_refusal(&mut self) -> Option<PresentError> {
+        match &mut self.state {
+            PresentationState::Ready(slot) if matches!(slot, Some(Err(_))) => {
+                slot.take().and_then(Result::err)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -540,20 +590,58 @@ pub(crate) mod wire {
     }
 }
 
+/// Test seams shared with other modules' host tests (the `api` layer's
+/// adapter tests): a presentation whose sender the test holds, and the
+/// process-wide Busy slot held for the duration of a closure. Every test in
+/// this crate that touches [`ACTIVE`] serializes on
+/// [`serialize`](test_support::serialize).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    use super::{Presentation, Sender, lock_active, next_generation, oneshot};
+
+    /// Serializes every test that touches [`super::ACTIVE`] — one
+    /// process-global slot, and `#[test]`s run on parallel threads.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Hold [`TEST_LOCK`], recovering from a test that panicked holding it.
+    pub(crate) fn serialize() -> MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// An accepted-looking presentation and the sender that resolves it,
+    /// under a generation nothing is ever live under — so neither half
+    /// touches the Busy slot.
+    #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
+    pub(crate) fn pending_pair<T>() -> (Sender<T>, Presentation<T>) {
+        let (tx, rx) = oneshot::channel(u64::MAX);
+        (tx, Presentation::pending(rx, u64::MAX))
+    }
+
+    /// Run `f` with the Busy slot held by some other presentation, freeing
+    /// it afterwards; serialized on [`TEST_LOCK`].
+    #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
+    pub(crate) fn with_slot_held<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = serialize();
+        *lock_active() = Some(next_generation());
+        let result = f();
+        *lock_active() = None;
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::Ordering as AtomicOrdering;
     use std::task::Waker;
 
     use super::oneshot::tests::counting_waker;
     use super::*;
-
-    /// Serializes every test that touches [`ACTIVE`] — one process-global
-    /// slot, and `#[test]`s run on parallel threads.
-    static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     /// A scripted stand-in host: what `show_alert` should do, the one live
     /// sender it holds, and a record of every call.
@@ -617,12 +705,10 @@ mod tests {
         }
     }
 
-    /// Run `f` holding [`TEST_LOCK`], with [`ACTIVE`] and the fake reset
-    /// before and after.
+    /// Run `f` holding `test_support`'s lock, with [`ACTIVE`] and the fake
+    /// reset before and after.
     fn isolated<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = test_support::serialize();
         let reset = || {
             *lock_active() = None;
             FAKE.with(|fake| *fake.borrow_mut() = FakeState::default());
@@ -880,6 +966,20 @@ mod tests {
                 assert_eq!(*lock_active(), None);
             }
             assert!(FAKE.with(|fake| fake.borrow().shown.is_empty()));
+        });
+    }
+
+    #[test]
+    fn a_refusal_is_taken_once_and_an_accepted_request_has_none() {
+        isolated(|| {
+            let mut accepted = show_alert_on::<FakeHost>(two_button_spec());
+            assert_eq!(accepted.take_refusal(), None);
+            assert_eq!(poll_once(&mut accepted), Poll::Pending);
+
+            let mut busy = show_alert_on::<FakeHost>(two_button_spec());
+            assert_eq!(busy.take_refusal(), Some(PresentError::Busy));
+            assert_eq!(busy.take_refusal(), None);
+            assert_eq!(poll_once(&mut busy), Poll::Pending);
         });
     }
 

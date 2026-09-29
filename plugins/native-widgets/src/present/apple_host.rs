@@ -1,6 +1,8 @@
 //! The Apple (iOS + macOS) presentation host: where a presentation goes, how
 //! a request reaches the main thread, and what keeps a live presentation's
-//! objects alive until its one outcome.
+//! objects alive until its one outcome — the helpers both Apple arms build
+//! on (iOS's alert arm is `super::apple_alert`), plus macOS's placeholder
+//! `Host` until its own alert arm lands.
 //!
 //! # Host discovery
 //!
@@ -15,8 +17,9 @@
 //! - **macOS** — the key window, else the main window, else the first
 //!   visible window: a window-modal sheet needs a window on screen.
 //!
-//! `None` means [`PresentError::NoHost`]: the app has no UI to present over
-//! yet (a request during launch, before the first scene/window exists).
+//! `None` means [`PresentError::NoHost`](super::PresentError::NoHost): the
+//! app has no UI to present over yet (a request during launch, before the
+//! first scene/window exists).
 //!
 //! # Main-thread dispatch
 //!
@@ -36,12 +39,13 @@
 //! parks everything the presentation needs (its controller, its blocks, its
 //! delegate, its sender) in [`LIVE`], one entry tagged with the
 //! presentation's generation, until the terminal outcome. Every later touch
-//! — a handler firing, [`AlertHost::dismiss`], the host going away — takes
-//! the entry back **by generation**: a stale callback for a finished
-//! presentation finds nothing and does nothing, and can never resolve the
-//! one live now. `LIVE` is a `thread_local!` because `Retained`/`RcBlock`
-//! are `!Send` and everything touching it already runs on the main thread
-//! (every accessor takes a [`MainThreadMarker`] to say so).
+//! — a handler firing, [`AlertHost::dismiss`](super::AlertHost::dismiss),
+//! the host going away — takes the entry back **by generation**: a stale
+//! callback for a finished presentation finds nothing and does nothing, and
+//! can never resolve the one live now. `LIVE` is a `thread_local!` because
+//! `Retained`/`RcBlock` are `!Send` and everything touching it already runs
+//! on the main thread (every accessor takes a [`MainThreadMarker`] to say
+//! so).
 //!
 //! # `unsafe`
 //!
@@ -66,6 +70,7 @@ use objc2_ui_kit::{
     UIApplication, UISceneActivationState, UIViewController, UIWindow, UIWindowScene,
 };
 
+#[cfg(target_os = "macos")]
 use super::{AlertHost, AlertOutcome, AlertSpec, PresentError, Sender};
 
 /// What a presentation is presented from: the topmost view controller on
@@ -83,7 +88,8 @@ pub(crate) type PresentingAnchor = NSWindow;
 /// `f` runs under `catch_unwind`: it runs inside libdispatch's frames, and
 /// no unwind may cross back into them. A panic is logged; any sender `f`
 /// held is dropped with it, which resolves that presentation as a
-/// [`PresentError::Platform`] error rather than leaving it pending.
+/// [`PresentError::Platform`](super::PresentError::Platform) error rather
+/// than leaving it pending.
 pub(crate) fn on_main(f: impl FnOnce(MainThreadMarker) + Send + 'static) {
     DispatchQueue::main().exec_async(move || {
         // SAFETY: this closure is submitted to `dispatch_get_main_queue()`,
@@ -178,7 +184,8 @@ thread_local! {
 /// with a displaced entry (typically [`LivePresentation::dismiss`] it, whose
 /// outcome then has no receiver and is discarded). Returned rather than
 /// dropped here so no arm code runs inside the `LIVE` borrow.
-#[allow(dead_code)] // consumed by the platform alert/sheet arms
+// Consumed by the iOS alert arm; macOS has no arm on it yet.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn install_live(
     _mtm: MainThreadMarker,
     generation: u64,
@@ -213,7 +220,8 @@ pub(crate) fn take_live(
 /// [`take_live`] for an arm that needs its own concrete state back (to
 /// resolve an action through its sender): taken only if the entry is
 /// `generation`'s **and** of type `P`, so a mismatch leaves it in place.
-#[allow(dead_code)] // consumed by the platform alert/sheet arms
+// Consumed by the iOS alert arm; macOS has no arm on it yet.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn take_live_as<P: LivePresentation>(
     _mtm: MainThreadMarker,
     generation: u64,
@@ -242,12 +250,14 @@ pub(crate) fn dismiss_live(generation: u64) {
     });
 }
 
-/// The Apple host. Until an alert arm is built on it for a platform, a
-/// request still runs host discovery on the main thread — resolving
-/// [`PresentError::NoHost`] when there is nothing to present over — and
-/// answers [`PresentError::Unsupported`] otherwise.
+/// The macOS placeholder host (iOS selects `super::apple_alert`'s). Until
+/// macOS's alert arm is built, a request still runs host discovery on the
+/// main thread — resolving [`PresentError::NoHost`] when there is nothing to
+/// present over — and answers [`PresentError::Unsupported`] otherwise.
+#[cfg(target_os = "macos")]
 pub(crate) struct Host;
 
+#[cfg(target_os = "macos")]
 impl AlertHost for Host {
     fn show_alert(
         _spec: AlertSpec,
@@ -258,9 +268,7 @@ impl AlertHost for Host {
             let outcome = match presenting_anchor(mtm) {
                 None => Err(PresentError::NoHost),
                 Some(_) => {
-                    log::warn!(
-                        "frust-native-widgets: no native alert is built for this Apple platform"
-                    );
+                    log::warn!("frust-native-widgets: no native alert is built for macOS");
                     Err(PresentError::Unsupported)
                 }
             };

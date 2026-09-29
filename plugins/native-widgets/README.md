@@ -141,6 +141,89 @@ fn save_button(saved: RwSignal<bool>) -> impl frust::View<AppState> {
 
 ---
 
+## 1b. Native presentations (alerts)
+
+A native **alert** is not a control in the tree: it is a request answered by
+exactly one outcome — the chosen action's id, `Cancelled`, `Dismissed` (you
+took it down with `present::dismiss(&handle)`) or `HostLost` (the window scene
+went away first). One presentation is live per process; a second request while
+one is up is refused `PresentError::Busy` at once, never queued. Nothing ever
+blocks waiting for the user.
+
+| Platform | Today |
+|---|---|
+| iOS / iPadOS | `UIAlertController` — `AlertStyle::Alert` centered, `AlertStyle::ActionSheet` from the bottom (iPhone) or as a popover pointing at `anchor` (iPad) |
+| macOS, Android | discovers the host, then answers `PresentError::Unsupported` (arms in progress) |
+| desktop preview, web | `PresentError::Unsupported` |
+
+Up to three actions, each with a unique non-empty `id` and a role —
+`ActionRole::Default`, `Cancel` (at most one; UIKit places it itself) or
+`Destructive` (red). Two shapes:
+
+```rust
+use frust::{RwSignal, Set};
+use frust_native_widgets::{
+    ActionRole, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, native_button, show_native_alert,
+    show_native_alert_into,
+};
+
+fn delete_spec() -> AlertSpec {
+    AlertSpec::new("Delete draft?", "This cannot be undone.")
+        .with_action("keep", "Keep", ActionRole::Cancel)
+        .with_action("delete", "Delete", ActionRole::Destructive)
+}
+
+// 1. Awaitable — from any async context (`frust::spawn_local` on the UI thread);
+//    `deleted` is an app `RwSignal<bool>`:
+frust::spawn_local(async move {
+    if let Ok(AlertOutcome::Action(id)) = show_native_alert(delete_spec()).await
+        && id == "delete"
+    {
+        deleted.set(true);
+    }
+});
+
+// 2. Into a signal — no async block. Writes `Some(outcome)` exactly once;
+//    you read it on a later rebuild and reset it to `None` yourself:
+let outcome: RwSignal<Option<AlertOutcome>> = RwSignal::new(None);
+native_button("Delete").on_press(move || {
+    if let Err(err) = show_native_alert_into(delete_spec(), outcome) {
+        log::warn!("no alert: {err}"); // Busy, InvalidSpec, Unsupported…
+    }
+})
+```
+
+`show_native_alert_into` returns synchronous refusals (`Busy`, an invalid
+spec, `Unsupported`) as `Err` and never writes the signal for them; an error
+found only later on the main thread (`NoHost`) is logged, not written — await
+`show_native_alert` when you need to tell those apart. Dropping the awaited
+future frees the one-at-a-time slot but leaves the alert on screen until the
+user answers it (that answer is discarded).
+
+**The iPad anchor rule.** An action sheet on iPad is a popover and must point
+at something: `AlertStyle::ActionSheet` with no `anchor` is refused
+`PresentError::InvalidSpec` on iPad before anything is shown (UIKit would
+crash). Pass an `AnchorRect` in **logical window coordinates** — frust's
+logical pixels are iOS points, so the rect a native control's
+`platform_view` slot paints at, or any frust widget's window-space rect, is
+already right; a zero-size rect points at a tap location. iPhone ignores the
+anchor.
+
+```rust
+let mut spec = delete_spec();
+spec.style = AlertStyle::ActionSheet;
+spec.anchor = Some(AnchorRect { x: 24.0, y: 600.0, width: 120.0, height: 44.0 });
+```
+
+`cancelable` matters only where the platform has a non-action dismissal: on
+iPad, `cancelable: false` stops an outside tap from closing the action-sheet
+popover. UIKit alerts (and iPhone action sheets) have none, so there it
+removes nothing. On an iPad popover with a `Cancel`-role action, UIKit hides
+that button and an outside tap reports it (`Action("keep")` above) rather than
+`Cancelled`.
+
+---
+
 ## 2. Add the dependency (always)
 
 ```toml
