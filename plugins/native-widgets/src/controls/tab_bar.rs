@@ -74,9 +74,20 @@
 //! a retap of a tab the app never confirmed (no write-back), even though
 //! UIKit has already moved `selectedItem` and the highlight to it either way
 //! (the same v1 identical-props limitation the *Write-back* section above
-//! names; the classification is independent of that highlight). Each
-//! `UITabBarItem` is built with its index as its `tag`, which is what the
-//! delegate reports.
+//! names; the classification is independent of that highlight).
+//!
+//! The same tracking has a consequence worth naming in reverse: a rejected
+//! tap moves UIKit's own highlight to the rejected item while `showing` (the
+//! tab the app last confirmed) stays put — a tap itself never moves it — so
+//! tapping back on the confirmed tab reports
+//! [`crate::events::EVENT_KIND_RESELECTED`], even though the user is moving
+//! the highlight *back*, not repeating a tap UIKit is still showing
+//! selected. The classification still follows the app's model, not UIKit's
+//! chrome — an app that pops to root on a reselect should feed the confirmed
+//! selection back promptly (so the next [`TabBarProps::plan`] re-plans
+//! [`Setter::SelectedTab`]) rather than let its highlight and `showing` keep
+//! diverging. Each `UITabBarItem` is built with its index as its `tag`,
+//! which is what the delegate reports.
 //!
 //! # Theme
 //!
@@ -959,6 +970,19 @@ mod tests {
         let confirmed = Some(0);
         assert_eq!(tap_kind(confirmed, 1), EVENT_KIND_SELECTION);
         assert_eq!(tap_kind(confirmed, 1), EVENT_KIND_SELECTION);
+    }
+
+    #[test]
+    fn retapping_the_confirmed_tab_after_a_rejected_tap_elsewhere_is_a_reselect() {
+        // The reverse sequence (module doc's *Select vs reselect*): the app
+        // rejects a tap on another item first, so UIKit's own highlight
+        // moves there while `showing` — what the app last confirmed — stays
+        // at 0 (a tap never moves it). Tapping back on 0 must classify as a
+        // reselect, even though the user is moving the highlight *back*, not
+        // repeating a tap UIKit is still showing selected.
+        let confirmed = Some(0);
+        assert_eq!(tap_kind(confirmed, 1), EVENT_KIND_SELECTION);
+        assert_eq!(tap_kind(confirmed, 0), EVENT_KIND_RESELECTED);
     }
 
     fn event(kind: i32, index: isize) -> NativeEvent {

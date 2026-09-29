@@ -3683,7 +3683,7 @@ mod tests {
     fn placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size() {
         // A range of slot sizes the app-facing builders actually allow,
         // including `native_switch`'s own deliberately small box
-        // (`examples/glyph-catalog/src/pages/native_widgets.rs`) and an
+        // (`examples/native-widgets-demo/src/pages/controls.rs`) and an
         // even smaller one to stress the invariant further.
         for (label, (w, h)) in [
             ("native_switch's own box (70x40)", (70.0, 40.0)),

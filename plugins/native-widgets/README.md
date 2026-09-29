@@ -85,7 +85,12 @@ reports the *requested* tab: route there and feed the id back as `selected`
 tab the app last confirmed was tapped again — the conventional "scroll to
 top / pop to root" — not merely the one UIKit is highlighting: a tap you
 reject (no write-back) retapped still reports as another `.on_select`, even
-though the OS has already moved the highlight to it. The bar sizes itself to
+though the OS has already moved the highlight to it. The same tracking works
+in reverse too: tap back on the tab the app still confirms and that retap
+fires `.on_reselect`, even though the OS's own highlight had just moved to
+the rejected tab a moment before, not to the one you tapped back — an app
+that pops to root on `.on_reselect` should feed the confirmed selection back
+promptly so its highlight and `selected` never keep diverging. The bar sizes itself to
 49pt plus the window's bottom safe-area inset,
 so its background runs under the home indicator: put it last in a `Column`
 docked to the bottom edge, and if you wrap it in `frust::safe_area` for

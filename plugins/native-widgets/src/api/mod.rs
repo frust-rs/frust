@@ -124,7 +124,7 @@ pub fn ensure_native_factory_registered() {
 /// describes ("the number the leak bar every create/dispose cycle must
 /// return to `0`"), surfaced app-side for exactly one reason: a
 /// device-gate harness (a mount/unmount cycler plus a 50-slot stress
-/// toggle, `examples/glyph-catalog/src/pages/native_widgets.rs`'s GATE
+/// toggle, `examples/native-widgets-demo/src/pages/stress.rs`'s GATE
 /// HARNESS section) needs an in-app readout to prove the teardown-retire
 /// path disposes promptly rather than waiting out the differ's
 /// missing-streak backstop (`crate::registry`'s module doc's Idle-deferred

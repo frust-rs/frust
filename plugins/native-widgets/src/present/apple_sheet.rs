@@ -756,7 +756,8 @@ struct SheetIvars {
 define_class!(
     // SAFETY:
     // - `UIViewController` may be subclassed (it is designed for it); this
-    //   subclass overrides only `viewDidDisappear:`, calling super first.
+    //   subclass overrides `viewDidDisappear:` and `viewDidAppear:`, each
+    //   calling super first.
     // - The ivars are plain Rust values; the macro's generated `dealloc`
     //   drops them, and none of them touches the object being deallocated.
     #[unsafe(super(UIViewController, UIResponder, NSObject))]

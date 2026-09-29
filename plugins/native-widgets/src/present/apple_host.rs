@@ -224,12 +224,17 @@ pub(crate) trait LivePresentation: Any {
     /// step. An implementation must never park itself back under its old
     /// generation while `then` is `Some` — the entry is already gone and a
     /// newer one is about to take its place — and must run `then` exactly
-    /// once: after its platform UI has finished dismissing, or immediately
-    /// when nothing was ever on screen. `then` is `None` for a genuinely
-    /// programmatic dismissal ([`dismiss_live`]), where an implementation
-    /// may still re-park itself if the platform is already dismissing it
-    /// for some other reason — a race this call lost. See
-    /// [`displaced_action`] for the shared decision an implementation's
+    /// once: after its platform UI has finished dismissing, immediately when
+    /// nothing was ever on screen, or — when the platform is already
+    /// mid-dismissal for some other reason and a successor is waiting
+    /// ([`DisplacedAction::ResolveAndContinue`]) — at once as well, without
+    /// waiting for that other dismissal's completion, so the successor may
+    /// be refused [`NoHost`](super::PresentError::NoHost) mid-transition
+    /// (`apple_alert.rs`'s and `apple_sheet.rs`'s `take_down`). `then` is
+    /// `None` for a genuinely programmatic dismissal ([`dismiss_live`]),
+    /// where an implementation may still re-park itself if the platform is
+    /// already dismissing it for some other reason — a race this call lost.
+    /// See [`displaced_action`] for the shared decision an implementation's
     /// `take_down` typically makes once its platform UI is confirmed on
     /// screen.
     fn dismiss(self: Box<Self>, mtm: MainThreadMarker, then: Option<AfterDismiss>);

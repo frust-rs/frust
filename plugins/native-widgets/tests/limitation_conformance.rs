@@ -22,21 +22,26 @@
 //! 2. Rewrite every one of them, then delete that limitation's entry from
 //!    [`LIMITATIONS`] below (delete the whole file once the last one is gone —
 //!    a list of zero claims proves nothing).
-//! 3. Update the one surface this scan deliberately cannot see, by hand:
-//!    `examples/native-widgets-demo/src/pages/composite.rs` (the
-//!    native-widgets page lives in the demo app until a later phase moves it
-//!    — follow it if it has moved). This crate's tests do not reach into
-//!    `examples/**` — a deliberate boundary, see
-//!    `tests/kotlin_conformance.rs`'s own module doc — so nothing enforces
-//!    that page, which is exactly why it is named here.
-//!    **Search it for the claim and rewrite whatever states it**, rather than
-//!    trusting a description of what it says: an earlier version of this step
-//!    described that file instead, and was stale one commit later (and a later
-//!    one named a page that had since moved). Search *short* fragments
-//!    (`app crate cannot`), never a whole marker from [`LIMITATIONS`] — those
-//!    captions are Rust string literals whose `\` line continuations can split
-//!    a marker mid-phrase, which neither `grep` nor [`normalized`] sees
-//!    through. Today the FFI wall is stated in one `composite_block` caption.
+//! 3. Update the surfaces this scan deliberately cannot see, by hand:
+//!    `examples/native-widgets-demo/src/pages/composite.rs` AND
+//!    `examples/native-widgets-demo/README.md` (the native-widgets page
+//!    lives in the demo app until a later phase moves it — follow it if it
+//!    has moved). This crate's tests do not reach into `examples/**` — a
+//!    deliberate boundary, see `tests/kotlin_conformance.rs`'s own module
+//!    doc — so nothing enforces either surface, which is exactly why both
+//!    are named here.
+//!    **Search each for the claim and rewrite whatever states it**, rather
+//!    than trusting a description of what it says: an earlier version of
+//!    this step named only `composite.rs`, and was stale one commit later
+//!    (and a later one named a page that had since moved). Search *short*
+//!    fragments (`app crate cannot`), never a whole marker from
+//!    [`LIMITATIONS`] — those captions are Rust string literals whose `\`
+//!    line continuations can split a marker mid-phrase, which neither `grep`
+//!    nor [`normalized`] sees through. Today the FFI wall is discussed in
+//!    `composite.rs`'s *The FFI wall still applies* module-doc section and
+//!    stated in its `composite_block` caption, and stated again in
+//!    `README.md`'s Composite row — two surfaces, not the one caption an
+//!    earlier version of this step named.
 //!
 //! # The idiom, and the precedents
 //!
