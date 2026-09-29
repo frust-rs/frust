@@ -2864,9 +2864,8 @@ later attach replaces it or the view is destroyed.
 `plugins/native-widgets/src/android/ctx.rs`'s `disarm_listener` and `unwind_partial_attach`;
 `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativeListener.kt`'s
 class doc, `armed`, and `disarm()`.
+
 ---
-
-
 
 ### `native-widgets-alert-busy-slot-unobserved-host-teardown` — a presenting host torn down through a path the arm cannot observe leaves the Busy slot held indefinitely
 
@@ -2905,7 +2904,6 @@ class doc, `armed`, and `disarm()`.
 **Evidence**: `plugins/native-widgets/src/present/mod.rs` module doc; `apple_alert.rs` / `appkit_alert.rs` / `android_alert.rs` *A displaced presentation* sections.
 
 ---
----
 
 ### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
 
@@ -2921,6 +2919,7 @@ sanctioned `frust-core` test-only dev-dependency, the same plugin-tier exemption
 (`docs/CODE_STANDARDS.md`), not available to a genuinely external crate like `design-system-sample`.
 
 **Applies to**: any external design-system crate wanting to unit-test its `Widget::semantics`
+output.
 
 **Why accepted**: closing it means either re-exporting a semantics-pass entry point from the
 facade or loosening `SemanticsCtx::new`'s visibility — a deliberate facade-API decision deferred
