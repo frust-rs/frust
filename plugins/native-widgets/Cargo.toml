@@ -122,6 +122,12 @@ objc2 = { workspace = true }
 # `objc2-ui-kit/UIDatePicker` feature below turns all three on transitively,
 # but this crate names the first two in its own source, so they are
 # requested here explicitly (the same rule as `NSData` above).
+# `NSSet`/`NSEnumerator`/`NSArray`: native presentations' host discovery
+# (`src/present/apple_host.rs`) iterates `UIApplication.connectedScenes` (an
+# `NSSet`, whose `iter()` is `NSEnumerator`-gated) and reads a scene's
+# `windows` (an `NSArray`) — all three also reached transitively through
+# `objc2-ui-kit`'s `UIApplication`/`UIScene`/`UIWindowScene` features below,
+# named here because this crate names them in its own source.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
@@ -130,6 +136,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSDate",
     "NSCalendar",
     "NSLocale",
+    "NSArray",
+    "NSSet",
+    "NSEnumerator",
 ] }
 # `UIView`: the retained-handle registry (`AppleHandle` wraps a
 # `Retained<UIView>`, the type every control view specializes to).
@@ -178,6 +187,25 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `tintColor` via the shared `UIColor`) — the tenth class, and a SHARED
 # control (all three arms). Pulls in `objc2-foundation`'s `NSCalendar`/
 # `NSDate`/`NSLocale` features transitively — features only, no new crate.
+#
+# Native presentations (`src/present/`) — the complete list for every
+# presentation arm on iOS, requested up front so none of those arms needs a
+# further manifest edit: `UIApplication`/`UIScene`/`UISceneDefinitions`
+# (`activationState`)/`UIWindowScene`/`UIWindow`: host discovery walks the
+# connected scenes to a foreground-active scene's key window, the
+# `frust-auth-session` Apple backend's chain. `UIViewController`: that
+# window's `rootViewController` and the `presentedViewController` walk to the
+# topmost controller, plus `present…`/`dismiss…` themselves.
+# `UIAlertController` (+ `UIAlertAction`, generated in the same module): the
+# alert. `UIPresentationController`/`UIPopoverPresentationController`: an
+# iPad action sheet's popover anchor (`sourceView`/`sourceRect`) and the
+# adaptive-presentation delegate that reports an outside-tap dismissal.
+# `UISheetPresentationController` + `UIStackView`: the sheet presentation and
+# its content layout. `UIDevice`: `userInterfaceIdiom` (`UIUserInterfaceIdiom`
+# lives in that module) — an unanchored action sheet crashes on iPad, so the
+# arm must tell an iPad from an iPhone before presenting. `block2`: every
+# block-taking member (an alert action's handler, `present…`'s completion) is
+# gated on it. `UIImage` and `UIResponder` are already listed above.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -198,6 +226,19 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIFont",
     "UIAccessibility",
     "UIInterface",
+    "UIApplication",
+    "UIScene",
+    "UISceneDefinitions",
+    "UIWindowScene",
+    "UIWindow",
+    "UIViewController",
+    "UIAlertController",
+    "UIPresentationController",
+    "UIPopoverPresentationController",
+    "UISheetPresentationController",
+    "UIStackView",
+    "UIDevice",
+    "block2",
     "objc2-core-foundation",
     "objc2-quartz-core",
     "objc2-core-text",
@@ -243,6 +284,23 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "std",
     "CFData",
 ] }
+# Native presentations: an alert action's handler and a presentation's
+# completion are blocks this crate must *construct* (`block2::RcBlock`), not
+# merely name — the same reason `plugins/video-player/Cargo.toml` and
+# `plugins/auth-session/Cargo.toml` depend on `block2` directly. Not
+# `{ workspace = true }`: the root has no `block2` row, so every plugin
+# repeats this per-crate literal.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# Native presentations: a request can arrive on any thread, and every UIKit
+# presentation call must run on the main thread — `DispatchQueue::main()`/
+# `exec_async` is that hop (`src/present/apple_host.rs`'s `on_main`), the
+# never-block-the-caller shape `frust-auth-session`'s Apple backend uses.
+# Feature list repeated rather than inherited: the root `dispatch2 = "0.3"`
+# row is a plain string, so it cannot narrow a member's feature set.
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+] }
 
 # macOS only: the AppKit arm (`src/appkit/`), hosted as opaque native
 # siblings by the desktop Mode-A platform-view host (`crates/frust-shell-macos`
@@ -265,6 +323,11 @@ objc2 = { workspace = true }
 # `NSDate`/`NSCalendar`/`NSLocale`: `DatePicker`'s `NSDate` <-> civil-date
 # mapping, identical to the iOS block's rows (see their comment — including
 # why there is no `NSDateComponents` feature to request).
+# `NSArray` + `NSEnumerator`: native presentations' host discovery iterates
+# `NSApplication.windows` for a visible window when there is no key or main
+# window (`NSArray::iter` is `NSEnumerator`-gated). `NSNotification`:
+# `NSNotificationCenter`, through which the alert arm observes its window
+# closing (`NSWindowWillCloseNotification`) to report the host lost.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
@@ -274,6 +337,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSCalendar",
     "NSLocale",
     "NSGeometry",
+    "NSArray",
+    "NSEnumerator",
+    "NSNotification",
     "objc2-core-foundation",
 ] }
 # objc2-app-kit 0.3.2 gates by SUPERCLASS and by member, not by class name,
@@ -314,6 +380,17 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # feature its style/mode/elements members and enums (`NSDatePickerStyle`,
 # `NSDatePickerMode`, `NSDatePickerElementFlags`) are gated on — unlike
 # `NSStepper`, the cell feature IS needed here.
+#
+# Native presentations (`src/present/`) — the complete list for every
+# presentation arm on macOS, requested up front so none of those arms needs a
+# further manifest edit: `NSApplication`/`NSWindow`: host discovery (the key
+# window, then the main window, then the first visible one — the
+# `frust-auth-session` Apple backend's chain, narrowed to visible windows), a
+# window-modal sheet's `beginSheet…`/`endSheet…` and the
+# `NSWindowWillCloseNotification` name. `NSAlert`: the alert itself.
+# `NSPopover` + `NSViewController`: the popover presentation and its content
+# controller. `block2`: `beginSheetModalForWindow:completionHandler:` and every
+# other block-taking member are gated on it.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSView",
@@ -340,6 +417,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSAppearance",
     "NSGraphics",
     "NSAccessibilityProtocols",
+    "NSApplication",
+    "NSWindow",
+    "NSAlert",
+    "NSPopover",
+    "NSViewController",
+    "block2",
     "objc2-quartz-core",
     "objc2-core-text",
     "objc2-core-foundation",
@@ -374,6 +457,14 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "CFData",
+] }
+# Native presentations — identical to the iOS block's `block2`/`dispatch2`
+# rows (see their comments): a sheet's completion handler is a constructed
+# block, and every AppKit presentation call hops to the main queue first.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
 ] }
 
 [dev-dependencies]

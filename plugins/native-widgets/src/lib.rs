@@ -76,6 +76,21 @@
 //! layer injects — the same payload that carries the differ's slot id across a
 //! factory contract that does not pass it.
 //!
+//! # Native presentations
+//!
+//! Modal platform UI — an alert today — is not a `platform_view` slot: the
+//! differ owns a slot's lifetime and knows no modal stacking, while a modal
+//! belongs to the host (the resumed Android `Activity`, the topmost iOS view
+//! controller, the macOS key window). The [`present`] module therefore serves
+//! it imperatively: [`present::show_alert`] answers a [`Presentation`] future
+//! resolving exactly one [`AlertOutcome`], one presentation is live per
+//! process (a second request resolves [`PresentError::Busy`]), and
+//! [`present::dismiss`] takes one down. It needs no `frust-api` feature — a
+//! plain [`core::future::Future`] pollable from any executor — and its
+//! Android half is one more Kotlin object in the same Gradle module,
+//! `FrustNativePresenter`, which tracks the resumed `Activity` from a
+//! manifest-declared init provider.
+//!
 //! # Charter: a platform plugin
 //!
 //! Like [`frust-camera`](../frust_camera/index.html) and
@@ -157,6 +172,19 @@ pub mod demo;
 pub use demo::{
     DEMO_CARD_CHILDREN, DEMO_CARD_HEIGHT, DEMO_CARD_KIND, DEMO_CARD_WIDTH, DemoCard, DemoCardProps,
     DemoCardState, register_demo_components,
+};
+
+// Native presentations (alerts): imperative, host-owned modal UI resolving
+// one outcome through a plain `Future` — see the crate doc's *Native
+// presentations*. Deliberately outside the `frust-api` gate: it names no
+// framework type, so the bare platform plugin serves it too.
+pub mod present;
+// Flat re-export of the presentation vocabulary, same convention as `api`
+// above; the two entry points stay namespaced (`present::show_alert`,
+// `present::dismiss`).
+pub use present::{
+    ActionRole, AlertAction, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, PresentError,
+    Presentation, PresentationHandle,
 };
 
 #[cfg(target_os = "android")]
