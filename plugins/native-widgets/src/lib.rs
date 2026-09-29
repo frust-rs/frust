@@ -86,16 +86,18 @@
 //! resolving exactly one [`AlertOutcome`], one presentation is live per
 //! process (a second request resolves [`PresentError::Busy`]), and
 //! [`present::dismiss`] takes one down. It needs no `frust-api` feature — a
-//! plain [`core::future::Future`] pollable from any executor — and its
-//! Android half is one more Kotlin object in the same Gradle module,
-//! `FrustNativePresenter`, which tracks the resumed `Activity` from a
-//! manifest-declared init provider. The iOS/iPadOS arm is built: a
-//! `UIAlertController` (an iPad action sheet anchored as a popover on
-//! [`AnchorRect`]); macOS and Android still discover their host and answer
-//! [`PresentError::Unsupported`]. With `frust-api` on, `show_native_alert`
-//! (the awaitable form) and `show_native_alert_into` (writing the outcome
-//! into an `RwSignal`, spawned on `frust::spawn_local`) are the app-facing
-//! front door, re-exported at the crate root like the builders.
+//! plain [`core::future::Future`] pollable from any executor. All three arms
+//! are built: iOS/iPadOS presents a `UIAlertController` (an iPad action
+//! sheet anchored as a popover on [`AnchorRect`]); macOS presents an
+//! `NSAlert` window sheet; Android presents a framework
+//! `android.app.AlertDialog` over the resumed `Activity` (one more Kotlin
+//! object, `FrustNativePresenter`, in the same Gradle module, tracking the
+//! resumed `Activity` from a manifest-declared init provider) — every other
+//! target answers [`PresentError::Unsupported`]. With `frust-api` on,
+//! `show_native_alert` (the awaitable form) and `show_native_alert_into`
+//! (writing the outcome into an `RwSignal`, spawned on
+//! `frust::spawn_local`) are the app-facing front door, re-exported at the
+//! crate root like the builders.
 //!
 //! # Charter: a platform plugin
 //!

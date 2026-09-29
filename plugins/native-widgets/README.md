@@ -145,20 +145,25 @@ fn save_button(saved: RwSignal<bool>) -> impl frust::View<AppState> {
 
 A native **alert** is not a control in the tree: it is a request answered by
 exactly one outcome — the chosen action's id, `Cancelled`, `Dismissed` (you
-took it down with `present::dismiss(&handle)`) or `HostLost` (the window scene
-went away first). One presentation is live per process; a second request while
-one is up is refused `PresentError::Busy` at once, never queued. Nothing ever
-blocks waiting for the user.
+took it down with `present::dismiss(&handle)`) or `HostLost` (the presenting
+host went away first — the iOS/iPadOS window scene, the macOS presenting
+window closing, or the Android hosting `Activity` being destroyed). One
+presentation is live per process; a second request while one is up is
+refused `PresentError::Busy` at once, never queued. Nothing ever blocks
+waiting for the user.
 
 | Platform | Today |
 |---|---|
-| iOS / iPadOS | `UIAlertController` — `AlertStyle::Alert` centered, `AlertStyle::ActionSheet` from the bottom (iPhone) or as a popover pointing at `anchor` (iPad) |
-| macOS, Android | discovers the host, then answers `PresentError::Unsupported` (arms in progress) |
-| desktop preview, web | `PresentError::Unsupported` |
+| iOS / iPadOS | `UIAlertController` — `AlertStyle::Alert` centered, `AlertStyle::ActionSheet` from the bottom (iPhone) or as a popover pointing at `anchor` (iPad; required there, see below) |
+| macOS | `NSAlert` presented as a window sheet on the key/main window — Return resolves the first action, Escape resolves the `Cancel`-role action; no click-away, so `Cancelled` is never produced; `style`/`anchor` ignored |
+| Android | framework `android.app.AlertDialog` over the resumed `Activity` — the back key / an outside tap resolve `Cancelled`, only when `cancelable`; `style`/`anchor` ignored |
+| desktop preview, web, every other target | `PresentError::Unsupported` |
 
 Up to three actions, each with a unique non-empty `id` and a role —
 `ActionRole::Default`, `Cancel` (at most one; UIKit places it itself) or
-`Destructive` (red). Two shapes:
+`Destructive`: iOS styles it red, macOS sets `NSButton.hasDestructiveAction`,
+and Android has no severity styling for it — plain, sharing `Default`'s
+button-slot preference. Two shapes:
 
 ```rust
 use frust::{RwSignal, Set};
@@ -215,12 +220,14 @@ spec.style = AlertStyle::ActionSheet;
 spec.anchor = Some(AnchorRect { x: 24.0, y: 600.0, width: 120.0, height: 44.0 });
 ```
 
-`cancelable` matters only where the platform has a non-action dismissal: on
-iPad, `cancelable: false` stops an outside tap from closing the action-sheet
-popover. UIKit alerts (and iPhone action sheets) have none, so there it
-removes nothing. On an iPad popover with a `Cancel`-role action, UIKit hides
-that button and an outside tap reports it (`Action("keep")` above) rather than
-`Cancelled`.
+`cancelable` matters only where the platform has a non-action dismissal.
+**iOS:** on iPad, `cancelable: false` stops an outside tap from closing the
+action-sheet popover; UIKit alerts (and iPhone action sheets) have none, so
+there it removes nothing. On an iPad popover with a `Cancel`-role action,
+UIKit hides that button and an outside tap reports it (`Action("keep")`
+above) rather than `Cancelled`. **Android:** `cancelable` gates both the back
+key and an outside tap, either resolving `Cancelled`. **macOS:** no analog —
+a window sheet has no click-away dismissal, so `cancelable` is ignored there.
 
 ---
 

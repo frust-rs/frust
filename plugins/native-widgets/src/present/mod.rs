@@ -87,6 +87,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 /// The most actions one alert takes — the common ceiling of the three
 /// platforms (Android's `AlertDialog` has exactly three button slots).
@@ -96,13 +97,13 @@ pub const MAX_ALERT_ACTIONS: usize = 3;
 /// actions, and how it is presented.
 ///
 /// Validated when submitted ([`show_alert`]), before any platform API is
-/// touched: at most [`MAX_ALERT_ACTIONS`] actions, every action id non-empty
-/// and unique (the id is what [`AlertOutcome::Action`] reports back), at
-/// most one [`ActionRole::Cancel`] action (UIKit raises on a second one), and
-/// an [`AnchorRect`] — when given — finite with a non-negative size. An
-/// [`AlertStyle::ActionSheet`] on iPad additionally requires `anchor`; that
-/// rule is the iOS arm's, checked when it presents (only it can tell an iPad
-/// from an iPhone).
+/// touched: at least one action and at most [`MAX_ALERT_ACTIONS`] actions,
+/// every action id non-empty and unique (the id is what
+/// [`AlertOutcome::Action`] reports back), at most one [`ActionRole::Cancel`]
+/// action (UIKit raises on a second one), and an [`AnchorRect`] — when given
+/// — finite with a non-negative size. An [`AlertStyle::ActionSheet`] on iPad
+/// additionally requires `anchor`; that rule is the iOS arm's, checked when
+/// it presents (only it can tell an iPad from an iPhone).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlertSpec {
     /// The alert's title.
@@ -157,6 +158,11 @@ impl AlertSpec {
     /// # Errors
     /// [`PresentError::InvalidSpec`] naming the first rule broken.
     pub fn validate(&self) -> Result<(), PresentError> {
+        if self.actions.is_empty() {
+            return Err(PresentError::InvalidSpec(
+                "an alert needs at least one action".to_string(),
+            ));
+        }
         if self.actions.len() > MAX_ALERT_ACTIONS {
             return Err(PresentError::InvalidSpec(format!(
                 "an alert takes at most {MAX_ALERT_ACTIONS} actions, got {}",
@@ -301,7 +307,13 @@ pub enum AlertOutcome {
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PresentError {
-    /// Another presentation is live — one at a time, process-wide.
+    /// Another presentation is live — one at a time, process-wide. Recover
+    /// by resolving it: take it down through its [`PresentationHandle`] with
+    /// [`dismiss`], or drop its [`Presentation`] future — either frees the
+    /// slot. A refusal logs the live presentation's generation and how long
+    /// it has been held; see `docs/LIMITATIONS.md`'s
+    /// `native-widgets-alert-busy-slot-unobserved-host-teardown` for the
+    /// case where a live presentation outlives an unobserved host teardown.
     #[error("native presentation: another presentation is live")]
     Busy,
     /// No host to present over: no resumed Android `Activity`, no iOS
@@ -440,8 +452,15 @@ pub(crate) trait AlertHost {
     fn dismiss(generation: u64);
 }
 
-/// The live presentation's generation, if any — the process-wide Busy slot.
-static ACTIVE: Mutex<Option<u64>> = Mutex::new(None);
+/// A live presentation: its generation and when its slot was claimed — the
+/// claim time backs a Busy refusal's diagnostic ([`submit`]).
+struct ActiveSlot {
+    generation: u64,
+    claimed_at: Instant,
+}
+
+/// The live presentation, if any — the process-wide Busy slot.
+static ACTIVE: Mutex<Option<ActiveSlot>> = Mutex::new(None);
 
 /// The counter behind [`next_generation`]. Starts at `1` so a generation is
 /// never `0` — a zero-initialized `jlong`/`u64` arriving from a host that
@@ -462,8 +481,8 @@ fn next_generation() -> u64 {
 /// Lock [`ACTIVE`], recovering from poisoning instead of panicking — a panic
 /// on either side (a polling caller, a platform callback) must not turn the
 /// other side's next call into a panic too. The guarded data is a plain
-/// `Option<u64>`, coherent after any panic.
-fn lock_active() -> MutexGuard<'static, Option<u64>> {
+/// `Option<ActiveSlot>`, coherent after any panic.
+fn lock_active() -> MutexGuard<'static, Option<ActiveSlot>> {
     ACTIVE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -474,9 +493,24 @@ fn lock_active() -> MutexGuard<'static, Option<u64>> {
 /// presentation holds the slot or none does.
 pub(crate) fn release_if_live(generation: u64) {
     let mut active = lock_active();
-    if *active == Some(generation) {
+    if active
+        .as_ref()
+        .is_some_and(|slot| slot.generation == generation)
+    {
         *active = None;
     }
+}
+
+/// The live presentation's generation and how long its slot has been held —
+/// the same claim a Busy refusal logs ([`submit`]), read directly by tests.
+/// `None` when the slot is free. Test-only: production code reads the claim
+/// under the lock it already holds ([`submit`]), never through this second
+/// lock acquisition.
+#[cfg(test)]
+pub(crate) fn live_since() -> Option<(u64, std::time::Duration)> {
+    lock_active()
+        .as_ref()
+        .map(|slot| (slot.generation, slot.claimed_at.elapsed()))
 }
 
 /// Claim the Busy slot for a fresh generation, then hand the sending half to
@@ -486,11 +520,20 @@ pub(crate) fn release_if_live(generation: u64) {
 fn submit<T>(start: impl FnOnce(Sender<T>, u64) -> Result<(), PresentError>) -> Presentation<T> {
     let generation = {
         let mut active = lock_active();
-        if active.is_some() {
+        if let Some(live) = active.as_ref() {
+            log::warn!(
+                "frust-native-widgets: alert request refused: presentation {} has been live \
+                 for {:.1}s — dismiss it through its handle or drop its future to free the slot",
+                live.generation,
+                live.claimed_at.elapsed().as_secs_f64()
+            );
             return Presentation::ready(Err(PresentError::Busy));
         }
         let generation = next_generation();
-        *active = Some(generation);
+        *active = Some(ActiveSlot {
+            generation,
+            claimed_at: Instant::now(),
+        });
         generation
     };
 
@@ -517,7 +560,9 @@ fn show_alert_on<H: AlertHost>(spec: AlertSpec) -> Presentation<AlertOutcome> {
 fn dismiss_on<H: AlertHost>(handle: &PresentationHandle) {
     // Checked, then released, before calling into the host: the host may
     // resolve synchronously, which re-enters `release_if_live`.
-    let live = *lock_active() == Some(handle.generation);
+    let live = lock_active()
+        .as_ref()
+        .is_some_and(|slot| slot.generation == handle.generation);
     if live {
         H::dismiss(handle.generation);
     }
@@ -545,9 +590,10 @@ pub fn dismiss(handle: &PresentationHandle) {
 /// The integer outcome codes the Android presenter reports through its one
 /// `nativeOnOutcome(generation, code, actionIndex)` callback — mirrored
 /// verbatim by `FrustNativePresenter.kt`'s `OUTCOME_*` constants and pinned
-/// against drift by this module's tests. Consumed by the Android alert arm;
-/// until that arm is built only the tests read it.
-#[cfg_attr(not(test), allow(dead_code))]
+/// against drift by this module's tests. Consumed by the Android alert arm
+/// (`android_alert`/`android_host`); on every other target this module's own
+/// tests are the only reader.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 pub(crate) mod wire {
     use super::{AlertOutcome, PresentError};
 
@@ -604,8 +650,9 @@ pub(crate) mod wire {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard};
+    use std::time::Instant;
 
-    use super::{Presentation, Sender, lock_active, next_generation, oneshot};
+    use super::{ActiveSlot, Presentation, Sender, lock_active, next_generation, oneshot};
 
     /// Serializes every test that touches [`super::ACTIVE`] — one
     /// process-global slot, and `#[test]`s run on parallel threads.
@@ -632,7 +679,10 @@ pub(crate) mod test_support {
     #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
     pub(crate) fn with_slot_held<R>(f: impl FnOnce() -> R) -> R {
         let _guard = serialize();
-        *lock_active() = Some(next_generation());
+        *lock_active() = Some(ActiveSlot {
+            generation: next_generation(),
+            claimed_at: Instant::now(),
+        });
         let result = f();
         *lock_active() = None;
         result
@@ -791,6 +841,24 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_refusal_reports_the_live_generation() {
+        isolated(|| {
+            let first = show_alert_on::<FakeHost>(two_button_spec());
+            let first_generation = first.handle().expect("accepted").generation;
+
+            let mut second = show_alert_on::<FakeHost>(two_button_spec());
+            assert_eq!(poll_once(&mut second), Poll::Ready(Err(PresentError::Busy)));
+
+            let (generation, age) = live_since().expect("the first presentation is still live");
+            assert_eq!(generation, first_generation);
+            // Just claimed, well under any real hang.
+            assert!(age < std::time::Duration::from_secs(5));
+
+            drop(first);
+        });
+    }
+
+    #[test]
     fn the_slot_is_free_again_once_the_outcome_is_sent() {
         isolated(|| {
             let first = show_alert_on::<FakeHost>(two_button_spec());
@@ -866,7 +934,7 @@ mod tests {
                 poll_once(&mut presentation),
                 Poll::Ready(Ok(AlertOutcome::HostLost))
             );
-            assert_eq!(*lock_active(), None);
+            assert!(live_since().is_none());
 
             // A dismiss arriving after the host is gone is stale.
             dismiss_on::<FakeHost>(&handle);
@@ -879,7 +947,7 @@ mod tests {
         isolated(|| {
             let abandoned = show_alert_on::<FakeHost>(two_button_spec());
             drop(abandoned);
-            assert_eq!(*lock_active(), None);
+            assert!(live_since().is_none());
 
             // The abandoned alert is still up on the platform; its eventual
             // answer arrives after a newer presentation took the slot.
@@ -889,7 +957,10 @@ mod tests {
             assert!(!stale_tx.send(Ok(AlertOutcome::Cancelled)), "discarded");
 
             assert_eq!(poll_once(&mut current), Poll::Pending);
-            assert_eq!(*lock_active(), current.handle().map(|h| h.generation));
+            assert_eq!(
+                live_since().map(|(generation, _)| generation),
+                current.handle().map(|h| h.generation)
+            );
         });
     }
 
@@ -903,7 +974,7 @@ mod tests {
                 poll_once(&mut refused),
                 Poll::Ready(Err(PresentError::NoHost))
             );
-            assert_eq!(*lock_active(), None);
+            assert!(live_since().is_none());
         });
     }
 
@@ -912,7 +983,7 @@ mod tests {
         isolated(|| {
             let mut presentation = show_alert_on::<FakeHost>(two_button_spec());
             drop(FAKE.with(|fake| fake.borrow_mut().live.take()));
-            assert_eq!(*lock_active(), None);
+            assert!(live_since().is_none());
             assert_eq!(
                 poll_once(&mut presentation),
                 Poll::Ready(Err(PresentError::Platform(
@@ -925,6 +996,7 @@ mod tests {
     #[test]
     fn an_invalid_spec_is_refused_before_claiming_the_slot() {
         isolated(|| {
+            let zero_actions = AlertSpec::new("t", "m");
             let four = AlertSpec::new("t", "m")
                 .with_action("a", "A", ActionRole::Default)
                 .with_action("b", "B", ActionRole::Default)
@@ -937,7 +1009,10 @@ mod tests {
             let two_cancels = AlertSpec::new("t", "m")
                 .with_action("a", "A", ActionRole::Cancel)
                 .with_action("b", "B", ActionRole::Cancel);
-            let mut bad_anchor = AlertSpec::new("t", "m");
+            // One action so this fixture pins the anchor rule specifically,
+            // not the (now earlier-checked) zero-action rule above.
+            let mut bad_anchor =
+                AlertSpec::new("t", "m").with_action("a", "A", ActionRole::Default);
             bad_anchor.style = AlertStyle::ActionSheet;
             bad_anchor.anchor = Some(AnchorRect {
                 x: f64::NAN,
@@ -954,6 +1029,7 @@ mod tests {
             });
 
             for spec in [
+                zero_actions,
                 four,
                 duplicate,
                 empty_id,
@@ -969,7 +1045,7 @@ mod tests {
                     ),
                     "{spec:?} should be refused"
                 );
-                assert_eq!(*lock_active(), None);
+                assert!(live_since().is_none());
             }
             assert!(FAKE.with(|fake| fake.borrow().shown.is_empty()));
         });
@@ -1000,7 +1076,22 @@ mod tests {
             height: 0.0,
         });
         assert_eq!(sheet.validate(), Ok(()));
-        assert_eq!(AlertSpec::new("", "").validate(), Ok(()));
+        assert_eq!(
+            AlertSpec::new("", "")
+                .with_action("a", "A", ActionRole::Default)
+                .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_zero_action_spec_is_rejected() {
+        assert_eq!(
+            AlertSpec::new("t", "m").validate(),
+            Err(PresentError::InvalidSpec(
+                "an alert needs at least one action".to_string()
+            ))
+        );
     }
 
     #[test]
