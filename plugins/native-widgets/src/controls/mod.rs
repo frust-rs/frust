@@ -22,8 +22,10 @@
 //!    arm builds the `android.widget.*` view, hands each planned [`Setter`] to
 //!    `platform::apply` and retains/releases the global refs; the iOS arm builds
 //!    the UIKit view, applies the **same plan** through typed `objc2-ui-kit`
-//!    setters, and lets ARC own the references; the macOS arm (being built out
-//!    control by control, `Button` first) does the same over `objc2-app-kit`.
+//!    setters, and lets ARC own the references; the macOS arm registers every
+//!    shared control plus the Apple-only pair (`Segmented`, `Stepper` — see
+//!    `src/appkit/mod.rs`'s `register_controls` and [`APPLE_KINDS`] / [`IOS_ONLY_KINDS`]),
+//!    and applies the same plan over `objc2-app-kit`.
 //!
 //! Half 1 is shared verbatim — one `Props`, one `decode`, one `plan`, two arms —
 //! which is the point of the split: diff behaviour is asserted once, on a host,

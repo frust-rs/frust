@@ -36,10 +36,11 @@
 //! subtree*): frust's wire carries one rect for the whole card. Android's
 //! `LinearLayout` measures and stacks its own children; the two Apple arms
 //! assign each child an explicit frame inside [`DEMO_CARD_WIDTH`] x
-//! [`DEMO_CARD_HEIGHT`], because this crate deliberately pulls in neither a
-//! stack view nor any constraint API (`crate::apple::ctx`'s and
-//! `crate::appkit::ctx`'s *Frame-setting layout only*). Mount the slot at
-//! exactly that size.
+//! [`DEMO_CARD_HEIGHT`], because `DemoCard` deliberately lays its children
+//! by frame and takes no layout API of its own. The crate's sheet arm
+//! (`src/present/apple_sheet.rs`), by contrast, does use UIKit's
+//! `UIStackView` and layout constraints (`NSLayoutAnchor` / `UILayoutGuide`).
+//! Mount the slot at exactly that size.
 //!
 //! # One slot, four handles, and a counted teardown
 //!
