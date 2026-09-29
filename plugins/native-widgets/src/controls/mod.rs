@@ -25,7 +25,10 @@
 //!    setters, and lets ARC own the references; the macOS arm registers every
 //!    shared control plus the Apple-only pair (`Segmented`, `Stepper` — see
 //!    `src/appkit/mod.rs`'s `register_controls` and [`APPLE_KINDS`] / [`IOS_ONLY_KINDS`]),
-//!    and applies the same plan over `objc2-app-kit`.
+//!    while the tab bar (`IOS_ONLY_KINDS`) and the native sheet
+//!    (`present::apple_sheet`) remain iOS-only. All apply the same plan over
+//!    their respective Apple frameworks (`objc2-app-kit` on macOS,
+//!    `objc2-ui-kit` on iOS).
 //!
 //! Half 1 is shared verbatim — one `Props`, one `decode`, one `plan`, two arms —
 //! which is the point of the split: diff behaviour is asserted once, on a host,
