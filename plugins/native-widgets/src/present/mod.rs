@@ -311,9 +311,9 @@ pub enum PresentError {
     /// by resolving it: take it down through its [`PresentationHandle`] with
     /// [`dismiss`], or drop its [`Presentation`] future — either frees the
     /// slot. A refusal logs the live presentation's generation and how long
-    /// it has been held; see `docs/LIMITATIONS.md`'s
-    /// `native-widgets-alert-busy-slot-unobserved-host-teardown` for the
-    /// case where a live presentation outlives an unobserved host teardown.
+    /// it has been held (where the target has a monotonic clock); see
+    /// `docs/LIMITATIONS.md`'s `native-widgets-alert-busy-slot-unobserved-host-teardown`
+    /// for the case where a live presentation outlives an unobserved host teardown.
     #[error("native presentation: another presentation is live")]
     Busy,
     /// No host to present over: no resumed Android `Activity`, no iOS
@@ -456,7 +456,7 @@ pub(crate) trait AlertHost {
 /// claim time backs a Busy refusal's diagnostic ([`submit`]).
 struct ActiveSlot {
     generation: u64,
-    claimed_at: Instant,
+    claimed_at: Option<Instant>,
 }
 
 /// The live presentation, if any — the process-wide Busy slot.
@@ -475,6 +475,44 @@ fn next_generation() -> u64 {
         if generation != 0 {
             return generation;
         }
+    }
+}
+
+/// Capture the current monotonic clock, or `None` on targets where no such
+/// clock exists (wasm32-unknown-unknown). On native platforms, `Some(Instant::now())`;
+/// on wasm32, `None` without touching [`Instant`] to avoid a platform-panic
+/// where the clock is unavailable. The shim exists to let `show_alert` on web
+/// resolve `Err(PresentError::Unsupported)` instead of panicking, per the
+/// fail-soft contract in `frust-native-widgets` lib.rs.
+#[inline]
+fn claim_clock() -> Option<Instant> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
+/// Format the Busy refusal message logged when a second presentation is
+/// requested while one is live. Formats the live presentation's generation
+/// and the age of its slot if available (some platforms have no monotonic clock).
+/// Used by [`submit`] and asserted by tests; the single source of the logged text.
+fn busy_refusal_message(generation: u64, age: Option<std::time::Duration>) -> String {
+    match age {
+        Some(duration) => format!(
+            "frust-native-widgets: alert request refused: presentation {} has been live for {:.1}s \
+             — dismiss it through its handle or drop its future to free the slot",
+            generation,
+            duration.as_secs_f64()
+        ),
+        None => format!(
+            "frust-native-widgets: alert request refused: presentation {} has been live for \
+             (age unavailable on this target) — dismiss it through its handle or drop its future to free the slot",
+            generation
+        ),
     }
 }
 
@@ -503,14 +541,18 @@ pub(crate) fn release_if_live(generation: u64) {
 
 /// The live presentation's generation and how long its slot has been held —
 /// the same claim a Busy refusal logs ([`submit`]), read directly by tests.
-/// `None` when the slot is free. Test-only: production code reads the claim
-/// under the lock it already holds ([`submit`]), never through this second
-/// lock acquisition.
+/// `None` when the slot is free. The age is `None` on targets without a
+/// monotonic clock (wasm32-unknown-unknown). Test-only: production code reads
+/// the claim under the lock it already holds ([`submit`]), never through this
+/// second lock acquisition.
 #[cfg(test)]
-pub(crate) fn live_since() -> Option<(u64, std::time::Duration)> {
-    lock_active()
-        .as_ref()
-        .map(|slot| (slot.generation, slot.claimed_at.elapsed()))
+pub(crate) fn live_since() -> Option<(u64, Option<std::time::Duration>)> {
+    lock_active().as_ref().map(|slot| {
+        (
+            slot.generation,
+            slot.claimed_at.map(|instant| instant.elapsed()),
+        )
+    })
 }
 
 /// Claim the Busy slot for a fresh generation, then hand the sending half to
@@ -521,18 +563,15 @@ fn submit<T>(start: impl FnOnce(Sender<T>, u64) -> Result<(), PresentError>) -> 
     let generation = {
         let mut active = lock_active();
         if let Some(live) = active.as_ref() {
-            log::warn!(
-                "frust-native-widgets: alert request refused: presentation {} has been live \
-                 for {:.1}s — dismiss it through its handle or drop its future to free the slot",
-                live.generation,
-                live.claimed_at.elapsed().as_secs_f64()
-            );
+            let age = live.claimed_at.map(|instant| instant.elapsed());
+            let message = busy_refusal_message(live.generation, age);
+            log::warn!("{}", message);
             return Presentation::ready(Err(PresentError::Busy));
         }
         let generation = next_generation();
         *active = Some(ActiveSlot {
             generation,
-            claimed_at: Instant::now(),
+            claimed_at: claim_clock(),
         });
         generation
     };
@@ -650,9 +689,10 @@ pub(crate) mod wire {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard};
-    use std::time::Instant;
 
-    use super::{ActiveSlot, Presentation, Sender, lock_active, next_generation, oneshot};
+    use super::{
+        ActiveSlot, Presentation, Sender, claim_clock, lock_active, next_generation, oneshot,
+    };
 
     /// Serializes every test that touches [`super::ACTIVE`] — one
     /// process-global slot, and `#[test]`s run on parallel threads.
@@ -681,7 +721,7 @@ pub(crate) mod test_support {
         let _guard = serialize();
         *lock_active() = Some(ActiveSlot {
             generation: next_generation(),
-            claimed_at: Instant::now(),
+            claimed_at: claim_clock(),
         });
         let result = f();
         *lock_active() = None;
@@ -851,11 +891,42 @@ mod tests {
 
             let (generation, age) = live_since().expect("the first presentation is still live");
             assert_eq!(generation, first_generation);
-            // Just claimed, well under any real hang.
-            assert!(age < std::time::Duration::from_secs(5));
+            // Just claimed, well under any real hang (age is available on native targets).
+            if let Some(duration) = age {
+                assert!(duration < std::time::Duration::from_secs(5));
+            }
 
             drop(first);
         });
+    }
+
+    #[test]
+    fn a_busy_refusal_message_is_formatted_with_and_without_age() {
+        // Test with age (Some case).
+        let age_some = Some(std::time::Duration::from_secs_f64(1.5));
+        let msg_with_age = busy_refusal_message(42, age_some);
+        assert!(msg_with_age.contains("42"), "message includes generation");
+        assert!(msg_with_age.contains("1.5"), "message includes age");
+        assert!(
+            msg_with_age.contains("has been live for"),
+            "message includes time phrase"
+        );
+        assert!(
+            !msg_with_age.contains("unavailable"),
+            "message does not say unavailable"
+        );
+
+        // Test without age (None case).
+        let msg_no_age = busy_refusal_message(43, None);
+        assert!(msg_no_age.contains("43"), "message includes generation");
+        assert!(
+            msg_no_age.contains("age unavailable on this target"),
+            "message explains no age"
+        );
+        assert!(
+            msg_no_age.contains("has been live for"),
+            "message includes time phrase"
+        );
     }
 
     #[test]
