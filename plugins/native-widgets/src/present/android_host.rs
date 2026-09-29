@@ -62,7 +62,7 @@ use jni::refs::Global;
 use jni::sys::{jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
-use super::{AlertHost, AlertOutcome, AlertSpec, PresentError, Sender, wire};
+use super::{AlertOutcome, PresentError, Sender, wire};
 
 /// The presenter's fully-qualified name in the **binary/dotted** form
 /// `ClassLoader.loadClass` expects. Resolved through the application
@@ -201,7 +201,6 @@ fn lock_live() -> MutexGuard<'static, Option<LiveEntry>> {
 /// displaced (one whose caller dropped the future). Returned rather than
 /// dropped here so no resolver code runs under the lock; dropping it drops
 /// its sender, whose receiver is already gone.
-#[allow(dead_code)] // consumed by the platform alert/sheet arms
 pub(crate) fn install_live(generation: u64, resolve: Resolve) -> Option<Resolve> {
     lock_live()
         .replace(LiveEntry {
@@ -223,7 +222,6 @@ pub(crate) fn take_live(generation: u64) -> Option<Resolve> {
 
 /// The resolver an alert parks: `super::wire`'s table over the spec's action
 /// ids, into the alert's sender.
-#[allow(dead_code)] // consumed by the platform alert arm
 pub(crate) fn alert_resolver(tx: Sender<AlertOutcome>, action_ids: Vec<String>) -> Resolve {
     Box::new(move |code, action_index| {
         tx.send(wire::alert_outcome(code, action_index, &action_ids));
@@ -255,28 +253,4 @@ pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativePresenter_nativeO
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
-}
-
-/// The Android host. Until the alert arm is built on it, a request runs host
-/// discovery — [`PresentError::NoHost`] when no `Activity` is resumed — and
-/// answers [`PresentError::Unsupported`] otherwise.
-pub(crate) struct Host;
-
-impl AlertHost for Host {
-    fn show_alert(
-        _spec: AlertSpec,
-        _tx: Sender<AlertOutcome>,
-        _generation: u64,
-    ) -> Result<(), PresentError> {
-        if !with_presenter(has_resumed_activity)? {
-            return Err(PresentError::NoHost);
-        }
-        log::warn!("frust-native-widgets: no native alert is built for Android");
-        Err(PresentError::Unsupported)
-    }
-
-    fn dismiss(_generation: u64) {
-        // `show_alert` above accepts nothing, so nothing is ever parked here
-        // to dismiss.
-    }
 }

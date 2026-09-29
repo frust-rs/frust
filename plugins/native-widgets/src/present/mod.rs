@@ -45,7 +45,8 @@
 //!   also built over `apple_host`'s shared helpers. macOS has no action-sheet
 //!   idiom, so [`AlertStyle::ActionSheet`] presents the same sheet as
 //!   [`AlertStyle::Alert`] and [`AlertSpec::anchor`] is ignored.
-//! - **Android** — `android_host` (the
+//! - **Android** — `android_alert`: an `android.app.AlertDialog`, over
+//!   `android_host`'s shared JNI plumbing (the
 //!   `dev.frust.nativewidgets.FrustNativePresenter` Kotlin object that
 //!   tracks the resumed `Activity`, its one `nativeOnOutcome` callback and
 //!   the live-presentation guard).
@@ -56,6 +57,8 @@
 
 mod oneshot;
 
+#[cfg(target_os = "android")]
+mod android_alert;
 #[cfg(target_os = "android")]
 mod android_host;
 #[cfg(target_os = "macos")]
@@ -68,7 +71,7 @@ mod apple_host;
 mod unsupported;
 
 #[cfg(target_os = "android")]
-use android_host::Host as PlatformHost;
+use android_alert::Host as PlatformHost;
 #[cfg(target_os = "macos")]
 use appkit_alert::Host as PlatformHost;
 #[cfg(target_os = "ios")]
