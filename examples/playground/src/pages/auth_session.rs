@@ -47,7 +47,8 @@ use crate::PlaygroundState;
 /// Defines a `fn $name() -> RwSignal<$ty>` returning a screen-local signal
 /// cached in a `thread_local!`, self-healing across a disposed owner — the
 /// established per-module precedent (`url_launcher.rs`, `platform_views.rs`,
-/// `native_widgets.rs` each carry the same macro), not shared across files.
+/// the demo app's `composite.rs` page each carry the same macro), not shared
+/// across files.
 macro_rules! local_sig {
     ($name:ident, $ty:ty, $init:expr) => {
         fn $name() -> RwSignal<$ty> {

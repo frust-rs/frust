@@ -23,11 +23,12 @@
 //!    [`LIMITATIONS`] below (delete the whole file once the last one is gone —
 //!    a list of zero claims proves nothing).
 //! 3. Update the one surface this scan deliberately cannot see, by hand:
-//!    `examples/playground/src/pages/native_widgets.rs` (the native-widgets
-//!    page lives in the playground until a later phase moves it — follow it
-//!    if it has moved). This crate's tests do not reach into `examples/**` — a
-//!    deliberate boundary, see `tests/kotlin_conformance.rs`'s own module doc
-//!    — so nothing enforces that page, which is exactly why it is named here.
+//!    `examples/native-widgets-demo/src/pages/composite.rs` (the
+//!    native-widgets page lives in the demo app until a later phase moves it
+//!    — follow it if it has moved). This crate's tests do not reach into
+//!    `examples/**` — a deliberate boundary, see
+//!    `tests/kotlin_conformance.rs`'s own module doc — so nothing enforces
+//!    that page, which is exactly why it is named here.
 //!    **Search it for the claim and rewrite whatever states it**, rather than
 //!    trusting a description of what it says: an earlier version of this step
 //!    described that file instead, and was stale one commit later (and a later
