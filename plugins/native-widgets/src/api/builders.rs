@@ -1428,16 +1428,24 @@ pub fn native_date_picker(date: CivilDate) -> NativeDatePickerView {
 }
 
 impl NativeDatePickerView {
-    /// The earliest selectable date — default: the platform's own floor. A
-    /// `date` before it is shown (and reported) as `min`; a `max` before it
-    /// collapses the range to the single day `min`.
+    /// The earliest selectable date — a missing bound is the arm's own
+    /// default: unbounded on iOS/macOS, 1900-01-01 on Android. A `date`
+    /// before it is shown (and reported) as `min`; a `max` before it
+    /// collapses the range to the single day `min`. On Android, an
+    /// explicit `min` (and `date`) outside the platform's own
+    /// 1900-01-01..2100-12-31 range is clamped into it, with a warning
+    /// (`native-widgets-android-date-picker-range` in LIMITATIONS.md).
     pub fn min(mut self, min: CivilDate) -> Self {
         self.min = Some(min);
         self
     }
 
-    /// The latest selectable date — default: the platform's own ceiling. A
-    /// `date` after it is shown (and reported) as `max`.
+    /// The latest selectable date — a missing bound is the arm's own
+    /// default: unbounded on iOS/macOS, 2100-12-31 on Android. A `date`
+    /// after it is shown (and reported) as `max`. On Android, an explicit
+    /// `max` (and `date`) outside the platform's own
+    /// 1900-01-01..2100-12-31 range is clamped into it, with a warning
+    /// (`native-widgets-android-date-picker-range` in LIMITATIONS.md).
     pub fn max(mut self, max: CivilDate) -> Self {
         self.max = Some(max);
         self
@@ -1849,9 +1857,9 @@ pub fn native_stepper(value: i32, min: i32, max: i32) -> NativeStepperView {
 impl NativeStepperView {
     /// The increment a tap on either button applies — default `1`. A
     /// non-positive value (`0` or negative) is normalized to `1` before it
-    /// ever reaches a platform control, logged once — `UIStepper` requires
-    /// `stepValue > 0` (`crate::controls::stepper`'s module doc's *Range
-    /// and step invariants*).
+    /// ever reaches a platform control, logged once per process —
+    /// `UIStepper` requires `stepValue > 0` (`crate::controls::stepper`'s
+    /// module doc's *Range and step invariants*).
     pub fn step(mut self, step: i32) -> Self {
         self.step = step;
         self

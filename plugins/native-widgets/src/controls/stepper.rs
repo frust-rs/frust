@@ -60,9 +60,11 @@
 //! Cocoa layer, so the fix lives in the shared props layer both Apple arms
 //! plan from, not in either `platform` module alone:
 //!
-//! - **[`StepperProps::decode`] normalizes `step` to `>= 1` once.** A
-//!   decoded `step <= 0` is logged (naming the slot and the offending
-//!   value) and treated as `1`.
+//! - **[`StepperProps::decode`] normalizes `step` to `>= 1` on every call, but
+//!   logs the non-positive-step warning at most once per process** (naming
+//!   the first offending slot and value) — a static `AtomicBool` guard, not
+//!   a per-decode log line, so a misbehaving app that keeps sending `step:
+//!   0` doesn't flood the log while every decode still normalizes to `1`.
 //! - **[`StepperProps::span`] can never return less than `1`.** A
 //!   degenerate app range (`max <= min`) still reports a platform span of
 //!   `1`, never `0` — `0` is exactly as out-of-contract as a negative span.
@@ -70,8 +72,11 @@
 //!   `props.enabled && max > min`**, never overwriting the app's own
 //!   [`StepperProps::enabled`] field, so a degenerate range disables the
 //!   control outright: the user can never tap it, and no value outside the
-//!   app's own `[min, max]` is ever reported. A later update that makes the
-//!   range non-degenerate again re-enables the control and re-asserts
+//!   app's own `[min, max]` is ever reported. **Re-enabling is scoped to the
+//!   range alone** — `old.max <= old.min && new.max > new.min` — so a plain
+//!   `enabled: false → true` over an already-valid range plans only
+//!   [`Setter::Enabled`], never a forced replay; a range transition that
+//!   actually crosses degenerate-to-valid still re-asserts
 //!   [`Setter::Max`]/[`Setter::Progress`]/[`Setter::Step`] unconditionally,
 //!   rather than relying on the values themselves having also changed.
 //!
@@ -112,6 +117,8 @@
 //! [`pack_value_changed`]: crate::events::pack_value_changed
 //! [`unpack_value_changed`]: crate::events::unpack_value_changed
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::{
     CONTENT_DESCRIPTION, ENABLED, MAX, MIN, Plan, STEP, Setter, TINT, VALUE, WRAPS, color,
     owned_text, slot_of,
@@ -134,6 +141,11 @@ pub(crate) const PLATFORM_DEFAULT_MAX: i32 = 100;
 /// The platform's own default step size (`UIStepper.stepValue`/
 /// `NSStepper.increment`, both documented as `1.0`).
 pub(crate) const PLATFORM_DEFAULT_STEP: i32 = 1;
+
+/// Whether [`StepperProps::decode`]'s non-positive-step warning has already
+/// fired this process — logged once, naming the first offending slot and
+/// value, never once per decode (module doc's *Range and step invariants*).
+static STEP_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// The marker type registered under [`KIND`]; its
 /// [`NativeWidget`](crate::runtime::NativeWidget) impl is each Apple arm
@@ -201,10 +213,16 @@ impl StepperProps {
         let step = match int_or(params, STEP, PLATFORM_DEFAULT_STEP) {
             step if step >= 1 => step,
             non_positive => {
-                log::warn!(
-                    "frust-native-widgets: stepper slot {slot} decoded a non-positive step \
-                     ({non_positive}) — UIStepper/NSStepper require step > 0; using 1 instead"
-                );
+                // Normalization runs every decode; the warning fires at most
+                // once per process (module doc's *Range and step
+                // invariants*) so a repeat offender doesn't flood the log.
+                if !STEP_WARNED.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "frust-native-widgets: stepper slot {slot} decoded a non-positive step \
+                         ({non_positive}) — UIStepper/NSStepper require step > 0; using 1 \
+                         instead (this warning is logged once per process)"
+                    );
+                }
                 1
             }
         };
@@ -259,11 +277,15 @@ impl StepperProps {
         let mut plan = Plan::new();
         let old_enabled = old.effective_enabled();
         let new_enabled = new.effective_enabled();
-        // A degenerate range never let a value/step the platform could
-        // trust through while disabled; re-enabling reasserts all three
-        // unconditionally rather than relying on them having also changed
-        // (module doc's *Range and step invariants*).
-        let reenabling = !old_enabled && new_enabled;
+        // Scoped to the RANGE alone, not `effective_enabled()`: a plain
+        // `props.enabled` flip over an already-valid range is an ordinary
+        // diffed `Setter::Enabled`, not a forced replay. Only an actual
+        // degenerate-to-valid range transition never let a value/step the
+        // platform could trust through while disabled, so only that
+        // transition reasserts all three unconditionally rather than
+        // relying on them having also changed (module doc's *Range and step
+        // invariants*).
+        let reenabling = old.max <= old.min && new.max > new.min;
         if old.span() != new.span() || reenabling {
             plan.push(Setter::Max(new.span()));
         }
@@ -724,6 +746,18 @@ mod tests {
     }
 
     #[test]
+    fn two_non_positive_step_decodes_both_still_normalize_to_one() {
+        // The warning itself is logged at most once per process (module
+        // doc's *Range and step invariants*) — not asserted here, since
+        // this module has no log-capture harness — but normalization is
+        // NOT gated by that once-guard: every decode with a non-positive
+        // step keeps landing on 1, whether or not the warning already
+        // fired for an earlier slot.
+        assert_eq!(decode("\"step\":0").step, 1);
+        assert_eq!(decode("\"step\":0").step, 1);
+    }
+
+    #[test]
     fn a_degenerate_range_max_equal_min_spans_one_and_disables_the_control() {
         let props = decode("\"value\":5,\"min\":5,\"max\":5");
         assert_eq!(props.span(), 1, "UIStepper requires max > min");
@@ -834,6 +868,21 @@ mod tests {
             StepperProps::plan(&old, &new, None),
             vec![Setter::Max(1), Setter::Progress(0), Setter::Enabled(false)],
             "going disabled needs the usual diffed setters, no forced replay"
+        );
+    }
+
+    #[test]
+    fn enabling_a_control_whose_range_was_already_valid_plans_only_enabled() {
+        // Both sides have a valid, unchanged range — `reenabling` is scoped
+        // to a degenerate-to-valid RANGE transition (module doc's *Range
+        // and step invariants*), not to `props.enabled` alone, so a plain
+        // false-to-true flip is an ordinary diffed `Setter::Enabled`, never
+        // a forced max/progress/step replay.
+        let old = decode("\"value\":5,\"min\":0,\"max\":10,\"enabled\":false");
+        let new = decode("\"value\":5,\"min\":0,\"max\":10,\"enabled\":true");
+        assert_eq!(
+            StepperProps::plan(&old, &new, None),
+            vec![Setter::Enabled(true)]
         );
     }
 

@@ -50,7 +50,7 @@
 //!    programmatic `setDate:`/`setDateValue:` at all. No per-instance
 //!    suppression flag, on any arm.
 //!
-//! # Range: clamped on decode, never inverted on the platform
+//! # Range: clamped on decode, never inverted or out of range on the platform
 //!
 //! A `date` outside `[min, max]` is clamped into it on decode (the platforms
 //! clamp their own display anyway; clamping first keeps the write-back from
@@ -62,17 +62,28 @@
 //! catches an *explicit* `min > max`; it cannot see that a `None` bound
 //! resolves to a different literal date per arm ([`CivilDate::MIN`]/
 //! [`CivilDate::MAX`] for the Apple arms; the Android arm's own documented
-//! 1900-01-01/2100-12-31 default). [`DatePickerProps::plan`] therefore
-//! takes each arm's own [`Bounds`] and orders the two range setters against
-//! the values the platform will *actually* hold: the bound that *widens*
-//! the range (compared with `Bounds`-resolved ceilings, never a
-//! platform-agnostic assumption) is written first. If a `None` bound
-//! resolves inverted on one arm (e.g. an app sets min to 2150-01-01 with no
-//! max on Android, where the ceiling is 2100-12-31), a warning is logged
-//! and the inverted range is handed to the platform's own setter, whose
-//! exception or clamp is the authority. A range change also re-asserts
-//! [`Setter::Date`], because narrowing a range can move the platform's
-//! date.
+//! 1900-01-01/2100-12-31 default), nor that an *explicit* bound — API-legal,
+//! valid on the Apple arms — can fall outside a narrower arm's own range.
+//!
+//! [`DatePickerProps::plan`] therefore resolves each side (`old` and `new`)
+//! against the calling arm's own [`Bounds`] and clamps the result into
+//! `[Bounds::floor, Bounds::ceiling]` before it ever reaches a setter or a
+//! widen-vs-narrow comparison: no arm ever receives an inverted range or a
+//! date outside it; on Android, bounds outside 1900-01-01..2100-12-31 are
+//! clamped to it (a LIMITATIONS entry follows). The two range setters are
+//! then ordered against these CLAMPED, arm-resolved values — the bound that
+//! *widens* the range is written first — so the ordering matches what the
+//! platform will actually hold, never a platform-agnostic assumption; a
+//! `min`/`max` whose clamped value did not change from `old` to `new` plans
+//! no setter at all, even when the app's own raw value did (e.g. an
+//! explicit bound moving from one out-of-range value to another that
+//! clamps to the same arm ceiling/floor). When clamping altered an explicit
+//! bound or the date, `plan` logs one warning per call naming the slot, the
+//! app's values, and the arm's range. A range change (by its clamped value)
+//! also re-asserts [`Setter::Date`], because narrowing a range can move the
+//! platform's date — the date itself is clamped into the same resolved
+//! range so the platform is never asked for a date outside the range it
+//! will hold.
 //!
 //! # `style`: live on Apple, baked at construction on Android
 //!
@@ -285,6 +296,30 @@ impl Bounds {
     fn resolve_ceiling(self, max: Option<CivilDate>) -> CivilDate {
         max.unwrap_or(self.ceiling)
     }
+
+    /// The range this arm will actually hold for `min`/`max`: each resolved
+    /// bound ([`Self::resolve_min`]/[`Self::resolve_ceiling`]) clamped into
+    /// this arm's own `[floor, ceiling]` — module doc's *Range*. An explicit
+    /// bound outside that range (API-legal, valid on the Apple arms) is
+    /// clamped here rather than reaching the platform's own setter as an
+    /// out-of-range or inverted pair; if the clamp still crosses (only
+    /// possible when both bounds are explicit and inverted, which
+    /// [`DatePickerProps::decode`] already prevents) the floor collapses
+    /// onto the ceiling rather than risk an inverted pair reaching a
+    /// setter.
+    fn effective_range(
+        self,
+        min: Option<CivilDate>,
+        max: Option<CivilDate>,
+    ) -> (CivilDate, CivilDate) {
+        let floor = self.resolve_min(min).clamp(self.floor, self.ceiling);
+        let ceiling = self.resolve_ceiling(max).clamp(self.floor, self.ceiling);
+        if floor > ceiling {
+            (ceiling, ceiling)
+        } else {
+            (floor, ceiling)
+        }
+    }
 }
 
 /// The marker type registered under [`KIND`] — by all three arms.
@@ -370,55 +405,49 @@ impl DatePickerProps {
     /// `bounds` — the calling arm's own [`Bounds`], module doc's *Range*.
     ///
     /// Order is load-bearing: the style first; then the two range bounds,
-    /// the *widening* one first (compared through `bounds`, so a `None`
-    /// resolves to what this specific platform will hold) so the platform
-    /// never holds an inverted range; then the date — re-planned when the
-    /// app's date changed, when the platform drifted from it (the
-    /// write-back), or when either bound changed (a narrowed range can have
-    /// moved the platform's date).
+    /// the *widening* one first (compared through `bounds`'
+    /// [`Bounds::effective_range`], so a `None` resolves to — and an
+    /// out-of-range explicit bound clamps to — what this specific platform
+    /// will hold) so the platform never holds an inverted or out-of-range
+    /// pair; then the date, itself clamped into the same resolved range and
+    /// re-planned when the app's date changed, when the platform drifted
+    /// from it (the write-back), or when either bound's CLAMPED value
+    /// changed (a narrowed range can have moved the platform's date).
     pub(crate) fn plan<'a>(
         old: &Self,
         new: &'a Self,
         observed: Option<CivilDate>,
         bounds: Bounds,
     ) -> Plan<'a> {
-        // A range that resolves inverted for this platform is handed to the
-        // platform as-is (module doc's *Range*): the platform's own setter
-        // guards (Android's exception, or the framework's clamp) are the
-        // authority. Log a warning so operators can diagnose app-side bounds
-        // that are valid on one arm but inverted on another.
-        let resolved_min = bounds.resolve_min(new.min);
-        let resolved_ceiling = bounds.resolve_ceiling(new.max);
-        if resolved_min > resolved_ceiling {
-            log::warn!(
-                "frust-native-widgets: date_picker slot {} has a resolved range \
-                 {}..{} that is inverted for this platform — handing to the \
-                 platform's own setter to resolve",
-                new.slot,
-                resolved_min,
-                resolved_ceiling
-            );
-        }
+        let (new_min, new_max) = bounds.effective_range(new.min, new.max);
+        let (old_min, old_max) = bounds.effective_range(old.min, old.max);
+        let clamped_date = new.date.map(|date| date.clamp(new_min, new_max));
+        warn_if_clamped(new, new_min, new_max, clamped_date, bounds);
+
         let mut plan = Plan::new();
         if old.style != new.style {
             plan.push(Setter::DatePickerStyle(new.style));
         }
-        let min_changed = old.min != new.min;
-        let max_changed = old.max != new.max;
-        let min_setter = min_changed.then_some(Setter::MinDate(new.min));
-        let max_setter = max_changed.then_some(Setter::MaxDate(new.max));
-        // An absent ceiling resolves to this platform's own default
-        // (`bounds`): growing it (or keeping it) widens the range upward,
-        // so write it before the floor; otherwise the floor moves down
-        // first.
-        if bounds.resolve_ceiling(new.max) >= bounds.resolve_ceiling(old.max) {
+        // A `min`/`max` setter is planned from the CLAMPED, arm-resolved
+        // value, never the app's own raw one: an explicit bound that
+        // resolves to the same clamped value as before is a no-op for this
+        // platform even when the raw value changed (module doc's *Range*).
+        let min_changed = old_min != new_min;
+        let max_changed = old_max != new_max;
+        let min_setter = min_changed.then(|| Setter::MinDate(new.min.map(|_| new_min)));
+        let max_setter = max_changed.then(|| Setter::MaxDate(new.max.map(|_| new_max)));
+        // Growing (or keeping) the effective ceiling widens the range
+        // upward, so write it before the floor; otherwise the floor moves
+        // down first — compared through the CLAMPED effective values, so
+        // the ordering matches what the platform will actually hold.
+        if new_max >= old_max {
             plan.extend(max_setter);
             plan.extend(min_setter);
         } else {
             plan.extend(min_setter);
             plan.extend(max_setter);
         }
-        if let Some(date) = new.date {
+        if let Some(date) = clamped_date {
             let drifted = observed.is_some_and(|platform| platform != date);
             if old.date != new.date || drifted || min_changed || max_changed {
                 plan.push(Setter::Date(date));
@@ -440,6 +469,46 @@ impl DatePickerProps {
         }
         plan
     }
+}
+
+/// Log ONE warning per [`DatePickerProps::plan`] call when clamping into
+/// `bounds` (module doc's *Range*) actually changed an explicit `min`/`max`
+/// or the date — never once per field, and never when nothing was out of
+/// range to begin with.
+fn warn_if_clamped(
+    new: &DatePickerProps,
+    new_min: CivilDate,
+    new_max: CivilDate,
+    clamped_date: Option<CivilDate>,
+    bounds: Bounds,
+) {
+    let mut clamped: Vec<String> = Vec::new();
+    if let Some(min) = new.min
+        && min != new_min
+    {
+        clamped.push(format!("min {min} -> {new_min}"));
+    }
+    if let Some(max) = new.max
+        && max != new_max
+    {
+        clamped.push(format!("max {max} -> {new_max}"));
+    }
+    if let (Some(date), Some(clamped_date)) = (new.date, clamped_date)
+        && date != clamped_date
+    {
+        clamped.push(format!("date {date} -> {clamped_date}"));
+    }
+    if clamped.is_empty() {
+        return;
+    }
+    log::warn!(
+        "frust-native-widgets: date_picker slot {} — {} outside this platform's own range \
+         {}..{}, clamped into it",
+        new.slot,
+        clamped.join(", "),
+        bounds.floor,
+        bounds.ceiling
+    );
 }
 
 /// A packed date field (`crate::events::pack_date`'s layout), `None` when
@@ -1526,13 +1595,18 @@ mod tests {
 
     #[test]
     fn a_none_ceiling_crosses_below_an_explicit_old_ceiling_on_android_only() {
-        // The bug this fixes: `old.max` is explicit and ABOVE Android's own
-        // substituted default, so a platform-agnostic ceiling (always
-        // `CivilDate::MAX`) would wrongly call `new.max = None` a widen and
-        // write `MaxDate` before `MinDate` — passing the still-old, higher
-        // `min` through a platform max that just shrank underneath it
-        // (module doc's *Range*). The Apple bounds never cross here at all:
-        // `None` stays this crate's own unbounded ceiling either way.
+        // `old.max` (2150-01-01) is explicit and, unclamped, ABOVE Android's
+        // own ceiling — but `plan` now clamps every explicit bound into the
+        // arm's own range (module doc's *Range*) before comparing, so the
+        // platform never actually held 2150-01-01: it held the clamped
+        // 2100-12-31, the exact value `new.max = None` resolves to on this
+        // arm. The effective ceiling is therefore unchanged and only the
+        // floor moves. The Apple bounds never clamp anything here
+        // (2150-01-01 is inside `CivilDate::MIN..CivilDate::MAX`), so there
+        // `None` genuinely widens the ceiling (resolving to
+        // `CivilDate::MAX`, above the old explicit 2150-01-01) and it is
+        // written first — the two arms disagree on order for the exact same
+        // props.
         let old = decode(&format!(
             "{},{}",
             field(MIN_DATE, date(2095, 1, 1)),
@@ -1543,13 +1617,9 @@ mod tests {
 
         assert_eq!(
             DatePickerProps::plan(&old, &new, None, android_bounds()),
-            vec![
-                Setter::MinDate(Some(date(2050, 1, 1))),
-                Setter::MaxDate(None),
-            ],
-            "Android's real ceiling for None (2100-12-31) is BELOW the old \
-             explicit one (2150-01-01) — a narrow, so the floor must move \
-             first"
+            vec![Setter::MinDate(Some(date(2050, 1, 1)))],
+            "old.max's clamped ceiling (2100-12-31) equals new's resolved \
+             None default — no MaxDate setter at all, only the floor moves"
         );
         assert_eq!(
             DatePickerProps::plan(&old, &new, None, Bounds::APPLE),
@@ -1566,14 +1636,67 @@ mod tests {
     #[test]
     fn planning_with_an_inverted_resolved_range_does_not_panic() {
         // An app setting min to 2150-01-01 with no max is valid API input
-        // on Apple (ceiling 9999-12-31) but resolves inverted on Android
-        // (ceiling 2100-12-31). The plan should not panic and should emit
-        // the MinDate setter (no MaxDate since max didn't change from None).
+        // on Apple (ceiling 9999-12-31) but resolves inverted for Android's
+        // own 1900-01-01..2100-12-31 default. `plan` clamps the explicit
+        // bound into the arm's range rather than hand an inverted pair to
+        // the platform's own setter.
         let old = DatePickerProps::platform_default(7);
         let new = decode(&field(MIN_DATE, date(2150, 1, 1)));
         let plan = DatePickerProps::plan(&old, &new, None, android_bounds());
-        // The warning is logged but the plan proceeds with the setter.
-        assert_eq!(plan, vec![Setter::MinDate(Some(date(2150, 1, 1)))]);
+        // The warning is logged but the plan proceeds with the clamped
+        // setter.
+        assert_eq!(plan, vec![Setter::MinDate(Some(date(2100, 12, 31)))]);
+    }
+
+    #[test]
+    fn an_explicit_min_above_androids_ceiling_clamps_the_bound_and_the_date() {
+        let old = DatePickerProps::platform_default(9);
+        let new = decode(&format!(
+            "{},{}",
+            field(MIN_DATE, date(2150, 1, 1)),
+            field(DATE, date(2150, 6, 1)),
+        ));
+        assert_eq!(
+            DatePickerProps::plan(&old, &new, None, android_bounds()),
+            vec![
+                Setter::MinDate(Some(date(2100, 12, 31))),
+                Setter::Date(date(2100, 12, 31)),
+            ],
+            "an explicit min above Android's own ceiling clamps into it, \
+             and a date later than the clamped ceiling clamps with it — the \
+             platform is never asked for a date outside the range it will \
+             hold"
+        );
+    }
+
+    #[test]
+    fn an_explicit_max_below_androids_floor_clamps_the_bound() {
+        let old = DatePickerProps::platform_default(9);
+        let new = decode(&field(MAX_DATE, date(1850, 1, 1)));
+        assert_eq!(
+            DatePickerProps::plan(&old, &new, None, android_bounds()),
+            vec![Setter::MaxDate(Some(date(1900, 1, 1)))],
+            "an explicit max below Android's own floor clamps up into it"
+        );
+    }
+
+    #[test]
+    fn the_same_out_of_androids_range_bounds_are_not_clamped_on_apple() {
+        let old = DatePickerProps::platform_default(9);
+        let min_only = decode(&field(MIN_DATE, date(2150, 1, 1)));
+        assert_eq!(
+            DatePickerProps::plan(&old, &min_only, None, Bounds::APPLE),
+            vec![Setter::MinDate(Some(date(2150, 1, 1)))],
+            "2150-01-01 is well inside CivilDate::MIN..CivilDate::MAX — \
+             Apple's own unbounded range — so nothing clamps it"
+        );
+        let max_only = decode(&field(MAX_DATE, date(1850, 1, 1)));
+        assert_eq!(
+            DatePickerProps::plan(&old, &max_only, None, Bounds::APPLE),
+            vec![Setter::MaxDate(Some(date(1850, 1, 1)))],
+            "1850-01-01 is well inside CivilDate::MIN..CivilDate::MAX, so \
+             nothing clamps it on Apple either"
+        );
     }
 
     #[test]
