@@ -42,9 +42,13 @@
 //!
 //! **Known v1 limitation:** since the queue is the app's own ever-growing
 //! `Vec`, a very long-running session accumulates every message ever shown.
-//! An app that cares can periodically truncate the vec — `next_index` is
-//! clamped to the (possibly shorter) new length on the following rebuild, so
-//! this is always safe, just not automatic.
+//! An app that cares can periodically truncate the vec — truncating from the
+//! **tail** (removing entries after the last consumed message) or clearing
+//! when nothing is pending is safe, because `next_index` is clamped to the
+//! (possibly shorter) new length on the following rebuild. However, removing
+//! entries at or **below** `next_index` (i.e., draining from the front) shifts
+//! the cursor and causes already-consumed or in-flight messages to be skipped
+//! or lost — never do this.
 //!
 //! # Anchoring (framework-side positioning)
 //!
