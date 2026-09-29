@@ -42,12 +42,16 @@
 //! `UITabBarDelegate.tabBar:didSelectItem:`, so [`FrustNativeControlTarget`]
 //! conforms to `UITabBarDelegate` and `TabBar`'s iOS arm sets a target as the
 //! bar's (weak) delegate ([`Self::attach_tab_bar`]). The one piece of
-//! per-instance state beyond the slot id lives in [`TargetIvars`]: the item
-//! the bar last showed, which is what tells a reselect from a selection
-//! (`crate::controls::tab_bar::tap_kind`). UIKit calls the delegate for every
-//! tap on an enabled item — the showing one included — and never for a
-//! programmatic `selectedItem` write, so the *No echo guard* rule below holds
-//! for it too.
+//! per-instance state beyond the slot id lives in [`TargetIvars`]: the tab
+//! the app last confirmed ([`Self::note_tab_showing`], called only from a
+//! `Setter::SelectedTab` apply — never a tap), which is what tells a
+//! reselect from a selection (`crate::controls::tab_bar::tap_kind`): a tap
+//! the app rejects leaves it unchanged, so retapping that same item still
+//! classifies as a selection, even though UIKit has already moved
+//! `selectedItem` and the highlight to it either way. UIKit calls the
+//! delegate for every tap on an enabled item — the showing one included —
+//! and never for a programmatic `selectedItem` write, so the *No echo guard*
+//! rule below holds for it too.
 //!
 //! A public `NativeComponent` reaches the same class through
 //! `FrustNativeControlTarget::attach_component` (called by
@@ -171,7 +175,8 @@ use crate::runtime::{self, NativeEvent};
 /// [`FrustNativeControlTarget`]'s per-instance state: the slot every event
 /// reports for, plus `showing_tab`, which is `TabBar`-only (module doc's
 /// *One class, many delegates*):
-/// the item index the bar last showed, `None` before any selection — every
+/// the tab index the app last confirmed selected via a `Setter::SelectedTab`
+/// apply, `None` before any confirmation — a tap never writes it, and every
 /// other control's target leaves it untouched.
 pub(crate) struct TargetIvars {
     slot: SlotId,
@@ -197,11 +202,15 @@ define_class!(
     // delegate, not target-action (module doc's *One class, many delegates*).
     unsafe impl UITabBarDelegate for FrustNativeControlTarget {
         /// A tap on an enabled item → [`EVENT_KIND_SELECTION`], or
-        /// [`crate::events::EVENT_KIND_RESELECTED`] when it is the item the
-        /// bar was already showing ([`tap_kind`]), `detail` the item's `tag`
-        /// — which `TabBar`'s iOS arm sets to the item's index — packed with
-        /// [`pack_index`]. The tapped item becomes the showing one either
-        /// way: UIKit has already moved `selectedItem` to it.
+        /// [`crate::events::EVENT_KIND_RESELECTED`] when it is the tab the
+        /// app last confirmed ([`tap_kind`]), `detail` the item's `tag` —
+        /// which `TabBar`'s iOS arm sets to the item's index — packed with
+        /// [`pack_index`]. The tap never updates `showing_tab` itself — only
+        /// a `Setter::SelectedTab` apply does ([`Self::note_tab_showing`]) —
+        /// so a tap the app rejects (no write-back) leaves a same-tab retap
+        /// classified as another selection, not a reselect, even though
+        /// UIKit has already moved `selectedItem` and the highlight to it
+        /// either way.
         #[unsafe(method(tabBar:didSelectItem:))]
         fn tab_bar_did_select_item(&self, _tab_bar: &UITabBar, item: &UITabBarItem) {
             let tag = item.tag();
@@ -213,7 +222,6 @@ define_class!(
                 return;
             };
             let kind = tap_kind(self.ivars().showing_tab.get(), index);
-            self.ivars().showing_tab.set(Some(index));
             self.dispatch(kind, pack_index(tag), "tabBar:didSelectItem:");
         }
     }
@@ -598,8 +606,9 @@ impl FrustNativeControlTarget {
         Self::new(mtm, slot)
     }
 
-    /// Record the item index `view` now shows (`None`: no selection) — what
-    /// the next tap is classified against ([`tap_kind`]).
+    /// Record the item index the app has confirmed `view` shows (`None`: no
+    /// selection) — what the next tap is classified against ([`tap_kind`]).
+    /// Called only from a `Setter::SelectedTab` apply, never from a tap.
     pub(crate) fn note_tab_showing(&self, index: Option<usize>) {
         self.ivars().showing_tab.set(index);
     }

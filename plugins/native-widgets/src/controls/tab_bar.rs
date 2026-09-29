@@ -65,11 +65,16 @@
 //!
 //! `UITabBarDelegate.tabBar:didSelectItem:` fires for every tap on an enabled
 //! item, including the one already showing. The one target class
-//! (`crate::apple::events`) remembers the item the bar last *showed* — every
-//! [`Setter::SelectedTab`] apply and every tap updates it — and classifies each
-//! tap with [`tap_kind`]: the showing item again is
+//! (`crate::apple::events`) remembers the tab the **app last confirmed** —
+//! only a [`Setter::SelectedTab`] apply updates it (`note_tab_showing`), a
+//! tap itself never does — and classifies each tap with [`tap_kind`]: the
+//! app-confirmed tab tapped again is
 //! [`crate::events::EVENT_KIND_RESELECTED`] (an app's "scroll to top / pop to
-//! root"), anything else [`crate::events::EVENT_KIND_SELECTION`]. Each
+//! root"), anything else [`crate::events::EVENT_KIND_SELECTION`] — including
+//! a retap of a tab the app never confirmed (no write-back), even though
+//! UIKit has already moved `selectedItem` and the highlight to it either way
+//! (the same v1 identical-props limitation the *Write-back* section above
+//! names; the classification is independent of that highlight). Each
 //! `UITabBarItem` is built with its index as its `tag`, which is what the
 //! delegate reports.
 //!
@@ -161,10 +166,14 @@ pub(crate) fn icon_decode_scale(width: f64, height: f64) -> f64 {
     }
 }
 
-/// Classify a tap on item `tapped` given the item the bar was `showing`
-/// before it: the showing item again is a reselect, anything else a
-/// selection (module doc's *Select vs reselect*). Called by the one target
-/// class's `tabBar:didSelectItem:` — pure so the rule is host-tested.
+/// Classify a tap on item `tapped` against `showing` — the tab the app last
+/// **confirmed** selected, not merely the one UIKit is highlighting (module
+/// doc's *Select vs reselect*): the confirmed tab tapped again is a
+/// reselect, anything else — including a retap of a tab the app never
+/// confirmed — a selection. `showing` moves only on a `Setter::SelectedTab`
+/// apply, never on a tap itself, which is what keeps a rejected-then-retapped
+/// tap classified as a selection. Called by the one target class's
+/// `tabBar:didSelectItem:` — pure so the rule is host-tested.
 pub(crate) fn tap_kind(showing: Option<usize>, tapped: usize) -> i32 {
     if showing == Some(tapped) {
         EVENT_KIND_RESELECTED
@@ -449,8 +458,8 @@ pub(crate) mod platform {
     //! Taps arrive through `UITabBarDelegate.tabBar:didSelectItem:` on the one
     //! target class ([`FrustNativeControlTarget`]), set as the bar's
     //! (weak) delegate after the create plan and retained here; the target
-    //! also remembers the showing item for [`super::tap_kind`], so every
-    //! [`Setter::SelectedTab`] apply tells it.
+    //! also remembers the tab the app last confirmed, for [`super::tap_kind`]
+    //! — every [`Setter::SelectedTab`] apply tells it, a tap never does.
 
     use std::sync::Once;
 
@@ -584,7 +593,7 @@ pub(crate) mod platform {
                         .map(|items| items.objectAtIndex(index))
                 });
                 view.setSelectedItem(item.as_deref());
-                target.note_tab_showing(item.is_some().then_some(selected).flatten());
+                target.note_tab_showing(item.and(selected));
             }
             Setter::TabBarTint(argb) => {
                 let color = platform::optional_ui_color(argb);
@@ -937,6 +946,19 @@ mod tests {
         assert_eq!(tap_kind(Some(0), 1), EVENT_KIND_SELECTION);
         assert_eq!(tap_kind(None, 0), EVENT_KIND_SELECTION);
         assert_eq!(tap_kind(Some(2), 2), EVENT_KIND_RESELECTED);
+    }
+
+    #[test]
+    fn a_tab_the_app_rejects_stays_a_selection_when_retapped_not_a_reselect() {
+        // The app never confirms the first tap (no `Setter::SelectedTab`
+        // write-back), so `showing` — the tab the app last confirmed — stays
+        // put across both taps: a tap itself never moves it (module doc's
+        // *Select vs reselect*). Retapping the same rejected tab must
+        // classify as another selection, not a reselect, even though
+        // UIKit's own highlight has already moved to it either way.
+        let confirmed = Some(0);
+        assert_eq!(tap_kind(confirmed, 1), EVENT_KIND_SELECTION);
+        assert_eq!(tap_kind(confirmed, 1), EVENT_KIND_SELECTION);
     }
 
     fn event(kind: i32, index: isize) -> NativeEvent {
