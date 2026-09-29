@@ -237,6 +237,29 @@ pub fn at_rest_slots(section: usize) -> usize {
     AT_REST_SLOTS.get(section).copied().unwrap_or(0)
 }
 
+/// The expected value [`live_readout`] displays for `section`: [`at_rest_slots`]
+/// on a target with a native host (Android/iOS/macOS), or `0` everywhere
+/// else. A Linux/Windows desktop preview has no [`frust_native_widgets`]
+/// runtime at all — [`live_slot_count`] always reads `0` there (its own doc:
+/// "0 ... on a platform with no live runtime at all") — so comparing it
+/// against a nonzero [`AT_REST_SLOTS`] entry (e.g. Controls' 6) would show a
+/// count that target can never reach. [`AT_REST_SLOTS`]/[`at_rest_slots`]
+/// stay exactly as documented — the structural count `tests/smoke.rs`'s
+/// `every_page_publishes_its_documented_at_rest_slot_count` asserts, which is
+/// unaffected by whether a native runtime exists; only this header's
+/// displayed comparison changes.
+fn expected_live_slots(section: usize) -> usize {
+    if cfg!(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "macos"
+    )) {
+        at_rest_slots(section)
+    } else {
+        0
+    }
+}
+
 local_sig!(live_refresh_sig, u32, 0);
 
 /// The live-slot readout line plus its "Re-read" chip.
@@ -246,14 +269,16 @@ local_sig!(live_refresh_sig, u32, 0);
 /// it — so the value shown on a page's first frame can still include the
 /// previous page's slots. "Re-read" forces one rebuild (the tracked read below
 /// subscribes the page to it) to sample it again. Diagnostics only:
-/// `live_slot_count` carries no compatibility promise.
+/// `live_slot_count` carries no compatibility promise. The "expected at rest"
+/// figure is [`expected_live_slots`], not [`at_rest_slots`] directly — see its
+/// doc comment for why they diverge on a no-native-host target.
 pub fn live_readout(section: usize) -> Vec<FlexChild<S>> {
     let _ = live_refresh_sig().get();
     vec![
         inflexible(readout(format!(
             "Live native slots (process): {} \u{2014} expected at rest here: {}",
             live_slot_count(),
-            at_rest_slots(section)
+            expected_live_slots(section)
         ))),
         gap(4.0),
         inflexible(chip("Re-read live count", |_: &mut S| {

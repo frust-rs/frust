@@ -33,8 +33,8 @@ use frust_native_widgets::{
 };
 
 use super::common::{
-    CellFit, NativeClasses, PAIR_CELL_W, S, block, bump, caption, chip, gap, gap_h, label,
-    local_sig, page_column, page_header, pair_row, readout, row,
+    CellFit, NativeClasses, PAIR_CELL_W, S, block, bump, caption, chip, gap, gap_h, local_sig,
+    page_column, page_header, pair_row, readout, row,
 };
 
 /// This page's index in [`SECTION_LABELS`](crate::SECTION_LABELS).
@@ -273,24 +273,33 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
     ]
 }
 
-/// The date picker: compact in a pair, or inline full-width.
+/// The date picker: compact in a pair, or inline full-width — always built
+/// through [`pair_row`], at the same [`FlexChildS`] position, so a
+/// compact/inline switch never changes the concrete view type
+/// `AnyView::rebuild` walks at that position (only the `height` and `style`
+/// *values* differ). A version that instead swapped in a differently shaped
+/// tree per mode (the picker bare in one branch, wrapped in a pair's `row`
+/// in the other) tore the native picker down and rebuilt it on every
+/// toggle: `AnyView::rebuild` compares the *inner* boxed view's concrete
+/// type, not the erasing `AnyView` wrapper (`frust-core`'s
+/// `any_view_type_swap_tears_down_and_replaces` test), so a
+/// differently-shaped child at the same position is a teardown + rebuild,
+/// never an in-place update. Kept structurally stable instead, the style
+/// switch reaches the mounted picker as a single in-place
+/// `Setter::DatePickerStyle` update.
 fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
     let style = if inline {
         NativeDatePickerStyle::Inline
     } else {
         NativeDatePickerStyle::Compact
     };
-    let (w, h) = if inline {
-        (300.0, 330.0)
-    } else {
-        (PAIR_CELL_W, 40.0)
-    };
+    let h = if inline { 330.0 } else { 40.0 };
     let picker = any(native_date_picker(value)
         .min(date_min())
         .max(date_max())
         .style(style)
         .content_description("Native date picker")
-        .size(w, h)
+        .size(PAIR_CELL_W, h)
         .on_change(|requested| {
             bump(date_events_sig());
             date_sig().set(requested);
@@ -300,31 +309,22 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
         ios: "UIDatePicker",
         macos: "NSDatePicker",
     };
+    let title = if inline {
+        "Date picker (inline)"
+    } else {
+        "Date picker (compact)"
+    };
     let note = "Glyph has no date picker: the drawn column is a Text readout of the confirmed \
                 date. Range 2026-01-01..=2027-12-31.";
-    let mut rows = if inline {
-        vec![block(vec![
-            inflexible(label("Date picker (inline)")),
-            gap(4.0),
-            inflexible(caption(classes.caption())),
-            gap(2.0),
-            inflexible(caption(note)),
-            gap(6.0),
-            inflexible(picker),
-            gap(6.0),
-            inflexible(readout(format!("Drawn: {}", format_date(value)))),
-        ])]
-    } else {
-        vec![pair_row(
-            "Date picker (compact)",
-            classes,
-            note,
-            CellFit::Natural,
-            40.0,
-            picker,
-            readout(format_date(value)),
-        )]
-    };
+    let mut rows = vec![pair_row(
+        title,
+        classes,
+        note,
+        CellFit::Natural,
+        h,
+        picker,
+        readout(format_date(value)),
+    )];
     rows.push(block(vec![
         inflexible(chip(
             if inline {
@@ -344,8 +344,11 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
         ))),
         gap(2.0),
         inflexible(caption(
-            "Android fixes the style when the picker is created: the switch applies there after \
-             the picker remounts (leave this page and return).",
+            "iOS/macOS apply the style switch in place, immediately (no remount). Android's \
+             DatePicker bakes its spinner/calendar mode into the constructor with no setter \
+             (plugins/native-widgets/src/controls/date_picker.rs's Android `apply` arm warns \
+             once and ignores a later Setter::DatePickerStyle), so the switch has no visible \
+             effect there until the picker remounts (leave this page and return).",
         )),
     ]));
     rows

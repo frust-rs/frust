@@ -24,6 +24,8 @@ use frust_native_widgets::{
     ActionRole, Detent, PresentError, SheetContent, SheetOutcome, SheetSpec, show_native_sheet_into,
 };
 
+use crate::push_toast;
+
 use super::common::{
     S, block, caption, demo_image_bytes, gap, label, local_sig, page_column, page_header, readout,
     theme,
@@ -113,7 +115,10 @@ fn trigger(
 }
 
 /// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+pub fn page(state: &S) -> AnyView<S> {
+    // Copy handle, cheap to move into the programmatic run's timers below —
+    // see their `Err(join_err)` arms.
+    let toasts = state.toasts;
     let outcome = outcome_sig().get();
     let status = status_sig().get();
     let detent = detent_sig().get();
@@ -179,10 +184,37 @@ pub fn page(_state: &S) -> AnyView<S> {
                 return;
             };
             frust::spawn_local(async move {
-                let _ = frust::spawn_blocking(|| std::thread::sleep(EXPAND_AFTER)).await;
-                handle.select_detent(Detent::Large);
-                let _ = frust::spawn_blocking(|| std::thread::sleep(DISMISS_AFTER_EXPAND)).await;
-                handle.dismiss();
+                // Match each join `Result` and surface a failure rather than
+                // silently dropping it (`examples/playground`'s `camera.rs`
+                // convention); an expand-timer failure skips the dismiss
+                // timer too, since the sheet's detent state is now unknown.
+                match frust::spawn_blocking(|| std::thread::sleep(EXPAND_AFTER)).await {
+                    Ok(()) => handle.select_detent(Detent::Large),
+                    Err(join_err) => {
+                        log::warn!(
+                            "native-widgets-demo sheet: programmatic expand timer panicked: \
+                             {join_err}"
+                        );
+                        push_toast(
+                            toasts,
+                            "Sheet: programmatic expand timer failed".to_string(),
+                        );
+                        return;
+                    }
+                }
+                match frust::spawn_blocking(|| std::thread::sleep(DISMISS_AFTER_EXPAND)).await {
+                    Ok(()) => handle.dismiss(),
+                    Err(join_err) => {
+                        log::warn!(
+                            "native-widgets-demo sheet: programmatic dismiss timer panicked: \
+                             {join_err}"
+                        );
+                        push_toast(
+                            toasts,
+                            "Sheet: programmatic dismiss timer failed".to_string(),
+                        );
+                    }
+                }
             });
         },
     );

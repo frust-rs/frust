@@ -122,6 +122,53 @@ fn parse_section_deep_link(url: &str) -> Option<&str> {
     if label.is_empty() { None } else { Some(label) }
 }
 
+/// The longest unrecognized deep-link label [`sanitize_deep_link_label`]
+/// ever echoes verbatim into UI text.
+const MAX_ECHOED_LABEL_LEN: usize = 32;
+
+/// Whether `label` is safe to echo verbatim in a toast: ASCII alphanumerics
+/// and `-` only, at most [`MAX_ECHOED_LABEL_LEN`] characters. An unrecognized
+/// [`DeepLinkAction::UnknownLabel`] is untrusted display text — it is
+/// whatever any process on the device handed this app's deep-link scheme, not
+/// a value this app produced — so anything outside that character set (or
+/// merely too long) is dropped rather than echoed character-for-character;
+/// [`deep_link_router`] falls back to a fixed message and logs the raw label
+/// `{:?}`-escaped instead.
+fn sanitize_deep_link_label(label: &str) -> Option<&str> {
+    let ok = !label.is_empty()
+        && label.len() <= MAX_ECHOED_LABEL_LEN
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    ok.then_some(label)
+}
+
+/// The most [`push_toast`] ever leaves queued in [`NativeWidgetsDemoState::toasts`]
+/// at once — a small constant so a burst of toast-worthy failures (a
+/// misbehaving deep-link sender, several timer join failures) cannot grow the
+/// FIFO without bound. The oldest entries are dropped first.
+const MAX_QUEUED_TOASTS: usize = 8;
+
+/// Append `message` to `queue`, then drop entries from the front beyond
+/// [`MAX_QUEUED_TOASTS`]. Pure (touches no signal) so it is unit-testable on
+/// a plain `Vec` — [`push_toast`] is the signal-touching wrapper every toast
+/// producer in this app goes through.
+fn push_toast_capped(queue: &mut Vec<String>, message: String) {
+    queue.push(message);
+    let overflow = queue.len().saturating_sub(MAX_QUEUED_TOASTS);
+    if overflow > 0 {
+        queue.drain(0..overflow);
+    }
+}
+
+/// Push `message` onto `toasts`, capped at [`MAX_QUEUED_TOASTS`]
+/// ([`push_toast_capped`]) — call this rather than updating
+/// [`NativeWidgetsDemoState::toasts`] directly, so the FIFO's size bound
+/// holds regardless of which page or event handler is pushing.
+pub(crate) fn push_toast(toasts: RwSignal<Vec<String>>, message: String) {
+    toasts.update(|queue| push_toast_capped(queue, message));
+}
+
 /// The effect a delivered [`DeepLink`] resolves to, as decided by
 /// [`plan_deep_link`] — applied by [`deep_link_router`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,10 +224,12 @@ fn deep_link_router(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemo
                     );
                 }
                 DeepLinkAction::UnknownLabel(label) => {
-                    state.toasts.update(|queue| {
-                        queue.push(format!("Unknown section '{label}' in deep link"))
-                    });
-                    log::warn!("native-widgets-demo deep-link: section {label} unknown");
+                    let message = match sanitize_deep_link_label(&label) {
+                        Some(safe) => format!("Unknown section '{safe}' in deep link"),
+                        None => "Unknown section in deep link".to_string(),
+                    };
+                    push_toast(state.toasts, message);
+                    log::warn!("native-widgets-demo deep-link: section {label:?} unknown");
                 }
             }
         }
@@ -609,5 +658,53 @@ mod deep_link_tests {
         assert_eq!(slide_for(0, 3), SlideDirection::Left);
         assert_eq!(slide_for(3, 3), SlideDirection::Left);
         assert_eq!(slide_for(5, 1), SlideDirection::Right);
+    }
+
+    #[test]
+    fn deep_link_label_sanitizer_accepts_ascii_alnum_and_dash_within_the_length_cap() {
+        assert_eq!(sanitize_deep_link_label("abc-123"), Some("abc-123"));
+        assert_eq!(sanitize_deep_link_label("A-Z-0-9"), Some("A-Z-0-9"));
+        let at_cap = "a".repeat(MAX_ECHOED_LABEL_LEN);
+        assert_eq!(sanitize_deep_link_label(&at_cap), Some(at_cap.as_str()));
+    }
+
+    #[test]
+    fn deep_link_label_sanitizer_rejects_empty_oversized_or_non_ascii_alnum_dash() {
+        assert_eq!(sanitize_deep_link_label(""), None, "empty");
+        let over_cap = "a".repeat(MAX_ECHOED_LABEL_LEN + 1);
+        assert_eq!(
+            sanitize_deep_link_label(&over_cap),
+            None,
+            "one over the cap"
+        );
+        assert_eq!(sanitize_deep_link_label("has space"), None, "space");
+        assert_eq!(sanitize_deep_link_label("has/slash"), None, "slash");
+        assert_eq!(sanitize_deep_link_label("<script>"), None, "markup");
+        assert_eq!(sanitize_deep_link_label("caf\u{e9}"), None, "non-ASCII");
+    }
+
+    #[test]
+    fn push_toast_capped_keeps_every_message_under_the_cap() {
+        let mut queue: Vec<String> = Vec::new();
+        push_toast_capped(&mut queue, "a".to_string());
+        push_toast_capped(&mut queue, "b".to_string());
+        assert_eq!(queue, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn push_toast_capped_drops_the_oldest_entries_beyond_the_cap() {
+        let mut queue: Vec<String> = (0..MAX_QUEUED_TOASTS).map(|i| i.to_string()).collect();
+        push_toast_capped(&mut queue, "newest".to_string());
+        assert_eq!(
+            queue.len(),
+            MAX_QUEUED_TOASTS,
+            "still at the cap, not over it"
+        );
+        assert_eq!(
+            queue.first().map(String::as_str),
+            Some("1"),
+            "oldest ('0') was dropped"
+        );
+        assert_eq!(queue.last().map(String::as_str), Some("newest"));
     }
 }

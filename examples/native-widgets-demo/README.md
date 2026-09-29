@@ -34,7 +34,7 @@ page's slots).
 |---|---|---|---|---|
 | 1 | Controls | `controls.rs` | The six base builders (button, label, switch, slider, progress, image), each REAL control beside its frust-drawn peer in the same cell, theme and signal; the native → signal → frust readout (`Taps:`/`Switch:`/`Slider:`); the REJECT write-back affordance (a test-only refusal count in the accessibility label, so a refusal reaches the wire); a light/dark toggle re-theming both columns live. Each pair names its class per platform. | 6 |
 | 2 | macOS | `macos.rs` | The AppKit arm: what each builder mounts on macOS, the documented AppKit gaps (with their `docs/LIMITATIONS.md` ids), and a live `Cover`/`Contain` image pair (iOS/Android crop `Cover`; macOS letterboxes both). A reference page off macOS. | 2 |
-| 3 | New | `new_controls.rs` | Spinner (animating toggle) vs Glyph `dots_loader`; segmented (three segments, controlled, REFUSE toggle) vs Glyph `segmented_control`; stepper (range 0..=10, step 1/2, wraps) vs baseline `−`/`+` buttons; date picker (compact ↔ inline, bounded 2026–2027) vs a `Text` readout — Glyph has no stepper or date picker. | 4 on iOS/macOS, 2 on Android |
+| 3 | New | `new_controls.rs` | Spinner (animating toggle) vs Glyph `dots_loader`; segmented (three segments, controlled, REFUSE toggle) vs Glyph `segmented_control`; stepper (range 0..=10, step 1/2, wraps) vs baseline `−`/`+` buttons; date picker (compact ↔ inline, bounded 2026–2027, always mounted through the same pair-row shape so the switch is an in-place style update, never a remount — the switch applies immediately on iOS/macOS, and is a no-op on Android until the picker remounts) vs a `Text` readout — Glyph has no stepper or date picker. | 4 on iOS/macOS, 2 on Android |
 | 4 | Alerts | `alerts.rs` | `show_native_alert_into`: a three-role alert with a cancelable toggle; an action sheet anchored to its own button's painted window rect (`AnchorProbe`); two requests from one tap, the second refused `Busy`; a programmatic `present::dismiss` 2 s after presenting; the outcome readout. | 0 |
 | 5 | TabBar | `tab_bar.rs` | A bare `native_tab_bar` at the page bottom (`.safe_area(false)` — the page is not docked to the window edge): a byte icon, an SF Symbol with a selected symbol, a badged item; selection drives a page-local index, not the app router (routing from here would navigate away from the control under test); a reselect counter; Glyph `tabs` on the same selection. | 1 on iOS, 0 elsewhere |
 | 6 | Sheet | `sheet.rs` | `show_native_sheet_into`: medium + large with grabber, non-dismissible, a custom 0.4 detent, a programmatic run (expand to large after 1 s, dismiss 2 s later); the outcome and user-detent readouts. | 0 |
@@ -66,9 +66,13 @@ builder as a frust-drawn placeholder (no slot), so the at-rest counts read 0
 there.
 
 A `native-widgets-demo://section/<label>` deep link (case-insensitive against
-`SECTION_LABELS`) routes straight to a section; an unrecognized `<label>` shows
-a toast instead. Deliveries dedupe by `DeepLink::sequence`, not URL text. On
-Android:
+`SECTION_LABELS`) routes straight to a section; an unrecognized `<label>`
+shows a toast instead — the raw label is untrusted external text, so it is
+echoed into the toast only when it is ASCII alphanumerics/`-`, 32 characters
+or fewer (otherwise a fixed "Unknown section in deep link" message; either
+way the raw label still reaches the log, `{:?}`-escaped). The toast queue
+holds at most 8 messages at once, oldest dropped first. Deliveries dedupe by
+`DeepLink::sequence`, not URL text. On Android:
 
 ```
 adb shell am start -a android.intent.action.VIEW \

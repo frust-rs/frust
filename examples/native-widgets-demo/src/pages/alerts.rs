@@ -29,6 +29,8 @@ use frust_native_widgets::{
     ActionRole, AlertOutcome, AlertSpec, AlertStyle, PresentError, present, show_native_alert_into,
 };
 
+use crate::push_toast;
+
 use super::common::{
     S, anchor_probe, anchor_rect, block, caption, gap, label, local_sig, page_column, page_header,
     readout,
@@ -98,7 +100,10 @@ fn describe_outcome(outcome: Option<&AlertOutcome>) -> String {
 }
 
 /// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+pub fn page(state: &S) -> AnyView<S> {
+    // Copy handle, cheap to move into the auto-dismiss timer's async block
+    // below — see its `Err(join_err)` arm.
+    let toasts = state.toasts;
     // Tracked reads: the outcome arrives from the platform's main-thread
     // callback, outside any frust event pass.
     let outcome = outcome_sig().get();
@@ -201,19 +206,32 @@ pub fn page(_state: &S) -> AnyView<S> {
              (a stale handle is ignored).",
         )),
         gap(6.0),
-        inflexible(any(button("Show, auto-dismiss in 2 s", |_: &mut S| {
-            let Some(handle) = present_alert(
-                "Auto-dismiss",
-                AlertSpec::new("Going away", "This alert dismisses itself in 2 seconds.")
-                    .with_action("ok", "OK", ActionRole::Default),
-            ) else {
-                return;
-            };
-            frust::spawn_local(async move {
-                let _ = frust::spawn_blocking(|| std::thread::sleep(AUTO_DISMISS_AFTER)).await;
-                present::dismiss(&handle);
-            });
-        }))),
+        inflexible(any(button(
+            "Show, auto-dismiss in 2 s",
+            move |_: &mut S| {
+                let Some(handle) = present_alert(
+                    "Auto-dismiss",
+                    AlertSpec::new("Going away", "This alert dismisses itself in 2 seconds.")
+                        .with_action("ok", "OK", ActionRole::Default),
+                ) else {
+                    return;
+                };
+                frust::spawn_local(async move {
+                    // Match the join `Result` and surface a failure rather than
+                    // silently dropping it (`examples/playground`'s
+                    // `camera.rs` convention).
+                    match frust::spawn_blocking(|| std::thread::sleep(AUTO_DISMISS_AFTER)).await {
+                        Ok(()) => present::dismiss(&handle),
+                        Err(join_err) => {
+                            log::warn!(
+                                "native-widgets-demo alerts: auto-dismiss timer panicked: {join_err}"
+                            );
+                            push_toast(toasts, "Alerts: auto-dismiss timer failed".to_string());
+                        }
+                    }
+                });
+            },
+        ))),
     ]);
 
     let readouts = block(vec![
