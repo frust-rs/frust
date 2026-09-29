@@ -2800,10 +2800,13 @@ unbounded `CivilDate::MIN`/`CivilDate::MAX` on iOS/macOS (`Bounds::APPLE`). At p
 (`Bounds::effective_range`, called from `DatePickerProps::plan`), an explicit bound outside the
 calling arm's own range — or a date outside the resolved range — is clamped into it, never left to
 reach a platform setter as an out-of-range or inverted pair; `warn_if_clamped` logs one warning per
-`plan` call naming the slot, the clamped values, and the arm's range. Because this clamp is
-arm-resolved rather than the platform-agnostic clamp `DatePickerProps::decode` already applies to an
-explicit `min > max`, an app that sets, say, a minimum date after 2100 gets a single-day range on
-Android (the floor collapses onto the ceiling) while iOS/macOS honour the same value unclamped.
+process — a static once-guard, the same shape as the stepper's non-positive-step warning — naming
+the first offending slot, the clamped values, and the arm's range. On Android the initial date
+handed to `DatePicker.init` is the same effective (clamped) date the plan uses for `updateDate`,
+through `DatePickerProps::effective_date`. Because this clamp is arm-resolved rather than the
+platform-agnostic clamp `DatePickerProps::decode` already applies to an explicit `min > max`, an
+app that sets, say, a minimum date after 2100 gets a single-day range on Android (the floor
+collapses onto the ceiling) while iOS/macOS honour the same value unclamped.
 
 **Applies to**: `native_date_picker`'s `min`/`max` builders (`NativeDatePickerView::min`/`max`) on
 Android specifically; iOS and macOS resolve the same bounds unbounded.
