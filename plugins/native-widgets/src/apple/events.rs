@@ -34,6 +34,21 @@
 //! different sender type — `crate::controls::stepper`'s module doc names the
 //! shared shape.
 //!
+//! # One class, many delegates
+//!
+//! A control that reports through a **delegate protocol** rather than
+//! target-action gets that conformance on this same class, never a second
+//! one: `UITabBar` is not a `UIControl` and reports taps only through
+//! `UITabBarDelegate.tabBar:didSelectItem:`, so [`FrustNativeControlTarget`]
+//! conforms to `UITabBarDelegate` and `TabBar`'s iOS arm sets a target as the
+//! bar's (weak) delegate ([`Self::attach_tab_bar`]). The one piece of
+//! per-instance state beyond the slot id lives in [`TargetIvars`]: the item
+//! the bar last showed, which is what tells a reselect from a selection
+//! (`crate::controls::tab_bar::tap_kind`). UIKit calls the delegate for every
+//! tap on an enabled item — the showing one included — and never for a
+//! programmatic `selectedItem` write, so the *No echo guard* rule below holds
+//! for it too.
+//!
 //! A public `NativeComponent` reaches the same class through
 //! `FrustNativeControlTarget::attach_component` (called by
 //! `crate::component::ComponentCtx::attach_listener`), which wires the same
@@ -130,19 +145,21 @@
 //! `Self::alloc`/`Self::class()` call regardless, with no separate trigger
 //! required.
 
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 #[cfg(feature = "frust-api")]
 use objc2_ui_kit::UIView;
 use objc2_ui_kit::{
     UIButton, UIControl, UIControlEvents, UIDatePicker, UISegmentedControl, UISlider, UIStepper,
-    UISwitch,
+    UISwitch, UITabBar, UITabBarDelegate, UITabBarItem,
 };
 
 use crate::controls::date_picker::foundation::civil_date;
+use crate::controls::tab_bar::tap_kind;
 use crate::events::{
     EVENT_KIND_CLICK, EVENT_KIND_DATE, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START,
     EVENT_KIND_SELECTION, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_date,
@@ -151,19 +168,55 @@ use crate::events::{
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent};
 
+/// [`FrustNativeControlTarget`]'s per-instance state: the slot every event
+/// reports for, plus `showing_tab`, which is `TabBar`-only (module doc's
+/// *One class, many delegates*):
+/// the item index the bar last showed, `None` before any selection — every
+/// other control's target leaves it untouched.
+pub(crate) struct TargetIvars {
+    slot: SlotId,
+    showing_tab: Cell<Option<usize>>,
+}
+
 define_class!(
     // SAFETY:
     // - `NSObject` has no subclassing requirements.
-    // - The ivars are a plain `SlotId` (`u64`) with no `Drop` impl, so the
-    //   macro's generated `dealloc` has nothing extra to uphold.
+    // - The ivars are a plain `SlotId` (`u64`) and a `Cell<Option<usize>>`,
+    //   neither with a `Drop` impl, so the macro's generated `dealloc` has
+    //   nothing extra to uphold.
     #[unsafe(super(NSObject))]
     // See the module doc's *Threading*: every action fires on the main
     // thread, so construction (`Self::alloc`) must too.
     #[thread_kind = MainThreadOnly]
-    #[ivars = SlotId]
+    #[ivars = TargetIvars]
     pub(crate) struct FrustNativeControlTarget;
 
     unsafe impl NSObjectProtocol for FrustNativeControlTarget {}
+
+    // `TabBar`'s delegate conformance — a `UITabBar` reports taps through its
+    // delegate, not target-action (module doc's *One class, many delegates*).
+    unsafe impl UITabBarDelegate for FrustNativeControlTarget {
+        /// A tap on an enabled item → [`EVENT_KIND_SELECTION`], or
+        /// [`crate::events::EVENT_KIND_RESELECTED`] when it is the item the
+        /// bar was already showing ([`tap_kind`]), `detail` the item's `tag`
+        /// — which `TabBar`'s iOS arm sets to the item's index — packed with
+        /// [`pack_index`]. The tapped item becomes the showing one either
+        /// way: UIKit has already moved `selectedItem` to it.
+        #[unsafe(method(tabBar:didSelectItem:))]
+        fn tab_bar_did_select_item(&self, _tab_bar: &UITabBar, item: &UITabBarItem) {
+            let tag = item.tag();
+            let Ok(index) = usize::try_from(tag) else {
+                log::debug!(
+                    "frust-native-widgets: slot {} tab item has a negative tag — dropped",
+                    self.slot()
+                );
+                return;
+            };
+            let kind = tap_kind(self.ivars().showing_tab.get(), index);
+            self.ivars().showing_tab.set(Some(index));
+            self.dispatch(kind, pack_index(tag), "tabBar:didSelectItem:");
+        }
+    }
 
     impl FrustNativeControlTarget {
         /// `Button`'s `TouchUpInside` action → [`EVENT_KIND_CLICK`], `detail`
@@ -300,7 +353,10 @@ impl FrustNativeControlTarget {
     /// [`Self::attach_button`]/[`Self::attach_switch`]/[`Self::attach_slider`]
     /// are the whole public construction surface.
     fn new(mtm: MainThreadMarker, slot: SlotId) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(slot);
+        let this = Self::alloc(mtm).set_ivars(TargetIvars {
+            slot,
+            showing_tab: Cell::new(None),
+        });
         // SAFETY: `NSObject`'s designated initializer, called on a freshly
         // allocated instance whose ivars are already set (mirrors
         // `crate::apple` camera's — `plugins/camera/src/apple.rs`'s
@@ -310,7 +366,7 @@ impl FrustNativeControlTarget {
 
     /// The slot this target reports events for.
     fn slot(&self) -> SlotId {
-        *self.ivars()
+        self.ivars().slot
     }
 
     /// Decode `(kind, detail)` and forward to
@@ -531,6 +587,32 @@ impl FrustNativeControlTarget {
             sel!(handleDateValueChanged:),
             UIControlEvents::ValueChanged,
         );
+    }
+
+    /// A target for `TabBar` slot `slot`, not yet the bar's delegate — the
+    /// bar's create plan runs against it first (every
+    /// [`Setter::SelectedTab`](crate::controls::Setter::SelectedTab) apply
+    /// calls [`Self::note_tab_showing`]), then [`Self::attach_tab_bar`] wires
+    /// it (iOS-only control, `crate::controls::IOS_ONLY_KINDS`).
+    pub(crate) fn tab_bar_target(mtm: MainThreadMarker, slot: SlotId) -> Retained<Self> {
+        Self::new(mtm, slot)
+    }
+
+    /// Record the item index `view` now shows (`None`: no selection) — what
+    /// the next tap is classified against ([`tap_kind`]).
+    pub(crate) fn note_tab_showing(&self, index: Option<usize>) {
+        self.ivars().showing_tab.set(index);
+    }
+
+    /// Make this target `view`'s delegate — `TabBar`'s whole attach.
+    /// `UITabBar.delegate` is weak, so the caller's `State` retains `self`.
+    pub(crate) fn attach_tab_bar(&self, view: &UITabBar) {
+        view.setDelegate(Some(ProtocolObject::from_ref(self)));
+    }
+
+    /// [`Self::attach_tab_bar`]'s inverse — called from `TabBar::dispose`.
+    pub(crate) fn detach_tab_bar(&self, view: &UITabBar) {
+        view.setDelegate(None);
     }
 
     /// Build a target for `slot` and wire it onto `view` for whichever of the

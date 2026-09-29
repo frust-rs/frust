@@ -56,9 +56,10 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
-use crate::controls::{APPLE_KINDS, SHARED_KINDS};
+use crate::controls::{APPLE_KINDS, IOS_ONLY_KINDS, SHARED_KINDS};
 use crate::controls::{
     button, date_picker, image, label, progress, segmented, slider, spinner, stepper, switch,
+    tab_bar,
 };
 use crate::runtime::NativeRuntime;
 
@@ -76,16 +77,19 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 /// Register every control kind this backend serves, once, when the thread's
 /// runtime is first touched (`crate::runtime`'s `seeded_runtime`) — the Apple
 /// mirror of `crate::android::register_controls`, **line for line** for the
-/// shared kinds, then the Apple-only ones.
+/// shared kinds, then the Apple-only ones, then the iOS-only ones.
 ///
 /// The controls live in the shared `crate::controls`, where the props/plan
 /// half is platform-neutral and host-tested and only the platform half is a
 /// per-target `mod platform` inside each control file. So every backend
-/// registers by the same `KIND` consts — never a literal here — and by two
-/// tables: `crate::controls::SHARED_KINDS` (all three arms) then
+/// registers by the same `KIND` consts — never a literal here — and by its
+/// arm's tables: `crate::controls::SHARED_KINDS` (all three arms), then
 /// `crate::controls::APPLE_KINDS` (iOS + macOS only; `Segmented`,
-/// `Stepper`). The
-/// `debug_assert!` below checks this registration against both tables at
+/// `Stepper`), then `crate::controls::IOS_ONLY_KINDS` (this arm alone;
+/// `TabBar` — `crate::appkit::register_controls` does **not** register it,
+/// the first asymmetry between the two Apple arms, recorded in that table's
+/// doc). The
+/// `debug_assert!` below checks this registration against all three tables at
 /// runtime; `crate::controls::tests`'
 /// `every_register_controls_registers_exactly_its_kind_tables` is the
 /// host-visible half, reading all three arms' sources.
@@ -107,11 +111,15 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     // table — Android registers none of these.
     runtime.register::<segmented::Segmented>(segmented::KIND);
     runtime.register::<stepper::Stepper>(stepper::KIND);
+    // The iOS-only kinds (`crate::controls::IOS_ONLY_KINDS`), last — neither
+    // macOS nor Android registers these.
+    runtime.register::<tab_bar::TabBar>(tab_bar::KIND);
     debug_assert!(
         SHARED_KINDS
             .iter()
             .chain(&APPLE_KINDS)
+            .chain(&IOS_ONLY_KINDS)
             .all(|kind| runtime.is_registered(kind)),
-        "register_controls drifted from crate::controls::SHARED_KINDS/APPLE_KINDS"
+        "register_controls drifted from crate::controls::SHARED_KINDS/APPLE_KINDS/IOS_ONLY_KINDS"
     );
 }

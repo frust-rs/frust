@@ -37,9 +37,10 @@
 //! [`kind_constants_match_between_kotlin_and_rust`] pins every `KIND_*`/
 //! `EVENT_KIND_*` pair, whatever the table's length — including `SELECTION`
 //! (6), which is appended on BOTH sides even though only the Apple arms emit
-//! it (a Rust-only kind would fail the name-set comparison), and `DATE` (7),
-//! appended after it and emitted by all three arms; both are pinned by value
-//! in [`the_appended_kinds_keep_their_codes_on_both_sides`].
+//! it (a Rust-only kind would fail the name-set comparison), `DATE` (7),
+//! appended after it and emitted by all three arms, and `RESELECTED` (8),
+//! appended after that and emitted only by the iOS tab bar; all three are
+//! pinned by value in [`the_appended_kinds_keep_their_codes_on_both_sides`].
 //! [`value_changed_bit_packing_matches_between_kotlin_and_rust`]
 //! pins the packing contract's mask/shift **values** (not their literal
 //! text — Kotlin's `0xFFFFFFFFL`/`shl 32` and Rust's `0xFFFF_FFFF`/`<< 32`
@@ -218,7 +219,8 @@ fn the_appended_kinds_keep_their_codes_on_both_sides() {
     let kotlin_kinds = parse_kotlin_kind_constants(&read(KOTLIN_LISTENER_PATH));
     let rust_kinds = parse_rust_event_kind_constants(&read(RUST_EVENTS_PATH));
     // Append-only: the five shipped kinds keep 1-5, SELECTION took the next
-    // free code (6) and DATE the one after it (7), on both sides.
+    // free code (6), DATE the one after it (7) and RESELECTED the one after
+    // that (8), on both sides.
     for (name, value) in [
         ("CLICK", 1),
         ("TOGGLED", 2),
@@ -227,6 +229,7 @@ fn the_appended_kinds_keep_their_codes_on_both_sides() {
         ("DRAG_END", 5),
         ("SELECTION", 6),
         ("DATE", 7),
+        ("RESELECTED", 8),
     ] {
         assert_eq!(
             kotlin_kinds.get(name),

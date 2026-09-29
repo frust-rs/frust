@@ -19,14 +19,17 @@
 //! [`EventPayload`] straight into a signal write, which is what wakes
 //! exactly one frust frame.
 //!
-//! # One listener, seven kinds, no JSON
+//! # One listener, eight kinds, no JSON
 //!
 //! Kinds 1-5 are emitted on Android; the sixth,
 //! [`EVENT_KIND_SELECTION`], is appended for the Apple-arm-only segmented
 //! control and is emitted only by the two Apple target classes today (its
-//! Kotlin twin exists purely to keep the shared table whole). The seventh,
+//! Kotlin twin exists purely to keep the shared table whole; the iOS tab bar
+//! reports its selections through it too). The seventh,
 //! [`EVENT_KIND_DATE`], is appended after it for the date picker and is
-//! emitted by all three arms.
+//! emitted by all three arms. The eighth, [`EVENT_KIND_RESELECTED`], is the
+//! iOS-only tab bar's tap on its showing item — emitted by the iOS target
+//! class alone, its Kotlin twin again kept only for table parity.
 //!
 //! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,
@@ -96,6 +99,18 @@ pub(crate) const EVENT_KIND_SELECTION: i32 = 6;
 /// table: kinds 1-6 are shipped wire values. Unlike `SELECTION`, all three
 /// arms emit it (`crate::controls::date_picker` is a shared control).
 pub(crate) const EVENT_KIND_DATE: i32 = 7;
+/// A tab bar's tap on the item it was already showing
+/// (`UITabBarDelegate.tabBar:didSelectItem:` for the showing item) — `detail`
+/// packs the item index exactly as [`EVENT_KIND_SELECTION`] does
+/// ([`pack_index`]); a tap on any other item reports `SELECTION` instead
+/// (`crate::controls::tab_bar::tap_kind`).
+///
+/// **Appended** after [`EVENT_KIND_DATE`], **iOS-only in this build**: the tab
+/// bar has no macOS or Android arm (`crate::controls::tab_bar`'s module doc).
+/// Kotlin's `KIND_RESELECTED` carries the same value so the two tables stay
+/// one table (`tests/kotlin_conformance.rs`), though no Android listener emits
+/// it.
+pub(crate) const EVENT_KIND_RESELECTED: i32 = 8;
 
 // --- the typed vocabulary the app-facing api wraps into a signal -----------
 
@@ -142,6 +157,12 @@ pub(crate) enum EventPayload {
     /// the date back as props (`crate::controls::date_picker`). Always a
     /// valid civil date ([`unpack_date`] refuses anything else).
     Date(CivilDate),
+    /// A tab bar's item at this index was tapped **while already showing** —
+    /// an app's "scroll to top / pop to root" signal, not a selection
+    /// request. A tab bar's *selection* request rides [`Self::Selected`]
+    /// (`crate::controls::tab_bar::decode_event`); the builder maps both
+    /// indices back to the item's `TabId`.
+    Reselected(usize),
 }
 
 // --- the detail codec -------------------------------------------------------
@@ -337,8 +358,9 @@ mod tests {
 
     #[test]
     fn the_kind_table_is_append_only() {
-        // Kinds 1-5 are shipped wire values; SELECTION and then DATE are
-        // appended after them, never renumbered into the middle.
+        // Kinds 1-5 are shipped wire values; SELECTION, DATE and then
+        // RESELECTED are appended after them, never renumbered into the
+        // middle.
         assert_eq!(
             [
                 EVENT_KIND_CLICK,
@@ -348,8 +370,9 @@ mod tests {
                 EVENT_KIND_DRAG_END,
                 EVENT_KIND_SELECTION,
                 EVENT_KIND_DATE,
+                EVENT_KIND_RESELECTED,
             ],
-            [1, 2, 3, 4, 5, 6, 7]
+            [1, 2, 3, 4, 5, 6, 7, 8]
         );
     }
 

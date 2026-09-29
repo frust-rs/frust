@@ -191,6 +191,17 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `tintColor` via the shared `UIColor`) — the tenth class, and a SHARED
 # control (all three arms). Pulls in `objc2-foundation`'s `NSCalendar`/
 # `NSDate`/`NSLocale` features transitively — features only, no new crate.
+# `UITabBar` + `UITabBarItem` + `UIBarItem`: `TabBar`'s bare bar (`items`,
+# `selectedItem`, `delegate`, `tintColor`/`unselectedItemTintColor`) and its
+# items (`initWithTitle:image:tag:`, `selectedImage`, `badgeValue`, and
+# `enabled`/`tag` inherited from `UIBarItem` — every item member, and the
+# `UITabBarDelegate` method itself, is gated on `UIBarItem` too). An
+# iOS-only control (`crate::controls::IOS_ONLY_KINDS`), so no AppKit row.
+# `UITabBarAppearance` + `UIBarAppearance`: the appearance installed as both
+# `standardAppearance` and `scrollEdgeAppearance` (`configureWith…Background`,
+# `backgroundColor` via the shared `UIColor`) — the bar's appearance members
+# are gated on both. No `UIGeometry`/`UIBlurEffect`/`UIVisualEffect`: nothing
+# this crate calls needs them. Features only, no new crate.
 #
 # Native presentations (`src/present/`) — the complete list for every
 # presentation arm on iOS, requested up front so none of those arms needs a
@@ -226,6 +237,11 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UISegmentedControl",
     "UIStepper",
     "UIDatePicker",
+    "UITabBar",
+    "UITabBarItem",
+    "UIBarItem",
+    "UITabBarAppearance",
+    "UIBarAppearance",
     "UIColor",
     "UIFont",
     "UIAccessibility",

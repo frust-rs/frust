@@ -1,7 +1,8 @@
 //! The v1 controls — eight shared (`Button`, `Label`, `Switch`, `Slider`,
-//! `ProgressBar`, `Image`, `Spinner`, `DatePicker`) plus the two
-//! Apple-arm-only controls,
-//! `Segmented` and `Stepper` ([`APPLE_KINDS`]) — each an internal
+//! `ProgressBar`, `Image`, `Spinner`, `DatePicker`), the two
+//! Apple-arm-only controls
+//! `Segmented` and `Stepper` ([`APPLE_KINDS`]), and the iOS-only `TabBar`
+//! ([`IOS_ONLY_KINDS`]) — each an internal
 //! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
 //! setter on the main thread.
@@ -41,8 +42,8 @@
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
-//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`] (`Slider`/`Stepper`), [`Setter::Max`] (`Slider`/`Stepper`), [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`], [`Setter::Step`], [`Setter::Wraps`], [`Setter::StepperTint`]; not independently measured, tiered by shape: [`Setter::Date`] (`DatePicker.updateDate`, the controlled value write — `Progress`'s class), [`Setter::DatePickerTint`], [`Setter::DatePickerTextColor`] |
-//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment), [`Setter::MinDate`]/[`Setter::MaxDate`] (not independently measured — a range change repopulates a calendar's month pages/year list), [`Setter::DatePickerStyle`] (a presentation swap rebuilds the picker's layout; Apple-only in effect — Android warns and ignores) |
+//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`] (`Slider`/`Stepper`), [`Setter::Max`] (`Slider`/`Stepper`), [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`], [`Setter::Step`], [`Setter::Wraps`], [`Setter::StepperTint`]; not independently measured, tiered by shape: [`Setter::Date`] (`DatePicker.updateDate`, the controlled value write — `Progress`'s class), [`Setter::DatePickerTint`], [`Setter::DatePickerTextColor`]; iOS-only, tiered by shape: [`Setter::SelectedTab`], [`Setter::TabBarTint`], [`Setter::TabBarUnselectedTint`], [`Setter::TabBarBackground`] |
+//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment), [`Setter::MinDate`]/[`Setter::MaxDate`] (not independently measured — a range change repopulates a calendar's month pages/year list), [`Setter::DatePickerStyle`] (a presentation swap rebuilds the picker's layout; Apple-only in effect — Android warns and ignores), [`Setter::TabItems`] (iOS-only — an item-array replace re-lays-out every item and decodes any byte icon) |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
 //! **Per-frame guidance:** ~500 [`Tier::Cheap`] setters per frame ≈ 0.4 ms and
@@ -117,6 +118,7 @@ pub(crate) mod slider;
 pub(crate) mod spinner;
 pub(crate) mod stepper;
 pub(crate) mod switch;
+pub(crate) mod tab_bar;
 pub(crate) mod typeface;
 
 use std::borrow::Cow;
@@ -128,18 +130,29 @@ use crate::runtime::Params;
 use self::date_picker::{CivilDate, DatePickerStyle};
 use self::image::{Fit, ImageBytes};
 use self::spinner::SizeClass;
+use self::tab_bar::TabItemProps;
 use self::typeface::Typeface;
 
 // --- the kind tables ----------------------------------------------------------
 //
-// Which control kinds each platform arm registers, as two tables rather than
-// one: a control is either SHARED (all three arms carry a `NativeWidget` impl)
-// or APPLE-only (iOS + macOS; the builder renders a refusal banner on every
-// other target — `crate::api::builders`). Every arm's `register_controls`
-// registers exactly its tables, in this order — pinned host-side by
+// Which control kinds each platform arm registers, as three tables — one per
+// arm-membership shape, because membership is per ARM, not per vendor:
+//
+// | table | Android | iOS | macOS |
+// |---|---|---|---|
+// | `SHARED_KINDS` | yes | yes | yes |
+// | `APPLE_KINDS` | — | yes | yes |
+// | `IOS_ONLY_KINDS` | — | yes | — |
+//
+// A kind outside an arm's tables has no `NativeWidget` impl there, and its
+// builder renders a refusal banner on that target at compile time
+// (`crate::api::builders`). Every arm's `register_controls` registers exactly
+// its tables, in this order (shared, then Apple, then iOS-only) — pinned
+// host-side by
 // `tests::every_register_controls_registers_exactly_its_kind_tables`, and on
 // the two Apple arms additionally checked at runtime (a `debug_assert!` loop
-// over both tables in their `register_controls`).
+// over their tables in their `register_controls`). The tables are
+// append-only, like the event kinds.
 
 /// The kinds all three platform arms (Android, iOS, macOS) register.
 pub(crate) const SHARED_KINDS: [&str; 8] = [
@@ -157,6 +170,14 @@ pub(crate) const SHARED_KINDS: [&str; 8] = [
 /// `NativeWidget` impl for these yet, and its builder path renders the
 /// refusal banner instead of a slot.
 pub(crate) const APPLE_KINDS: [&str; 2] = [segmented::KIND, stepper::KIND];
+
+/// The kinds only the iOS arm registers — the macOS arm has no counterpart
+/// (`TabBar`: macOS has no bottom-tab-bar idiom) and Android has none either
+/// (`BottomNavigationView` is Material, decision D2); both builders render the
+/// refusal banner. The first asymmetric kind between the two Apple arms, which
+/// is why this is its own table rather than a row in [`APPLE_KINDS`]
+/// (`tab_bar.rs`'s module doc).
+pub(crate) const IOS_ONLY_KINDS: [&str; 1] = [tab_bar::KIND];
 
 // --- the params wire keys ---------------------------------------------------
 //
@@ -507,6 +528,35 @@ pub(crate) enum Setter<'a> {
     /// `TextView.setTextColor` a `DatePicker` does not have; UIKit and
     /// Android expose no public picker text colour — logged and no-op'd.
     DatePickerTextColor(Option<i32>),
+
+    /// Replace a tab bar's whole item array — one `UITabBarItem` per item
+    /// (`initWithTitle:image:tag:`, `selectedImage`, `badgeValue`, `enabled`)
+    /// then `UITabBar.setItems:animated:` — **[`Tier::Relayout`]**: the bar
+    /// re-lays-out every item, and a byte icon is decoded here. `TabBar`-only
+    /// and iOS-only (`tab_bar.rs`'s module doc). Planned only when the items
+    /// changed, and always followed by [`Self::SelectedTab`], because the new
+    /// array holds new item objects.
+    TabItems(&'a [TabItemProps]),
+
+    /// `UITabBar.selectedItem` — **[`Tier::Cheap`]**. `None` (or an index
+    /// past the items) clears the selection. The controlled-component
+    /// write-back setter of `TabBar`, the [`Self::SelectedSegment`] of that
+    /// control.
+    SelectedTab(Option<usize>),
+
+    /// `UITabBar.tintColor` (the selected item) — **[`Tier::Cheap`]**, the
+    /// nullable-clearable shape of [`Self::ProgressTint`]. `TabBar`-only.
+    TabBarTint(Option<i32>),
+
+    /// `UITabBar.unselectedItemTintColor` — **[`Tier::Cheap`]**, nullable.
+    /// `TabBar`-only.
+    TabBarUnselectedTint(Option<i32>),
+
+    /// The bar background through a `UITabBarAppearance` installed as both
+    /// `standardAppearance` and `scrollEdgeAppearance` (opaque with the
+    /// colour; `None` the default blurred material) — **[`Tier::Cheap`]**: a
+    /// redisplay, no item relayout. `TabBar`-only.
+    TabBarBackground(Option<i32>),
 }
 
 impl Setter<'_> {
@@ -521,6 +571,7 @@ impl Setter<'_> {
             | Self::Typeface(_)
             | Self::SizeClass(_)
             | Self::Segments(_)
+            | Self::TabItems(_)
             | Self::MinDate(_)
             | Self::MaxDate(_)
             | Self::DatePickerStyle(_) => Tier::Relayout,
@@ -546,7 +597,11 @@ impl Setter<'_> {
             | Self::StepperTint(_)
             | Self::Date(_)
             | Self::DatePickerTint(_)
-            | Self::DatePickerTextColor(_) => Tier::Cheap,
+            | Self::DatePickerTextColor(_)
+            | Self::SelectedTab(_)
+            | Self::TabBarTint(_)
+            | Self::TabBarUnselectedTint(_)
+            | Self::TabBarBackground(_) => Tier::Cheap,
         }
     }
 }
@@ -1127,6 +1182,21 @@ pub(crate) mod platform {
                 log::warn!(
                     "frust-native-widgets: a date-picker setter ({setter:?}) reached the shared \
                      Android apply instead of date_picker.rs's own — ignored"
+                );
+                Ok(())
+            }
+            // `TabBar`'s five setters: that control is iOS-only
+            // (`crate::controls::IOS_ONLY_KINDS`; `tab_bar.rs`'s module doc),
+            // so no control this arm registers ever plans one — the
+            // segmented group's shape.
+            Setter::TabItems(_)
+            | Setter::SelectedTab(_)
+            | Setter::TabBarTint(_)
+            | Setter::TabBarUnselectedTint(_)
+            | Setter::TabBarBackground(_) => {
+                log::warn!(
+                    "frust-native-widgets: an Android control planned a tab-bar setter \
+                     ({setter:?}), which this arm does not implement — ignored"
                 );
                 Ok(())
             }
@@ -1988,6 +2058,10 @@ mod tests {
             Setter::Date(CivilDate::MIN),
             Setter::DatePickerTint(None),
             Setter::DatePickerTextColor(Some(1)),
+            Setter::SelectedTab(Some(0)),
+            Setter::TabBarTint(None),
+            Setter::TabBarUnselectedTint(Some(1)),
+            Setter::TabBarBackground(None),
         ];
         for setter in cheap {
             assert_eq!(setter.tier(), Tier::Cheap, "{setter:?}");
@@ -2007,6 +2081,7 @@ mod tests {
             Setter::MinDate(None),
             Setter::MaxDate(Some(CivilDate::MAX)),
             Setter::DatePickerStyle(DatePickerStyle::Inline),
+            Setter::TabItems(&[]),
         ];
         for setter in relayout {
             assert_eq!(setter.tier(), Tier::Relayout, "{setter:?}");
@@ -2071,12 +2146,13 @@ mod tests {
         }
     }
 
-    // --- shared-Props parity: two kind tables, three platform arms ---------
+    // --- shared-Props parity: three kind tables, three platform arms -------
 
     #[test]
     fn the_kind_tables_are_the_shipped_wire_strings() {
-        // What every arm registers *by*: [`SHARED_KINDS`] (all three arms) and
-        // [`APPLE_KINDS`] (iOS + macOS only). No arm spells a kind literally
+        // What every arm registers *by*: [`SHARED_KINDS`] (all three arms),
+        // [`APPLE_KINDS`] (iOS + macOS only) and [`IOS_ONLY_KINDS`] (iOS
+        // only). No arm spells a kind literally
         // (`crate::android`'s own registration note), so a drift in the wire
         // vocabulary has to pass through here.
         //
@@ -2106,14 +2182,24 @@ mod tests {
             ["segmented", "stepper"],
             "the Apple-arm-only kinds are a shipped wire contract too"
         );
-        let mut unique: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
+        assert_eq!(
+            IOS_ONLY_KINDS,
+            ["tab_bar"],
+            "the iOS-only kinds are a shipped wire contract too"
+        );
+        let mut unique: Vec<&str> = SHARED_KINDS
+            .iter()
+            .chain(&APPLE_KINDS)
+            .chain(&IOS_ONLY_KINDS)
+            .copied()
+            .collect();
         let total = unique.len();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(
             unique.len(),
             total,
-            "two controls share a kind (or a kind sits in both tables)"
+            "two controls share a kind (or a kind sits in two tables)"
         );
     }
 
@@ -2141,6 +2227,7 @@ mod tests {
                     "date_picker" => date_picker::KIND,
                     "segmented" => segmented::KIND,
                     "stepper" => stepper::KIND,
+                    "tab_bar" => tab_bar::KIND,
                     other => panic!(
                         "{file}: registers `{other}::KIND`, a module this test does not know"
                     ),
@@ -2158,18 +2245,26 @@ mod tests {
         // exactly its tables, in table order, line for line: Android the
         // shared kinds only (an Apple-only kind registered there would be a
         // control with no Android `NativeWidget` impl — it would not even
-        // compile), the two Apple arms the shared kinds then the Apple ones.
+        // compile), macOS the shared kinds then the Apple ones, and iOS the
+        // shared kinds, the Apple ones, then the iOS-only ones — per-arm
+        // membership, the kind-table matrix above `SHARED_KINDS`.
         let shared: Vec<&str> = SHARED_KINDS.to_vec();
-        let apple: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
+        let macos: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
+        let ios: Vec<&str> = SHARED_KINDS
+            .iter()
+            .chain(&APPLE_KINDS)
+            .chain(&IOS_ONLY_KINDS)
+            .copied()
+            .collect();
         for (file, source, expected) in [
             ("android/mod.rs", include_str!("../android/mod.rs"), &shared),
-            ("apple/mod.rs", include_str!("../apple/mod.rs"), &apple),
-            ("appkit/mod.rs", include_str!("../appkit/mod.rs"), &apple),
+            ("apple/mod.rs", include_str!("../apple/mod.rs"), &ios),
+            ("appkit/mod.rs", include_str!("../appkit/mod.rs"), &macos),
         ] {
             assert_eq!(
                 &registered_kinds(source, file),
                 expected,
-                "{file}'s register_controls drifted from SHARED_KINDS/APPLE_KINDS"
+                "{file}'s register_controls drifted from SHARED_KINDS/APPLE_KINDS/IOS_ONLY_KINDS"
             );
         }
     }

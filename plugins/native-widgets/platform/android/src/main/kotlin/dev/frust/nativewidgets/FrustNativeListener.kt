@@ -152,5 +152,15 @@ class FrustNativeListener(private val slotId: Long) :
          * after `KIND_SELECTION` — append-only, never renumbered.
          */
         const val KIND_DATE = 7
+        /**
+         * A tab bar's tap on the item it was already showing (the Rust
+         * side's `EVENT_KIND_RESELECTED`, `detail` = the item index).
+         * **Never emitted on Android in this build**: the tab bar is
+         * iOS-only (its builder renders a refusal banner here), so this
+         * listener implements no interface that reports it. Kept so this
+         * table and the Rust one stay the same table — appended after
+         * `KIND_DATE`, never renumbered.
+         */
+        const val KIND_RESELECTED = 8
     }
 }

@@ -4,12 +4,13 @@ Render **real OS controls** from pure Rust — `native_button("Save")`,
 `native_label(...)`, `native_switch(checked)`, `native_slider(...)`,
 `native_progress(...)`, `native_image(bytes)`, `native_spinner(animating)`,
 `native_date_picker(date)`, `native_segmented(labels, selected)` (iOS/macOS only),
-`native_stepper(value, min, max)` (iOS/macOS only) — composed straight
+`native_stepper(value, min, max)` (iOS/macOS only),
+`native_tab_bar(items, selected)` (iOS/iPadOS only) — composed straight
 into a frust `View` tree like any other widget. Each control is backed by a
 genuine Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`/a
 circular-style `ProgressBar`/`DatePicker`), UIKit view (`UIButton`/`UILabel`/`UISwitch`/
 `UISlider`/`UIProgressView`/`UIImageView`/`UIActivityIndicatorView`/`UIDatePicker`/
-`UISegmentedControl`/`UIStepper`), or
+`UISegmentedControl`/`UIStepper`/a bare `UITabBar`), or
 AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/`NSSlider`/
 `NSProgressIndicator`/`NSImageView`/an `NSProgressIndicator` in its
 `Spinning` style/`NSDatePicker`/`NSSegmentedControl`/`NSStepper`), hosted as a **platform-view slot**
@@ -46,6 +47,7 @@ Ten controls, one Rust API, no Kotlin or Swift to write for any of them:
 | `native_date_picker(date)` | `DatePicker` | `UIDatePicker` (date mode) | `NSDatePicker` (year/month/day) |
 | `native_segmented(labels, selected)` | **none — renders a refusal banner** (see below) | `UISegmentedControl` | `NSSegmentedControl` (select-one) |
 | `native_stepper(value, min, max)` | **none — renders a refusal banner** (see below) | `UIStepper` | `NSStepper` |
+| `native_tab_bar(items, selected)` | **none — renders a refusal banner** (see below) | a bare `UITabBar` (no `UITabBarController`) | **none — renders a refusal banner** |
 
 `native_segmented` and `native_stepper` are **iOS/iPadOS and macOS only** in
 this release. Android's framework has no segmented control — the stock one is
@@ -68,6 +70,52 @@ clamping. The control wears the theme's `accent_ink` as its tint on iOS only
 — `NSStepper` has no tint property AppKit exposes at all, so the fold is a
 silent no-op there, logged at debug (same shape as the AppKit tint gaps in §4
 below).
+
+`native_tab_bar` is **iOS/iPadOS only**: macOS has no bottom-tab-bar idiom,
+and Android's `BottomNavigationView` needs Material, which this plugin never
+assumes — both render the refusal banner, naming both reasons. It is a
+**bare** `UITabBar`, never a `UITabBarController`: frust keeps screen
+ownership and routing, so a tap never navigates by itself. Each `TabItem`
+carries a stable app-chosen `TabId`, a title, an icon — `TabIcon::AppleSymbol`
+(an SF Symbol name) or `TabIcon::Bytes` (encoded image bytes, normalized to a
+25pt box; supply 75×75px for a crisp 3x icon) — and optionally a
+`.selected_icon(…)`, a `.badge(…)` and `.enabled(false)`. `.on_select(|id| …)`
+reports the *requested* tab: route there and feed the id back as `selected`
+(controlled, like `native_segmented`). `.on_reselect(|id| …)` fires when the
+user taps the tab already showing — the conventional "scroll to top / pop to
+root". The bar sizes itself to 49pt plus the window's bottom safe-area inset,
+so its background runs under the home indicator: put it last in a `Column`
+docked to the bottom edge, and if you wrap it in `frust::safe_area` for
+horizontal cutouts use `.top(false).bottom(false)` (the way `examples/huddle`
+docks Material's `navigation_bar`); `.safe_area(false)` gives the bare 49pt
+for a bar that isn't docked to the bottom. The selected item wears the
+theme's `accent_ink`, unselected items its `on_surface_variant`, and the bar
+its `surface` colour (an opaque appearance, set for both the standard and the
+scroll-edge state so iOS 15+ never shows a transparent bar). On iPadOS the
+bare bar stays at the bottom and gets no Liquid Glass — the iPadOS 18 top tab
+bar and the floating glass bar are `UITabBarController` features.
+
+```rust
+use frust::{RwSignal, Get, Set, RouteNavigator};
+use frust_native_widgets::{native_tab_bar, TabIcon, TabId, TabItem};
+
+// The router owns navigation; the tab bar only reports the request.
+fn bottom_tabs(nav: RouteNavigator, tab: RwSignal<String>) -> impl frust::View<AppState> {
+    native_tab_bar(
+        vec![
+            TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into()))
+                .selected_icon(TabIcon::AppleSymbol("house.fill".into())),
+            TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())).badge("3"),
+        ],
+        TabId::new(tab.get()),
+    )
+    .on_select(move |id| {
+        tab.set(id.to_string()); // feed the confirmed id back next rebuild
+        nav.go(format!("/{id}")); // Router::go through its Send + Sync navigator
+    })
+    .on_reselect(|id| log::info!("scroll {id} to top"))
+}
+```
 
 `native_date_picker` picks a **date only** (no time) and is controlled like
 `native_switch`: `.on_change(|date| …)` reports the *requested* `CivilDate`

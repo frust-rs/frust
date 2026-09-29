@@ -25,17 +25,17 @@
 //! The public form is a different trait entirely:
 //! [`crate::component::NativeComponent`], with `&self` methods, already-typed
 //! `Props` the app constructs directly, no `decode_props` step and no `Result`
-//! returns. The ten builders here keep riding the internal trait's wire
+//! returns. The eleven builders here keep riding the internal trait's wire
 //! (`params_json` in, `EventPayload` callbacks out) unchanged — bridging the
 //! public trait onto the same runtime (`crate::component::Bridge`) is what let
 //! that stay true.
 //!
 //! # Two builder families, one slot shape
 //!
-//! The ten built-in controls above are one family (`native_segmented`/
-//! `native_stepper` on iOS/macOS only — a compile-time refusal banner
-//! elsewhere; `native_date_picker` on all three arms, reporting a
-//! [`CivilDate`]); [`native_component`] is
+//! The eleven built-in controls above are one family (`native_segmented`/
+//! `native_stepper` on iOS/macOS only and [`native_tab_bar`] on iOS only — a
+//! compile-time refusal banner elsewhere; `native_date_picker` on all three
+//! arms, reporting a [`CivilDate`]); [`native_component`] is
 //! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (another plugin's
 //! included — an app crate cannot implement one; see that trait's own doc)
@@ -82,9 +82,9 @@ pub use crate::controls::date_picker::CivilDate;
 pub use builders::{
     NativeButtonView, NativeDatePickerStyle, NativeDatePickerView, NativeImageFit, NativeImageView,
     NativeLabelView, NativeProgressView, NativeSegmentedView, NativeSliderView, NativeSpinnerSize,
-    NativeSpinnerView, NativeStepperView, NativeSwitchView, native_button, native_date_picker,
-    native_image, native_label, native_progress, native_segmented, native_slider, native_spinner,
-    native_stepper, native_switch,
+    NativeSpinnerView, NativeStepperView, NativeSwitchView, NativeTabBarView, TabIcon, TabId,
+    TabItem, native_button, native_date_picker, native_image, native_label, native_progress,
+    native_segmented, native_slider, native_spinner, native_stepper, native_switch, native_tab_bar,
 };
 pub use mount::{NativeComponentView, native_component};
 /// The app-facing native-alert entry points over `crate::present`: an

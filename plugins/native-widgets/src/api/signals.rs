@@ -1,7 +1,7 @@
 //! Events-as-signals: wraps a decoded [`EventPayload`] into the plain,
 //! parameter-shaped callback an app supplies to a builder's `.on_press`/
-//! `.on_toggle`/`.on_change`/`.on_select` (a date picker's `.on_change`
-//! included) — the seam
+//! `.on_toggle`/`.on_change`/`.on_select` (a date picker's `.on_change` and a
+//! tab bar's `.on_select`/`.on_reselect` included) — the seam
 //! [`crate::runtime::NativeRuntime::set_callback`] invokes on the platform
 //! main thread.
 //!
@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use super::builders::TabId;
 use crate::controls::date_picker::CivilDate;
 use crate::events::EventPayload;
 
@@ -97,10 +98,72 @@ pub(super) fn on_date(handler: Arc<dyn Fn(CivilDate) + Send + Sync>) -> EventCal
     })
 }
 
+/// An optional `Fn(TabId)` handler, as a tab bar builder stores it.
+pub(super) type TabHandler = Option<Arc<dyn Fn(TabId) + Send + Sync>>;
+
+/// Wrap a tab bar's two handlers: [`EventPayload::Selected`] fires
+/// `on_select` and [`EventPayload::Reselected`] fires `on_reselect`, each with
+/// the `TabId` of the item at the reported index in `ids` — the ids of the
+/// items the builder published alongside this callback (both are rebuilt
+/// together every build, so the index and the list agree). An index past
+/// `ids` (a report racing an item change) fires nothing; so does every other
+/// payload. Selection is **requested**, never applied: the app confirms it by
+/// feeding the id back as `selected` (controlled, like [`on_selected`]).
+pub(super) fn on_tab_bar(
+    ids: Arc<[TabId]>,
+    on_select: TabHandler,
+    on_reselect: TabHandler,
+) -> EventCallback {
+    Arc::new(move |payload| {
+        let (handler, index) = match payload {
+            EventPayload::Selected(index) => (&on_select, index),
+            EventPayload::Reselected(index) => (&on_reselect, index),
+            _ => return,
+        };
+        if let (Some(handler), Some(id)) = (handler, ids.get(index)) {
+            handler(id.clone());
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn on_tab_bar_maps_indices_to_ids_and_splits_select_from_reselect() {
+        let selected = Arc::new(Mutex::new(Vec::new()));
+        let reselected = Arc::new(Mutex::new(Vec::new()));
+        let (sel, resel) = (Arc::clone(&selected), Arc::clone(&reselected));
+        let ids: Arc<[TabId]> = vec![TabId::new("home"), TabId::new("inbox")].into();
+        let cb = on_tab_bar(
+            ids,
+            Some(Arc::new(move |id: TabId| sel.lock().unwrap().push(id))),
+            Some(Arc::new(move |id: TabId| resel.lock().unwrap().push(id))),
+        );
+
+        cb(EventPayload::Selected(1));
+        cb(EventPayload::Reselected(0));
+        cb(EventPayload::Selected(2)); // past the ids: nothing
+        cb(EventPayload::Click);
+
+        assert_eq!(*selected.lock().unwrap(), vec![TabId::new("inbox")]);
+        assert_eq!(*reselected.lock().unwrap(), vec![TabId::new("home")]);
+    }
+
+    #[test]
+    fn on_tab_bar_without_a_reselect_handler_ignores_reselects() {
+        let selected = Arc::new(Mutex::new(Vec::new()));
+        let sel = Arc::clone(&selected);
+        let cb = on_tab_bar(
+            vec![TabId::new("a")].into(),
+            Some(Arc::new(move |id: TabId| sel.lock().unwrap().push(id))),
+            None,
+        );
+        cb(EventPayload::Reselected(0));
+        assert!(selected.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn on_click_fires_only_for_click() {

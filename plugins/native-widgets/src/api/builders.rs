@@ -1,12 +1,13 @@
-//! The ten app-facing builders: `native_button`/
+//! The eleven app-facing builders: `native_button`/
 //! `native_label`/`native_switch`/`native_slider`/`native_progress`/
 //! `native_image`/`native_spinner`/`native_date_picker`/`native_segmented`/
-//! `native_stepper`, each
+//! `native_stepper`/`native_tab_bar`, each
 //! composing exactly one [`platform_view`] slot behind this crate's one
 //! factory per platform (the "N controls = N slots" envelope) —
-//! `native_segmented`/`native_stepper` only on iOS and macOS; elsewhere each
-//! renders its own refusal banner at compile time ([`SEGMENTED_ARM`]/
-//! [`STEPPER_ARM`]).
+//! `native_segmented`/`native_stepper` only on iOS and macOS and
+//! `native_tab_bar` only on iOS; elsewhere each renders its own refusal
+//! banner at compile time ([`SEGMENTED_ARM`]/[`STEPPER_ARM`]/
+//! [`TAB_BAR_ARM`]).
 //!
 //! # Retained identity via `Component`, not a hand-rolled `Widget`
 //!
@@ -62,8 +63,9 @@ use frust::{
 };
 use frust_core::accesskit::Role;
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, component,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    component,
 };
 use kurbo::{Size, Vec2};
 
@@ -74,12 +76,14 @@ use crate::controls::{
     TRACK_TINT, TYPEFACE, VALUE, WRAPS,
 };
 use crate::controls::{
-    button, image, label, progress, segmented, slider, spinner, stepper, switch,
+    button, image, label, progress, segmented, slider, spinner, stepper, switch, tab_bar,
 };
 use crate::registry::SlotId;
 use crate::runtime::{escape, with_identity, with_runtime};
 
-use super::signals::{on_click, on_date, on_selected, on_toggled, on_value_changed};
+use super::signals::{
+    TabHandler, on_click, on_date, on_selected, on_tab_bar, on_toggled, on_value_changed,
+};
 use super::theme::{self, ResolvedTheme};
 
 /// The one factory class every control resolves through, per platform.
@@ -1992,6 +1996,475 @@ impl Component for NativeStepperView {
 }
 
 // ============================================================================
+// Tab bar
+// ============================================================================
+
+/// Whether this build's platform arm registers the tab bar — the same
+/// compile-time gate as [`SEGMENTED_ARM`], narrower: `TabBar` is in
+/// `crate::controls::IOS_ONLY_KINDS`, so **only iOS/iPadOS** carries a
+/// `NativeWidget` impl. macOS has no bottom-tab-bar idiom and Android's
+/// `BottomNavigationView` needs Material (decision D2), so both — and every
+/// host target — render the refusal banner.
+#[cfg(target_os = "ios")]
+const TAB_BAR_ARM: bool = true;
+/// See the iOS definition above.
+#[cfg(not(target_os = "ios"))]
+const TAB_BAR_ARM: bool = false;
+
+/// The banner's visible label on a target with no tab-bar arm.
+const TAB_BAR_UNAVAILABLE_LABEL: &str = "Native tab bar unavailable";
+
+/// The banner's explanation on a target with no tab-bar arm — names both
+/// reasons (macOS idiom, Android Material).
+const TAB_BAR_UNAVAILABLE_DESCRIPTION: &str = "native_tab_bar is iOS/iPadOS-only: macOS has no \
+     bottom tab bar idiom, and Android's BottomNavigationView needs Material, which this plugin \
+     never assumes — rendering a frust placeholder instead of an empty native slot.";
+
+/// Log the no-tab-bar-arm fallback exactly once, crate-wide.
+static TAB_BAR_NO_ARM_LOGGED: Once = Once::new();
+
+fn warn_no_tab_bar_arm_once() {
+    TAB_BAR_NO_ARM_LOGGED.call_once(|| {
+        log::warn!(
+            "frust-native-widgets: native_tab_bar is an iOS/iPadOS-only control (macOS has no \
+             bottom tab bar idiom; Android's BottomNavigationView needs Material); rendering the \
+             frust-drawn refusal banner instead of a native slot"
+        );
+    });
+}
+
+/// A tab's stable, app-chosen identity — what [`native_tab_bar`]'s
+/// `selected` names and what [`NativeTabBarView::on_select`]/
+/// [`NativeTabBarView::on_reselect`] report. Never an index: reordering or
+/// inserting items keeps every id meaning the same tab.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TabId(String);
+
+impl TabId {
+    /// A tab id spelled `id`.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The id's spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for TabId {
+    fn from(id: &str) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<String> for TabId {
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for TabId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A tab's icon: encoded image bytes, or an Apple SF Symbol name — never an
+/// arbitrary string passed off as a cross-platform icon (the bar is
+/// iOS-only, and a symbol name means nothing anywhere else).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TabIcon {
+    /// Encoded image bytes (PNG/JPEG — whatever `UIImage` decodes), shown as
+    /// a template image tinted by the bar. Normalized to a 25pt box: supply
+    /// 75×75px for a crisp 3x icon; a smaller image is never upscaled.
+    Bytes(Arc<[u8]>),
+    /// An SF Symbol name (`"house"`, `"gearshape.fill"`) —
+    /// `UIImage.systemImageNamed:`, sized by the bar itself. An unknown name
+    /// shows the title alone (logged once).
+    AppleSymbol(String),
+}
+
+/// One tab of a [`native_tab_bar`]: a stable [`TabId`], a title, an icon,
+/// and optionally a selected-state icon, a badge and a disabled state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabItem {
+    id: TabId,
+    title: String,
+    icon: TabIcon,
+    selected_icon: Option<TabIcon>,
+    badge: Option<String>,
+    enabled: bool,
+}
+
+impl TabItem {
+    /// An enabled, badge-less tab `id` titled `title` showing `icon`.
+    pub fn new(id: impl Into<TabId>, title: impl Into<String>, icon: TabIcon) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            icon,
+            selected_icon: None,
+            badge: None,
+            enabled: true,
+        }
+    }
+
+    /// The icon shown while this tab is selected (`UITabBarItem.selectedImage`)
+    /// — e.g. the `.fill` variant of an SF Symbol. Default: the bar tints
+    /// [`Self::new`]'s icon.
+    pub fn selected_icon(mut self, icon: TabIcon) -> Self {
+        self.selected_icon = Some(icon);
+        self
+    }
+
+    /// A badge (`UITabBarItem.badgeValue`) — a count, `"new"`, or `""` for a
+    /// bare dot-sized badge. Default: none.
+    pub fn badge(mut self, badge: impl Into<String>) -> Self {
+        self.badge = Some(badge.into());
+        self
+    }
+
+    /// Whether the tab can be tapped (`UIBarItem.enabled`). Default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// This tab's id.
+    pub fn id(&self) -> &TabId {
+        &self.id
+    }
+}
+
+/// The SF Symbol name one icon slot carries on the wire (byte icons ride
+/// the side table instead — `crate::controls::tab_bar`'s module doc).
+fn symbol_name(icon: Option<&TabIcon>) -> Option<&str> {
+    match icon {
+        Some(TabIcon::AppleSymbol(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// The encoded bytes one icon slot publishes, if it is a byte icon.
+fn icon_bytes(icon: Option<&TabIcon>) -> Option<Arc<[u8]>> {
+    match icon {
+        Some(TabIcon::Bytes(bytes)) => Some(Arc::clone(bytes)),
+        _ => None,
+    }
+}
+
+/// A real, bare `UITabBar` on iOS/iPadOS — a **controlled** bottom tab bar
+/// that never navigates by itself: a tap reports the requested [`TabId`]
+/// through [`Self::on_select`], the app routes (typically
+/// `RouteNavigator::go`) and feeds the confirmed id back as `selected` on the
+/// next build. A tap on the tab already showing reports through
+/// [`Self::on_reselect`] instead ("scroll to top / pop to root"). macOS and
+/// Android (and every host target) render a frust-drawn refusal banner.
+/// Build one with [`native_tab_bar`].
+///
+/// # Placement and height
+///
+/// The bar sizes itself: 49pt tall plus the window's bottom safe-area inset,
+/// read at layout time, as wide as its parent allows — so its background runs
+/// under the home indicator while UIKit keeps the items above it. Put it last
+/// in a `Column` docked to the window's bottom edge, and do **not** also
+/// consume the bottom inset above it: if you wrap it in `frust::safe_area`
+/// for horizontal cutouts, use `.top(false).bottom(false)` — the shape
+/// `examples/huddle` uses for Material's `navigation_bar`, which self-insets
+/// the same way. For a bar that is not docked to the bottom edge, call
+/// [`Self::safe_area`]`(false)` to get the bare 49pt.
+///
+/// On iPadOS a bare `UITabBar` stays a bottom bar (the iPadOS 18 top tab bar
+/// and the Liquid Glass floating bar are `UITabBarController` features), which
+/// is expected.
+#[derive(Clone)]
+pub struct NativeTabBarView {
+    items: Vec<TabItem>,
+    selected: TabId,
+    safe_area: bool,
+    on_select: TabHandler,
+    on_reselect: TabHandler,
+}
+
+/// A native bottom tab bar over `items`, with the app-owned `selected` tab —
+/// see [`NativeTabBarView`]. A `selected` id no item carries shows no
+/// selection; duplicate ids resolve to the first item carrying them; at most
+/// 16 items are shown (`crate::controls::tab_bar::MAX_ITEMS`).
+///
+/// ```ignore
+/// let nav = router.route_navigator();
+/// native_tab_bar(
+///     vec![
+///         TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into())),
+///         TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())).badge("3"),
+///     ],
+///     TabId::new(current_tab.get()),
+/// )
+/// .on_select(move |id| nav.go(format!("/{id}")))
+/// ```
+pub fn native_tab_bar(items: Vec<TabItem>, selected: impl Into<TabId>) -> NativeTabBarView {
+    NativeTabBarView {
+        items,
+        selected: selected.into(),
+        safe_area: true,
+        on_select: None,
+        on_reselect: None,
+    }
+}
+
+impl NativeTabBarView {
+    /// Fires with the *requested* tab's id when the user taps a tab other
+    /// than the one showing — the app confirms (or rejects) it by feeding
+    /// `selected` back through the next build. Never fires on a target with
+    /// no tab-bar arm.
+    pub fn on_select(mut self, handler: impl Fn(TabId) + Send + Sync + 'static) -> Self {
+        self.on_select = Some(Arc::new(handler));
+        self
+    }
+
+    /// Fires with the showing tab's id when the user taps it again —
+    /// conventionally "scroll to top" or "pop to the tab's root". Changes
+    /// nothing by itself.
+    pub fn on_reselect(mut self, handler: impl Fn(TabId) + Send + Sync + 'static) -> Self {
+        self.on_reselect = Some(Arc::new(handler));
+        self
+    }
+
+    /// Whether the bar grows by the window's bottom safe-area inset (default
+    /// `true`, for a bar docked to the bottom edge). `false` keeps the bare
+    /// 49pt, for a bar embedded mid-screen.
+    pub fn safe_area(mut self, enabled: bool) -> Self {
+        self.safe_area = enabled;
+        self
+    }
+
+    /// The index of the first item carrying `selected`, if any.
+    fn selected_index(&self) -> Option<usize> {
+        self.items.iter().position(|item| item.id == self.selected)
+    }
+
+    /// The byte icons this bar publishes into the side table, one entry per
+    /// item (`crate::controls::tab_bar::publish_icon_bytes`).
+    fn icon_bytes(&self) -> Vec<tab_bar::ItemIconBytes> {
+        self.items
+            .iter()
+            .map(|item| tab_bar::ItemIconBytes {
+                icon: icon_bytes(Some(&item.icon)),
+                selected_icon: icon_bytes(item.selected_icon.as_ref()),
+            })
+            .collect()
+    }
+
+    /// `tokens` (theme ladder L2) folds `accent_ink` (selected tint),
+    /// `muted` (unselected tint) and `surface_bg` (bar background) in — see
+    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
+    /// explicitly. `icons_rev` is the side table's revision for this slot
+    /// (`crate::controls::tab_bar`'s module doc).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>, icons_rev: u64) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(tab_bar::ITEM_COUNT, self.items.len());
+        for (index, item) in self.items.iter().enumerate() {
+            body.push_str(&tab_bar::item_key(index, tab_bar::FIELD_TITLE), &item.title);
+            body.push_raw(
+                &tab_bar::item_key(index, tab_bar::FIELD_ENABLED),
+                item.enabled,
+            );
+            body.push_opt_str(
+                &tab_bar::item_key(index, tab_bar::FIELD_BADGE),
+                item.badge.as_deref(),
+            );
+            body.push_opt_str(
+                &tab_bar::item_key(index, tab_bar::FIELD_SYMBOL),
+                symbol_name(Some(&item.icon)),
+            );
+            body.push_opt_str(
+                &tab_bar::item_key(index, tab_bar::FIELD_SELECTED_SYMBOL),
+                symbol_name(item.selected_icon.as_ref()),
+            );
+        }
+        if let Some(index) = self.selected_index() {
+            body.push_raw(tab_bar::SELECTED, index);
+        }
+        body.push_raw(tab_bar::ICONS_REV, icons_rev);
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+            body.push_raw(tab_bar::UNSELECTED_TINT, t.muted);
+            body.push_raw(BACKGROUND_COLOR, t.surface_bg);
+        }
+        with_identity(tab_bar::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        self.build_for_arm(slot, mode, tokens, TAB_BAR_ARM)
+    }
+
+    /// [`Self::build_with_mode`] with the platform-arm gate threaded as a
+    /// parameter, so a host test can drive both branches on any target.
+    /// Every branch — banner, translucency placeholder, native slot — sits
+    /// inside the same inset-aware [`TabBarSlot`], so the bar's footprint is
+    /// identical whichever one renders.
+    fn build_for_arm(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+        arm_available: bool,
+    ) -> AnyView<SlotId> {
+        let child = if !arm_available {
+            warn_no_tab_bar_arm_once();
+            banner_placeholder(
+                None,
+                TAB_BAR_UNAVAILABLE_LABEL.to_string(),
+                TAB_BAR_UNAVAILABLE_DESCRIPTION.to_string(),
+            )
+        } else if mode.translucency_refused() {
+            placeholder(None, "TabBar")
+        } else {
+            let icons_rev = tab_bar::publish_icon_bytes(slot, self.icon_bytes());
+            let params = self.params_for(slot, tokens, icons_rev);
+            if self.on_select.is_some() || self.on_reselect.is_some() {
+                let ids: Arc<[TabId]> = self.items.iter().map(|item| item.id.clone()).collect();
+                with_runtime(|rt| {
+                    rt.set_callback(
+                        slot,
+                        on_tab_bar(ids, self.on_select.clone(), self.on_reselect.clone()),
+                    )
+                });
+            }
+            any(platform_view(VIEW_TYPE)
+                .params_json(params)
+                .interactive()
+                .semantics_label("tab bar")
+                .expand())
+        };
+        any(TabBarSlot {
+            child,
+            safe_area: self.safe_area,
+        })
+    }
+}
+
+impl Component for NativeTabBarView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc for the callback reaper; the tab
+        // bar also owns an icon-bytes side-table entry, retired here exactly
+        // once per mounted component (`crate::controls::tab_bar`'s module
+        // doc) — both harmless no-ops on a target with no arm.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+            tab_bar::retire_icon_bytes(slot);
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+/// The tab bar's inset-aware slot: lays its child out at exactly
+/// [`tab_bar::BAR_HEIGHT`] plus — when `safe_area` — the window's bottom
+/// safe-area inset (`LayoutCtx::window_insets().padding().bottom`, read at
+/// layout time, the same inset Material's `navigation_bar` consumes), as wide
+/// as the parent allows. `platform_view` can only be sized by a builder-time
+/// `.size(w, h)` or `.expand()`, and the inset is not known until layout, so
+/// this crate-local wrapper (the [`ClipToSlot`] shape) supplies the tight
+/// constraints and the child `.expand()`s into them — the `UITabBar` frame
+/// then covers the whole slot, home-indicator band included. It also clips
+/// its child's paint to the slot, which the refusal banner's prose needs.
+struct TabBarSlot<State: 'static> {
+    child: AnyView<State>,
+    safe_area: bool,
+}
+
+/// The retained widget for [`TabBarSlot`].
+struct TabBarSlotWidget {
+    child: Box<dyn Widget>,
+    safe_area: bool,
+}
+
+impl<State: 'static> View<State> for TabBarSlot<State> {
+    type Element = TabBarSlotWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+        TabBarSlotWidget {
+            child: self.child.build(ctx),
+            safe_area: self.safe_area,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut Self::Element,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = self.child.rebuild(&prev.child, &mut element.child, ctx);
+        if element.safe_area != self.safe_area {
+            element.safe_area = self.safe_area;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+        self.child.teardown(&mut element.child, ctx);
+    }
+}
+
+impl TabBarSlotWidget {
+    /// The slot size for `bc` under `bottom_inset` px of bottom safe-area
+    /// padding — pure, so the height rule is host-tested directly.
+    fn slot_size(&self, bc: &BoxConstraints, bottom_inset: f64) -> Size {
+        let inset = if self.safe_area {
+            bottom_inset.max(0.0)
+        } else {
+            0.0
+        };
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            bc.min().width
+        };
+        bc.constrain(Size::new(width, tab_bar::BAR_HEIGHT + inset))
+    }
+}
+
+impl Widget for TabBarSlotWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.slot_size(bc, ctx.window_insets().padding().bottom);
+        self.child.layout(ctx, &BoxConstraints::tight(size));
+        size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        scene.push_clip(ctx.origin(), ctx.size());
+        self.child.paint(ctx, scene);
+        scene.pop_clip();
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.child.event(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent wrapper: forward unchanged (`docs/CODE_STANDARDS.md`'s
+        // Semantics Conventions).
+        self.child.semantics(ctx);
+    }
+}
+
+// ============================================================================
 // Image
 // ============================================================================
 
@@ -2200,6 +2673,7 @@ impl_native_view!(NativeSpinnerView);
 impl_native_view!(NativeDatePickerView);
 impl_native_view!(NativeSegmentedView);
 impl_native_view!(NativeStepperView);
+impl_native_view!(NativeTabBarView);
 
 #[cfg(test)]
 mod tests {
@@ -2617,6 +3091,191 @@ mod tests {
         let mut element = build_any(view);
         let mut scene = NullScene;
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(94.0, 29.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
+    }
+
+    // --- tab bar ------------------------------------------------------------
+
+    fn symbol(name: &str) -> TabIcon {
+        TabIcon::AppleSymbol(name.into())
+    }
+
+    fn two_tabs() -> Vec<TabItem> {
+        vec![
+            TabItem::new("home", "Home", symbol("house")).selected_icon(symbol("house.fill")),
+            TabItem::new("inbox", "Inbox", symbol("tray"))
+                .badge("3")
+                .enabled(false),
+        ]
+    }
+
+    /// Lay `element` out under `bc` in a window carrying `bottom` px of
+    /// bottom system-bar inset — the shape a shell pushes for the home
+    /// indicator.
+    fn layout_with_bottom_inset(
+        element: &mut Box<dyn Widget>,
+        bc: &BoxConstraints,
+        bottom: f64,
+    ) -> Size {
+        use frust_core::{WindowEdgeInsets, WindowInsets};
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, bottom),
+            WindowEdgeInsets::ZERO,
+        );
+        let mut text_ctx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+        lctx.with_window_insets(insets, |ctx| element.layout(ctx, bc))
+    }
+
+    #[test]
+    fn tab_bar_params_snapshot() {
+        let view = native_tab_bar(two_tabs(), "inbox");
+        assert_eq!(
+            view.params_for(8, None, 0),
+            "{\"__frustControl\":\"tab_bar\",\"__frustSlot\":8,\"itemCount\":2,\
+             \"tab0Title\":\"Home\",\"tab0Enabled\":true,\"tab0Symbol\":\"house\",\
+             \"tab0SelectedSymbol\":\"house.fill\",\"tab1Title\":\"Inbox\",\
+             \"tab1Enabled\":false,\"tab1Badge\":\"3\",\"tab1Symbol\":\"tray\",\
+             \"selected\":1,\"iconsRev\":0,\"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_selected_id_encodes_no_selection() {
+        let raw = native_tab_bar(two_tabs(), "settings").params_for(8, None, 0);
+        assert!(!raw.contains("\"selected\""), "{raw}");
+    }
+
+    #[test]
+    fn tab_bar_params_round_trip_through_the_control_decoder() {
+        use crate::controls::tab_bar::{IconSource, TabBarProps};
+        use crate::runtime::Params;
+
+        let bytes: Arc<[u8]> = Arc::from(vec![9u8, 9, 9].into_boxed_slice());
+        let view = native_tab_bar(
+            vec![
+                TabItem::new("a", "A", TabIcon::Bytes(Arc::clone(&bytes))),
+                TabItem::new("b", "B", symbol("gear")),
+            ],
+            "b",
+        );
+        let slot = 7_701;
+        let rev = tab_bar::publish_icon_bytes(slot, view.icon_bytes());
+        let raw = view.params_for(slot, Some(dark_tokens()), rev);
+        let props = TabBarProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.items.len(), 2);
+        assert_eq!(props.items[0].icon, Some(IconSource::Bytes(bytes)));
+        assert_eq!(props.items[1].icon, Some(IconSource::Symbol("gear".into())));
+        assert_eq!(props.selected, Some(1));
+        assert_eq!(props.tint, Some(dark_tokens().accent_ink as i32));
+        assert_eq!(props.unselected_tint, Some(dark_tokens().muted as i32));
+        assert_eq!(props.background, Some(dark_tokens().surface_bg as i32));
+        tab_bar::retire_icon_bytes(slot);
+    }
+
+    #[test]
+    fn tab_bar_folds_accent_ink_muted_and_surface_from_the_theme() {
+        let tokens = light_tokens();
+        let raw = native_tab_bar(two_tabs(), "home").params_for(3, Some(tokens), 0);
+        assert!(raw.ends_with(&format!(
+            "\"dark\":false,\"tint\":{},\"unselectedTint\":{},\"backgroundColor\":{}}}",
+            tokens.accent_ink, tokens.muted, tokens.surface_bg
+        )));
+    }
+
+    #[test]
+    fn the_tab_bar_arm_gate_is_exactly_ios() {
+        assert_eq!(
+            TAB_BAR_ARM,
+            cfg!(target_os = "ios"),
+            "macOS (no idiom), Android (Material, D2) and every host render the banner"
+        );
+        assert!(TAB_BAR_UNAVAILABLE_DESCRIPTION.contains("macOS"));
+        assert!(TAB_BAR_UNAVAILABLE_DESCRIPTION.contains("Android"));
+        assert!(TAB_BAR_UNAVAILABLE_DESCRIPTION.contains("Material"));
+    }
+
+    #[test]
+    fn tab_bar_without_a_platform_arm_paints_the_banner_in_the_inset_aware_slot() {
+        for mode in [
+            ResolvedSurfaceMode::Unknown,
+            ResolvedSurfaceMode::Opaque,
+            ResolvedSurfaceMode::RefusedTranslucent,
+        ] {
+            let view = native_tab_bar(two_tabs(), "home").build_for_arm(3, mode, None, false);
+            let mut element = build_any(view);
+            let laid = layout_with_bottom_inset(
+                &mut element,
+                &BoxConstraints::new(Size::ZERO, Size::new(390.0, f64::INFINITY)),
+                34.0,
+            );
+            assert_eq!(laid, Size::new(390.0, 49.0 + 34.0), "{mode:?}");
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+            assert!(
+                pctx.take_platform_views().is_empty(),
+                "{mode:?}: no arm must publish no native platform_view frame"
+            );
+            assert!(rec.glyph_runs >= 1, "{mode:?}: the banner must paint");
+        }
+    }
+
+    #[test]
+    fn tab_bar_with_a_platform_arm_publishes_one_interactive_slot_under_the_home_indicator() {
+        let view = native_tab_bar(two_tabs(), "home");
+        let expected_params = view.params_for(4, None, 0);
+        let built = view.build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let laid = layout_with_bottom_inset(
+            &mut element,
+            &BoxConstraints::new(Size::ZERO, Size::new(390.0, 844.0)),
+            34.0,
+        );
+        assert_eq!(
+            laid,
+            Size::new(390.0, 83.0),
+            "49pt plus the 34pt home-indicator inset, full width"
+        );
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, laid);
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a tab bar slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn an_opted_out_tab_bar_is_the_bare_bar_height() {
+        let built = native_tab_bar(two_tabs(), "home")
+            .safe_area(false)
+            .build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let laid = layout_with_bottom_inset(
+            &mut element,
+            &BoxConstraints::new(Size::ZERO, Size::new(320.0, 600.0)),
+            34.0,
+        );
+        assert_eq!(laid, Size::new(320.0, 49.0));
+    }
+
+    #[test]
+    fn tab_bar_with_an_arm_still_honours_the_translucency_refusal() {
+        let view = native_tab_bar(two_tabs(), "home").build_for_arm(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+            true,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(390.0, 49.0));
         element.paint(&mut pctx, &mut scene);
         assert!(pctx.take_platform_views().is_empty());
     }

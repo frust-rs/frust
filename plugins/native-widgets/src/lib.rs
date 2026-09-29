@@ -10,13 +10,13 @@
 //! retained-handle [`registry`] every control's create/update/dispose path is
 //! built over, the `runtime` those paths dispatch through, the `controls` —
 //! eight shared (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`,
-//! `Spinner`, `DatePicker`) plus the two iOS/macOS-only ones (`Segmented`,
-//! `Stepper`) —
+//! `Spinner`, `DatePicker`), the two iOS/macOS-only ones (`Segmented`,
+//! `Stepper`) and the iOS-only `TabBar` —
 //! that runtime serves, the typed `events` vocabulary their listeners decode
 //! into, the app-facing `api` builders, and the three platform arms' factory
 //! glue. Each shared control carries one platform half per arm (`Segmented`/
-//! `Stepper` have no Android half — their builders render a refusal banner
-//! there) — a
+//! `Stepper` have no Android half and `TabBar` has only the iOS one — their
+//! builders render a refusal banner elsewhere) — a
 //! `#[cfg(target_os = "android")] mod platform`, a
 //! `#[cfg(target_os = "ios")] mod platform` and a
 //! `#[cfg(target_os = "macos")] mod platform`, side by side in the same file,
@@ -24,7 +24,8 @@
 //! reporting a tap/toggle/drag back to the app through the same event
 //! dispatch on every platform (`crate::apple::events`'s and
 //! `crate::appkit::events`' Rust target-action objects, mirroring Android's
-//! shared listener). The macOS arm registers every kind iOS does.
+//! shared listener). The macOS arm registers every kind iOS does except the
+//! iOS-only `TabBar` (macOS has no bottom-tab-bar idiom).
 //! The theme ladder's two Apple arms are in: L1 pins brightness per view
 //! (`crate::apple::theme`'s `overrideUserInterfaceStyle`,
 //! `crate::appkit::theme`'s `NSAppearance`), re-pinned on every update; L2
@@ -217,8 +218,9 @@ mod appkit;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 #[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
 mod coretext;
-// The v1 controls (eight shared + the two Apple-only ones, `Segmented` and
-// `Stepper`). Compiled on every target on purpose: each control's
+// The v1 controls (eight shared, the two Apple-only ones, `Segmented` and
+// `Stepper`, and the iOS-only `TabBar`). Compiled on every target on
+// purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
 // `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`
 // — which is also why the modules live here rather than under a platform
