@@ -2732,6 +2732,65 @@ functions and their host tests.
 
 ---
 
+### `native-widgets-segmented-stepper-apple-only` — `native_segmented`/`native_stepper` exist on iOS and macOS only
+
+**Observed**: `native_segmented` and `native_stepper` are registered in `APPLE_KINDS`
+(`plugins/native-widgets/src/controls/mod.rs`), not `SHARED_KINDS` — neither control has an
+Android `NativeWidget` impl, or a Linux/Windows/web host one either. Each app-facing builder
+resolves this at compile time: `NativeSegmentedView`/`NativeStepperView`'s `SEGMENTED_ARM`/
+`STEPPER_ARM` constants (`plugins/native-widgets/src/api/builders.rs`) are `true` only under
+`cfg(any(target_os = "ios", target_os = "macos"))`; everywhere else the builder renders the
+frust-drawn `RefusalBanner` placeholder instead of an empty slot, naming the missing arm. Android's
+framework has no segmented control (the stock option, `MaterialButtonToggleGroup`, would impose an
+AndroidX/Material dependency this chartered leaf plugin never assumes an app added) and no
+increment/decrement stepper control either.
+
+**Why accepted**: a Material-backed segmented Android arm and a composite stepper Android arm (two
+`ImageButton`s plus a `TextView`) are both named follow-up plans, not v1 scope — building either
+means taking on the Material/AndroidX dependency this plugin's leaf-plugin charter
+(`docs/PLUGINS_CODE_STANDARDS.md`) currently avoids entirely. No Linux/Windows/web arm exists for
+either control either; the compile-time refusal covers every non-Apple target uniformly.
+
+**Evidence**: `plugins/native-widgets/src/controls/mod.rs`'s `SHARED_KINDS`/`APPLE_KINDS` tables
+and their source-scanning parity test; `plugins/native-widgets/src/controls/segmented.rs`'s and
+`stepper.rs`'s module docs ("No Android arm (decision D2)" / "No Android arm (the same shape as
+decision D2)"); `plugins/native-widgets/src/api/builders.rs`'s `SEGMENTED_ARM`/`STEPPER_ARM`
+compile-time constants and `banner_placeholder`; `plugins/native-widgets/README.md`'s "Ten
+controls" table.
+
+---
+
+### `native-widgets-component-same-kind-children-indistinguishable` — a `NativeComponent` cannot tell two same-family children's events apart
+
+**Observed**: `ComponentCtx::attach_listener` binds a view to the slot's own id and a
+`ListenerKinds` family (click, toggled, value changed); the event it later delivers to
+`NativeComponent::on_event` is a `NativeEvent` carrying only a `kind` and a primitive `detail` — no
+view or child identity (`plugins/native-widgets/src/component.rs`). Two children of the same
+component attached for the same family therefore report identically: a click is `(KIND_CLICK, 0)`
+whichever child produced it, so `on_event` cannot distinguish them. The shipped `DemoCard` (this
+plugin's own non-default `demo-components` feature) demonstrates the consequence directly: its
+**secondary** button is deliberately left unwired, because wiring both buttons to `CLICK` would
+make their events indistinguishable — only the primary button's clicks are attached and forwarded.
+
+**Applies to**: any `NativeComponent` implementor that attaches more than one child to the same
+`ListenerKinds` family. The documented escape is to give each child a distinct family, or to mount
+each as its own slot (a separate `NativeComponent`/builder) rather than as children of one.
+
+**Why accepted**: `NativeEvent`'s wire shape is the same `(slotId, kind, detail)` triple every
+built-in control's listener already uses (`crate::events`) — widening it to carry a child/view
+identity would mean a new field on the shared wire and every listener class, not a
+`NativeComponent`-only fix, and no production component has needed to tell same-family children
+apart yet.
+
+**Evidence**: `plugins/native-widgets/src/component.rs`'s `Bridge::on_event` doc comment (the event
+gate, and its note that a fabricated id naming a slot that attached a family is "indistinguishable
+from the real listener — the runtime asks nothing about which object fired") and `NativeEvent`'s
+`kind`/`detail` fields (no view identity); `plugins/native-widgets/src/demo.rs`'s module doc,
+*Event wiring: the primary button reports its clicks* (the secondary button is deliberately left
+unwired because "two children attached for the same family are indistinguishable in `on_event`").
+
+---
+
 ### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
 
 **Observed**: `examples/design-system-sample`'s widgets each carry a `semantics` impl, and the

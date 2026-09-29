@@ -2,10 +2,13 @@
 
 ## Overview
 
-NATIVE_WIDGETS (`plugins/native-widgets`) is a platform plugin rendering real OS controls —
-Button, Label, Switch, Slider, ProgressBar, Image — plus arbitrary plugin-authored native view
-hierarchies. Every control is driven entirely from Rust through exactly one generic factory and
-one generic listener class per platform, in three arms: a Kotlin factory + listener pair on
+NATIVE_WIDGETS (`plugins/native-widgets`) is a platform plugin rendering real OS controls — eight
+controls shared by all three platform arms (Button, Label, Switch, Slider, ProgressBar, Image,
+Spinner, DatePicker) plus two Apple-only controls (Segmented, Stepper) that exist on iOS and macOS
+only — every other target resolves their builder to a frust-drawn refusal banner at compile time,
+never an empty slot — plus arbitrary plugin-authored native view hierarchies. Every control is
+driven entirely from Rust through exactly one generic factory and one generic listener class per
+platform, in three arms: a Kotlin factory + listener pair on
 Android (Mode-B platform-view slots — the differ punches a transparent hole and composites the
 native view into it); a Rust-registered ObjC class on iOS, zero Swift involved (also Mode-B); and
 on macOS one Rust `DesktopViewFactory` plus one `define_class!` target-action class, registered by
@@ -20,8 +23,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how NATIVE_WIDGETS relates to the oth
 | Module | Responsibility |
 |--------|-----------------|
 | `runtime`/`registry` | Internal type-erased dispatch engine and retained-instance registry driving the create/update/dispose/event lifecycle; its `NativeCtx`/`NativeView` pair is real on each platform arm and a recording stand-in on a host with none, so the shared dispatch/diff/lifecycle contract is exercised by `cargo test` on Linux/Windows/web (not on Android/iOS/macOS, each of which swaps in its own real types) |
-| `controls/*` | The six v1 controls, each with shared host-tested props/decode logic plus per-platform Android/iOS/macOS implementations |
-| `component.rs` | Public `NativeComponent` trait plus `Bridge<C>`, letting a third-party native view hierarchy run through the same internal runtime as the six controls; `ComponentCtx` has the same real-arm/host-stand-in split as `runtime`/`registry` |
+| `controls/*` | The built-in controls — `SHARED_KINDS` (eight, all three platform arms) plus `APPLE_KINDS` (two, iOS/macOS only) — each with shared host-tested props/decode logic plus per-platform implementations |
+| `component.rs` | Public `NativeComponent` trait plus `Bridge<C>`, letting a third-party native view hierarchy run through the same internal runtime as the built-in controls; `ComponentCtx` has the same real-arm/host-stand-in split as `runtime`/`registry` |
 | `api/*` | App-facing builders, events-as-signals wiring, and theme folding into native control params |
 | `android/` (Kotlin) | One Kotlin factory + listener pair and frozen JNI exports, shipped as its own Gradle library module |
 | `apple/` (objc2) | One Rust-registered ObjC factory + listener class, resolved at runtime via `NSClassFromString` — no Swift involved |
@@ -52,8 +55,8 @@ than `target_vendor = "apple"`; and the FFI boundary uses hand-rolled flat-JSON 
 That same FFI boundary caps who can practically extend `NativeComponent`: an app crate cannot
 implement `NativeComponent` itself, because doing so means naming raw `jni`/`objc2-ui-kit` types
 that this plugin does not re-export. The trait's practical audience is therefore plugin authors,
-who take the FFI dependency directly — app code stays on the six builders and never touches
-`NativeComponent` at all.
+who take the FFI dependency directly — app code stays on the app-facing builders and never
+touches `NativeComponent` at all.
 
 ## Data Flow
 
@@ -62,18 +65,31 @@ who take the FFI dependency directly — app code stays on the six builders and 
   duplicate calls are no-ops.
 - Events: the platform listener fires on the main thread, routes by slot id into a typed payload
   delivered to app callbacks via signals, entirely bypassing the core render/event system described
-  in [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
-- The `NativeComponent` path reuses the same runtime/factory plumbing as the six built-in controls,
-  so a plugin author's native view subtree mounts through one slot. It is display-only in this
-  build, though: no production path attaches a listener to a component-built view, so overriding
-  `NativeComponent::on_event` has no effect (a deferred Phase 4 gap) — only the six built-in
-  controls actually deliver events end to end today. The plugin's own non-default
-  `demo-components` feature proves the whole define → register → mount path with `DemoCard`, one
-  composite (a parent view, a title label, two buttons) published as one slot: real native
-  coverage on all three platform arms (a Kotlin `LinearLayout` on Android, a `UIView` with
-  explicit child frames on iOS, a layer-backed `NSView` with explicit child frames on macOS) plus
-  a fourth, host-only arm on Linux/Windows/web that records the same create/update/dispose plan
-  instead of building real views.
+  in [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md). Seven wire kinds cross that boundary — `CLICK`,
+  `TOGGLED`, `VALUE_CHANGED`, `DRAG_START`, `DRAG_END` (1-5, all three arms), `SELECTION` (6,
+  Apple-arm-only — the segmented control), `DATE` (7, all three arms — the date picker) — mirrored
+  verbatim in `FrustNativeListener.kt`'s `KIND_*` constants and pinned against drift by
+  `tests/kotlin_conformance.rs`.
+- The `NativeComponent` path reuses the same runtime/factory plumbing as the built-in controls, so
+  a plugin author's native view subtree mounts through one slot. A component attaches the
+  platform's one listener class to any view it built — root or child — through
+  `ComponentCtx::attach_listener`, naming a `ListenerKinds` family (click, toggled, value changed —
+  the only three families a component can ask for today; no selection/date family yet). Each
+  attach answers one `ListenerHandle`, kept in `NativeComponent::State` and released when the
+  handle drops or the component is disposed. An event for an attached family routes by slot id to
+  `NativeComponent::on_event`, mapped into the same `EventPayload` vocabulary the builders' own
+  signals use; a family the slot never attached is dropped before the component sees it. An event
+  carries only the slot id, kind and a primitive detail — never which child fired — so a composite
+  with two interactive children in the same family cannot be told apart in `on_event`
+  ([LIMITATIONS.md](LIMITATIONS.md)'s
+  `native-widgets-component-same-kind-children-indistinguishable`). The plugin's own non-default
+  `demo-components` feature proves the whole define → register → mount → attach path with
+  `DemoCard`, one composite (a parent view, a title label, two buttons — only the primary button's
+  clicks wired, for exactly this reason) published as one slot: real native coverage on all three
+  platform arms (a Kotlin `LinearLayout` on Android, a `UIView` with explicit child frames on iOS,
+  a layer-backed `NSView` with explicit child frames on macOS) plus a fourth, host-only arm on
+  Linux/Windows/web that records the same create/update/dispose plan instead of building real
+  views.
 - Mode-B translucency (Android/iOS only): a native-widgets slot needs the frust surface
   above/beside it to actually resolve translucent to be visible. The `frust-engine` render path
   never itself refuses a translucent surface (every backend/alpha-mode pair renders, see
@@ -104,6 +120,9 @@ who take the FFI dependency directly — app code stays on the six builders and 
 
 | Type | Purpose |
 |------|---------|
-| `native_button` / `native_label` / `native_switch` / `native_slider` / `native_progress` / `native_image` | The six app-facing builders, each composing one platform_view slot |
+| `native_button` / `native_label` / `native_switch` / `native_slider` / `native_progress` / `native_image` / `native_spinner` / `native_date_picker` | The eight shared app-facing builders (all three platform arms), each composing one platform_view slot |
+| `native_segmented` / `native_stepper` | The two Apple-only app-facing builders (iOS + macOS; a compile-time refusal banner everywhere else) |
+| `CivilDate` | Plain year/month/day value type `native_date_picker` takes and its `DATE` event payload reports back |
 | `NativeComponent` (+ `ComponentCtx`) | Public trait for a plugin author to drive a native view hierarchy from Rust |
+| `ListenerKinds` / `ListenerHandle` | Which event families (click, toggled, value changed) a component attaches to a view it built, and the RAII handle releasing that attach |
 | `native_component` / `register_component` | Generic define→register→mount path for a `NativeComponent`, reusing the controls' factory/runtime plumbing |
