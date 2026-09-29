@@ -78,12 +78,13 @@
 //! no setter at all, even when the app's own raw value did (e.g. an
 //! explicit bound moving from one out-of-range value to another that
 //! clamps to the same arm ceiling/floor). When clamping altered an explicit
-//! bound or the date, `plan` logs one warning per call naming the slot, the
-//! app's values, and the arm's range. A range change (by its clamped value)
+//! bound or the date, `plan` logs a warning (once per process) naming the slot,
+//! the app's values, and the arm's range. A range change (by its clamped value)
 //! also re-asserts [`Setter::Date`], because narrowing a range can move the
 //! platform's date — the date itself is clamped into the same resolved
 //! range so the platform is never asked for a date outside the range it
-//! will hold.
+//! will hold. Both create-time init and update-time updateDate receive the
+//! effective date (the app's date clamped into the arm's resolved range).
 //!
 //! # `style`: live on Apple, baked at construction on Android
 //!
@@ -115,6 +116,7 @@
 //! theme module), macOS its `NSAppearance`.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT_COLOR, TINT, color, owned_text, slot_of,
@@ -371,6 +373,15 @@ impl DatePickerProps {
         }
     }
 
+    /// The app's `date` clamped into the effective range this arm will hold —
+    /// the date that an arm's `create` and `update` both pass to platform calls
+    /// (module doc's *Range*). `None` when the app's date is absent, leaving
+    /// the platform on its own initial date (today).
+    pub(crate) fn effective_date(&self, bounds: Bounds) -> Option<CivilDate> {
+        let (min, max) = bounds.effective_range(self.min, self.max);
+        self.date.map(|date| date.clamp(min, max))
+    }
+
     /// Decode a `DatePicker` slot's params (module doc's *Range* for the
     /// normalization).
     ///
@@ -471,10 +482,14 @@ impl DatePickerProps {
     }
 }
 
-/// Log ONE warning per [`DatePickerProps::plan`] call when clamping into
-/// `bounds` (module doc's *Range*) actually changed an explicit `min`/`max`
-/// or the date — never once per field, and never when nothing was out of
-/// range to begin with.
+/// One-time warning that clamping into `bounds` (module doc's *Range*)
+/// altered an explicit `min`/`max` or the date — logged at most once per
+/// process, not once per call.
+static WARN_CLAMPED: AtomicBool = AtomicBool::new(false);
+
+/// Log at most once per process when clamping into `bounds` (module doc's
+/// *Range*) actually changed an explicit `min`/`max` or the date — never once
+/// per field, and never when nothing was out of range to begin with.
 fn warn_if_clamped(
     new: &DatePickerProps,
     new_min: CivilDate,
@@ -501,14 +516,16 @@ fn warn_if_clamped(
     if clamped.is_empty() {
         return;
     }
-    log::warn!(
-        "frust-native-widgets: date_picker slot {} — {} outside this platform's own range \
-         {}..{}, clamped into it",
-        new.slot,
-        clamped.join(", "),
-        bounds.floor,
-        bounds.ceiling
-    );
+    if !WARN_CLAMPED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "frust-native-widgets: date_picker slot {} — {} outside this platform's own range \
+             {}..{}, clamped into it (this warning is logged once per process)",
+            new.slot,
+            clamped.join(", "),
+            bounds.floor,
+            bounds.ceiling
+        );
+    }
 }
 
 /// A packed date field (`crate::events::pack_date`'s layout), `None` when
@@ -854,8 +871,9 @@ pub(crate) mod platform {
             let plan = DatePickerProps::plan(&default, props, None, BOUNDS);
             ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &view, &plan))?;
             // Read after the range setters ran, so an app that supplied no
-            // date still hands `init` the platform's (possibly clamped) own.
-            let date = match props.date {
+            // date still hands `init` the platform's own. The effective date
+            // is clamped into the resolved range for this arm.
+            let date = match props.effective_date(BOUNDS) {
                 Some(date) => date,
                 None => current_date(ctx, &view)?,
             };
@@ -1762,6 +1780,77 @@ mod tests {
             };
             assert_eq!(setter.tier(), expected, "{setter:?}");
         }
+    }
+
+    // --- effective_date --------------------------------------------------
+
+    #[test]
+    fn effective_date_with_android_bounds_clamps_out_of_range_dates() {
+        let props = decode(&field(DATE, date(2150, 6, 1)));
+        let clamped = props.effective_date(android_bounds());
+        assert_eq!(
+            clamped,
+            Some(date(2100, 12, 31)),
+            "2150-06-01 is outside Android's 1900-01-01..2100-12-31 range, \
+             clamped to the ceiling"
+        );
+    }
+
+    #[test]
+    fn effective_date_with_android_bounds_and_explicit_min_still_clamps() {
+        let props = decode(&format!(
+            "{},{}",
+            field(DATE, date(2150, 6, 1)),
+            field(MIN_DATE, date(2050, 1, 1))
+        ));
+        let clamped = props.effective_date(android_bounds());
+        assert_eq!(
+            clamped,
+            Some(date(2100, 12, 31)),
+            "with an explicit min, the date 2150-06-01 still clamps to \
+             Android's ceiling 2100-12-31"
+        );
+    }
+
+    #[test]
+    fn effective_date_is_identity_with_apple_bounds() {
+        let date_to_test = date(2150, 6, 1);
+        let props = decode(&field(DATE, date_to_test));
+        let result = props.effective_date(Bounds::APPLE);
+        assert_eq!(
+            result,
+            Some(date_to_test),
+            "2150-06-01 is inside Apple's CivilDate::MIN..CivilDate::MAX, \
+             so effective_date returns it unchanged"
+        );
+    }
+
+    #[test]
+    fn effective_date_equals_the_date_setter_in_plan() {
+        let props = decode(&format!(
+            "{},{}",
+            field(DATE, date(2150, 6, 1)),
+            field(MIN_DATE, date(2050, 1, 1))
+        ));
+        let effective = props.effective_date(android_bounds());
+        let plan = DatePickerProps::plan(
+            &DatePickerProps::platform_default(5),
+            &props,
+            None,
+            android_bounds(),
+        );
+        // The Date setter in the plan should be for the effective date
+        let date_setter = plan.iter().find_map(|s| {
+            if let Setter::Date(d) = s {
+                Some(*d)
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            date_setter, effective,
+            "plan's Date setter matches effective_date"
+        );
     }
 
     // --- events ---------------------------------------------------------

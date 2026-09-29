@@ -4444,10 +4444,10 @@ mod tests {
     fn replacing_a_handle_on_the_same_view_keeps_the_new_listener_live() {
         // The replace-handle pattern: `update` re-attaches the SAME view for
         // the SAME kinds and assigns over the old handle, which drops it. A
-        // release that nulled the view's interface (Android's round-1 Drop)
-        // would wipe the listener just set; a release that touches only the
-        // old handle's own listener must leave the new one live and the
-        // slot's family still admitted.
+        // release that nulled the view's interface — the earlier defect this
+        // handle's Drop is designed to avoid — would wipe the listener just
+        // set; a release that touches only the old handle's own listener must
+        // leave the new one live and the slot's family still admitted.
         struct Rewire;
 
         impl NativeComponent for Rewire {
