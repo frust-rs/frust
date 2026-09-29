@@ -16,6 +16,10 @@ a `view_type` string through the desktop shell's Mode-A host — there the frust
 opaque and the native view is an AppKit sibling composited *above* it, no punch (no Mac Catalyst).
 New controls extend the existing generic dispatch rather than adding per-control platform glue.
 
+Beside the control tree, `present/` adds native presentations — host-owned modal UI (an alert
+today) requested imperatively from Rust and resolved to exactly one outcome, never a node in the
+`View` tree — on iOS/iPadOS, macOS and Android; see *Data Flow*'s Native Presentations below.
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how NATIVE_WIDGETS relates to the other units.
 
 ## Module Structure
@@ -25,7 +29,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how NATIVE_WIDGETS relates to the oth
 | `runtime`/`registry` | Internal type-erased dispatch engine and retained-instance registry driving the create/update/dispose/event lifecycle; its `NativeCtx`/`NativeView` pair is real on each platform arm and a recording stand-in on a host with none, so the shared dispatch/diff/lifecycle contract is exercised by `cargo test` on Linux/Windows/web (not on Android/iOS/macOS, each of which swaps in its own real types) |
 | `controls/*` | The built-in controls — `SHARED_KINDS` (eight, all three platform arms) plus `APPLE_KINDS` (two, iOS/macOS only) — each with shared host-tested props/decode logic plus per-platform implementations |
 | `component.rs` | Public `NativeComponent` trait plus `Bridge<C>`, letting a third-party native view hierarchy run through the same internal runtime as the built-in controls; `ComponentCtx` has the same real-arm/host-stand-in split as `runtime`/`registry` |
+| `present/mod.rs` | Native presentations' platform-independent core: the `AlertSpec`/`AlertAction`/`ActionRole`/`AlertStyle`/`AnchorRect` request types, `AlertOutcome`, `PresentError`, the `Presentation<T>` future plus `PresentationHandle`, the generation-guarded `oneshot` channel, the process-wide Busy slot, and the `AlertHost` trait selecting one `PlatformHost` per OS by `cfg` |
+| `present/apple_host.rs` | Shared Apple (iOS + macOS) presentation plumbing both alert arms build on: host discovery (the topmost view controller on iOS, the key/main/first-visible window on macOS), the main-queue hop, and the live-presentation guard |
+| `present/apple_alert.rs` | The iOS/iPadOS alert arm: a `UIAlertController` (centered alert or action sheet), an iPad action sheet anchored as a popover |
+| `present/appkit_alert.rs` | The macOS alert arm: an `NSAlert` presented as a window sheet |
+| `present/android_host.rs` + `present/android_alert.rs` | The Android alert arm: the Kotlin `dev.frust.nativewidgets.FrustNativePresenter` object reached over JNI (tracking the resumed `Activity` via `FrustNativePresenterInitProvider`) building a framework `android.app.AlertDialog` |
+| `present/unsupported.rs` | The presentation arm for every target with no native modal UI (desktop Linux, Windows, web): every request resolves `PresentError::Unsupported` |
 | `api/*` | App-facing builders, events-as-signals wiring, and theme folding into native control params |
+| `api/present.rs` | App-facing front door to native presentations: `show_native_alert` (awaitable) and `show_native_alert_into` (events-as-signals) |
 | `android/` (Kotlin) | One Kotlin factory + listener pair and frozen JNI exports, shipped as its own Gradle library module |
 | `apple/` (objc2) | One Rust-registered ObjC factory + listener class, resolved at runtime via `NSClassFromString` — no Swift involved |
 | `appkit/` (objc2) | One Rust `DesktopViewFactory` (`ensure_registered` registers it once, lazily, under a `view_type` string) plus one `define_class!` `FrustNativeControlTarget` class carrying one action selector for all interactive controls — no Swift involved |
@@ -36,7 +47,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how NATIVE_WIDGETS relates to the oth
 NATIVE_WIDGETS depends on `frust-plugin` (Android JavaVM/Context handle install), `jni` on Android,
 and the `objc2` family on iOS (`objc2-ui-kit`/`objc2-quartz-core`/`objc2-core-text`/
 `objc2-core-foundation`) and macOS (`objc2-app-kit`/`objc2-quartz-core`/`objc2-core-graphics`/
-`objc2-core-text`/`objc2-core-foundation`), plus `thiserror`/`log`. Its optional, default-on
+`objc2-core-text`/`objc2-core-foundation`), plus `thiserror`/`log`. Native presentations add
+`block2`/`dispatch2` on both Apple arms — the main-queue hop and every block-based handler (an
+alert action, a presentation's completion). Its optional, default-on
 `frust-api` feature additionally pulls in `frust`/`frust-core`/`frust-theme`/`kurbo` for the
 app-facing builder API; with that feature off, the crate is a bare leaf plugin. On Android and iOS
 it integrates with `frust-shell-common`'s `platform_view`/Mode-B differ and platform-view-factory
@@ -47,10 +60,15 @@ resolves by `view_type` string — a different integration seam, not a Cargo dep
 This is a chartered leaf plugin: `frust-plugin` + FFI only with default features off, a boundary
 pinned by a no-default-features conformance gate. The one-generic-factory/one-generic-listener
 shape per platform is a permanent architectural constraint, not an interim simplification — a new
-control extends the existing dispatch rather than adding platform glue. Once shipped, JNI export
-symbol names and the Kotlin package/class names are frozen; iOS gates on `target_os = "ios"` rather
-than `target_vendor = "apple"`; and the FFI boundary uses hand-rolled flat-JSON parsing instead of
-`serde`, keeping the wire format independent of any Rust-side type change.
+control extends the existing dispatch rather than adding platform glue; native presentations are
+the one chartered exception, adding one presenter object plus one callback per platform rather than
+riding the control dispatch. On Android that is a **third** frozen Kotlin class (beside the factory
+and the listener), `FrustNativePresenter`, plus **one** frozen JNI export,
+`Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome` — both permanent once shipped,
+the same as the control factory/listener pair. Once shipped, JNI export symbol names and the Kotlin
+package/class names are frozen; iOS gates on `target_os = "ios"` rather than `target_vendor =
+"apple"`; and the FFI boundary uses hand-rolled flat-JSON parsing instead of `serde`, keeping the
+wire format independent of any Rust-side type change.
 
 That same FFI boundary caps who can practically extend `NativeComponent`: an app crate cannot
 implement `NativeComponent` itself, because doing so means naming raw `jni`/`objc2-ui-kit` types
@@ -97,6 +115,20 @@ touches `NativeComponent` at all.
   platform's own compositor offers no translucent alpha mode, surfaced to app/plugin code as
   `frust::resolved_surface_mode() == ResolvedSurfaceMode::RefusedTranslucent`. The macOS arm has no
   such concern: its desktop Mode-A host never punches the surface at all (see Overview).
+- **Native presentations** (`present/`): imperative host-owned modal UI, never a `platform_view`
+  slot. Submit → validate the spec → claim the process-wide Busy slot → the platform host arms the
+  presentation on its own main thread → exactly one outcome comes back through a generation-guarded
+  `oneshot` → the slot is released (before the caller is woken, so its continuation may present
+  again). No queueing: a second `show_native_alert` while one is live answers `Busy` at once, never
+  replacing or stacking. Dropping the `Presentation` future frees the slot but not the platform UI —
+  the alert stays on screen until the next request displaces it or the user answers it, and that
+  answer is discarded.
+
+  | Platform | Dismissal | Button/action mapping | `style`/`anchor` |
+  |----------|-----------|------------------------|-------------------|
+  | macOS | Return → the first action; Escape → the Cancel-role action; no click-away, so a bare `Cancelled` never happens | one `NSAlert` button per action, added in spec order | ignored — no action-sheet idiom |
+  | iOS/iPadOS | `Cancelled` only on an iPad popover's outside tap | UIKit places the Cancel-role action itself | `ActionSheet` on iPad requires `anchor` (`InvalidSpec` without one) |
+  | Android | back key / outside tap → `Cancelled`, only when `cancelable` | role preference: Cancel → negative then neutral then positive; Default/Destructive → positive then neutral then negative | ignored — `android.app.AlertDialog` has no action-sheet idiom |
 - Theme ladder: `Theme` folds into control props every frame but is diff-gated, so an unchanged
   theme costs zero FFI calls (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) for `Theme`
   itself). Typefaces resolve through a **two-step ladder, independently per slot** (button/body):
@@ -126,3 +158,7 @@ touches `NativeComponent` at all.
 | `NativeComponent` (+ `ComponentCtx`) | Public trait for a plugin author to drive a native view hierarchy from Rust |
 | `ListenerKinds` / `ListenerHandle` | Which event families (click, toggled, value changed) a component attaches to a view it built, and the RAII handle releasing that attach |
 | `native_component` / `register_component` | Generic define→register→mount path for a `NativeComponent`, reusing the controls' factory/runtime plumbing |
+| `AlertSpec` / `AlertAction` / `ActionRole` / `AlertStyle` / `AnchorRect` | A native alert's request: title/message/actions/cancelable/style/anchor; one button (id, label, role); an action's semantic role; centered-alert-vs-action-sheet; and the popover anchor rect an action sheet points from |
+| `AlertOutcome` / `PresentError` | The one terminal outcome a presentation resolves to (`Action`/`Cancelled`/`Dismissed`/`HostLost`), and why one could not be shown or did not complete (`Busy`/`NoHost`/`Unsupported`/`InvalidSpec`/`Platform`) |
+| `Presentation<T>` / `PresentationHandle` | The awaitable future a presentation request answers with (see *Data Flow*'s Native Presentations), and the handle naming it for `dismiss` |
+| `show_native_alert` / `show_native_alert_into` | App-facing presentation entry points: the awaitable form, and the events-as-signals form writing the outcome into an app `RwSignal` once |
