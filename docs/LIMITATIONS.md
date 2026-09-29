@@ -2864,7 +2864,47 @@ later attach replaces it or the view is destroyed.
 `plugins/native-widgets/src/android/ctx.rs`'s `disarm_listener` and `unwind_partial_attach`;
 `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativeListener.kt`'s
 class doc, `armed`, and `disarm()`.
+---
 
+
+
+### `native-widgets-alert-busy-slot-unobserved-host-teardown` — a presenting host torn down through a path the arm cannot observe leaves the Busy slot held indefinitely
+
+**Observed**: both Apple alert arms document a teardown path their resolution mechanism cannot see: macOS's `NSWindowWillCloseNotification` fires only on a real window close, not `orderOut:` (hidden, not closed — `appkit_alert.rs`'s *Not observed*); on iOS the app replacing the presenting controller chain outside UIKit's own dismissal path removes the alert with no callback the arm can see (`apple_alert.rs`'s *Not observed*). In both cases the presentation stays pending in `present::ACTIVE` (the process-wide Busy slot) until `present::dismiss` resolves it `Dismissed` or the caller drops the `Presentation` future; every later `show_native_alert`/`show_native_alert_into` answers `PresentError::Busy` until then (a Busy refusal is logged at warn with the live presentation's generation and age).
+
+**Applies to**: `show_native_alert`/`show_native_alert_into` on macOS and iOS/iPadOS — an app that hides rather than closes its presenting window (macOS `orderOut:`) or replaces a presenting controller chain outside UIKit's dismissal path (iOS) while an alert is live.
+
+**Why accepted**: no watchdog by design — a long-lived alert (a slow user decision) is legitimate, so a timeout would misfire on the common case to guard the rare one; `dismiss` and dropping the future are the caller's two ways out.
+
+**Evidence**: `plugins/native-widgets/src/present/appkit_alert.rs` *Not observed*; `plugins/native-widgets/src/present/apple_alert.rs` *Not observed*; `plugins/native-widgets/src/present/mod.rs` module doc (the contract's slot-release bullet).
+
+**Workaround**: close (not hide) the presenting window on macOS while an alert may be live; call `dismiss` before tearing down a presenting controller chain on iOS.
+
+---
+
+### `native-widgets-android-alert-theme-from-activity` — the Android alert's light/dark appearance follows the hosting `Activity`'s theme, not the app's `Brightness`
+
+**Observed**: `FrustNativePresenter.kt` builds the dialog with `AlertDialog.Builder(activity)`; the framework dialog's light/dark styling resolves from the hosting `Activity`'s own theme attributes, not from `frust::Theme`'s `Brightness`, unlike the native-widgets controls (whose theme ladder reads `frust::Theme` directly).
+
+**Applies to**: `show_native_alert`/`show_native_alert_into` on Android.
+
+**Why accepted**: the arm is framework-only by decision (no AppCompat/Material theming), and `android.app.AlertDialog` offers no per-dialog brightness without a themed context this crate does not construct.
+
+**Evidence**: `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativePresenter.kt` (`AlertDialog.Builder(activity)`); `plugins/native-widgets/src/present/android_alert.rs` module doc.
+
+---
+
+### `native-widgets-alert-drop-leaves-platform-ui` — dropping a `Presentation` frees the Busy slot but leaves the platform alert on screen
+
+**Observed**: dropping `Presentation<T>` releases the process-wide Busy slot (a new request may present at once) but does not dismiss the platform alert; it stays on screen until the next request displaces it (the displacing arm takes it down first) or the user answers it, and that answer is discarded because nothing is listening.
+
+**Applies to**: any caller that drops the future returned by `show_native_alert` (or the request behind `show_native_alert_into`) without calling `dismiss`, on all three arms.
+
+**Why accepted**: documented module contract (`present/mod.rs`: dropping the future frees only this module's bookkeeping); tearing down live platform UI from a dropped future would need arm-specific plumbing for a case the API already covers with `dismiss`.
+
+**Evidence**: `plugins/native-widgets/src/present/mod.rs` module doc; `apple_alert.rs` / `appkit_alert.rs` / `android_alert.rs` *A displaced presentation* sections.
+
+---
 ---
 
 ### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
@@ -2881,7 +2921,6 @@ sanctioned `frust-core` test-only dev-dependency, the same plugin-tier exemption
 (`docs/CODE_STANDARDS.md`), not available to a genuinely external crate like `design-system-sample`.
 
 **Applies to**: any external design-system crate wanting to unit-test its `Widget::semantics`
-output.
 
 **Why accepted**: closing it means either re-exporting a semantics-pass entry point from the
 facade or loosening `SemanticsCtx::new`'s visibility — a deliberate facade-API decision deferred
