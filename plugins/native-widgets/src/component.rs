@@ -115,10 +115,19 @@
 //! id**, which it knows privately and never hands to the component, so a
 //! component cannot route an event anywhere but home. It answers a
 //! [`ListenerHandle`] the component keeps in its [`NativeComponent::State`];
-//! dropping it with the state is the release **on every arm** — the platform
-//! interfaces/target-action pairs it set are cleared first, then whatever
-//! reference it held is released — and [`ComponentCtx::detach_listener`]
-//! detaches explicitly (the same release, run early instead of at drop).
+//! dropping it with the state is the release **on every arm**, and
+//! [`ComponentCtx::detach_listener`] detaches explicitly (the same release,
+//! run early instead of at drop). A release only ever affects **the handle's
+//! own listener**: iOS removes its own target's action pairs, macOS clears the
+//! control's target/action only while they are still its own, and Android —
+//! whose `setOn*Listener` setters hold one listener each, replace it outright
+//! and expose no getter — **disarms** the handle's own `FrustNativeListener`
+//! (a `@Volatile` flag every callback checks) rather than nulling the view's
+//! interface, which may already hold a newer attach's listener. The interface
+//! keeps an inert object until a later attach replaces it or the view dies.
+//! So re-attaching the same view for the same kinds and letting the old
+//! handle drop is safe on every arm, and on Android a handle dropped off the
+//! main thread never touches a `View` at all.
 //!
 //! The dispatch then runs the path the built-in controls already use: the
 //! platform listener fires on the main thread, `crate::runtime`'s `on_event`
@@ -667,17 +676,23 @@ impl ComponentCtx<'_, '_, '_> {
     /// [`NativeComponent::on_event`] and nowhere else.
     ///
     /// Keep the returned [`ListenerHandle`] in your
-    /// [`NativeComponent::State`]: its `Drop` nulls exactly `kinds` off `view`
-    /// and releases the global reference it holds to it (this arm's `Drop`,
-    /// [`ListenerHandle`]'s own doc).
+    /// [`NativeComponent::State`]: its `Drop` **disarms** the listener it
+    /// created — that one object, never the view — and releases the global
+    /// references it holds to both (this arm's `Drop`, [`ListenerHandle`]'s
+    /// own doc). Attaching `view` again for the same `kinds` replaces the
+    /// view's listener outright, so `state.handle = ctx.attach_listener(..)`
+    /// is safe: the old handle's drop silences only the old listener, which
+    /// the view no longer holds.
     ///
     /// Latches and answers `None` when `kinds` is empty, the listener class
     /// cannot be loaded, or a setter throws — typically
     /// [`ListenerKinds::TOGGLED`]/[`ListenerKinds::VALUE_CHANGED`] asked of a
     /// view that is no `CompoundButton`/`SeekBar` (`NoSuchMethodError`). A
     /// failure part-way is unwound before this answers `None`: whatever
-    /// setter already succeeded is nulled again first (`NativeCtx`'s own
-    /// `attach_listener`), so no stray interface survives it.
+    /// setter this same call already succeeded with is nulled again first
+    /// (`NativeCtx`'s own `attach_listener` — the one place nulling is
+    /// identity-safe, since nothing can have replaced those interfaces in
+    /// between), so no stray interface survives it.
     pub fn attach_listener(
         &mut self,
         view: &jni::objects::JObject<'_>,
@@ -693,11 +708,15 @@ impl ComponentCtx<'_, '_, '_> {
             kinds.contains(ListenerKinds::TOGGLED),
             kinds.contains(ListenerKinds::VALUE_CHANGED),
         ) {
-            Ok(view) => {
+            Ok((view, listener)) => {
                 self.note_attached(kinds);
                 Some(ListenerHandle {
                     kinds,
-                    inner: ListenerInner { view },
+                    inner: ListenerInner {
+                        _view: view,
+                        listener,
+                        _not_send: PhantomData,
+                    },
                 })
             }
             Err(error) => {
@@ -708,10 +727,13 @@ impl ComponentCtx<'_, '_, '_> {
     }
 
     /// Detach what `handle` attached and release it — the explicit spelling
-    /// of dropping the handle, whose `Drop` already nulls the interfaces it
-    /// set and releases the global reference (this arm's `Drop`, matching iOS
-    /// and macOS below). For a component that stops listening while its view
-    /// lives on, or that detaches in `dispose`, as the built-in controls do.
+    /// of dropping the handle, whose `Drop` already disarms the listener it
+    /// created and releases both global references (this arm's `Drop`; iOS
+    /// and macOS below release their own target the same way). For a
+    /// component that stops listening while its view lives on, or that
+    /// detaches in `dispose`, as the built-in controls do. The view's
+    /// interface keeps the disarmed, inert listener until a later attach
+    /// replaces it or the view dies — the view itself is never mutated here.
     ///
     /// Consuming `handle` here is what makes a double detach impossible: a
     /// `ListenerHandle`'s fields cannot be moved out of it individually once
@@ -1462,25 +1484,34 @@ impl std::fmt::Debug for ListenerKinds {
 ///
 /// **Dropping it is the release, on every arm**, and `State` is dropped
 /// immediately after [`NativeComponent::dispose`] returns, so a listener is
-/// released with the view it listens to by construction: on Android the
-/// interfaces this handle attached are nulled off the view first (obtaining a
-/// JNI env from the process VM, since a `Drop` carries no context of its own —
-/// see the impl below), then the handle's global reference to the view is
-/// deleted; on iOS and macOS the target-action pairs it added are removed
-/// from the control first — its target is held weakly by UIKit and AppKit, so
-/// this handle is the target's only strong reference — and then the target is
-/// released. [`ComponentCtx::detach_listener`] is the explicit form on every
-/// arm: dropping the handle early rather than waiting for `State` to go.
+/// released with the view it listens to by construction. A release only ever
+/// affects **this handle's own listener**, never one a later attach set:
 ///
-/// Every arm's `Drop` runs on the main thread by construction — a handle
-/// lives in a component's `State`, which the runtime drops there
-/// (`crate::component`'s module doc, *Every method here runs on the platform
-/// main thread*). A handle dropped off it would race whatever the main
-/// thread is doing to the same view/control concurrently, which nothing here
-/// guards against; on Android the JNI env is reachable from any attached
-/// thread regardless (see the impl below), so a background drop would not
-/// fail loudly — it would silently mutate a `View` that only the main thread
-/// may touch.
+/// - **Android** disarms the `FrustNativeListener` this handle created — a
+///   `@Volatile` flag every callback checks before reporting — through a JNI
+///   env obtained from the process VM (a `Drop` carries no context of its
+///   own; see the impl below), then deletes its global references to the
+///   listener and the view. **The view is never mutated**: its
+///   `setOn*Listener` slots hold one listener each, replace it outright and
+///   expose no getter, so nulling one could wipe a newer listener. The slot
+///   keeps the disarmed, inert object until a later attach replaces it or the
+///   view dies.
+/// - **iOS** removes the target-action pairs this handle's own target added,
+///   and **macOS** clears the control's target/action only while they are
+///   still this handle's target — UIKit and AppKit hold the target weakly, so
+///   this handle is its only strong reference — then the target is released.
+///
+/// So `state.handle = ctx.attach_listener(&view, kinds)` on a view that
+/// already carries a handle for the same kinds is safe on every arm: the
+/// assignment drops the old handle, which silences only the old listener.
+/// [`ComponentCtx::detach_listener`] is the explicit form on every arm:
+/// dropping the handle early rather than waiting for `State` to go.
+///
+/// The handle is `!Send`/`!Sync` on every platform arm (Android as well as
+/// iOS/macOS), so it stays on the main thread the runtime creates and drops
+/// component `State` on. Even so, Android's release is thread-safe by
+/// construction — it flips a volatile flag on its own listener and touches no
+/// `View` — so no drop path can corrupt a view from the wrong thread.
 #[must_use = "a dropped ListenerHandle releases its listener at once — keep it in State"]
 pub struct ListenerHandle {
     kinds: ListenerKinds,
@@ -1497,10 +1528,17 @@ impl ListenerHandle {
 /// [`ListenerHandle`]'s per-platform payload.
 #[cfg(target_os = "android")]
 struct ListenerInner {
-    /// A global reference to the view the listener was set on — what
-    /// [`ComponentCtx::detach_listener`] (and this handle's own `Drop`) clear
-    /// the listener interfaces off before releasing.
-    view: jni::refs::Global<jni::objects::JObject<'static>>,
+    /// A global reference to the view the listener was set on. Never mutated
+    /// by the release — held so the view outlives every handle that names it,
+    /// exactly as the Apple arms retain their control.
+    _view: jni::refs::Global<jni::objects::JObject<'static>>,
+    /// A global reference to the `FrustNativeListener` this handle created —
+    /// the one object the handle's `Drop` disarms.
+    listener: jni::refs::Global<jni::objects::JObject<'static>>,
+    /// Makes [`ListenerHandle`] `!Send`/`!Sync` on Android, matching the
+    /// Apple arms (whose `Retained` fields already are): `State` lives and
+    /// dies on the platform main thread.
+    _not_send: PhantomData<*const ()>,
 }
 
 /// [`ListenerHandle`]'s per-platform payload.
@@ -1534,49 +1572,65 @@ type ListenerInner = HostListener;
 /// the same way the context-free dispatch-boundary guard does
 /// (`frust_plugin::android::vm` +
 /// [`with_top_local_frame`](jni::JavaVM::with_top_local_frame), module doc's
-/// *Dispatch-boundary exception guard*), then nulls exactly this handle's
-/// `kinds` off the view through the same setters `NativeCtx::detach_listener`
-/// (`crate::android::ctx`) uses for every other caller, and lets the `Global`
-/// go.
+/// *Dispatch-boundary exception guard*), then **disarms this handle's own
+/// listener** — `FrustNativeListener.disarm()` through
+/// `NativeCtx::disarm_listener` (`crate::android::ctx`) — and lets both
+/// `Global`s go. It never calls a `setOn*Listener` setter: the view may
+/// already hold a newer attach's listener in the same slot (the defect a
+/// nulling release had — [`ListenerHandle`]'s own doc).
 ///
-/// A `Drop` that cannot reach an env — no platform handles installed yet, or
-/// the VM cannot supply one — logs at `warn` and still releases the global
-/// reference: the view is left with a stale listener interface in that case
-/// (Bridge's per-slot family gate still refuses the event, since the slot
-/// that attached it is already gone), never a panic. Same for a setter that
-/// throws while nulling: logged, not propagated — a `Drop` has no `Result` to
-/// return it through.
+/// The sequence, in order:
+///
+/// 1. Obtain the VM. None — no platform handles installed yet — logs at
+///    `warn` and skips to step 4.
+/// 2. Inside `with_top_local_frame`, **check for a pending Java exception
+///    first**. Making a JNI call with one pending is undefined behaviour, and
+///    a `Drop` may run mid-unwind of a JNI export that has not cleared its
+///    own; so when one is pending the disarm is skipped and logged at `warn`
+///    (naming the kinds), and the exception is left for its owner to handle.
+/// 3. Otherwise call `disarm()`. A failure (the method missing, a throw — the
+///    exception is cleared by `run_jni`) is logged at `warn`, never
+///    propagated and never a panic: a `Drop` has no `Result` to return it
+///    through.
+/// 4. Both `Global`s drop, issuing `DeleteGlobalRef` — which is on JNI's
+///    short list of calls that are safe with an exception pending.
+///
+/// A listener left armed by step 1 or 2's early out can still fire; the
+/// bridge's per-slot family gate refuses its event once the slot that
+/// attached it is gone, so the cost is a wasted crossing, not a misroute.
 #[cfg(target_os = "android")]
 impl Drop for ListenerHandle {
     fn drop(&mut self) {
+        let kinds = self.kinds;
         let vm = match frust_plugin::android::vm() {
             Ok(vm) => vm,
             Err(error) => {
                 log::warn!(
                     "frust-native-widgets: ListenerHandle drop ({kinds}) could not reach a JNI \
-                     env ({error}) — the view keeps its listener interface(s) set; releasing only \
-                     the global reference to it",
-                    kinds = self.kinds
+                     env ({error}) — the listener stays armed; releasing only the global \
+                     references"
                 );
                 return;
             }
         };
-        let kinds = self.kinds;
-        let view = &self.inner.view;
+        let listener = &self.inner.listener;
         let outcome = vm.with_top_local_frame(|env| {
+            if env.exception_check() {
+                return Ok::<Option<Result<(), NativeWidgetError>>, jni::errors::Error>(None);
+            }
             let mut ctx = PlatformCtx::detached(env);
-            Ok::<Result<(), NativeWidgetError>, jni::errors::Error>(ctx.detach_listener(
-                view,
-                kinds.contains(ListenerKinds::CLICK),
-                kinds.contains(ListenerKinds::TOGGLED),
-                kinds.contains(ListenerKinds::VALUE_CHANGED),
-            ))
+            Ok(Some(ctx.disarm_listener(listener)))
         });
         match outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => log::warn!(
-                "frust-native-widgets: ListenerHandle drop ({kinds}) failed nulling the view's \
-                 listener interface(s): {error}"
+            Ok(Some(Ok(()))) => {}
+            Ok(None) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) found a Java exception \
+                 pending — skipped disarming the listener (no JNI call is safe with one pending); \
+                 releasing only the global references"
+            ),
+            Ok(Some(Err(error))) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) failed disarming its \
+                 listener: {error}"
             ),
             Err(error) => log::warn!(
                 "frust-native-widgets: ListenerHandle drop ({kinds}) could not reach a JNI env: \
@@ -4384,6 +4438,82 @@ mod tests {
                 "detachListener 7 click|toggled".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn replacing_a_handle_on_the_same_view_keeps_the_new_listener_live() {
+        // The replace-handle pattern: `update` re-attaches the SAME view for
+        // the SAME kinds and assigns over the old handle, which drops it. A
+        // release that nulled the view's interface (Android's round-1 Drop)
+        // would wipe the listener just set; a release that touches only the
+        // old handle's own listener must leave the new one live and the
+        // slot's family still admitted.
+        struct Rewire;
+
+        impl NativeComponent for Rewire {
+            type Props = GaugeProps;
+            type State = (u64, Option<ListenerHandle>);
+
+            fn create(
+                &self,
+                ctx: &mut ComponentCtx<'_, '_, '_>,
+                _props: &Self::Props,
+            ) -> Option<(NativeRoot, Self::State)> {
+                let identity = next_identity();
+                let listener = ctx.attach_listener(identity, ListenerKinds::CLICK)?;
+                Some((ctx.root(identity)?, (identity, Some(listener))))
+            }
+
+            fn update(
+                &self,
+                ctx: &mut ComponentCtx<'_, '_, '_>,
+                state: &mut Self::State,
+                _old: &Self::Props,
+                _new: &Self::Props,
+            ) {
+                // Handle A is dropped by this assignment, after handle B's
+                // attach has already run.
+                state.1 = ctx.attach_listener(state.0, ListenerKinds::CLICK);
+            }
+        }
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        publish(96, Rc::new(Rewire), props("rewire", 1));
+        let first = BridgeProps {
+            slot: 96,
+            props: props("rewire", 1),
+        };
+        let (_view, mut state) = Bridge::<Rewire>::create(&mut ctx, &first).unwrap();
+        assert_eq!(live_listener_count(), 1, "create attached handle A");
+
+        let second = BridgeProps {
+            slot: 96,
+            props: props("rewire", 2),
+        };
+        Bridge::<Rewire>::update(&mut ctx, &mut state, &first, &second).unwrap();
+        assert_eq!(
+            live_listener_count(),
+            1,
+            "handle A was released by the reassignment and handle B is live"
+        );
+        assert_eq!(
+            Bridge::<Rewire>::on_event(&mut state, click()),
+            Some(EventPayload::Click),
+            "a click is still admitted after the old handle dropped"
+        );
+
+        drop(state);
+        assert_eq!(live_listener_count(), 0, "handle B goes with the state");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("attachListener "))
+                .count(),
+            2,
+            "one attach in create, one in update: {calls:?}"
+        );
+        forget(96);
     }
 }
 

@@ -31,14 +31,42 @@ import android.widget.CompoundButton
 import android.widget.DatePicker
 import android.widget.SeekBar
 
+/**
+ * The one listener class, bound to one slot.
+ *
+ * **Disarm, never unset.** An instance starts armed; [disarm] flips it for
+ * good, and every override below returns before reaching `nativeOnEvent`
+ * once it has. This is how a component's `ListenerHandle` (Rust,
+ * `plugins/native-widgets/src/component.rs`) releases its listener: Android's
+ * `setOn*Listener` setters each hold ONE listener, replace it outright and
+ * expose no getter, so nulling an interface cannot know whether it still holds
+ * *this* instance — a newer attach on the same view may already have replaced
+ * it. Disarming touches only this object, never the view, so it is safe from
+ * any thread (the flag is `@Volatile`) and cannot wipe a newer listener. A
+ * disarmed instance left set on a view is inert: it stays there until a later
+ * attach replaces it or the view itself dies, and takes nothing with it.
+ */
 class FrustNativeListener(private val slotId: Long) :
     View.OnClickListener,
     CompoundButton.OnCheckedChangeListener,
     SeekBar.OnSeekBarChangeListener,
     DatePicker.OnDateChangedListener {
 
+    /** Cleared once, by [disarm]; never set again. */
+    @Volatile private var armed = true
+
+    /**
+     * Stop this instance from reporting anything, permanently — the Rust
+     * `ListenerHandle` release (see the class doc). Idempotent; mutates only
+     * this object, so it is safe off the main thread.
+     */
+    fun disarm() {
+        armed = false
+    }
+
     /** `detail` is unused (0) for a click. */
     override fun onClick(v: View) {
+        if (!armed) return
         nativeOnEvent(slotId, KIND_CLICK, 0L)
     }
 
@@ -47,6 +75,7 @@ class FrustNativeListener(private val slotId: Long) :
      * `pack_bool`/`unpack_bool` in `plugins/native-widgets/src/events.rs`).
      */
     override fun onCheckedChanged(buttonView: CompoundButton, isChecked: Boolean) {
+        if (!armed) return
         nativeOnEvent(slotId, KIND_TOGGLED, if (isChecked) 1L else 0L)
     }
 
@@ -57,17 +86,20 @@ class FrustNativeListener(private val slotId: Long) :
      * See the Rust side's `pack_value_changed`/`unpack_value_changed`.
      */
     override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+        if (!armed) return
         val detail = (progress.toLong() and 0xFFFFFFFFL) or (if (fromUser) 1L shl 32 else 0L)
         nativeOnEvent(slotId, KIND_VALUE_CHANGED, detail)
     }
 
     /** `detail` is unused (0) — a drag gesture starting. */
     override fun onStartTrackingTouch(seekBar: SeekBar) {
+        if (!armed) return
         nativeOnEvent(slotId, KIND_DRAG_START, 0L)
     }
 
     /** `detail` is unused (0) — a drag gesture ending. */
     override fun onStopTrackingTouch(seekBar: SeekBar) {
+        if (!armed) return
         nativeOnEvent(slotId, KIND_DRAG_END, 0L)
     }
 
@@ -79,6 +111,7 @@ class FrustNativeListener(private val slotId: Long) :
      * `plugins/native-widgets/src/events.rs`, which also validates the date.
      */
     override fun onDateChanged(view: DatePicker, year: Int, monthOfYear: Int, dayOfMonth: Int) {
+        if (!armed) return
         val detail = ((year.toLong() and 0xFFFFL) shl 16) or
             (((monthOfYear + 1).toLong() and 0xFFL) shl 8) or
             (dayOfMonth.toLong() and 0xFFL)
