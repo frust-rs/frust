@@ -221,6 +221,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # arm must tell an iPad from an iPhone before presenting. `block2`: every
 # block-taking member (an alert action's handler, `present…`'s completion) is
 # gated on it. `UIImage` and `UIResponder` are already listed above.
+# `NSLayoutAnchor` + `NSLayoutConstraint` + `UILayoutGuide`: the sheet arm
+# (`src/present/apple_sheet.rs`) pins its content `UIStackView` to the root
+# view's `safeAreaLayoutGuide` with Auto Layout anchors (and caps an image
+# row's height) — the anchor accessors, `constraint…Anchor…`/
+# `activateConstraints:` and the guide type are gated on these three. Features
+# only, no new crate (`NSLayoutConstraint`'s own `bitflags` edge is already
+# resolved through `UIView`/`UIControl`), so no lockfile change.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -257,6 +264,9 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIPopoverPresentationController",
     "UISheetPresentationController",
     "UIStackView",
+    "NSLayoutAnchor",
+    "NSLayoutConstraint",
+    "UILayoutGuide",
     "UIDevice",
     "block2",
     "objc2-core-foundation",

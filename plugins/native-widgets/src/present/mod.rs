@@ -1,5 +1,6 @@
-//! Native presentations: platform-owned modal UI (an alert today) requested
-//! imperatively from Rust and resolved to exactly one terminal outcome.
+//! Native presentations: platform-owned modal UI (an alert, and on iOS/iPadOS
+//! a sheet) requested imperatively from Rust and resolved to exactly one
+//! terminal outcome.
 //!
 //! # Why not a platform-view slot
 //!
@@ -7,20 +8,24 @@
 //! that goes missing from the ingest stream and knows nothing about modal
 //! stacking. A modal belongs to the host instead — the resumed Android
 //! `Activity`, the topmost iOS view controller, the macOS key window — so a
-//! presentation is a **request** ([`show_alert`]) answered by a
-//! [`Presentation`] future, never a node in the tree.
+//! presentation is a **request** ([`show_alert`], [`show_sheet`]) answered by
+//! a [`Presentation`] future, never a node in the tree.
 //!
 //! # The contract
 //!
-//! - **One in flight, process-wide.** A second [`show_alert`] while one is
-//!   live resolves [`PresentError::Busy`] immediately — no queueing, no
-//!   replacing.
+//! - **One in flight, process-wide — across every kind.** A second request
+//!   while one is live resolves [`PresentError::Busy`] immediately — no
+//!   queueing, no replacing. The slot is shared by every presentation kind:
+//!   an alert and a sheet can never both be live, so a [`show_sheet`] while
+//!   an alert is up (or the reverse) is refused `Busy` too.
 //! - **Exactly one terminal outcome.** Each accepted request is stamped with
 //!   a fresh, never-zero **generation**, and resolves through a one-shot
 //!   channel whose sending half is consumed by its first use: an action, a
 //!   cancellation, a programmatic [`dismiss`], or the host going away
-//!   ([`AlertOutcome::HostLost`]). A platform callback arriving for any other
-//!   generation finds no live entry and is dropped.
+//!   ([`AlertOutcome::HostLost`], [`SheetOutcome::HostLost`]). A platform
+//!   callback arriving for any other generation finds no live entry and is
+//!   dropped. A sheet's detent changes are **not** outcomes: they stream
+//!   through [`SheetSpec::on_detent`] while the sheet stays live.
 //! - **The slot frees itself.** It is released when the outcome is sent
 //!   (before the caller is woken, so the caller's continuation may present
 //!   again), when an arm drops its sender without sending (resolving
@@ -35,7 +40,7 @@
 //!
 //! # Platform arms
 //!
-//! `AlertHost` is the seam, selected by `cfg` per OS:
+//! `AlertHost` is the alert seam, selected by `cfg` per OS:
 //!
 //! - **iOS/iPadOS** — `apple_alert`: a `UIAlertController` (alert or action
 //!   sheet, an iPad action sheet anchored as a popover) built over
@@ -52,7 +57,14 @@
 //!   the live-presentation guard).
 //! - **Every other target** — `unsupported`: [`PresentError::Unsupported`].
 //!
-//! `apple_host` holds what both Apple arms share: host discovery, the
+//! `SheetHost` is the sheet seam: **iOS/iPadOS** — `apple_sheet`, a
+//! plugin-owned `UIViewController` subclass presented as a page sheet under
+//! `UISheetPresentationController` (detents, grabber, adaptive dismissal);
+//! **every other target** — this module's own `UnsupportedSheet`
+//! ([`PresentError::Unsupported`]; a macOS `NSPopover` or Android
+//! `BottomSheetDialog` arm is follow-up work).
+//!
+//! `apple_host` holds what every Apple arm shares: host discovery, the
 //! main-queue hop and the live-presentation guard.
 
 mod oneshot;
@@ -67,6 +79,8 @@ mod appkit_alert;
 mod apple_alert;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 mod apple_host;
+#[cfg(target_os = "ios")]
+mod apple_sheet;
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 mod unsupported;
 
@@ -79,13 +93,18 @@ use apple_alert::Host as PlatformHost;
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 use unsupported::Host as PlatformHost;
 
+#[cfg(not(target_os = "ios"))]
+use UnsupportedSheet as SheetPlatformHost;
+#[cfg(target_os = "ios")]
+use apple_sheet::Host as SheetPlatformHost;
+
 pub(crate) use oneshot::Sender;
 
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -300,6 +319,392 @@ pub enum AlertOutcome {
     HostLost,
 }
 
+/// The most actions one sheet takes — the same ceiling as an alert's
+/// ([`MAX_ALERT_ACTIONS`]): a sheet's action rows are a short choice, not a
+/// menu.
+pub const MAX_SHEET_ACTIONS: usize = 3;
+
+/// A sheet's content — the constrained schema a native sheet renders with
+/// platform views only (decision D4): a title, a message, an optional image
+/// and up to [`MAX_SHEET_ACTIONS`] action rows, laid out top to bottom in
+/// that order. Arbitrary frust content is deliberately not accepted: frust
+/// has a single render root, and a `platform_view` slot never mounts inside
+/// a presented controller.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SheetContent {
+    /// A bold headline; `None` (or empty) omits the row.
+    pub title: Option<String>,
+    /// Body text, wrapped over as many lines as it needs; `None` (or empty)
+    /// omits the row.
+    pub message: Option<String>,
+    /// Encoded image bytes (PNG/JPEG/HEIC — whatever the platform decodes),
+    /// shown aspect-fit under the text. Bytes the platform cannot decode omit
+    /// the row (logged), never fail the sheet.
+    pub image: Option<Arc<[u8]>>,
+    /// The action rows, in presentation order.
+    pub actions: Vec<SheetAction>,
+}
+
+impl SheetContent {
+    /// Empty content — add rows with the `with_*` builders. Presenting it
+    /// empty is refused ([`SheetSpec::validate`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the title row.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the message row.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
+    }
+
+    /// Set the image row from encoded bytes.
+    #[must_use]
+    pub fn with_image(mut self, bytes: impl Into<Arc<[u8]>>) -> Self {
+        self.image = Some(bytes.into());
+        self
+    }
+
+    /// Append one action row.
+    #[must_use]
+    pub fn with_action(
+        mut self,
+        id: impl Into<String>,
+        label: impl Into<String>,
+        role: ActionRole,
+    ) -> Self {
+        self.actions.push(SheetAction {
+            id: id.into(),
+            label: label.into(),
+            role,
+        });
+        self
+    }
+
+    /// No row at all would render: no non-empty title or message, no image
+    /// and no action.
+    fn is_empty(&self) -> bool {
+        self.title.as_deref().is_none_or(str::is_empty)
+            && self.message.as_deref().is_none_or(str::is_empty)
+            && self.image.is_none()
+            && self.actions.is_empty()
+    }
+}
+
+/// One sheet action row — a system button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SheetAction {
+    /// Reported back verbatim as [`SheetOutcome::Action`] when tapped.
+    pub id: String,
+    /// The button's visible label.
+    pub label: String,
+    /// How the platform styles it: `Default` wears the sheet's tint,
+    /// `Destructive` the system red, `Cancel` the secondary label colour. A
+    /// sheet keeps every row where the spec puts it (unlike an alert, which
+    /// moves its `Cancel` action).
+    pub role: ActionRole,
+}
+
+/// A height a sheet rests at.
+///
+/// **iPad in regular width ignores detents**: UIKit presents a page sheet
+/// there as a centered form sheet at a fixed size, and only an edge-attached
+/// presentation (compact width, or compact height with
+/// `prefersEdgeAttachedInCompactHeight`) honours them — see
+/// `docs/LIMITATIONS.md`'s `native-sheet-ipad-regular-width-detents`. Never
+/// assume detent parity across idioms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Detent {
+    /// About half the screen height (UIKit's `mediumDetent`).
+    Medium,
+    /// The full-height sheet (UIKit's `largeDetent`).
+    Large,
+    /// A fraction `0 < f <= 1` of the largest height the sheet can take.
+    /// Needs iOS 16 (`customDetentWithIdentifier:resolver:`), checked at
+    /// runtime: below it the arm substitutes the nearest of [`Self::Medium`]
+    /// (`f <= 0.75`) or [`Self::Large`] and logs once, and
+    /// [`SheetSpec::on_detent`] then reports that substitute.
+    Custom(f64),
+}
+
+impl Detent {
+    /// A [`Self::Custom`] fraction must be finite with `0 < f <= 1`.
+    fn is_valid(self) -> bool {
+        match self {
+            Self::Medium | Self::Large => true,
+            Self::Custom(fraction) => fraction.is_finite() && fraction > 0.0 && fraction <= 1.0,
+        }
+    }
+
+    /// The system detent a [`Self::Custom`] stands in as where custom
+    /// detents do not exist (iOS 15): the nearest of [`Self::Medium`]
+    /// (`f <= 0.75`, the midpoint between about-half and all) and
+    /// [`Self::Large`]. Every other detent is itself.
+    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    pub(crate) fn system_fallback(self) -> Self {
+        match self {
+            Self::Custom(fraction) if fraction <= 0.75 => Self::Medium,
+            Self::Custom(_) => Self::Large,
+            other => other,
+        }
+    }
+}
+
+/// The callback [`SheetSpec::on_detent`] registers, behind an `Arc` so the
+/// spec stays `Clone`. Compared by identity, printed opaquely.
+#[derive(Clone)]
+struct DetentListener(Arc<dyn Fn(Detent) + Send + Sync>);
+
+impl fmt::Debug for DetentListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DetentListener(..)")
+    }
+}
+
+impl PartialEq for DetentListener {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What a sheet asks: its [`SheetContent`], the detents it rests at and how
+/// its sheet chrome behaves.
+///
+/// Validated when submitted ([`show_sheet`]), before any platform API is
+/// touched — see [`Self::validate`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetSpec {
+    /// What the sheet shows.
+    pub content: SheetContent,
+    /// The heights the sheet may rest at, smallest first by convention;
+    /// non-empty, no duplicates. Default `[Medium, Large]`.
+    pub detents: Vec<Detent>,
+    /// The detent the sheet opens at; `None` lets the platform choose (the
+    /// smallest). Must be one of [`Self::detents`].
+    pub selected: Option<Detent>,
+    /// Show the grabber bar at the top edge (default `true`).
+    pub grabber: bool,
+    /// Whether scrolling to a scroll view's edge grows the sheet to its next
+    /// detent instead of scrolling (UIKit's
+    /// `prefersScrollingExpandsWhenScrolledToEdge`; default `true`).
+    pub scrolling_expands: bool,
+    /// The largest detent at which the content behind the sheet stays
+    /// undimmed and interactive; `None` dims at every detent. Must be one of
+    /// [`Self::detents`].
+    pub largest_undimmed: Option<Detent>,
+    /// The sheet's corner radius in points; `None` keeps the system radius.
+    pub corner_radius: Option<f64>,
+    /// Whether the user may swipe the sheet away — answered as
+    /// [`SheetOutcome::Dismissed`]`(`[`DismissReason::User`]`)`. `false`
+    /// leaves only an action or a programmatic dismissal (default `true`).
+    pub dismissible: bool,
+    /// A packed ARGB tint the `Default`-role action rows (and any other
+    /// tint-following chrome) wear; `None` keeps the system tint. With the
+    /// `frust-api` feature, `SheetSpec::with_theme` fills it (and
+    /// [`Self::dark`]) from the active theme.
+    pub tint: Option<u32>,
+    /// Pin the sheet's light/dark appearance; `None` follows the system.
+    pub dark: Option<bool>,
+    on_detent: Option<DetentListener>,
+}
+
+impl SheetSpec {
+    /// A dismissible `[Medium, Large]` sheet with a grabber, showing
+    /// `content`.
+    pub fn new(content: SheetContent) -> Self {
+        Self {
+            content,
+            detents: vec![Detent::Medium, Detent::Large],
+            selected: None,
+            grabber: true,
+            scrolling_expands: true,
+            largest_undimmed: None,
+            corner_radius: None,
+            dismissible: true,
+            tint: None,
+            dark: None,
+            on_detent: None,
+        }
+    }
+
+    /// Replace the detents.
+    #[must_use]
+    pub fn with_detents(mut self, detents: impl IntoIterator<Item = Detent>) -> Self {
+        self.detents = detents.into_iter().collect();
+        self
+    }
+
+    /// Open at `detent` (one of [`Self::detents`]).
+    #[must_use]
+    pub fn with_selected(mut self, detent: Detent) -> Self {
+        self.selected = Some(detent);
+        self
+    }
+
+    /// Set [`Self::dismissible`].
+    #[must_use]
+    pub fn with_dismissible(mut self, dismissible: bool) -> Self {
+        self.dismissible = dismissible;
+        self
+    }
+
+    /// Stream the user's detent changes into `listener` — intermediate
+    /// events while the sheet stays live, never terminal outcomes. Called on
+    /// the platform's main thread (frust's UI thread), once per change the
+    /// **user** makes (a drag, a grabber tap); a programmatic
+    /// [`SheetHandle::select_detent`] is not echoed back, following UIKit.
+    #[must_use]
+    pub fn on_detent(mut self, listener: impl Fn(Detent) + Send + Sync + 'static) -> Self {
+        self.on_detent = Some(DetentListener(Arc::new(listener)));
+        self
+    }
+
+    /// The listener [`Self::on_detent`] registered, if any.
+    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    pub(crate) fn detent_listener(&self) -> Option<Arc<dyn Fn(Detent) + Send + Sync>> {
+        self.on_detent
+            .as_ref()
+            .map(|listener| Arc::clone(&listener.0))
+    }
+
+    /// The submit-time validation: the content is not empty (a non-empty
+    /// title or message, an image or an action) and any image is non-empty
+    /// bytes; at most [`MAX_SHEET_ACTIONS`] actions, every action id
+    /// non-empty and unique; at least one detent, no duplicates, every
+    /// [`Detent::Custom`] fraction finite with `0 < f <= 1`; `selected` and
+    /// `largest_undimmed`, when given, among `detents`; a `corner_radius`,
+    /// when given, finite and non-negative.
+    ///
+    /// # Errors
+    /// [`PresentError::InvalidSpec`] naming the first rule broken.
+    pub fn validate(&self) -> Result<(), PresentError> {
+        let invalid = |message: String| Err(PresentError::InvalidSpec(message));
+        if self.content.is_empty() {
+            return invalid(
+                "a sheet needs content: a title, a message, an image or an action".to_string(),
+            );
+        }
+        if self.content.image.as_deref().is_some_and(<[u8]>::is_empty) {
+            return invalid("the sheet's image bytes are empty".to_string());
+        }
+        let actions = &self.content.actions;
+        if actions.len() > MAX_SHEET_ACTIONS {
+            return invalid(format!(
+                "a sheet takes at most {MAX_SHEET_ACTIONS} actions, got {}",
+                actions.len()
+            ));
+        }
+        for (index, action) in actions.iter().enumerate() {
+            if action.id.is_empty() {
+                return invalid(format!("action {index} has an empty id"));
+            }
+            if actions[..index].iter().any(|a| a.id == action.id) {
+                return invalid(format!("duplicate action id {:?}", action.id));
+            }
+        }
+        if self.detents.is_empty() {
+            return invalid("a sheet needs at least one detent".to_string());
+        }
+        for (index, detent) in self.detents.iter().enumerate() {
+            if !detent.is_valid() {
+                return invalid(format!(
+                    "detent {index} ({detent:?}): a custom fraction must be finite with \
+                     0 < f <= 1"
+                ));
+            }
+            if self.detents[..index].contains(detent) {
+                return invalid(format!("duplicate detent {detent:?}"));
+            }
+        }
+        for (name, detent) in [
+            ("selected", self.selected),
+            ("largest_undimmed", self.largest_undimmed),
+        ] {
+            if let Some(detent) = detent
+                && !self.detents.contains(&detent)
+            {
+                return invalid(format!("{name} ({detent:?}) is not one of the detents"));
+            }
+        }
+        if let Some(radius) = self.corner_radius
+            && !(radius.is_finite() && radius >= 0.0)
+        {
+            return invalid("the corner radius must be finite and non-negative".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Why a sheet went away without an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DismissReason {
+    /// The user swiped it down (only a [`SheetSpec::dismissible`] sheet).
+    User,
+    /// [`SheetHandle::dismiss`] (or [`dismiss`]) took it down.
+    Programmatic,
+}
+
+/// How a sheet ended — exactly one per accepted [`show_sheet`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SheetOutcome {
+    /// The user tapped the action row with this [`SheetAction::id`]; the
+    /// sheet has already finished dismissing itself.
+    Action(String),
+    /// The sheet went away without an action.
+    Dismissed(DismissReason),
+    /// The presenting host went away before the sheet was answered.
+    HostLost,
+}
+
+/// Names one accepted sheet: take it down or move it between detents. Stale
+/// once that sheet has resolved — both calls then do nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SheetHandle {
+    generation: u64,
+}
+
+impl SheetHandle {
+    /// The generic [`PresentationHandle`] for the same sheet ([`dismiss`]
+    /// takes it too).
+    pub fn presentation(&self) -> PresentationHandle {
+        PresentationHandle {
+            generation: self.generation,
+        }
+    }
+
+    /// Animate the sheet to `detent` — ignored (logged) when `detent` is not
+    /// one of its [`SheetSpec::detents`] or is an invalid
+    /// [`Detent::Custom`]. Not echoed to [`SheetSpec::on_detent`].
+    pub fn select_detent(&self, detent: Detent) {
+        select_detent_on::<SheetPlatformHost>(self, detent);
+    }
+
+    /// Take the sheet down; it resolves
+    /// [`SheetOutcome::Dismissed`]`(`[`DismissReason::Programmatic`]`)`
+    /// exactly once.
+    pub fn dismiss(&self) {
+        dismiss_sheet_on::<SheetPlatformHost>(self);
+    }
+}
+
+impl Presentation<SheetOutcome> {
+    /// The [`SheetHandle`] for this sheet — `None` when the request was
+    /// refused before anything was presented (like [`Self::handle`]).
+    pub fn sheet_handle(&self) -> Option<SheetHandle> {
+        self.handle.map(|handle| SheetHandle {
+            generation: handle.generation,
+        })
+    }
+}
+
 /// Why a presentation could not be shown or did not complete.
 ///
 /// `thiserror`-derived per `docs/CODE_STANDARDS.md`: callers match on the
@@ -323,7 +728,8 @@ pub enum PresentError {
     /// This platform has no native presentation of this kind.
     #[error("native presentation: unsupported on this platform")]
     Unsupported,
-    /// The request broke a submit-time rule (see [`AlertSpec`]).
+    /// The request broke a submit-time rule (see [`AlertSpec`] /
+    /// [`SheetSpec::validate`]).
     #[error("native presentation: invalid spec: {0}")]
     InvalidSpec(String),
     /// A platform failure not covered above (a JNI/Objective-C error, an arm
@@ -503,13 +909,13 @@ fn claim_clock() -> Option<Instant> {
 fn busy_refusal_message(generation: u64, age: Option<std::time::Duration>) -> String {
     match age {
         Some(duration) => format!(
-            "frust-native-widgets: alert request refused: presentation {} has been live for {:.1}s \
+            "frust-native-widgets: presentation request refused: presentation {} has been live for {:.1}s \
              — dismiss it through its handle or drop its future to free the slot",
             generation,
             duration.as_secs_f64()
         ),
         None => format!(
-            "frust-native-widgets: alert request refused: presentation {} has been live for \
+            "frust-native-widgets: presentation request refused: presentation {} has been live for \
              (age unavailable on this target) — dismiss it through its handle or drop its future to free the slot",
             generation
         ),
@@ -599,10 +1005,7 @@ fn show_alert_on<H: AlertHost>(spec: AlertSpec) -> Presentation<AlertOutcome> {
 fn dismiss_on<H: AlertHost>(handle: &PresentationHandle) {
     // Checked, then released, before calling into the host: the host may
     // resolve synchronously, which re-enters `release_if_live`.
-    let live = lock_active()
-        .as_ref()
-        .is_some_and(|slot| slot.generation == handle.generation);
-    if live {
+    if is_live(handle.generation) {
         H::dismiss(handle.generation);
     }
 }
@@ -620,10 +1023,111 @@ pub fn show_alert(spec: AlertSpec) -> Presentation<AlertOutcome> {
 }
 
 /// Take the presentation `handle` names down; it resolves
-/// [`AlertOutcome::Dismissed`] exactly once. A stale handle — its
-/// presentation already resolved, or superseded — is ignored.
+/// [`AlertOutcome::Dismissed`] — or, for a sheet,
+/// [`SheetOutcome::Dismissed`]`(`[`DismissReason::Programmatic`]`)` —
+/// exactly once. A stale handle — its presentation already resolved, or
+/// superseded — is ignored.
 pub fn dismiss(handle: &PresentationHandle) {
     dismiss_on::<PlatformHost>(handle);
+}
+
+/// The platform seam a sheet arm implements (selected by `cfg`, see the
+/// module doc's *Platform arms*). Shares the Busy slot, the generation guard
+/// and the `oneshot` channel with [`AlertHost`] — only the platform half
+/// differs.
+pub(crate) trait SheetHost {
+    /// Present `spec` for presentation `generation`, resolving `tx` exactly
+    /// once — later, from the platform's own callback — or return an error
+    /// synchronously without having sent anything. Never blocks for the
+    /// user's answer. `spec` has already passed [`SheetSpec::validate`].
+    fn show_sheet(
+        spec: SheetSpec,
+        tx: Sender<SheetOutcome>,
+        generation: u64,
+    ) -> Result<(), PresentError>;
+
+    /// Take presentation `generation` down programmatically, resolving it
+    /// [`SheetOutcome::Dismissed`]`(`[`DismissReason::Programmatic`]`)`. Must
+    /// ignore a generation it is not presenting (the same race
+    /// [`AlertHost::dismiss`] names).
+    fn dismiss(generation: u64);
+
+    /// Move presentation `generation` to `detent` (already validated as a
+    /// [`Detent`]; membership in the spec's detents is the arm's check).
+    /// Must ignore a generation it is not presenting.
+    fn select_detent(generation: u64, detent: Detent);
+}
+
+/// The sheet arm of every target without a native sheet (everything but
+/// iOS/iPadOS today — macOS, Android, desktop Linux/Windows, web): every
+/// request resolves [`PresentError::Unsupported`] on its first poll, and
+/// nothing is ever live to dismiss or move.
+#[cfg_attr(target_os = "ios", allow(dead_code))]
+pub(crate) struct UnsupportedSheet;
+
+impl SheetHost for UnsupportedSheet {
+    fn show_sheet(
+        _spec: SheetSpec,
+        _tx: Sender<SheetOutcome>,
+        _generation: u64,
+    ) -> Result<(), PresentError> {
+        Err(PresentError::Unsupported)
+    }
+
+    fn dismiss(_generation: u64) {}
+
+    fn select_detent(_generation: u64, _detent: Detent) {}
+}
+
+fn show_sheet_on<H: SheetHost>(spec: SheetSpec) -> Presentation<SheetOutcome> {
+    if let Err(err) = spec.validate() {
+        return Presentation::ready(Err(err));
+    }
+    submit(|tx, generation| H::show_sheet(spec, tx, generation))
+}
+
+/// Whether `generation` holds the Busy slot — the stale-handle filter
+/// [`dismiss_on`] applies, shared by the sheet handle's calls. Released
+/// before the caller reaches the host, which may resolve synchronously.
+fn is_live(generation: u64) -> bool {
+    lock_active()
+        .as_ref()
+        .is_some_and(|slot| slot.generation == generation)
+}
+
+fn dismiss_sheet_on<H: SheetHost>(handle: &SheetHandle) {
+    if is_live(handle.generation) {
+        H::dismiss(handle.generation);
+    }
+}
+
+fn select_detent_on<H: SheetHost>(handle: &SheetHandle, detent: Detent) {
+    if !detent.is_valid() {
+        log::warn!(
+            "frust-native-widgets: select_detent({detent:?}) ignored: a custom fraction must be \
+             finite with 0 < f <= 1"
+        );
+        return;
+    }
+    if is_live(handle.generation) {
+        H::select_detent(handle.generation, detent);
+    }
+}
+
+/// Present a native sheet — see the module doc's *The contract*.
+///
+/// The returned [`Presentation`] resolves [`SheetOutcome`] once the user
+/// (an action row, a swipe-down), [`SheetHandle::dismiss`] or the host going
+/// away ends the sheet, or [`PresentError`]: `InvalidSpec` / `Busy` (another
+/// presentation of any kind is live) / `Unsupported` (every platform but
+/// iOS/iPadOS) on its first poll, or a later `NoHost`/`Platform` from the
+/// arm. [`Presentation::sheet_handle`] names it for
+/// [`SheetHandle::select_detent`] and [`SheetHandle::dismiss`].
+///
+/// On iPad in regular width the system shows a centered form sheet and
+/// ignores the detents (see [`Detent`]).
+pub fn show_sheet(spec: SheetSpec) -> Presentation<SheetOutcome> {
+    show_sheet_on::<SheetPlatformHost>(spec)
 }
 
 /// The integer outcome codes the Android presenter reports through its one
@@ -1213,6 +1717,378 @@ mod tests {
             wire::alert_outcome(99, -1, &ids),
             Err(PresentError::Platform(_))
         ));
+    }
+
+    // --- Sheets ----------------------------------------------------------
+
+    /// The sheet counterpart of [`FakeState`]: one live sender, and a record
+    /// of every show / dismiss / detent move that reached the host.
+    #[derive(Default)]
+    struct FakeSheetState {
+        live: Option<(u64, Sender<SheetOutcome>)>,
+        shown: usize,
+        dismissed: Vec<u64>,
+        moved: Vec<(u64, Detent)>,
+    }
+
+    thread_local! {
+        static FAKE_SHEET: RefCell<FakeSheetState> = RefCell::new(FakeSheetState::default());
+    }
+
+    struct FakeSheetHost;
+
+    impl SheetHost for FakeSheetHost {
+        fn show_sheet(
+            _spec: SheetSpec,
+            tx: Sender<SheetOutcome>,
+            generation: u64,
+        ) -> Result<(), PresentError> {
+            FAKE_SHEET.with(|fake| {
+                let mut fake = fake.borrow_mut();
+                fake.shown += 1;
+                fake.live = Some((generation, tx));
+            });
+            Ok(())
+        }
+
+        fn dismiss(generation: u64) {
+            let taken = FAKE_SHEET.with(|fake| {
+                let mut fake = fake.borrow_mut();
+                fake.dismissed.push(generation);
+                match &fake.live {
+                    Some((live, _)) if *live == generation => fake.live.take(),
+                    _ => None,
+                }
+            });
+            if let Some((_, tx)) = taken {
+                tx.send(Ok(SheetOutcome::Dismissed(DismissReason::Programmatic)));
+            }
+        }
+
+        fn select_detent(generation: u64, detent: Detent) {
+            FAKE_SHEET.with(|fake| fake.borrow_mut().moved.push((generation, detent)));
+        }
+    }
+
+    /// The platform delivering `outcome` for whatever sheet is live — `false`
+    /// when none is.
+    fn sheet_resolves(outcome: Result<SheetOutcome, PresentError>) -> bool {
+        match FAKE_SHEET.with(|fake| fake.borrow_mut().live.take()) {
+            Some((_, tx)) => {
+                tx.send(outcome);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`isolated`] plus the sheet fake's reset.
+    fn isolated_sheet<R>(f: impl FnOnce() -> R) -> R {
+        isolated(|| {
+            let reset = || FAKE_SHEET.with(|fake| *fake.borrow_mut() = FakeSheetState::default());
+            reset();
+            let result = f();
+            reset();
+            result
+        })
+    }
+
+    fn sheet_spec() -> SheetSpec {
+        SheetSpec::new(
+            SheetContent::new()
+                .with_title("Share draft")
+                .with_message("Pick where it goes.")
+                .with_action("copy", "Copy link", ActionRole::Default)
+                .with_action("delete", "Delete", ActionRole::Destructive),
+        )
+    }
+
+    fn assert_invalid_sheet(spec: &SheetSpec) {
+        assert!(
+            matches!(spec.validate(), Err(PresentError::InvalidSpec(_))),
+            "{spec:?} should be refused"
+        );
+    }
+
+    #[test]
+    fn a_valid_sheet_spec_passes() {
+        assert_eq!(sheet_spec().validate(), Ok(()));
+        // Any single row is content; a full-height custom detent is in range.
+        for content in [
+            SheetContent::new().with_title("t"),
+            SheetContent::new().with_message("m"),
+            SheetContent::new().with_image(vec![0x89, b'P', b'N', b'G']),
+            SheetContent::new().with_action("ok", "OK", ActionRole::Default),
+        ] {
+            let spec = SheetSpec::new(content)
+                .with_detents([Detent::Custom(0.25), Detent::Medium, Detent::Custom(1.0)])
+                .with_selected(Detent::Custom(0.25));
+            assert_eq!(spec.validate(), Ok(()), "{spec:?}");
+        }
+    }
+
+    #[test]
+    fn empty_sheet_content_is_refused() {
+        assert_invalid_sheet(&SheetSpec::new(SheetContent::new()));
+        // Empty strings are no content either.
+        assert_invalid_sheet(&SheetSpec::new(
+            SheetContent::new().with_title("").with_message(""),
+        ));
+        // An image row needs bytes.
+        assert_invalid_sheet(&SheetSpec::new(
+            SheetContent::new()
+                .with_title("t")
+                .with_image(Vec::<u8>::new()),
+        ));
+    }
+
+    #[test]
+    fn more_than_three_sheet_actions_are_refused() {
+        let content = (0..=MAX_SHEET_ACTIONS).fold(SheetContent::new(), |content, i| {
+            content.with_action(format!("a{i}"), "A", ActionRole::Default)
+        });
+        assert_eq!(content.actions.len(), MAX_SHEET_ACTIONS + 1);
+        assert_invalid_sheet(&SheetSpec::new(content));
+    }
+
+    #[test]
+    fn sheet_action_ids_must_be_non_empty_and_unique() {
+        assert_invalid_sheet(&SheetSpec::new(SheetContent::new().with_action(
+            "",
+            "A",
+            ActionRole::Default,
+        )));
+        assert_invalid_sheet(&SheetSpec::new(
+            SheetContent::new()
+                .with_action("a", "A", ActionRole::Default)
+                .with_action("a", "Again", ActionRole::Cancel),
+        ));
+    }
+
+    #[test]
+    fn a_custom_fraction_must_lie_in_zero_exclusive_to_one_inclusive() {
+        for fraction in [0.0, -0.25, 1.000_001, 2.0, f64::NAN, f64::INFINITY] {
+            assert_invalid_sheet(&sheet_spec().with_detents([Detent::Custom(fraction)]));
+        }
+        for fraction in [f64::MIN_POSITIVE, 0.5, 1.0] {
+            assert_eq!(
+                sheet_spec()
+                    .with_detents([Detent::Custom(fraction)])
+                    .validate(),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_detent_falls_back_to_the_nearest_system_detent() {
+        assert_eq!(Detent::Custom(0.1).system_fallback(), Detent::Medium);
+        assert_eq!(Detent::Custom(0.75).system_fallback(), Detent::Medium);
+        assert_eq!(Detent::Custom(0.76).system_fallback(), Detent::Large);
+        assert_eq!(Detent::Custom(1.0).system_fallback(), Detent::Large);
+        assert_eq!(Detent::Medium.system_fallback(), Detent::Medium);
+        assert_eq!(Detent::Large.system_fallback(), Detent::Large);
+    }
+
+    #[test]
+    fn detent_rules_are_enforced() {
+        assert_invalid_sheet(&sheet_spec().with_detents([]));
+        assert_invalid_sheet(&sheet_spec().with_detents([Detent::Medium, Detent::Medium]));
+        assert_invalid_sheet(
+            &sheet_spec()
+                .with_detents([Detent::Medium])
+                .with_selected(Detent::Large),
+        );
+        let mut undimmed = sheet_spec().with_detents([Detent::Large]);
+        undimmed.largest_undimmed = Some(Detent::Medium);
+        assert_invalid_sheet(&undimmed);
+        let mut radius = sheet_spec();
+        radius.corner_radius = Some(-1.0);
+        assert_invalid_sheet(&radius);
+        radius.corner_radius = Some(f64::NAN);
+        assert_invalid_sheet(&radius);
+        radius.corner_radius = Some(0.0);
+        assert_eq!(radius.validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_invalid_sheet_never_reaches_the_host_or_the_slot() {
+        isolated_sheet(|| {
+            let mut refused = show_sheet_on::<FakeSheetHost>(SheetSpec::new(SheetContent::new()));
+            assert_eq!(refused.sheet_handle(), None);
+            assert!(matches!(
+                poll_once(&mut refused),
+                Poll::Ready(Err(PresentError::InvalidSpec(_)))
+            ));
+            assert!(live_since().is_none());
+            assert_eq!(FAKE_SHEET.with(|fake| fake.borrow().shown), 0);
+        });
+    }
+
+    #[test]
+    fn the_unsupported_sheet_arm_refuses_and_frees_the_slot() {
+        isolated_sheet(|| {
+            let mut refused = show_sheet_on::<UnsupportedSheet>(sheet_spec());
+            assert_eq!(refused.sheet_handle(), None);
+            assert_eq!(
+                poll_once(&mut refused),
+                Poll::Ready(Err(PresentError::Unsupported))
+            );
+            assert!(live_since().is_none());
+            // Nothing is ever live on it, so its dismiss/move are no-ops.
+            UnsupportedSheet::dismiss(u64::MAX);
+            UnsupportedSheet::select_detent(u64::MAX, Detent::Large);
+        });
+    }
+
+    /// The public entry point on this (non-iOS) host resolves through the
+    /// unsupported arm.
+    #[cfg(not(target_os = "ios"))]
+    #[test]
+    fn show_sheet_is_unsupported_off_ios() {
+        isolated_sheet(|| {
+            let mut presentation = show_sheet(sheet_spec());
+            assert_eq!(
+                poll_once(&mut presentation),
+                Poll::Ready(Err(PresentError::Unsupported))
+            );
+            assert!(live_since().is_none());
+        });
+    }
+
+    #[test]
+    fn a_sheet_action_resolves_exactly_once() {
+        isolated_sheet(|| {
+            let mut presentation = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            let handle = presentation.sheet_handle().expect("accepted");
+            assert_eq!(Some(handle.presentation()), presentation.handle());
+            assert_eq!(poll_once(&mut presentation), Poll::Pending);
+
+            assert!(sheet_resolves(Ok(SheetOutcome::Action("copy".into()))));
+            // A late swipe-down callback has nothing left to resolve.
+            assert!(!sheet_resolves(Ok(SheetOutcome::Dismissed(
+                DismissReason::User
+            ))));
+            assert_eq!(
+                poll_once(&mut presentation),
+                Poll::Ready(Ok(SheetOutcome::Action("copy".into())))
+            );
+            assert_eq!(poll_once(&mut presentation), Poll::Pending);
+            assert!(live_since().is_none());
+        });
+    }
+
+    #[test]
+    fn a_user_swipe_resolves_dismissed_user() {
+        isolated_sheet(|| {
+            let mut presentation = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            assert!(sheet_resolves(Ok(SheetOutcome::Dismissed(
+                DismissReason::User
+            ))));
+            assert_eq!(
+                poll_once(&mut presentation),
+                Poll::Ready(Ok(SheetOutcome::Dismissed(DismissReason::User)))
+            );
+        });
+    }
+
+    #[test]
+    fn the_sheet_handle_dismisses_once_and_goes_stale() {
+        isolated_sheet(|| {
+            let mut presentation = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            let handle = presentation.sheet_handle().expect("accepted");
+
+            dismiss_sheet_on::<FakeSheetHost>(&handle);
+            assert_eq!(
+                poll_once(&mut presentation),
+                Poll::Ready(Ok(SheetOutcome::Dismissed(DismissReason::Programmatic)))
+            );
+            // Stale: filtered before the host, for both calls.
+            dismiss_sheet_on::<FakeSheetHost>(&handle);
+            select_detent_on::<FakeSheetHost>(&handle, Detent::Large);
+            FAKE_SHEET.with(|fake| {
+                let fake = fake.borrow();
+                assert_eq!(fake.dismissed, vec![handle.generation]);
+                assert!(fake.moved.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn select_detent_reaches_the_host_only_while_live_and_valid() {
+        isolated_sheet(|| {
+            let mut presentation = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            let handle = presentation.sheet_handle().expect("accepted");
+
+            select_detent_on::<FakeSheetHost>(&handle, Detent::Large);
+            select_detent_on::<FakeSheetHost>(&handle, Detent::Custom(0.0));
+            select_detent_on::<FakeSheetHost>(&handle, Detent::Custom(f64::NAN));
+            assert_eq!(
+                FAKE_SHEET.with(|fake| fake.borrow().moved.clone()),
+                vec![(handle.generation, Detent::Large)]
+            );
+            // A detent move is not an outcome: the sheet is still live.
+            assert_eq!(poll_once(&mut presentation), Poll::Pending);
+            assert!(live_since().is_some());
+        });
+    }
+
+    #[test]
+    fn a_lost_host_resolves_the_sheet_and_frees_the_slot() {
+        isolated_sheet(|| {
+            let mut presentation = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            assert!(sheet_resolves(Ok(SheetOutcome::HostLost)));
+            assert_eq!(
+                poll_once(&mut presentation),
+                Poll::Ready(Ok(SheetOutcome::HostLost))
+            );
+            assert!(live_since().is_none());
+        });
+    }
+
+    #[test]
+    fn alerts_and_sheets_share_the_one_busy_slot() {
+        isolated_sheet(|| {
+            let alert = show_alert_on::<FakeHost>(two_button_spec());
+            let mut sheet = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            assert_eq!(sheet.sheet_handle(), None);
+            assert_eq!(poll_once(&mut sheet), Poll::Ready(Err(PresentError::Busy)));
+            assert_eq!(FAKE_SHEET.with(|fake| fake.borrow().shown), 0);
+            drop(alert);
+
+            let live_sheet = show_sheet_on::<FakeSheetHost>(sheet_spec());
+            assert!(live_sheet.sheet_handle().is_some());
+            let mut alert = show_alert_on::<FakeHost>(two_button_spec());
+            assert_eq!(poll_once(&mut alert), Poll::Ready(Err(PresentError::Busy)));
+
+            // Resolving the sheet frees the slot for the next kind at once.
+            assert!(sheet_resolves(Ok(SheetOutcome::Dismissed(
+                DismissReason::User
+            ))));
+            let mut next = show_alert_on::<FakeHost>(two_button_spec());
+            assert!(next.handle().is_some());
+            assert_eq!(poll_once(&mut next), Poll::Pending);
+            drop(live_sheet);
+        });
+    }
+
+    #[test]
+    fn the_detent_listener_is_carried_and_compared_by_identity() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let spec = sheet_spec().on_detent(move |detent| {
+            sink.lock().expect("unpoisoned").push(detent);
+        });
+        let listener = spec.detent_listener().expect("registered");
+        listener(Detent::Large);
+        listener(Detent::Custom(0.4));
+        assert_eq!(
+            *seen.lock().expect("unpoisoned"),
+            vec![Detent::Large, Detent::Custom(0.4)]
+        );
+        assert_eq!(spec.clone(), spec, "a clone shares the listener");
+        assert_ne!(spec.clone().on_detent(|_| {}), spec);
+        assert!(sheet_spec().detent_listener().is_none());
     }
 
     // --- Kotlin <-> Rust drift checks for the presenter ------------------

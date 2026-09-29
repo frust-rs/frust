@@ -189,7 +189,7 @@ fn save_button(saved: RwSignal<bool>) -> impl frust::View<AppState> {
 
 ---
 
-## 1b. Native presentations (alerts)
+## 1b. Native presentations (alerts, sheets)
 
 A native **alert** is not a control in the tree: it is a request answered by
 exactly one outcome — the chosen action's id, `Cancelled`, `Dismissed` (you
@@ -276,6 +276,78 @@ UIKit hides that button and an outside tap reports it (`Action("keep")`
 above) rather than `Cancelled`. **Android:** `cancelable` gates both the back
 key and an outside tap, either resolving `Cancelled`. **macOS:** no analog —
 a window sheet has no click-away dismissal, so `cancelable` is ignored there.
+
+### Native sheets (iOS / iPadOS)
+
+A **sheet** is the same kind of request: a `SheetSpec` answered by exactly
+one `SheetOutcome` — `Action(id)` (the user tapped a row; the sheet has
+already slid away), `Dismissed(DismissReason::User)` (swiped down),
+`Dismissed(DismissReason::Programmatic)` (you called `handle.dismiss()`) or
+`HostLost`. It shares the one-at-a-time slot with alerts: while an alert is
+up, a sheet request is refused `PresentError::Busy`, and the reverse.
+
+| Platform | Today |
+|---|---|
+| iOS / iPadOS | a page sheet under `UISheetPresentationController`: detents, grabber, swipe-to-dismiss |
+| macOS, Android, desktop preview, web | `PresentError::Unsupported` (an `NSPopover` / `BottomSheetDialog` arm is follow-up work) |
+
+The content is a **constrained native schema**, not frust widgets: an
+optional title, an optional message, optional image bytes and up to three
+action rows (system buttons — `Default` wears the tint, `Destructive` red,
+`Cancel` the secondary label colour), stacked top to bottom. An empty sheet
+is refused `InvalidSpec`, as are more than three actions or a
+`Detent::Custom(f)` outside `0 < f <= 1`.
+
+```rust
+use frust::RwSignal;
+use frust_native_widgets::{
+    ActionRole, Detent, SheetContent, SheetOutcome, SheetSpec, native_button, show_native_sheet,
+    show_native_sheet_into,
+};
+
+fn share_spec() -> SheetSpec {
+    SheetSpec::new(
+        SheetContent::new()
+            .with_title("Share draft")
+            .with_message("Anyone with the link can read it.")
+            .with_action("copy", "Copy link", ActionRole::Default)
+            .with_action("stop", "Stop sharing", ActionRole::Destructive),
+    )
+    .with_detents([Detent::Medium, Detent::Large])
+    .with_theme(&theme) // tint + light/dark from the active frust theme
+}
+
+// Awaitable, with the handle taken first (moves it, or takes it down):
+let presentation = show_native_sheet(share_spec().on_detent(move |detent| {
+    expanded.set(detent == Detent::Large); // user drags stream here; not outcomes
+}));
+let handle = presentation.sheet_handle();
+frust::spawn_local(async move {
+    if let Ok(SheetOutcome::Action(id)) = presentation.await {
+        chosen.set(Some(id));
+    }
+});
+// later: handle.map(|h| h.select_detent(Detent::Large));
+
+// Into a signal — the same controlled contract as the alert form:
+let outcome: RwSignal<Option<SheetOutcome>> = RwSignal::new(None);
+native_button("Share").on_press(move || {
+    if let Err(err) = show_native_sheet_into(share_spec(), outcome) {
+        log::warn!("no sheet: {err}"); // Busy, InvalidSpec, Unsupported…
+    }
+})
+```
+
+`dismissible: false` (`.with_dismissible(false)`) stops the swipe-down, so
+only a row or `handle.dismiss()` ends the sheet. `Detent::Custom` needs
+iOS 16; on iOS 15 it becomes the nearest of medium/large (logged once).
+
+**iPad in regular width ignores detents.** UIKit presents a page sheet in a
+full-width (or large Split View) iPad window as a centered form sheet at a
+fixed size — no medium height, no detent changes; only an edge-attached sheet
+(iPhone, or an iPad window in compact width such as Slide Over) rests at its
+detents. Design the content to read well at both sizes; never rely on detent
+parity across idioms.
 
 ---
 

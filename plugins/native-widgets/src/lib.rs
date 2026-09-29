@@ -94,10 +94,17 @@
 //! `android.app.AlertDialog` over the resumed `Activity` (one more Kotlin
 //! object, `FrustNativePresenter`, in the same Gradle module, tracking the
 //! resumed `Activity` from a manifest-declared init provider) — every other
-//! target answers [`PresentError::Unsupported`]. With `frust-api` on,
-//! `show_native_alert` (the awaitable form) and `show_native_alert_into`
-//! (writing the outcome into an `RwSignal`, spawned on
-//! `frust::spawn_local`) are the app-facing front door, re-exported at the
+//! target answers [`PresentError::Unsupported`]. A **sheet**
+//! ([`present::show_sheet`]: a [`SheetSpec`]'s constrained native content —
+//! title, message, image, up to three action rows — resolving one
+//! [`SheetOutcome`], with detent changes streamed to a callback) is built
+//! on iOS/iPadOS only, a page sheet under `UISheetPresentationController`
+//! (an iPad in regular width shows a form sheet and ignores detents); every
+//! other target answers [`PresentError::Unsupported`]. Alerts and sheets
+//! share the one-at-a-time slot. With `frust-api` on, `show_native_alert` /
+//! `show_native_sheet` (the awaitable forms) and `show_native_alert_into` /
+//! `show_native_sheet_into` (writing the outcome into an `RwSignal`, spawned
+//! on `frust::spawn_local`) are the app-facing front door, re-exported at the
 //! crate root like the builders.
 //!
 //! # Charter: a platform plugin
@@ -183,7 +190,7 @@ pub use demo::{
     DemoCardState, register_demo_components,
 };
 
-// Native presentations (alerts): imperative, host-owned modal UI resolving
+// Native presentations (alerts, sheets): imperative, host-owned modal UI resolving
 // one outcome through a plain `Future` — see the crate doc's *Native
 // presentations*. Deliberately outside the `frust-api` gate: it names no
 // framework type, so the bare platform plugin serves it too.
@@ -192,8 +199,9 @@ pub mod present;
 // above; the two entry points stay namespaced (`present::show_alert`,
 // `present::dismiss`).
 pub use present::{
-    ActionRole, AlertAction, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, PresentError,
-    Presentation, PresentationHandle,
+    ActionRole, AlertAction, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, Detent,
+    DismissReason, PresentError, Presentation, PresentationHandle, SheetAction, SheetContent,
+    SheetHandle, SheetOutcome, SheetSpec,
 };
 
 #[cfg(target_os = "android")]
