@@ -1,8 +1,8 @@
 //! The Apple (iOS + macOS) presentation host: where a presentation goes, how
 //! a request reaches the main thread, and what keeps a live presentation's
 //! objects alive until its one outcome — the helpers both Apple arms build
-//! on (iOS's alert arm is `super::apple_alert`), plus macOS's placeholder
-//! `Host` until its own alert arm lands.
+//! on (iOS's alert arm is `super::apple_alert`; macOS's is
+//! `super::appkit_alert`).
 //!
 //! # Host discovery
 //!
@@ -69,9 +69,6 @@ use objc2_app_kit::{NSApplication, NSWindow};
 use objc2_ui_kit::{
     UIApplication, UISceneActivationState, UIViewController, UIWindow, UIWindowScene,
 };
-
-#[cfg(target_os = "macos")]
-use super::{AlertHost, AlertOutcome, AlertSpec, PresentError, Sender};
 
 /// What a presentation is presented from: the topmost view controller on
 /// iOS, a window (for a window-modal sheet) on macOS.
@@ -184,8 +181,6 @@ thread_local! {
 /// with a displaced entry (typically [`LivePresentation::dismiss`] it, whose
 /// outcome then has no receiver and is discarded). Returned rather than
 /// dropped here so no arm code runs inside the `LIVE` borrow.
-// Consumed by the iOS alert arm; macOS has no arm on it yet.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn install_live(
     _mtm: MainThreadMarker,
     generation: u64,
@@ -220,8 +215,6 @@ pub(crate) fn take_live(
 /// [`take_live`] for an arm that needs its own concrete state back (to
 /// resolve an action through its sender): taken only if the entry is
 /// `generation`'s **and** of type `P`, so a mismatch leaves it in place.
-// Consumed by the iOS alert arm; macOS has no arm on it yet.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn take_live_as<P: LivePresentation>(
     _mtm: MainThreadMarker,
     generation: u64,
@@ -248,36 +241,4 @@ pub(crate) fn dismiss_live(generation: u64) {
             presentation.dismiss(mtm);
         }
     });
-}
-
-/// The macOS placeholder host (iOS selects `super::apple_alert`'s). Until
-/// macOS's alert arm is built, a request still runs host discovery on the
-/// main thread — resolving [`PresentError::NoHost`] when there is nothing to
-/// present over — and answers [`PresentError::Unsupported`] otherwise.
-#[cfg(target_os = "macos")]
-pub(crate) struct Host;
-
-#[cfg(target_os = "macos")]
-impl AlertHost for Host {
-    fn show_alert(
-        _spec: AlertSpec,
-        tx: Sender<AlertOutcome>,
-        _generation: u64,
-    ) -> Result<(), PresentError> {
-        on_main(move |mtm| {
-            let outcome = match presenting_anchor(mtm) {
-                None => Err(PresentError::NoHost),
-                Some(_) => {
-                    log::warn!("frust-native-widgets: no native alert is built for macOS");
-                    Err(PresentError::Unsupported)
-                }
-            };
-            tx.send(outcome);
-        });
-        Ok(())
-    }
-
-    fn dismiss(generation: u64) {
-        dismiss_live(generation);
-    }
 }

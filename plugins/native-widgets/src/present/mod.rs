@@ -40,7 +40,11 @@
 //! - **iOS/iPadOS** — `apple_alert`: a `UIAlertController` (alert or action
 //!   sheet, an iPad action sheet anchored as a popover) built over
 //!   `apple_host`'s shared helpers.
-//! - **macOS** — `apple_host`'s own placeholder host (see below).
+//! - **macOS** — `appkit_alert`: an `NSAlert` presented as a window sheet
+//!   (`beginSheetModalForWindow:completionHandler:`) on the key/main window,
+//!   also built over `apple_host`'s shared helpers. macOS has no action-sheet
+//!   idiom, so [`AlertStyle::ActionSheet`] presents the same sheet as
+//!   [`AlertStyle::Alert`] and [`AlertSpec::anchor`] is ignored.
 //! - **Android** — `android_host` (the
 //!   `dev.frust.nativewidgets.FrustNativePresenter` Kotlin object that
 //!   tracks the resumed `Activity`, its one `nativeOnOutcome` callback and
@@ -48,15 +52,14 @@
 //! - **Every other target** — `unsupported`: [`PresentError::Unsupported`].
 //!
 //! `apple_host` holds what both Apple arms share: host discovery, the
-//! main-queue hop and the live-presentation guard. Until a platform's alert
-//! arm is built on its host module (macOS, Android today), that host still
-//! discovers the presenting host — [`PresentError::NoHost`] when there is
-//! none — and answers [`PresentError::Unsupported`] otherwise.
+//! main-queue hop and the live-presentation guard.
 
 mod oneshot;
 
 #[cfg(target_os = "android")]
 mod android_host;
+#[cfg(target_os = "macos")]
+mod appkit_alert;
 #[cfg(target_os = "ios")]
 mod apple_alert;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -66,10 +69,10 @@ mod unsupported;
 
 #[cfg(target_os = "android")]
 use android_host::Host as PlatformHost;
+#[cfg(target_os = "macos")]
+use appkit_alert::Host as PlatformHost;
 #[cfg(target_os = "ios")]
 use apple_alert::Host as PlatformHost;
-#[cfg(target_os = "macos")]
-use apple_host::Host as PlatformHost;
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 use unsupported::Host as PlatformHost;
 
