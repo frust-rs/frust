@@ -49,6 +49,37 @@
 //! [`super::WRAPS`]/[`Setter::Wraps`] is the same shape, for the boolean
 //! wrap-at-the-bounds flag.
 //!
+//! # Range and step invariants: UIKit's contract, enforced once
+//!
+//! `UIStepper`'s reference (Apple's UIKit documentation for `UIStepper`)
+//! documents `maximumValue` as needing to be "numerically greater than the
+//! value of the minimumValue property" and `stepValue` as needing to be
+//! "greater than 0" — setting either otherwise raises an
+//! `NSInvalidArgumentException`, and an ObjC exception crossing `objc2`'s
+//! `msg_send!` aborts the process. `NSStepper` enforces neither at the
+//! Cocoa layer, so the fix lives in the shared props layer both Apple arms
+//! plan from, not in either `platform` module alone:
+//!
+//! - **[`StepperProps::decode`] normalizes `step` to `>= 1` once.** A
+//!   decoded `step <= 0` is logged (naming the slot and the offending
+//!   value) and treated as `1`.
+//! - **[`StepperProps::span`] can never return less than `1`.** A
+//!   degenerate app range (`max <= min`) still reports a platform span of
+//!   `1`, never `0` — `0` is exactly as out-of-contract as a negative span.
+//! - **[`StepperProps::plan`] derives the platform-facing `enabled` flag as
+//!   `props.enabled && max > min`**, never overwriting the app's own
+//!   [`StepperProps::enabled`] field, so a degenerate range disables the
+//!   control outright: the user can never tap it, and no value outside the
+//!   app's own `[min, max]` is ever reported. A later update that makes the
+//!   range non-degenerate again re-enables the control and re-asserts
+//!   [`Setter::Max`]/[`Setter::Progress`]/[`Setter::Step`] unconditionally,
+//!   rather than relying on the values themselves having also changed.
+//!
+//! Both Apple `apply` functions additionally `debug_assert!` the contract
+//! at the boundary, on top of — never instead of — the decode-time
+//! normalization, so a future regression in the shared layer still trips
+//! in a debug build before it can reach `UIStepper`.
+//!
 //! # Controlled, exactly like `Slider`
 //!
 //! A tap on either button reports a *requested* value; `update` writes the
@@ -159,18 +190,30 @@ impl StepperProps {
         }
     }
 
-    /// Decode a `Stepper` slot's params.
+    /// Decode a `Stepper` slot's params — module doc's *Range and step
+    /// invariants* for the `step` normalization.
     ///
     /// # Errors
     /// [`NativeWidgetError::Params`] when the reserved identity keys are
     /// missing.
     pub(crate) fn decode(params: &Params<'_>) -> Result<Self, NativeWidgetError> {
+        let slot = slot_of(params)?;
+        let step = match int_or(params, STEP, PLATFORM_DEFAULT_STEP) {
+            step if step >= 1 => step,
+            non_positive => {
+                log::warn!(
+                    "frust-native-widgets: stepper slot {slot} decoded a non-positive step \
+                     ({non_positive}) — UIStepper/NSStepper require step > 0; using 1 instead"
+                );
+                1
+            }
+        };
         Ok(Self {
-            slot: slot_of(params)?,
+            slot,
             value: int_or(params, VALUE, 0),
             min: int_or(params, MIN, 0),
             max: int_or(params, MAX, PLATFORM_DEFAULT_MAX),
-            step: int_or(params, STEP, PLATFORM_DEFAULT_STEP),
+            step,
             wraps: params.flag(WRAPS).unwrap_or(false),
             enabled: params.flag(ENABLED).unwrap_or(true),
             tint: color(params, TINT),
@@ -178,11 +221,24 @@ impl StepperProps {
         })
     }
 
-    /// The platform-space span (`max - min`, never negative) this control
-    /// hands `setMaximumValue:`/`setMaxValue:` — [`slider::SliderProps::span`](super::slider::SliderProps::span),
-    /// verbatim.
+    /// The platform-space span (`max - min`, never less than `1`) this
+    /// control hands `setMaximumValue:`/`setMaxValue:` —
+    /// [`slider::SliderProps::span`](super::slider::SliderProps::span)'s
+    /// shape, floored at `1` rather than `0` (module doc's *Range and step
+    /// invariants*: `UIStepper`/`NSStepper` both require a strictly
+    /// positive span).
     pub(crate) fn span(&self) -> i32 {
-        self.max.saturating_sub(self.min).max(0)
+        self.max.saturating_sub(self.min).max(1)
+    }
+
+    /// Whether the platform control should accept input: the app's own
+    /// [`Self::enabled`] folded with the range being non-degenerate
+    /// (module doc's *Range and step invariants*) — a degenerate
+    /// `[min, max]` disables the control regardless of what the app asked
+    /// for, so [`Self::enabled`] itself is never overwritten by this
+    /// derivation.
+    pub(crate) fn effective_enabled(&self) -> bool {
+        self.enabled && self.max > self.min
     }
 
     /// The platform-space value (`value - min`, clamped into the range) this
@@ -201,21 +257,28 @@ impl StepperProps {
     /// mandatory max-before-value order.
     pub(crate) fn plan<'a>(old: &Self, new: &'a Self, observed: Option<i32>) -> Plan<'a> {
         let mut plan = Plan::new();
-        if old.span() != new.span() {
+        let old_enabled = old.effective_enabled();
+        let new_enabled = new.effective_enabled();
+        // A degenerate range never let a value/step the platform could
+        // trust through while disabled; re-enabling reasserts all three
+        // unconditionally rather than relying on them having also changed
+        // (module doc's *Range and step invariants*).
+        let reenabling = !old_enabled && new_enabled;
+        if old.span() != new.span() || reenabling {
             plan.push(Setter::Max(new.span()));
         }
         let drifted = observed.is_some_and(|platform| platform != new.platform_value());
-        if old.platform_value() != new.platform_value() || drifted {
+        if old.platform_value() != new.platform_value() || drifted || reenabling {
             plan.push(Setter::Progress(new.platform_value()));
         }
-        if old.step != new.step {
+        if old.step != new.step || reenabling {
             plan.push(Setter::Step(new.step));
         }
         if old.wraps != new.wraps {
             plan.push(Setter::Wraps(new.wraps));
         }
-        if old.enabled != new.enabled {
-            plan.push(Setter::Enabled(new.enabled));
+        if old_enabled != new_enabled {
+            plan.push(Setter::Enabled(new_enabled));
         }
         if old.tint != new.tint {
             plan.push(Setter::StepperTint(new.tint));
@@ -400,9 +463,22 @@ pub(crate) mod platform {
     /// Execute one planned property write against `view`.
     fn apply(mtm: MainThreadMarker, view: &UIStepper, setter: &Setter<'_>) {
         match *setter {
-            Setter::Max(span) => view.setMaximumValue(f64::from(span)),
+            Setter::Max(span) => {
+                // Belt-and-braces on top of `StepperProps::span` (module
+                // doc's *Range and step invariants*): `UIStepper` aborts the
+                // process if `maximumValue` isn't strictly greater than
+                // `minimumValue` (always `0.0` here).
+                debug_assert!(span >= 1, "UIStepper requires maximumValue > minimumValue");
+                view.setMaximumValue(f64::from(span));
+            }
             Setter::Progress(value) => view.setValue(f64::from(value)),
-            Setter::Step(step) => view.setStepValue(f64::from(step)),
+            Setter::Step(step) => {
+                // Belt-and-braces on top of `StepperProps::decode` (module
+                // doc's *Range and step invariants*): `UIStepper` aborts the
+                // process if `stepValue` isn't strictly positive.
+                debug_assert!(step >= 1, "UIStepper requires stepValue > 0");
+                view.setStepValue(f64::from(step));
+            }
             Setter::Wraps(wraps) => view.setWraps(wraps),
             Setter::Enabled(enabled) => view.setEnabled(enabled),
             Setter::StepperTint(argb) => set_tint_color(view, argb),
@@ -558,9 +634,19 @@ pub(crate) mod platform {
     /// Execute one planned property write against `view`.
     fn apply(view: &NSStepper, setter: &Setter<'_>) {
         match *setter {
-            Setter::Max(span) => view.setMaxValue(f64::from(span)),
+            Setter::Max(span) => {
+                // `NSStepper` doesn't throw on a non-positive span the way
+                // `UIStepper` does, but the invariant is shared — belt-and-
+                // braces on top of `StepperProps::span` (module doc's *Range
+                // and step invariants*).
+                debug_assert!(span >= 1, "NSStepper's span must stay >= 1");
+                view.setMaxValue(f64::from(span));
+            }
             Setter::Progress(value) => view.setDoubleValue(f64::from(value)),
-            Setter::Step(step) => view.setIncrement(f64::from(step)),
+            Setter::Step(step) => {
+                debug_assert!(step >= 1, "NSStepper's increment must stay >= 1");
+                view.setIncrement(f64::from(step));
+            }
             Setter::Wraps(wraps) => view.setValueWraps(wraps),
             Setter::Enabled(enabled) => platform::set_enabled(view, enabled),
             Setter::StepperTint(argb) => platform::set_tint(view, "StepperTint", argb),
@@ -609,10 +695,11 @@ mod tests {
             decode("\"value\":-5,\"min\":0,\"max\":10").platform_value(),
             0
         );
-        // An inverted range degrades to an empty one instead of a negative
-        // max the platform would throw on.
+        // An inverted range degrades to a span of exactly 1 — never 0 or
+        // negative, both out of `UIStepper`/`NSStepper`'s contract (module
+        // doc's *Range and step invariants*).
         let inverted = decode("\"value\":3,\"min\":10,\"max\":2");
-        assert_eq!(inverted.span(), 0);
+        assert_eq!(inverted.span(), 1);
         assert_eq!(inverted.platform_value(), 0);
     }
 
@@ -622,6 +709,37 @@ mod tests {
         assert_eq!(props.step, PLATFORM_DEFAULT_STEP);
         let stepped = decode("\"min\":10,\"max\":20,\"step\":5");
         assert_eq!(stepped.step, 5, "a step size rides the wire unmapped");
+    }
+
+    #[test]
+    fn a_non_positive_or_missing_step_never_decodes_below_one() {
+        assert_eq!(decode("\"step\":0").step, 1, "zero normalizes to 1");
+        assert_eq!(decode("\"step\":-4").step, 1, "negative normalizes to 1");
+        assert_eq!(
+            decode("").step,
+            PLATFORM_DEFAULT_STEP,
+            "a missing step falls back to the platform default, not the \
+             non-positive branch"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_range_max_equal_min_spans_one_and_disables_the_control() {
+        let props = decode("\"value\":5,\"min\":5,\"max\":5");
+        assert_eq!(props.span(), 1, "UIStepper requires max > min");
+        assert_eq!(props.platform_value(), 0);
+        assert!(
+            !props.effective_enabled(),
+            "a single-point range can never be stepped"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_range_max_less_than_min_spans_one_and_disables_the_control() {
+        let props = decode("\"value\":5,\"min\":10,\"max\":2");
+        assert_eq!(props.span(), 1);
+        assert_eq!(props.platform_value(), 0);
+        assert!(!props.effective_enabled());
     }
 
     #[test]
@@ -676,6 +794,46 @@ mod tests {
         assert_eq!(
             StepperProps::plan(&old, &new, None),
             vec![Setter::Max(20), Setter::Progress(0)]
+        );
+    }
+
+    #[test]
+    fn a_range_becoming_non_degenerate_reenables_and_reasserts_max_progress_step() {
+        // The platform-space numbers happen not to change at all (span 1 →
+        // span 1, platform-value 0 → 0, step unchanged) — proving the
+        // re-enable transition forces the reassertion rather than
+        // piggy-backing on some other field having also changed.
+        let old = decode("\"value\":5,\"min\":5,\"max\":5,\"step\":3");
+        let new = decode("\"value\":5,\"min\":5,\"max\":6,\"step\":3");
+        assert_eq!(old.span(), 1);
+        assert_eq!(
+            new.span(),
+            1,
+            "the newly valid range still spans exactly one step"
+        );
+        assert!(!old.effective_enabled());
+        assert!(new.effective_enabled());
+        assert_eq!(
+            StepperProps::plan(&old, &new, None),
+            vec![
+                Setter::Max(1),
+                Setter::Progress(0),
+                Setter::Step(3),
+                Setter::Enabled(true),
+            ],
+            "re-enabling must reassert every range setter, not just the ones \
+             that changed"
+        );
+    }
+
+    #[test]
+    fn a_range_becoming_degenerate_disables_without_a_forced_reassertion() {
+        let old = decode("\"value\":5,\"min\":0,\"max\":10,\"step\":2");
+        let new = decode("\"value\":5,\"min\":5,\"max\":5,\"step\":2");
+        assert_eq!(
+            StepperProps::plan(&old, &new, None),
+            vec![Setter::Max(1), Setter::Progress(0), Setter::Enabled(false)],
+            "going disabled needs the usual diffed setters, no forced replay"
         );
     }
 

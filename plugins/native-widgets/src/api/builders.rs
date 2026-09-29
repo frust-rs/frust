@@ -1807,6 +1807,16 @@ fn warn_no_stepper_arm_once() {
 /// component, like [`NativeSliderView`]: the app owns `value`, and a tap on
 /// either button only ever arrives through [`Self::on_change`] as a
 /// *requested* value. Build one with [`native_stepper`].
+///
+/// `min`/`max`/[`Self::step`] are normalized before they ever reach a
+/// platform control (`crate::controls::stepper`'s module doc's *Range and
+/// step invariants*: `UIStepper` aborts the process on a non-positive
+/// `stepValue` or a `maximumValue` not strictly greater than
+/// `minimumValue`). A degenerate range (`max <= min`) renders the control
+/// **disabled** — the user can never tap it, and no value outside `[min,
+/// max]` is ever reported — rather than refusing to mount or crashing; it
+/// re-enables the moment a later update makes the range non-degenerate
+/// again.
 #[derive(Clone)]
 pub struct NativeStepperView {
     value: i32,
@@ -1837,7 +1847,11 @@ pub fn native_stepper(value: i32, min: i32, max: i32) -> NativeStepperView {
 }
 
 impl NativeStepperView {
-    /// The increment a tap on either button applies — default `1`.
+    /// The increment a tap on either button applies — default `1`. A
+    /// non-positive value (`0` or negative) is normalized to `1` before it
+    /// ever reaches a platform control, logged once — `UIStepper` requires
+    /// `stepValue > 0` (`crate::controls::stepper`'s module doc's *Range
+    /// and step invariants*).
     pub fn step(mut self, step: i32) -> Self {
         self.step = step;
         self
@@ -2502,6 +2516,22 @@ mod tests {
         assert!(props.wraps);
         assert!(!props.enabled);
         assert_eq!(props.tint, Some(dark_tokens().accent_ink as i32));
+    }
+
+    #[test]
+    fn a_non_positive_step_mounts_as_one_through_the_control_decoder() {
+        use crate::controls::stepper::StepperProps;
+        use crate::runtime::Params;
+
+        let view = native_stepper(3, 0, 20).step(0);
+        let raw = view.params_for(8, None);
+        assert!(
+            raw.contains("\"step\":0"),
+            "the builder still sends the app's raw value over the wire — \
+             normalization is the control's job, not the builder's"
+        );
+        let props = StepperProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.step, 1, "a non-positive step mounts as 1");
     }
 
     #[test]

@@ -15,9 +15,11 @@
 //!
 //! # `CivilDate`: a calendar date, validated at every boundary
 //!
-//! [`CivilDate`] is a plain proleptic-Gregorian `{year, month, day}` with no
-//! time and no time zone — the value the app owns and the value every arm
-//! reports. It is validated wherever it crosses a boundary: the params wire
+//! [`CivilDate`] is a proleptic-Gregorian year/month/day with no time and no
+//! time zone — the value the app owns and the value every arm reports. Its
+//! fields are crate-private behind [`CivilDate::new`], so an out-of-crate
+//! caller can never hold an unvalidated one; it is additionally validated
+//! wherever it crosses a boundary inside this crate: the params wire
 //! ([`DatePickerProps::decode`] — an invalid date decodes as absent), the
 //! event wire (`crate::events::unpack_date`), and the Apple arms'
 //! `NSDate` conversion ([`foundation`]). Each date rides the params wire as
@@ -54,11 +56,20 @@
 //! clamp their own display anyway; clamping first keeps the write-back from
 //! fighting them), and an inverted range (`min > max`) degrades to the
 //! single day `min` rather than reaching a platform — Android's calendar
-//! mode sizes its year list from `max - min`. The plan orders the two range
-//! setters so the platform never passes through an inverted range either:
-//! the bound that *widens* the range is written first
-//! ([`DatePickerProps::plan`]). A range change also re-asserts
-//! [`Setter::Date`], because narrowing a range can move the platform's date.
+//! mode sizes its year list from `max - min`. This decode-time clamp is
+//! necessarily platform-agnostic — [`DatePickerProps::decode`] runs once,
+//! shared by all three arms, before any arm is known — so it only ever
+//! catches an *explicit* `min > max`; it cannot see that a `None` bound
+//! resolves to a different literal date per arm ([`CivilDate::MIN`]/
+//! [`CivilDate::MAX`] for the Apple arms; the Android arm's own documented
+//! 1900-01-01/2100-12-31 default). [`DatePickerProps::plan`] therefore
+//! takes each arm's own [`Bounds`] and orders the two range setters against
+//! the values the platform will *actually* hold: the bound that *widens*
+//! the range (compared with `Bounds`-resolved ceilings, never a
+//! platform-agnostic assumption) is written first, so the platform never
+//! passes through an inverted range either. A range change also re-asserts
+//! [`Setter::Date`], because narrowing a range can move the platform's
+//! date.
 //!
 //! # `style`: live on Apple, baked at construction on Android
 //!
@@ -120,41 +131,38 @@ pub(crate) const STYLE: &str = "style";
 ///
 /// Proleptic Gregorian, `year` 1–9999, `month` **1-based** (1 = January),
 /// `day` 1–31 and real for its month (no 31 April, 29 February only in a
-/// leap year). Build one with [`CivilDate::new`], which refuses anything
-/// else; the fields are public for reading and pattern matching, and a value
-/// assembled by hand that is not a real date is treated as absent wherever
-/// this crate decodes one (module doc).
+/// leap year). [`CivilDate::new`] is the only public constructor, and the
+/// only way to build one outside this crate — it refuses anything that is
+/// not a real date in range, so an out-of-crate caller can never hold an
+/// invalid value. Read the components back with [`Self::year`],
+/// [`Self::month`] and [`Self::day`].
 ///
 /// Ordered chronologically (`year`, then `month`, then `day`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CivilDate {
-    /// The year, 1–9999.
-    pub year: i32,
-    /// The month, 1–12.
-    pub month: u8,
-    /// The day of the month, 1–31 (and no more than the month has).
-    pub day: u8,
+    // Crate-visible, not public: every direct field read/construction stays
+    // inside `frust_native_widgets` (`crate::events`'s wire codec and
+    // `crate::android::ctx`'s JNI calls both read these three directly), but
+    // `CivilDate::new` is the only constructor this crate's own public API
+    // (`native_date_picker`, `NativeDatePickerView::min`/`max`,
+    // `Self::on_change`'s callback) ever exposes to an app crate, so an
+    // out-of-crate caller can never assemble an invalid literal.
+    pub(crate) year: i32,
+    pub(crate) month: u8,
+    pub(crate) day: u8,
 }
 
 impl CivilDate {
     /// The earliest date this crate represents: 1 January of year 1.
-    pub const MIN: Self = Self {
-        year: 1,
-        month: 1,
-        day: 1,
-    };
+    pub const MIN: Self = Self::from_parts(1, 1, 1);
 
     /// The latest date this crate represents: 31 December 9999.
-    pub const MAX: Self = Self {
-        year: 9999,
-        month: 12,
-        day: 31,
-    };
+    pub const MAX: Self = Self::from_parts(9999, 12, 31);
 
     /// `year`-`month`-`day`, or `None` when that is not a real calendar date
     /// in the supported range (see the type doc).
     pub fn new(year: i32, month: u8, day: u8) -> Option<Self> {
-        let date = Self { year, month, day };
+        let date = Self::from_parts(year, month, day);
         date.is_valid().then_some(date)
     }
 
@@ -164,6 +172,31 @@ impl CivilDate {
             && (1..=12).contains(&self.month)
             && self.day >= 1
             && self.day <= days_in_month(self.year, self.month)
+    }
+
+    /// The year, 1–9999.
+    pub const fn year(&self) -> i32 {
+        self.year
+    }
+
+    /// The month, 1-based: 1 = January … 12 = December.
+    pub const fn month(&self) -> u8 {
+        self.month
+    }
+
+    /// The day of the month, 1–31 (and no more than the month has).
+    pub const fn day(&self) -> u8 {
+        self.day
+    }
+
+    /// Build a literal without going through [`Self::new`]'s validation —
+    /// never exposed publicly. Sanctioned only for this module's own
+    /// well-known constants ([`Self::MIN`]/[`Self::MAX`] here, the Android
+    /// arm's `PLATFORM_MIN`/`PLATFORM_MAX`), each a literal known valid by
+    /// inspection; every other construction path, in this crate or out of
+    /// it, goes through [`Self::new`].
+    const fn from_parts(year: i32, month: u8, day: u8) -> Self {
+        Self { year, month, day }
     }
 }
 
@@ -213,6 +246,41 @@ impl DatePickerStyle {
             "inline" => Some(Self::Inline),
             _ => None,
         }
+    }
+}
+
+/// What a `None` `min`/`max` resolves to on one platform's own control —
+/// supplied to [`DatePickerProps::plan`] so its widening-vs-narrowing
+/// ordering decision (module doc's *Range*) compares against the date the
+/// platform will *actually* hold, never a platform-agnostic assumption.
+/// Both Apple arms simply clear the bound for `nil`, which is this crate's
+/// own unbounded [`CivilDate::MIN`]/[`CivilDate::MAX`] ([`Self::APPLE`]);
+/// the Android arm substitutes `DatePicker`'s own documented
+/// 1900-01-01/2100-12-31 default (its `platform` module's own `BOUNDS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Bounds {
+    floor: CivilDate,
+    ceiling: CivilDate,
+}
+
+impl Bounds {
+    /// Both Apple arms: `setMinimumDate:`/`setMaximumDate:` and
+    /// `setMinDate:`/`setMaxDate:` simply clear the bound for `nil` — there
+    /// is no platform default narrower than this crate's own unbounded
+    /// ends to substitute.
+    pub(crate) const APPLE: Self = Self {
+        floor: CivilDate::MIN,
+        ceiling: CivilDate::MAX,
+    };
+
+    /// `min`, or this platform's own floor when it is `None`.
+    fn resolve_min(self, min: Option<CivilDate>) -> CivilDate {
+        min.unwrap_or(self.floor)
+    }
+
+    /// `max`, or this platform's own ceiling when it is `None`.
+    fn resolve_ceiling(self, max: Option<CivilDate>) -> CivilDate {
+        max.unwrap_or(self.ceiling)
     }
 }
 
@@ -295,15 +363,30 @@ impl DatePickerProps {
     }
 
     /// The setter-call plan for `old` → `new`, given the date the platform
-    /// last reported (`observed`, `None` until the user has picked one).
+    /// last reported (`observed`, `None` until the user has picked one) and
+    /// `bounds` — the calling arm's own [`Bounds`], module doc's *Range*.
     ///
     /// Order is load-bearing: the style first; then the two range bounds,
-    /// the *widening* one first so the platform never holds an inverted
-    /// range (module doc's *Range*); then the date — re-planned when the
+    /// the *widening* one first (compared through `bounds`, so a `None`
+    /// resolves to what this specific platform will hold) so the platform
+    /// never holds an inverted range; then the date — re-planned when the
     /// app's date changed, when the platform drifted from it (the
     /// write-back), or when either bound changed (a narrowed range can have
     /// moved the platform's date).
-    pub(crate) fn plan<'a>(old: &Self, new: &'a Self, observed: Option<CivilDate>) -> Plan<'a> {
+    pub(crate) fn plan<'a>(
+        old: &Self,
+        new: &'a Self,
+        observed: Option<CivilDate>,
+        bounds: Bounds,
+    ) -> Plan<'a> {
+        // Belt-and-braces on top of the decode-time clamp (module doc's
+        // *Range*): a request this arm cannot ever resolve to a valid
+        // `floor <= ceiling` range on ITS OWN platform is a decode-side or
+        // app-side bug, not something the ordering below can paper over.
+        debug_assert!(
+            bounds.resolve_min(new.min) <= bounds.resolve_ceiling(new.max),
+            "a date-picker range must never resolve inverted on the platform it targets"
+        );
         let mut plan = Plan::new();
         if old.style != new.style {
             plan.push(Setter::DatePickerStyle(new.style));
@@ -312,11 +395,11 @@ impl DatePickerProps {
         let max_changed = old.max != new.max;
         let min_setter = min_changed.then_some(Setter::MinDate(new.min));
         let max_setter = max_changed.then_some(Setter::MaxDate(new.max));
-        // An absent ceiling is the latest representable date: growing it (or
-        // keeping it) widens the range upward, so write it before the floor;
-        // otherwise the floor moves down first.
-        let ceiling = |max: Option<CivilDate>| max.unwrap_or(CivilDate::MAX);
-        if ceiling(new.max) >= ceiling(old.max) {
+        // An absent ceiling resolves to this platform's own default
+        // (`bounds`): growing it (or keeping it) widens the range upward,
+        // so write it before the floor; otherwise the floor moves down
+        // first.
+        if bounds.resolve_ceiling(new.max) >= bounds.resolve_ceiling(old.max) {
             plan.extend(max_setter);
             plan.extend(min_setter);
         } else {
@@ -510,7 +593,7 @@ pub(crate) mod platform {
     use jni::refs::Global;
     use jni::{jni_sig, jni_str};
 
-    use super::{CivilDate, DatePicker, DatePickerProps, DatePickerStyle, decode_event};
+    use super::{Bounds, CivilDate, DatePicker, DatePickerProps, DatePickerStyle, decode_event};
     use crate::NativeWidgetError;
     use crate::android::{NativeCtx, NativeView};
     use crate::controls::platform::{FRAME_CAPACITY, apply as apply_shared};
@@ -527,16 +610,15 @@ pub(crate) mod platform {
     const CALENDAR_CLASS: &str = "java.util.Calendar";
 
     /// `DatePicker`'s own default floor when no `min` is set.
-    const PLATFORM_MIN: CivilDate = CivilDate {
-        year: 1900,
-        month: 1,
-        day: 1,
-    };
+    const PLATFORM_MIN: CivilDate = CivilDate::from_parts(1900, 1, 1);
     /// `DatePicker`'s own default ceiling when no `max` is set.
-    const PLATFORM_MAX: CivilDate = CivilDate {
-        year: 2100,
-        month: 12,
-        day: 31,
+    const PLATFORM_MAX: CivilDate = CivilDate::from_parts(2100, 12, 31);
+    /// This arm's [`Bounds`] — module doc's *Range*: a `None` `min`/`max`
+    /// resolves to [`PLATFORM_MIN`]/[`PLATFORM_MAX`] here, never this
+    /// crate's unbounded [`Bounds::APPLE`].
+    const BOUNDS: Bounds = Bounds {
+        floor: PLATFORM_MIN,
+        ceiling: PLATFORM_MAX,
     };
 
     /// Build the picker for `style` — module doc's *Construction*.
@@ -688,7 +770,7 @@ pub(crate) mod platform {
             let mut default = DatePickerProps::platform_default(props.slot);
             default.style = props.style;
             default.date = props.date;
-            let plan = DatePickerProps::plan(&default, props, None);
+            let plan = DatePickerProps::plan(&default, props, None, BOUNDS);
             ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &view, &plan))?;
             // Read after the range setters ran, so an app that supplied no
             // date still hands `init` the platform's (possibly clamped) own.
@@ -718,7 +800,7 @@ pub(crate) mod platform {
             old: &Self::Props,
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
-            let plan = DatePickerProps::plan(old, new, state.observed);
+            let plan = DatePickerProps::plan(old, new, state.observed, BOUNDS);
             // `updateDate`/`setMinDate`/`setMaxDate` echo synchronously into
             // the listener; that echo re-enters `with_runtime` mid-borrow and
             // is dropped there (module doc's *Echo guard*) — no suppression
@@ -861,7 +943,7 @@ pub(crate) mod platform {
     use objc2_ui_kit::{UIDatePicker, UIDatePickerMode, UIDatePickerStyle};
 
     use super::foundation::{ns_date, optional_ns_date};
-    use super::{DatePicker, DatePickerProps, DatePickerStyle, KIND, decode_event};
+    use super::{Bounds, DatePicker, DatePickerProps, DatePickerStyle, KIND, decode_event};
     use crate::NativeWidgetError;
     use crate::apple::{FrustNativeControlTarget, NativeCtx, NativeView};
     use crate::controls::platform;
@@ -899,7 +981,7 @@ pub(crate) mod platform {
             // Module doc's *Construction-time normalization*.
             view.setDatePickerMode(UIDatePickerMode::Date);
             view.setPreferredDatePickerStyle(ui_style(default.style));
-            let plan = DatePickerProps::plan(&default, props, None);
+            let plan = DatePickerProps::plan(&default, props, None, Bounds::APPLE);
             apply_all(mtm, &view, &plan);
             // Attached after the initial plan, the other controls' order.
             let target = FrustNativeControlTarget::attach_date_picker(mtm, props.slot, &view);
@@ -920,7 +1002,7 @@ pub(crate) mod platform {
             old: &Self::Props,
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
-            let plan = DatePickerProps::plan(old, new, state.observed);
+            let plan = DatePickerProps::plan(old, new, state.observed, Bounds::APPLE);
             apply_all(ctx.mtm(), &state.view, &plan);
             // Nothing on this arm can fail, so the drift signal is cleared
             // unconditionally (`Switch`'s iOS arm).
@@ -1027,7 +1109,7 @@ pub(crate) mod platform {
     };
 
     use super::foundation::{ns_date, optional_ns_date};
-    use super::{DatePicker, DatePickerProps, DatePickerStyle, KIND, decode_event};
+    use super::{Bounds, DatePicker, DatePickerProps, DatePickerStyle, KIND, decode_event};
     use crate::NativeWidgetError;
     use crate::appkit::{FrustNativeControlTarget, NativeCtx, NativeView};
     use crate::controls::platform;
@@ -1067,7 +1149,7 @@ pub(crate) mod platform {
             view.setDatePickerMode(NSDatePickerMode::Single);
             view.setDatePickerElements(NSDatePickerElementFlags::YearMonthDay);
             set_style(&view, default.style);
-            let plan = DatePickerProps::plan(&default, props, None);
+            let plan = DatePickerProps::plan(&default, props, None, Bounds::APPLE);
             apply_all(&view, &plan);
             // Attached after the initial plan, the other controls' order.
             let target = FrustNativeControlTarget::attach(mtm, &view, props.slot, EVENT_KIND_DATE);
@@ -1090,7 +1172,7 @@ pub(crate) mod platform {
         ) -> Result<(), NativeWidgetError> {
             apply_all(
                 &state.view,
-                &DatePickerProps::plan(old, new, state.observed),
+                &DatePickerProps::plan(old, new, state.observed, Bounds::APPLE),
             );
             // Cleared unconditionally, as on iOS: nothing here can fail.
             state.observed = None;
@@ -1180,6 +1262,17 @@ mod tests {
         format!("\"{key}\":{}", wire(value))
     }
 
+    /// The Android arm's own [`Bounds`] (`platform::BOUNDS`, compiled only
+    /// under `target_os = "android"`) — duplicated here so the ordering
+    /// fix is host-testable on every target, matching that module's
+    /// documented 1900-01-01/2100-12-31 literal values.
+    fn android_bounds() -> Bounds {
+        Bounds {
+            floor: date(1900, 1, 1),
+            ceiling: date(2100, 12, 31),
+        }
+    }
+
     // --- CivilDate ------------------------------------------------------
 
     #[test]
@@ -1217,7 +1310,13 @@ mod tests {
         let props = decode("");
         assert_eq!(props, DatePickerProps::platform_default(5));
         assert!(
-            DatePickerProps::plan(&DatePickerProps::platform_default(5), &props, None).is_empty()
+            DatePickerProps::plan(
+                &DatePickerProps::platform_default(5),
+                &props,
+                None,
+                Bounds::APPLE
+            )
+            .is_empty()
         );
     }
 
@@ -1300,7 +1399,12 @@ mod tests {
             field(MAX_DATE, date(2030, 12, 31)),
         ));
         assert_eq!(
-            DatePickerProps::plan(&DatePickerProps::platform_default(5), &props, None),
+            DatePickerProps::plan(
+                &DatePickerProps::platform_default(5),
+                &props,
+                None,
+                Bounds::APPLE
+            ),
             vec![
                 Setter::DatePickerStyle(DatePickerStyle::Wheels),
                 Setter::MinDate(Some(date(2000, 1, 1))),
@@ -1319,11 +1423,11 @@ mod tests {
         let old = decode(&field(DATE, date(2026, 9, 29)));
         let new = decode(&field(DATE, date(2026, 9, 30)));
         assert_eq!(
-            DatePickerProps::plan(&old, &new, None),
+            DatePickerProps::plan(&old, &new, None, Bounds::APPLE),
             vec![Setter::Date(date(2026, 9, 30))]
         );
         assert!(
-            DatePickerProps::plan(&new, &new, None).is_empty(),
+            DatePickerProps::plan(&new, &new, None, Bounds::APPLE).is_empty(),
             "unchanged props plan nothing — the zero-FFI property"
         );
     }
@@ -1333,7 +1437,7 @@ mod tests {
         let before = decode(&field(DATE, date(2026, 9, 29)));
         let after = decode(&field(DATE, date(2026, 10, 3)));
         assert_eq!(
-            DatePickerProps::plan(&before, &after, Some(date(2026, 10, 3))),
+            DatePickerProps::plan(&before, &after, Some(date(2026, 10, 3)), Bounds::APPLE),
             vec![Setter::Date(date(2026, 10, 3))]
         );
     }
@@ -1348,12 +1452,12 @@ mod tests {
             field(DATE, date(2026, 9, 29))
         ));
         assert_eq!(
-            DatePickerProps::plan(&old, &new, Some(date(2026, 10, 3))),
+            DatePickerProps::plan(&old, &new, Some(date(2026, 10, 3)), Bounds::APPLE),
             vec![Setter::Date(date(2026, 9, 29)), Setter::Enabled(false)],
             "the app rejected the pick: the confirmed date is re-asserted"
         );
         assert_eq!(
-            DatePickerProps::plan(&old, &new, Some(date(2026, 9, 29))),
+            DatePickerProps::plan(&old, &new, Some(date(2026, 9, 29)), Bounds::APPLE),
             vec![Setter::Enabled(false)],
             "an observed date matching the app's is no drift"
         );
@@ -1374,13 +1478,15 @@ mod tests {
             field(MAX_DATE, date(2026, 3, 31)),
         ));
         assert_eq!(
-            DatePickerProps::plan(&old, &new, None),
+            DatePickerProps::plan(&old, &new, None, Bounds::APPLE),
             vec![
                 Setter::MaxDate(Some(date(2026, 3, 31))),
                 Setter::MinDate(Some(date(2026, 3, 1))),
                 Setter::Date(date(2026, 3, 15)),
             ],
-            "floor-first would pass through [March 1, January 31]"
+            "floor-first would pass through [March 1, January 31] — the \
+             non-crossing case: the Apple bounds' unbounded ceiling never \
+             enters the comparison"
         );
     }
 
@@ -1397,12 +1503,51 @@ mod tests {
             field(MAX_DATE, date(2026, 1, 31)),
         ));
         assert_eq!(
-            DatePickerProps::plan(&old, &new, None),
+            DatePickerProps::plan(&old, &new, None, Bounds::APPLE),
             vec![
                 Setter::MinDate(Some(date(2026, 1, 1))),
                 Setter::MaxDate(Some(date(2026, 1, 31))),
             ],
             "ceiling-first would pass through [March 1, January 31]"
+        );
+    }
+
+    #[test]
+    fn a_none_ceiling_crosses_below_an_explicit_old_ceiling_on_android_only() {
+        // The bug this fixes: `old.max` is explicit and ABOVE Android's own
+        // substituted default, so a platform-agnostic ceiling (always
+        // `CivilDate::MAX`) would wrongly call `new.max = None` a widen and
+        // write `MaxDate` before `MinDate` — passing the still-old, higher
+        // `min` through a platform max that just shrank underneath it
+        // (module doc's *Range*). The Apple bounds never cross here at all:
+        // `None` stays this crate's own unbounded ceiling either way.
+        let old = decode(&format!(
+            "{},{}",
+            field(MIN_DATE, date(2095, 1, 1)),
+            field(MAX_DATE, date(2150, 1, 1)),
+        ));
+        let new = decode(&field(MIN_DATE, date(2050, 1, 1)));
+        assert_eq!(new.max, None);
+
+        assert_eq!(
+            DatePickerProps::plan(&old, &new, None, android_bounds()),
+            vec![
+                Setter::MinDate(Some(date(2050, 1, 1))),
+                Setter::MaxDate(None),
+            ],
+            "Android's real ceiling for None (2100-12-31) is BELOW the old \
+             explicit one (2150-01-01) — a narrow, so the floor must move \
+             first"
+        );
+        assert_eq!(
+            DatePickerProps::plan(&old, &new, None, Bounds::APPLE),
+            vec![
+                Setter::MaxDate(None),
+                Setter::MinDate(Some(date(2050, 1, 1))),
+            ],
+            "Apple's None ceiling (CivilDate::MAX) is still >= the old one \
+             — a widen, so the ceiling moves first; the two arms disagree \
+             on order for the exact same props"
         );
     }
 
@@ -1419,7 +1564,7 @@ mod tests {
             field(MIN_DATE, date(2026, 6, 1))
         ));
         assert_eq!(
-            DatePickerProps::plan(&old, &new, None),
+            DatePickerProps::plan(&old, &new, None, Bounds::APPLE),
             vec![
                 Setter::MinDate(Some(date(2026, 6, 1))),
                 Setter::Date(date(2026, 6, 15)),
@@ -1435,7 +1580,7 @@ mod tests {
         ));
         let cleared = decode("");
         assert_eq!(
-            DatePickerProps::plan(&set, &cleared, None),
+            DatePickerProps::plan(&set, &cleared, None, Bounds::APPLE),
             vec![
                 Setter::MaxDate(None),
                 Setter::DatePickerTint(None),
@@ -1453,7 +1598,12 @@ mod tests {
             field(MIN_DATE, date(2000, 1, 1)),
             field(MAX_DATE, date(2030, 12, 31)),
         ));
-        for setter in DatePickerProps::plan(&DatePickerProps::platform_default(5), &props, None) {
+        for setter in DatePickerProps::plan(
+            &DatePickerProps::platform_default(5),
+            &props,
+            None,
+            Bounds::APPLE,
+        ) {
             let expected = if matches!(
                 setter,
                 Setter::MinDate(_) | Setter::MaxDate(_) | Setter::DatePickerStyle(_)
