@@ -144,6 +144,29 @@ fn sanitize_deep_link_label(label: &str) -> Option<&str> {
     ok.then_some(label)
 }
 
+/// How much of an unrecognized deep-link label the warning log echoes: its
+/// first this-many **characters**, counted on the raw label BEFORE `{:?}`
+/// escaping. The cap is on characters, not on bytes of the escaped form:
+/// std's `Debug` for `str` passes printable non-ASCII through unescaped, so
+/// slicing the escaped string at a byte offset can land inside a multi-byte
+/// character and panic — on text any process on the device can hand this
+/// app's scheme. The escaped output stays bounded: at most this many
+/// characters, each escaping to a few bytes at worst (`\u{10ffff}`).
+const MAX_LOGGED_LABEL_CHARS: usize = 128;
+
+/// The log form of an unrecognized label: the `{:?}`-escaped prefix of at
+/// most [`MAX_LOGGED_LABEL_CHARS`] characters (a `...` marks a cut) plus the
+/// raw label's byte length. Pure; never panics on any `&str`.
+fn logged_deep_link_label(label: &str) -> String {
+    let byte_len = label.len();
+    let prefix: String = label.chars().take(MAX_LOGGED_LABEL_CHARS).collect();
+    if prefix.len() < byte_len {
+        format!("{prefix:?}... ({byte_len} bytes)")
+    } else {
+        format!("{label:?} ({byte_len} bytes)")
+    }
+}
+
 /// The documented limit on concurrent toasts, per the
 /// [`frust_glyph::toast_host`] v1 policy: exactly one visible at a time,
 /// queued FIFO. The queue is append-only while the app runs, but growth is
@@ -260,14 +283,10 @@ fn deep_link_router(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemo
                         push_toast(state.toasts, message);
                         state.last_unknown_toast_at.set(Some(now));
                     }
-                    // Cap the logged label to at most 128 chars + original byte length.
-                    let debug_label = format!("{label:?}");
-                    let logged_label = if debug_label.len() > 128 {
-                        format!("{}... ({} bytes)", &debug_label[..128], label.len())
-                    } else {
-                        format!("{} ({} bytes)", debug_label, label.len())
-                    };
-                    log::warn!("native-widgets-demo deep-link: section {logged_label} unknown");
+                    log::warn!(
+                        "native-widgets-demo deep-link: section {} unknown",
+                        logged_deep_link_label(&label)
+                    );
                 }
             }
         }
@@ -726,6 +745,43 @@ mod deep_link_tests {
         assert_eq!(sanitize_deep_link_label("has/slash"), None, "slash");
         assert_eq!(sanitize_deep_link_label("<script>"), None, "markup");
         assert_eq!(sanitize_deep_link_label("caf\u{e9}"), None, "non-ASCII");
+    }
+
+    #[test]
+    fn logged_label_short_ascii_is_escaped_whole() {
+        assert_eq!(logged_deep_link_label("abc"), "\"abc\" (3 bytes)");
+        // Control characters still reach the log escaped, never raw.
+        assert_eq!(logged_deep_link_label("a\u{1}b"), "\"a\\u{1}b\" (3 bytes)");
+    }
+
+    #[test]
+    fn logged_label_caps_by_characters_never_slicing_inside_one() {
+        // 70 x 'é' is 140 bytes but 70 characters: under the cap, so it is
+        // logged whole. The former byte slice of the escaped form at 128 cut
+        // inside an 'é' and panicked.
+        let seventy_e_acute: String = "\u{e9}".repeat(70);
+        let logged = logged_deep_link_label(&seventy_e_acute);
+        assert_eq!(logged, format!("{seventy_e_acute:?} (140 bytes)"));
+
+        // 200 CJK characters (600 bytes): cut after 128 characters, marked.
+        let cjk: String = "\u{65e5}".repeat(200);
+        let logged = logged_deep_link_label(&cjk);
+        let expected_prefix: String = "\u{65e5}".repeat(128);
+        assert_eq!(logged, format!("{expected_prefix:?}... (600 bytes)"));
+
+        // Plain ASCII over the cap is cut the same way.
+        let long_ascii = "x".repeat(300);
+        assert_eq!(
+            logged_deep_link_label(&long_ascii),
+            format!("{:?}... (300 bytes)", "x".repeat(128))
+        );
+
+        // Exactly at the cap: not marked.
+        let at_cap = "y".repeat(128);
+        assert_eq!(
+            logged_deep_link_label(&at_cap),
+            format!("{at_cap:?} (128 bytes)")
+        );
     }
 
     #[test]
