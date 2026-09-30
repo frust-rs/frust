@@ -121,6 +121,11 @@ surface only in Mode A, so for simulator runs set `FRUST_DEMO_OPAQUE=1` in the
 Xcode scheme's environment (Product > Scheme > Edit Scheme > Run > Arguments >
 Environment Variables); any value selects Mode A. Leave it unset on a device.
 
+From the command line, `frust run -d <sim>` never reads the Xcode scheme, so
+use `SIMCTL_CHILD_FRUST_DEMO_OPAQUE=1 frust run -d <sim>` instead — `xcrun
+simctl launch` forwards every `SIMCTL_CHILD_<NAME>` variable in its own
+environment to the app as `<NAME>`.
+
 ## Tests
 
 ```
@@ -158,6 +163,8 @@ Phase 7 gates of the Apple-expansion plan, build `2b3ae58b`, 2026-09-30/10-01.
 | Platform | Device / OS | Result |
 |----------|-------------|--------|
 | macOS | Apple M4, macOS 27.0, debug build | All 11 lines pass (Ed-driven). The first `cargo run` launch painted nothing until relaunched — filed. |
-| iOS | iPhone SE (2nd gen), iOS 26.7, debug build | **Black screen as shipped**: with `synchronizesPresentWithPlatformViews` armed no frame is ever presented (filed, critical). With the seam off every line passes except VoiceOver (skipped); the playground renders under the same seam. |
-| iPadOS | iPad Pro 13-inch (M5) simulator, iPadOS 26.2, `FRUST_DEMO_OPAQUE=1` | All 7 legs pass (Ed-driven). Light host appearance shows the theme toggle out of sync with the shell-applied appearance — filed. |
-| Android | Pixel 5, Android 14 (UP1A.231105.001.B2), profile build | Alerts, refusal banners, Unsupported sheet and the stress cycler pass. **No native control is composited** (Mode A host, the scaffold default; filed, major), and an active accessibility client plus a rotation aborts the process inside `accesskit_android` (filed, critical). |
+| iOS | iPhone SE (2nd gen), iOS 26.7, debug build | **Black screen as shipped**: with `synchronizesPresentWithPlatformViews` armed no frame is ever presented (filed, critical). With the seam off every line passes except VoiceOver (skipped late in the session; to be run in the next Apple gate round, which must re-gate the iPhone on the shipped configuration once the black-screen finding is fixed); the playground renders under the same seam. |
+| iPadOS | iPad Pro 13-inch (M5) simulator, iPadOS 26.2, built with `xcodebuild -sdk iphonesimulator` and launched with `SIMCTL_CHILD_FRUST_DEMO_OPAQUE=1 xcrun simctl launch` (because `frust run -d <booted simulator>` currently matches the simulator twice, filed as a CLI minor) | All 7 legs pass (Ed-driven). Light host appearance shows the theme toggle out of sync with the shell-applied appearance — filed. |
+| Android | Pixel 5, Android 14 (UP1A.231105.001.B2), profile build | Alerts, refusal banners, Unsupported sheet and the stress cycler pass. **No native control is composited** (Mode A host, the scaffold default; filed, major), and an active accessibility client plus a rotation aborts the process inside `accesskit_android` (filed, critical). A page's native slots linger for about a minute after navigating away (filed as a minor). |
+
+Lines and legs are the per-platform checklists of the Phase 7 gate cards (g7-01 macOS, g7-02 iPhone/iPad, g7-03 Android); each line is a recorded gate row.

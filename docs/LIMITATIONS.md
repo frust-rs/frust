@@ -6375,8 +6375,8 @@ it (`docs/CODE_STANDARDS.md`'s Platform-View Conventions).
 **Evidence**: the macOS host's own z-order strategy (`addSubview:positioned:
 relativeTo:` above winit's content view, nothing made translucent anywhere)
 and the desktop host passing no shield rects. Runtime confirmation on a Mac
-is owed with the video-player device gate. macOS native-widgets demo gate:
-(pending — filled by the Phase 7 macOS gate).
+is owed with the video-player device gate. macOS native-widgets demo gate
+(2026-10-01, macOS 27.0 on an Apple M4, debug build 2b3ae58b, human-observed): confirmed as documented — with the pointer over a native control the page does not scroll, and a frust overlay painted over a native control is covered.
 
 ---
 
