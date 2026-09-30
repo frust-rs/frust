@@ -389,7 +389,22 @@ impl Widget for SliverAppBarWidget {
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, row));
         let title_index = self.title_index();
 
-        let mut left = PAD_X;
+        // The collapsed top row shifts out from under a protruding window-control
+        // corner; the EXPANDED headline (`expanded_x`, HEADLINE_INSET-based) is
+        // deliberately not shifted — only the collapsed row sits under the control.
+        let corners = ctx.window_insets().corner_insets;
+        let shift_l = if corners.top_left.height > 0.0 {
+            corners.top_left.width
+        } else {
+            0.0
+        };
+        let shift_r = if corners.top_right.height > 0.0 {
+            corners.top_right.width
+        } else {
+            0.0
+        };
+
+        let mut left = PAD_X + shift_l;
         if self.has_leading {
             let size = self.slots[0].layout_child(ctx, &slot_bc);
             self.slots[0].set_origin(Point::new(left, row_center - size.height / 2.0));
@@ -398,7 +413,7 @@ impl Widget for SliverAppBarWidget {
 
         // Actions, laid out in reverse so the *last* one lands flush against
         // the trailing edge with reading order preserved.
-        let mut right = width - PAD_X;
+        let mut right = width - PAD_X - shift_r;
         for pod in self.slots[title_index + 1..].iter_mut().rev() {
             let size = pod.layout_child(ctx, &slot_bc);
             right -= size.width;
@@ -472,6 +487,7 @@ impl Widget for SliverAppBarWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
+    use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
     use frust_widgets::test_support::leaf_any;
     use std::any::Any;
 
@@ -496,6 +512,25 @@ mod tests {
         w.layout(
             &mut lctx,
             &BoxConstraints::loose(Size::new(width, f64::INFINITY)),
+        )
+    }
+
+    /// Like [`layout`], under a window carrying the given corners.
+    fn layout_with_corners(w: &mut SliverAppBarWidget, width: f64, corners: CornerInsets) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        let bc = BoxConstraints::loose(Size::new(width, f64::INFINITY));
+        lctx.with_window_insets(WindowInsets::default().with_corner_insets(corners), |ctx| {
+            w.layout(ctx, &bc)
+        })
+    }
+
+    fn top_corners() -> CornerInsets {
+        CornerInsets::new(
+            CornerInset::new(44.0, 30.0),
+            CornerInset::new(52.0, 30.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
         )
     }
 
@@ -531,6 +566,39 @@ mod tests {
         fn pop_clip(&mut self) {
             self.pops += 1;
         }
+    }
+
+    #[test]
+    fn corner_shift_moves_the_collapsed_row_slots() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .collapse(1.0);
+        let mut w = build(&view);
+        layout_with_corners(&mut w, 400.0, top_corners());
+        assert_eq!(w.slots[0].origin().x, PAD_X + 44.0);
+        let action = w.slots.last().unwrap();
+        assert_eq!(
+            action.origin().x + action.size().width,
+            400.0 - PAD_X - 52.0
+        );
+    }
+
+    #[test]
+    fn expanded_headline_is_not_shifted() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .leading(leaf_any(40.0, 40.0))
+            .collapse(0.0);
+        let mut w = build(&view);
+        layout_with_corners(&mut w, 400.0, top_corners());
+        let shifted = w.slots[w.title_index()].origin();
+        let mut w = build(&view);
+        layout_with_corners(&mut w, 400.0, CornerInsets::ZERO);
+        let plain = w.slots[w.title_index()].origin();
+        assert_eq!(shifted.x, HEADLINE_INSET);
+        assert_eq!(shifted, plain);
     }
 
     #[test]

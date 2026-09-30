@@ -31,6 +31,13 @@
 //! no icon primitive here to tint, and upstream's own `IconTheme.merge`
 //! ambient-icon-size push has no analogue on this framework's public surface).
 //!
+//! Every top and sliver bar also shifts its leading slot right by
+//! `corner_insets.top_left.width` and its trailing edge left by
+//! `corner_insets.top_right.width` whenever that corner's height is above zero
+//! (the iPadOS 26+ window control). The band height is unchanged, the other
+//! corners are ignored, the bottom bar is unaffected, and the value is never
+//! consumed by `safe_area`, so a bar under a top-consuming safe area still sees it.
+//!
 //! The **title** is the one child a top/collapsing bar fully owns when given as
 //! a string: composed as a child [`frust::TextView`] (no hand-shaped text),
 //! themed `onSurface` (the `Text` default role) so it survives a live theme swap

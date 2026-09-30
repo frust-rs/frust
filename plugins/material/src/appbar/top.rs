@@ -337,7 +337,21 @@ impl Widget for AppBarWidget {
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, band));
         let title_index = self.title_index();
 
-        let mut left = PAD_X;
+        // Shift the row out from under a protruding window-control corner (the
+        // iPadOS 26+ traffic lights); see the module docs of `appbar`.
+        let corners = ctx.window_insets().corner_insets;
+        let shift_l = if corners.top_left.height > 0.0 {
+            corners.top_left.width
+        } else {
+            0.0
+        };
+        let shift_r = if corners.top_right.height > 0.0 {
+            corners.top_right.width
+        } else {
+            0.0
+        };
+
+        let mut left = PAD_X + shift_l;
         if self.has_leading {
             let size = self.slots[0].layout_child(ctx, &slot_bc);
             self.slots[0].set_origin(Point::new(left, (band - size.height) / 2.0));
@@ -346,7 +360,7 @@ impl Widget for AppBarWidget {
 
         // Lay out actions in reverse so the *last* action lands flush against
         // the trailing edge, preserving left-to-right reading order.
-        let mut right = width - PAD_X;
+        let mut right = width - PAD_X - shift_r;
         for pod in self.slots[title_index + 1..].iter_mut().rev() {
             let size = pod.layout_child(ctx, &slot_bc);
             right -= size.width;
@@ -395,6 +409,7 @@ impl Widget for AppBarWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
+    use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
     use frust_widgets::test_support::{RecordingScene, leaf_any};
     use std::any::Any;
 
@@ -424,6 +439,28 @@ mod tests {
         let mut lctx =
             LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(theme as &dyn Any));
         w.layout(&mut lctx, bc)
+    }
+
+    /// Lay out under a window carrying the given window-control corners.
+    fn layout_with_corners(
+        w: &mut AppBarWidget,
+        bc: &BoxConstraints,
+        corners: CornerInsets,
+    ) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(WindowInsets::default().with_corner_insets(corners), |ctx| {
+            w.layout(ctx, bc)
+        })
+    }
+
+    fn top_corners() -> CornerInsets {
+        CornerInsets::new(
+            CornerInset::new(44.0, 30.0),
+            CornerInset::new(52.0, 30.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        )
     }
 
     /// Records both container shapes — `fill_rect` (square family) and
@@ -495,6 +532,90 @@ mod tests {
             "the title is centered in the remaining space \
              (left_gap={left_gap}, right_gap={right_gap})"
         );
+    }
+
+    #[test]
+    fn corner_shift_moves_leading_and_actions() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        let size = layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        assert_eq!(size.height, BAND);
+        assert_eq!(w.slots[0].origin().x, PAD_X + 44.0);
+        assert_eq!(
+            w.slots[3].origin().x + w.slots[3].size().width,
+            400.0 - PAD_X - 52.0
+        );
+    }
+
+    #[test]
+    fn corner_with_zero_height_shifts_nothing() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        let corners = CornerInsets::new(
+            CornerInset::new(44.0, 0.0),
+            CornerInset::new(52.0, 0.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        );
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            corners,
+        );
+        assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            400.0 - PAD_X
+        );
+    }
+
+    #[test]
+    fn center_title_still_centers_in_the_remaining_space_with_shifted_slots() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .center_title(true);
+        let mut w = build(&view);
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        let leading_end = w.slots[0].origin().x + w.slots[0].size().width;
+        let action_start = w.slots[2].origin().x;
+        let title_start = w.slots[1].origin().x;
+        let title_end = title_start + w.slots[1].size().width;
+        let left_gap = title_start - leading_end;
+        let right_gap = action_start - title_end;
+        assert!(
+            (left_gap - right_gap).abs() < 0.01,
+            "left_gap={left_gap}, right_gap={right_gap}"
+        );
+    }
+
+    #[test]
+    fn zero_corners_are_byte_identical() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+        let bc = BoxConstraints::loose(Size::new(400.0, 200.0));
+        let mut plain = build(&view);
+        layout(&mut plain, &bc);
+        let mut zeroed = build(&view);
+        layout_with_corners(&mut zeroed, &bc, CornerInsets::ZERO);
+        assert_eq!(plain.slots.len(), zeroed.slots.len());
+        for (a, b) in plain.slots.iter().zip(zeroed.slots.iter()) {
+            assert_eq!(a.origin(), b.origin());
+            assert_eq!(a.size(), b.size());
+        }
     }
 
     #[test]
