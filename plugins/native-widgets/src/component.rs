@@ -16,10 +16,10 @@
 //! | receiver | associated functions | `&self` — the value the app constructs each rebuild |
 //! | props | decoded from `params_json` inside the impl | **already-typed Rust values** the app hands over, staged beside the wire (*Props travel beside the wire*, below) |
 //! | errors | every method returns `Result` | latched on the context ([`ComponentCtx::report_error`]); `create` may answer `None` |
-//! | events | decoded into the crate's typed `EventPayload` | the raw [`NativeEvent`] pair, handled by the component itself |
+//! | events | decoded into the crate's typed `EventPayload` | the [`NativeEvent`] pair from a listener the component attached ([`ComponentCtx::attach_listener`]), answered with the event (if any) the app's `.on_event` hook receives |
 //! | context | the platform's own `NativeCtx` | the opaque [`ComponentCtx`] wrapper |
 //!
-//! The six v1 controls are **not** ported onto it: they stay internal
+//! The built-in controls are **not** ported onto it: they stay internal
 //! `NativeWidget` impls, and this module **bridges** to them through
 //! `Bridge<C>` (crate-private), one `NativeWidget` impl generic over every
 //! public component, so both kinds reach the same runtime, registry, props diff
@@ -50,23 +50,26 @@
 //!    rebuilds each cost one dispatch for byte-identical props. Field-level
 //!    diffing inside a changed props value is the component's own job — only it
 //!    knows which setter is cheap and which forces a re-layout.
-//! 4. **`on_event` fires between frames — except that no production path
-//!    attaches a listener to a public component's view, so overriding it has no
-//!    effect in this build** ([`NativeComponent::on_event`] owns that scope,
-//!    including the fabricated-slot-id misroute that *can* still reach it). A
-//!    native interaction bypasses `RenderRoot::event` entirely: no `EventCtx`,
-//!    no capture/focus, none of `docs/CODE_STANDARDS.md`'s Interaction
-//!    Semantics. And a listener that fires while the runtime is already
-//!    borrowed — the classic case is a setter provoking its own listener
-//!    synchronously from inside `update` — is **dropped with a warning**, not
-//!    delivered re-entrantly.
+//! 4. **`on_event` fires between frames, for the listeners the component
+//!    attached.** A component attaches the platform's one listener to any view
+//!    it built — root or child — with [`ComponentCtx::attach_listener`], and
+//!    from then on that view's clicks/toggles/value changes reach
+//!    [`NativeComponent::on_event`] through the same slot-id routing the
+//!    built-in controls use (*Listener attachment*, below). A slot that
+//!    attached nothing for an event's family never reaches the method at all.
+//!    A native interaction bypasses `RenderRoot::event` entirely: no
+//!    `EventCtx`, no capture/focus, none of `docs/CODE_STANDARDS.md`'s
+//!    Interaction Semantics. And a listener that fires while the runtime is
+//!    already borrowed — the classic case is a setter provoking its own
+//!    listener synchronously from inside `update` — is **dropped with a
+//!    warning**, not delivered re-entrantly.
 //! 5. **The staged-`&self` re-read is component-only, and its `dispose` half is
 //!    live today.** The `&self` carried into `on_event`/`dispose` is re-read
 //!    from the staging table on **every** dispatch, not only when props changed
 //!    (`BridgeState::refresh_component`): the diff gate skips `update` on an
 //!    equal-props rebuild, so anything less would run a stale rebuild's closures
-//!    ([`NativeComponent::dispose`]). The six controls decode `params_json` and
-//!    never read this table.
+//!    ([`NativeComponent::dispose`]). The built-in controls decode `params_json`
+//!    and never read this table.
 //! 6. **`dispose` is best-effort-prompt, and may be late** — below.
 //!
 //! # Three design decisions this trait settles
@@ -85,12 +88,12 @@
 //! `inventory`-style link-time auto-registration stays **banned**, being exactly
 //! the mechanism that fails silently in a stripped, LTO'd device build.
 //! Registration is **first-wins** — a kind already registered, including any of
-//! the six built-in controls (which the backend registers when the thread's
+//! the built-in controls (which the backend registers when the thread's
 //! runtime is first touched), is refused with a warning rather than replaced, so
 //! a third-party kind can never shadow a shipped one.
 //!
-//! **3. Disposal promptness** is **exactly the guarantee the six controls get,
-//! and no more**: the framework's `retire()` (driven from the mounting widget's
+//! **3. Disposal promptness** is **exactly the guarantee the built-in controls
+//! get, and no more**: the framework's `retire()` (driven from the mounting widget's
 //! teardown) is the prompt primary path, and the differ's missing-frame streak
 //! is the backstop. That streak only advances on gate-`Run` frames, so on an
 //! idle screen a `dispose` can arrive many frames late — or after a replacement
@@ -101,18 +104,56 @@
 //! dropped immediately after [`NativeComponent::dispose`] returns, alongside
 //! the runtime's paired delete of the [`NativeRoot`].
 //!
+//! # Listener attachment
+//!
+//! There is still exactly **one listener class per platform** — Android's
+//! `dev.frust.nativewidgets.FrustNativeListener`, and each Apple arm's
+//! `FrustNativeControlTarget` — and a component reaches it the same way the
+//! built-in controls do, through one call: [`ComponentCtx::attach_listener`],
+//! given the view and the [`ListenerKinds`] to wire (click, toggled, value
+//! changed). The context constructs the listener bound to **this slot's own
+//! id**, which it knows privately and never hands to the component, so a
+//! component cannot route an event anywhere but home. It answers a
+//! [`ListenerHandle`] the component keeps in its [`NativeComponent::State`];
+//! dropping it with the state is the release **on every arm**, and
+//! [`ComponentCtx::detach_listener`] detaches explicitly (the same release,
+//! run early instead of at drop). A release only ever affects **the handle's
+//! own listener**: iOS removes its own target's action pairs, macOS clears the
+//! control's target/action only while they are still its own, and Android —
+//! whose `setOn*Listener` setters hold one listener each, replace it outright
+//! and expose no getter — **disarms** the handle's own `FrustNativeListener`
+//! (a `@Volatile` flag every callback checks) rather than nulling the view's
+//! interface, which may already hold a newer attach's listener. The interface
+//! keeps an inert object until a later attach replaces it or the view dies.
+//! So re-attaching the same view for the same kinds and letting the old
+//! handle drop is safe on every arm, and on Android a handle dropped off the
+//! main thread never touches a `View` at all.
+//!
+//! The dispatch then runs the path the built-in controls already use: the
+//! platform listener fires on the main thread, `crate::runtime`'s `on_event`
+//! routes it by slot id to this module's `Bridge`, which hands the
+//! [`NativeEvent`] (and the component's own state and last-applied props) to
+//! [`NativeComponent::on_event`]. Whatever event that answers rides the
+//! built-in controls' `EventPayload` callback table to the app's
+//! [`NativeComponentView::on_event`](crate::api::NativeComponentView::on_event)
+//! hook — the events-as-signals idiom, unchanged. The bridge remembers which
+//! [`ListenerKinds`] the slot attached and drops any other family before the
+//! component sees it, so a component that attached nothing still answers
+//! nothing.
+//!
 //! # A component owns its own native subtree
 //!
 //! One component may build a whole native view *hierarchy* — a parent with
 //! native children — and ship it as ONE slot, which is what stops a composite
-//! from leaking three slots to the consuming app. Four calls on
+//! from leaking three slots to the consuming app. Five calls on
 //! [`ComponentCtx`], which documents each, are the entire surface: build a
-//! child (`ComponentCtx::new_view`, or an `objc2-ui-kit` constructor off
-//! `ComponentCtx::mtm` — the one `#[cfg]`-gated pair), attach it
+//! child (`ComponentCtx::new_view`, or an `objc2-ui-kit`/`objc2-app-kit`
+//! constructor off `ComponentCtx::mtm` — the one `#[cfg]`-gated pair), attach it
 //! ([`ComponentCtx::add_child`]), keep talking to it
-//! ([`ComponentCtx::retain_child`] → [`NativeChild`]), and bound the JNI
+//! ([`ComponentCtx::retain_child`] → [`NativeChild`]), hear from it
+//! ([`ComponentCtx::attach_listener`] → [`ListenerHandle`]), and bound the JNI
 //! reference table ([`ComponentCtx::with_local_frame`], a no-op under ARC). The
-//! last three exist on every target, and the host arm's stand-ins let an
+//! last four exist on every target, and the host arm's stand-ins let an
 //! ordinary `cargo test` assert a component's create/update/dispose plan.
 //!
 //! **The platform lays the subtree out, and frust deliberately does not know
@@ -127,11 +168,11 @@
 //! **Teardown releases children with the parent**, so peak global refs return
 //! to zero over a dispose cycle by construction: a merely *attached* child
 //! needs no handle at all (Android's `ViewGroup` holds its own strong
-//! reference, UIKit retains a subview) and dies with the parent, while a child
-//! you keep talking to lives in [`NativeComponent::State`] as a
+//! reference, UIKit and AppKit retain a subview) and dies with the parent,
+//! while a child you keep talking to lives in [`NativeComponent::State`] as a
 //! [`NativeChild`], whose `Drop` *is* the release (`DeleteGlobalRef` on
-//! Android, `Retained`'s own `Drop` on iOS). The leak bar is the six controls'
-//! own; `tests::a_component_builds_a_native_subtree_and_releases_every_child`
+//! Android, `Retained`'s own `Drop` on iOS and macOS). The leak bar is the built-in
+//! controls' own; `tests::a_component_builds_a_native_subtree_and_releases_every_child`
 //! counts refs rather than merely surviving the cycle.
 //!
 //! # Props travel beside the wire, not on it
@@ -249,7 +290,12 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::NativeWidgetError;
-use crate::events::EventPayload;
+use crate::controls::DARK;
+use crate::events::{
+    EVENT_KIND_CLICK, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_TOGGLED,
+    EVENT_KIND_VALUE_CHANGED, EventPayload, pack_bool, pack_value_changed, unpack_bool,
+    unpack_value_changed,
+};
 use crate::registry::SlotId;
 use crate::runtime::{
     NativeCtx as PlatformCtx, NativeEvent as WireEvent, NativeView, NativeWidget, Params,
@@ -273,7 +319,7 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 ///
 /// Implement this for a plain marker/config type, register it once under a
 /// kind string ([`register_component`]), and the same runtime that serves this
-/// crate's six built-in controls will serve yours: one generic platform
+/// crate's built-in controls will serve yours: one generic platform
 /// factory, one generic listener, **no per-component Kotlin or Swift, ever**.
 ///
 /// Read the module doc first — it is the lifecycle contract (when each method
@@ -285,10 +331,9 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 ///   mounting widget appeared;
 /// - `update` runs only when [`Props`](Self::Props) compare unequal (plus the
 ///   bounded retry window a failed one opens);
-/// - `on_event` would run from a platform listener between frames, but no
-///   production path attaches one to a component's view, so overriding it has
-///   no effect in this build — a misroute can still reach it, an app-arranged
-///   route cannot (a deliberately deferred gap — [`on_event`](Self::on_event));
+/// - `on_event` runs from a platform listener between frames, for every view
+///   the component attached one to with [`ComponentCtx::attach_listener`]
+///   ([`on_event`](Self::on_event));
 /// - `dispose` is prompt on teardown but may be late, and at process exit may
 ///   not run at all.
 ///
@@ -362,56 +407,58 @@ pub trait NativeComponent: 'static {
         new: &Self::Props,
     );
 
-    /// What a platform listener *would* deliver for this slot — but no
-    /// production path attaches one, so overriding this has no effect. See
-    /// below.
+    /// A platform listener the component attached fired for this slot: act on
+    /// it, and answer the event (if any) the app's
+    /// [`NativeComponentView::on_event`](crate::api::NativeComponentView::on_event)
+    /// hook should receive.
     ///
-    /// # No production path reaches this in the current build
+    /// # Which events arrive here
     ///
-    /// **No production path attaches a listener to a view a component built —
-    /// its root as much as its children — so overriding this method has no
-    /// effect today, and every public component is display-only.** The two
-    /// listener objects that exist are constructed from a slot id (Android's
-    /// shared `FrustNativeListener`, iOS's target-action object), and the only
-    /// callers of either constructor are the six built-in controls;
-    /// [`ComponentCtx`] exposes neither a slot id nor a way to build one, and
-    /// the generic mounting builder registers no callback either
-    /// (`crate::api::mount`'s `init`, whose comment says so, and
-    /// `Bridge::on_event` answers `None` unconditionally).
+    /// Exactly the ones a listener this component attached reports: a view it
+    /// built (its root as much as a child) wired with
+    /// [`ComponentCtx::attach_listener`], for the [`ListenerKinds`] it asked
+    /// for. The listener is the platform's one shared class, bound to this
+    /// slot's own id by the context — the component never sees the id, so it
+    /// cannot route anything but home — and its events reach this method
+    /// through the runtime's slot-id routing, the path the built-in
+    /// controls' events take. An event whose family this slot never attached
+    /// (a stray, or a hand-built Android listener carrying this slot's number)
+    /// is dropped at the bridge and never reaches this method.
     ///
-    /// **A misroute is possible; a route is not.** The scope above is the
-    /// whole claim and it is not "can never fire": `NativeRuntime::on_event`
-    /// keys on the slot id alone, and Android's `nativeOnEvent` export checks
-    /// only that the incoming `jlong` is non-negative (`SlotId::try_from`), so
-    /// a listener carrying a *fabricated* id that happens to name a live
-    /// component's slot is delivered here indistinguishably from a real one.
-    /// Nothing in production fabricates one — but the dispatch is real code on
-    /// a real path, which is why it is guarded at the boundary like the other
-    /// three (the module doc's *Dispatch-boundary exception guard*) rather than
-    /// treated as unreachable.
+    /// # The pair, the state and the props
     ///
-    /// This is a **deliberately deferred gap**, not an oversight: the dispatch
-    /// half — runtime → bridge → this method — is wired and unit-tested, and
-    /// only the attach half is missing. The method stays on the trait so the
-    /// contract it will be given is already stated.
-    ///
-    /// # The shape the channel carries when it opens
-    ///
-    /// The pair is the generic listener glue's raw wire
-    /// ([`NativeEvent::kind`]/[`NativeEvent::detail`]); this crate's own typed
-    /// event vocabulary stays internal in v1, so a component would decode the
-    /// pair itself. The `&self` a dispatch runs against is the value the app
+    /// `event` is the listener's raw wire ([`NativeEvent::kind`]/
+    /// [`NativeEvent::detail`], with [`NativeEvent::checked`] and
+    /// [`NativeEvent::value`] decoding the two payload-carrying kinds).
+    /// `state` is the component's own, and `props` the last props a `create`
+    /// or successful `update` applied — the typed baseline the runtime diffs
+    /// against. The `&self` a dispatch runs against is the value the app
     /// published this rebuild — re-read from the staging table on every
-    /// dispatch (the module doc's point 4) — so it can carry the closures such
+    /// dispatch (the module doc's point 5) — so it can carry the closures such
     /// an event should reach.
     ///
-    /// Defaults to doing nothing — and since no production path attaches a
-    /// listener, overriding it changes nothing a v1 app can arrange to see. A
-    /// misroute is possible, a route is not, so an override is not *dead* code
-    /// so much as unreachable-by-design code: write it for the contract above
-    /// if you like, but do not ship a build that depends on it firing.
-    fn on_event(&self, state: &mut Self::State, event: NativeEvent) {
-        let _ = (state, event);
+    /// # The answer
+    ///
+    /// `Some(event)` forwards that event to the app's hook (the builders'
+    /// events-as-signals idiom: the hook typically writes a signal, which wakes
+    /// exactly one frust frame); `None` swallows it. The answer need not be
+    /// the event that arrived — a component may translate one kind into
+    /// another — but only the kinds [`NativeEvent`] names are forwarded; any
+    /// other kind is dropped (logged at `debug`). The default forwards every
+    /// event unchanged, which is right for a component whose listeners exist
+    /// to report straight to the app.
+    ///
+    /// It runs on the main thread inside the runtime's borrow, like every
+    /// listener dispatch here: a setter provoking its own listener
+    /// synchronously from inside this method is dropped, not re-entered.
+    fn on_event(
+        &self,
+        state: &mut Self::State,
+        props: &Self::Props,
+        event: NativeEvent,
+    ) -> Option<NativeEvent> {
+        let _ = (state, props);
+        Some(event)
     }
 
     /// The slot is going away: detach listeners and release anything `state`
@@ -438,8 +485,8 @@ pub trait NativeComponent: 'static {
     /// reaches a **still-mounted** slot: the differ's missing-frame-streak
     /// culling backstop, and `suspend_all` on surface teardown.
     ///
-    /// Unlike [`on_event`](Self::on_event), this method **does** run in the
-    /// current build.
+    /// A [`ListenerHandle`] kept in `state` needs no call here: dropping it
+    /// with the state is its release ([`ListenerHandle`]'s own doc).
     fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
         let _ = (ctx, state);
     }
@@ -474,20 +521,68 @@ pub trait NativeComponent: 'static {
 /// place a second context exists to lose an error in: the latch travels into
 /// the frame and back out, so `failed()` answers the same inside it as
 /// outside, on every platform arm.
+///
+/// # The slot it speaks for
+///
+/// A context also knows **which slot** the call is for — privately. That is
+/// what [`attach_listener`](Self::attach_listener) binds the platform's one
+/// listener to, and it is never handed to the component: a component can
+/// only ever route an event back to its own slot (the module doc's *Listener
+/// attachment*).
 pub struct ComponentCtx<'ctx, 'local, 'env> {
     inner: &'ctx mut PlatformCtx<'local, 'env>,
     error: Option<NativeWidgetError>,
+    /// The slot this call is for — the id every listener this context attaches
+    /// reports under. Private on purpose (the type doc's *The slot it speaks
+    /// for*).
+    slot: SlotId,
+    /// Every [`ListenerKinds`] family an [`attach_listener`](Self::attach_listener)
+    /// made through this context succeeded for — read back by `Bridge` so the
+    /// slot's event gate knows what it may deliver.
+    attached: ListenerKinds,
 }
 
 impl<'ctx, 'local, 'env> ComponentCtx<'ctx, 'local, 'env> {
-    /// Wrap the platform context of one runtime call.
-    fn new(inner: &'ctx mut PlatformCtx<'local, 'env>) -> Self {
-        Self { inner, error: None }
+    /// Wrap the platform context of one runtime call for `slot`.
+    fn new(inner: &'ctx mut PlatformCtx<'local, 'env>, slot: SlotId) -> Self {
+        Self {
+            inner,
+            error: None,
+            slot,
+            attached: ListenerKinds::NONE,
+        }
     }
 
-    /// Consume the wrapper, reporting whatever was latched.
-    fn into_error(self) -> Option<NativeWidgetError> {
-        self.error
+    /// Consume the wrapper, reporting whatever was latched and every listener
+    /// family attached through it.
+    fn into_parts(self) -> (Option<NativeWidgetError>, ListenerKinds) {
+        (self.error, self.attached)
+    }
+
+    /// Record a successful attach: the families join what `Bridge` will let
+    /// through for this slot, and the attach is logged at `debug` — the one
+    /// line a device or desktop run can grep to see a component's listener
+    /// wiring happen (the slot id appears in the log, never in the component).
+    fn note_attached(&mut self, kinds: ListenerKinds) {
+        self.attached |= kinds;
+        log::debug!(
+            "frust-native-widgets: component slot {} attached a {kinds} listener",
+            self.slot
+        );
+    }
+
+    /// Refuse an [`attach_listener`](Self::attach_listener) asking for no
+    /// family at all — shared by every arm, so an empty request latches the
+    /// same error everywhere rather than attaching a listener that could never
+    /// report anything.
+    fn refuse_empty(&mut self, kinds: ListenerKinds) -> bool {
+        if kinds.is_empty() {
+            self.latch(NativeWidgetError::Params(
+                "attach_listener was asked for no ListenerKinds — nothing to attach".into(),
+            ));
+            return true;
+        }
+        false
     }
 
     /// Record the first failure and keep it (see this type's *error latch*).
@@ -567,6 +662,90 @@ impl ComponentCtx<'_, '_, '_> {
         }
     }
 
+    /// Attach this crate's one listener class, `FrustNativeListener`, to
+    /// `view` for `kinds` — the module doc's *Listener attachment*. `view` may
+    /// be the component's root or any child it built.
+    ///
+    /// [`ListenerKinds::CLICK`] sets it as the view's `View.OnClickListener`
+    /// (any view); [`ListenerKinds::TOGGLED`] as a `CompoundButton`'s
+    /// `OnCheckedChangeListener`; [`ListenerKinds::VALUE_CHANGED`] as a
+    /// `SeekBar`'s `OnSeekBarChangeListener`, which also reports the drag
+    /// edges ([`NativeEvent::KIND_DRAG_START`]/[`NativeEvent::KIND_DRAG_END`]).
+    /// The listener is constructed bound to this slot's id — which this
+    /// context never hands you — so its events come home to
+    /// [`NativeComponent::on_event`] and nowhere else.
+    ///
+    /// Keep the returned [`ListenerHandle`] in your
+    /// [`NativeComponent::State`]: its `Drop` **disarms** the listener it
+    /// created — that one object, never the view — and releases the global
+    /// references it holds to both (this arm's `Drop`, [`ListenerHandle`]'s
+    /// own doc). Attaching `view` again for the same `kinds` replaces the
+    /// view's listener outright, so `state.handle = ctx.attach_listener(..)`
+    /// is safe: the old handle's drop silences only the old listener, which
+    /// the view no longer holds.
+    ///
+    /// Latches and answers `None` when `kinds` is empty, the listener class
+    /// cannot be loaded, or a setter throws — typically
+    /// [`ListenerKinds::TOGGLED`]/[`ListenerKinds::VALUE_CHANGED`] asked of a
+    /// view that is no `CompoundButton`/`SeekBar` (`NoSuchMethodError`). A
+    /// failure part-way is unwound before this answers `None`: whatever
+    /// setter this same call already succeeded with is nulled again first
+    /// (`NativeCtx`'s own `attach_listener` — the one place nulling is
+    /// identity-safe, since nothing can have replaced those interfaces in
+    /// between), so no stray interface survives it.
+    pub fn attach_listener(
+        &mut self,
+        view: &jni::objects::JObject<'_>,
+        kinds: ListenerKinds,
+    ) -> Option<ListenerHandle> {
+        if self.refuse_empty(kinds) {
+            return None;
+        }
+        match self.inner.attach_listener(
+            view,
+            self.slot,
+            kinds.contains(ListenerKinds::CLICK),
+            kinds.contains(ListenerKinds::TOGGLED),
+            kinds.contains(ListenerKinds::VALUE_CHANGED),
+        ) {
+            Ok((view, listener)) => {
+                self.note_attached(kinds);
+                Some(ListenerHandle {
+                    kinds,
+                    inner: ListenerInner {
+                        _view: view,
+                        listener,
+                        _not_send: PhantomData,
+                    },
+                })
+            }
+            Err(error) => {
+                self.latch(error);
+                None
+            }
+        }
+    }
+
+    /// Detach what `handle` attached and release it — the explicit spelling
+    /// of dropping the handle, whose `Drop` already disarms the listener it
+    /// created and releases both global references (this arm's `Drop`; iOS
+    /// and macOS below release their own target the same way). For a
+    /// component that stops listening while its view lives on, or that
+    /// detaches in `dispose`, as the built-in controls do. The view's
+    /// interface keeps the disarmed, inert listener until a later attach
+    /// replaces it or the view dies — the view itself is never mutated here.
+    ///
+    /// Consuming `handle` here is what makes a double detach impossible: a
+    /// `ListenerHandle`'s fields cannot be moved out of it individually once
+    /// it carries a `Drop` impl, so this — like the two Apple arms — can only
+    /// ever run the release once, through `Drop` itself, never twice against
+    /// the same global reference. Never latches: a detach failure logs from
+    /// inside the `Drop` instead, which has no context to latch onto.
+    pub fn detach_listener(&mut self, handle: ListenerHandle) -> Option<()> {
+        drop(handle);
+        Some(())
+    }
+
     /// Run `f` inside a pushed JNI local frame, so every local reference it
     /// creates is released the moment it returns — **mandatory** around a
     /// loop building more than a handful of children (module doc's subtree
@@ -596,19 +775,27 @@ impl ComponentCtx<'_, '_, '_> {
         // `false` inside a frame where the other two arms read `true`, and
         // re-latching the inner error on return would silently drop it whenever
         // this context already held one.
+        //
+        // The slot and the attached-listener record travel the same way: a
+        // listener attached inside the frame is this slot's like any other.
         let mut latched = self.error.take();
+        let slot = self.slot;
+        let mut attached = self.attached;
         let outcome = self.inner.with_frame(capacity, |inner| {
             let mut cx = ComponentCtx {
                 inner,
                 error: latched.take(),
+                slot,
+                attached,
             };
             let value = f(&mut cx);
-            latched = cx.into_error();
+            (latched, attached) = cx.into_parts();
             Ok::<Option<T>, NativeWidgetError>(value)
         });
         // A frame that could not be pushed never ran the closure, so this puts
         // the carried-in error back rather than erasing it.
         self.error = latched;
+        self.attached = attached;
         match outcome {
             Ok(value) => value,
             Err(error) => {
@@ -741,6 +928,66 @@ impl ComponentCtx<'_, '_, '_> {
         Some(NativeChild(view.retain()))
     }
 
+    /// Attach this crate's one target-action class, `FrustNativeControlTarget`,
+    /// to `view` for `kinds` — the module doc's *Listener attachment*. `view`
+    /// may be the component's root or any child it built.
+    ///
+    /// [`ListenerKinds::CLICK`] wires `TouchUpInside` on any `UIControl`;
+    /// [`ListenerKinds::TOGGLED`] a `UISwitch`'s `ValueChanged`;
+    /// [`ListenerKinds::VALUE_CHANGED`] a `UISlider`'s `ValueChanged` plus its
+    /// `TouchDown`/`TouchUpInside|TouchUpOutside` drag edges — exactly the
+    /// wiring the built-in controls use. The target is bound to this slot's id,
+    /// which this context never hands you.
+    ///
+    /// UIKit holds a control's targets **weakly**, so the returned
+    /// [`ListenerHandle`] is the target's only strong reference: keep it in
+    /// your [`NativeComponent::State`]. Dropping it removes the target-action
+    /// pairs it added, then releases the target.
+    ///
+    /// Latches and answers `None` when `kinds` is empty or `view` is not the
+    /// class a requested kind reads its payload from (no `UIControl` at all,
+    /// or `TOGGLED`/`VALUE_CHANGED` on a view that is no
+    /// `UISwitch`/`UISlider`) — checked before anything is attached, so a
+    /// refusal leaves nothing half-wired.
+    pub fn attach_listener(
+        &mut self,
+        view: &objc2_ui_kit::UIView,
+        kinds: ListenerKinds,
+    ) -> Option<ListenerHandle> {
+        if self.refuse_empty(kinds) {
+            return None;
+        }
+        let mtm = self.inner.mtm();
+        match crate::apple::FrustNativeControlTarget::attach_component(
+            mtm,
+            self.slot,
+            view,
+            kinds.contains(ListenerKinds::CLICK),
+            kinds.contains(ListenerKinds::TOGGLED),
+            kinds.contains(ListenerKinds::VALUE_CHANGED),
+        ) {
+            Ok((target, control)) => {
+                self.note_attached(kinds);
+                Some(ListenerHandle {
+                    kinds,
+                    inner: ListenerInner { target, control },
+                })
+            }
+            Err(message) => {
+                self.latch(NativeWidgetError::Platform(message));
+                None
+            }
+        }
+    }
+
+    /// Detach what `handle` attached and release it — the explicit spelling
+    /// of dropping the handle, whose `Drop` already removes its target-action
+    /// pairs on this arm. Never latches.
+    pub fn detach_listener(&mut self, handle: ListenerHandle) -> Option<()> {
+        drop(handle);
+        Some(())
+    }
+
     /// The Apple counterpart of Android's local-frame wrapper: it runs `f`
     /// and nothing else.
     ///
@@ -762,19 +1009,168 @@ impl ComponentCtx<'_, '_, '_> {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// The macOS arm: the `NSView` twin of the iOS block above, method for method
+/// — the main-thread proof (AppKit's whole escape hatch, exactly as on iOS),
+/// `root`/`add_child`/`retain_child` over `Retained<NSView>`, and the same
+/// run-`f`-and-nothing-else local frame.
+///
+/// `add_child` goes through `crate::appkit::NativeCtx::add_child`
+/// (`addSubview:`), the seam `crate::appkit::ctx`'s *Hierarchy* section keeps
+/// for exactly this caller. There is no host-style `record` here: this arm
+/// builds real views, and the `demo-components` `DemoCard` has its own AppKit
+/// `mod platform` (`crate::demo`).
+///
+/// [`attach_listener`](Self::attach_listener) wires `crate::appkit::events`'
+/// one target class onto an `NSControl` the component built, the AppKit
+/// counterpart of the other two arms' listener attach.
+#[cfg(target_os = "macos")]
+impl ComponentCtx<'_, '_, '_> {
+    /// The main-thread proof this call carries — what every `objc2-app-kit`
+    /// constructor demands, and the macOS arm's whole escape hatch (the
+    /// Objective-C runtime is globally reachable; there is no `Env` to thread).
+    pub fn mtm(&self) -> objc2::MainThreadMarker {
+        self.inner.mtm()
+    }
+
+    /// Take this slot's root view. ARC owns it from here — `Retained`'s own
+    /// `Drop` is the release, so there is no paired-delete discipline on this
+    /// arm.
+    ///
+    /// A typed view converts with objc2's own upcast, e.g.
+    /// `Retained::clone(&button).into_super().into_super()` for an `NSButton`
+    /// (`NSButton` → `NSControl` → `NSView`). Answers `Option` only so a
+    /// component reads the same on every platform (`let root =
+    /// ctx.root(view)?;`); this arm never latches here.
+    pub fn root(&mut self, view: objc2::rc::Retained<objc2_app_kit::NSView>) -> Option<NativeRoot> {
+        let mtm = self.inner.mtm();
+        Some(NativeRoot(NativeView::new(view, mtm)))
+    }
+
+    /// `parent.addSubview(child)` — attach one native child, the subtree call
+    /// (module doc's *A component owns its own native subtree*).
+    ///
+    /// AppKit retains a subview, so a child you never touch again needs no
+    /// handle of yours at all — it is released when the parent is. Answers
+    /// `Option` only so a component reads the same on every platform; this
+    /// arm never latches here.
+    ///
+    /// A typed view passes with objc2's own upcast, e.g. `&label` for a
+    /// `Retained<NSTextField>` derefs through `NSView`'s superclass chain.
+    pub fn add_child(
+        &mut self,
+        parent: &objc2_app_kit::NSView,
+        child: &objc2_app_kit::NSView,
+    ) -> Option<()> {
+        self.inner.add_child(parent, child);
+        Some(())
+    }
+
+    /// Retain a child view as a [`NativeChild`] the component keeps in its
+    /// [`NativeComponent::State`], released when `State` drops (module doc's
+    /// *Teardown*).
+    ///
+    /// ARC already does this for any `Retained<T>` a component keeps itself,
+    /// with the child's own concrete type preserved — reach for that first.
+    /// This exists so a component that wants one `State` shape on every arm
+    /// can name [`NativeChild`] on this one too. Never latches.
+    pub fn retain_child(&mut self, view: &objc2_app_kit::NSView) -> Option<NativeChild> {
+        use objc2::Message as _;
+        Some(NativeChild(view.retain()))
+    }
+
+    /// Attach this crate's one target-action class, `FrustNativeControlTarget`,
+    /// to `view` for `kinds` — the module doc's *Listener attachment*. `view`
+    /// may be the component's root or any child it built, and must be an
+    /// `NSControl`.
+    ///
+    /// **Exactly one family per control on this arm**: an `NSControl` carries
+    /// a single `target`/`action` pair, sent at its one "value committed"
+    /// moment, so [`ListenerKinds::CLICK`] (any control — a button click),
+    /// [`ListenerKinds::TOGGLED`] (an `NSSwitch`, whose `state` is the payload)
+    /// and [`ListenerKinds::VALUE_CHANGED`] (any control's `doubleValue` — set
+    /// an `NSSlider` `continuous` to hear every drag step) are alternatives
+    /// here, not a mask. AppKit reports no drag edges (`crate::appkit::events`'
+    /// module doc). The target is bound to this slot's id, which this context
+    /// never hands you.
+    ///
+    /// `NSControl.target` is weak, so the returned [`ListenerHandle`] is the
+    /// target's only strong reference: keep it in your
+    /// [`NativeComponent::State`]. Dropping it clears the control's
+    /// target/action (if they are still this handle's), then releases the
+    /// target.
+    ///
+    /// Latches and answers `None` when `kinds` is empty or names more than one
+    /// family, `view` is no `NSControl`, or `TOGGLED` is asked of a control
+    /// that is no `NSSwitch` — checked before anything is attached.
+    pub fn attach_listener(
+        &mut self,
+        view: &objc2_app_kit::NSView,
+        kinds: ListenerKinds,
+    ) -> Option<ListenerHandle> {
+        if self.refuse_empty(kinds) {
+            return None;
+        }
+        let Some(kind) = kinds.single_event_kind() else {
+            self.latch(NativeWidgetError::Params(format!(
+                "macOS attach_listener: an NSControl carries one target/action pair, so attach \
+                 exactly one ListenerKinds family per control (asked for {kinds})"
+            )));
+            return None;
+        };
+        let mtm = self.inner.mtm();
+        match crate::appkit::FrustNativeControlTarget::attach_view(mtm, view, self.slot, kind) {
+            Ok((target, control)) => {
+                self.note_attached(kinds);
+                Some(ListenerHandle {
+                    kinds,
+                    inner: ListenerInner { target, control },
+                })
+            }
+            Err(message) => {
+                self.latch(NativeWidgetError::Platform(message));
+                None
+            }
+        }
+    }
+
+    /// Detach what `handle` attached and release it — the explicit spelling
+    /// of dropping the handle, whose `Drop` already clears the control's
+    /// target/action on this arm. Never latches.
+    pub fn detach_listener(&mut self, handle: ListenerHandle) -> Option<()> {
+        drop(handle);
+        Some(())
+    }
+
+    /// The Apple counterpart of Android's local-frame wrapper: it runs `f`
+    /// and nothing else.
+    ///
+    /// There is no reference table to bound here — a `Retained`'s own `Drop`
+    /// is the release (`crate::appkit::ctx`'s module doc) — so `capacity` is
+    /// accepted and ignored. Handing the closure this very context is what
+    /// makes the error latch shared, exactly as on the iOS arm: `failed()`
+    /// reads the same inside the frame as outside it on every arm.
+    pub fn with_local_frame<T>(
+        &mut self,
+        _capacity: usize,
+        f: impl FnOnce(&mut ComponentCtx<'_, '_, '_>) -> Option<T>,
+    ) -> Option<T> {
+        f(self)
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 impl ComponentCtx<'_, '_, '_> {
     /// Record one would-be platform call — the host stand-in's whole surface,
     /// so a component's create/update/dispose can be asserted by an ordinary
     /// `cargo test` on a machine with no JNI and no Objective-C runtime at
-    /// all. Compiled only on a non-mobile host; there is no native view to
-    /// build there.
+    /// all. Compiled only on a host with no platform arm; there is no native
+    /// view to build there.
     pub fn record(&mut self, call: impl Into<String>) {
         self.inner.record(call);
     }
 
     /// Take a stand-in root view with the given identity — the host mirror of
-    /// the two platform arms' `root`, where `identity` plays the role
+    /// the three platform arms' `root`, where `identity` plays the role
     /// `Env::is_same_object` plays on Android (what a dispose resolves
     /// against).
     pub fn root(&mut self, identity: u64) -> Option<NativeRoot> {
@@ -782,7 +1178,7 @@ impl ComponentCtx<'_, '_, '_> {
     }
 
     /// Record one would-be `addView`/`addSubview` — the host mirror of the
-    /// two platform arms' `add_child`, so a subtree's *plan* is assertable
+    /// three platform arms' `add_child`, so a subtree's *plan* is assertable
     /// (which child went under which parent, in what order) on a machine with
     /// no view hierarchy at all.
     pub fn add_child(&mut self, parent: u64, child: u64) -> Option<()> {
@@ -791,7 +1187,7 @@ impl ComponentCtx<'_, '_, '_> {
     }
 
     /// Take a stand-in retained child handle — the host mirror of Android's
-    /// global reference and iOS's `Retained`.
+    /// global reference and the Apple arms' `Retained`.
     ///
     /// Live handles are counted process-thread-wide (this module's
     /// crate-private `live_child_count`), so a host test asserts the paired
@@ -800,6 +1196,37 @@ impl ComponentCtx<'_, '_, '_> {
     pub fn retain_child(&mut self, identity: u64) -> Option<NativeChild> {
         self.inner.record(format!("retainChild {identity}"));
         Some(NativeChild::new(identity))
+    }
+
+    /// Record a would-be listener attach on the stand-in view `view` — the
+    /// host mirror of the three platform arms' `attach_listener`, so a
+    /// component's listener wiring is part of its assertable plan.
+    ///
+    /// Like the real arms it binds the stand-in to this context's own slot
+    /// (logged, never recorded in the plan, never handed out), and it latches
+    /// and answers `None`
+    /// for an empty `kinds`. Live stand-in handles are counted
+    /// (`live_listener_count`) the way [`Self::retain_child`]'s are.
+    pub fn attach_listener(&mut self, view: u64, kinds: ListenerKinds) -> Option<ListenerHandle> {
+        if self.refuse_empty(kinds) {
+            return None;
+        }
+        self.inner.record(format!("attachListener {view} {kinds}"));
+        self.note_attached(kinds);
+        Some(ListenerHandle {
+            kinds,
+            inner: HostListener::new(view),
+        })
+    }
+
+    /// Record a would-be detach of what `handle` attached, then release it —
+    /// the host mirror of the three platform arms' `detach_listener`.
+    pub fn detach_listener(&mut self, handle: ListenerHandle) -> Option<()> {
+        self.inner.record(format!(
+            "detachListener {} {}",
+            handle.inner.identity, handle.kinds
+        ));
+        Some(())
     }
 
     /// Record a would-be `PushLocalFrame`/`PopLocalFrame` pair around `f` —
@@ -825,12 +1252,12 @@ impl ComponentCtx<'_, '_, '_> {
 
 /// The root native view a [`NativeComponent::create`] hands back — an opaque
 /// handle the runtime retains for the slot and releases on dispose (Android:
-/// the paired global-ref delete; iOS: ARC).
+/// the paired global-ref delete; iOS and macOS: ARC).
 ///
 /// Built only through [`ComponentCtx::root`], so the platform handle type
 /// itself never has to appear in a component's signature; a component that
 /// wants to keep talking to its own view retains a second, typed reference in
-/// its [`NativeComponent::State`], exactly as the six built-in controls do.
+/// its [`NativeComponent::State`], exactly as the built-in controls do.
 pub struct NativeRoot(NativeView);
 
 impl NativeRoot {
@@ -845,7 +1272,8 @@ impl NativeRoot {
 /// that child later (module doc's *A component owns its own native subtree*).
 ///
 /// Built only through [`ComponentCtx::retain_child`]. **Dropping it is the
-/// release** — `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS —
+/// release** — `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS and
+/// macOS —
 /// and `State` is dropped immediately after [`NativeComponent::dispose`]
 /// returns, so a child is released with its parent by construction rather
 /// than by remembering to.
@@ -855,12 +1283,15 @@ impl NativeRoot {
 pub struct NativeChild(ChildHandle);
 
 /// [`NativeChild`]'s per-platform payload: a global reference on Android, an
-/// ARC retain on iOS, a counted stand-in on a non-mobile host.
+/// ARC retain on iOS (`UIView`) and macOS (`NSView`), a counted stand-in on a
+/// host with no platform arm (Linux/Windows/web).
 #[cfg(target_os = "android")]
 type ChildHandle = jni::refs::Global<jni::objects::JObject<'static>>;
 #[cfg(target_os = "ios")]
 type ChildHandle = objc2::rc::Retained<objc2_ui_kit::UIView>;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
+type ChildHandle = objc2::rc::Retained<objc2_app_kit::NSView>;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 type ChildHandle = HostChild;
 
 #[cfg(target_os = "android")]
@@ -883,7 +1314,18 @@ impl NativeChild {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
+impl NativeChild {
+    /// The retained child, for the `objc2-app-kit` setters a component's
+    /// `update` calls on it. Takes the same main-thread proof
+    /// [`AppKitHandle::view`](crate::registry::appkit::AppKitHandle::view)
+    /// does — a typestate guard, not a runtime cost.
+    pub fn view(&self, _mtm: objc2::MainThreadMarker) -> &objc2_app_kit::NSView {
+        &self.0
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 impl NativeChild {
     /// A counted stand-in handle with the given identity.
     fn new(identity: u64) -> Self {
@@ -901,19 +1343,19 @@ impl NativeChild {
 /// dropped, exactly as Android's `Global` issues its `DeleteGlobalRef` — the
 /// leak bar `crate::registry`'s own `CountingHandle` established, one table
 /// over.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 pub(crate) struct HostChild {
     identity: u64,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 impl Drop for HostChild {
     fn drop(&mut self) {
         LIVE_CHILDREN.with(|live| live.set(live.get().saturating_sub(1)));
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 thread_local! {
     /// How many host stand-in child handles are alive on this thread — the
     /// mirror of ART's live-global-ref count ("52 at peak → 0 after the
@@ -925,10 +1367,339 @@ thread_local! {
 
 /// How many retained subtree children are currently alive — the host arm's
 /// leak bar, which every create/dispose cycle must return to `0`.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 #[allow(dead_code)] // the leak bar's only caller is this module's own tests
 pub(crate) fn live_child_count() -> usize {
     LIVE_CHILDREN.with(|live| live.get())
+}
+
+// --- listener attachment -----------------------------------------------------
+
+/// Which of the platform listener's event families
+/// [`ComponentCtx::attach_listener`] wires onto a view — the module doc's
+/// *Listener attachment*. Combine with `|`.
+///
+/// | family | Android (`FrustNativeListener` as…) | iOS (`FrustNativeControlTarget` on…) | macOS (`FrustNativeControlTarget` on…) | [`NativeEvent`] kinds it delivers |
+/// |---|---|---|---|---|
+/// | [`CLICK`](Self::CLICK) | `View.OnClickListener`, any view | `TouchUpInside`, any `UIControl` | the action, any `NSControl` | [`NativeEvent::KIND_CLICK`] |
+/// | [`TOGGLED`](Self::TOGGLED) | `OnCheckedChangeListener`, a `CompoundButton` | `ValueChanged`, a `UISwitch` | the action, an `NSSwitch` | [`NativeEvent::KIND_TOGGLED`] |
+/// | [`VALUE_CHANGED`](Self::VALUE_CHANGED) | `OnSeekBarChangeListener`, a `SeekBar` | `ValueChanged` + drag edges, a `UISlider` | the action, any `NSControl` (`doubleValue`) | [`NativeEvent::KIND_VALUE_CHANGED`], plus the drag edges on the two mobile arms |
+///
+/// macOS takes exactly one family per control (one target/action pair per
+/// `NSControl` — [`ComponentCtx::attach_listener`]'s macOS doc). Later
+/// families (a selection, a date) land beside these three and route through
+/// the same table.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ListenerKinds(u8);
+
+impl ListenerKinds {
+    /// No family at all — what [`ComponentCtx::attach_listener`] refuses.
+    pub const NONE: Self = Self(0);
+    /// A click / tap.
+    pub const CLICK: Self = Self(1);
+    /// A two-state control flipped.
+    pub const TOGGLED: Self = Self(1 << 1);
+    /// A ranged control moved (and, on Android and iOS, its drag began/ended).
+    pub const VALUE_CHANGED: Self = Self(1 << 2);
+
+    /// Whether every family in `other` is in `self` (so `contains(NONE)` is
+    /// always `true`).
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether no family is set.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Every family in either.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// The single `crate::events` kind code a one-family mask means on the
+    /// macOS arm (one target/action pair per `NSControl`), or `None` for an
+    /// empty or multi-family mask.
+    #[cfg(target_os = "macos")]
+    fn single_event_kind(self) -> Option<i32> {
+        match self {
+            Self::CLICK => Some(EVENT_KIND_CLICK),
+            Self::TOGGLED => Some(EVENT_KIND_TOGGLED),
+            Self::VALUE_CHANGED => Some(EVENT_KIND_VALUE_CHANGED),
+            _ => None,
+        }
+    }
+}
+
+impl std::ops::BitOr for ListenerKinds {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        self.union(other)
+    }
+}
+
+impl std::ops::BitOrAssign for ListenerKinds {
+    fn bitor_assign(&mut self, other: Self) {
+        *self = self.union(other);
+    }
+}
+
+/// `click|toggled|value_changed`, or `none` — the spelling log lines and the
+/// host arm's recorded plan use.
+impl std::fmt::Display for ListenerKinds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return f.write_str("none");
+        }
+        let names = [
+            (Self::CLICK, "click"),
+            (Self::TOGGLED, "toggled"),
+            (Self::VALUE_CHANGED, "value_changed"),
+        ];
+        let mut first = true;
+        for (family, name) in names {
+            if self.contains(family) {
+                if !first {
+                    f.write_str("|")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for ListenerKinds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ListenerKinds({self})")
+    }
+}
+
+/// One platform listener a component attached through
+/// [`ComponentCtx::attach_listener`] — keep it in your
+/// [`NativeComponent::State`].
+///
+/// **Dropping it is the release, on every arm**, and `State` is dropped
+/// immediately after [`NativeComponent::dispose`] returns, so a listener is
+/// released with the view it listens to by construction. A release only ever
+/// affects **this handle's own listener**, never one a later attach set:
+///
+/// - **Android** disarms the `FrustNativeListener` this handle created — a
+///   `@Volatile` flag every callback checks before reporting — through a JNI
+///   env obtained from the process VM (a `Drop` carries no context of its
+///   own; see the impl below), then deletes its global references to the
+///   listener and the view. **The view is never mutated**: its
+///   `setOn*Listener` slots hold one listener each, replace it outright and
+///   expose no getter, so nulling one could wipe a newer listener. The slot
+///   keeps the disarmed, inert object until a later attach replaces it or the
+///   view dies.
+/// - **iOS** removes the target-action pairs this handle's own target added,
+///   and **macOS** clears the control's target/action only while they are
+///   still this handle's target — UIKit and AppKit hold the target weakly, so
+///   this handle is its only strong reference — then the target is released.
+///
+/// So `state.handle = ctx.attach_listener(&view, kinds)` on a view that
+/// already carries a handle for the same kinds is safe on every arm: the
+/// assignment drops the old handle, which silences only the old listener.
+/// [`ComponentCtx::detach_listener`] is the explicit form on every arm:
+/// dropping the handle early rather than waiting for `State` to go.
+///
+/// The handle is `!Send`/`!Sync` on every platform arm (Android as well as
+/// iOS/macOS), so it stays on the main thread the runtime creates and drops
+/// component `State` on. Even so, Android's release is thread-safe by
+/// construction — it flips a volatile flag on its own listener and touches no
+/// `View` — so no drop path can corrupt a view from the wrong thread.
+#[must_use = "a dropped ListenerHandle releases its listener at once — keep it in State"]
+pub struct ListenerHandle {
+    kinds: ListenerKinds,
+    inner: ListenerInner,
+}
+
+impl ListenerHandle {
+    /// The families this handle's listener was attached for.
+    pub fn kinds(&self) -> ListenerKinds {
+        self.kinds
+    }
+}
+
+/// [`ListenerHandle`]'s per-platform payload.
+#[cfg(target_os = "android")]
+struct ListenerInner {
+    /// A global reference to the view the listener was set on. Never mutated
+    /// by the release — held so the view outlives every handle that names it,
+    /// exactly as the Apple arms retain their control.
+    _view: jni::refs::Global<jni::objects::JObject<'static>>,
+    /// A global reference to the `FrustNativeListener` this handle created —
+    /// the one object the handle's `Drop` disarms.
+    listener: jni::refs::Global<jni::objects::JObject<'static>>,
+    /// Makes [`ListenerHandle`] `!Send`/`!Sync` on Android, matching the
+    /// Apple arms (whose `Retained` fields already are): `State` lives and
+    /// dies on the platform main thread.
+    _not_send: PhantomData<*const ()>,
+}
+
+/// [`ListenerHandle`]'s per-platform payload.
+#[cfg(target_os = "ios")]
+struct ListenerInner {
+    /// The target, whose only strong reference this is.
+    target: objc2::rc::Retained<crate::apple::FrustNativeControlTarget>,
+    /// The control it is attached to — kept so the handle's `Drop` can remove
+    /// exactly the target-action pairs it added.
+    control: objc2::rc::Retained<objc2_ui_kit::UIControl>,
+}
+
+/// [`ListenerHandle`]'s per-platform payload.
+#[cfg(target_os = "macos")]
+struct ListenerInner {
+    /// The target, whose only strong reference this is.
+    target: objc2::rc::Retained<crate::appkit::FrustNativeControlTarget>,
+    /// The control it is attached to — kept so the handle's `Drop` can clear
+    /// the control's target/action while they are still this target's.
+    control: objc2::rc::Retained<objc2_app_kit::NSControl>,
+}
+
+/// [`ListenerHandle`]'s per-platform payload: a counted stand-in on a host
+/// with no platform arm.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+type ListenerInner = HostListener;
+
+/// Android's counterpart to the two Apple arms below: a `Drop` carries no
+/// `Env` of its own (unlike every other call in this module, which runs
+/// inside a JNI export's own frame), so this obtains one from the process VM
+/// the same way the context-free dispatch-boundary guard does
+/// (`frust_plugin::android::vm` +
+/// [`with_top_local_frame`](jni::JavaVM::with_top_local_frame), module doc's
+/// *Dispatch-boundary exception guard*), then **disarms this handle's own
+/// listener** — `FrustNativeListener.disarm()` through
+/// `NativeCtx::disarm_listener` (`crate::android::ctx`) — and lets both
+/// `Global`s go. It never calls a `setOn*Listener` setter: the view may
+/// already hold a newer attach's listener in the same slot (the defect a
+/// nulling release had — [`ListenerHandle`]'s own doc).
+///
+/// The sequence, in order:
+///
+/// 1. Obtain the VM. None — no platform handles installed yet — logs at
+///    `warn` and skips to step 4.
+/// 2. Inside `with_top_local_frame`, **check for a pending Java exception
+///    first**. Making a JNI call with one pending is undefined behaviour, and
+///    a `Drop` may run mid-unwind of a JNI export that has not cleared its
+///    own; so when one is pending the disarm is skipped and logged at `warn`
+///    (naming the kinds), and the exception is left for its owner to handle.
+/// 3. Otherwise call `disarm()`. A failure (the method missing, a throw — the
+///    exception is cleared by `run_jni`) is logged at `warn`, never
+///    propagated and never a panic: a `Drop` has no `Result` to return it
+///    through.
+/// 4. Both `Global`s drop, issuing `DeleteGlobalRef` — which is on JNI's
+///    short list of calls that are safe with an exception pending.
+///
+/// A listener left armed by step 1 or 2's early out can still fire; the
+/// bridge's per-slot family gate refuses its event once the slot that
+/// attached it is gone, so the cost is a wasted crossing, not a misroute.
+#[cfg(target_os = "android")]
+impl Drop for ListenerHandle {
+    fn drop(&mut self) {
+        let kinds = self.kinds;
+        let vm = match frust_plugin::android::vm() {
+            Ok(vm) => vm,
+            Err(error) => {
+                log::warn!(
+                    "frust-native-widgets: ListenerHandle drop ({kinds}) could not reach a JNI \
+                     env ({error}) — the listener stays armed; releasing only the global \
+                     references"
+                );
+                return;
+            }
+        };
+        let listener = &self.inner.listener;
+        let outcome = vm.with_top_local_frame(|env| {
+            if env.exception_check() {
+                return Ok::<Option<Result<(), NativeWidgetError>>, jni::errors::Error>(None);
+            }
+            let mut ctx = PlatformCtx::detached(env);
+            Ok(Some(ctx.disarm_listener(listener)))
+        });
+        match outcome {
+            Ok(Some(Ok(()))) => {}
+            Ok(None) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) found a Java exception \
+                 pending — skipped disarming the listener (no JNI call is safe with one pending); \
+                 releasing only the global references"
+            ),
+            Ok(Some(Err(error))) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) failed disarming its \
+                 listener: {error}"
+            ),
+            Err(error) => log::warn!(
+                "frust-native-widgets: ListenerHandle drop ({kinds}) could not reach a JNI env: \
+                 {error}"
+            ),
+        }
+    }
+}
+
+/// The two Apple arms detach on drop too: the platform holds the target
+/// weakly, so releasing it while still attached would leave a control whose
+/// action has nowhere to go. Runs on the main thread by construction — a
+/// handle lives in a component's `State`, which the runtime drops there.
+#[cfg(target_os = "ios")]
+impl Drop for ListenerHandle {
+    fn drop(&mut self) {
+        self.inner.target.detach_component(
+            &self.inner.control,
+            self.kinds.contains(ListenerKinds::CLICK),
+            self.kinds.contains(ListenerKinds::TOGGLED),
+            self.kinds.contains(ListenerKinds::VALUE_CHANGED),
+        );
+    }
+}
+
+/// See the iOS arm's `Drop`.
+#[cfg(target_os = "macos")]
+impl Drop for ListenerHandle {
+    fn drop(&mut self) {
+        self.inner.target.detach_if_current(&self.inner.control);
+    }
+}
+
+/// The host arm's stand-in listener: it decrements [`LIVE_LISTENERS`] when
+/// dropped, the leak bar [`HostChild`] keeps for retained children.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+pub(crate) struct HostListener {
+    identity: u64,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+impl HostListener {
+    /// A counted stand-in attached to the view with the given identity.
+    fn new(identity: u64) -> Self {
+        LIVE_LISTENERS.with(|live| live.set(live.get() + 1));
+        Self { identity }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+impl Drop for HostListener {
+    fn drop(&mut self) {
+        LIVE_LISTENERS.with(|live| live.set(live.get().saturating_sub(1)));
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+thread_local! {
+    /// How many host stand-in listener handles are alive on this thread — the
+    /// [`LIVE_CHILDREN`] leak bar's twin for [`ListenerHandle`].
+    static LIVE_LISTENERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many attached listener handles are currently alive — every
+/// create/dispose cycle must return it to `0`.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+#[allow(dead_code)] // the leak bar's only callers are this crate's own tests
+pub(crate) fn live_listener_count() -> usize {
+    LIVE_LISTENERS.with(|live| live.get())
 }
 
 /// A platform listener firing for one component slot, as the generic listener
@@ -946,9 +1717,21 @@ pub struct NativeEvent {
 }
 
 impl NativeEvent {
-    /// Which listener fired. A component attaching this crate's shared
-    /// listener sees that class's own kind codes; one attaching its own
-    /// listener sees whatever it sends.
+    /// A click / tap ([`ListenerKinds::CLICK`]); `detail` unused (`0`).
+    pub const KIND_CLICK: i32 = EVENT_KIND_CLICK;
+    /// A two-state control flipped ([`ListenerKinds::TOGGLED`]); the new
+    /// state is [`Self::checked`].
+    pub const KIND_TOGGLED: i32 = EVENT_KIND_TOGGLED;
+    /// A ranged control moved ([`ListenerKinds::VALUE_CHANGED`]); the new
+    /// position is [`Self::value`].
+    pub const KIND_VALUE_CHANGED: i32 = EVENT_KIND_VALUE_CHANGED;
+    /// A ranged control's drag began (Android and iOS only); `detail` unused.
+    pub const KIND_DRAG_START: i32 = EVENT_KIND_DRAG_START;
+    /// A ranged control's drag ended (Android and iOS only); `detail` unused.
+    pub const KIND_DRAG_END: i32 = EVENT_KIND_DRAG_END;
+
+    /// Which listener fired — one of the `KIND_*` codes above, which are
+    /// `crate::events`' wire codes, shared verbatim with Android's listener.
     pub fn kind(self) -> i32 {
         self.kind
     }
@@ -958,12 +1741,96 @@ impl NativeEvent {
         self.detail
     }
 
+    /// Whether this is a [`Self::KIND_CLICK`].
+    pub fn is_click(self) -> bool {
+        self.kind == EVENT_KIND_CLICK
+    }
+
+    /// The reported checked state of a [`Self::KIND_TOGGLED`]; `None` for
+    /// any other kind.
+    pub fn checked(self) -> Option<bool> {
+        (self.kind == EVENT_KIND_TOGGLED).then(|| unpack_bool(self.detail))
+    }
+
+    /// The reported position of a [`Self::KIND_VALUE_CHANGED`], in the
+    /// **platform's own** space (a `SeekBar`'s zero-based progress, a
+    /// `UISlider`'s/`NSSlider`'s value rounded to the nearest integer) —
+    /// mapping it into an app range is the component's job, since only it
+    /// configured the control's range. `None` for any other kind.
+    pub fn value(self) -> Option<i32> {
+        (self.kind == EVENT_KIND_VALUE_CHANGED).then(|| unpack_value_changed(self.detail).0)
+    }
+
+    /// The [`ListenerKinds`] family whose attach delivers this kind — what the
+    /// bridge checks a slot attached before delivering (the module doc's
+    /// *Listener attachment*); [`ListenerKinds::NONE`] for a kind no family
+    /// delivers.
+    pub fn family(self) -> ListenerKinds {
+        match self.kind {
+            EVENT_KIND_CLICK => ListenerKinds::CLICK,
+            EVENT_KIND_TOGGLED => ListenerKinds::TOGGLED,
+            EVENT_KIND_VALUE_CHANGED | EVENT_KIND_DRAG_START | EVENT_KIND_DRAG_END => {
+                ListenerKinds::VALUE_CHANGED
+            }
+            _ => ListenerKinds::NONE,
+        }
+    }
+
     /// Adapt the runtime's internal wire event.
     fn from_wire(event: WireEvent) -> Self {
         Self {
             kind: event.kind,
             detail: event.detail,
         }
+    }
+
+    /// This event in the built-in controls' typed [`EventPayload`] vocabulary —
+    /// the table a component's answer rides to the app's hook
+    /// (`crate::api::mount`). `None` for a kind that vocabulary has no word
+    /// for, which the bridge then drops.
+    ///
+    /// Exactly inverted by [`Self::from_payload`] for every kind it maps: the
+    /// same `crate::events` codec packs and unpacks both directions.
+    pub(crate) fn into_payload(self) -> Option<EventPayload> {
+        match self.kind {
+            EVENT_KIND_CLICK => Some(EventPayload::Click),
+            EVENT_KIND_TOGGLED => Some(EventPayload::Toggled(unpack_bool(self.detail))),
+            EVENT_KIND_VALUE_CHANGED => {
+                let (value, from_user) = unpack_value_changed(self.detail);
+                Some(EventPayload::ValueChanged { value, from_user })
+            }
+            EVENT_KIND_DRAG_START => Some(EventPayload::DragStart),
+            EVENT_KIND_DRAG_END => Some(EventPayload::DragEnd),
+            _ => None,
+        }
+    }
+
+    /// [`Self::into_payload`]'s inverse — how `crate::api::mount` hands the
+    /// app's `.on_event` hook the public pair back.
+    pub(crate) fn from_payload(payload: EventPayload) -> Self {
+        let (kind, detail) = match payload {
+            EventPayload::Click => (EVENT_KIND_CLICK, 0),
+            EventPayload::Toggled(checked) => (EVENT_KIND_TOGGLED, pack_bool(checked)),
+            EventPayload::ValueChanged { value, from_user } => (
+                EVENT_KIND_VALUE_CHANGED,
+                pack_value_changed(value, from_user),
+            ),
+            EventPayload::DragStart => (EVENT_KIND_DRAG_START, 0),
+            EventPayload::DragEnd => (EVENT_KIND_DRAG_END, 0),
+            EventPayload::Selected(index) => (
+                crate::events::EVENT_KIND_SELECTION,
+                crate::events::pack_index(index as isize),
+            ),
+            EventPayload::Date(date) => (
+                crate::events::EVENT_KIND_DATE,
+                crate::events::pack_date(date),
+            ),
+            EventPayload::Reselected(index) => (
+                crate::events::EVENT_KIND_RESELECTED,
+                crate::events::pack_index(index as isize),
+            ),
+        };
+        Self { kind, detail }
     }
 }
 
@@ -974,7 +1841,7 @@ impl NativeEvent {
 ///
 /// Call it once, from app or plugin init, **on the platform main thread**.
 /// Returns whether the registration was accepted: **first-wins**, so a `kind`
-/// already taken — including the six built-in control kinds this build's
+/// already taken — including the built-in control kinds this build's
 /// backend registers itself — is refused with a warning rather than replaced.
 ///
 /// # A wrong-thread call is refused, not silently accepted
@@ -1070,16 +1937,18 @@ fn on_platform_main_thread() -> Option<bool> {
 }
 
 /// See the Android arm: `MainThreadMarker::new()` is `NSThread.isMainThread`,
-/// so this arm always has a definitive answer.
-#[cfg(target_os = "ios")]
+/// so both Apple arms (UIKit and AppKit — the desktop host dispatches on
+/// winit's event-loop thread, which is the process main thread) always have a
+/// definitive answer.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn on_platform_main_thread() -> Option<bool> {
     Some(objc2::MainThreadMarker::new().is_some())
 }
 
-/// See the Android arm: a desktop/CI host has no platform main thread to be
-/// wrong about — and no platform dispatch either — so the answer is always
-/// *unknown*.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// See the Android arm: a host with no platform arm (Linux/Windows/web) has no
+/// platform main thread to be wrong about — and no platform dispatch either —
+/// so the answer is always *unknown*.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn on_platform_main_thread() -> Option<bool> {
     None
 }
@@ -1294,14 +2163,29 @@ pub(crate) fn forget(slot: SlotId) {
     with_staged(|staged| staged.remove(&slot));
 }
 
-/// The `params_json` a component slot's `platform_view` carries: the runtime's
-/// two identity keys plus the props generation [`publish`] returned, and
-/// nothing else — a component's real props never cross the wire.
-pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64) -> String {
+/// The `params_json` a component slot's `platform_view` carries: the
+/// runtime's two identity keys, the props generation [`publish`] returned,
+/// and the app's active brightness (theme ladder L1's [`DARK`] wire bit) —
+/// never a component's real props.
+///
+/// `dark` is the caller's to resolve (`crate::api::mount`'s `build_with_mode`
+/// reads it off the same `use_context::<Theme>()` the builders'
+/// `ambient_theme_tokens` already does) — this module has no reactive
+/// context of its own. Carrying the bit directly on the wire, rather than
+/// folding it into a component's typed `Props` (which this crate
+/// deliberately never touches — `crate::api::mount`'s *What a component's
+/// builder does NOT carry*), means a brightness-only flip still changes
+/// `params_json` byte-for-byte, bumping `PlatformViewFrame::params_generation`
+/// and reaching `crate::appkit::theme`'s/`crate::apple::theme`'s shared
+/// `brightness_is_dark`, which both read this exact key straight off a
+/// slot's raw wire — unconditionally, for every registered kind, before any
+/// per-kind decode — the same mechanism the built-in controls' own
+/// `params_for` already rides.
+pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64, dark: bool) -> String {
     crate::runtime::with_identity(
         kind,
         slot,
-        &format!("\"{PROPS_GENERATION_KEY}\":{generation}"),
+        &format!("\"{PROPS_GENERATION_KEY}\":{generation},\"{DARK}\":{dark}"),
     )
 }
 
@@ -1383,7 +2267,7 @@ fn staged_component<C: NativeComponent>(slot: SlotId) -> Result<Rc<C>, StagedMis
 /// One internal `NativeWidget` impl standing in for **every** public
 /// [`NativeComponent`] — the module doc's bridge.
 ///
-/// Never instantiated: like the six controls' own marker types it exists only
+/// Never instantiated: like the built-in controls' own marker types it exists only
 /// to name a vtable ([`register_component`] registers `Bridge<C>`, and the
 /// runtime's dispatch table holds the monomorphised shims).
 pub(crate) struct Bridge<C>(PhantomData<fn() -> C>);
@@ -1426,6 +2310,12 @@ impl<C: NativeComponent> PartialEq for BridgeProps<C> {
 /// `forget` reaper already ran (`crate::api::mount`'s `on_cleanup`), which on
 /// the primary teardown path is the *usual* order, since `retire`'s `Dispose`
 /// is drained a frame or more later.
+///
+/// It also carries the two things an event dispatch needs that
+/// `NativeWidget::on_event`'s `(state, event)` signature does not: the props
+/// last applied (the typed baseline [`NativeComponent::on_event`] is handed)
+/// and the [`ListenerKinds`] this slot's component attached — the event gate
+/// (module doc's *Listener attachment*).
 pub(crate) struct BridgeState<C: NativeComponent> {
     /// The slot whose staged entry [`Self::refresh_component`] re-reads. Slot
     /// ids are handed out by a process-wide monotonic counter
@@ -1434,6 +2324,14 @@ pub(crate) struct BridgeState<C: NativeComponent> {
     slot: SlotId,
     component: Rc<C>,
     state: C::State,
+    /// The props the last `create` or successful `update` applied — the same
+    /// value the runtime keeps as its diff baseline, so a failed `update`
+    /// leaves this at `old` exactly as it leaves the runtime's.
+    props: C::Props,
+    /// Every family an `attach_listener` succeeded for on this slot, across
+    /// `create` and every `update` — the union, never narrowed, since a
+    /// listener detached on the platform side simply stops firing.
+    listening: ListenerKinds,
 }
 
 impl<C: NativeComponent> BridgeState<C> {
@@ -1516,24 +2414,25 @@ fn guard_pending_exception_off_context(op: &str) -> Option<NativeWidgetError> {
     })
 }
 
-/// The Apple arm has nothing to guard: there is no pending-exception channel
-/// between a component and the runtime here (an ObjC exception is not a return
-/// path — `crate::apple::factory`'s own contract answers a failed create with a
+/// The Apple arms (iOS and macOS) have nothing to guard: there is no
+/// pending-exception channel between a component and the runtime here (an ObjC
+/// exception is not a return path — `crate::apple::factory`'s and
+/// `crate::appkit::factory`'s contracts answer a failed create with a
 /// placeholder view instead), and no `Env` whose next call could be poisoned.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
     None
 }
 
 /// See the context-carrying arm above: this platform has nothing to guard.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn guard_pending_exception_off_context(_op: &str) -> Option<NativeWidgetError> {
     None
 }
 
 /// The host arm has no JNI to check, so it counts instead — see
 /// `dispatch_guard_count`.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
     DISPATCH_GUARDS.with(|guards| guards.set(guards.get() + 1));
     None
@@ -1542,13 +2441,13 @@ fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<
 /// The host arm of the context-free guard: it counts through the same tally, so
 /// the wiring bar covers all four dispatches and not just the three that carry
 /// a context.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn guard_pending_exception_off_context(_op: &str) -> Option<NativeWidgetError> {
     DISPATCH_GUARDS.with(|guards| guards.set(guards.get() + 1));
     None
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 thread_local! {
     /// How many times the dispatch-boundary guard ran on this thread — the
     /// host arm's stand-in for a check it cannot make, the same shape
@@ -1563,7 +2462,7 @@ thread_local! {
 
 /// How many times the dispatch-boundary exception guard has run on this
 /// thread.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 #[allow(dead_code)] // the guard's wiring bar: tests only, by design
 pub(crate) fn dispatch_guard_count() -> usize {
     DISPATCH_GUARDS.with(|guards| guards.get())
@@ -1616,10 +2515,11 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         let component = staged_component::<C>(props.slot)
             .map_err(|miss| miss.describe(props.slot, "component", None))?;
 
-        let mut cx = ComponentCtx::new(ctx);
+        let mut cx = ComponentCtx::new(ctx, props.slot);
         let built = component.create(&mut cx, &props.props);
+        let (error, listening) = cx.into_parts();
         let latched = fold_error(
-            cx.into_error(),
+            error,
             guard_pending_exception(ctx, "NativeComponent::create"),
         );
         match built {
@@ -1638,6 +2538,8 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
                         slot: props.slot,
                         component,
                         state,
+                        props: props.props.clone(),
+                        listening,
                     },
                 ))
             }
@@ -1661,10 +2563,15 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         // keeps the one it was created with.
         state.refresh_component();
         let component = Rc::clone(&state.component);
-        let mut cx = ComponentCtx::new(ctx);
+        let mut cx = ComponentCtx::new(ctx, new.slot);
         component.update(&mut cx, &mut state.state, &old.props, &new.props);
+        let (error, attached) = cx.into_parts();
+        // Recorded whatever the update's outcome: a listener attached before a
+        // later setter failed is live, and its handle is in the component's
+        // state now.
+        state.listening |= attached;
         let error = fold_error(
-            cx.into_error(),
+            error,
             guard_pending_exception(ctx, "NativeComponent::update"),
         );
         match error {
@@ -1682,21 +2589,32 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
             }
             None => {
                 // A success ends the run of failures, so a flaky platform never
-                // accumulates its way to the cap.
+                // accumulates its way to the cap — and moves the baseline
+                // `on_event` is handed, in step with the runtime's own.
                 clear_update_retry_budget(new.slot);
+                state.props = new.props.clone();
                 Ok(())
             }
         }
     }
 
-    /// Always `None`: a public component is meant to handle its own events
-    /// (its `&self` is the value the app published, closures and all), so
-    /// nothing rides the six built-in controls' `EventPayload` callback
-    /// channel. Unconditional, which is also why no production path reaches
-    /// this method — the attach half a component would need does not exist yet
-    /// ([`NativeComponent::on_event`]); a fabricated slot id naming a live
-    /// component's slot still lands here, and this module's own tests drive it
-    /// directly.
+    /// The event gate, then the component's own answer (module doc's
+    /// *Listener attachment*).
+    ///
+    /// **The gate:** an event whose [`NativeEvent::family`] this slot never
+    /// attached a listener for answers `None` without reaching the component
+    /// at all. The runtime routes on the slot id alone, so without this a
+    /// hand-built Android `FrustNativeListener` carrying a fabricated id that
+    /// named a live component's slot would be delivered like a real event; with
+    /// it, only the families the component itself asked for arrive. (A
+    /// fabricated id naming a slot that *did* attach that family is still
+    /// indistinguishable from the real listener — the runtime asks nothing
+    /// about which object fired, for components and the built-in controls alike.)
+    ///
+    /// **The answer:** [`NativeComponent::on_event`]'s, mapped into the
+    /// built-in controls' `EventPayload` vocabulary so it rides their callback table to
+    /// the app's hook (`crate::api::mount`). A kind that vocabulary has no word
+    /// for is dropped and logged.
     ///
     /// The staged value is re-read first — an event can arrive after any
     /// number of rebuilds that changed the component but not its props, and
@@ -1708,11 +2626,24 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
     /// leftover-exception hazard is the dispatch's, not the context's, and the
     /// only error channel here is the log (this returns `Option`, not
     /// `Result`). See `guard_pending_exception_off_context` and the module
-    /// doc's *Dispatch-boundary exception guard*.
+    /// doc's *Dispatch-boundary exception guard*. The gate's early `None`
+    /// crosses no FFI and runs no component code, so it has nothing to guard.
     fn on_event(state: &mut Self::State, event: WireEvent) -> Option<EventPayload> {
+        let event = NativeEvent::from_wire(event);
+        let family = event.family();
+        if family.is_empty() || !state.listening.contains(family) {
+            log::debug!(
+                "frust-native-widgets: component slot {} got event kind {} but attached no \
+                 listener for it (attached: {}) — dropped",
+                state.slot,
+                event.kind(),
+                state.listening
+            );
+            return None;
+        }
         state.refresh_component();
         let component = Rc::clone(&state.component);
-        component.on_event(&mut state.state, NativeEvent::from_wire(event));
+        let answer = component.on_event(&mut state.state, &state.props, event);
         if let Some(error) = guard_pending_exception_off_context("NativeComponent::on_event") {
             log::warn!(
                 "frust-native-widgets: component slot {} left a Java exception pending after \
@@ -1721,7 +2652,17 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
                 state.slot
             );
         }
-        None
+        let answer = answer?;
+        let payload = answer.into_payload();
+        if payload.is_none() {
+            log::debug!(
+                "frust-native-widgets: component slot {} answered event kind {}, which the \
+                 app-facing callback has no vocabulary for — dropped",
+                state.slot,
+                answer.kind()
+            );
+        }
+        payload
     }
 
     /// The staged value is re-read first, for the same reason `on_event` does
@@ -1735,14 +2676,17 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
     ) -> Result<(), NativeWidgetError> {
         state.refresh_component();
         let BridgeState {
-            slot: _,
+            slot,
             component,
             state,
+            props: _,
+            listening: _,
         } = state;
-        let mut cx = ComponentCtx::new(ctx);
+        let mut cx = ComponentCtx::new(ctx, slot);
         component.dispose(&mut cx, state);
+        let (error, _attached) = cx.into_parts();
         match fold_error(
-            cx.into_error(),
+            error,
             guard_pending_exception(ctx, "NativeComponent::dispose"),
         ) {
             Some(error) => Err(error),
@@ -1753,9 +2697,12 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
 
 // Gated on the host arm, not merely on `test` (the same gate `crate::runtime`'s
 // own tests carry): these drive the public trait through the real runtime using
-// the host stand-in context, which a platform build replaces with the
-// device-only types.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+// the host stand-in context, which a platform build (macOS included, since it
+// has a real AppKit arm) replaces with the platform-only types.
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_os = "macos"))
+))]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::sync::{Mutex, Once};
@@ -1814,7 +2761,7 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// A component defined **outside the six** — the whole point of the
+    /// A component defined **outside the built-in controls** — the whole point of the
     /// acceptance bar: it implements nothing but the public
     /// [`NativeComponent`] trait, using only the public [`ComponentCtx`]/
     /// [`NativeRoot`]/[`NativeEvent`] surface, exactly as a third-party crate
@@ -1841,6 +2788,9 @@ mod tests {
     struct GaugeState {
         identity: u64,
         events: Vec<NativeEvent>,
+        /// The listener `create` attached to the gauge's root — a click and a
+        /// value-changed listener, the two kinds these tests fire.
+        _listener: ListenerHandle,
     }
 
     const GAUGE_KIND: &str = "test-gauge";
@@ -1901,12 +2851,17 @@ mod tests {
             let identity = next_identity();
             ctx.record(format!("gauge create {identity} '{}'", props.label));
             self.note(format!("{} create '{}'", self.tag, props.label));
+            let listener = ctx.attach_listener(
+                identity,
+                ListenerKinds::CLICK | ListenerKinds::VALUE_CHANGED,
+            )?;
             let root = ctx.root(identity)?;
             Some((
                 root,
                 GaugeState {
                     identity,
                     events: Vec::new(),
+                    _listener: listener,
                 },
             ))
         }
@@ -1942,7 +2897,12 @@ mod tests {
             ));
         }
 
-        fn on_event(&self, state: &mut Self::State, event: NativeEvent) {
+        fn on_event(
+            &self,
+            state: &mut Self::State,
+            _props: &Self::Props,
+            event: NativeEvent,
+        ) -> Option<NativeEvent> {
             state.events.push(event);
             self.note(format!(
                 "{} event {}/{}",
@@ -1950,6 +2910,7 @@ mod tests {
                 event.kind(),
                 event.detail()
             ));
+            Some(event)
         }
 
         fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
@@ -1974,14 +2935,17 @@ mod tests {
 
     /// Publish `component` + `props` for `slot` and return the `params_json`
     /// its `platform_view` would carry — the exact sequence the app-facing
-    /// builder will run on every rebuild.
+    /// builder will run on every rebuild. Brightness is out of scope for
+    /// every test that calls this (`publish_bumps_the_generation_only_when_
+    /// the_props_change` exercises the `dark` bit directly instead), so it is
+    /// pinned to `false` here.
     fn mount(slot: SlotId, component: Gauge, props: GaugeProps) -> String {
         let generation = publish(slot, Rc::new(component), props);
-        component_params(GAUGE_KIND, slot, generation)
+        component_params(GAUGE_KIND, slot, generation, false)
     }
 
     #[test]
-    fn a_component_outside_the_six_lives_the_whole_lifecycle() {
+    fn a_component_outside_the_built_in_controls_lives_the_whole_lifecycle() {
         // The acceptance bar: create → update → event → dispose, driven
         // by the real runtime through the public trait alone.
         let log = Rc::new(RefCell::new(Vec::new()));
@@ -2029,10 +2993,15 @@ mod tests {
             "one create, one update (the equal republish crossed nothing), \
              and both later calls ran on the newest published component value"
         );
-        assert_eq!(calls.len(), 3, "one platform call each: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            4,
+            "one platform call each, plus create's listener attach: {calls:?}"
+        );
         assert!(calls[0].starts_with("gauge create"));
-        assert!(calls[1].contains("10 -> 42"));
-        assert!(calls[2].starts_with("gauge dispose"));
+        assert!(calls[1].starts_with("attachListener "), "{calls:?}");
+        assert!(calls[2].contains("10 -> 42"));
+        assert!(calls[3].starts_with("gauge dispose"));
     }
 
     #[test]
@@ -2136,10 +3105,10 @@ mod tests {
         );
     }
 
-    /// A control shaped exactly like the six built-ins: an **internal**
+    /// A control shaped exactly like the built-in ones: an **internal**
     /// `NativeWidget`, props decoded out of `params_json`, no staging table
     /// involved. Its only job here is to prove the two trait families share one
-    /// dispatch table, since the real six compile on device targets only.
+    /// dispatch table, since the real built-in controls compile on device targets only.
     struct LegacyControl;
 
     #[derive(Clone, Debug, PartialEq)]
@@ -2193,7 +3162,7 @@ mod tests {
     #[test]
     fn a_public_component_and_an_internal_widget_share_one_dispatch_table() {
         // The bridge's actual claim (module doc): a public `NativeComponent`
-        // is not a second runtime beside the six controls' — it is the same
+        // is not a second runtime beside the built-in controls' — it is the same
         // registry, the same diff gate, the same disposal path, dispatched by
         // kind. Both families live side by side here, in one runtime, with no
         // cross-talk.
@@ -2239,7 +3208,14 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["gauge", "legacy", "gauge", "gauge", "legacy"],
+            vec![
+                "gauge",
+                "attachListener",
+                "legacy",
+                "gauge",
+                "gauge",
+                "legacy"
+            ],
             "each command reached its own kind's impl and nobody else's: {calls:?}"
         );
     }
@@ -2307,6 +3283,23 @@ mod tests {
         assert_ne!(same, changed);
         assert!(changed.contains(PROPS_GENERATION_KEY));
 
+        // Theme ladder L1: `component_params` also carries the app's active
+        // brightness directly on the wire, not through the staged/diffed
+        // props above — so an unchanged republish with only the brightness
+        // flipped must still differ, and the flag round-trips exactly the
+        // way `crate::appkit::theme`'s/`crate::apple::theme`'s shared
+        // `brightness_is_dark` reads it back (`Params::flag(DARK)`, the same
+        // call both make).
+        let generation = publish(3, Rc::new(Gauge::new(&log, "c")), props("Disk", 2));
+        let light = component_params(GAUGE_KIND, 3, generation, false);
+        let dark = component_params(GAUGE_KIND, 3, generation, true);
+        assert_ne!(
+            light, dark,
+            "an unchanged props republish with a flipped brightness must still change the wire"
+        );
+        assert_eq!(Params::new(&light).flag(DARK), Some(false));
+        assert_eq!(Params::new(&dark).flag(DARK), Some(true));
+
         forget(3);
         // A fresh mount after teardown starts over at generation 0.
         assert_eq!(mount(3, Gauge::new(&log, "d"), props("Disk", 2)), first);
@@ -2326,7 +3319,7 @@ mod tests {
         register_component::<Gauge>(GAUGE_KIND);
         // Params for a slot whose staged entry was already reaped — the
         // replay-after-teardown case.
-        let params = component_params(GAUGE_KIND, 4, 0);
+        let params = component_params(GAUGE_KIND, 4, 0, false);
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
 
@@ -2649,7 +3642,7 @@ mod tests {
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
-        let mut cx = ComponentCtx::new(&mut ctx);
+        let mut cx = ComponentCtx::new(&mut ctx, 0);
 
         cx.report_error(ROOT);
         assert!(cx.failed());
@@ -2665,7 +3658,7 @@ mod tests {
         });
 
         assert!(value.is_none());
-        let error = cx.into_error().expect("the root failure still reports");
+        let error = cx.into_parts().0.expect("the root failure still reports");
         assert!(
             matches!(&error, NativeWidgetError::Platform(message) if message == ROOT),
             "the first error stays the reported one: {error:?}"
@@ -2688,11 +3681,10 @@ mod tests {
         // Four, not three: "on_event has no context to guard through" is not a
         // licence to skip it. The export runs `debug_assert_main_thread` and
         // further JNI after `runtime.on_event` returns, so a leftover exception
-        // is *ours* to trip over, and `NativeRuntime::on_event` routes on the
-        // slot id alone, so a fabricated id naming a live component's slot
-        // reaches the trait method today (`crate::runtime`'s own note). A
-        // reachable UB path guarded on three of four dispatches is not a
-        // resting place.
+        // is *ours* to trip over, and an attached listener's event reaches
+        // the trait method on every platform arm (module doc's *Listener
+        // attachment*). A reachable UB path guarded on three of four
+        // dispatches is not a resting place.
         //
         // Whether the guard's JNI check actually *finds* a pending exception is
         // Android-only and unrunnable here (no embedded-JVM harness in this
@@ -2763,7 +3755,7 @@ mod tests {
         // the runtime's own dispatch before any decode runs.
         let log = Rc::new(RefCell::new(Vec::new()));
         let generation = publish(70, Rc::new(Gauge::new(&log, "g")), props("CPU", 1));
-        let params = component_params("test-never-registered", 70, generation);
+        let params = component_params("test-never-registered", 70, generation, false);
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
@@ -2805,7 +3797,7 @@ mod tests {
                 title: "wrong kind".to_string(),
             },
         );
-        let params = component_params(GAUGE_KIND, 71, generation);
+        let params = component_params(GAUGE_KIND, 71, generation, false);
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
@@ -2835,7 +3827,7 @@ mod tests {
         // a different message and a different call.
         register_component::<Gauge>(GAUGE_KIND);
         let generation = publish(72, Rc::new(Twin), props("CPU", 1));
-        let params = component_params(GAUGE_KIND, 72, generation);
+        let params = component_params(GAUGE_KIND, 72, generation, false);
 
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
@@ -2875,7 +3867,7 @@ mod tests {
         );
 
         let generation = publish(73, Rc::new(Twin), props("CPU", 1));
-        let params = component_params(GAUGE_KIND, 73, generation);
+        let params = component_params(GAUGE_KIND, 73, generation, false);
         let mut calls = Vec::new();
         let mut ctx = PlatformCtx::new(&mut calls);
         let error = with_runtime(|runtime| runtime.create(&mut ctx, &params))
@@ -2989,7 +3981,7 @@ mod tests {
                 title: title.to_string(),
             },
         );
-        component_params(CARD_KIND, slot, generation)
+        component_params(CARD_KIND, slot, generation, false)
     }
 
     #[test]
@@ -3161,5 +4153,453 @@ mod tests {
             "the local frame is popped on the failure path too: {calls:?}"
         );
         forget(8);
+    }
+
+    // --- listener attachment (the retired display-only gap) -----------------
+
+    thread_local! {
+        /// How many times [`Relay::on_event`] actually ran on this thread — the
+        /// probe that tells "the bridge's gate dropped it" apart from "the
+        /// component was asked and answered `None`".
+        static RELAYED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn relayed() -> usize {
+        RELAYED.with(Cell::get)
+    }
+
+    /// The [`GaugeProps::label`] that makes [`Relay::create`] attach its click
+    /// listener; any other label attaches nothing.
+    const LISTEN: &str = "listen";
+
+    const RELAY_KIND: &str = "test-relay";
+
+    /// A component whose answer is distinguishable from a pass-through: it
+    /// attaches a click listener to its root (when told to) and answers every
+    /// click with a `Toggled` carrying whether its last-applied props' value is
+    /// positive — so a test sees the *component's* answer, built from the
+    /// props the bridge handed it, not the event that arrived.
+    struct Relay;
+
+    impl NativeComponent for Relay {
+        type Props = GaugeProps;
+        type State = (u64, Option<ListenerHandle>);
+
+        fn create(
+            &self,
+            ctx: &mut ComponentCtx<'_, '_, '_>,
+            props: &Self::Props,
+        ) -> Option<(NativeRoot, Self::State)> {
+            let identity = next_identity();
+            let listener = if props.label == LISTEN {
+                Some(ctx.attach_listener(identity, ListenerKinds::CLICK)?)
+            } else {
+                None
+            };
+            Some((ctx.root(identity)?, (identity, listener)))
+        }
+
+        fn update(
+            &self,
+            _ctx: &mut ComponentCtx<'_, '_, '_>,
+            _state: &mut Self::State,
+            _old: &Self::Props,
+            _new: &Self::Props,
+        ) {
+        }
+
+        fn on_event(
+            &self,
+            _state: &mut Self::State,
+            props: &Self::Props,
+            event: NativeEvent,
+        ) -> Option<NativeEvent> {
+            RELAYED.with(|count| count.set(count.get() + 1));
+            event
+                .is_click()
+                .then(|| NativeEvent::from_payload(EventPayload::Toggled(props.value > 0)))
+        }
+    }
+
+    fn click() -> WireEvent {
+        WireEvent {
+            kind: EVENT_KIND_CLICK,
+            detail: 0,
+        }
+    }
+
+    #[test]
+    fn bridge_on_event_returns_the_component_answer_only_for_an_attached_family() {
+        // The deliverable this test pins: `Bridge::on_event` used to answer
+        // `None` unconditionally; now a routed event returns whatever the
+        // component answers, and a slot without an attached listener still
+        // answers `None` — without the component ever being asked.
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+
+        publish(90, Rc::new(Relay), props(LISTEN, 5));
+        let (_view, mut listening) = Bridge::<Relay>::create(
+            &mut ctx,
+            &BridgeProps {
+                slot: 90,
+                props: props(LISTEN, 5),
+            },
+        )
+        .expect("a listening relay builds");
+        assert_eq!(live_listener_count(), 1, "create attached one listener");
+
+        let before = relayed();
+        assert_eq!(
+            Bridge::<Relay>::on_event(&mut listening, click()),
+            Some(EventPayload::Toggled(true)),
+            "a click on an attached CLICK listener returns the component's own \
+             answer (a Toggled built from its props), not the click that arrived"
+        );
+        assert_eq!(relayed(), before + 1);
+
+        // A family this slot never attached is gated at the bridge.
+        assert_eq!(
+            Bridge::<Relay>::on_event(
+                &mut listening,
+                WireEvent {
+                    kind: EVENT_KIND_VALUE_CHANGED,
+                    detail: pack_value_changed(3, true),
+                },
+            ),
+            None
+        );
+        assert_eq!(relayed(), before + 1, "the gate never asked the component");
+
+        // A slot that attached nothing answers `None` for every kind.
+        publish(91, Rc::new(Relay), props("quiet", 5));
+        let (_view, mut quiet) = Bridge::<Relay>::create(
+            &mut ctx,
+            &BridgeProps {
+                slot: 91,
+                props: props("quiet", 5),
+            },
+        )
+        .expect("a quiet relay builds");
+        assert_eq!(Bridge::<Relay>::on_event(&mut quiet, click()), None);
+        assert_eq!(
+            relayed(),
+            before + 1,
+            "an unattached slot never reaches the component — the misroute a \
+             fabricated slot id used to be able to cause stops at the bridge"
+        );
+
+        drop((listening, quiet));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("attachListener "))
+                .count(),
+            1,
+            "only the listening relay attached: {calls:?}"
+        );
+        assert_eq!(
+            live_listener_count(),
+            0,
+            "the handle is released with the state"
+        );
+        forget(90);
+        forget(91);
+    }
+
+    #[test]
+    fn an_attached_listener_reaches_the_slot_callback_through_the_runtime() {
+        // End to end below the app hook: the platform listener's
+        // `runtime.on_event(slot, ..)` → the bridge → the component → its
+        // answer handed to the slot's registered callback, the table
+        // `crate::api::mount`'s `.on_event` hook registers into.
+        use std::sync::Arc;
+
+        assert!(register_component::<Relay>(RELAY_KIND));
+        let generation = publish(92, Rc::new(Relay), props(LISTEN, 0));
+        let params = component_params(RELAY_KIND, 92, generation, false);
+        let fired: Arc<Mutex<Vec<EventPayload>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&fired);
+
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                assert!(runtime.set_callback(
+                    92,
+                    Arc::new(move |payload| recorder.lock().unwrap().push(payload)),
+                ));
+                runtime.create(&mut ctx, &params).unwrap();
+                runtime.on_event(92, click());
+                assert_eq!(runtime.dispose_slot(&mut ctx, 92), DisposeOutcome::Disposed);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(92);
+
+        assert_eq!(
+            *fired.lock().unwrap(),
+            vec![EventPayload::Toggled(false)],
+            "the component's answer — built from its value-0 props — reached the callback"
+        );
+        assert_eq!(live_listener_count(), 0);
+    }
+
+    #[test]
+    fn a_listener_attached_in_update_opens_the_gate_too() {
+        // `listening` is the union across create AND update: a component that
+        // wires a listener later (a child it only builds on some props) must
+        // not be gated out of its own events.
+        struct Late;
+
+        impl NativeComponent for Late {
+            type Props = GaugeProps;
+            type State = (u64, Option<ListenerHandle>);
+
+            fn create(
+                &self,
+                ctx: &mut ComponentCtx<'_, '_, '_>,
+                _props: &Self::Props,
+            ) -> Option<(NativeRoot, Self::State)> {
+                let identity = next_identity();
+                Some((ctx.root(identity)?, (identity, None)))
+            }
+
+            fn update(
+                &self,
+                ctx: &mut ComponentCtx<'_, '_, '_>,
+                state: &mut Self::State,
+                _old: &Self::Props,
+                _new: &Self::Props,
+            ) {
+                state.1 = ctx.attach_listener(state.0, ListenerKinds::TOGGLED);
+            }
+        }
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        publish(93, Rc::new(Late), props("late", 1));
+        let first = BridgeProps {
+            slot: 93,
+            props: props("late", 1),
+        };
+        let (_view, mut state) = Bridge::<Late>::create(&mut ctx, &first).unwrap();
+        let toggled = WireEvent {
+            kind: EVENT_KIND_TOGGLED,
+            detail: pack_bool(true),
+        };
+        assert_eq!(Bridge::<Late>::on_event(&mut state, toggled), None);
+
+        let second = BridgeProps {
+            slot: 93,
+            props: props("late", 2),
+        };
+        Bridge::<Late>::update(&mut ctx, &mut state, &first, &second).unwrap();
+        assert_eq!(
+            Bridge::<Late>::on_event(&mut state, toggled),
+            Some(EventPayload::Toggled(true)),
+            "the default `on_event` forwards the event unchanged once attached"
+        );
+        forget(93);
+    }
+
+    #[test]
+    fn an_empty_listener_request_latches_instead_of_attaching() {
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let mut cx = ComponentCtx::new(&mut ctx, 94);
+        assert!(cx.attach_listener(1, ListenerKinds::NONE).is_none());
+        assert!(cx.failed(), "an empty request is a wiring bug, reported");
+        let (error, attached) = cx.into_parts();
+        assert!(
+            matches!(error, Some(NativeWidgetError::Params(_))),
+            "{error:?}"
+        );
+        assert!(attached.is_empty());
+        assert!(calls.is_empty(), "nothing was recorded as attached");
+        assert_eq!(live_listener_count(), 0);
+    }
+
+    #[test]
+    fn detach_listener_records_the_detach_and_releases_the_handle() {
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let mut cx = ComponentCtx::new(&mut ctx, 95);
+        let handle = cx
+            .attach_listener(7, ListenerKinds::CLICK | ListenerKinds::TOGGLED)
+            .expect("the host arm always attaches");
+        assert_eq!(
+            handle.kinds(),
+            ListenerKinds::CLICK | ListenerKinds::TOGGLED
+        );
+        assert_eq!(live_listener_count(), 1);
+        assert_eq!(cx.detach_listener(handle), Some(()));
+        assert_eq!(live_listener_count(), 0);
+        drop(cx);
+        assert_eq!(
+            calls,
+            vec![
+                "attachListener 7 click|toggled".to_string(),
+                "detachListener 7 click|toggled".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_a_handle_on_the_same_view_keeps_the_new_listener_live() {
+        // The replace-handle pattern: `update` re-attaches the SAME view for
+        // the SAME kinds and assigns over the old handle, which drops it. A
+        // release that nulled the view's interface — the earlier defect this
+        // handle's Drop is designed to avoid — would wipe the listener just
+        // set; a release that touches only the old handle's own listener must
+        // leave the new one live and the slot's family still admitted.
+        struct Rewire;
+
+        impl NativeComponent for Rewire {
+            type Props = GaugeProps;
+            type State = (u64, Option<ListenerHandle>);
+
+            fn create(
+                &self,
+                ctx: &mut ComponentCtx<'_, '_, '_>,
+                _props: &Self::Props,
+            ) -> Option<(NativeRoot, Self::State)> {
+                let identity = next_identity();
+                let listener = ctx.attach_listener(identity, ListenerKinds::CLICK)?;
+                Some((ctx.root(identity)?, (identity, Some(listener))))
+            }
+
+            fn update(
+                &self,
+                ctx: &mut ComponentCtx<'_, '_, '_>,
+                state: &mut Self::State,
+                _old: &Self::Props,
+                _new: &Self::Props,
+            ) {
+                // Handle A is dropped by this assignment, after handle B's
+                // attach has already run.
+                state.1 = ctx.attach_listener(state.0, ListenerKinds::CLICK);
+            }
+        }
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        publish(96, Rc::new(Rewire), props("rewire", 1));
+        let first = BridgeProps {
+            slot: 96,
+            props: props("rewire", 1),
+        };
+        let (_view, mut state) = Bridge::<Rewire>::create(&mut ctx, &first).unwrap();
+        assert_eq!(live_listener_count(), 1, "create attached handle A");
+
+        let second = BridgeProps {
+            slot: 96,
+            props: props("rewire", 2),
+        };
+        Bridge::<Rewire>::update(&mut ctx, &mut state, &first, &second).unwrap();
+        assert_eq!(
+            live_listener_count(),
+            1,
+            "handle A was released by the reassignment and handle B is live"
+        );
+        assert_eq!(
+            Bridge::<Rewire>::on_event(&mut state, click()),
+            Some(EventPayload::Click),
+            "a click is still admitted after the old handle dropped"
+        );
+
+        drop(state);
+        assert_eq!(live_listener_count(), 0, "handle B goes with the state");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("attachListener "))
+                .count(),
+            2,
+            "one attach in create, one in update: {calls:?}"
+        );
+        forget(96);
+    }
+}
+
+// Platform-neutral: the listener-kind mask and the public event pair's
+// codec, which every arm (macOS included) shares — so, unlike `tests` above,
+// these run on a Mac too.
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+
+    #[test]
+    fn listener_kinds_combine_and_spell_themselves() {
+        let both = ListenerKinds::CLICK | ListenerKinds::VALUE_CHANGED;
+        assert!(both.contains(ListenerKinds::CLICK));
+        assert!(both.contains(ListenerKinds::VALUE_CHANGED));
+        assert!(!both.contains(ListenerKinds::TOGGLED));
+        assert!(both.contains(ListenerKinds::NONE));
+        assert!(ListenerKinds::NONE.is_empty());
+        assert!(!both.is_empty());
+        assert_eq!(both.to_string(), "click|value_changed");
+        assert_eq!(ListenerKinds::NONE.to_string(), "none");
+        let mut grown = ListenerKinds::NONE;
+        grown |= ListenerKinds::TOGGLED;
+        assert_eq!(grown, ListenerKinds::TOGGLED);
+    }
+
+    #[test]
+    fn every_payload_round_trips_through_the_public_pair() {
+        // The component answer's ride to the app hook: NativeEvent →
+        // EventPayload (the built-in controls' callback table) → NativeEvent
+        // (the hook's parameter). A lossy leg would hand the app something other than
+        // what the component answered.
+        for payload in [
+            EventPayload::Click,
+            EventPayload::Toggled(true),
+            EventPayload::Toggled(false),
+            EventPayload::ValueChanged {
+                value: 42,
+                from_user: true,
+            },
+            EventPayload::ValueChanged {
+                value: 0,
+                from_user: false,
+            },
+            EventPayload::DragStart,
+            EventPayload::DragEnd,
+        ] {
+            let event = NativeEvent::from_payload(payload);
+            assert_eq!(event.into_payload(), Some(payload), "{payload:?}");
+        }
+        let unknown = NativeEvent {
+            kind: 99,
+            detail: 0,
+        };
+        assert_eq!(unknown.into_payload(), None);
+        assert_eq!(unknown.family(), ListenerKinds::NONE);
+    }
+
+    #[test]
+    fn the_public_decoders_read_only_their_own_kind() {
+        let toggled = NativeEvent::from_payload(EventPayload::Toggled(true));
+        assert_eq!(toggled.checked(), Some(true));
+        assert_eq!(toggled.value(), None);
+        assert!(!toggled.is_click());
+        assert_eq!(toggled.family(), ListenerKinds::TOGGLED);
+
+        let moved = NativeEvent::from_payload(EventPayload::ValueChanged {
+            value: 17,
+            from_user: true,
+        });
+        assert_eq!(moved.value(), Some(17));
+        assert_eq!(moved.checked(), None);
+        assert_eq!(moved.family(), ListenerKinds::VALUE_CHANGED);
+        assert_eq!(
+            NativeEvent::from_payload(EventPayload::DragEnd).family(),
+            ListenerKinds::VALUE_CHANGED,
+            "the drag edges ride the VALUE_CHANGED attach"
+        );
+
+        let click = NativeEvent::from_payload(EventPayload::Click);
+        assert!(click.is_click());
+        assert_eq!(click.kind(), NativeEvent::KIND_CLICK);
+        assert_eq!(click.family(), ListenerKinds::CLICK);
     }
 }

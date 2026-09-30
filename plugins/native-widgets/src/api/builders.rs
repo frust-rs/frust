@@ -1,7 +1,13 @@
-//! The six app-facing builders: `native_button`/
+//! The eleven app-facing builders: `native_button`/
 //! `native_label`/`native_switch`/`native_slider`/`native_progress`/
-//! `native_image`, each composing exactly one [`platform_view`] slot behind
-//! this crate's one Android factory (the "N controls = N slots" envelope).
+//! `native_image`/`native_spinner`/`native_date_picker`/`native_segmented`/
+//! `native_stepper`/`native_tab_bar`, each
+//! composing exactly one [`platform_view`] slot behind this crate's one
+//! factory per platform (the "N controls = N slots" envelope) —
+//! `native_segmented`/`native_stepper` only on iOS and macOS and
+//! `native_tab_bar` only on iOS; elsewhere each renders its own refusal
+//! banner at compile time ([`SEGMENTED_ARM`]/[`STEPPER_ARM`]/
+//! [`TAB_BAR_ARM`]).
 //!
 //! # Retained identity via `Component`, not a hand-rolled `Widget`
 //!
@@ -57,21 +63,27 @@ use frust::{
 };
 use frust_core::accesskit::Role;
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, component,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    component,
 };
 use kurbo::{Size, Vec2};
 
+use crate::controls::date_picker::{self, CivilDate};
 use crate::controls::{
     BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
-    INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TRACK_TINT,
-    TYPEFACE, VALUE,
+    INDETERMINATE, MAX, MIN, PROGRESS_TINT, STEP, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TINT,
+    TRACK_TINT, TYPEFACE, VALUE, WRAPS,
 };
-use crate::controls::{button, image, label, progress, slider, switch};
+use crate::controls::{
+    button, image, label, progress, segmented, slider, spinner, stepper, switch, tab_bar,
+};
 use crate::registry::SlotId;
 use crate::runtime::{escape, with_identity, with_runtime};
 
-use super::signals::{on_click, on_toggled, on_value_changed};
+use super::signals::{
+    TabHandler, on_click, on_date, on_selected, on_tab_bar, on_toggled, on_value_changed,
+};
 use super::theme::{self, ResolvedTheme};
 
 /// The one factory class every control resolves through, per platform.
@@ -93,18 +105,26 @@ use super::theme::{self, ResolvedTheme};
 ///   class registers under. A mismatch is silent: the lookup returns nil, the
 ///   host takes its unresolvable-factory branch, and every native control on
 ///   iOS renders nothing.
-/// - **Anywhere else**: no factory exists; the Android spelling stands in so
-///   the constant is always defined.
+/// - **macOS**: the desktop registry key `crate::appkit::factory::VIEW_TYPE`
+///   (`"dev.frust.nativewidgets.FrustNativeControlFactory"`, the Android
+///   spelling), named here rather than repeated: the desktop Mode-A host
+///   resolves a slot's factory by looking this exact string up in
+///   `frust_plugin::desktop`'s registry, where the AppKit arm registered it.
+///   A mismatch would be just as silent as on iOS — no factory, an empty slot.
+/// - **Anywhere else** (Linux/Windows/web): no factory exists; the Android
+///   spelling stands in so the constant is always defined.
 ///
 /// `pub(super)` rather than private: the generic mounting builder
-/// ([`crate::api::mount`]) composes the same one factory these six do —
+/// ([`crate::api::mount`]) composes the same one factory these eight do —
 /// a public component is served by the same runtime, so it must resolve
 /// through the same class.
 #[cfg(target_os = "android")]
 pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
 #[cfg(target_os = "ios")]
 pub(super) const VIEW_TYPE: &str = "FrustNativeControlFactory";
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
+pub(super) const VIEW_TYPE: &str = crate::appkit::factory::VIEW_TYPE;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
 
 /// This plugin's own per-widget-instance identity counter (module doc: "this
@@ -179,12 +199,27 @@ pub(super) fn placeholder<State: 'static>(
     control: &str,
 ) -> AnyView<State> {
     warn_refusal_once();
-    let banner: AnyView<State> = any(RefusalBanner {
-        label: format!("Native {control} unavailable"),
-        description: "the host declared a translucent surface but the platform refused it — \
-                      rendering a frust placeholder instead of an invisible native slot."
+    banner_placeholder(
+        size,
+        format!("Native {control} unavailable"),
+        "the host declared a translucent surface but the platform refused it — rendering a \
+         frust placeholder instead of an invisible native slot."
             .to_string(),
-    });
+    )
+}
+
+/// The sized, slot-clipped [`RefusalBanner`] itself, with caller-chosen
+/// wording — [`placeholder`]'s body, shared with the compile-time
+/// no-platform-arm fallback ([`NativeSegmentedView`] on Android, see
+/// [`SEGMENTED_ARM`]), which refuses for a different reason and so says a
+/// different thing. Logging is the caller's: each refusal reason logs once
+/// under its own `Once`.
+fn banner_placeholder<State: 'static>(
+    size: Option<(f64, f64)>,
+    label: String,
+    description: String,
+) -> AnyView<State> {
+    let banner: AnyView<State> = any(RefusalBanner { label, description });
     let sized = SizedBox(size.map(|(w, _)| w), size.map(|(_, h)| h)).child(banner);
     any(ClipToSlot { child: any(sized) })
 }
@@ -547,7 +582,7 @@ fn ambient_theme_tokens() -> Option<ResolvedTheme> {
 /// boundary rather than pulling in `serde` (`docs/CODE_STANDARDS.md`'s
 /// Language Idioms; `crate::runtime::Params`/`with_identity` are the
 /// reader/identity-encoder halves this writes the *body* half for). Only the
-/// handful of primitive field shapes the six controls need.
+/// handful of primitive field shapes the eight controls need.
 struct ParamsBody(String);
 
 impl ParamsBody {
@@ -1192,6 +1227,1244 @@ impl Component for NativeProgressView {
 }
 
 // ============================================================================
+// Spinner
+// ============================================================================
+
+/// How large the spinner renders — the public mirror of
+/// `crate::controls::spinner::SizeClass`, which stays `pub(crate)`. iOS has
+/// no distinct small style (`UIActivityIndicatorView.Style` offers only
+/// `.medium`/`.large`), so [`Self::Small`] renders the same as
+/// [`Self::Medium`] on that one arm — see `crate::controls::spinner`'s
+/// module doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeSpinnerSize {
+    /// The smallest stock size. Degrades to [`Self::Medium`] on iOS.
+    Small,
+    /// The platform's own default circular spinner size.
+    #[default]
+    Medium,
+    /// The largest stock size.
+    Large,
+}
+
+impl NativeSpinnerSize {
+    /// The wire spelling `crate::controls::spinner::SizeClass::from_wire`
+    /// decodes.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+}
+
+/// A real indeterminate activity indicator rendered from pure Rust —
+/// display-only (no listener, no `.interactive()`). Build one with
+/// [`native_spinner`].
+#[derive(Clone)]
+pub struct NativeSpinnerView {
+    animating: bool,
+    size_class: NativeSpinnerSize,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+}
+
+/// A native spinner, animating or not — see [`NativeSpinnerView`].
+pub fn native_spinner(animating: bool) -> NativeSpinnerView {
+    NativeSpinnerView {
+        animating,
+        size_class: NativeSpinnerSize::default(),
+        enabled: true,
+        content_description: None,
+        size: None,
+    }
+}
+
+impl NativeSpinnerView {
+    /// The spinner's size — see [`NativeSpinnerSize`].
+    pub fn size_class(mut self, size_class: NativeSpinnerSize) -> Self {
+        self.size_class = size_class;
+        self
+    }
+
+    /// `View.setEnabled` — Android only; the other two arms have no
+    /// `enabled` property on this control at all (`crate::controls::spinner`'s
+    /// module doc's *`enabled`* section). Default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack/VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_ink` in
+    /// as the spinner's tint — see [`NativeButtonView::params_for`]'s doc
+    /// for why it's threaded explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(spinner::ANIMATING, self.animating);
+        body.push_str(spinner::SIZE_CLASS, self.size_class.wire());
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+        }
+        with_identity(spinner::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Spinner");
+        }
+        let params = self.params_for(slot, tokens);
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "spinner".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeSpinnerView {
+    type State = SlotId;
+
+    // No `on_cleanup` here: the spinner is display-only and never calls
+    // `set_callback` — see `NativeLabelView::init`'s doc.
+    fn init(&self) -> SlotId {
+        next_local_slot()
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Date picker
+// ============================================================================
+
+/// How [`NativeDatePickerView`] presents itself — the public mirror of
+/// `crate::controls::date_picker::DatePickerStyle`, which stays `pub(crate)`.
+///
+/// | Style | Android | iOS | macOS |
+/// |---|---|---|---|
+/// | [`Self::Compact`] | spinner mode | `.compact` | text field + stepper, calendar overlay on click |
+/// | [`Self::Wheels`] | spinner mode | `.wheels` | text field + stepper (AppKit has no wheels) |
+/// | [`Self::Inline`] | calendar mode | `.inline` | clock-and-calendar |
+///
+/// Android fixes the mode when the picker is created: a later style change
+/// is not applied there (logged once) — see `crate::controls::date_picker`'s
+/// module doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeDatePickerStyle {
+    /// The smallest footprint the platform offers.
+    #[default]
+    Compact,
+    /// Spinning wheels.
+    Wheels,
+    /// A full, always-visible calendar.
+    Inline,
+}
+
+impl NativeDatePickerStyle {
+    /// The wire spelling `crate::controls::date_picker::DatePickerStyle`
+    /// decodes.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Wheels => "wheels",
+            Self::Inline => "inline",
+        }
+    }
+}
+
+/// A real DATE-mode picker (no time) rendered from pure Rust —
+/// `android.widget.DatePicker`, `UIDatePicker`, `NSDatePicker`. Controlled,
+/// like [`NativeSwitchView`]: the app owns `date`, and a pick only ever
+/// arrives through [`Self::on_change`] as a *requested* [`CivilDate`] the app
+/// confirms by feeding it back. Build one with [`native_date_picker`].
+#[derive(Clone)]
+pub struct NativeDatePickerView {
+    date: CivilDate,
+    min: Option<CivilDate>,
+    max: Option<CivilDate>,
+    style: NativeDatePickerStyle,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_change: Option<Arc<dyn Fn(CivilDate) + Send + Sync>>,
+}
+
+/// A native date picker showing `date` — see [`NativeDatePickerView`].
+pub fn native_date_picker(date: CivilDate) -> NativeDatePickerView {
+    NativeDatePickerView {
+        date,
+        min: None,
+        max: None,
+        style: NativeDatePickerStyle::default(),
+        enabled: true,
+        content_description: None,
+        size: None,
+        on_change: None,
+    }
+}
+
+impl NativeDatePickerView {
+    /// The earliest selectable date — a missing bound is the arm's own
+    /// default: unbounded on iOS/macOS, 1900-01-01 on Android. A `date`
+    /// before it is shown (and reported) as `min`; a `max` before it
+    /// collapses the range to the single day `min`. On Android, an
+    /// explicit `min` (and `date`) outside the platform's own
+    /// 1900-01-01..2100-12-31 range is clamped into it, with a warning
+    /// (`native-widgets-android-date-picker-range` in LIMITATIONS.md).
+    pub fn min(mut self, min: CivilDate) -> Self {
+        self.min = Some(min);
+        self
+    }
+
+    /// The latest selectable date — a missing bound is the arm's own
+    /// default: unbounded on iOS/macOS, 2100-12-31 on Android. A `date`
+    /// after it is shown (and reported) as `max`. On Android, an explicit
+    /// `max` (and `date`) outside the platform's own
+    /// 1900-01-01..2100-12-31 range is clamped into it, with a warning
+    /// (`native-widgets-android-date-picker-range` in LIMITATIONS.md).
+    pub fn max(mut self, max: CivilDate) -> Self {
+        self.max = Some(max);
+        self
+    }
+
+    /// The presentation — see [`NativeDatePickerStyle`]. Default
+    /// [`NativeDatePickerStyle::Compact`].
+    pub fn style(mut self, style: NativeDatePickerStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// `View.setEnabled` / `UIControl.enabled` / `NSControl.enabled` —
+    /// default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack/VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the **requested** date when the user picks one. Feed it
+    /// back as the builder's `date` to accept it; keep the old one to refuse
+    /// it (the picker snaps back on the next differing params).
+    pub fn on_change(mut self, handler: impl Fn(CivilDate) + Send + Sync + 'static) -> Self {
+        self.on_change = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_ink` in as
+    /// the tint and `body_text` as the text colour — see
+    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
+    /// explicitly, and `crate::api::theme`'s mapping table for which arm
+    /// honours which (Android's `DatePicker` honours neither).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(date_picker::DATE, date_picker::wire(self.date));
+        if let Some(min) = self.min {
+            body.push_raw(date_picker::MIN_DATE, date_picker::wire(min));
+        }
+        if let Some(max) = self.max {
+            body.push_raw(date_picker::MAX_DATE, date_picker::wire(max));
+        }
+        body.push_str(date_picker::STYLE, self.style.wire());
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+            body.push_raw(TEXT_COLOR, t.body_text);
+        }
+        with_identity(date_picker::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Date picker");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_change) = self.on_change.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_date(on_change)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "date picker".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeDatePickerView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc — the picker registers a
+        // callback via `Self::on_change`, so it needs the same
+        // `pending_callbacks` reaper.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Segmented
+// ============================================================================
+
+/// Whether this build's platform arm registers the segmented control — the
+/// crate's first **compile-time** platform gate on a builder. `Segmented` is
+/// in `crate::controls::APPLE_KINDS`: iOS and macOS carry a `NativeWidget`
+/// impl, Android does not (decision D2 — `crate::controls::segmented`'s module
+/// doc), and neither does any host target. Where it is `false`,
+/// [`NativeSegmentedView`] renders the frust-drawn refusal banner
+/// ([`RefusalBanner`], via [`banner_placeholder`]) instead of publishing a slot
+/// no registered kind could serve — a visible, screen-reader-announced
+/// refusal rather than the factory's silent empty dead-slot view.
+///
+/// A `cfg`-selected constant rather than `cfg`'d code paths so both branches
+/// compile, and are host-tested ([`NativeSegmentedView::build_for_arm`]), on
+/// every target.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+const SEGMENTED_ARM: bool = true;
+/// See the Apple-arm definition above: no segmented arm on Android (D2) or on
+/// any host target.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+const SEGMENTED_ARM: bool = false;
+
+/// The banner's visible label on a target with no segmented arm.
+const SEGMENTED_UNAVAILABLE_LABEL: &str = "Native segmented control unavailable";
+
+/// The banner's explanation on a target with no segmented arm — names the
+/// missing Android arm and where it is tracked.
+const SEGMENTED_UNAVAILABLE_DESCRIPTION: &str = "native_segmented has no Android arm in this \
+     build (the framework has no segmented control; a Material-backed Android arm is a \
+     follow-up plan) — rendering a frust placeholder instead of an empty native slot.";
+
+/// Log the no-segmented-arm fallback exactly once, crate-wide.
+static SEGMENTED_NO_ARM_LOGGED: Once = Once::new();
+
+fn warn_no_segmented_arm_once() {
+    SEGMENTED_NO_ARM_LOGGED.call_once(|| {
+        log::warn!(
+            "frust-native-widgets: native_segmented is an iOS/macOS-only control in this build \
+             (no Android arm yet — a Material-backed one is a follow-up plan); rendering the \
+             frust-drawn refusal banner instead of a native slot"
+        );
+    });
+}
+
+/// A real segmented control rendered from pure Rust — `UISegmentedControl` on
+/// iOS/iPadOS, `NSSegmentedControl` on macOS, and a frust-drawn refusal banner
+/// everywhere else (Android included: see [`SEGMENTED_ARM`]). A
+/// **controlled** component, like [`NativeSwitchView`]: the app owns
+/// `selected`, and a tap only ever arrives through [`Self::on_select`] as a
+/// *requested* index. Build one with [`native_segmented`].
+#[derive(Clone)]
+pub struct NativeSegmentedView {
+    labels: Vec<String>,
+    selected: usize,
+    enabled: bool,
+    momentary: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_select: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+}
+
+/// A native segmented control over `labels`, with the app-owned `selected`
+/// segment — see [`NativeSegmentedView`]. An out-of-range `selected` shows no
+/// selection rather than failing; at most 64 segments are shown
+/// (`crate::controls::segmented::MAX_SEGMENTS`).
+pub fn native_segmented(labels: Vec<String>, selected: usize) -> NativeSegmentedView {
+    NativeSegmentedView {
+        labels,
+        selected,
+        enabled: true,
+        momentary: false,
+        content_description: None,
+        size: None,
+        on_select: None,
+    }
+}
+
+impl NativeSegmentedView {
+    /// `UIControl.enabled` / `NSControl.enabled` — default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Momentary tracking: a tap flashes its segment and reports it through
+    /// [`Self::on_select`] without leaving it selected (a toolbar of
+    /// actions rather than a choice). Default `false`.
+    pub fn momentary(mut self, momentary: bool) -> Self {
+        self.momentary = momentary;
+        self
+    }
+
+    /// The VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the *requested* segment index on a user tap — the app
+    /// confirms (or rejects) it by feeding `selected` back through the next
+    /// build, the controlled-component contract every interactive frust
+    /// widget follows. Never fires on a target with no segmented arm.
+    pub fn on_select(mut self, handler: impl Fn(usize) + Send + Sync + 'static) -> Self {
+        self.on_select = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_fill` in
+    /// as the selected segment's tint — see [`NativeButtonView::params_for`]'s
+    /// doc for why it's threaded explicitly, and
+    /// `crate::controls::segmented`'s module doc for the per-arm property.
+    /// The labels ride flat `segmentCount` + `segment<i>` keys (that module
+    /// doc's *The labels ride flat params*).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(segmented::SEGMENT_COUNT, self.labels.len());
+        for (index, label) in self.labels.iter().enumerate() {
+            body.push_str(&segmented::segment_key(index), label);
+        }
+        body.push_raw(segmented::SELECTED, self.selected);
+        body.push_raw(segmented::MOMENTARY, self.momentary);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_fill);
+        }
+        with_identity(segmented::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        self.build_for_arm(slot, mode, tokens, SEGMENTED_ARM)
+    }
+
+    /// [`Self::build_with_mode`] with the platform-arm gate threaded as a
+    /// parameter, so a host test can drive both branches on any target.
+    ///
+    /// No arm → the unavailable banner, before anything else: the refusal is
+    /// structural, whatever the surface mode, and no callback is registered
+    /// (no event could ever arrive for it).
+    fn build_for_arm(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+        arm_available: bool,
+    ) -> AnyView<SlotId> {
+        if !arm_available {
+            warn_no_segmented_arm_once();
+            return banner_placeholder(
+                self.size,
+                SEGMENTED_UNAVAILABLE_LABEL.to_string(),
+                SEGMENTED_UNAVAILABLE_DESCRIPTION.to_string(),
+            );
+        }
+        if mode.translucency_refused() {
+            return placeholder(self.size, "SegmentedControl");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_select) = self.on_select.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_selected(on_select)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "segmented control".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeSegmentedView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc — `Segmented` registers a
+        // callback via `Self::on_select`, so it needs the same
+        // `pending_callbacks` reaper (a harmless no-op on a target with no
+        // arm, where nothing is ever registered).
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Stepper
+// ============================================================================
+
+/// Whether this build's platform arm registers the stepper control — the
+/// same compile-time platform gate [`SEGMENTED_ARM`] is, for `Stepper`
+/// instead. `Stepper` is in `crate::controls::APPLE_KINDS`: iOS and macOS
+/// carry a `NativeWidget` impl, Android does not (`android.widget` has no
+/// increment/decrement control — `crate::controls::stepper`'s module doc),
+/// and neither does any host target. Where it is `false`,
+/// [`NativeStepperView`] renders the frust-drawn refusal banner
+/// ([`RefusalBanner`], via [`banner_placeholder`]) instead of publishing a
+/// slot no registered kind could serve.
+///
+/// A `cfg`-selected constant rather than `cfg`'d code paths so both branches
+/// compile, and are host-tested ([`NativeStepperView::build_for_arm`]), on
+/// every target.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+const STEPPER_ARM: bool = true;
+/// See the Apple-arm definition above: no stepper arm on Android or on any
+/// host target.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+const STEPPER_ARM: bool = false;
+
+/// The banner's visible label on a target with no stepper arm.
+const STEPPER_UNAVAILABLE_LABEL: &str = "Native stepper unavailable";
+
+/// The banner's explanation on a target with no stepper arm — names the
+/// missing Android arm and where it is tracked.
+const STEPPER_UNAVAILABLE_DESCRIPTION: &str = "native_stepper has no Android arm in this build \
+     (the framework has no increment/decrement control; a composite Android arm is a follow-up \
+     plan) — rendering a frust placeholder instead of an empty native slot.";
+
+/// Log the no-stepper-arm fallback exactly once, crate-wide.
+static STEPPER_NO_ARM_LOGGED: Once = Once::new();
+
+fn warn_no_stepper_arm_once() {
+    STEPPER_NO_ARM_LOGGED.call_once(|| {
+        log::warn!(
+            "frust-native-widgets: native_stepper is an iOS/macOS-only control in this build (no \
+             Android arm yet — a composite one is a follow-up plan); rendering the frust-drawn \
+             refusal banner instead of a native slot"
+        );
+    });
+}
+
+/// A real increment/decrement control rendered from pure Rust — `UIStepper`
+/// on iOS/iPadOS, `NSStepper` on macOS, and a frust-drawn refusal banner
+/// everywhere else (Android included: see [`STEPPER_ARM`]). A **controlled**
+/// component, like [`NativeSliderView`]: the app owns `value`, and a tap on
+/// either button only ever arrives through [`Self::on_change`] as a
+/// *requested* value. Build one with [`native_stepper`].
+///
+/// `min`/`max`/[`Self::step`] are normalized before they ever reach a
+/// platform control (`crate::controls::stepper`'s module doc's *Range and
+/// step invariants*: `UIStepper` aborts the process on a non-positive
+/// `stepValue` or a `maximumValue` not strictly greater than
+/// `minimumValue`). A degenerate range (`max <= min`) renders the control
+/// **disabled** — the user can never tap it, and no value outside `[min,
+/// max]` is ever reported — rather than refusing to mount or crashing; it
+/// re-enables the moment a later update makes the range non-degenerate
+/// again.
+#[derive(Clone)]
+pub struct NativeStepperView {
+    value: i32,
+    min: i32,
+    max: i32,
+    step: i32,
+    wraps: bool,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_change: Option<Arc<dyn Fn(i32) + Send + Sync>>,
+}
+
+/// A native `Stepper` at `value`, ranging over `[min, max]` — see
+/// [`NativeStepperView`].
+pub fn native_stepper(value: i32, min: i32, max: i32) -> NativeStepperView {
+    NativeStepperView {
+        value,
+        min,
+        max,
+        step: 1,
+        wraps: false,
+        enabled: true,
+        content_description: None,
+        size: None,
+        on_change: None,
+    }
+}
+
+impl NativeStepperView {
+    /// The increment a tap on either button applies — default `1`. A
+    /// non-positive value (`0` or negative) is normalized to `1` before it
+    /// ever reaches a platform control, logged once per process —
+    /// `UIStepper` requires `stepValue > 0` (`crate::controls::stepper`'s
+    /// module doc's *Range and step invariants*).
+    pub fn step(mut self, step: i32) -> Self {
+        self.step = step;
+        self
+    }
+
+    /// Whether the value wraps from `max` back to `min` (and back) instead
+    /// of clamping at the bounds — default `false`.
+    pub fn wraps(mut self, wraps: bool) -> Self {
+        self.wraps = wraps;
+        self
+    }
+
+    /// `UIControl.enabled` / `NSControl.enabled` — default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The VoiceOver label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the requested **app-space** value on a tap
+    /// (`crate::controls::stepper`'s platform-space mapping already undone —
+    /// the same mapping [`NativeSliderView::on_change`] documents). Never
+    /// fires on a target with no stepper arm.
+    pub fn on_change(mut self, handler: impl Fn(i32) + Send + Sync + 'static) -> Self {
+        self.on_change = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2) folds the active theme's `accent_ink` in as
+    /// `UIStepper.tintColor` — see [`NativeButtonView::params_for`]'s doc for
+    /// why it's threaded explicitly, and `crate::controls::stepper`'s module
+    /// doc's *Tint* section for why `NSStepper` never receives it (logged and
+    /// no-op'd on that one arm, not a gap in this fold).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(VALUE, self.value);
+        body.push_raw(MIN, self.min);
+        body.push_raw(MAX, self.max);
+        body.push_raw(STEP, self.step);
+        body.push_raw(WRAPS, self.wraps);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+        }
+        with_identity(stepper::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        self.build_for_arm(slot, mode, tokens, STEPPER_ARM)
+    }
+
+    /// [`Self::build_with_mode`] with the platform-arm gate threaded as a
+    /// parameter, so a host test can drive both branches on any target —
+    /// [`NativeSegmentedView::build_for_arm`]'s exact shape.
+    ///
+    /// No arm → the unavailable banner, before anything else: the refusal is
+    /// structural, whatever the surface mode, and no callback is registered
+    /// (no event could ever arrive for it).
+    fn build_for_arm(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+        arm_available: bool,
+    ) -> AnyView<SlotId> {
+        if !arm_available {
+            warn_no_stepper_arm_once();
+            return banner_placeholder(
+                self.size,
+                STEPPER_UNAVAILABLE_LABEL.to_string(),
+                STEPPER_UNAVAILABLE_DESCRIPTION.to_string(),
+            );
+        }
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Stepper");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_change) = self.on_change.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_value_changed(on_change)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "stepper".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeStepperView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc — `Stepper` registers a
+        // callback via `Self::on_change`, so it needs the same
+        // `pending_callbacks` reaper (a harmless no-op on a target with no
+        // arm, where nothing is ever registered).
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Tab bar
+// ============================================================================
+
+/// Whether this build's platform arm registers the tab bar — the same
+/// compile-time gate as [`SEGMENTED_ARM`], narrower: `TabBar` is in
+/// `crate::controls::IOS_ONLY_KINDS`, so **only iOS/iPadOS** carries a
+/// `NativeWidget` impl. macOS has no bottom-tab-bar idiom and Android's
+/// `BottomNavigationView` needs Material (decision D2), so both — and every
+/// host target — render the refusal banner.
+#[cfg(target_os = "ios")]
+const TAB_BAR_ARM: bool = true;
+/// See the iOS definition above.
+#[cfg(not(target_os = "ios"))]
+const TAB_BAR_ARM: bool = false;
+
+/// The banner's visible label on a target with no tab-bar arm.
+const TAB_BAR_UNAVAILABLE_LABEL: &str = "Native tab bar unavailable";
+
+/// The banner's explanation on a target with no tab-bar arm — names both
+/// reasons (macOS idiom, Android Material).
+const TAB_BAR_UNAVAILABLE_DESCRIPTION: &str = "native_tab_bar is iOS/iPadOS-only: macOS has no \
+     bottom tab bar idiom, and Android's BottomNavigationView needs Material, which this plugin \
+     never assumes — rendering a frust placeholder instead of an empty native slot.";
+
+/// Log the no-tab-bar-arm fallback exactly once, crate-wide.
+static TAB_BAR_NO_ARM_LOGGED: Once = Once::new();
+
+fn warn_no_tab_bar_arm_once() {
+    TAB_BAR_NO_ARM_LOGGED.call_once(|| {
+        log::warn!(
+            "frust-native-widgets: native_tab_bar is an iOS/iPadOS-only control (macOS has no \
+             bottom tab bar idiom; Android's BottomNavigationView needs Material); rendering the \
+             frust-drawn refusal banner instead of a native slot"
+        );
+    });
+}
+
+/// A tab's stable, app-chosen identity — what [`native_tab_bar`]'s
+/// `selected` names and what [`NativeTabBarView::on_select`]/
+/// [`NativeTabBarView::on_reselect`] report. Never an index: reordering or
+/// inserting items keeps every id meaning the same tab.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TabId(String);
+
+impl TabId {
+    /// A tab id spelled `id`.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The id's spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for TabId {
+    fn from(id: &str) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<String> for TabId {
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for TabId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A tab's icon: encoded image bytes, or an Apple SF Symbol name — never an
+/// arbitrary string passed off as a cross-platform icon (the bar is
+/// iOS-only, and a symbol name means nothing anywhere else).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TabIcon {
+    /// Encoded image bytes (PNG/JPEG — whatever `UIImage` decodes), shown as
+    /// a template image tinted by the bar. Normalized to a 25pt box: supply
+    /// 75×75px for a crisp 3x icon; a smaller image is never upscaled.
+    Bytes(Arc<[u8]>),
+    /// An SF Symbol name (`"house"`, `"gearshape.fill"`) —
+    /// `UIImage.systemImageNamed:`, sized by the bar itself. An unknown name
+    /// shows the title alone (logged once).
+    AppleSymbol(String),
+}
+
+/// One tab of a [`native_tab_bar`]: a stable [`TabId`], a title, an icon,
+/// and optionally a selected-state icon, a badge and a disabled state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabItem {
+    id: TabId,
+    title: String,
+    icon: TabIcon,
+    selected_icon: Option<TabIcon>,
+    badge: Option<String>,
+    enabled: bool,
+}
+
+impl TabItem {
+    /// An enabled, badge-less tab `id` titled `title` showing `icon`.
+    pub fn new(id: impl Into<TabId>, title: impl Into<String>, icon: TabIcon) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            icon,
+            selected_icon: None,
+            badge: None,
+            enabled: true,
+        }
+    }
+
+    /// The icon shown while this tab is selected (`UITabBarItem.selectedImage`)
+    /// — e.g. the `.fill` variant of an SF Symbol. Default: the bar tints
+    /// [`Self::new`]'s icon.
+    pub fn selected_icon(mut self, icon: TabIcon) -> Self {
+        self.selected_icon = Some(icon);
+        self
+    }
+
+    /// A badge (`UITabBarItem.badgeValue`) — a count, `"new"`, or `""` for a
+    /// bare dot-sized badge. Default: none.
+    pub fn badge(mut self, badge: impl Into<String>) -> Self {
+        self.badge = Some(badge.into());
+        self
+    }
+
+    /// Whether the tab can be tapped (`UIBarItem.enabled`). Default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// This tab's id.
+    pub fn id(&self) -> &TabId {
+        &self.id
+    }
+}
+
+/// The SF Symbol name one icon slot carries on the wire (byte icons ride
+/// the side table instead — `crate::controls::tab_bar`'s module doc).
+fn symbol_name(icon: Option<&TabIcon>) -> Option<&str> {
+    match icon {
+        Some(TabIcon::AppleSymbol(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// The encoded bytes one icon slot publishes, if it is a byte icon.
+fn icon_bytes(icon: Option<&TabIcon>) -> Option<Arc<[u8]>> {
+    match icon {
+        Some(TabIcon::Bytes(bytes)) => Some(Arc::clone(bytes)),
+        _ => None,
+    }
+}
+
+/// A real, bare `UITabBar` on iOS/iPadOS — a **controlled** bottom tab bar
+/// that never navigates by itself: a tap reports the requested [`TabId`]
+/// through [`Self::on_select`], the app routes (typically
+/// `RouteNavigator::go`) and feeds the confirmed id back as `selected` on the
+/// next build. A tap on the tab already showing reports through
+/// [`Self::on_reselect`] instead ("scroll to top / pop to root"). macOS and
+/// Android (and every host target) render a frust-drawn refusal banner.
+/// Build one with [`native_tab_bar`].
+///
+/// # Placement and height
+///
+/// The bar sizes itself: 49pt tall plus the window's bottom safe-area inset,
+/// read at layout time, as wide as its parent allows — so its background runs
+/// under the home indicator while UIKit keeps the items above it. Put it last
+/// in a `Column` docked to the window's bottom edge, and do **not** also
+/// consume the bottom inset above it: if you wrap it in `frust::safe_area`
+/// for horizontal cutouts, use `.top(false).bottom(false)` — the shape
+/// `examples/huddle` uses for Material's `navigation_bar`, which self-insets
+/// the same way. For a bar that is not docked to the bottom edge, call
+/// [`Self::safe_area`]`(false)` to get the bare 49pt.
+///
+/// On iPadOS a bare `UITabBar` stays a bottom bar (the iPadOS 18 top tab bar
+/// and the Liquid Glass floating bar are `UITabBarController` features), which
+/// is expected.
+#[derive(Clone)]
+pub struct NativeTabBarView {
+    items: Vec<TabItem>,
+    selected: TabId,
+    safe_area: bool,
+    on_select: TabHandler,
+    on_reselect: TabHandler,
+}
+
+/// A native bottom tab bar over `items`, with the app-owned `selected` tab —
+/// see [`NativeTabBarView`]. A `selected` id no item carries shows no
+/// selection; duplicate ids resolve to the first item carrying them; at most
+/// 16 items are shown (`crate::controls::tab_bar::MAX_ITEMS`).
+///
+/// ```ignore
+/// let nav = router.route_navigator();
+/// native_tab_bar(
+///     vec![
+///         TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into())),
+///         TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())).badge("3"),
+///     ],
+///     TabId::new(current_tab.get()),
+/// )
+/// .on_select(move |id| nav.go(format!("/{id}")))
+/// ```
+pub fn native_tab_bar(items: Vec<TabItem>, selected: impl Into<TabId>) -> NativeTabBarView {
+    NativeTabBarView {
+        items,
+        selected: selected.into(),
+        safe_area: true,
+        on_select: None,
+        on_reselect: None,
+    }
+}
+
+impl NativeTabBarView {
+    /// Fires with the *requested* tab's id when the user taps a tab other
+    /// than the one showing — the app confirms (or rejects) it by feeding
+    /// `selected` back through the next build. Never fires on a target with
+    /// no tab-bar arm.
+    pub fn on_select(mut self, handler: impl Fn(TabId) + Send + Sync + 'static) -> Self {
+        self.on_select = Some(Arc::new(handler));
+        self
+    }
+
+    /// Fires with the showing tab's id when the user taps it again —
+    /// conventionally "scroll to top" or "pop to the tab's root". Changes
+    /// nothing by itself.
+    pub fn on_reselect(mut self, handler: impl Fn(TabId) + Send + Sync + 'static) -> Self {
+        self.on_reselect = Some(Arc::new(handler));
+        self
+    }
+
+    /// Whether the bar grows by the window's bottom safe-area inset (default
+    /// `true`, for a bar docked to the bottom edge). `false` keeps the bare
+    /// 49pt, for a bar embedded mid-screen.
+    pub fn safe_area(mut self, enabled: bool) -> Self {
+        self.safe_area = enabled;
+        self
+    }
+
+    /// The index of the first item carrying `selected`, if any.
+    fn selected_index(&self) -> Option<usize> {
+        self.items.iter().position(|item| item.id == self.selected)
+    }
+
+    /// The byte icons this bar publishes into the side table, one entry per
+    /// item (`crate::controls::tab_bar::publish_icon_bytes`).
+    fn icon_bytes(&self) -> Vec<tab_bar::ItemIconBytes> {
+        self.items
+            .iter()
+            .map(|item| tab_bar::ItemIconBytes {
+                icon: icon_bytes(Some(&item.icon)),
+                selected_icon: icon_bytes(item.selected_icon.as_ref()),
+            })
+            .collect()
+    }
+
+    /// `tokens` (theme ladder L2) folds `accent_ink` (selected tint),
+    /// `muted` (unselected tint) and `surface_bg` (bar background) in — see
+    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
+    /// explicitly. `icons_rev` is the side table's revision for this slot
+    /// (`crate::controls::tab_bar`'s module doc).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>, icons_rev: u64) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(tab_bar::ITEM_COUNT, self.items.len());
+        for (index, item) in self.items.iter().enumerate() {
+            body.push_str(&tab_bar::item_key(index, tab_bar::FIELD_TITLE), &item.title);
+            body.push_raw(
+                &tab_bar::item_key(index, tab_bar::FIELD_ENABLED),
+                item.enabled,
+            );
+            body.push_opt_str(
+                &tab_bar::item_key(index, tab_bar::FIELD_BADGE),
+                item.badge.as_deref(),
+            );
+            body.push_opt_str(
+                &tab_bar::item_key(index, tab_bar::FIELD_SYMBOL),
+                symbol_name(Some(&item.icon)),
+            );
+            body.push_opt_str(
+                &tab_bar::item_key(index, tab_bar::FIELD_SELECTED_SYMBOL),
+                symbol_name(item.selected_icon.as_ref()),
+            );
+        }
+        if let Some(index) = self.selected_index() {
+            body.push_raw(tab_bar::SELECTED, index);
+        }
+        body.push_raw(tab_bar::ICONS_REV, icons_rev);
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TINT, t.accent_ink);
+            body.push_raw(tab_bar::UNSELECTED_TINT, t.muted);
+            body.push_raw(BACKGROUND_COLOR, t.surface_bg);
+        }
+        with_identity(tab_bar::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        self.build_for_arm(slot, mode, tokens, TAB_BAR_ARM)
+    }
+
+    /// [`Self::build_with_mode`] with the platform-arm gate threaded as a
+    /// parameter, so a host test can drive both branches on any target.
+    /// Every branch — banner, translucency placeholder, native slot — sits
+    /// inside the same inset-aware [`TabBarSlot`], so the bar's footprint is
+    /// identical whichever one renders.
+    fn build_for_arm(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+        arm_available: bool,
+    ) -> AnyView<SlotId> {
+        let child = if !arm_available {
+            warn_no_tab_bar_arm_once();
+            banner_placeholder(
+                None,
+                TAB_BAR_UNAVAILABLE_LABEL.to_string(),
+                TAB_BAR_UNAVAILABLE_DESCRIPTION.to_string(),
+            )
+        } else if mode.translucency_refused() {
+            placeholder(None, "TabBar")
+        } else {
+            let icons_rev = tab_bar::publish_icon_bytes(slot, self.icon_bytes());
+            let params = self.params_for(slot, tokens, icons_rev);
+            if self.on_select.is_some() || self.on_reselect.is_some() {
+                let ids: Arc<[TabId]> = self.items.iter().map(|item| item.id.clone()).collect();
+                with_runtime(|rt| {
+                    rt.set_callback(
+                        slot,
+                        on_tab_bar(ids, self.on_select.clone(), self.on_reselect.clone()),
+                    )
+                });
+            }
+            any(platform_view(VIEW_TYPE)
+                .params_json(params)
+                .interactive()
+                .semantics_label("tab bar")
+                .expand())
+        };
+        any(TabBarSlot {
+            child,
+            safe_area: self.safe_area,
+        })
+    }
+}
+
+impl Component for NativeTabBarView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc for the callback reaper; the tab
+        // bar also owns an icon-bytes side-table entry, retired here exactly
+        // once per mounted component (`crate::controls::tab_bar`'s module
+        // doc) — both harmless no-ops on a target with no arm.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+            tab_bar::retire_icon_bytes(slot);
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+/// The tab bar's inset-aware slot: lays its child out at exactly
+/// [`tab_bar::BAR_HEIGHT`] plus — when `safe_area` — the window's bottom
+/// safe-area inset (`LayoutCtx::window_insets().padding().bottom`, read at
+/// layout time, the same inset Material's `navigation_bar` consumes), as wide
+/// as the parent allows. `platform_view` can only be sized by a builder-time
+/// `.size(w, h)` or `.expand()`, and the inset is not known until layout, so
+/// this crate-local wrapper (the [`ClipToSlot`] shape) supplies the tight
+/// constraints and the child `.expand()`s into them — the `UITabBar` frame
+/// then covers the whole slot, home-indicator band included. It also clips
+/// its child's paint to the slot, which the refusal banner's prose needs.
+struct TabBarSlot<State: 'static> {
+    child: AnyView<State>,
+    safe_area: bool,
+}
+
+/// The retained widget for [`TabBarSlot`].
+struct TabBarSlotWidget {
+    child: Box<dyn Widget>,
+    safe_area: bool,
+}
+
+impl<State: 'static> View<State> for TabBarSlot<State> {
+    type Element = TabBarSlotWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+        TabBarSlotWidget {
+            child: self.child.build(ctx),
+            safe_area: self.safe_area,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut Self::Element,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = self.child.rebuild(&prev.child, &mut element.child, ctx);
+        if element.safe_area != self.safe_area {
+            element.safe_area = self.safe_area;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+        self.child.teardown(&mut element.child, ctx);
+    }
+}
+
+impl TabBarSlotWidget {
+    /// The slot size for `bc` under `bottom_inset` px of bottom safe-area
+    /// padding — pure, so the height rule is host-tested directly.
+    fn slot_size(&self, bc: &BoxConstraints, bottom_inset: f64) -> Size {
+        let inset = if self.safe_area {
+            bottom_inset.max(0.0)
+        } else {
+            0.0
+        };
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            bc.min().width
+        };
+        bc.constrain(Size::new(width, tab_bar::BAR_HEIGHT + inset))
+    }
+}
+
+impl Widget for TabBarSlotWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.slot_size(bc, ctx.window_insets().padding().bottom);
+        self.child.layout(ctx, &BoxConstraints::tight(size));
+        size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        scene.push_clip(ctx.origin(), ctx.size());
+        self.child.paint(ctx, scene);
+        scene.pop_clip();
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.child.event(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent wrapper: forward unchanged (`docs/CODE_STANDARDS.md`'s
+        // Semantics Conventions).
+        self.child.semantics(ctx);
+    }
+}
+
+// ============================================================================
 // Image
 // ============================================================================
 
@@ -1396,6 +2669,11 @@ impl_native_view!(NativeSwitchView);
 impl_native_view!(NativeSliderView);
 impl_native_view!(NativeProgressView);
 impl_native_view!(NativeImageView);
+impl_native_view!(NativeSpinnerView);
+impl_native_view!(NativeDatePickerView);
+impl_native_view!(NativeSegmentedView);
+impl_native_view!(NativeStepperView);
+impl_native_view!(NativeTabBarView);
 
 #[cfg(test)]
 mod tests {
@@ -1490,6 +2768,516 @@ mod tests {
             "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"cover\",\
              \"dark\":false}"
         );
+    }
+
+    #[test]
+    fn spinner_params_snapshot() {
+        let view = native_spinner(true)
+            .size_class(NativeSpinnerSize::Large)
+            .content_description("loading");
+        assert_eq!(
+            view.params_for(6, None),
+            "{\"__frustControl\":\"spinner\",\"__frustSlot\":6,\"animating\":true,\
+             \"sizeClass\":\"large\",\"enabled\":true,\"contentDescription\":\"loading\",\
+             \"dark\":false}"
+        );
+    }
+
+    fn civil(year: i32, month: u8, day: u8) -> CivilDate {
+        CivilDate::new(year, month, day).expect("a real date")
+    }
+
+    #[test]
+    fn date_picker_params_snapshot() {
+        let view = native_date_picker(civil(2026, 9, 29))
+            .min(civil(2026, 1, 1))
+            .max(civil(2026, 12, 31))
+            .style(NativeDatePickerStyle::Inline)
+            .content_description("due date");
+        assert_eq!(
+            view.params_for(12, None),
+            format!(
+                "{{\"__frustControl\":\"date_picker\",\"__frustSlot\":12,\"date\":{},\
+                 \"minDate\":{},\"maxDate\":{},\"style\":\"inline\",\"enabled\":true,\
+                 \"contentDescription\":\"due date\",\"dark\":false}}",
+                (2026 << 16) | (9 << 8) | 29,
+                (2026 << 16) | (1 << 8) | 1,
+                (2026 << 16) | (12 << 8) | 31,
+            )
+        );
+    }
+
+    #[test]
+    fn date_picker_params_round_trip_through_the_control_decoder() {
+        use crate::controls::date_picker::DatePickerProps;
+        use crate::runtime::Params;
+
+        let view = native_date_picker(civil(2024, 2, 29))
+            .min(civil(2000, 1, 1))
+            .style(NativeDatePickerStyle::Wheels)
+            .enabled(false);
+        let raw = view.params_for(12, Some(dark_tokens()));
+        let props = DatePickerProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.date, Some(civil(2024, 2, 29)));
+        assert_eq!(props.min, Some(civil(2000, 1, 1)));
+        assert_eq!(props.max, None);
+        assert!(!props.enabled);
+        assert_eq!(props.tint, Some(dark_tokens().accent_ink as i32));
+        assert_eq!(props.text_color, Some(dark_tokens().body_text as i32));
+    }
+
+    #[test]
+    fn date_picker_publishes_one_interactive_slot_on_every_target() {
+        // A shared control: no compile-time arm gate, unlike
+        // `native_segmented`/`native_stepper`.
+        let view = native_date_picker(civil(2026, 9, 29)).size(320.0, 216.0);
+        let expected_params = view.params_for(4, None);
+        let built = view.build_with_mode(4, ResolvedSurfaceMode::Opaque, None);
+        let mut element = build_any(built);
+        let mut lctx = LayoutCtx::new();
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(320.0, 216.0)));
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(320.0, 216.0));
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a date picker slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn date_picker_honours_the_translucency_refusal() {
+        let view = native_date_picker(civil(2026, 9, 29)).build_with_mode(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(320.0, 216.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
+    }
+
+    #[test]
+    fn segmented_params_snapshot() {
+        let view = native_segmented(vec!["Day".into(), "Week \"W\"".into()], 1)
+            .momentary(true)
+            .content_description("range");
+        assert_eq!(
+            view.params_for(8, None),
+            "{\"__frustControl\":\"segmented\",\"__frustSlot\":8,\"segmentCount\":2,\
+             \"segment0\":\"Day\",\"segment1\":\"Week \\\"W\\\"\",\"selected\":1,\
+             \"momentary\":true,\"enabled\":true,\"contentDescription\":\"range\",\
+             \"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn segmented_params_round_trip_through_the_control_decoder() {
+        use crate::controls::segmented::SegmentedProps;
+        use crate::runtime::Params;
+
+        let view = native_segmented(vec!["A".into(), "B".into(), "C".into()], 2).enabled(false);
+        let raw = view.params_for(8, Some(dark_tokens()));
+        let props = SegmentedProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.labels, vec!["A", "B", "C"]);
+        assert_eq!(props.selected, Some(2));
+        assert!(!props.enabled);
+        assert!(!props.momentary);
+        assert_eq!(props.tint, Some(dark_tokens().accent_fill as i32));
+    }
+
+    #[test]
+    fn the_segmented_arm_gate_is_exactly_the_apple_targets() {
+        assert_eq!(
+            SEGMENTED_ARM,
+            cfg!(any(target_os = "ios", target_os = "macos")),
+            "Android (decision D2) and every host target render the banner"
+        );
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("Android"));
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("follow-up"));
+    }
+
+    #[test]
+    fn segmented_without_a_platform_arm_paints_the_banner_and_publishes_no_slot() {
+        // Every surface mode, including the ones a native slot would render
+        // in: with no arm, the refusal is structural.
+        for mode in [
+            ResolvedSurfaceMode::Unknown,
+            ResolvedSurfaceMode::Opaque,
+            ResolvedSurfaceMode::Translucent,
+            ResolvedSurfaceMode::RefusedTranslucent,
+        ] {
+            let view = native_segmented(vec!["A".into(), "B".into()], 0)
+                .size(240.0, 60.0)
+                .build_for_arm(3, mode, None, false);
+            let mut element = build_any(view);
+            let mut text_ctx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+            let laid = element.layout(&mut lctx, &BoxConstraints::tight(Size::new(240.0, 60.0)));
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+            assert!(
+                pctx.take_platform_views().is_empty(),
+                "{mode:?}: no arm must publish no native platform_view frame"
+            );
+            assert!(
+                rec.glyph_runs >= 2,
+                "{mode:?}: the banner's label and description must paint, saw {} runs",
+                rec.glyph_runs
+            );
+        }
+    }
+
+    #[test]
+    fn segmented_with_a_platform_arm_publishes_one_interactive_slot() {
+        let view = native_segmented(vec!["A".into(), "B".into()], 1).size(200.0, 32.0);
+        let expected_params = view.params_for(4, None);
+        let built = view.build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let mut lctx = LayoutCtx::new();
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(200.0, 32.0)));
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(200.0, 32.0));
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a segmented slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn segmented_with_an_arm_still_honours_the_translucency_refusal() {
+        let view = native_segmented(vec!["A".into()], 0).build_for_arm(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+            true,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(120.0, 32.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
+    }
+
+    #[test]
+    fn stepper_params_snapshot() {
+        let view = native_stepper(4, 0, 10)
+            .step(2)
+            .wraps(true)
+            .content_description("count");
+        assert_eq!(
+            view.params_for(8, None),
+            "{\"__frustControl\":\"stepper\",\"__frustSlot\":8,\"value\":4,\"min\":0,\"max\":10,\
+             \"step\":2,\"wraps\":true,\"enabled\":true,\"contentDescription\":\"count\",\
+             \"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn stepper_params_round_trip_through_the_control_decoder() {
+        use crate::controls::stepper::StepperProps;
+        use crate::runtime::Params;
+
+        let view = native_stepper(3, 0, 20).step(5).wraps(true).enabled(false);
+        let raw = view.params_for(8, Some(dark_tokens()));
+        let props = StepperProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.value, 3);
+        assert_eq!(props.step, 5);
+        assert!(props.wraps);
+        assert!(!props.enabled);
+        assert_eq!(props.tint, Some(dark_tokens().accent_ink as i32));
+    }
+
+    #[test]
+    fn a_non_positive_step_mounts_as_one_through_the_control_decoder() {
+        use crate::controls::stepper::StepperProps;
+        use crate::runtime::Params;
+
+        let view = native_stepper(3, 0, 20).step(0);
+        let raw = view.params_for(8, None);
+        assert!(
+            raw.contains("\"step\":0"),
+            "the builder still sends the app's raw value over the wire — \
+             normalization is the control's job, not the builder's"
+        );
+        let props = StepperProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.step, 1, "a non-positive step mounts as 1");
+    }
+
+    #[test]
+    fn the_stepper_arm_gate_is_exactly_the_apple_targets() {
+        assert_eq!(
+            STEPPER_ARM,
+            cfg!(any(target_os = "ios", target_os = "macos")),
+            "Android and every host target render the banner"
+        );
+        assert!(STEPPER_UNAVAILABLE_DESCRIPTION.contains("Android"));
+        assert!(STEPPER_UNAVAILABLE_DESCRIPTION.contains("follow-up"));
+    }
+
+    #[test]
+    fn stepper_without_a_platform_arm_paints_the_banner_and_publishes_no_slot() {
+        // Every surface mode, including the ones a native slot would render
+        // in: with no arm, the refusal is structural.
+        for mode in [
+            ResolvedSurfaceMode::Unknown,
+            ResolvedSurfaceMode::Opaque,
+            ResolvedSurfaceMode::Translucent,
+            ResolvedSurfaceMode::RefusedTranslucent,
+        ] {
+            let view = native_stepper(0, 0, 10)
+                .size(120.0, 40.0)
+                .build_for_arm(3, mode, None, false);
+            let mut element = build_any(view);
+            let mut text_ctx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+            let laid = element.layout(&mut lctx, &BoxConstraints::tight(Size::new(120.0, 40.0)));
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+            assert!(
+                pctx.take_platform_views().is_empty(),
+                "{mode:?}: no arm must publish no native platform_view frame"
+            );
+            assert!(
+                rec.glyph_runs >= 2,
+                "{mode:?}: the banner's label and description must paint, saw {} runs",
+                rec.glyph_runs
+            );
+        }
+    }
+
+    #[test]
+    fn stepper_with_a_platform_arm_publishes_one_interactive_slot() {
+        let view = native_stepper(2, 0, 10).size(94.0, 29.0);
+        let expected_params = view.params_for(4, None);
+        let built = view.build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let mut lctx = LayoutCtx::new();
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(94.0, 29.0)));
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(94.0, 29.0));
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a stepper slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn stepper_with_an_arm_still_honours_the_translucency_refusal() {
+        let view = native_stepper(0, 0, 10).build_for_arm(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+            true,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(94.0, 29.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
+    }
+
+    // --- tab bar ------------------------------------------------------------
+
+    fn symbol(name: &str) -> TabIcon {
+        TabIcon::AppleSymbol(name.into())
+    }
+
+    fn two_tabs() -> Vec<TabItem> {
+        vec![
+            TabItem::new("home", "Home", symbol("house")).selected_icon(symbol("house.fill")),
+            TabItem::new("inbox", "Inbox", symbol("tray"))
+                .badge("3")
+                .enabled(false),
+        ]
+    }
+
+    /// Lay `element` out under `bc` in a window carrying `bottom` px of
+    /// bottom system-bar inset — the shape a shell pushes for the home
+    /// indicator.
+    fn layout_with_bottom_inset(
+        element: &mut Box<dyn Widget>,
+        bc: &BoxConstraints,
+        bottom: f64,
+    ) -> Size {
+        use frust_core::{WindowEdgeInsets, WindowInsets};
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, bottom),
+            WindowEdgeInsets::ZERO,
+        );
+        let mut text_ctx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+        lctx.with_window_insets(insets, |ctx| element.layout(ctx, bc))
+    }
+
+    #[test]
+    fn tab_bar_params_snapshot() {
+        let view = native_tab_bar(two_tabs(), "inbox");
+        assert_eq!(
+            view.params_for(8, None, 0),
+            "{\"__frustControl\":\"tab_bar\",\"__frustSlot\":8,\"itemCount\":2,\
+             \"tab0Title\":\"Home\",\"tab0Enabled\":true,\"tab0Symbol\":\"house\",\
+             \"tab0SelectedSymbol\":\"house.fill\",\"tab1Title\":\"Inbox\",\
+             \"tab1Enabled\":false,\"tab1Badge\":\"3\",\"tab1Symbol\":\"tray\",\
+             \"selected\":1,\"iconsRev\":0,\"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_selected_id_encodes_no_selection() {
+        let raw = native_tab_bar(two_tabs(), "settings").params_for(8, None, 0);
+        assert!(!raw.contains("\"selected\""), "{raw}");
+    }
+
+    #[test]
+    fn tab_bar_params_round_trip_through_the_control_decoder() {
+        use crate::controls::tab_bar::{IconSource, TabBarProps};
+        use crate::runtime::Params;
+
+        let bytes: Arc<[u8]> = Arc::from(vec![9u8, 9, 9].into_boxed_slice());
+        let view = native_tab_bar(
+            vec![
+                TabItem::new("a", "A", TabIcon::Bytes(Arc::clone(&bytes))),
+                TabItem::new("b", "B", symbol("gear")),
+            ],
+            "b",
+        );
+        let slot = 7_701;
+        let rev = tab_bar::publish_icon_bytes(slot, view.icon_bytes());
+        let raw = view.params_for(slot, Some(dark_tokens()), rev);
+        let props = TabBarProps::decode(&Params::new(&raw)).expect("decodes");
+        assert_eq!(props.items.len(), 2);
+        assert_eq!(props.items[0].icon, Some(IconSource::Bytes(bytes)));
+        assert_eq!(props.items[1].icon, Some(IconSource::Symbol("gear".into())));
+        assert_eq!(props.selected, Some(1));
+        assert_eq!(props.tint, Some(dark_tokens().accent_ink as i32));
+        assert_eq!(props.unselected_tint, Some(dark_tokens().muted as i32));
+        assert_eq!(props.background, Some(dark_tokens().surface_bg as i32));
+        tab_bar::retire_icon_bytes(slot);
+    }
+
+    #[test]
+    fn tab_bar_folds_accent_ink_muted_and_surface_from_the_theme() {
+        let tokens = light_tokens();
+        let raw = native_tab_bar(two_tabs(), "home").params_for(3, Some(tokens), 0);
+        assert!(raw.ends_with(&format!(
+            "\"dark\":false,\"tint\":{},\"unselectedTint\":{},\"backgroundColor\":{}}}",
+            tokens.accent_ink, tokens.muted, tokens.surface_bg
+        )));
+    }
+
+    #[test]
+    fn the_tab_bar_arm_gate_is_exactly_ios() {
+        assert_eq!(
+            TAB_BAR_ARM,
+            cfg!(target_os = "ios"),
+            "macOS (no idiom), Android (Material, D2) and every host render the banner"
+        );
+        assert!(TAB_BAR_UNAVAILABLE_DESCRIPTION.contains("macOS"));
+        assert!(TAB_BAR_UNAVAILABLE_DESCRIPTION.contains("Android"));
+        assert!(TAB_BAR_UNAVAILABLE_DESCRIPTION.contains("Material"));
+    }
+
+    #[test]
+    fn tab_bar_without_a_platform_arm_paints_the_banner_in_the_inset_aware_slot() {
+        for mode in [
+            ResolvedSurfaceMode::Unknown,
+            ResolvedSurfaceMode::Opaque,
+            ResolvedSurfaceMode::RefusedTranslucent,
+        ] {
+            let view = native_tab_bar(two_tabs(), "home").build_for_arm(3, mode, None, false);
+            let mut element = build_any(view);
+            let laid = layout_with_bottom_inset(
+                &mut element,
+                &BoxConstraints::new(Size::ZERO, Size::new(390.0, f64::INFINITY)),
+                34.0,
+            );
+            assert_eq!(laid, Size::new(390.0, 49.0 + 34.0), "{mode:?}");
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+            assert!(
+                pctx.take_platform_views().is_empty(),
+                "{mode:?}: no arm must publish no native platform_view frame"
+            );
+            assert!(rec.glyph_runs >= 1, "{mode:?}: the banner must paint");
+        }
+    }
+
+    #[test]
+    fn tab_bar_with_a_platform_arm_publishes_one_interactive_slot_under_the_home_indicator() {
+        let view = native_tab_bar(two_tabs(), "home");
+        let expected_params = view.params_for(4, None, 0);
+        let built = view.build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let laid = layout_with_bottom_inset(
+            &mut element,
+            &BoxConstraints::new(Size::ZERO, Size::new(390.0, 844.0)),
+            34.0,
+        );
+        assert_eq!(
+            laid,
+            Size::new(390.0, 83.0),
+            "49pt plus the 34pt home-indicator inset, full width"
+        );
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, laid);
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].view_type, VIEW_TYPE);
+        assert_eq!(frames[0].params_json, expected_params);
+        assert!(
+            frames[0].interactive,
+            "a tab bar slot forwards native input"
+        );
+    }
+
+    #[test]
+    fn an_opted_out_tab_bar_is_the_bare_bar_height() {
+        let built = native_tab_bar(two_tabs(), "home")
+            .safe_area(false)
+            .build_for_arm(4, ResolvedSurfaceMode::Opaque, None, true);
+        let mut element = build_any(built);
+        let laid = layout_with_bottom_inset(
+            &mut element,
+            &BoxConstraints::new(Size::ZERO, Size::new(320.0, 600.0)),
+            34.0,
+        );
+        assert_eq!(laid, Size::new(320.0, 49.0));
+    }
+
+    #[test]
+    fn tab_bar_with_an_arm_still_honours_the_translucency_refusal() {
+        let view = native_tab_bar(two_tabs(), "home").build_for_arm(
+            5,
+            ResolvedSurfaceMode::RefusedTranslucent,
+            None,
+            true,
+        );
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(390.0, 49.0));
+        element.paint(&mut pctx, &mut scene);
+        assert!(pctx.take_platform_views().is_empty());
     }
 
     // --- theme ladder L2: token folding, one snapshot per colour-bearing
@@ -1628,6 +3416,56 @@ mod tests {
             view.params_for(900, 42, Some(dark_tokens())),
             "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"contain\",\
              \"dark\":true}"
+        );
+    }
+
+    #[test]
+    fn spinner_folds_accent_ink_as_its_tint() {
+        let view = native_spinner(false);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(6, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"spinner\",\"__frustSlot\":6,\"animating\":false,\
+                 \"sizeClass\":\"medium\",\"enabled\":true,\"dark\":true,\"tint\":{}}}",
+                tokens.accent_ink
+            )
+        );
+    }
+
+    #[test]
+    fn stepper_folds_accent_ink_as_its_tint() {
+        // `UIStepper.tintColor` reads the same accent-ink role Switch/Slider's
+        // thumb tint and Spinner's own tint already do — `NSStepper` simply
+        // has no AppKit property to apply it through (module doc's *Tint*
+        // section on `crate::controls::stepper`), a platform gap this fold
+        // does not need to know about at the params level.
+        let view = native_stepper(0, 0, 10);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(6, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"stepper\",\"__frustSlot\":6,\"value\":0,\"min\":0,\
+                 \"max\":10,\"step\":1,\"wraps\":false,\"enabled\":true,\"dark\":true,\"tint\":{}}}",
+                tokens.accent_ink
+            )
+        );
+    }
+
+    #[test]
+    fn date_picker_folds_accent_ink_tint_and_body_text_colour() {
+        let view = native_date_picker(civil(2026, 9, 29));
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(6, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"date_picker\",\"__frustSlot\":6,\"date\":{},\
+                 \"style\":\"compact\",\"enabled\":true,\"dark\":true,\"tint\":{},\
+                 \"textColor\":{}}}",
+                (2026 << 16) | (9 << 8) | 29,
+                tokens.accent_ink,
+                tokens.body_text
+            )
         );
     }
 
@@ -1845,7 +3683,7 @@ mod tests {
     fn placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size() {
         // A range of slot sizes the app-facing builders actually allow,
         // including `native_switch`'s own deliberately small box
-        // (`examples/glyph-catalog/src/pages/native_widgets.rs`) and an
+        // (`examples/native-widgets-demo/src/pages/controls.rs`) and an
         // even smaller one to stress the invariant further.
         for (label, (w, h)) in [
             ("native_switch's own box (70x40)", (70.0, 40.0)),

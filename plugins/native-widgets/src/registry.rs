@@ -24,8 +24,8 @@
 //! [`Registry`] itself carries no `#[cfg]` — its insert/remove/live-count
 //! contract is exercised on any host by this module's own unit tests
 //! (below), using a plain counting fixture, independent of JNI/ObjC. The
-//! real per-platform handle types live in the [`android`]/[`apple`]
-//! submodules, each compiled only under its own target:
+//! real per-platform handle types live in the [`android`]/[`apple`]/
+//! [`appkit`] submodules, each compiled only under its own target:
 //!
 //! - [`android::AndroidHandle`] is the RAII owner of every
 //!   `Global<JObject<'static>>` a control's create step allocated — the
@@ -39,7 +39,10 @@
 //!   counterpart — memory-safe by construction (no paired-delete
 //!   discipline needed; `Retained`'s own `Drop` releases the object) — kept
 //!   behind the same slot-keyed shape so a surface-recreate replay's
-//!   replace-and-release-old contract behaves identically on both platforms.
+//!   replace-and-release-old contract behaves identically on every platform.
+//! - [`appkit::AppKitHandle`] is the macOS twin of [`apple::AppleHandle`]:
+//!   the same ARC-managed shape over a `Retained<NSView>` (AppKit instead of
+//!   UIKit), behind the same main-thread typestate guard.
 
 use std::collections::HashMap;
 
@@ -184,10 +187,10 @@ pub mod android {
     }
 }
 
-// iOS only — not `target_vendor = "apple"`: this plugin's Apple surface is
-// UIKit, which doesn't exist on macOS (no AppKit backend here, unlike
-// `plugins/camera`'s AVFoundation arm) — see `Cargo.toml`'s comment on the
-// same gate for the linker failure `target_vendor = "apple"` caused.
+// iOS only — not `target_vendor = "apple"`: this plugin's iOS surface is
+// UIKit, which doesn't exist on macOS (the macOS arm is AppKit — `appkit`
+// below) — see `Cargo.toml`'s comment on the same gate for the linker
+// failure `target_vendor = "apple"` caused.
 #[cfg(target_os = "ios")]
 pub mod apple {
     //! iOS's [`Registry`](super::Registry) handle: an ARC-managed
@@ -218,6 +221,44 @@ pub mod apple {
 
         /// The retained view, requiring the same main-thread proof.
         pub fn view(&self, _mtm: MainThreadMarker) -> &Retained<UIView> {
+            &self.view
+        }
+    }
+}
+
+// macOS only — the AppKit arm's handle, mirroring `apple` above exactly with
+// `NSView` in place of `UIView` (the two arms share no UI framework, only the
+// ARC ownership model).
+#[cfg(target_os = "macos")]
+pub mod appkit {
+    //! macOS's [`Registry`](super::Registry) handle: an ARC-managed
+    //! `Retained<NSView>`.
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSView;
+
+    /// A retained control view. Memory-safe by construction — no
+    /// paired-delete discipline needed, `Retained`'s own `Drop` releases
+    /// the object — but AppKit views are main-thread-only, so
+    /// [`AppKitHandle::view`] only hands the `Retained<NSView>` back
+    /// alongside proof of a live [`MainThreadMarker`], never off it (every
+    /// desktop platform-view create/update/dispose call is made on the main
+    /// thread already — `frust_plugin::desktop`'s contract — so this is a
+    /// documentation-and-typestate guard, not a new runtime cost).
+    pub struct AppKitHandle {
+        view: Retained<NSView>,
+    }
+
+    impl AppKitHandle {
+        /// Retain `view`, requiring proof the caller is on the main
+        /// thread.
+        pub fn new(view: Retained<NSView>, _mtm: MainThreadMarker) -> Self {
+            Self { view }
+        }
+
+        /// The retained view, requiring the same main-thread proof.
+        pub fn view(&self, _mtm: MainThreadMarker) -> &Retained<NSView> {
             &self.view
         }
     }

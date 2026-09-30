@@ -11,15 +11,15 @@
 //!   earlier examples-convergence deleted `catalog` and `inbox`, folding
 //!   their hand-sync role into `huddle`) — drift silently reopens the
 //!   measured size/perf regression.
-//! - `[profile.release]` hardening lives in NINE: those five plus four
+//! - `[profile.release]` hardening lives in TEN: those five plus five
 //!   standalone workspaces that hand-copied the block with no tripwire over
 //!   them — `benchmarks/frust_bench` (its numbers only mean anything if it
-//!   builds under the settings a shipped app does), the two further `frust
-//!   create` scaffolds `examples/playground` and `examples/shadertoy`, and
-//!   the wasm-only `examples/web-gallery`.
+//!   builds under the settings a shipped app does), the three further `frust
+//!   create` scaffolds `examples/playground`, `examples/shadertoy` and
+//!   `examples/native-widgets-demo`, and the wasm-only `examples/web-gallery`.
 //! - the cold-set `[profile.release.package.<crate>]` block (`opt-level =
-//!   "z"` for crates that do no per-frame work) lives in the EIGHT of those
-//!   nine that build an Android artifact — i.e. all but `web-gallery`, which
+//!   "z"` for crates that do no per-frame work) lives in the NINE of those
+//!   ten that build an Android artifact — i.e. all but `web-gallery`, which
 //!   is wasm-only and deliberately has no package overrides. Drift here
 //!   silently drops a measured footprint win for one app, or demotes a
 //!   per-frame crate to `"z"` in one app alone and makes two apps' frame
@@ -108,14 +108,17 @@ fn synced_manifests() -> Vec<std::path::PathBuf> {
 }
 
 /// Every manifest carrying a `[profile.release]` mirror. A superset of
-/// `synced_manifests` above: four more standalone workspaces hand-copied the
-/// release block without ever being covered by a tripwire — the two further
-/// `frust create` scaffolds (`playground`, `shadertoy`), the benchmark app
-/// (`benchmarks/frust_bench`, whose numbers are only meaningful if it builds
-/// under the same release settings a shipped app does) and the wasm-only
-/// `examples/web-gallery`. They carry no `[profile.dev.package.*]` blocks
-/// comparable to the five above (each scaffold's dev override set is
-/// narrower), so they join the release-block comparison only.
+/// `synced_manifests` above: five more standalone workspaces hand-copied the
+/// release block without ever being covered by a tripwire — the three further
+/// `frust create` scaffolds (`playground`, `shadertoy`,
+/// `native-widgets-demo`), the benchmark app (`benchmarks/frust_bench`, whose
+/// numbers are only meaningful if it builds under the same release settings a
+/// shipped app does) and the wasm-only `examples/web-gallery`. They join the
+/// release-block comparison only, not the dev-override one
+/// (`synced_manifests`): `playground`'s and `shadertoy`'s dev override sets are
+/// narrower than the five above, and `native-widgets-demo`'s is the scaffold
+/// template's copy, kept as `frust create` emitted it but — like
+/// `playground`'s — left outside the dev tripwire.
 fn release_profile_manifests() -> Vec<std::path::PathBuf> {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut manifests = synced_manifests();
@@ -123,6 +126,7 @@ fn release_profile_manifests() -> Vec<std::path::PathBuf> {
         repo_root.join("benchmarks/frust_bench/Cargo.toml"),
         repo_root.join("examples/playground/Cargo.toml"),
         repo_root.join("examples/shadertoy/Cargo.toml"),
+        repo_root.join("examples/native-widgets-demo/Cargo.toml"),
         repo_root.join("examples/web-gallery/Cargo.toml"),
     ]);
     manifests
@@ -360,7 +364,7 @@ fn shader_stack_dev_override_name_set_is_identical_across_synced_manifests() {
 /// (worse) quietly demotes a per-frame crate to `"z"` in one app and not the
 /// others, making two apps' frame numbers incomparable.
 ///
-/// Scope is `android_package_override_manifests()` — the eight manifests that
+/// Scope is `android_package_override_manifests()` — the nine manifests that
 /// build an Android artifact. `examples/web-gallery` is deliberately excluded;
 /// the next test pins that exclusion so it stays a decision rather than an
 /// oversight.

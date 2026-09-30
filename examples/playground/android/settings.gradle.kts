@@ -70,24 +70,6 @@ gradle.lifecycle.beforeProject {
     }
 }
 
-// frust-native-widgets: the same
-// include/projectDir/build-dir-redirect trio as `:frust-camera` above, and
-// exactly what `frust-drive::plugin::apply_gradle_module` writes for this
-// plugin's `Contribution::GradleModule`. Carried in-tree because playground is
-// a committed example, not a generated project.
-//
-// The module supplies the `dev.frust.nativewidgets` factory/listener classes;
-// no per-control Kotlin lives in this app's own source tree.
-include(":frust-native-widgets")
-project(":frust-native-widgets").projectDir =
-    file("../../../plugins/native-widgets/platform/android")
-
-gradle.lifecycle.beforeProject {
-    if (path == ":frust-native-widgets") {
-        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-native-widgets"))
-    }
-}
-
 // frust-video-player: the same include/projectDir/build-dir-redirect trio as
 // `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
 // writes for this plugin's `Contribution::GradleModule`. Carried in-tree

@@ -1,5 +1,7 @@
 # `frust-native-widgets`: the native-controls-from-pure-Rust platform
-# plugin. Leaf
+# plugin — three platform arms: Android (`jni`), iOS (`objc2-ui-kit`) and
+# macOS (`objc2-app-kit`, hosted through the desktop Mode-A platform-view
+# host; no Mac Catalyst). Leaf
 # platform plugin per `docs/CODE_STANDARDS.md`'s Plugin Conventions:
 # `frust-plugin` + FFI crates only, never another `frust-*` framework
 # crate. Feature lists below start from an earlier throwaway spike crate's
@@ -80,12 +82,12 @@ jni = { workspace = true }
 
 # iOS only — **not** `target_vendor = "apple"`. Unlike
 # `plugins/camera`/`plugins/shared-preferences`/`plugins/secure-storage`,
-# this plugin's Apple surface is UIKit (`objc2-ui-kit`), which doesn't
-# exist on macOS (no AppKit backend, no Mac Catalyst support here); gating
-# on `target_vendor = "apple"` would try to link the `UIKit` framework into
-# a macOS desktop-preview host build and fail (`ld: framework 'UIKit' not
-# found`) — confirmed by `cargo test -p frust-native-widgets` on this
-# macOS host. Controls via `objc2-ui-kit`, the Rust `define_class!` factory
+# this plugin's iOS surface is UIKit (`objc2-ui-kit`), which doesn't exist
+# on macOS (the macOS arm is AppKit, in its own target block below; Mac
+# Catalyst stays unsupported); gating on `target_vendor = "apple"` would
+# try to link the `UIKit` framework into a macOS build and fail
+# (`ld: framework 'UIKit' not found`) — confirmed by
+# `cargo test -p frust-native-widgets` on a macOS host. Controls via `objc2-ui-kit`, the Rust `define_class!` factory
 # via `objc2`/`objc2-foundation` (no Swift factory
 # needed). Every objc2-family crate below is `default-features = false` +
 # an explicit feature list per CODE_STANDARDS (pulling the default set
@@ -110,17 +112,44 @@ objc2 = { workspace = true }
 # this crate *names* `NSData` in its own source, so it is requested here
 # explicitly rather than relied on as a side effect of someone else's
 # feature list.
+# `NSDate`/`NSCalendar`/`NSLocale`: `DatePicker`'s `NSDate` <-> civil-date
+# mapping (`crate::controls::date_picker::foundation`, shared with the macOS
+# arm): a Gregorian `NSCalendar` builds the date from an `NSDateComponents`
+# and reads year/month/day back with `component:fromDate:`. There is NO
+# `NSDateComponents` feature — that class is generated under `NSCalendar`
+# (`NSDateComponentsFormatter` is a different, unrelated feature). `NSLocale`
+# is what the `UIDatePicker`/`NSCalendar` locale members are gated on; the
+# `objc2-ui-kit/UIDatePicker` feature below turns all three on transitively,
+# but this crate names the first two in its own source, so they are
+# requested here explicitly (the same rule as `NSData` above).
+# `NSSet`/`NSEnumerator`/`NSArray`: native presentations' host discovery
+# (`src/present/apple_host.rs`) iterates `UIApplication.connectedScenes` (an
+# `NSSet`, whose `iter()` is `NSEnumerator`-gated) and reads a scene's
+# `windows` (an `NSArray`) — all three also reached transitively through
+# `objc2-ui-kit`'s `UIApplication`/`UIScene`/`UIWindowScene` features below,
+# named here because this crate names them in its own source.
+# `NSNotification`: `NSNotificationCenter`, through which the alert arm
+# (`src/present/apple_alert.rs`) observes its scene disconnecting
+# (`UISceneDidDisconnectNotification`) to report the host lost.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
     "NSString",
     "NSData",
+    "NSDate",
+    "NSCalendar",
+    "NSLocale",
+    "NSArray",
+    "NSSet",
+    "NSEnumerator",
+    "NSNotification",
 ] }
 # `UIView`: the retained-handle registry (`AppleHandle` wraps a
 # `Retained<UIView>`, the type every control view specializes to).
 # `UIButton`/`UIControl`/`UILabel`/`UIResponder` + `UISwitch`/`UISlider`/
-# `UIProgressView`/`UIImage`/`UIImageView`: the v1 control set's six classes
-# and the `UIImage` payload one of them decodes. `UIColor`/`UIFont`: the shared property surface every control's
+# `UIProgressView`/`UIImage`/`UIImageView`/`UIActivityIndicatorView`: the v1
+# control set's seven classes and the `UIImage` payload one of them decodes.
+# `UIColor`/`UIFont`: the shared property surface every control's
 # `Setter` plan applies through (packed-ARGB colours, `TextSizeSp`).
 # `UIAccessibility`: `Setter::ContentDescription`'s
 # `NSObject.accessibilityLabel` category — the VoiceOver counterpart of
@@ -143,6 +172,62 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `objc2-core-text`: L3's typeface resolution — `objc2-ui-kit`'s
 # `AsRef<UIFont> for CTFont` / `AsRef<CTFont> for UIFont` toll-free-bridge
 # impls (`UIFont.rs`) are gated on this same feature name.
+# `UIActivityIndicatorView`: `Spinner`'s class (`initWithActivityIndicatorStyle:`,
+# `startAnimating`/`stopAnimating`, `hidesWhenStopped`, `color`) — pulls in
+# `objc2-foundation`'s `NSCoder` feature transitively (its own `Cargo.toml`),
+# already satisfied by feature unification, no explicit addition needed here.
+# `UISegmentedControl`: `Segmented`'s class (`insertSegmentWithTitle:atIndex:
+# animated:`/`removeAllSegments`, `selectedSegmentIndex`, `momentary`,
+# `selectedSegmentTintColor`) — an Apple-arm-only control, the eighth class.
+# Pulls in `objc2-foundation`'s `NSArray`/`NSAttributedString`/`NSDictionary`
+# features transitively (its own `Cargo.toml`) — features only, no new crate.
+# `UIStepper`: `Stepper`'s class (`minimumValue`/`maximumValue`/`stepValue`/
+# `value`/`wraps`/`autorepeat`, `tintColor` via the `UIView`-inherited
+# `UIColor` feature already enabled below) — the ninth class, Apple-arm-only
+# like `UISegmentedControl`. Needs no feature of its own beyond `UIColor`
+# (already requested for the shared tint bridge).
+# `UIDatePicker`: `DatePicker`'s class (`datePickerMode`,
+# `preferredDatePickerStyle`, `date`/`minimumDate`/`maximumDate`,
+# `tintColor` via the shared `UIColor`) — the tenth class, and a SHARED
+# control (all three arms). Pulls in `objc2-foundation`'s `NSCalendar`/
+# `NSDate`/`NSLocale` features transitively — features only, no new crate.
+# `UITabBar` + `UITabBarItem` + `UIBarItem`: `TabBar`'s bare bar (`items`,
+# `selectedItem`, `delegate`, `tintColor`/`unselectedItemTintColor`) and its
+# items (`initWithTitle:image:tag:`, `selectedImage`, `badgeValue`, and
+# `enabled`/`tag` inherited from `UIBarItem` — every item member, and the
+# `UITabBarDelegate` method itself, is gated on `UIBarItem` too). An
+# iOS-only control (`crate::controls::IOS_ONLY_KINDS`), so no AppKit row.
+# `UITabBarAppearance` + `UIBarAppearance`: the appearance installed as both
+# `standardAppearance` and `scrollEdgeAppearance` (`configureWith…Background`,
+# `backgroundColor` via the shared `UIColor`) — the bar's appearance members
+# are gated on both. No `UIGeometry`/`UIBlurEffect`/`UIVisualEffect`: nothing
+# this crate calls needs them. Features only, no new crate.
+#
+# Native presentations (`src/present/`) — the complete list for every
+# presentation arm on iOS, requested up front so none of those arms needs a
+# further manifest edit: `UIApplication`/`UIScene`/`UISceneDefinitions`
+# (`activationState`)/`UIWindowScene`/`UIWindow`: host discovery walks the
+# connected scenes to a foreground-active scene's key window, the
+# `frust-auth-session` Apple backend's chain. `UIViewController`: that
+# window's `rootViewController` and the `presentedViewController` walk to the
+# topmost controller, plus `present…`/`dismiss…` themselves.
+# `UIAlertController` (+ `UIAlertAction`, generated in the same module): the
+# alert. `UIPresentationController`/`UIPopoverPresentationController`: an
+# iPad action sheet's popover anchor (`sourceView`/`sourceRect`) and the
+# adaptive-presentation delegate that reports an outside-tap dismissal.
+# `UISheetPresentationController` + `UIStackView`: the sheet presentation and
+# its content layout. `UIDevice`: `userInterfaceIdiom` (`UIUserInterfaceIdiom`
+# lives in that module) — an unanchored action sheet crashes on iPad, so the
+# arm must tell an iPad from an iPhone before presenting. `block2`: every
+# block-taking member (an alert action's handler, `present…`'s completion) is
+# gated on it. `UIImage` and `UIResponder` are already listed above.
+# `NSLayoutAnchor` + `NSLayoutConstraint` + `UILayoutGuide`: the sheet arm
+# (`src/present/apple_sheet.rs`) pins its content `UIStackView` to the root
+# view's `safeAreaLayoutGuide` with Auto Layout anchors (and caps an image
+# row's height) — the anchor accessors, `constraint…Anchor…`/
+# `activateConstraints:` and the guide type are gated on these three. Features
+# only, no new crate (`NSLayoutConstraint`'s own `bitflags` edge is already
+# resolved through `UIView`/`UIControl`), so no lockfile change.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -155,10 +240,35 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIProgressView",
     "UIImage",
     "UIImageView",
+    "UIActivityIndicatorView",
+    "UISegmentedControl",
+    "UIStepper",
+    "UIDatePicker",
+    "UITabBar",
+    "UITabBarItem",
+    "UIBarItem",
+    "UITabBarAppearance",
+    "UIBarAppearance",
     "UIColor",
     "UIFont",
     "UIAccessibility",
     "UIInterface",
+    "UIApplication",
+    "UIScene",
+    "UISceneDefinitions",
+    "UIWindowScene",
+    "UIWindow",
+    "UIViewController",
+    "UIAlertController",
+    "UIPresentationController",
+    "UIPopoverPresentationController",
+    "UISheetPresentationController",
+    "UIStackView",
+    "NSLayoutAnchor",
+    "NSLayoutConstraint",
+    "UILayoutGuide",
+    "UIDevice",
+    "block2",
     "objc2-core-foundation",
     "objc2-quartz-core",
     "objc2-core-text",
@@ -203,6 +313,188 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "CFData",
+] }
+# Native presentations: an alert action's handler and a presentation's
+# completion are blocks this crate must *construct* (`block2::RcBlock`), not
+# merely name — the same reason `plugins/video-player/Cargo.toml` and
+# `plugins/auth-session/Cargo.toml` depend on `block2` directly. Not
+# `{ workspace = true }`: the root has no `block2` row, so every plugin
+# repeats this per-crate literal.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# Native presentations: a request can arrive on any thread, and every UIKit
+# presentation call must run on the main thread — `DispatchQueue::main()`/
+# `exec_async` is that hop (`src/present/apple_host.rs`'s `on_main`), the
+# never-block-the-caller shape `frust-auth-session`'s Apple backend uses.
+# Feature list repeated rather than inherited: the root `dispatch2 = "0.3"`
+# row is a plain string, so it cannot narrow a member's feature set.
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+] }
+
+# macOS only: the AppKit arm (`src/appkit/`), hosted as opaque native
+# siblings by the desktop Mode-A platform-view host (`crates/frust-shell-macos`
+# resolves this plugin's `frust_plugin::desktop::DesktopViewFactory` by its
+# `view_type` string). Its own block rather than a widened iOS gate: the two
+# arms share no UI framework (UIKit vs AppKit), only the CoreText/
+# CoreFoundation rows at the bottom, which repeat the iOS block's rows
+# verbatim. No Mac Catalyst.
+#
+# Every objc2-family crate below is `default-features = false` + an explicit
+# feature list, for the same reason as the iOS block above (and the same
+# workspace-inheritance restriction on overriding `default-features`, which
+# is why the version literals repeat the root pins).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+# `NSObject`/`NSString`: the target-action class's superclass and the
+# control captions. `NSData`: `Image`'s `NSImage` payload. `NSGeometry` +
+# `objc2-core-foundation`: what makes `NSRect`/`NSPoint`/`CGFloat` usable at
+# all — both are type gates, not controls.
+# `NSDate`/`NSCalendar`/`NSLocale`: `DatePicker`'s `NSDate` <-> civil-date
+# mapping, identical to the iOS block's rows (see their comment — including
+# why there is no `NSDateComponents` feature to request).
+# `NSArray` + `NSEnumerator`: native presentations' host discovery iterates
+# `NSApplication.windows` for a visible window when there is no key or main
+# window (`NSArray::iter` is `NSEnumerator`-gated). `NSNotification`:
+# `NSNotificationCenter`, through which the alert arm observes its window
+# closing (`NSWindowWillCloseNotification`) to report the host lost.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSString",
+    "NSData",
+    "NSDate",
+    "NSCalendar",
+    "NSLocale",
+    "NSGeometry",
+    "NSArray",
+    "NSEnumerator",
+    "NSNotification",
+    "objc2-core-foundation",
+] }
+# objc2-app-kit 0.3.2 gates by SUPERCLASS and by member, not by class name,
+# so this is the whole macOS-arm list (seven controls + theme ladder), not a
+# one-feature-per-class reading:
+# `NSView`/`NSResponder`/`NSControl`: every control's superclass chain
+# (`NSButton` alone needs all three). `NSButton`, `NSButtonCell`
+# (`NSButtonType`/`NSBezelStyle` and `setButtonType:`/`setBezelStyle:`),
+# `NSCell` (state/controlSize/imageScaling — `controlSize`/`NSControlSize`
+# is also `Spinner`'s live size-class setter, declared directly on
+# `NSProgressIndicator` itself rather than inherited from `NSControl`, which
+# this control is not). `NSTextField`, `NSSwitch`, `NSSlider` +
+# `NSSliderCell`, `NSProgressIndicator`, `NSImageView` + `NSImageCell`,
+# `NSImage`: the other five class groups, covering the other six controls —
+# `NSProgressIndicator` alone backs two (`ProgressBar`'s `Bar` style and
+# `Spinner`'s `Spinning` style), no new class needed. `NSColor`/`NSFont`:
+# the shared `Setter` surface (packed-ARGB colours, `TextSizeSp` via
+# `NSFont::systemFontOfSize` on `NSControl.setFont`). `NSAppearance`: theme
+# ladder L1. `NSGraphics`: `NSWindowOrderingMode` et al., matching
+# `frust-shell-macos`. `NSAccessibilityProtocols`:
+# `Setter::ContentDescription` — `NSView`'s `NSAccessibility` conformance
+# (`setAccessibilityLabel:`) is gated on it, the AppKit counterpart of the
+# iOS block's `UIAccessibility`. `objc2-quartz-core`: `NSView.layer`/
+# `setWantsLayer:` (corner radius, L2). `objc2-core-text`: the
+# `NSFont` <-> `CTFont` toll-free bridge (L3). `objc2-core-foundation`: the
+# `CGFloat` type gate every size/colour-taking member needs.
+# `NSSegmentedControl` + `NSSegmentedCell`: `Segmented`'s class and its cell
+# (`segmentCount`/`setLabel:forSegment:`, `selectedSegment`, `trackingMode`,
+# `segmentDistribution`, `selectedSegmentBezelColor`) — an Apple-arm-only
+# control, so the pair has no Android counterpart.
+# `NSStepper`: `Stepper`'s class (`minValue`/`maxValue`/`increment`/
+# `valueWraps`/`autorepeat`, plus `doubleValue`/`setDoubleValue:` inherited
+# from `NSControl`) — an Apple-arm-only control like `NSSegmentedControl`.
+# No `NSStepperCell` needed: nothing this crate calls on `Stepper` requires a
+# member the generated `NSStepper` impl gates behind that feature.
+# `NSDatePicker` + `NSDatePickerCell`: `DatePicker`'s class (`dateValue`,
+# `minDate`/`maxDate`, `textColor`, `presentsCalendarOverlay`) and the cell
+# feature its style/mode/elements members and enums (`NSDatePickerStyle`,
+# `NSDatePickerMode`, `NSDatePickerElementFlags`) are gated on — unlike
+# `NSStepper`, the cell feature IS needed here.
+#
+# Native presentations (`src/present/`) — the complete list for every
+# presentation arm on macOS, requested up front so none of those arms needs a
+# further manifest edit: `NSApplication`/`NSWindow`: host discovery (the key
+# window, then the main window, then the first visible one — the
+# `frust-auth-session` Apple backend's chain, narrowed to visible windows), a
+# window-modal sheet's `beginSheet…`/`endSheet…` and the
+# `NSWindowWillCloseNotification` name. `NSAlert`: the alert itself.
+# `NSPopover` + `NSViewController`: the popover presentation and its content
+# controller. `block2`: `beginSheetModalForWindow:completionHandler:` and every
+# other block-taking member are gated on it.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSView",
+    "NSResponder",
+    "NSControl",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSTextField",
+    "NSSwitch",
+    "NSSlider",
+    "NSSliderCell",
+    "NSProgressIndicator",
+    "NSSegmentedControl",
+    "NSSegmentedCell",
+    "NSStepper",
+    "NSDatePicker",
+    "NSDatePickerCell",
+    "NSImageView",
+    "NSImageCell",
+    "NSImage",
+    "NSColor",
+    "NSFont",
+    "NSAppearance",
+    "NSGraphics",
+    "NSAccessibilityProtocols",
+    "NSApplication",
+    "NSWindow",
+    "NSAlert",
+    "NSPopover",
+    "NSViewController",
+    "block2",
+    "objc2-quartz-core",
+    "objc2-core-text",
+    "objc2-core-foundation",
+] }
+# Theme ladder L2: `NSView.layer` → `CALayer.cornerRadius`/`masksToBounds`/
+# `backgroundColor` (the last one a `CGColor`, hence `objc2-core-graphics`).
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+# Theme ladder L2: `CALayer.backgroundColor` takes a `CGColor`, and the
+# feature above only makes that SETTER reachable — building the colour
+# (`CGColor::new_srgb`, i.e. `CGColorCreateSRGB`) needs the type's own crate,
+# so it is named directly here rather than reached through `objc2-app-kit`'s
+# `objc2-core-graphics` feature (`NSColor.CGColor`), which would compile in
+# every CoreGraphics-gated AppKit member for one conversion. Already resolved
+# transitively at this version (`objc2-quartz-core`'s own edge); this only
+# promotes it to direct, like `objc2-core-text` below.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGColor",
+] }
+# Theme ladder L3 — identical to the iOS block's rows (see their comments).
+objc2-core-text = { version = "0.3", default-features = false, features = [
+    "std",
+    "CTFont",
+    "CTFontDescriptor",
+    "CTFontManager",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFData",
+] }
+# Native presentations — identical to the iOS block's `block2`/`dispatch2`
+# rows (see their comments): a sheet's completion handler is a constructed
+# block, and every AppKit presentation call hops to the main queue first.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
 ] }
 
 [dev-dependencies]

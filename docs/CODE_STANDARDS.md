@@ -18,8 +18,7 @@ off this index — read this plus the one that covers what you are touching:
   instead: bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`.
   `frust-shell-web`'s frame waker in particular needs no sanctioned zone of its own: it is a
   capture-nothing closure over a `thread_local` `EventLoopProxy` slot
-  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`), chosen over
-  the Phase-0 probe's `unsafe impl Send + Sync` precedent. The
+  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`). The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
   in one function/module with a `# Safety` doc comment stating the caller contract:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
@@ -70,15 +69,16 @@ off this index — read this plus the one that covers what you are touching:
     `unsafe impl Send/Sync` (serial-queue confinement, one `# Safety` note), and
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1** — a +0
     borrow proved unhonourable across the FFI boundary).
-  - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked`
-    for hot per-frame property setters, confined to one `# Safety`-documented helper
-    (`call_void_cached`, `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule)
-    with a per-call-site note pairing the cached id to its class/signature; cold setters use
-    the checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend
-    closes objc2's nullability-unannotated `unsafe` (not a memory-safety claim) behind
-    **safe** property wrappers, each `// SAFETY:`-noted at its one call site; the same arm's
-    `define_class!`/`extern_protocol!` factory/event-target registration and
-    `addTarget:action:` attach/detach are the other confined sites.
+  - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked` for hot
+    per-frame property setters, confined to one `# Safety`-documented helper (`call_void_cached`,
+    `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule); cold setters use the
+    checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend closes objc2's
+    nullability-unannotated `unsafe` (not a memory-safety claim) behind **safe** property wrappers,
+    each `// SAFETY:`-noted at its call site; the arm's `define_class!`/`extern_protocol!`
+    factory/event-target registration and `addTarget:action:` attach/detach are its other sites. Its
+    presentation arms add `apple_host::on_main`'s `MainThreadMarker::new_unchecked()`, proving
+    the `dispatch2` main-queue bounce, and `apple_alert`/`apple_sheet`/`appkit_alert`'s
+    `define_class!` controller and `block2` handlers — each `SAFETY`-noted.
   - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the
     Swift glue's singleton by runtime-only class name (no generated binding for it), plus two
     completion blocks (`RcBlock`) receiving raw `NSString` pointers whose validity only the
@@ -208,12 +208,17 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
   resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate, leaves
   rects and clips in **logical points** (no physical conversion, unlike the mobile FFI boundary), and
   treats `on_platform_views_suspended` as remove-not-hide — the surface-recreate replay is the way back.
+- **A desktop-hosted `NSControl` owns its input; `interactive` means nothing there.** AppKit's
+  responder chain routes it, so `frust-shell-macos`' Mode-A host ignores `interactive` and shields —
+  add no shielding or hit-test forwarding for `plugins/native-widgets/src/appkit/`'s controls.
 - **Mode B paint contract: an unpainted region is a window, not a compositor bug.** `platform_view`
   punches its own slot rect automatically; any other chrome region a Mode B host leaves unpainted shows
   raw OS content — pair translucency with an opaque app-root background (the `AppBackground` precedent).
 - **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is OS-routed
   through the host's own view hierarchy, not `EventCtx` — there is no hit-test/dispatch seam for a
   hosted view; don't add pointer handling to `PlatformViewWidget`.
+- **A modal is never a slot.** An alert or sheet is host-owned, imperatively requested modal UI — no
+  `platform_view` slot, rect or Mode, and no slot inside it (`plugins/native-widgets/src/present/mod.rs`).
 
 ## GPU / Render-Engine Rules
 
@@ -276,13 +281,10 @@ for any future value crossing this boundary.
 `frust-widgets`/`frust-core` directly instead of the facade.
 
 **GOOD:** depend on `frust::authoring` only (`frust`, `default-features = false`), and file a gap
-against `authoring` instead. The historical Cargo-feature-unification hazard this anti-pattern used
-to warn about (one `features = ["glyph"]` line silently turning a catalog back on for every
-dependent app) no longer applies — `frust` carries no catalog cargo feature at all; the three
-built-ins are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
+against `authoring` instead. `frust` carries no catalog cargo feature at all — the three built-ins
+are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
 Design-System Plugins). `design-system-sample`'s `cargo tree -e features -i frust -p sample-app`
-gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) now proves out-of-tree resolution realism rather than
-a catalog-off contract.
+gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) proves out-of-tree resolution realism.
 
 ### Printing directly from a `frust-drive` build/run core
 
@@ -520,10 +522,10 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
   `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
   those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
-  Version-Pin Policy). Mechanically enforced
-  across `benchmarks/frust_bench` and the four in-repo example apps by
-  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt
-  ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
+  Version-Pin Policy). Mechanically enforced across `benchmarks/frust_bench` and the five
+  in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
+  `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
+  the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their

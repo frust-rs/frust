@@ -2591,8 +2591,11 @@ Phase C task 03 completion summary, Doc Updates Needed.
 **Observed**: `plugins/native-widgets`' typeface resolution (theme ladder L3) is extension-first,
 per slot, and re-publishes host-side (`api::theme`'s `PublishGuard`) whenever the active
 (button, body) face pair changes — including a live design-system swap. The *platform* halves do
-not follow: Android's `set_glyph_bytes` is a `OnceLock::set`, and both Android and iOS additionally
-cache each resolved face object process-wide once registration succeeds, so only the *first*
+not follow: Android's `set_glyph_bytes` is a `OnceLock::set`, caching each resolved face object
+process-wide once registration succeeds; iOS and macOS share one `coretext.rs` module (`apple`'s
+`fonts` is a re-export of it, so the two Apple arms cannot drift from each other) with the same
+`OnceLock`-published-bytes/cached-descriptor shape, just thread-local rather than process-wide for
+the descriptor cache (`CTFontDescriptor` is not `Sync`). On all three platforms, only the *first*
 (button, body) pair a process ever publishes actually reaches a native `Button`/`Label`/`Switch`.
 A later design-system swap re-publishes the new bytes from the host side with no error, but the
 platform keeps rendering the first system's faces until the process relaunches.
@@ -2618,6 +2621,12 @@ gap — the empty slot resolves to `System` in that same resolve, so nothing eve
 half to register bytes for it; the gap only resurfaces if a *later* resolve wants real bytes for
 that same slot, which is the ordinary swap case above.
 
+**Applies to**: the platform halves of the typeface ladder on Android, iOS, **and macOS** — the
+AppKit arm resolves L3 through the same `coretext.rs` module the iOS arm re-exports
+(`plugins/native-widgets/src/appkit/mod.rs`'s module doc, "L3's CoreText half is the shared
+`crate::coretext`"), so a mid-process design-system swap latches on macOS exactly as it does on
+iOS.
+
 **Why accepted**: widening the platform halves to re-register on a swap is a platform-side change
 with its own device gate, not a host-side one — deferred rather than blocking this feature.
 **Also owed**: custom-face rendering (either system's) has never been exercised on real Android/iOS
@@ -2625,8 +2634,9 @@ hardware — this entry covers both the swap gap and that outstanding device gat
 
 **Evidence**: `plugins/native-widgets/src/api/theme.rs`'s module doc ("Publishing: last-pair-wins,
 not once-per-process" and "System publishes nothing"); `plugins/native-widgets/src/android/fonts.rs`
-and `plugins/native-widgets/src/apple/fonts.rs` module docs (`OnceLock`/process-wide and
-thread-local cache notes).
+module doc (`OnceLock`/process-wide cache notes); `plugins/native-widgets/src/coretext.rs`'s module
+doc (the shared-module rationale and the thread-local descriptor cache, consumed identically by
+`crate::apple::fonts`' iOS re-export and `crate::appkit`'s macOS call sites).
 
 ---
 
@@ -2660,6 +2670,336 @@ hardware.
 `placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size` and
 `a_refused_slot_still_publishes_no_platform_view_frame_through_the_clip_wrapper` tests (`cargo test
 -p native-widgets`, host-only).
+
+---
+
+### `native-widgets-macos-image-cover-letterboxes` — `Fit::Cover` degrades to a letterbox on macOS instead of cropping
+
+**Observed**: `native_image`'s `Fit::Cover` means "fill the box, keep aspect, crop the overflow" —
+Android's `ScaleType.CENTER_CROP` and iOS's `UIViewContentMode.ScaleAspectFill` (plus a
+`clipsToBounds` normalization) both implement it exactly. `NSImageScaling` has no equivalent
+constant: the only scale-and-keep-aspect option, `ScaleProportionallyUpOrDown`, fits the whole
+image inside the box rather than cropping the overflow. The macOS arm maps `Fit::Cover` to that
+same constant it uses for `Fit::Contain`, so a `Cover`-fit image on macOS is letterboxed (visible
+background around the shorter axis) rather than cropped to fill — the only one of the four `Fit`
+variants where macOS's rendered result differs from Android's and iOS's.
+
+**Why accepted**: a real crop-and-fill needs custom drawing (`NSImageScaling` has no primitive for
+it), which this control does not do — a platform capability gap recorded per-platform rather than
+corrected onto the platform that lacks it (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions).
+
+**Evidence**: `plugins/native-widgets/src/controls/image.rs`'s `Fit::image_scaling` doc and its
+`NSImageScaling` mapping table (the `Fit::Cover` row explicitly marked "Degraded, not equivalent").
+
+---
+
+### `native-widgets-macos-slider-no-drag-edges` — `DragStart`/`DragEnd` are never emitted by `native_slider` on macOS
+
+**Observed**: Android (`onStart/StopTrackingTouch`) and iOS (`TouchDown`/`TouchUpInside|Outside`
+UIKit control events) both report a slider drag's gesture edges; macOS's `NSSlider` target-action
+has no counterpart — an `NSControl` sends its one action on every drag step with no phase
+information, so `FrustNativeControlTarget::detail_for` refuses `EVENT_KIND_DRAG_START`/
+`EVENT_KIND_DRAG_END` outright rather than guessing one from the value stream. `native_slider` on
+macOS therefore only ever delivers `ValueChanged` events; an app whose slider handler relies on
+`DragStart`/`DragEnd` (e.g. to suspend other work while scrubbing) sees no signal at all on macOS.
+
+**Why accepted**: recovering the edges would need inspecting `NSApp.currentEvent`'s type inside the
+action or overriding `NSSliderCell`'s tracking methods — a new `NSEvent` dependency and a second
+target-action class — and a synthesized edge from the value stream alone would be a guess, worse
+than an honest absence.
+
+**Evidence**: `plugins/native-widgets/src/appkit/events.rs`'s module doc ("Drag start/end are never
+emitted on macOS") and its `the_drag_edges_are_refused_never_synthesized` test;
+`plugins/native-widgets/src/controls/slider.rs`'s macOS `platform` module doc ("Which event kinds
+this arm emits").
+
+---
+
+### `native-widgets-macos-imageio-dyld-shadow` — `native_image` silently shows nothing when the host process's ImageIO codecs are DYLD-shadowed
+
+**Observed**: when the running process's `DYLD_LIBRARY_PATH` has replaced one of ImageIO's private
+codec dylibs (see [DEVELOPMENT.md](DEVELOPMENT.md)'s Known Issues for the mechanism and the
+developer-side fix), `native_image`'s macOS arm detects the shadow once and refuses every later
+`NSImage` decode rather than crashing the process: the slot's view is left empty, and exactly one
+process-wide warning names the shadowing file. An app has no API-level way to detect this
+degrade — it looks identical to an ordinary undecodable-payload result, the same empty-view
+degrade every arm already gives a bad image (`BitmapFactory.decodeByteArray`/`UIImage.imageWithData:`
+failing return the same clear-and-warn outcome) — so a QA pass on a contaminated dev machine can
+read as "images don't work" with no code-level cause.
+
+**Why accepted**: the alternative is letting the process SIGBUS on first decode, which is strictly
+worse; fixing the shadow is a developer-environment problem outside this plugin's own control
+(`DEVELOPMENT.md`'s workaround), and the degrade-not-crash contract matches every other undecodable-
+payload case this control already handles.
+
+**Evidence**: `plugins/native-widgets/src/controls/image.rs`'s macOS `platform` module doc
+("`DYLD_LIBRARY_PATH` can take ImageIO's codecs away") and its `shadowed_codec`/`shadowing_file`
+functions and their host tests.
+
+---
+
+### `native-widgets-segmented-stepper-apple-only` — `native_segmented`/`native_stepper` exist on iOS and macOS only, and decision D2 refuses `native_tab_bar`/`show_native_sheet` on Android too
+
+**Observed**: `native_segmented` and `native_stepper` are registered in `APPLE_KINDS`
+(`plugins/native-widgets/src/controls/mod.rs`), not `SHARED_KINDS` — neither control has an
+Android `NativeWidget` impl, or a Linux/Windows/web host one either. Each app-facing builder
+resolves this at compile time: `NativeSegmentedView`/`NativeStepperView`'s `SEGMENTED_ARM`/
+`STEPPER_ARM` constants (`plugins/native-widgets/src/api/builders.rs`) are `true` only under
+`cfg(any(target_os = "ios", target_os = "macos"))`; everywhere else the builder renders the
+frust-drawn `RefusalBanner` placeholder instead of an empty slot, naming the missing arm. Android's
+framework has no segmented control (the stock option, `MaterialButtonToggleGroup`, would impose an
+AndroidX/Material dependency this chartered leaf plugin never assumes an app added) and no
+increment/decrement stepper control either.
+
+`native_tab_bar` is the same decision, one arm narrower: it is registered in `IOS_ONLY_KINDS`, not
+`APPLE_KINDS` (macOS has no bottom-tab-bar idiom either —
+`plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *No macOS arm, no Android arm
+(decision D2)*), and `NativeTabBarView`'s own compile-time gate (`TAB_BAR_ARM`,
+`plugins/native-widgets/src/api/builders.rs`) renders the same `RefusalBanner` everywhere but iOS,
+naming both the missing idiom and decision D2. `show_native_sheet`/`show_native_sheet_into` refuse
+for the same reason at runtime instead of compile time: the sheet arm exists only on iOS
+(`present::apple_sheet`), and every other target — Android included — resolves through
+`present::mod.rs`'s own `UnsupportedSheet`, answering `PresentError::Unsupported`.
+
+**Why accepted**: a Material-backed segmented Android arm and a composite stepper Android arm (two
+`ImageButton`s plus a `TextView`) are both named follow-up plans, not v1 scope — building either
+means taking on the Material/AndroidX dependency this plugin's leaf-plugin charter
+(`docs/PLUGINS_CODE_STANDARDS.md`) currently avoids entirely. No Linux/Windows/web arm exists for
+either control either; the compile-time refusal covers every non-Apple target uniformly. The same
+reasoning covers `native_tab_bar` (no `BottomNavigationView` dependency either) and the sheet arm
+(no `BottomSheetDialog`/`NSPopover` arm yet — `present/mod.rs`'s module doc's *Platform arms*
+names both as follow-up work).
+
+**Evidence**: `plugins/native-widgets/src/controls/mod.rs`'s `SHARED_KINDS`/`APPLE_KINDS`/
+`IOS_ONLY_KINDS` tables and their source-scanning parity test;
+`plugins/native-widgets/src/controls/segmented.rs`'s and
+`stepper.rs`'s module docs ("No Android arm (decision D2)" / "No Android arm (the same shape as
+decision D2)"); `plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *No macOS arm, no
+Android arm (decision D2)*; `plugins/native-widgets/src/api/builders.rs`'s `SEGMENTED_ARM`/
+`STEPPER_ARM`/`TAB_BAR_ARM` compile-time constants and `banner_placeholder`;
+`plugins/native-widgets/src/present/mod.rs`'s `UnsupportedSheet` and its module doc's *Platform
+arms* section; `plugins/native-widgets/README.md`'s "Eleven controls" table.
+
+---
+
+### `native-tab-bar-bare-no-liquid-glass` — `native_tab_bar` is a bare `UITabBar`, so it never gets iPadOS 18+'s top placement or the Liquid Glass scroll-edge effect
+
+**Observed**: `native_tab_bar` builds and drives a bare `UITabBar` directly from Rust —
+deliberately never a `UITabBarController` (decision D5,
+`plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *A bare bar, never a
+`UITabBarController`*): frust owns screen ownership and routing, so the bar reports a tap and
+nothing more. iPadOS 18's top-placed tab bar and the floating glass bar both live on
+`UITabBarController`'s adaptive presentation, which a bare `UITabBar` has no access to — on iPadOS
+this control stays a bottom bar with no Liquid Glass regardless of OS version, exactly as
+`plugins/native-widgets/README.md`'s tab-bar paragraph already states. The delegate wiring
+(`UITabBarDelegate.tabBar:didSelectItem:` on the one target class,
+`plugins/native-widgets/src/apple/events.rs`) is the whole surface UIKit gives a bare bar —
+nothing there can opt into the controller-level chrome either.
+
+**Applies to**: `native_tab_bar` on iPadOS, every OS version; the bar always renders at the bottom,
+never atop content, and never gains the translucent glass material a `UITabBarController` gets
+automatically on iPadOS 18+/26.
+
+**Why accepted**: adopting `UITabBarController` to get the adaptive placement would hand it screen
+and navigation ownership frust's own `Router` already owns (module doc's decision D5) — the whole
+reason this control is a bare bar in the first place. Nothing about the bare-bar shape can be
+patched onto the controller-only chrome without reversing that decision.
+
+**Evidence**: `plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *A bare bar, never a
+`UITabBarController` (decision D5)*; `plugins/native-widgets/README.md`'s tab-bar paragraph ("On
+iPadOS the bare bar stays at the bottom and gets no Liquid Glass — the iPadOS 18 top tab bar and
+the floating glass bar are `UITabBarController` features");
+`plugins/native-widgets/src/apple/events.rs`'s `UITabBarDelegate`/`tabBar:didSelectItem:` wiring.
+
+---
+
+### `native-keyboard-focus-via-full-keyboard-access` — a hosted iOS control is keyboard-focusable only when Full Keyboard Access is on
+
+**Observed**: every standard UIKit control this plugin hosts
+(`plugins/native-widgets/src/apple/factory.rs`'s `createView` builds each one straight from
+`objc2-ui-kit` — `UIButton`/`UILabel`/`UISwitch`/`UISlider`/`UIProgressView`/`UIImageView`/
+`UIActivityIndicatorView`/`UIDatePicker`/`UISegmentedControl`/`UIStepper`/`UITabBar`) is left
+exactly as UIKit vends it: the plugin does not override `canBecomeFocused` (or any other
+`UIFocusEnvironment`/`UIFocusItem` method) anywhere in `apple/factory.rs` or any
+`src/controls/*.rs` platform arm. UIKit's own default is that a standard control answers
+`canBecomeFocused` `true` — and so becomes reachable by a hardware keyboard's Tab traversal, a
+Made-for-iPhone game controller's D-pad, or Switch Control — only when the user has Full Keyboard
+Access on (Settings → Accessibility → Keyboards → Full Keyboard Access, or a connected keyboard's
+own toggle); it is off by default. Nothing in this crate's create/update/dispose path asks about or
+changes that setting.
+
+**Applies to**: every control this plugin hosts on iOS/iPadOS when Full Keyboard Access is off —
+the platform default. macOS's AppKit arm is a separate focus model this entry does not cover.
+
+**Why accepted**: this is UIKit's own accessibility contract, not a gap this plugin introduces —
+`canBecomeFocused`'s Full-Keyboard-Access gate is Apple's, and this plugin's controls behave
+exactly like the same controls in a plain UIKit app that never overrides it either.
+
+**Evidence**: absence, honestly cited — `plugins/native-widgets/src/apple/factory.rs` and every
+`plugins/native-widgets/src/controls/*.rs` platform arm carry no `canBecomeFocused` override, no
+`becomeFirstResponder` override, and no `UIFocus*` conformance anywhere in the crate (`git grep
+canBecomeFocused` under `plugins/native-widgets/src` finds nothing on this base).
+
+---
+
+### `native-widgets-component-same-kind-children-indistinguishable` — a `NativeComponent` cannot tell two same-family children's events apart
+
+**Observed**: `ComponentCtx::attach_listener` binds a view to the slot's own id and a
+`ListenerKinds` family (click, toggled, value changed); the event it later delivers to
+`NativeComponent::on_event` is a `NativeEvent` carrying only a `kind` and a primitive `detail` — no
+view or child identity (`plugins/native-widgets/src/component.rs`). Two children of the same
+component attached for the same family therefore report identically: a click is `(KIND_CLICK, 0)`
+whichever child produced it, so `on_event` cannot distinguish them. The shipped `DemoCard` (this
+plugin's own non-default `demo-components` feature) demonstrates the consequence directly: its
+**secondary** button is deliberately left unwired, because wiring both buttons to `CLICK` would
+make their events indistinguishable — only the primary button's clicks are attached and forwarded.
+
+**Applies to**: any `NativeComponent` implementor that attaches more than one child to the same
+`ListenerKinds` family. The documented escape is to give each child a distinct family, or to mount
+each as its own slot (a separate `NativeComponent`/builder) rather than as children of one.
+
+**Why accepted**: `NativeEvent`'s wire shape is the same `(slotId, kind, detail)` triple every
+built-in control's listener already uses (`crate::events`) — widening it to carry a child/view
+identity would mean a new field on the shared wire and every listener class, not a
+`NativeComponent`-only fix, and no production component has needed to tell same-family children
+apart yet.
+
+**Evidence**: `plugins/native-widgets/src/component.rs`'s `Bridge::on_event` doc comment (the event
+gate, and its note that a fabricated id naming a slot that attached a family is "indistinguishable
+from the real listener — the runtime asks nothing about which object fired") and `NativeEvent`'s
+`kind`/`detail` fields (no view identity); `plugins/native-widgets/src/demo.rs`'s module doc,
+*Event wiring: the primary button reports its clicks* (the secondary button is deliberately left
+unwired because "two children attached for the same family are indistinguishable in `on_event`").
+
+---
+
+### `native-widgets-android-date-picker-range` — Android's `DatePicker` resolves a missing bound to its own 1900–2100 range and clamps into it; the Apple arms do not
+
+**Observed**: `android.widget.DatePicker`'s documented default and usable range is 1900-01-01
+through 2100-12-31 (`date_picker.rs`'s Android `platform::BOUNDS`, built from `PLATFORM_MIN`/
+`PLATFORM_MAX`). A missing `min`/`max` resolves to that range on Android and to this crate's own
+unbounded `CivilDate::MIN`/`CivilDate::MAX` on iOS/macOS (`Bounds::APPLE`). At plan time
+(`Bounds::effective_range`, called from `DatePickerProps::plan`), an explicit bound outside the
+calling arm's own range — or a date outside the resolved range — is clamped into it, never left to
+reach a platform setter as an out-of-range or inverted pair; `warn_if_clamped` logs one warning per
+process — a static once-guard, the same shape as the stepper's non-positive-step warning — naming
+the first offending slot, the clamped values, and the arm's range. On Android the initial date
+handed to `DatePicker.init` is the same effective (clamped) date the plan uses for `updateDate`,
+through `DatePickerProps::effective_date`. Because this clamp is arm-resolved rather than the
+platform-agnostic clamp `DatePickerProps::decode` already applies to an explicit `min > max`, an
+app that sets, say, a minimum date after 2100 gets a single-day range on Android (the floor
+collapses onto the ceiling) while iOS/macOS honour the same value unclamped.
+
+**Applies to**: `native_date_picker`'s `min`/`max` builders (`NativeDatePickerView::min`/`max`) on
+Android specifically; iOS and macOS resolve the same bounds unbounded.
+
+**Why accepted**: the range is the framework's own — `DatePicker`'s calendar/spinner presentation
+sizes itself from `max - min` — and never handing it an inverted or out-of-range pair is the safe,
+Apple-first contract this crate commits to elsewhere (module doc's *Range*): clamp to what the
+platform will actually hold rather than asking it to reject or silently reinterpret an illegal
+range.
+
+**Evidence**: `plugins/native-widgets/src/controls/date_picker.rs` — `Bounds::APPLE`, the Android
+`platform::BOUNDS`/`PLATFORM_MIN`/`PLATFORM_MAX`, `Bounds::effective_range`, `DatePickerProps::plan`,
+`warn_if_clamped`, the module doc's *Range* section, and the tests
+`an_explicit_min_above_androids_ceiling_clamps_the_bound_and_the_date`,
+`an_explicit_max_below_androids_floor_clamps_the_bound`, and
+`the_same_out_of_androids_range_bounds_are_not_clamped_on_apple`; `plugins/native-widgets/src/api/builders.rs`'s
+`NativeDatePickerView::min`/`max` rustdoc.
+
+**Workaround**: keep app-supplied bounds inside 1900-01-01..2100-12-31 where Android matters.
+
+---
+
+### `native-widgets-android-component-listener-disarm` — releasing a `NativeComponent`'s `ListenerHandle` on Android disarms the listener object, not the view's interface
+
+**Observed**: Android's `View.setOn*Listener` setters each hold exactly one listener, replace it
+outright, and expose no getter — so a release can never confirm it still holds the listener it
+created, and nulling the interface could silently wipe a newer listener a later
+`ComponentCtx::attach_listener` call set on the same view. `ListenerHandle`'s Android `Drop` (and
+the equivalent explicit `ComponentCtx::detach_listener`) therefore never calls a `setOn*Listener`
+setter: it obtains a JNI env from the process VM, checks for a pending Java exception first
+(skipping the disarm and logging if one is pending, since no JNI call is safe with one pending), and
+otherwise calls `FrustNativeListener.disarm()` through `NativeCtx::disarm_listener` — flipping that
+one instance's `@Volatile armed` flag, which every overridden callback checks before reporting —
+then releases both global references regardless of the outcome. A disarmed instance is left set on
+the view: it stays there, inert, until a later `attach_listener` call replaces it or the view itself
+is destroyed. The one place nulling a listener interface remains is `android/ctx.rs`'s
+`unwind_partial_attach`, reached only from inside the same `attach_listener` call that just set
+those interfaces synchronously moments earlier — nothing else can have replaced them in between, so
+nulling is identity-safe there and nowhere else.
+
+**Applies to**: any `NativeComponent` implementor on Android calling `ComponentCtx::attach_listener`
+more than once for the same view, or relying on `detach_listener`/a handle's drop to stop a listener
+from ever firing again on the platform side. The disarm mechanism itself is exercised on a device
+gate, not by a host-only `cargo test` — the host arm's `ListenerInner` stand-in has no `armed` flag
+to disarm.
+
+**Why accepted**: the alternative — nulling the view's interface on release — is exactly the
+regression a review caught: it can wipe a newer listener a later attach already installed. The cost
+of disarming instead is one inert Java listener object per released handle, kept alive by the
+view's listener field — not by any JNI global reference, both of which the drop releases — until a
+later attach replaces it or the view is destroyed.
+
+**Evidence**: `plugins/native-widgets/src/component.rs` — `ListenerHandle`'s doc, the Android
+`ListenerInner` struct, and `impl Drop for ListenerHandle` under `target_os = "android"`;
+`plugins/native-widgets/src/android/ctx.rs`'s `disarm_listener` and `unwind_partial_attach`;
+`plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativeListener.kt`'s
+class doc, `armed`, and `disarm()`.
+
+---
+
+### `native-widgets-alert-busy-slot-unobserved-host-teardown` — a presenting host torn down through a path the arm cannot observe leaves the Busy slot held indefinitely
+
+**Observed**: both Apple alert arms document a teardown path their resolution mechanism cannot see: macOS's `NSWindowWillCloseNotification` fires only on a real window close, not `orderOut:` (hidden, not closed — `appkit_alert.rs`'s *Not observed*); on iOS the app replacing the presenting controller chain outside UIKit's own dismissal path removes the alert with no callback the arm can see (`apple_alert.rs`'s *Not observed*). In both cases the presentation stays pending in `present::ACTIVE` (the process-wide Busy slot) until `present::dismiss` resolves it `Dismissed` or the caller drops the `Presentation` future; every later `show_native_alert`/`show_native_alert_into` answers `PresentError::Busy` until then (a Busy refusal is logged at warn with the live presentation's generation and age).
+
+**Applies to**: `show_native_alert`/`show_native_alert_into` on macOS and iOS/iPadOS — an app that hides rather than closes its presenting window (macOS `orderOut:`) or replaces a presenting controller chain outside UIKit's dismissal path (iOS) while an alert is live.
+
+**Why accepted**: no watchdog by design — a long-lived alert (a slow user decision) is legitimate, so a timeout would misfire on the common case to guard the rare one; `dismiss` and dropping the future are the caller's two ways out.
+
+**Evidence**: `plugins/native-widgets/src/present/appkit_alert.rs` *Not observed*; `plugins/native-widgets/src/present/apple_alert.rs` *Not observed*; `plugins/native-widgets/src/present/mod.rs` module doc (the contract's slot-release bullet).
+
+**Workaround**: close (not hide) the presenting window on macOS while an alert may be live; call `dismiss` before tearing down a presenting controller chain on iOS.
+
+---
+
+### `native-widgets-android-alert-theme-from-activity` — the Android alert's light/dark appearance follows the hosting `Activity`'s theme, not the app's `Brightness`
+
+**Observed**: `FrustNativePresenter.kt` builds the dialog with `AlertDialog.Builder(activity)`; the framework dialog's light/dark styling resolves from the hosting `Activity`'s own theme attributes, not from `frust::Theme`'s `Brightness`, unlike the native-widgets controls (whose theme ladder reads `frust::Theme` directly).
+
+**Applies to**: `show_native_alert`/`show_native_alert_into` on Android.
+
+**Why accepted**: the arm is framework-only by decision (no AppCompat/Material theming), and `android.app.AlertDialog` offers no per-dialog brightness without a themed context this crate does not construct.
+
+**Evidence**: `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativePresenter.kt` (`AlertDialog.Builder(activity)`); `plugins/native-widgets/src/present/android_alert.rs` module doc.
+
+---
+
+### `native-widgets-alert-drop-leaves-platform-ui` — dropping a `Presentation` frees the Busy slot but leaves the platform alert or sheet on screen
+
+**Observed**: dropping `Presentation<T>` releases the process-wide Busy slot (a new request — alert or sheet — may present at once) but does not dismiss the live platform UI. An alert stays on screen until the next request displaces it (the displacing arm takes it down first) or the user answers it, and that answer is discarded because nothing is listening. A sheet behaves the same way: dropping its future frees the slot, not the sheet, so a newer request (of either kind) can find the older sheet still live; whatever its kind, a displaced presentation goes down through the shared `LivePresentation::dismiss` seam and the successor presents from that dismissal's completion (`apple_host.rs`'s *The live-presentation guard*; `apple_sheet.rs`'s *A displaced presentation*).
+
+A mid-interactive-dismissal race is accepted rather than closed: a successor request arriving while the user's swipe is still animating a displaced sheet away resolves it at once (`DisplacedAction::ResolveAndContinue`, `apple_host.rs`) without waiting for that animation, so the successor's own presentation attempt can find UIKit still mid-transition and resolve `PresentError::NoHost` instead of showing; and if the user's swipe is then cancelled, the old sheet is back on screen with no live entry to answer it — removable only by another swipe, not by a further programmatic `dismiss` — accepted, a Phase 7 device-gate observable.
+
+**Applies to**: any caller that drops the future returned by `show_native_alert` (or the request behind `show_native_alert_into`) without calling `dismiss`, on all three alert arms; the same holds for `show_native_sheet` (or `show_native_sheet_into`) on its one arm, iOS/iPadOS.
+
+**Why accepted**: documented module contract (`present/mod.rs`: dropping the future frees only this module's bookkeeping); tearing down live platform UI from a dropped future would need arm-specific plumbing for a case the API already covers with `dismiss`.
+
+**Evidence**: `plugins/native-widgets/src/present/mod.rs` module doc; `apple_alert.rs` / `appkit_alert.rs` / `android_alert.rs` and `apple_sheet.rs`'s *A displaced presentation* sections.
+
+---
+
+### `native-sheet-ipad-regular-width-detents` — a page sheet in a regular-width iPad window ignores detents
+
+**Observed**: UIKit presents a page sheet in a regular-width iPad window as a centered form sheet at a fixed size, not at any of its configured detents; only an edge-attached presentation — compact width, or compact height with `prefersEdgeAttachedInCompactHeight` — rests at its detents. The arm configures `sheetPresentationController.detents` regardless (they take effect the moment the window turns compact — Slide Over, Split View) and never fakes parity between the two idioms.
+
+**Applies to**: `show_native_sheet`/`show_native_sheet_into` on iPadOS whenever the presenting window is in regular width (full-screen or a large Split View pane).
+
+**Why accepted**: the API never promises detent parity across idioms; it is a UIKit presentation-controller rule, not a bug this crate's arm can route around without abandoning `UISheetPresentationController` (and the page-sheet chrome that comes with it) for a hand-built modal.
+
+**Evidence**: `plugins/native-widgets/src/present/apple_sheet.rs`'s module doc, *iPad in regular width ignores detents*; `plugins/native-widgets/src/present/mod.rs`'s `Detent` doc.
+
+**Workaround**: none — design sheet content to read well at both a compact edge-attached presentation and a regular-width centered form sheet; never rely on detent changes firing on an iPad in regular width.
 
 ---
 
@@ -6035,7 +6375,10 @@ it (`docs/CODE_STANDARDS.md`'s Platform-View Conventions).
 **Evidence**: the macOS host's own z-order strategy (`addSubview:positioned:
 relativeTo:` above winit's content view, nothing made translucent anywhere)
 and the desktop host passing no shield rects. Runtime confirmation on a Mac
-is owed with the video-player device gate.
+is owed with the video-player device gate. macOS native-widgets demo gate
+(2026-10-01, macOS 27.0 on an Apple M4, debug build 2b3ae58b, human-observed):
+confirmed as documented — with the pointer over a native control the page does
+not scroll, and a frust overlay painted over a native control is covered.
 
 ---
 

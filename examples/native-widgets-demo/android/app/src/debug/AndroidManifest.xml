@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Debug-only overlay: Gradle's manifest merger folds this over
+         `src/main/AndroidManifest.xml` for the `debug` build type
+         automatically (standard source-set layout, no extra wiring).
+         `android.permission.INTERNET` is required for ANY socket on
+         Android, loopback included — the Frust tooling debug service
+         needs it to accept a local connection. There is no matching
+         `src/release/` overlay, so a release build keeps the empty
+         permission set the main manifest declares. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+</manifest>

@@ -88,6 +88,15 @@ The repository already contains substantial non-pixel coverage:
   end-to-end tests.
 - Plugin conformance tests using file/fake backends, with platform secret-store
   and biometric behavior kept as explicit hardware gates.
+- `plugins/native-widgets`: the shared runtime/component/`api::mount`/demo-lifecycle dispatch,
+  diff, and lifecycle contract is host-tested through a per-platform stand-in context/view pair,
+  but that stand-in — and the roughly 50 tests built against it (runtime 26, component 21, mount
+  3, demo 3) — is `#[cfg]`-compiled only on a host with **no** platform arm at all
+  (`not(any(target_os = "android", target_os = "ios", target_os = "macos"))`); each platform arm
+  swaps in its own real context/view types instead. So `cargo test --workspace` on a macOS runner
+  exercises none of that layer — Linux/Windows/web hosts are the only ones that do — while every
+  platform's `Cargo.toml`-target compile gate (`docs/DEVELOPMENT.md` § Test) still type-checks the
+  real arm. See [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md).
 - `benchmarks/`: deterministic scenario logic, harness parser tests, and the
   S1-S8 cross-framework device protocol.
 

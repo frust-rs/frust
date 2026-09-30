@@ -25,20 +25,23 @@
 //! The public form is a different trait entirely:
 //! [`crate::component::NativeComponent`], with `&self` methods, already-typed
 //! `Props` the app constructs directly, no `decode_props` step and no `Result`
-//! returns. The six builders here keep riding the internal trait's wire
+//! returns. The eleven builders here keep riding the internal trait's wire
 //! (`params_json` in, `EventPayload` callbacks out) unchanged — bridging the
 //! public trait onto the same runtime (`crate::component::Bridge`) is what let
 //! that stay true.
 //!
 //! # Two builder families, one slot shape
 //!
-//! The six built-in controls above are one family; [`native_component`] is
+//! The eleven built-in controls above are one family (`native_segmented`/
+//! `native_stepper` on iOS/macOS only and [`native_tab_bar`] on iOS only — a
+//! compile-time refusal banner elsewhere; `native_date_picker` on all three
+//! arms, reporting a [`CivilDate`]); [`native_component`] is
 //! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (another plugin's
 //! included — an app crate cannot implement one; see that trait's own doc)
-//! into the same single `platform_view` slot, reusing the six's
+//! into the same single `platform_view` slot, reusing the eight's
 //! own factory constant, slot counter, sizing rule and refusal placeholder.
-//! It is what closes *define → register → mount*; the six are deliberately
+//! It is what closes *define → register → mount*; the eight are deliberately
 //! not rewritten to route through it (see `src/api/mount.rs`'s module doc).
 //!
 //! # One `platform_view` slot per control
@@ -48,6 +51,17 @@
 //! (`dev.frust.nativewidgets.FrustNativeControlFactory`)
 //! — N controls = N slots, within the differ's design envelope (a
 //! shared-container optimization is future work).
+//!
+//! # Native presentations — not a slot
+//!
+//! [`show_native_alert`] / [`show_native_alert_into`] and
+//! [`show_native_sheet`] / [`show_native_sheet_into`] are the app-facing
+//! front door to `crate::present`: an alert or a sheet is an imperative
+//! request answered by one outcome, never a `platform_view` slot (nor does a
+//! sheet host one — its content is a constrained native schema). The `_into`
+//! forms write that outcome into an `RwSignal`, the same events-as-signals
+//! idiom the builders' `on_...` callbacks follow, spawned on
+//! `frust::spawn_local`.
 //!
 //! # Theme ladder L2
 //!
@@ -59,15 +73,29 @@
 
 mod builders;
 mod mount;
+mod present;
 mod signals;
 mod theme;
 
+/// The date value `native_date_picker` shows and reports — defined beside the
+/// control (`crate::controls::date_picker`) because the platform-agnostic
+/// event vocabulary carries it too, and re-exported here as the builder's
+/// public vocabulary.
+pub use crate::controls::date_picker::CivilDate;
 pub use builders::{
-    NativeButtonView, NativeImageFit, NativeImageView, NativeLabelView, NativeProgressView,
-    NativeSliderView, NativeSwitchView, native_button, native_image, native_label, native_progress,
-    native_slider, native_switch,
+    NativeButtonView, NativeDatePickerStyle, NativeDatePickerView, NativeImageFit, NativeImageView,
+    NativeLabelView, NativeProgressView, NativeSegmentedView, NativeSliderView, NativeSpinnerSize,
+    NativeSpinnerView, NativeStepperView, NativeSwitchView, NativeTabBarView, TabIcon, TabId,
+    TabItem, native_button, native_date_picker, native_image, native_label, native_progress,
+    native_segmented, native_slider, native_spinner, native_stepper, native_switch, native_tab_bar,
 };
 pub use mount::{NativeComponentView, native_component};
+/// The app-facing native-presentation entry points over `crate::present`:
+/// for an alert and for a sheet, an awaitable form and an events-as-signals
+/// form — see the `present` submodule doc.
+pub use present::{
+    show_native_alert, show_native_alert_into, show_native_sheet, show_native_sheet_into,
+};
 
 /// Make sure this build's platform factory exists before the host can look it
 /// up — **optional**: every builder already does this for you.
@@ -96,7 +124,7 @@ pub fn ensure_native_factory_registered() {
 /// describes ("the number the leak bar every create/dispose cycle must
 /// return to `0`"), surfaced app-side for exactly one reason: a
 /// device-gate harness (a mount/unmount cycler plus a 50-slot stress
-/// toggle, `examples/glyph-catalog/src/pages/native_widgets.rs`'s GATE
+/// toggle, `examples/native-widgets-demo/src/pages/stress.rs`'s GATE
 /// HARNESS section) needs an in-app readout to prove the teardown-retire
 /// path disposes promptly rather than waiting out the differ's
 /// missing-streak backstop (`crate::registry`'s module doc's Idle-deferred

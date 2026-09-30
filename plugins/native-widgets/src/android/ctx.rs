@@ -46,7 +46,7 @@
 //! Class lookups still work on those paths — the cached loader outlives the
 //! call that seeded it.
 
-// This module is the *whole* helper surface the six controls, their
+// This module is the *whole* helper surface the built-in controls, their
 // listeners, and the public `NativeComponent` surface build on.
 // Most of it now has a caller on Android; one item (`set_enabled`) stays
 // genuinely unused until a control needs the checked path rather than the
@@ -64,6 +64,7 @@ use jni::strings::JNIStr;
 use jni::{Env, jni_sig, jni_str};
 
 use crate::NativeWidgetError;
+use crate::controls::date_picker::CivilDate;
 use crate::registry::SlotId;
 
 /// The generic listener class every interactive control attaches
@@ -365,10 +366,12 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     /// `new FrustNativeListener(slot_id)` — the ONE generic listener class
     /// (`crate::android`'s contract table). Attach it with
     /// [`Self::set_on_click_listener`]/[`Self::set_on_checked_change_listener`]/
-    /// [`Self::set_on_seek_bar_change_listener`] (whichever interface the
-    /// control needs), and retain it in the control's
+    /// [`Self::set_on_seek_bar_change_listener`]/[`Self::init_date_picker`]
+    /// (whichever interface the control needs), and retain it in the control's
     /// [`NativeView`](crate::android::NativeView) `extra` list so it is
-    /// pair-deleted with the view.
+    /// pair-deleted with the view. A `NativeComponent` reaches the same
+    /// constructor through [`Self::attach_listener`], never with an id of its
+    /// own.
     ///
     /// # Errors
     /// [`NativeWidgetError::Platform`] when the class is missing from the app
@@ -439,6 +442,220 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
             jni_sig!("(Landroid/widget/SeekBar$OnSeekBarChangeListener;)V"),
             &[JValue::Object(listener)],
         )
+    }
+
+    /// `DatePicker.init(year, monthOfYear, dayOfMonth, listener)` — the date
+    /// picker's initial date **and** its `OnDateChangedListener` attach in
+    /// one framework call (`init` sets the date before it stores the
+    /// listener, so the initial date never reaches the listener).
+    ///
+    /// `date` is a 1-based [`CivilDate`]; the 0-based `monthOfYear`
+    /// `DatePicker` wants is derived here, the one place this helper's
+    /// callers never have to think about it.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws.
+    pub(crate) fn init_date_picker(
+        &mut self,
+        view: &JObject<'_>,
+        date: CivilDate,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(
+            view,
+            jni_str!("init"),
+            jni_sig!("(IIILandroid/widget/DatePicker$OnDateChangedListener;)V"),
+            &[
+                JValue::Int(date.year),
+                JValue::Int(i32::from(date.month) - 1),
+                JValue::Int(i32::from(date.day)),
+                JValue::Object(listener),
+            ],
+        )
+    }
+
+    /// `DatePicker.setOnDateChangedListener(listener)` (API 26, inside this
+    /// plugin's `minSdk = 26` floor) — the date picker's detach: pass
+    /// `&JObject::null()`. The attach itself goes through
+    /// [`Self::init_date_picker`], which sets the initial date in the same
+    /// call.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws.
+    pub(crate) fn set_on_date_changed_listener(
+        &mut self,
+        view: &JObject<'_>,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(
+            view,
+            jni_str!("setOnDateChangedListener"),
+            jni_sig!("(Landroid/widget/DatePicker$OnDateChangedListener;)V"),
+            &[JValue::Object(listener)],
+        )
+    }
+
+    /// `new FrustNativeListener(slot_id)` set on `view` as each requested
+    /// interface — `setOnClickListener` (`click`, any `View`),
+    /// `setOnCheckedChangeListener` (`checked_change`, a `CompoundButton`) and
+    /// `setOnSeekBarChangeListener` (`seek_bar_change`, a `SeekBar`) — then
+    /// one global reference each to `view` and to the listener it just
+    /// created, answered as `(view, listener)`.
+    ///
+    /// The **public** `NativeComponent` path's attach
+    /// (`crate::component::ComponentCtx::attach_listener`): the same one
+    /// listener class and the same setters the built-in controls use, with
+    /// the slot id supplied by the component's context rather than by a
+    /// control's props — it never reaches the component. The listener's
+    /// global reference is what the release acts on:
+    /// [`crate::component::ListenerHandle`]'s Android `Drop` calls
+    /// [`Self::disarm_listener`] on exactly that object and never a setter on
+    /// the view, because by then the view's one-listener-per-interface slots
+    /// may already hold a newer attach's listener.
+    ///
+    /// A failure after an earlier setter succeeded — a later setter throwing,
+    /// or a global reference that cannot be allocated — is unwound before
+    /// this returns: [`Self::unwind_partial_attach`] nulls exactly the
+    /// interfaces that were already set, best effort, so no stray interface
+    /// survives a part-way failure (this method's `# Errors`). The slot the
+    /// caller tracks (`ComponentCtx`'s `attached`, a control's own registry
+    /// entry) never learns of an attach that returned `Err`, so an unwind
+    /// failure only means a listener the runtime already considers absent
+    /// stays wired a little longer — logged, not propagated, since
+    /// propagating it would replace the original failure with a less
+    /// informative one.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the listener class is missing,
+    /// its constructor throws, a setter throws — typically
+    /// `NoSuchMethodError` for an interface `view`'s class does not have — or
+    /// the JVM cannot allocate either global reference.
+    pub(crate) fn attach_listener(
+        &mut self,
+        view: &JObject<'_>,
+        slot_id: SlotId,
+        click: bool,
+        checked_change: bool,
+        seek_bar_change: bool,
+    ) -> Result<(Global<JObject<'static>>, Global<JObject<'static>>), NativeWidgetError> {
+        let listener = self.new_listener(slot_id)?;
+
+        let mut click_set = false;
+        let mut checked_change_set = false;
+
+        if click {
+            self.set_on_click_listener(view, &listener)?;
+            click_set = true;
+        }
+        if checked_change {
+            if let Err(error) = self.set_on_checked_change_listener(view, &listener) {
+                self.unwind_partial_attach(view, click_set, checked_change_set, false, &error);
+                return Err(error);
+            }
+            checked_change_set = true;
+        }
+        if seek_bar_change && let Err(error) = self.set_on_seek_bar_change_listener(view, &listener)
+        {
+            self.unwind_partial_attach(view, click_set, checked_change_set, false, &error);
+            return Err(error);
+        }
+        let retained = match self.retain(view) {
+            Ok(view_global) => self
+                .retain(&listener)
+                .map(|listener_global| (view_global, listener_global)),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = &retained {
+            self.unwind_partial_attach(view, click, checked_change, seek_bar_change, error);
+        }
+        retained
+    }
+
+    /// `listener.disarm()` — the Android release of a component's
+    /// [`crate::component::ListenerHandle`]. `FrustNativeListener.disarm`
+    /// clears a `@Volatile` flag every override checks before reporting, so
+    /// the listener goes inert for good **without the view being touched**:
+    /// whichever interface still holds it keeps an inert object until a later
+    /// attach replaces it or the view itself dies. That makes the release
+    /// identity-safe — it can only ever silence *this* handle's listener,
+    /// never a newer one set on the same view — and thread-safe, since it
+    /// mutates no `View`.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws or the method is
+    /// missing (a `FrustNativeListener` from a Kotlin module older than this
+    /// crate).
+    pub(crate) fn disarm_listener(
+        &mut self,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(listener, jni_str!("disarm"), jni_sig!("()V"), &[])
+    }
+
+    /// [`Self::attach_listener`]'s failure unwind: null whatever it had
+    /// already set (`click_set`/`checked_change_set`/`seek_bar_change_set`)
+    /// through [`Self::detach_listener`].
+    ///
+    /// **This is the one place nulling a listener interface is
+    /// identity-safe**: every interface it nulls was set by this same
+    /// `attach_listener` call, synchronously, on the main thread, moments
+    /// earlier — nothing can have replaced it in between. Every other release
+    /// disarms its own listener instead ([`Self::disarm_listener`]).
+    ///
+    /// `original` is what the caller returns either way; a failure nulling
+    /// one of these interfaces is logged rather than replacing it, since the
+    /// failure that actually stopped the attach is the more useful of the two
+    /// errors.
+    fn unwind_partial_attach(
+        &mut self,
+        view: &JObject<'_>,
+        click_set: bool,
+        checked_change_set: bool,
+        seek_bar_change_set: bool,
+        original: &NativeWidgetError,
+    ) {
+        if let Err(unwind_error) =
+            self.detach_listener(view, click_set, checked_change_set, seek_bar_change_set)
+        {
+            log::warn!(
+                "android native-widgets: attach_listener failed ({original}) and unwinding the \
+                 interface(s) it had already set also failed: {unwind_error}"
+            );
+        }
+    }
+
+    /// Set each requested interface back to `null` on `view` — called
+    /// **only** by [`Self::unwind_partial_attach`] (see its identity-safety
+    /// note).
+    ///
+    /// Deliberately not a general detach: Android's setters each hold one
+    /// listener, replace it outright and expose no getter, so nulling an
+    /// interface anywhere else could wipe a newer listener a later attach set
+    /// on the same view. [`crate::component::ListenerHandle`]'s release
+    /// disarms its own listener ([`Self::disarm_listener`]) instead.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when a setter throws. A setter that
+    /// already ran before the failing one stays nulled; only the later ones
+    /// are skipped.
+    fn detach_listener(
+        &mut self,
+        view: &JObject<'_>,
+        click: bool,
+        checked_change: bool,
+        seek_bar_change: bool,
+    ) -> Result<(), NativeWidgetError> {
+        let none = JObject::null();
+        if click {
+            self.set_on_click_listener(view, &none)?;
+        }
+        if checked_change {
+            self.set_on_checked_change_listener(view, &none)?;
+        }
+        if seek_bar_change {
+            self.set_on_seek_bar_change_listener(view, &none)?;
+        }
+        Ok(())
     }
 
     /// Run `f` inside a pushed JNI local frame, so the references it creates

@@ -191,10 +191,6 @@ dependencies {
     implementation(project(":frust-embedding"))
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
     implementation(project(":frust-camera"))
-    // frust-native-widgets' one factory + one listener class
-    // (`dev.frust.nativewidgets`), supplied by the plugin's own library module
-    // — this app carries no per-control Kotlin of its own.
-    implementation(project(":frust-native-widgets"))
     // frust-video-player: the session host (`FrustVideoPlayerHost`) + the
     // SurfaceView-backed picture factory (`VideoPlayerViewFactory`) —
     // `src/pages/video_player.rs`'s "Video" section.

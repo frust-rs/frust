@@ -41,10 +41,21 @@
 //! reads a fresh snapshot each rebuild and clamps its own cursor to it.
 //!
 //! **Known v1 limitation:** since the queue is the app's own ever-growing
-//! `Vec`, a very long-running session accumulates every message ever shown.
-//! An app that cares can periodically truncate the vec — `next_index` is
-//! clamped to the (possibly shorter) new length on the following rebuild, so
-//! this is always safe, just not automatic.
+//! `Vec`, a very long-running session accumulates every message ever shown,
+//! and the app cannot safely trim it from the outside. The host's cursor and
+//! whether a toast is active are retained state the app cannot observe, and
+//! both matter: while a toast plays, `next_index` still points AT its entry
+//! and only advances past it when it finishes (in `maybe_advance_queue`,
+//! after `rebuild`'s clamp), so cutting the vec to a length at or below that
+//! index — clearing it included — makes the post-finish advance land past
+//! the new end, and the next message pushed there is skipped, never shown.
+//! Draining from the front shifts every pending entry under the cursor and
+//! skips or loses them. Only removing entries strictly after the one being
+//! shown is harmless (it cancels pending toasts), and the app cannot tell
+//! which one that is. Treat the vec as append-only and bound growth at the
+//! producers instead (rate-limit what can be triggered repeatedly), as
+//! `examples/native-widgets-demo` does; a later revision may expose a
+//! consumed count so an app can trim what the host is provably done with.
 //!
 //! # Anchoring (framework-side positioning)
 //!

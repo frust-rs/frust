@@ -2,13 +2,20 @@
 
 Render **real OS controls** from pure Rust — `native_button("Save")`,
 `native_label(...)`, `native_switch(checked)`, `native_slider(...)`,
-`native_progress(...)`, `native_image(bytes)` — composed straight into a
-frust `View` tree like any other widget. Each control is backed by a genuine
-Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`)
-or UIKit view (`UIButton`/`UILabel`/`UISwitch`/`UISlider`/`UIProgressView`/
-`UIImageView`), hosted as a **platform-view slot** (`docs/ARCHITECTURE.md`'s
-Platform-view flow) — frust paints nothing for it, the OS composites it in
-place.
+`native_progress(...)`, `native_image(bytes)`, `native_spinner(animating)`,
+`native_date_picker(date)`, `native_segmented(labels, selected)` (iOS/macOS only),
+`native_stepper(value, min, max)` (iOS/macOS only),
+`native_tab_bar(items, selected)` (iOS/iPadOS only) — composed straight
+into a frust `View` tree like any other widget. Each control is backed by a
+genuine Android `View` (`Button`/`TextView`/`Switch`/`SeekBar`/`ProgressBar`/`ImageView`/a
+circular-style `ProgressBar`/`DatePicker`), UIKit view (`UIButton`/`UILabel`/`UISwitch`/
+`UISlider`/`UIProgressView`/`UIImageView`/`UIActivityIndicatorView`/`UIDatePicker`/
+`UISegmentedControl`/`UIStepper`/a bare `UITabBar`), or
+AppKit view on macOS (`NSButton`/`NSTextField`/`NSSwitch`/`NSSlider`/
+`NSProgressIndicator`/`NSImageView`/an `NSProgressIndicator` in its
+`Spinning` style/`NSDatePicker`/`NSSegmentedControl`/`NSStepper`), hosted as a **platform-view slot**
+(`docs/ARCHITECTURE.md`'s Platform-view flow) — frust paints nothing for it,
+the OS composites it in place.
 
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
@@ -26,30 +33,139 @@ not re-export it.
 
 ## 1. What you get
 
-Six controls, one Rust API, no Kotlin or Swift to write for any of them:
+Eleven controls, one Rust API, no Kotlin or Swift to write for any of them:
 
-| Builder | Android view | iOS view |
-|---|---|---|
-| `native_button(text)` | `Button` | `UIButton` |
-| `native_label(text)` | `TextView` | `UILabel` |
-| `native_switch(checked)` | `Switch` | `UISwitch` |
-| `native_slider(value, min, max)` | `SeekBar` | `UISlider` |
-| `native_progress(value, min, max)` | `ProgressBar` | `UIProgressView` |
-| `native_image(bytes)` | `ImageView` | `UIImageView` |
+| Builder | Android view | iOS view | macOS view |
+|---|---|---|---|
+| `native_button(text)` | `Button` | `UIButton` | `NSButton` |
+| `native_label(text)` | `TextView` | `UILabel` | `NSTextField` (label) |
+| `native_switch(checked)` | `Switch` | `UISwitch` | `NSSwitch` |
+| `native_slider(value, min, max)` | `SeekBar` | `UISlider` | `NSSlider` |
+| `native_progress(value, min, max)` | `ProgressBar` | `UIProgressView` | `NSProgressIndicator` |
+| `native_image(bytes)` | `ImageView` | `UIImageView` | `NSImageView` |
+| `native_spinner(animating)` | `ProgressBar` (circular style) | `UIActivityIndicatorView` | `NSProgressIndicator` (`Spinning` style) |
+| `native_date_picker(date)` | `DatePicker` | `UIDatePicker` (date mode) | `NSDatePicker` (year/month/day) |
+| `native_segmented(labels, selected)` | **none — renders a refusal banner** (see below) | `UISegmentedControl` | `NSSegmentedControl` (select-one) |
+| `native_stepper(value, min, max)` | **none — renders a refusal banner** (see below) | `UIStepper` | `NSStepper` |
+| `native_tab_bar(items, selected)` | **none — renders a refusal banner** (see below) | a bare `UITabBar` (no `UITabBarController`) | **none — renders a refusal banner** |
+
+`native_segmented` and `native_stepper` are **iOS/iPadOS and macOS only** in
+this release. Android's framework has no segmented control — the stock one is
+Material's `MaterialButtonToggleGroup` — and no increment/decrement stepper
+control either; this plugin never assumes a Material/AndroidX dependency your
+app did not add — so on Android (and on every desktop-preview host) each
+builder is resolved **at compile time** to the same frust-drawn warning
+banner the translucency-refused fallback uses, naming the missing arm, rather
+than an empty slot. A Material-backed segmented Android arm and a composite
+stepper Android arm (two `ImageButton`s plus a `TextView`) are both follow-up
+plans. `native_segmented` is controlled like `native_switch`:
+`.on_select(|index| …)` reports the *requested* segment, and the app confirms
+it by feeding `selected` back; `.momentary(true)` makes a tap flash its
+segment instead of selecting it. The selected segment wears the theme's
+`accent_fill`. `native_stepper` is controlled like `native_slider`:
+`.on_change(|value| …)` reports the *requested* value on a tap, and the app
+confirms it by feeding `value` back; `.step(n)` sets the increment (default
+`1`) and `.wraps(true)` wraps the value from `max` back to `min` instead of
+clamping. The control wears the theme's `accent_ink` as its tint on iOS only
+— `NSStepper` has no tint property AppKit exposes at all, so the fold is a
+silent no-op there, logged at debug (same shape as the AppKit tint gaps in §4
+below).
+
+`native_tab_bar` is **iOS/iPadOS only**: macOS has no bottom-tab-bar idiom,
+and Android's `BottomNavigationView` needs Material, which this plugin never
+assumes — both render the refusal banner, naming both reasons. It is a
+**bare** `UITabBar`, never a `UITabBarController`: frust keeps screen
+ownership and routing, so a tap never navigates by itself. Each `TabItem`
+carries a stable app-chosen `TabId`, a title, an icon — `TabIcon::AppleSymbol`
+(an SF Symbol name) or `TabIcon::Bytes` (encoded image bytes, normalized to a
+25pt box; supply 75×75px for a crisp 3x icon) — and optionally a
+`.selected_icon(…)`, a `.badge(…)` and `.enabled(false)`. `.on_select(|id| …)`
+reports the *requested* tab: route there and feed the id back as `selected`
+(controlled, like `native_segmented`). `.on_reselect(|id| …)` fires when the
+tab the app last confirmed was tapped again — the conventional "scroll to
+top / pop to root" — not merely the one UIKit is highlighting: a tap you
+reject (no write-back) retapped still reports as another `.on_select`, even
+though the OS has already moved the highlight to it. The same tracking works
+in reverse too: tap back on the tab the app still confirms and that retap
+fires `.on_reselect`, even though the OS's own highlight had just moved to
+the rejected tab a moment before, not to the one you tapped back — an app
+that pops to root on `.on_reselect` should feed the confirmed selection back
+promptly so its highlight and `selected` never keep diverging. The bar
+sizes itself to 49pt plus the window's bottom safe-area inset,
+so its background runs under the home indicator: put it last in a `Column`
+docked to the bottom edge, and if you wrap it in `frust::safe_area` for
+horizontal cutouts use `.top(false).bottom(false)` (the way `examples/huddle`
+docks Material's `navigation_bar`); `.safe_area(false)` gives the bare 49pt
+for a bar that isn't docked to the bottom. The selected item wears the
+theme's `accent_ink`, unselected items its `on_surface_variant`, and the bar
+its `surface` colour (an opaque appearance, set for both the standard and the
+scroll-edge state so iOS 15+ never shows a transparent bar). On iPadOS the
+bare bar stays at the bottom and gets no Liquid Glass — the iPadOS 18 top tab
+bar and the floating glass bar are `UITabBarController` features.
+
+```rust
+use frust::{RwSignal, Get, Set, RouteNavigator};
+use frust_native_widgets::{native_tab_bar, TabIcon, TabId, TabItem};
+
+// The router owns navigation; the tab bar only reports the request.
+fn bottom_tabs(nav: RouteNavigator, tab: RwSignal<String>) -> impl frust::View<AppState> {
+    native_tab_bar(
+        vec![
+            TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into()))
+                .selected_icon(TabIcon::AppleSymbol("house.fill".into())),
+            TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())).badge("3"),
+        ],
+        TabId::new(tab.get()),
+    )
+    .on_select(move |id| {
+        tab.set(id.to_string()); // feed the confirmed id back next rebuild
+        nav.go(format!("/{id}")); // Router::go through its Send + Sync navigator
+    })
+    .on_reselect(|id| log::info!("scroll {id} to top"))
+}
+```
+
+`native_date_picker` picks a **date only** (no time) and is controlled like
+`native_switch`: `.on_change(|date| …)` reports the *requested* `CivilDate`
+(`{ year, month, day }`, month 1-based, validated — build one with
+`CivilDate::new(2026, 9, 29)`), and the app confirms it by feeding it back
+as `date`. `.min(date)`/`.max(date)` bound the range (a `date` outside it is
+shown and reported clamped), and `.style(NativeDatePickerStyle::…)` picks the
+presentation: `Compact` (default — iOS's compact button, a macOS text field
+with a click-to-open calendar, Android's spinner mode), `Wheels` (iOS wheels,
+the macOS text field and stepper, Android's spinner mode) or `Inline` (an
+always-visible calendar on all three). Android fixes the mode when the picker
+is created, so a later `.style(…)` change applies on iOS/macOS only (logged
+once on Android). The picker wears the theme's `accent_ink` as its tint on iOS
+and the theme's body-text colour as its text colour on macOS; Android's
+`DatePicker` has no tint or text-colour API — its colours come only from the
+(light/dark) theme it is built against — and `NSDatePicker` has no tint, so
+those folds are silent no-ops, logged at debug.
 
 …plus `native_component`, the generic mounting seam for a control this crate
 does not ship: `impl NativeComponent` (with your own typed `Props`) →
 `register_component::<C>(KIND)` → `native_component(KIND, c, props)`, mounted
-through the same one factory and the same runtime the six builders use, with
-no per-component Kotlin or Swift anywhere in it. See the `api::mount` module
-docs.
+through the same one factory and the same runtime the built-in builders use,
+with no per-component Kotlin or Swift anywhere in it. See the `api::mount`
+module docs.
 
-> **Two limits on that seam — read them before you plan around it.** An app
+A component hears its own views the way the built-in builders do: it attaches the
+platform's one listener to any view it built with
+`ComponentCtx::attach_listener(view, ListenerKinds::CLICK)` (or `TOGGLED` /
+`VALUE_CHANGED`), its `NativeComponent::on_event` receives each event, and
+whatever that answers reaches the app on the mounted view's `.on_event(...)`
+hook — the same events-as-signals idiom as `.on_press`:
+
+```rust
+native_component(KIND, MyCard, props)
+    .interactive()
+    .on_event(move |event| if event.is_click() { taps.set(taps.get_untracked() + 1) })
+```
+
+> **One limit on that seam — read it before you plan around it.** An app
 > crate cannot implement `NativeComponent` today (it needs raw
-> `jni`/`objc2-ui-kit` dependencies this crate does not re-export), and a
-> component's native view is **display-only** — no production path attaches a
-> listener to it, so overriding `on_event` has no effect. Both are spelled out
-> in §5, and neither applies to the six builders above.
+> `jni`/`objc2-ui-kit` dependencies this crate does not re-export). It is
+> spelled out in §5, and does not apply to the built-in builders above.
 
 Every control follows frust's **controlled-component** convention where the
 platform allows it: a switch/slider reports the *requested* value through its
@@ -78,6 +194,168 @@ fn save_button(saved: RwSignal<bool>) -> impl frust::View<AppState> {
         .on_press(move || saved.set(true))
 }
 ```
+
+---
+
+## 1b. Native presentations (alerts, sheets)
+
+A native **alert** is not a control in the tree: it is a request answered by
+exactly one outcome — the chosen action's id, `Cancelled`, `Dismissed` (you
+took it down with `present::dismiss(&handle)`) or `HostLost` (the presenting
+host went away first — the iOS/iPadOS window scene, the macOS presenting
+window closing, or the Android hosting `Activity` being destroyed). One
+presentation is live per process; a second request while one is up is
+refused `PresentError::Busy` at once, never queued. Nothing ever blocks
+waiting for the user.
+
+| Platform | Today |
+|---|---|
+| iOS / iPadOS | `UIAlertController` — `AlertStyle::Alert` centered, `AlertStyle::ActionSheet` from the bottom (iPhone) or as a popover pointing at `anchor` (iPad; required there, see below) |
+| macOS | `NSAlert` presented as a window sheet on the key/main window — Return resolves the first action, Escape resolves the `Cancel`-role action; no click-away, so `Cancelled` is never produced; `style`/`anchor` ignored |
+| Android | framework `android.app.AlertDialog` over the resumed `Activity` — the back key / an outside tap resolve `Cancelled`, only when `cancelable`; `style`/`anchor` ignored |
+| desktop preview, web, every other target | `PresentError::Unsupported` |
+
+Up to three actions, each with a unique non-empty `id` and a role —
+`ActionRole::Default`, `Cancel` (at most one; UIKit places it itself) or
+`Destructive`: iOS styles it red, macOS sets `NSButton.hasDestructiveAction`,
+and Android has no severity styling for it — plain, sharing `Default`'s
+button-slot preference. Two shapes:
+
+```rust
+use frust::{RwSignal, Set};
+use frust_native_widgets::{
+    ActionRole, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, native_button, show_native_alert,
+    show_native_alert_into,
+};
+
+fn delete_spec() -> AlertSpec {
+    AlertSpec::new("Delete draft?", "This cannot be undone.")
+        .with_action("keep", "Keep", ActionRole::Cancel)
+        .with_action("delete", "Delete", ActionRole::Destructive)
+}
+
+// 1. Awaitable — from any async context (`frust::spawn_local` on the UI thread);
+//    `deleted` is an app `RwSignal<bool>`:
+frust::spawn_local(async move {
+    if let Ok(AlertOutcome::Action(id)) = show_native_alert(delete_spec()).await
+        && id == "delete"
+    {
+        deleted.set(true);
+    }
+});
+
+// 2. Into a signal — no async block. Writes `Some(outcome)` exactly once;
+//    you read it on a later rebuild and reset it to `None` yourself:
+let outcome: RwSignal<Option<AlertOutcome>> = RwSignal::new(None);
+native_button("Delete").on_press(move || {
+    if let Err(err) = show_native_alert_into(delete_spec(), outcome) {
+        log::warn!("no alert: {err}"); // Busy, InvalidSpec, Unsupported…
+    }
+})
+```
+
+`show_native_alert_into` returns synchronous refusals (`Busy`, an invalid
+spec, `Unsupported`) as `Err` and never writes the signal for them; an error
+found only later on the main thread (`NoHost`) is logged, not written — await
+`show_native_alert` when you need to tell those apart. Dropping the awaited
+future frees the one-at-a-time slot but leaves the alert on screen until the
+user answers it (that answer is discarded).
+
+**The iPad anchor rule.** An action sheet on iPad is a popover and must point
+at something: `AlertStyle::ActionSheet` with no `anchor` is refused
+`PresentError::InvalidSpec` on iPad before anything is shown (UIKit would
+crash). Pass an `AnchorRect` in **logical window coordinates** — frust's
+logical pixels are iOS points, so the rect a native control's
+`platform_view` slot paints at, or any frust widget's window-space rect, is
+already right; a zero-size rect points at a tap location. iPhone ignores the
+anchor.
+
+```rust
+let mut spec = delete_spec();
+spec.style = AlertStyle::ActionSheet;
+spec.anchor = Some(AnchorRect { x: 24.0, y: 600.0, width: 120.0, height: 44.0 });
+```
+
+`cancelable` matters only where the platform has a non-action dismissal.
+**iOS:** on iPad, `cancelable: false` stops an outside tap from closing the
+action-sheet popover; UIKit alerts (and iPhone action sheets) have none, so
+there it removes nothing. On an iPad popover with a `Cancel`-role action,
+UIKit hides that button and an outside tap reports it (`Action("keep")`
+above) rather than `Cancelled`. **Android:** `cancelable` gates both the back
+key and an outside tap, either resolving `Cancelled`. **macOS:** no analog —
+a window sheet has no click-away dismissal, so `cancelable` is ignored there.
+
+### Native sheets (iOS / iPadOS)
+
+A **sheet** is the same kind of request: a `SheetSpec` answered by exactly
+one `SheetOutcome` — `Action(id)` (the user tapped a row; the sheet has
+already slid away), `Dismissed(DismissReason::User)` (swiped down),
+`Dismissed(DismissReason::Programmatic)` (you called `handle.dismiss()`) or
+`HostLost`. It shares the one-at-a-time slot with alerts: while an alert is
+up, a sheet request is refused `PresentError::Busy`, and the reverse.
+
+| Platform | Today |
+|---|---|
+| iOS / iPadOS | a page sheet under `UISheetPresentationController`: detents, grabber, swipe-to-dismiss |
+| macOS, Android, desktop preview, web | `PresentError::Unsupported` (an `NSPopover` / `BottomSheetDialog` arm is follow-up work) |
+
+The content is a **constrained native schema**, not frust widgets: an
+optional title, an optional message, optional image bytes and up to three
+action rows (system buttons — `Default` wears the tint, `Destructive` red,
+`Cancel` the secondary label colour), stacked top to bottom. An empty sheet
+is refused `InvalidSpec`, as are more than three actions or a
+`Detent::Custom(f)` outside `0 < f <= 1`.
+
+```rust
+use frust::RwSignal;
+use frust_native_widgets::{
+    ActionRole, Detent, SheetContent, SheetOutcome, SheetSpec, native_button, show_native_sheet,
+    show_native_sheet_into,
+};
+
+fn share_spec() -> SheetSpec {
+    SheetSpec::new(
+        SheetContent::new()
+            .with_title("Share draft")
+            .with_message("Anyone with the link can read it.")
+            .with_action("copy", "Copy link", ActionRole::Default)
+            .with_action("stop", "Stop sharing", ActionRole::Destructive),
+    )
+    .with_detents([Detent::Medium, Detent::Large])
+    .with_theme(&theme) // tint + light/dark from the active frust theme
+}
+
+// Awaitable, with the handle taken first (moves it, or takes it down):
+let presentation = show_native_sheet(share_spec().on_detent(move |detent| {
+    expanded.set(detent == Detent::Large); // user drags stream here; not outcomes
+}));
+let handle = presentation.sheet_handle();
+frust::spawn_local(async move {
+    if let Ok(SheetOutcome::Action(id)) = presentation.await {
+        chosen.set(Some(id));
+    }
+});
+// later: handle.map(|h| h.select_detent(Detent::Large));
+
+// Into a signal — the same controlled contract as the alert form:
+let outcome: RwSignal<Option<SheetOutcome>> = RwSignal::new(None);
+native_button("Share").on_press(move || {
+    if let Err(err) = show_native_sheet_into(share_spec(), outcome) {
+        log::warn!("no sheet: {err}"); // Busy, InvalidSpec, Unsupported…
+    }
+})
+```
+
+`dismissible: false` (`.with_dismissible(false)`) stops the swipe-down, so
+only a row or `handle.dismiss()` ends the sheet. `Detent::Custom` needs
+iOS 16; on iOS 15 it becomes the nearest of medium/large (logged once).
+
+**iPad in regular width ignores detents.** UIKit presents a page sheet in a
+full-width (or large Split View) iPad window as a centered form sheet at a
+fixed size — no medium height, no detent changes; only an edge-attached sheet
+(iPhone, or an iPad window in compact width such as Slide Over) rests at its
+detents. Design the content to read well at both sizes; never rely on detent
+parity across idioms.
 
 ---
 
@@ -152,11 +430,15 @@ four export symbols changed — see §7 before you rebuild.
 
 ---
 
-## 4. iOS setup — nothing. Zero Swift, by design.
+## 4. iOS and macOS setup — nothing either
 
-iOS needs **no platform addition at all** beyond §2's Cargo dependency: no
-Swift package reference, no Xcode project edit, no `Info.plist` key. The
-factory that would be a Swift class on every other plugin's Apple arm is
+Neither Apple platform needs anything beyond §2's Cargo dependency: no Swift
+package reference, no Xcode project edit, no `Info.plist` key, and on macOS
+no explicit "install" call either.
+
+### iOS — zero Swift, by design
+
+The factory that would be a Swift class on every other plugin's Apple arm is
 instead a Rust `objc2` `define_class!` type, registered straight into the
 Objective-C runtime from this crate's own code and resolved by
 `NSClassFromString` under the bare runtime name `FrustNativeControlFactory`
@@ -164,6 +446,41 @@ Objective-C runtime from this crate's own code and resolved by
 package prefix — the opposite convention from Android's fully-qualified
 FQCN). This was proven out in Phase 0's spike 2 and has held for every
 control added since.
+
+### macOS — the desktop Mode-A host registers the factory lazily
+
+The desktop preview/bundle needs no app-side wiring either: this crate's
+AppKit factory (a Rust `frust_plugin::desktop::DesktopViewFactory`) registers
+itself with the shell's platform-view registry the first time any builder in
+this crate encodes a slot's params — there is nothing for your app to call.
+
+Two things differ from the mobile arms, both by design:
+
+- **The theme ladder follows the app, not the Mac.** Every control's
+  `NSAppearance` is pinned to the active `frust::Theme`'s brightness
+  (`DarkAqua`/`Aqua`), re-applied on every update — so a Mac running Dark
+  Mode still draws a Light-themed app's controls light, and vice versa.
+- **A handful of AppKit gaps are logged, not papered over**: `Fit::Cover`
+  has no true fill-and-crop on `NSImageView`, so it letterboxes like
+  `Fit::Contain` rather than cropping; a slider emits no drag-start/drag-end
+  event (AppKit target-action carries no gesture phase, only the final
+  value); `NSSwitch`'s track and `NSProgressIndicator`'s fill have no tint
+  API at all, so `thumbTint`/`trackTint`/`progressTint` on `native_switch`/
+  `native_progress` — the spinner's own tint on `native_spinner`, which
+  also draws through `NSProgressIndicator` — and `native_stepper`'s tint,
+  since `NSStepper` exposes no tint property either — and `native_date_picker`'s
+  tint, `NSDatePicker` having none (its calendar draws in the system accent
+  colour) — are silent no-ops
+  logged at debug (`NSSwitch`/`NSProgressIndicator` still draw in the system
+  accent colour regardless; `NSStepper`'s own `-`/`+` glyphs simply keep
+  their default appearance);
+  `native_image`'s tint marks the image as a template and sets
+  `NSImageView.contentTintColor` — a silhouette in the tint colour, like Android's SRC_IN and iOS's template rendering — and clearing
+  the tint restores the original image; and `native_image` decodes through
+  ImageIO, so a shell environment whose `DYLD_LIBRARY_PATH` shadows one of
+  ImageIO's private codec dylibs (e.g. Homebrew's `/opt/homebrew/lib` on a
+  machine with `libpng`/`libjpeg` installed) leaves every image slot empty
+  with one logged warning rather than decoding or crashing.
 
 ---
 
@@ -201,27 +518,20 @@ control added since.
   only implementor in this repo is this crate's own non-default
   `demo-components` composite. Closing the gap (re-exporting a curated
   view-construction surface, or the FFI crates themselves) is a separate,
-  unscheduled decision. The six builders in §1 are unaffected: they are
+  unscheduled decision. The built-in builders in §1 are unaffected: they are
   ordinary Rust calls needing no FFI dependency of yours.
-- **A `NativeComponent` is display-only — overriding `on_event` has no effect
-  in this build.** The dispatch half is wired and unit-tested (runtime →
-  bridge → trait method), but no production path attaches a platform listener
-  to a view a component built — its root as much as its children — because
-  both listener objects are constructed from a slot id `ComponentCtx` never
-  exposes, and the mounting builder registers no callback. It is a
-  deliberately deferred **Phase 4** gap. Deliberately *not* phrased as "can
-  never fire", and the difference matters if you go looking for a workaround:
-  the runtime routes an event on the slot id alone, and Android's
-  `nativeOnEvent` export rejects only a *negative* id, so a listener you
-  construct yourself with a fabricated non-negative id that happens to name a
-  live component's slot **is** delivered — into whichever slot that number
-  currently means, which is a misroute rather than a route, since a component
-  is never told its own id. iOS leaves no such opening at all: the target
-  class is crate-private and this plugin exports no C symbol. Marking a
-  component `.interactive()` still routes touches to the native view, so it
-  behaves natively (a button highlights) — it just reports nothing back to
-  Rust. The six built-in controls are unaffected: their `on_press`/`on_change`
-  callbacks fire normally (§1).
+- **A `NativeComponent`'s events come only from listeners it attached.**
+  `ComponentCtx::attach_listener` binds the platform's one listener class to
+  the component's own slot id — which the context never hands the component —
+  and the runtime's bridge delivers only the event families the slot attached,
+  so a view the component attached nothing to still behaves natively (a
+  button highlights) but reports nothing. Two children attached for the same
+  family are indistinguishable in `on_event`: a click carries its slot, not
+  which child fired, so give each child its own family or its own slot. On
+  macOS an `NSControl` carries one target/action pair, so it takes exactly one
+  family (`CLICK`, `TOGGLED` or `VALUE_CHANGED`), and AppKit reports no drag
+  edges. The listener is released when the `ListenerHandle` the component
+  keeps in its state drops.
 
 ---
 

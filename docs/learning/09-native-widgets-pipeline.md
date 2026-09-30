@@ -33,7 +33,7 @@ numbers: labs 1–8's line anchors drift, names don't.
 | The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-engine/src/compile/clear.rs` → `crates/frust-engine/src/schedule/mod.rs` | `PlatformViewWidget::paint`, `clear::punch_rect`, `schedule::cut_at`, `shield` |
 | Host-side factory resolution | `platform/android/frust-embedding/…/FrustViewHost.kt` · `platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
 | A plugin author's own native subtree | `plugins/native-widgets/src/component.rs` | `NativeComponent`, `ComponentCtx`, `register_component`, `native_component` |
-| The device-gate vehicle | `examples/playground/src/pages/native_widgets.rs` | `page`, `theme_toggle_demo`, `gate_harness_block` |
+| The device-gate vehicle | `examples/native-widgets-demo/src/pages/stress.rs` | `page`, `STRESS_SLOT_COUNT`, `CYCLE_STEP_MS`, `cycle_phase`, `live_slot_count` |
 
 ## The pipeline, in seven stages
 
@@ -323,11 +323,18 @@ made a scrolled-offscreen camera preview tear down and restart. Revert both.
 
 ### 9.3 — Mode A vs Mode B, on a device
 
-[The Native Widgets section now lives in `examples/playground` only —
-`examples/glyph-catalog` was stripped to a Glyph-theme-only showcase after this
-lab was written. Substitute `examples/playground`, package `it.f0x.playground`,
-and `MainActivity.kt`/`SceneDelegate.swift` under that app's tree when running
-the steps below.]
+[The Native Widgets section moved again: it no longer lives in
+`examples/playground` either — `examples/native-widgets-demo` is now the
+dedicated device-gate vehicle (its own `README.md`'s charter). `src/lib.rs`
+is its shell (section nav, deep links, the brightness toggle),
+`src/pages/stress.rs` the gate harness (`live_slot_count`, the mount/unmount
+cycler, the 50-slot stress toggle) and `src/pages/composite.rs` the
+composite-`NativeComponent` demo. Substitute `examples/native-widgets-demo`,
+package `it.f0x.native_widgets_demo` (Android) / `it.f0x.nativeWidgetsDemo`
+(iOS — never `it.f0x.nativewidgetsdemo`), and
+`android/app/src/main/kotlin/it/f0x/native_widgets_demo/MainActivity.kt` /
+`ios/Runner/SceneDelegate.swift` under that app's tree when running the
+steps below.]
 
 `examples/glyph-catalog` is the vehicle — a standalone workspace, run from its
 own directory, and it ships in **Mode B**:

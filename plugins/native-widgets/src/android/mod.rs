@@ -25,6 +25,19 @@
 //! |---|---|---|
 //! | `nativeOnEvent(slotId, kind, detail)` | [`Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent`] | ONE class, ONE native method, dispatched by `(slot id, kind)`; `detail` packs a primitive payload, never JSON on the hot path |
 //!
+//! ## `FrustNativePresenter` (native presentations — not a control)
+//!
+//! A third class in the same package, outside the one-factory/one-listener
+//! control surface: the Kotlin host native presentations (alerts) are shown
+//! through. Its one callback, `nativeOnOutcome(generation, code,
+//! actionIndex)`, is exported as
+//! `Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome` by
+//! `crate::present::android_host`, beside the host it belongs to — this
+//! module's exports stay pinned to the two control classes
+//! (`tests/kotlin_conformance.rs`), and the presenter's contract is pinned by
+//! `crate::present`'s own drift tests. Its name is frozen exactly like the
+//! symbols below.
+//!
 //! ## Which call carries the slot id
 //!
 //! `createView`/`updateParams`/`disposeView` are the embedding's fixed
@@ -69,7 +82,8 @@
 //!
 //! # Package
 //!
-//! The two Kotlin files sit in the `dev.frust.nativewidgets` subpackage of
+//! The Kotlin files (the two control classes, plus the presenter and its init
+//! provider) sit in the `dev.frust.nativewidgets` subpackage of
 //! this plugin's own `com.android.library` module — the shape
 //! `docs/CODE_STANDARDS.md`'s Plugin Conventions requires of every plugin
 //! (`plugins/secure-storage`'s `dev.frust.securestorage`,
@@ -106,17 +120,16 @@ use jni::sys::{jint, jlong, jobject};
 use jni::{Env, EnvUnowned, jni_str};
 
 pub(crate) use ctx::NativeCtx;
-// Re-exported so `crate::demo`'s `guard_jni` (the `ComponentCtx::env()`
-// escape hatch's own check-and-clear, `docs/CODE_STANDARDS.md`-sanctioned)
-// can reuse the crate's own exception-extracting helper instead of
-// re-implementing a weaker bare check-and-clear (R0-8) — `ctx` itself stays
-// private to this module, only this one function widens. `demo` is the only
-// consumer, so this is unused with `demo-components` off.
-#[cfg(feature = "demo-components")]
+// Re-exported so code outside this module reuses the crate's own
+// exception-extracting helper instead of re-implementing a weaker bare
+// check-and-clear (R0-8): `crate::present::android_host`'s presenter calls,
+// and `crate::demo`'s `guard_jni` (the `ComponentCtx::env()` escape hatch's
+// own check-and-clear, `docs/CODE_STANDARDS.md`-sanctioned). `ctx` itself
+// stays private to this module; only this one function widens.
 pub(crate) use ctx::run_jni;
 
 use crate::NativeWidgetError;
-use crate::controls::{button, image, label, progress, slider, switch};
+use crate::controls::{button, date_picker, image, label, progress, slider, spinner, switch};
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent, NativeRuntime, UpdateOutcome};
 
@@ -143,6 +156,8 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<slider::Slider>(slider::KIND);
     runtime.register::<progress::Progress>(progress::KIND);
     runtime.register::<image::Image>(image::KIND);
+    runtime.register::<spinner::Spinner>(spinner::KIND);
+    runtime.register::<date_picker::DatePicker>(date_picker::KIND);
 }
 
 // --- exports: FrustNativeControlFactory -------------------------------------

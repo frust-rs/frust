@@ -36,7 +36,8 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 | `examples/huddle` | clean-signals clean-architecture showcase; the sole full example app |
 | `examples/shadertoy` | Fragment-shader effects showcase — `draw_shader` records a `Command::ShaderQuad`, rendered by the engine's shader-quad pre-pass (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam) |
 | `examples/glyph-catalog` | Glyph design-system showcase (theme only) |
-| `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
+| `examples/playground` | Plugin functionality, platform views, responsiveness, and general testing showcase; a standalone workspace |
+| `examples/native-widgets-demo` | `frust-native-widgets` showcase and device-gate vehicle — every native control beside its frust-drawn peer, one page per widget family; standalone workspace |
 | `examples/design-system-sample` | Out-of-tree design-system proof, built on `frust`'s public API alone; standalone workspace |
 | `examples/shadcn-demo` | `frust-shadcn` catalog gallery (desktop-only); root-workspace member |
 | `examples/material3-demo` | `frust-material` catalog gallery — Material 3 Expressive design system; standalone workspace |
