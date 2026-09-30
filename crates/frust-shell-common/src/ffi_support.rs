@@ -7,7 +7,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use frust_core::WindowMetrics;
-use frust_core::insets::{EdgeInsets, WindowInsets};
+use frust_core::insets::{CornerInset, CornerInsets, EdgeInsets, WindowInsets};
 use kurbo::Size;
 
 /// Sanitize a raw density (e.g. a JNI `jfloat`) into a scale safe to divide or
@@ -88,6 +88,29 @@ pub fn logical_insets(physical: [f64; 8], scale: f64) -> WindowInsets {
             to_logical(physical[6]),
             to_logical(physical[7]),
         ),
+    )
+}
+
+/// Convert platform window-control corner extents into logical
+/// [`CornerInsets`].
+///
+/// `physical` order is `[tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h]`. Each
+/// value is sanitized (non-finite or negative → 0.0) and then divided by
+/// `scale`, exactly like [`logical_insets`]. The caller passes an
+/// already-[`sanitize_scale`]d scale; iOS passes `1.0` because UIKit values are
+/// already logical points. Android does not call this today.
+#[inline]
+pub fn logical_corner_insets(physical: [f64; 8], scale: f64) -> CornerInsets {
+    let to_logical = |px: f64| {
+        let px = if px.is_finite() && px >= 0.0 { px } else { 0.0 };
+        px / scale
+    };
+    let corner = |w: f64, h: f64| CornerInset::new(to_logical(w), to_logical(h));
+    CornerInsets::new(
+        corner(physical[0], physical[1]),
+        corner(physical[2], physical[3]),
+        corner(physical[4], physical[5]),
+        corner(physical[6], physical[7]),
     )
 }
 
@@ -354,6 +377,50 @@ mod tests {
         let insets = logical_insets(physical, 2.0);
         assert_eq!(insets.view_padding, EdgeInsets::new(4.0, 22.0, 8.0, 17.0));
         assert_eq!(insets.view_insets, EdgeInsets::new(0.0, 0.0, 0.0, 170.0));
+    }
+
+    #[test]
+    fn logical_corner_insets_divides_each_value_by_scale() {
+        let c = logical_corner_insets([0.0, 0.0, 144.0, 48.0, 2.0, 4.0, 6.0, 8.0], 2.0);
+        assert_eq!(
+            c,
+            CornerInsets::new(
+                CornerInset::new(0.0, 0.0),
+                CornerInset::new(72.0, 24.0),
+                CornerInset::new(1.0, 2.0),
+                CornerInset::new(3.0, 4.0),
+            )
+        );
+    }
+
+    #[test]
+    fn logical_corner_insets_identity_at_scale_one() {
+        let c = logical_corner_insets([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 1.0);
+        assert_eq!(c.top_left, CornerInset::new(1.0, 2.0));
+        assert_eq!(c.top_right, CornerInset::new(3.0, 4.0));
+        assert_eq!(c.bottom_left, CornerInset::new(5.0, 6.0));
+        assert_eq!(c.bottom_right, CornerInset::new(7.0, 8.0));
+    }
+
+    #[test]
+    fn logical_corner_insets_sanitizes_nan_inf_negative_to_zero() {
+        let c = logical_corner_insets(
+            [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -4.0,
+                10.0,
+                -0.5,
+                f64::NAN,
+                20.0,
+            ],
+            2.0,
+        );
+        assert_eq!(c.top_left, CornerInset::ZERO);
+        assert_eq!(c.top_right, CornerInset::ZERO);
+        assert_eq!(c.bottom_left, CornerInset::new(5.0, 0.0));
+        assert_eq!(c.bottom_right, CornerInset::new(0.0, 10.0));
     }
 
     // --- WindowMetrics: units, derived orientation, change detection ---------

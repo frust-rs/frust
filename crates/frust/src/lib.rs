@@ -544,8 +544,9 @@ pub mod authoring {
     /// The inset vocabulary [`LayoutCtx::window_insets`]/[`PaintCtx::window_insets`]
     /// return — lifted because a widget that lays itself out around the status
     /// bar, notch, or on-screen keyboard cannot otherwise name the value those
-    /// accessors hand it.
-    pub use frust_core::{WindowEdgeInsets, WindowInsets};
+    /// accessors hand it. A bar laying out around the iPadOS window control
+    /// names the corner value, [`CornerInsets`].
+    pub use frust_core::{CornerInset, CornerInsets, WindowEdgeInsets, WindowInsets};
 
     /// The window-shape value recovered via
     /// `use_context::<`[`WindowMetrics`]`>()` inside `Component::build` — lifted
