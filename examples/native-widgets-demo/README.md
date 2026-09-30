@@ -107,10 +107,11 @@ from this directory.
   once at startup to open that section — e.g.
   `env -u DYLD_LIBRARY_PATH FRUST_DEMO_SECTION=alerts cargo run`. Unset,
   empty or unknown values are ignored; release builds never read it.
-- **Android:** `frust run android` (device or emulator), or
-  `frust build apk --profile` for an installable profile APK.
-- **iOS / iPadOS:** `frust run ios` (a connected device, or a simulator — see
-  below).
+- **Android:** `frust run -d <device>` (a device or emulator from `frust
+  devices`; the platform follows the device), or `frust build apk --profile`
+  for an installable profile APK.
+- **iOS / iPadOS:** `frust run -d <device>` (a connected device, or a
+  simulator — see below).
 
 ### iOS surface mode: `FRUST_DEMO_OPAQUE`
 
@@ -152,4 +153,11 @@ repo root) fails if they drift.
 
 ## Device status
 
-<!-- Filled in by the on-device gate: device, OS, date, result per section. -->
+Phase 7 gates of the Apple-expansion plan, build `2b3ae58b`, 2026-09-30/10-01.
+
+| Platform | Device / OS | Result |
+|----------|-------------|--------|
+| macOS | Apple M4, macOS 27.0, debug build | All 11 lines pass (Ed-driven). The first `cargo run` launch painted nothing until relaunched — filed. |
+| iOS | iPhone SE (2nd gen), iOS 26.7, debug build | **Black screen as shipped**: with `synchronizesPresentWithPlatformViews` armed no frame is ever presented (filed, critical). With the seam off every line passes except VoiceOver (skipped); the playground renders under the same seam. |
+| iPadOS | iPad Pro 13-inch (M5) simulator, iPadOS 26.2, `FRUST_DEMO_OPAQUE=1` | All 7 legs pass (Ed-driven). Light host appearance shows the theme toggle out of sync with the shell-applied appearance — filed. |
+| Android | Pixel 5, Android 14 (UP1A.231105.001.B2), profile build | Alerts, refusal banners, Unsupported sheet and the stress cycler pass. **No native control is composited** (Mode A host, the scaffold default; filed, major), and an active accessibility client plus a rotation aborts the process inside `accesskit_android` (filed, critical). |
