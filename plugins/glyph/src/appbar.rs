@@ -1984,14 +1984,29 @@ mod tests {
         insets: WindowInsets,
         width: f64,
     ) -> (Size, RenderRoot<(), AppBarView<()>>) {
+        let mut tcx = TextContext::new();
+        laid_out_with_insets_in(view, insets, width, &mut tcx)
+    }
+
+    /// Like [`laid_out_with_insets`] but shaping through the caller's
+    /// `TextContext`. A byte-identical comparison of two layouts must share one
+    /// context: sibling tests in this binary register the Glyph faces
+    /// process-wide, and a `TextContext` picks those fonts up only when it is
+    /// constructed, so two contexts created on either side of that registration
+    /// shape the title with different metrics (observed: title y 38.0 vs 34.55).
+    fn laid_out_with_insets_in(
+        view: AppBarView<()>,
+        insets: WindowInsets,
+        width: f64,
+        tcx: &mut TextContext,
+    ) -> (Size, RenderRoot<(), AppBarView<()>>) {
         let mut view = Some(view);
         let mut logic = move |_: &mut ()| view.take().expect("built once");
         let mut root: RenderRoot<(), AppBarView<()>> = RenderRoot::new();
         let mut state = ();
         root.rebuild(&mut logic, &mut state);
         root.set_insets(insets);
-        let mut tcx = TextContext::new();
-        let size = root.layout_with_text(Size::new(width, 300.0), &mut tcx as &mut dyn Any);
+        let size = root.layout_with_text(Size::new(width, 300.0), tcx as &mut dyn Any);
         (size, root)
     }
 
@@ -2097,8 +2112,9 @@ mod tests {
         };
         let plain = WindowInsets::new(top_padding(24.0), WindowEdgeInsets::ZERO);
         let zeroed = plain.with_corner_insets(CornerInsets::ZERO);
-        let (sa, ra) = laid_out_with_insets(build_view(), plain, 400.0);
-        let (sb, rb) = laid_out_with_insets(build_view(), zeroed, 400.0);
+        let mut tcx = TextContext::new();
+        let (sa, ra) = laid_out_with_insets_in(build_view(), plain, 400.0, &mut tcx);
+        let (sb, rb) = laid_out_with_insets_in(build_view(), zeroed, 400.0, &mut tcx);
         let (a, b) = (root_bar(&ra), root_bar(&rb));
         assert_eq!(sa, sb);
         assert_eq!(a.interactive.len(), b.interactive.len());
@@ -2121,8 +2137,9 @@ mod tests {
         };
         let plain = WindowInsets::new(top_padding(24.0), WindowEdgeInsets::ZERO);
         let cornered = plain.with_corner_insets(corners((44.0, 30.0), (52.0, 30.0)));
-        let (sa, ra) = laid_out_with_insets(build_view(true), plain, 400.0);
-        let (sb, rb) = laid_out_with_insets(build_view(false), cornered, 400.0);
+        let mut tcx = TextContext::new();
+        let (sa, ra) = laid_out_with_insets_in(build_view(true), plain, 400.0, &mut tcx);
+        let (sb, rb) = laid_out_with_insets_in(build_view(false), cornered, 400.0, &mut tcx);
         let (a, b) = (root_bar(&ra), root_bar(&rb));
         assert_eq!(sa, sb);
         assert_eq!(a.interactive.len(), b.interactive.len());
