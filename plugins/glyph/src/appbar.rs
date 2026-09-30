@@ -29,6 +29,12 @@
 //! title anchoring rules are unchanged (they simply see the shifted edges). A
 //! corner with zero height (full screen, every other platform) shifts nothing.
 //!
+//! The shift assumes the bar spans the window's top edge (its content band
+//! starts at the safe-area top and its left/right edges are the window's). A bar
+//! placed elsewhere (detail pane, sheet, dialog) opts out with
+//! [`AppBarView::corner_shift`]`(false)`; no automatic detection exists (corners
+//! are never consumed; see the `CornerInsets` rustdoc).
+//!
 //! # Elevation
 //!
 //! [`AppBarView::elevated`] is an app-fed flag (the app toggles it off its own
@@ -604,6 +610,7 @@ pub struct AppBarView<State: 'static> {
     leading: Option<AnyView<State>>,
     actions: Vec<AnyView<State>>,
     elevated: bool,
+    corner_shift: bool,
     title_direction: TitleDirection,
     title_position: TitlePosition,
     selection: Option<SelectionBar<State>>,
@@ -621,6 +628,7 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         leading: None,
         actions: Vec::new(),
         elevated: false,
+        corner_shift: true,
         title_direction: TitleDirection::Forward,
         title_position: TitlePosition::Leading,
         selection: None,
@@ -662,6 +670,19 @@ impl<State: 'static> AppBarView<State> {
     /// `on_scroll`; see the [module docs](self)).
     pub fn elevated(mut self, elevated: bool) -> Self {
         self.elevated = elevated;
+        self
+    }
+
+    /// Whether the bar moves its leading/trailing slots out from under the
+    /// iPadOS 26+ window control (`WindowInsets::corner_insets`). Default on;
+    /// pass `false` for a bar that does NOT span the window's top edge (a bar in
+    /// a detail pane of a split view, in a sheet, a dialog or below other
+    /// content): layout cannot see the bar's window-space position and the
+    /// corner value is never consumed, so such a bar would otherwise shift for a
+    /// control it does not sit under.
+    #[must_use]
+    pub fn corner_shift(mut self, enabled: bool) -> Self {
+        self.corner_shift = enabled;
         self
     }
 
@@ -785,6 +806,8 @@ pub struct AppBarWidget {
     /// Leading/trailing slot shifts from the window-control corners (zero when
     /// a corner has no height); set each layout pass.
     corner_shift: (f64, f64),
+    /// Whether the corner shift is applied (`AppBarView::corner_shift`).
+    corner_shift_enabled: bool,
     total_size: Size,
     /// The bar's own height (inset + content, excluding any banner strip). The
     /// surface/shadow/elevation border paint to this, so the banner area below
@@ -872,6 +895,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             last_time: None,
             top_inset: 0.0,
             corner_shift: (0.0, 0.0),
+            corner_shift_enabled: self.corner_shift,
             total_size: Size::ZERO,
             bar_height: 0.0,
             title_pos: Point::ZERO,
@@ -933,6 +957,11 @@ impl<State: 'static> View<State> for AppBarView<State> {
         if prev.elevated != self.elevated {
             element.elevated_target = self.elevated;
             flags |= ChangeFlags::PAINT;
+        }
+
+        if prev.corner_shift != self.corner_shift {
+            element.corner_shift_enabled = self.corner_shift;
+            flags |= ChangeFlags::LAYOUT;
         }
 
         // Face reconcile. A selection-presence toggle is a full face swap: tear
@@ -1153,19 +1182,23 @@ impl Widget for AppBarWidget {
         };
         let top_inset = ctx.window_insets().padding().top;
         self.top_inset = top_inset;
-        let corners = ctx.window_insets().corner_insets;
-        self.corner_shift = (
-            if corners.top_left.height > 0.0 {
-                corners.top_left.width
-            } else {
-                0.0
-            },
-            if corners.top_right.height > 0.0 {
-                corners.top_right.width
-            } else {
-                0.0
-            },
-        );
+        self.corner_shift = if self.corner_shift_enabled {
+            let corners = ctx.window_insets().corner_insets;
+            (
+                if corners.top_left.height > 0.0 {
+                    corners.top_left.width
+                } else {
+                    0.0
+                },
+                if corners.top_right.height > 0.0 {
+                    corners.top_right.width
+                } else {
+                    0.0
+                },
+            )
+        } else {
+            (0.0, 0.0)
+        };
 
         // The bar's own height, laid out either as the large scroll-collapse
         // variant or the compact three-zone bar. Selection mode
@@ -2075,6 +2108,52 @@ mod tests {
         }
         assert_eq!(a.close_rect, b.close_rect);
         assert_eq!(a.title_pos, b.title_pos);
+    }
+
+    #[test]
+    fn corner_shift_opt_out_is_byte_identical_with_nonzero_corners() {
+        let build_view = |shift: bool| -> AppBarView<()> {
+            app_bar("Home")
+                .subtitle("sub")
+                .corner_shift(shift)
+                .leading(leaf_any(40.0, 40.0))
+                .actions(vec![leaf_any(40.0, 40.0), leaf_any(30.0, 30.0)])
+        };
+        let plain = WindowInsets::new(top_padding(24.0), WindowEdgeInsets::ZERO);
+        let cornered = plain.with_corner_insets(corners((44.0, 30.0), (52.0, 30.0)));
+        let (sa, ra) = laid_out_with_insets(build_view(true), plain, 400.0);
+        let (sb, rb) = laid_out_with_insets(build_view(false), cornered, 400.0);
+        let (a, b) = (root_bar(&ra), root_bar(&rb));
+        assert_eq!(sa, sb);
+        assert_eq!(a.interactive.len(), b.interactive.len());
+        for (pa, pb) in a.interactive.iter().zip(b.interactive.iter()) {
+            assert_eq!(pa.origin(), pb.origin());
+            assert_eq!(pa.size(), pb.size());
+        }
+        assert_eq!(a.close_rect, b.close_rect);
+        assert_eq!(a.title_pos, b.title_pos);
+    }
+
+    #[test]
+    fn corner_shift_defaults_on() {
+        let view: AppBarView<()> = app_bar("Home").leading(leaf_any(40.0, 40.0));
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (52.0, 30.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 400.0);
+        let w = root_bar(&root);
+        assert!(w.corner_shift_enabled);
+        assert_eq!(w.interactive[0].origin().x, PAD_X + 44.0);
+    }
+
+    #[test]
+    fn corner_shift_prop_change_marks_layout() {
+        let prev = app_bar("Home");
+        let mut w = build(&prev);
+        assert!(w.corner_shift_enabled);
+        let next = app_bar("Home").corner_shift(false);
+        let flags = rebuild(&prev, &next, &mut w);
+        assert!(!w.corner_shift_enabled);
+        assert!(flags.contains(ChangeFlags::LAYOUT));
     }
 
     // -- Title crossfade staging ---------------------------------------------
