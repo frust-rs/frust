@@ -85,6 +85,12 @@ impl CornerInset {
 ///   Android, desktop, web and iOS < 26 leave them zero.
 /// * Accepted gap: a bar that does not consume the horizontal safe-area insets
 ///   under-shifts for a control on a notched edge (no platform draws one there).
+/// * Bars shift for overlap only when spanning the window's left/right edges
+///   (typical of app bars at the top). Content hosted in a detail pane, sheet,
+///   dialog, or below other content still receives the window-wide corner values
+///   (corners are never consumed; layout cannot see its window-space origin) and
+///   would over-shift. Shipped bars expose `corner_shift(false)` as the author's
+///   opt-out; no automatic detection exists.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CornerInsets {
     /// Top-left corner footprint.
