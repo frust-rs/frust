@@ -29,7 +29,9 @@ selecting between ten sections:
    `decode_frame` measurement rig) plus torch.
 3. **Responsive** — `frust::WindowMetrics` driving a **structural** layout
    switch between a single scrolling column and a two-pane master/detail split
-   at a named breakpoint.
+   at a named breakpoint; also displays a live readout of window-control
+   corner-insets (iPadOS 26+ windowed apps only; zero elsewhere) for gate
+   verification.
 4. **Terminal** — a checked-in byte stream replayed through a **real** VT
    emulator (the pinned `vt100` crate) into a batched, painted 80×45 character
    grid: five on-page profiles (idle / typing / build-log / htop / firehose),
