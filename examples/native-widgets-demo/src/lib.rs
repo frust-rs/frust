@@ -167,16 +167,6 @@ fn logged_deep_link_label(label: &str) -> String {
     }
 }
 
-/// The documented limit on concurrent toasts, per the
-/// [`frust_glyph::toast_host`] v1 policy: exactly one visible at a time,
-/// queued FIFO. The queue is append-only while the app runs, but growth is
-/// bounded by deduplication (no consecutive duplicates) and rate-limiting
-/// (unknown-label toasts at most once per [`UNKNOWN_LABEL_TOAST_INTERVAL`]).
-/// This constant is informational only — the actual queue may grow beyond it
-/// if toasts have distinct messages.
-#[allow(dead_code)]
-const MAX_QUEUED_TOASTS: usize = 8;
-
 /// The minimum interval between unknown-label toast messages (toasts pushed by
 /// [`deep_link_router`] when a deep link names an unrecognized section label).
 /// Two unknown-label toasts within this duration will suppress the second one;
@@ -824,7 +814,7 @@ mod deep_link_tests {
         // The toast host has an append-only cursor, so draining from the front
         // shifts indices and causes messages to be skipped. Verify that
         // push_toast_capped never drains, keeping the queue append-only.
-        let mut queue: Vec<String> = (0..MAX_QUEUED_TOASTS).map(|i| i.to_string()).collect();
+        let mut queue: Vec<String> = (0..8).map(|i| i.to_string()).collect();
         let before_len = queue.len();
         push_toast_capped(&mut queue, "extra".to_string());
         assert!(
