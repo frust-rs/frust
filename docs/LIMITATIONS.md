@@ -5840,6 +5840,8 @@ iOS target, and no real `cdylib`/app binary ever links this crate's own test har
 **Trigger for removal**: gating the macro-expansion test modules behind a dedicated cfg so at most
 one of them compiles into any one linked test binary.
 
+---
+
 ### `corner-insets-ios-26-only` — `WindowInsets::corner_insets` reports zero on all platforms except iPadOS 26+
 
 **Observed**: `WindowInsets::corner_insets` is non-zero only on iPadOS 26+ under the system window control. Android, desktop, web, and iOS < 26 always report zero (by construction: no other shell reads a corner region), so the Glyph and Material app bar shifts never fire there. Bars do not consume the horizontal safe-area insets; corner widths are measured from the safe-area edge, so a hypothetical control on a notched horizontal edge would under-shift (no platform draws one there).
