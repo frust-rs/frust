@@ -273,11 +273,15 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
     ]
 }
 
-/// The date picker: compact (140×40pt in a pair) or inline (300×330pt in the same
-/// pair structure) — always built through [`pair_row_sized`], at the same [`FlexChildS`]
+/// The date picker: compact (140×40pt in a pair) or inline (300×330pt native
+/// cell beside the usual 140pt drawn readout, in the same pair structure) —
+/// always built through [`pair_row_sized`], at the same [`FlexChildS`]
 /// position, so a compact/inline switch never changes the concrete view type
-/// `AnyView::rebuild` walks at that position (only the `width`, `height`, and
-/// `style` *values* differ). A version that instead swapped in a differently shaped
+/// `AnyView::rebuild` walks at that position (only the widths, `height`, and
+/// `style` *values* differ). Inline, the row is 452pt — over the 319pt phone
+/// pair budget [`PAIR_CELL_W`] documents — because the platform's inline
+/// picker is ~300pt wide by itself; the readout cell that a phone pushes
+/// off-screen is repeated in the block under the row. A version that instead swapped in a differently shaped
 /// tree per mode (the picker bare in one branch, wrapped in a pair's `row`
 /// in the other) tore the native picker down and rebuilt it on every
 /// toggle: `AnyView::rebuild` compares the *inner* boxed view's concrete
@@ -295,14 +299,14 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
     } else {
         NativeDatePickerStyle::Compact
     };
-    let w = if inline { 300.0 } else { PAIR_CELL_W };
+    let native_w = if inline { 300.0 } else { PAIR_CELL_W };
     let h = if inline { 330.0 } else { 40.0 };
     let picker = any(native_date_picker(value)
         .min(date_min())
         .max(date_max())
         .style(style)
         .content_description("Native date picker")
-        .size(w, h)
+        .size(native_w, h)
         .on_change(|requested| {
             bump(date_events_sig());
             date_sig().set(requested);
@@ -324,7 +328,7 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
         classes,
         note,
         CellFit::Natural,
-        w,
+        (native_w, PAIR_CELL_W),
         h,
         picker,
         readout(format_date(value)),

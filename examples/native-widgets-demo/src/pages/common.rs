@@ -312,7 +312,12 @@ pub fn page_header(section: usize) -> FlexChild<S> {
 
 /// One comparison column's width (logical px). Two of these plus [`PAIR_GAP`]
 /// fit an iPhone SE: 375pt less 16 (page) + 12 (block) of padding on each side
-/// leaves 319pt, against `140 + 12 + 140 = 292`.
+/// leaves 319pt, against `140 + 12 + 140 = 292`. The one documented
+/// exception is the inline date picker (`new_controls::date_block`): the
+/// platform's inline picker is ~300pt wide by itself, so its native cell is
+/// 300pt and the row runs `300 + 12 + 140 = 452` through [`pair_row_sized`]'s
+/// separate widths; the drawn cell there is a readout the block repeats
+/// under the row, so a phone loses nothing off-screen.
 pub const PAIR_CELL_W: f64 = 140.0;
 
 /// The gutter between a pair's native and drawn cells.
@@ -360,23 +365,28 @@ pub fn pair_row(
         classes,
         note,
         fit,
-        PAIR_CELL_W,
+        (PAIR_CELL_W, PAIR_CELL_W),
         height,
         native,
         drawn,
     )
 }
 
-/// One comparison row with explicit cell width: `title`, the per-platform native-class caption, a
-/// `note`, then the REAL platform control on the left and its frust-drawn
-/// counterpart on the right, in cells of exactly the same size.
+/// One comparison row with explicit cell widths — `(native, drawn)`, one
+/// shared height: `title`, the per-platform native-class caption, a `note`,
+/// then the REAL platform control on the left and its frust-drawn
+/// counterpart on the right. [`pair_row`] is the equal-width case every
+/// ordinary pair uses; pass different widths only when the platform control
+/// has an intrinsic size the drawn cell need not match (the inline date
+/// picker — see [`PAIR_CELL_W`]), keeping the row's tree shape identical to
+/// the equal-width one so a width change never remounts the native control.
 #[allow(clippy::too_many_arguments)]
 pub fn pair_row_sized(
     title: &str,
     classes: NativeClasses,
     note: &str,
     fit: CellFit,
-    width: f64,
+    (native_width, drawn_width): (f64, f64),
     height: f64,
     native: AnyView<S>,
     drawn: AnyView<S>,
@@ -389,9 +399,9 @@ pub fn pair_row_sized(
         inflexible(caption(note)),
         gap(6.0),
         inflexible(row(vec![
-            inflexible(cell(fit, width, height, native)),
+            inflexible(cell(fit, native_width, height, native)),
             gap_h(PAIR_GAP),
-            inflexible(cell(fit, width, height, drawn)),
+            inflexible(cell(fit, drawn_width, height, drawn)),
         ])),
     ])
 }
