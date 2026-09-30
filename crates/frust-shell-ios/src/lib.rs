@@ -380,6 +380,33 @@ macro_rules! ios_app {
             $crate::ffi_glue::set_insets(handle, vp_l, vp_t, vp_r, vp_b, vi_l, vi_t, vi_r, vi_b)
         }
 
+        /// `frust_set_corner_insets`: deliver the iPadOS 26+ window
+        /// control's footprint as `WindowInsets.corner_insets`. The eight
+        /// `f32`s are its protrusion beyond the safe area per **physical**
+        /// corner — top-left, top-right, bottom-left, bottom-right — each
+        /// width then height, in **logical points** (no scale division, like
+        /// `frust_set_insets`). Swift calls this from `pushInsets` and
+        /// `viewDidLayoutSubviews` on iOS 26+ only; the corners are never
+        /// consumed on the Rust side.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn frust_set_corner_insets(
+            handle: *mut ::core::ffi::c_void,
+            tl_w: f32,
+            tl_h: f32,
+            tr_w: f32,
+            tr_h: f32,
+            bl_w: f32,
+            bl_h: f32,
+            br_w: f32,
+            br_h: f32,
+        ) {
+            $crate::ffi_glue::set_corner_insets(
+                handle, tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h,
+            )
+        }
+
         /// `frust_on_deep_link`: deliver a platform deep link (cold-start
         /// or running) into the process-wide deep-link source.
         /// `url` is the URL's `absoluteString` as a UTF-8 C string.

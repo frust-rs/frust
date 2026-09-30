@@ -184,6 +184,21 @@ void  frust_set_insets(
     float vi_l, float vi_t, float vi_r, float vi_b
 );
 
+// Corner insets (iPadOS 26+ window control). The eight floats are the
+// control's protrusion beyond the safe area per PHYSICAL corner — top-left,
+// top-right, bottom-left, bottom-right — each width then height, in logical
+// points (no scale multiplication, like frust_set_insets). A corner with
+// either dimension 0 is pushed as 0x0. The Rust side merges these into
+// WindowInsets.corner_insets (keeping the frust_set_insets edges) and never
+// consumes them. iOS 26+ only: FrustViewController pushes from both
+// pushInsets and viewDidLayoutSubviews; below iOS 26 nothing is pushed and
+// the corners stay zero.
+void  frust_set_corner_insets(
+    void *handle,
+    float tl_w, float tl_h, float tr_w, float tr_h,
+    float bl_w, float bl_h, float br_w, float br_h
+);
+
 // System UI / SystemChrome: peek the process-wide `frust::set_system_ui_mode`
 // override slot, returning `frust_shell_common::system_ui::encoded_state()`'s
 // packed `(generation, mode)` u64 verbatim (see that fn's doc comment for the
