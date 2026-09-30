@@ -185,27 +185,26 @@ fn should_rate_limit_unknown_toast(last_toast_at: Option<Instant>, now: Instant)
     }
 }
 
-/// Append `message` to `queue`, deduplicating it if it equals the last queued
-/// message. Pure (touches no signal) so it is unit-testable on a plain `Vec`
-/// — [`push_toast`] is the signal-touching wrapper every toast producer in
-/// this app goes through. The queue is append-only (never drained from the
-/// front) to respect [`frust_glyph::toast_host`]'s append-only cursor
-/// semantics.
-fn push_toast_capped(queue: &mut Vec<String>, message: String) {
-    // Collapse if this message equals the last queued one, so a rapid burst of
-    // identical toasts (e.g., repeated rate-limited unknown-label attempts)
-    // does not bloat the queue.
-    if queue.last() != Some(&message) {
-        queue.push(message);
-    }
+/// Append `message` to the toast log — append-only and never collapsing.
+/// [`frust_glyph::toast_host`] consumes the log by index and shows each entry
+/// once, so a push equal to an entry it has already shown is a NEW request it
+/// must show again (collapsing against the log's tail silently dropped every
+/// legitimately repeated toast), and draining from the front would shift the
+/// pending entries under its cursor. Growth is bounded at the producers
+/// instead: [`should_rate_limit_unknown_toast`] gates the only toast an
+/// outside process can trigger. Pure (touches no signal) so it is
+/// unit-testable on a plain `Vec` — [`push_toast`] is the signal-touching
+/// wrapper every toast producer in this app goes through.
+fn append_toast(queue: &mut Vec<String>, message: String) {
+    queue.push(message);
 }
 
-/// Push `message` onto `toasts` via [`push_toast_capped`] — call this rather
-/// than updating [`NativeWidgetsDemoState::toasts`] directly, so the queue's
-/// deduplication and bounds hold regardless of which page or event handler is
+/// Push `message` onto `toasts` via [`append_toast`] — call this rather than
+/// updating [`NativeWidgetsDemoState::toasts`] directly, so the log's
+/// append-only contract holds regardless of which page or event handler is
 /// pushing.
 pub(crate) fn push_toast(toasts: RwSignal<Vec<String>>, message: String) {
-    toasts.update(|queue| push_toast_capped(queue, message));
+    toasts.update(|queue| append_toast(queue, message));
 }
 
 /// The effect a delivered [`DeepLink`] resolves to, as decided by
@@ -271,6 +270,8 @@ fn deep_link_router(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemo
                             None => "Unknown section in deep link".to_string(),
                         };
                         push_toast(state.toasts, message);
+                        // Stamped only on an actual enqueue: a suppressed
+                        // attempt must not extend the quiet window.
                         state.last_unknown_toast_at.set(Some(now));
                     }
                     log::warn!(
@@ -775,52 +776,33 @@ mod deep_link_tests {
     }
 
     #[test]
-    fn push_toast_capped_deduplicates_consecutive_messages() {
+    fn append_toast_keeps_a_repeated_message_as_a_new_request() {
+        // The host shows each log entry once, by index: a message equal to
+        // the last one is a second request, not a duplicate to collapse.
         let mut queue: Vec<String> = Vec::new();
-        push_toast_capped(&mut queue, "same".to_string());
-        push_toast_capped(&mut queue, "same".to_string());
-        push_toast_capped(&mut queue, "same".to_string());
-        assert_eq!(
-            queue,
-            vec!["same".to_string()],
-            "consecutive duplicates collapsed"
-        );
-        push_toast_capped(&mut queue, "different".to_string());
-        assert_eq!(
-            queue,
-            vec!["same".to_string(), "different".to_string()],
-            "different message appended"
-        );
-        push_toast_capped(&mut queue, "different".to_string());
-        assert_eq!(
-            queue,
-            vec!["same".to_string(), "different".to_string()],
-            "duplicate of last message rejected"
-        );
-        push_toast_capped(&mut queue, "third".to_string());
-        assert_eq!(
-            queue,
-            vec![
-                "same".to_string(),
-                "different".to_string(),
-                "third".to_string()
-            ],
-            "new message appended after dedup"
-        );
+        append_toast(&mut queue, "same".to_string());
+        append_toast(&mut queue, "same".to_string());
+        append_toast(&mut queue, "different".to_string());
+        append_toast(&mut queue, "different".to_string());
+        assert_eq!(queue, vec!["same", "same", "different", "different"]);
     }
 
     #[test]
-    fn push_toast_capped_is_append_only_never_drains() {
+    fn push_toast_through_the_signal_appends_repeats_too() {
+        let toasts: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+        push_toast(toasts, "same".to_string());
+        push_toast(toasts, "same".to_string());
+        assert_eq!(toasts.get_untracked(), vec!["same", "same"]);
+    }
+
+    #[test]
+    fn append_toast_never_drains_from_the_front() {
         // The toast host has an append-only cursor, so draining from the front
-        // shifts indices and causes messages to be skipped. Verify that
-        // push_toast_capped never drains, keeping the queue append-only.
+        // shifts indices and causes messages to be skipped.
         let mut queue: Vec<String> = (0..8).map(|i| i.to_string()).collect();
         let before_len = queue.len();
-        push_toast_capped(&mut queue, "extra".to_string());
-        assert!(
-            queue.len() >= before_len,
-            "queue must be append-only, never shrink from the front"
-        );
+        append_toast(&mut queue, "extra".to_string());
+        assert_eq!(queue.len(), before_len + 1, "append-only, never shrinks");
         assert_eq!(queue.last().map(String::as_str), Some("extra"));
         assert_eq!(
             queue.first().map(String::as_str),
@@ -861,7 +843,9 @@ mod deep_link_tests {
     /// append-only queue semantics work correctly. The host keeps a `next_index`
     /// cursor into the queue; on each rebuild it clamps the cursor to the
     /// (possibly shorter) new length and then calls `take_next()` to consume
-    /// messages in order.
+    /// messages in order. Every push goes through the app's own enqueue path
+    /// ([`append_toast`]), so the model exercises what the app does, not a
+    /// bare `Vec::push`.
     struct ToastCursorModel {
         queue: Vec<String>,
         next_index: usize,
@@ -873,6 +857,11 @@ mod deep_link_tests {
                 queue: Vec::new(),
                 next_index: 0,
             }
+        }
+
+        /// The app's enqueue path: [`push_toast`] on a plain `Vec`.
+        fn push(&mut self, message: &str) {
+            append_toast(&mut self.queue, message.to_string());
         }
 
         /// Simulate the host's rebuild: clamp the cursor to the current queue
@@ -900,7 +889,7 @@ mod deep_link_tests {
 
         // Push first batch: 0-3
         for i in 0..4 {
-            model.queue.push(i.to_string());
+            model.push(&i.to_string());
         }
         model.clamp_cursor();
 
@@ -912,7 +901,7 @@ mod deep_link_tests {
 
         // Push batch 2: 4-6
         for i in 4..7 {
-            model.queue.push(i.to_string());
+            model.push(&i.to_string());
         }
         model.clamp_cursor();
 
@@ -922,9 +911,9 @@ mod deep_link_tests {
         }
 
         // Push batch 3: 7-9
-        model.queue.push("7".to_string());
-        model.queue.push("8".to_string());
-        model.queue.push("9".to_string());
+        model.push("7");
+        model.push("8");
+        model.push("9");
         model.clamp_cursor();
 
         // Consume remaining: 7-9
@@ -937,5 +926,22 @@ mod deep_link_tests {
             consumed, expected,
             "every message consumed in order, none skipped"
         );
+    }
+
+    #[test]
+    fn toast_cursor_model_shows_a_repeated_message_again() {
+        // The property the tail-collapse broke: push X, the host shows it,
+        // push X again (a second unknown label after the quiet window, a
+        // second timer failure) — the host must show it again.
+        let mut model = ToastCursorModel::new();
+        let mut consumed = Vec::new();
+        model.push("X");
+        model.clamp_cursor();
+        consumed.extend(model.take_next());
+        model.push("X");
+        model.clamp_cursor();
+        consumed.extend(model.take_next());
+        assert_eq!(consumed, vec!["X", "X"], "shown twice, once per request");
+        assert_eq!(model.take_next(), None, "nothing pending afterwards");
     }
 }

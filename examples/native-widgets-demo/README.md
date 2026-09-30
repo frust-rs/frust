@@ -72,10 +72,12 @@ echoed into the toast only when it is ASCII alphanumerics/`-`, 32 characters
 or fewer (otherwise a fixed "Unknown section in deep link" message; either
 way the raw label's first 128 characters still reach the log, `{:?}`-escaped
 after the cut — never sliced inside a multi-byte character — plus the
-original byte length). The toast queue is append-only: messages are
-never dropped from the front to respect the toast host's cursor semantics;
-growth is bounded by collapsing consecutive duplicates and rate-limiting
-unknown-label toasts to at most one per ~2 seconds. Deliveries dedupe by
+original byte length). The toast queue is an append-only log the toast host
+walks by index: nothing is dropped from the front (that would shift entries
+under its cursor) and nothing is collapsed (a repeated message is a new
+request the host must show again); growth is bounded at the source by
+rate-limiting unknown-label toasts, the only toast an outside process can
+trigger, to at most one per ~2 seconds. Deliveries dedupe by
 `DeepLink::sequence`, not URL text. On Android:
 
 ```
