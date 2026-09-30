@@ -189,10 +189,14 @@ build from.
   `layout` — Material's `navigation_bar` is one such self-insetting `bottom_bar`, see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)), and `body` is never pre-inset; `fab` is the one slot
   the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw
-  window edge otherwise. **Bar contract:** a self-insetting (or `safe_area`-wrapped) top bar shifts its
-  leading slot right by `top_left.width` and its trailing edge left by `top_right.width` whenever that
-  corner's height > 0; the Scaffold is unchanged. The shipped bars are listed in
-  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md).
+  window edge otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars
+  (listed in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by
+  `top_left.width` and their trailing edge left by `top_right.width` whenever that corner's height > 0;
+  the Scaffold is unchanged. The shift assumes the bar spans the window's top edge: layout cannot see a
+  bar's window-space position and corners are never consumed, so there is no automatic detection — a bar
+  hosted in a pane, sheet or dialog opts out with `corner_shift(false)`. Other catalogs' top bars
+  (Cupertino's navigation bar, the shadcn/beUI headers) do not yet apply the rule; see
+  `corner-insets-ios-26-only` in [LIMITATIONS.md](LIMITATIONS.md).
 - Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)`
   and `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
   clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface
