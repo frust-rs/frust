@@ -340,7 +340,14 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   from the points where the window's shape actually changes, guarded by the shared
   `WindowMetricsPublisher` against per-frame churn (see
   [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Desktop seeds insets as the default, since winit
-  0.30 offers no cross-platform safe-area accessor.
+  0.30 offers no cross-platform safe-area accessor. On iOS 26+, `FrustViewController` also reads
+  the corner-adapted safe-area regions (`UIView.edgeInsets(for: .safeArea(cornerAdaptation:))`,
+  horizontal and vertical), subtracts `safeAreaInsets` per edge, and pushes four **physical**
+  window-control corner sizes through `frust_set_corner_insets` (beside `frust_set_insets`) from
+  both `pushInsets` and `viewDidLayoutSubviews`; the Rust handle merges the two calls into one
+  `WindowInsets` (corners are never consumed; zero on Android, desktop, web and below iOS 26). An
+  app's `FrustSceneDelegate` subclass owns `preferredWindowingControlStyle(for:)` and
+  `windowScene.sizeRestrictions` itself — no shell support, documented on the Swift class.
 - **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
   calls androidx `enableEdgeToEdge` with transparent status/navigation-bar `SystemBarStyle`s, then
   on API < 35 adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the status/nav-bar
@@ -353,7 +360,9 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   view_padding l=… t=… r=… b=… view_insets l=… t=… r=… b=… scale=…`
   (`crates/frust-shell-android/src/app/surface.rs`) — debug builds only (`cfg!(debug_assertions)`),
   since the Android logger is capped at Info in every build so an unconditional `log::debug!` would
-  never surface.
+  never surface. The iOS counterpart is `frust-corner-insets tl=… tr=… bl=… br=…`
+  (`crates/frust-shell-ios/src/app/surface.rs`), also debug builds only (the iOS stderr logger
+  installs Info by default; `FRUST_LOG` overrides).
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
   re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
   on the resolved brightness actually moving so an override swapping one dark theme for another

@@ -18,7 +18,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-core::view` / `widget` | `View` (per-frame declarative descriptor) and `Widget` (retained tree element: layout/paint/event) — the core declarative/retained trait pair |
 | `frust-core::app` / `tree` | `RenderRoot` owns the widget tree and theme, driving the rebuild → layout → paint → event pass; `WidgetTree`/`RenderRoot::inspect()` expose a read-only pre-order snapshot for external tooling |
 | `frust-core::component` | `Component`/`ComponentView`/`ComponentWidget` — a stateful-widget analog with retained state and its own reactive `Owner` |
-| `frust-core::event` / `animation` / `semantics` | Input/gesture routing, animation curve vocabulary, window insets, and pull-based accesskit semantics |
+| `frust-core::event` / `animation` / `semantics` | Input/gesture routing, animation curve vocabulary, window insets (incl. window-control corners), and pull-based accesskit semantics |
 | `frust-scene::scene` / `builder` | `Scene`/`SceneBuilder`/`Command` — the renderer-agnostic vector display list consumed by `frust-render`. `Command::SceneTexture { id, dest, transform }` draws a caller-owned GPU texture scaled to fill `dest`; `id` is opaque scene-layer data (the same precedent `ShaderProgram`'s own id sets) only the render backend resolves — an unregistered id draws nothing. `Command::ShaderQuad`'s fragment-shader output is treated as premultiplied alpha and rendered by the engine into such a texture ahead of the scene pass |
 | `frust-scene::glyph` / `shader` | Carries shaped text and opaque WGSL shader handles from `frust-text` through the `Scene` |
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
@@ -126,7 +126,8 @@ delivered via `provide_context` as a **plain value, not a signal** — exactly l
 `WindowInsets` already are. Only `deep_link` and `back` are true `RwSignal`s in the host-signal
 layer; theme, insets, and now metrics are re-provided plain values each time they change. A widget
 or component reads them inside `Component::build` via `use_context::<WindowMetrics>()` without any
-signal subscription.
+signal subscription. `WindowMetrics.insets` carries the window-control corners too; a corner change
+republishes both `WindowInsets` and `WindowMetrics` through the same guarded path.
 
 **Contexts are visible inside both build and event passes.** A root-level `provide_context` (the
 shell's root `Owner`) makes its context available to every `Component::build` **and** every
