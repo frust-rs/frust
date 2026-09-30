@@ -37,6 +37,9 @@
 //! (the iPadOS 26+ window control). The band height is unchanged, the other
 //! corners are ignored, the bottom bar is unaffected, and the value is never
 //! consumed by `safe_area`, so a bar under a top-consuming safe area still sees it.
+//! The shift assumes the bar spans the window's top edge; a bar placed elsewhere
+//! (detail pane, sheet, dialog) opts out with `corner_shift(false)`. There is no
+//! automatic detection.
 //!
 //! The **title** is the one child a top/collapsing bar fully owns when given as
 //! a string: composed as a child [`frust::TextView`] (no hand-shaped text),

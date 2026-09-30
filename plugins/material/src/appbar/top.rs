@@ -46,6 +46,7 @@ pub struct AppBarView<State: 'static> {
     leading: Option<AnyView<State>>,
     actions: Vec<AnyView<State>>,
     center_title: bool,
+    corner_shift: bool,
     density: AppBarDensity,
     shape_family: AppBarShapeFamily,
     toolbar_height: Option<f64>,
@@ -62,6 +63,7 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         leading: None,
         actions: Vec::new(),
         center_title: false,
+        corner_shift: true,
         density: AppBarDensity::Regular,
         shape_family: AppBarShapeFamily::Square,
         toolbar_height: None,
@@ -142,6 +144,17 @@ impl<State: 'static> AppBarView<State> {
     /// actions (`centerTitle`, default `false`).
     pub fn center_title(mut self, center: bool) -> Self {
         self.center_title = center;
+        self
+    }
+
+    /// Shift the row out from under a protruding window-control corner (default
+    /// `true`). Pass `false` for a bar that does not span the window's top edge
+    /// (detail pane, sheet, dialog, below other content): layout cannot see the
+    /// bar's window-space position and the corner value is never consumed, so
+    /// such a bar would otherwise over-shift.
+    #[must_use]
+    pub fn corner_shift(mut self, enabled: bool) -> Self {
+        self.corner_shift = enabled;
         self
     }
 
@@ -228,6 +241,7 @@ pub struct AppBarWidget {
     /// Whether `slots[0]` is the leading slot (vs. the title).
     has_leading: bool,
     center_title: bool,
+    corner_shift: bool,
     band: f64,
     shape_family: AppBarShapeFamily,
     background: Option<Color>,
@@ -256,6 +270,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             slots,
             has_leading: self.leading.is_some(),
             center_title: self.center_title,
+            corner_shift: self.corner_shift,
             band: self.band(),
             shape_family: self.shape_family,
             background: self.background,
@@ -301,6 +316,10 @@ impl<State: 'static> View<State> for AppBarView<State> {
             element.center_title = self.center_title;
             flags |= ChangeFlags::LAYOUT;
         }
+        if element.corner_shift != self.corner_shift {
+            element.corner_shift = self.corner_shift;
+            flags |= ChangeFlags::LAYOUT;
+        }
         let band = self.band();
         if element.band != band {
             element.band = band;
@@ -339,16 +358,22 @@ impl Widget for AppBarWidget {
 
         // Shift the row out from under a protruding window-control corner (the
         // iPadOS 26+ traffic lights); see the module docs of `appbar`.
-        let corners = ctx.window_insets().corner_insets;
-        let shift_l = if corners.top_left.height > 0.0 {
-            corners.top_left.width
+        let (shift_l, shift_r) = if self.corner_shift {
+            let corners = ctx.window_insets().corner_insets;
+            (
+                if corners.top_left.height > 0.0 {
+                    corners.top_left.width
+                } else {
+                    0.0
+                },
+                if corners.top_right.height > 0.0 {
+                    corners.top_right.width
+                } else {
+                    0.0
+                },
+            )
         } else {
-            0.0
-        };
-        let shift_r = if corners.top_right.height > 0.0 {
-            corners.top_right.width
-        } else {
-            0.0
+            (0.0, 0.0)
         };
 
         let mut left = PAD_X + shift_l;
@@ -551,6 +576,44 @@ mod tests {
             w.slots[3].origin().x + w.slots[3].size().width,
             400.0 - PAD_X - 52.0
         );
+    }
+
+    #[test]
+    fn corner_shift_opt_out_is_byte_identical_with_nonzero_corners() {
+        let bc = BoxConstraints::loose(Size::new(400.0, 200.0));
+        let mk = |shift: Option<bool>| {
+            let mut view: AppBarView<()> = app_bar("Home")
+                .leading(leaf_any(40.0, 40.0))
+                .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+            if let Some(b) = shift {
+                view = view.corner_shift(b);
+            }
+            build(&view)
+        };
+        let mut plain = mk(None);
+        let plain_size = layout(&mut plain, &bc);
+        let mut opted = mk(Some(false));
+        let opted_size = layout_with_corners(&mut opted, &bc, top_corners());
+        assert_eq!(plain_size, opted_size);
+        assert_eq!(plain.slots.len(), opted.slots.len());
+        for (a, b) in plain.slots.iter().zip(opted.slots.iter()) {
+            assert_eq!(a.origin(), b.origin());
+            assert_eq!(a.size(), b.size());
+        }
+    }
+
+    #[test]
+    fn corner_shift_defaults_on() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        assert_eq!(w.slots[0].origin().x, PAD_X + 44.0);
     }
 
     #[test]
