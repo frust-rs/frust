@@ -5840,6 +5840,20 @@ iOS target, and no real `cdylib`/app binary ever links this crate's own test har
 **Trigger for removal**: gating the macro-expansion test modules behind a dedicated cfg so at most
 one of them compiles into any one linked test binary.
 
+### `corner-insets-ios-26-only` — `WindowInsets::corner_insets` reports zero on all platforms except iPadOS 26+
+
+**Observed**: `WindowInsets::corner_insets` is non-zero only on iPadOS 26+ under the system window control. Android, desktop, web, and iOS < 26 always report zero (by construction: no other shell reads a corner region), so the Glyph and Material app bar shifts never fire there. Bars do not consume the horizontal safe-area insets; corner widths are measured from the safe-area edge, so a hypothetical control on a notched horizontal edge would under-shift (no platform draws one there).
+
+**Applies to**: Android, desktop, web, and iOS < 26; the `frust_glyph::app_bar` and `frust_material::{app_bar, search_app_bar, sliver_app_bar}` widget implementations.
+
+**Why not fixed**: nothing to report elsewhere. The notched-edge case has no producer. Android's edge-to-edge model has no corner control.
+
+**Watch item** (unconfirmed): a developer-forum report that UIKit's corner layout guide does not reset to zero when a window returns to full screen.
+
+**Evidence**: plan fplan_000001a0ed6d3e3a5vOFrNW1, research rsa_000001a0ed6cf8b2zqGLZEkL + rsa_000001a0ed7142ce7O3dRUAf, gate g4-01 (pending).
+
+---
+
 ### `bench-sub-markers-off-frame-thread-never-emitted` — a scenario sub-marker raised from a pool thread is dropped, not queued
 
 **Observed**: `frust-shell-common`'s scenario-marker route (`crates/frust-shell-common/src/perf.rs`)
