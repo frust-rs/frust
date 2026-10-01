@@ -4,7 +4,8 @@
 //! shell runs under.
 
 use frust_core::event::{
-    EditCommand, EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
+    EditCommand, EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerId,
+    PointerPhase,
 };
 use frust_core::selection_toolbar::SelectionToolbarRequest;
 use frust_reactive::ReactiveRuntime;
@@ -59,7 +60,8 @@ impl IosAppHandle {
     /// receives physical pixels and divides by the display density — this path
     /// passes `x`/`y` straight through with no scale division. First-touch only
     /// in v1: the Swift side forwards a single contact as
-    /// [`PointerButton::Primary`]. The redraw is implicit — the `CADisplayLink`
+    /// [`PointerButton::Primary`] on [`PointerId::touch`]`(0)`, delivered as an
+    /// [`InputEvent::PointerContact`]. The redraw is implicit — the `CADisplayLink`
     /// loop posts a frame every vsync, so the mutated state is picked up on the
     /// next `frame()` without an explicit schedule (contrast the desktop shell's
     /// `request_redraw`).
@@ -80,20 +82,30 @@ impl IosAppHandle {
         // frame-boundary-interpolated position; Down/Up/Cancel still pass
         // through losslessly. When the kill switch disabled the resampler,
         // deliver directly instead — pre-resampling behavior verbatim.
+        //
+        // Every contact is `touch(0)` here: the platform side forwards one
+        // contact, and it is the gesture's first. It travels as an identified
+        // `PointerContact` so the root's multi-contact contract (and the
+        // resampler's per-contact lane) apply to it.
+        let pointer_id = PointerId::touch(0);
         if self.resampler.is_enabled() {
             let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.resampler.push(RawPointerSample {
+                pointer_id,
                 phase: core_phase,
                 position,
                 button: PointerButton::Primary,
                 time_nanos,
             });
         } else {
-            let event = InputEvent::Pointer(PointerEvent {
-                phase: core_phase,
-                position,
-                button: PointerButton::Primary,
-            });
+            let event = InputEvent::PointerContact {
+                pointer_id,
+                event: PointerEvent {
+                    phase: core_phase,
+                    position,
+                    button: PointerButton::Primary,
+                },
+            };
             let app = &mut self.app;
             let _ = under_root_owner(|| app.event(&event));
         }

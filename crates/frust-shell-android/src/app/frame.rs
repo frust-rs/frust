@@ -367,8 +367,14 @@ impl AndroidAppHandle {
             let app = &mut self.app;
             let scratch = &self.pointer_scratch;
             under_root_owner(|| {
+                // Each sample rebuilds the identified carrier for its own
+                // lane's contact, so the root routes it under the
+                // multi-contact contract.
                 for sample in scratch {
-                    let _ = app.event(&InputEvent::Pointer(*sample));
+                    let _ = app.event(&InputEvent::PointerContact {
+                        pointer_id: sample.pointer_id,
+                        event: sample.event,
+                    });
                 }
             });
         }

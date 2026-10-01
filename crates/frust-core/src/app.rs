@@ -22,8 +22,9 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent, OverlayEvent,
-    OverlayEventKind, PointerButton, PointerEvent, PointerPhase, RequestPass,
+    ContactPass, CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
+    OverlayEvent, OverlayEventKind, PointerButton, PointerEvent, PointerId, PointerPhase,
+    RequestPass,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -297,13 +298,20 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// Monotonic widget-id counter, borrowed by each `BuildCtx`.
     next_id: u64,
     window_size: Size,
-    /// Whether a pointer is currently down-and-captured somewhere in the tree.
-    /// Set on a `Down` whose dispatch requested capture, cleared on `Up`/`Cancel`.
-    /// Root-level mirror of the per-container `active` path bookkeeping.
-    pointer_captured: bool,
+    /// The **claimant** of the pointer capture in flight, if any: the contact
+    /// whose `Down` requested capture. Set on that `Down`, cleared only by the
+    /// claimant's own `Up`/`Cancel` — another contact's release never touches
+    /// it (rule (c) of [`InputEvent::PointerContact`]'s multi-contact contract).
+    /// Root-level mirror of the per-container `active` path bookkeeping, which
+    /// is keyed on the same claimant (see [`crate::widget::ChildPod::set_active`]).
+    capture_claimant: Option<PointerId>,
+    /// Whether the live capture's captor opted into the gesture's other
+    /// contacts ([`EventCtx::capture_contacts`]) on the `Down` it captured
+    /// with. Meaningless — and kept `false` — while nothing is captured.
+    capture_contacts: bool,
     /// Whether some widget in the tree currently holds focus. Root-level mirror of
     /// the per-container `focused` path bookkeeping (the focus analog of
-    /// `pointer_captured`): set when a dispatch requested focus, cleared by a
+    /// `capture_claimant`): set when a dispatch requested focus, cleared by a
     /// session release — a blur-on-outside-tap `Down`, an explicit focus release,
     /// a widget publishing an inactive IME surface, or the generic-unmount orphan
     /// drain in [`RenderRoot::rebuild`] (see [`release_focus_session_in`]).
@@ -603,7 +611,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             prev_view: None,
             next_id: 0,
             window_size: Size::ZERO,
-            pointer_captured: false,
+            capture_claimant: None,
+            capture_contacts: false,
             focus_active: false,
             focus_surface: None,
             // Past a fresh pod's `0` stamp, and past the `(0, 0)` a rootless
@@ -758,7 +767,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// Whether a captured pointer gesture is currently in flight.
     pub fn is_pointer_captured(&self) -> bool {
-        self.pointer_captured
+        self.capture_claimant.is_some()
+    }
+
+    /// The contact that claimed the pointer capture in flight — the only one
+    /// whose `Up`/`Cancel` can end it — or `None` while nothing is captured.
+    pub fn pointer_capture_claimant(&self) -> Option<PointerId> {
+        self.capture_claimant
     }
 
     /// Whether some widget in the tree currently holds keyboard/IME focus.
@@ -2065,8 +2080,19 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// requested a redraw; the shell turns that into a `window.request_redraw()`.
     ///
     /// Root capture bookkeeping mirrors the per-container `active`-child model: a
-    /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
-    /// and `Cancel` release it (never a window-leave).
+    /// `Down` whose dispatch requested capture marks a gesture in flight and
+    /// latches the contact that sent it as the gesture's claimant; the
+    /// claimant's `Up` and `Cancel` release it (never a window-leave, and never
+    /// another contact's release).
+    ///
+    /// Pointer contacts are gated **first**, before anything else runs: an
+    /// [`InputEvent::PointerContact`] is unwrapped into the plain
+    /// [`InputEvent::Pointer`] every widget matches on, with
+    /// [`EventCtx::pointer_id`](crate::event::EventCtx::pointer_id) reporting its
+    /// id, and a contact the multi-contact contract does not route — an
+    /// additional contact with nothing captured, or one the captor did not opt
+    /// into — is dropped here with an empty outcome (see that variant's
+    /// *Multi-contact contract*). A bare `InputEvent::Pointer` is the mouse.
     ///
     /// Root hover bookkeeping is the third recorded path, and the one this pass
     /// *derives* rather than merely mirrors: an **uncaptured** `Move` opens a hover
@@ -2123,6 +2149,41 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
         };
+
+        // The multi-contact gate (`InputEvent::PointerContact`'s contract). A
+        // contact is unwrapped into the plain `Pointer` every widget matches on,
+        // so everything below sees one pointer shape; a bare `Pointer` is the
+        // mouse. Any other event dispatches under the contact the enclosing pass
+        // carries (the overlay pre-pass re-enters this method with a broadcast
+        // that must keep its gesture's id), or the mouse at the top level.
+        let unwrapped;
+        let (event, pointer_id) = match event {
+            InputEvent::PointerContact {
+                pointer_id,
+                event: pointer,
+            } => {
+                unwrapped = InputEvent::Pointer(*pointer);
+                (&unwrapped, *pointer_id)
+            }
+            InputEvent::Pointer(_) => (event, PointerId::MOUSE),
+            _ => (event, crate::event::current_pointer_id()),
+        };
+        let secondary = if matches!(event, InputEvent::Pointer(_)) {
+            match self.contact_route(pointer_id) {
+                Some(secondary) => secondary,
+                // Rule (b), or rule (c) for a captor that did not opt in: the
+                // contact reaches nothing and moves no root state.
+                None => return EventOutcome::default(),
+            }
+        } else {
+            false
+        };
+        // Published for the whole dispatch: `EventCtx::new` seeds
+        // `pointer_id()` from it (so the id survives a component boundary),
+        // `capture_contacts` records its opt-in into it, and `ChildPod::set_active`
+        // reads its `secondary` mark to keep every container's active link on
+        // the claimant. Restored on drop, so a nested pass scopes its own.
+        let contact_pass = ContactPass::enter(pointer_id, secondary);
 
         // The overlay pre-pass runs before every other thing this method does —
         // before the hover derivation, before the cursor bracket, before the
@@ -2187,16 +2248,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // cannot outlive the finger (`docs/LIMITATIONS.md`'s
         // `hover-window-leave-standing`). A scroll, key, IME, or the housekeeping
         // broadcast leaves a live hover exactly as it was.
+        //
+        // A non-claimant contact delivered down a live capture (`secondary`) is
+        // neither: it is not a gesture of its own, so it leaves hover exactly as
+        // the claimant's gesture had it.
         let hover_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move)
-            && !self.pointer_captured;
-        let hover_ends = matches!(
-            event,
-            InputEvent::Pointer(p)
-                if matches!(
-                    p.phase,
-                    PointerPhase::Down | PointerPhase::Up | PointerPhase::Cancel
-                )
-        );
+            && self.capture_claimant.is_none();
+        let hover_ends = !secondary
+            && matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(
+                        p.phase,
+                        PointerPhase::Down | PointerPhase::Up | PointerPhase::Cancel
+                    )
+            );
         let hover_epoch = self.hover_epoch;
         let hover_was_active = self.hover_active;
         let root_identity = self.root_identity;
@@ -2215,7 +2281,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // are one bracket (`CursorPass`) rather than two bare calls, so a dispatch
         // that re-entered this method could not silently eat the enclosing pass's
         // request — see that guard.
-        let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
+        //
+        // The claimant's moves only: a second finger moving under a captured
+        // drag says nothing about the drag's own cursor.
+        let cursor_pass =
+            !secondary && matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
         // The same bracket carries the clipboard channel (a write and a paste
         // request), which differs only in when it commits: every pass, not the
         // pointer-move subset, since a copy can be answered from a key chord or an
@@ -2325,10 +2395,36 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // therefore the standing epoch) exactly where it was.
         let mut focus_claim_honoured = false;
         match event {
+            // A non-claimant contact delivered down a live capture (rule (c) of
+            // `InputEvent::PointerContact`'s contract): not a gesture of its own,
+            // so it opens, moves and releases no capture and never blurs — its
+            // `Up` must not end the claimant's gesture, and its `Down` is not a
+            // tap outside anything. An explicit focus request or release from
+            // its handler is honoured exactly as the scroll arm below honours
+            // one.
+            InputEvent::Pointer(_) if secondary => {
+                if focus_req {
+                    focus_claim_honoured = true;
+                    self.set_focus_active(true);
+                }
+                if focus_rel {
+                    self.release_focus_session();
+                }
+            }
+            // Never reached: the gate at the top unwrapped every contact into a
+            // plain `Pointer`, and routed it by the arms around this one.
+            InputEvent::PointerContact { .. } => {}
             InputEvent::Pointer(pointer) => match pointer.phase {
                 PointerPhase::Down => {
                     if captured {
-                        self.pointer_captured = true;
+                        // Rule (a): the contact whose `Down` captured is the
+                        // claimant, and only its release ends the gesture. The
+                        // opt-in is read from the pass rather than the root
+                        // context's bubble so a captor below a component
+                        // boundary (which mirrors capture but not the opt-in)
+                        // is still heard.
+                        self.capture_claimant = Some(pointer_id);
+                        self.capture_contacts = contact_pass.contacts_requested();
                     }
                     if focus_req {
                         focus_claim_honoured = true;
@@ -2346,7 +2442,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                         self.release_focus_session();
                     }
                 }
-                PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
+                // Only ever the claimant's (or an uncaptured contact's) release:
+                // any other contact's was routed to the `secondary` arm above or
+                // dropped at the gate.
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    self.capture_claimant = None;
+                    self.capture_contacts = false;
+                }
                 PointerPhase::Move => {}
             },
             InputEvent::Scroll { .. }
@@ -2460,8 +2562,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // pointer event its owner is reached by. Mirroring the claim on
                 // any phase is what routes those follow-ups, and that `Up`, back
                 // down the capture path to the surface that opened it.
+                //
+                // The claimant is the contact this overlay event was routed for —
+                // the pre-pass re-enters this method under the gesture's own
+                // contact pass, so `pointer_id` is that gesture's id.
                 if captured {
-                    self.pointer_captured = true;
+                    self.capture_claimant = Some(pointer_id);
+                    self.capture_contacts = contact_pass.contacts_requested();
                 }
                 // ...and released on the phase that ends the gesture, in the
                 // same door it was claimed through. The claim is mirrored on any
@@ -2481,8 +2588,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // (see `frust-widgets`' `OverlaySlot::forward`).
                 if let OverlayEventKind::Pointer(pointer) = &overlay.kind
                     && matches!(pointer.phase, PointerPhase::Up | PointerPhase::Cancel)
+                    && self
+                        .capture_claimant
+                        .is_none_or(|claimant| claimant == pointer_id)
                 {
-                    self.pointer_captured = false;
+                    self.capture_claimant = None;
+                    self.capture_contacts = false;
                 }
             }
         }
@@ -2581,6 +2692,25 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
+    /// Decide what one pointer contact does — the root half of
+    /// [`InputEvent::PointerContact`]'s multi-contact contract.
+    ///
+    /// `Some(false)` routes it as the gesture's own pointer (rule (a): slot `0`
+    /// with nothing captured, hit-tested; or the claimant of a live capture,
+    /// down the captured path). `Some(true)` routes it as a **non-claimant**
+    /// contact down a live capture's path, which happens only when the captor
+    /// opted in (rule (c)). `None` drops it: an additional contact with nothing
+    /// captured (rule (b)), or one the captor did not opt into (rule (c)).
+    fn contact_route(&self, pointer_id: PointerId) -> Option<bool> {
+        match self.capture_claimant {
+            None if pointer_id.slot == 0 => Some(false),
+            None => None,
+            Some(claimant) if claimant == pointer_id => Some(false),
+            Some(_) if self.capture_contacts => Some(true),
+            Some(_) => None,
+        }
+    }
+
     /// Hit-test the surfaces the last paint floated, **before** the main tree
     /// sees an uncaptured pointer or scroll — the routing half of the overlay
     /// portal (see [`crate::overlay`]).
@@ -2614,11 +2744,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// each reach their target with no hit test, so there is nothing here to
     /// redirect.
     fn route_overlay(&mut self, state: &mut State, event: &InputEvent) -> OverlayRoute {
-        if self.pointer_captured || self.overlay_hits.is_empty() {
+        if self.capture_claimant.is_some() || self.overlay_hits.is_empty() {
             return OverlayRoute::Continue(EventOutcome::default());
         }
         let (position, kind) = match event {
-            InputEvent::Pointer(pointer) => (pointer.position, OverlayEventKind::Pointer(*pointer)),
+            // A contact is routed for its position and phase exactly like a
+            // plain pointer (the root's gate has already unwrapped one, so the
+            // second pattern is for totality); the re-entered dispatch below
+            // keeps its id through the contact pass it runs under.
+            InputEvent::Pointer(pointer) | InputEvent::PointerContact { event: pointer, .. } => {
+                (pointer.position, OverlayEventKind::Pointer(*pointer))
+            }
             InputEvent::Scroll { position, delta } => (
                 *position,
                 OverlayEventKind::Scroll {
@@ -2670,7 +2806,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // scroll outside a surface says nothing about dismissing it.
         let dismissing = matches!(
             event,
-            InputEvent::Pointer(pointer)
+            InputEvent::Pointer(pointer) | InputEvent::PointerContact { event: pointer, .. }
                 if pointer.phase == PointerPhase::Down
                     && pointer.button == PointerButton::Primary
         );
@@ -2774,7 +2910,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // synthetic `Cancel` then releases the capture that `Down` also
                 // opened (mirroring a real gesture steal), leaving the recorded
                 // focus path intact — `Cancel` clears both `active` and
-                // `pointer_captured` while never touching `focused`/`focus_active`.
+                // `capture_claimant` while never touching `focused`/`focus_active`.
                 // Without the `Cancel`, the `Down` alone would leave the widget
                 // permanently capturing every subsequent pointer event.
                 let down = self.event(state, &synth(PointerPhase::Down));
@@ -8833,5 +8969,330 @@ mod tests {
         // it — the same refusal the IME republish makes.
         h.frame();
         assert_eq!(h.root.selection_toolbar(), None);
+    }
+}
+
+/// The root half of the multi-contact contract (`InputEvent::PointerContact`):
+/// how a contact's id, the claimant latch and the `capture_contacts` opt-in
+/// decide where an event goes.
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+
+    /// What every probe saw: which probe, which contact, which phase.
+    #[derive(Default)]
+    struct Log {
+        seen: Vec<(char, PointerId, PointerPhase)>,
+    }
+
+    /// A leaf that logs every pointer event it receives with the contact id its
+    /// context reports, and on a `Down` captures (optionally opting into the
+    /// gesture's other contacts) and claims focus.
+    struct Probe {
+        tag: char,
+        opt_in: bool,
+    }
+    impl crate::widget::Widget for Probe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            let id = ctx.pointer_id();
+            ctx.state_mut::<Log>().seen.push((self.tag, id, p.phase));
+            if p.phase == PointerPhase::Down {
+                ctx.capture_pointer();
+                if self.opt_in {
+                    ctx.capture_contacts();
+                }
+                ctx.request_focus();
+            }
+            EventResult::Handled
+        }
+    }
+
+    /// Two probes stacked vertically (A at y 0..20, B at y 30..50) behind the
+    /// standard recorded-path routing: a captured gesture goes straight to the
+    /// active child and releases it on `Up`/`Cancel`; anything else is
+    /// hit-tested, and a `Down` that hits nothing blurs both.
+    struct Pair {
+        a: crate::widget::ChildPod,
+        b: crate::widget::ChildPod,
+    }
+    impl crate::widget::Widget for Pair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.a.layout_child(ctx, bc);
+            self.a.set_origin(Point::new(0.0, 0.0));
+            self.b.layout_child(ctx, bc);
+            self.b.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.a.paint_child(ctx, scene);
+            self.b.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let releases = matches!(
+                event,
+                InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for pod in [&mut self.a, &mut self.b] {
+                if pod.is_active() {
+                    let result = pod.event_child(ctx, event);
+                    if releases {
+                        pod.set_active(false);
+                    }
+                    return result;
+                }
+            }
+            let pos = event.position();
+            let down = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down);
+            for pod in [&mut self.a, &mut self.b] {
+                if pod.contains(pos) {
+                    return pod.event_child(ctx, event);
+                }
+            }
+            if down {
+                self.a.set_focused(false);
+                self.b.set_focused(false);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct PairView {
+        opt_in: bool,
+    }
+    impl View<Log> for PairView {
+        type Element = Pair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Pair {
+            Pair {
+                a: crate::widget::ChildPod::new(Box::new(Probe {
+                    tag: 'A',
+                    opt_in: self.opt_in,
+                })),
+                b: crate::widget::ChildPod::new(Box::new(Probe {
+                    tag: 'B',
+                    opt_in: self.opt_in,
+                })),
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut Pair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn root_with(opt_in: bool) -> (RenderRoot<Log, PairView>, Log) {
+        let mut root: RenderRoot<Log, PairView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(&mut |_| PairView { opt_in }, &mut log);
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    fn ev(phase: PointerPhase, x: f64, y: f64) -> PointerEvent {
+        PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        }
+    }
+
+    fn mouse(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(ev(phase, x, y))
+    }
+
+    fn touch(slot: u32, phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: PointerId::touch(slot),
+            event: ev(phase, x, y),
+        }
+    }
+
+    /// Positions: over A, over B, and over neither.
+    const A: (f64, f64) = (10.0, 10.0);
+    const B: (f64, f64) = (10.0, 40.0);
+    const NOWHERE: (f64, f64) = (150.0, 150.0);
+
+    #[test]
+    fn slot_zero_touch_takes_the_same_path_as_a_plain_pointer() {
+        use PointerPhase::{Down, Move, Up};
+        let script = [
+            (Down, A),
+            (Move, NOWHERE),
+            (Up, NOWHERE),
+            (Down, NOWHERE),
+            (Move, B),
+            (Down, B),
+            (Up, B),
+        ];
+        let (mut via_pointer, mut pointer_log) = root_with(false);
+        let (mut via_contact, mut contact_log) = root_with(false);
+        for (phase, (x, y)) in script {
+            let a = via_pointer.event(&mut pointer_log, &mouse(phase, x, y));
+            let b = via_contact.event(&mut contact_log, &touch(0, phase, x, y));
+            assert_eq!(a, b, "{phase:?} at ({x}, {y}): same outcome");
+            assert_eq!(
+                via_pointer.is_pointer_captured(),
+                via_contact.is_pointer_captured()
+            );
+            assert_eq!(via_pointer.is_focus_active(), via_contact.is_focus_active());
+            assert_eq!(via_pointer.is_hover_active(), via_contact.is_hover_active());
+            assert_eq!(
+                via_pointer.focus_ime_generation(),
+                via_contact.focus_ime_generation()
+            );
+        }
+        // Same widgets, same phases; only the reported id differs.
+        let strip = |log: &Log| -> Vec<(char, PointerPhase)> {
+            log.seen.iter().map(|(t, _, p)| (*t, *p)).collect()
+        };
+        assert_eq!(strip(&pointer_log), strip(&contact_log));
+        assert!(
+            pointer_log
+                .seen
+                .iter()
+                .all(|(_, id, _)| *id == PointerId::MOUSE)
+        );
+        assert!(
+            contact_log
+                .seen
+                .iter()
+                .all(|(_, id, _)| *id == PointerId::touch(0))
+        );
+        // The capture the contact's Down took named it as the claimant.
+        via_contact.event(&mut contact_log, &touch(0, Down, A.0, A.1));
+        assert_eq!(
+            via_contact.pointer_capture_claimant(),
+            Some(PointerId::touch(0))
+        );
+    }
+
+    #[test]
+    fn an_additional_contact_with_nothing_captured_is_dropped() {
+        let (mut root, mut log) = root_with(true);
+        let outcome = root.event(&mut log, &touch(1, PointerPhase::Down, A.0, A.1));
+        assert_eq!(outcome, EventOutcome::default());
+        assert!(log.seen.is_empty(), "no widget saw the slot-1 contact");
+        assert!(!root.is_pointer_captured());
+        assert!(!root.is_focus_active(), "a dropped contact claims nothing");
+    }
+
+    #[test]
+    fn an_opted_in_captor_receives_the_other_contacts_on_the_captured_path() {
+        use PointerPhase::{Down, Move, Up};
+        let (mut root, mut log) = root_with(true);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+
+        // The second finger lands over B, yet travels the captured path to A.
+        let t1 = PointerId::touch(1);
+        assert!(root.event(&mut log, &touch(1, Down, B.0, B.1)).handled);
+        root.event(&mut log, &touch(1, Move, NOWHERE.0, NOWHERE.1));
+        root.event(&mut log, &touch(1, Up, NOWHERE.0, NOWHERE.1));
+        assert_eq!(
+            log.seen[1..],
+            [('A', t1, Down), ('A', t1, Move), ('A', t1, Up)],
+            "A saw touch(1)'s whole contact, B saw nothing"
+        );
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+    }
+
+    #[test]
+    fn a_captor_that_did_not_opt_in_never_sees_the_other_contacts() {
+        use PointerPhase::{Down, Move, Up};
+        let (mut root, mut log) = root_with(false);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        for phase in [Down, Move, Up] {
+            let outcome = root.event(&mut log, &touch(1, phase, B.0, B.1));
+            assert_eq!(
+                outcome,
+                EventOutcome::default(),
+                "touch(1) {phase:?} dropped"
+            );
+        }
+        assert_eq!(log.seen, [('A', PointerId::touch(0), Down)]);
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+    }
+
+    #[test]
+    fn a_touch_release_never_ends_a_mouse_capture_and_vice_versa() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        // A mouse drag holds A; a finger tapping elsewhere must not break it.
+        let (mut root, mut log) = root_with(false);
+        root.event(&mut log, &mouse(Down, A.0, A.1));
+        root.event(&mut log, &touch(0, Down, B.0, B.1));
+        root.event(&mut log, &touch(0, Up, B.0, B.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::MOUSE));
+        root.event(&mut log, &mouse(Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(
+            log.seen.last(),
+            Some(&('A', PointerId::MOUSE, Move)),
+            "the drag still reaches its captor"
+        );
+        assert!(log.seen.iter().all(|(tag, _, _)| *tag == 'A'));
+        root.event(&mut log, &mouse(Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+
+        // The mirror image: a touch drag holds B; the mouse cannot end it.
+        let (mut root, mut log) = root_with(false);
+        root.event(&mut log, &touch(0, Down, B.0, B.1));
+        root.event(&mut log, &mouse(Up, A.0, A.1));
+        root.event(&mut log, &mouse(Cancel, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+        root.event(&mut log, &touch(0, Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(log.seen.last(), Some(&('B', PointerId::touch(0), Move)));
+        root.event(&mut log, &touch(0, Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+    }
+
+    #[test]
+    fn only_the_claimants_release_clears_the_latch() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        let (mut root, mut log) = root_with(true);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        // Another contact ends twice over — delivered, yet nothing releases:
+        // not the root latch, and not the container's active link either.
+        root.event(&mut log, &touch(1, Down, A.0, A.1));
+        root.event(&mut log, &touch(1, Up, A.0, A.1));
+        root.event(&mut log, &touch(2, Down, A.0, A.1));
+        root.event(&mut log, &touch(2, Cancel, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+        // Still on the captured path: a claimant move far outside A reaches A.
+        root.event(&mut log, &touch(0, Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(log.seen.last(), Some(&('A', PointerId::touch(0), Move)));
+
+        // The claimant's own release ends it; later contacts fall to rule (b).
+        root.event(&mut log, &touch(0, Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+        let before = log.seen.len();
+        root.event(&mut log, &touch(1, Move, A.0, A.1));
+        assert_eq!(
+            log.seen.len(),
+            before,
+            "touch(1) dropped once the gesture ended"
+        );
+        // And the container's link went with it: a fresh contact is hit-tested.
+        root.event(&mut log, &touch(0, Down, B.0, B.1));
+        assert_eq!(log.seen.last(), Some(&('B', PointerId::touch(0), Down)));
+    }
+
+    #[test]
+    fn a_non_claimant_contact_never_blurs_or_moves_hover() {
+        use PointerPhase::{Down, Up};
+        let (mut root, mut log) = root_with(true);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert!(root.is_focus_active());
+        let generation = root.focus_ime_generation();
+        root.event(&mut log, &touch(1, Down, NOWHERE.0, NOWHERE.1));
+        root.event(&mut log, &touch(1, Up, NOWHERE.0, NOWHERE.1));
+        assert!(
+            root.is_focus_active(),
+            "a second finger is not a tap outside"
+        );
+        assert_eq!(root.focus_ime_generation(), generation);
     }
 }

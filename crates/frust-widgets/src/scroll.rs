@@ -1382,6 +1382,13 @@ impl ScrollWidget {
                     EventResult::Handled
                 }
             },
+            // `InputEvent` grows (a scale gesture and file drops are planned);
+            // this widget handles only the variants named above, and hands any
+            // other to its child unconsumed, exactly like the broadcast arm.
+            _ => {
+                self.child.event_child(ctx, event);
+                EventResult::Ignored
+            }
         }
     }
 }
