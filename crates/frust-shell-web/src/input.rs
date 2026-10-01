@@ -12,24 +12,25 @@
 //! no touch on any desktop backend it targets), so touch mapping is
 //! web-specific and lives here instead, in [`TouchTracker`].
 //!
-//! # Why single-pointer, like the mobile shells
+//! # Multi-contact contract
 //!
-//! `frust_core::event::PointerEvent` carries no contact id — it was designed
-//! against the mobile shells' v1 contract, where Kotlin/the iOS bridge forward
-//! only the primary finger (see `frust-shell-android`'s `dispatch_touch` and
-//! its own `TouchPhase`). A browser's `WindowEvent::Touch` *does* carry a
-//! per-finger `id` (multiple concurrent contacts are routine — two-finger
-//! scroll, pinch), but there is nowhere in the framework's pointer vocabulary
-//! to carry a second one. [`TouchTracker`] therefore adopts the same v1 rule
-//! the mobile shells already ship: the first concurrent contact is tracked as
-//! *the* pointer, and every other contact that starts while it is still down
-//! is dropped outright (not merely unmapped — its own `Ended`/`Cancelled` is
-//! dropped too, so it never produces an unpaired release). This keeps the
-//! three host tiers that have touch at all telling `PointerEvent` the same
-//! story, rather than this shell inventing a multi-touch protocol the
-//! framework has no consumer for.
+//! A browser's `WindowEvent::Touch` carries a per-finger `id` (multiple
+//! concurrent contacts are routine — two-finger scroll, pinch). [`TouchTracker`]
+//! maps every winit touch `id` to a per-sequence **slot**: the first concurrent
+//! contact opens slot 0, later contacts get slots 1, 2, etc., and all slots
+//! reset to zero when the last contact ends. Each contact emits
+//! [`InputEvent::PointerContact`] with [`PointerId::touch(slot)`], so the root
+//! can route multi-finger gestures to widgets that opted into
+//! [`EventCtx::capture_contacts`]. The slot semantics match the mobile shells'
+//! multi-contact model (see `frust-shell-android`'s `dispatch_touch`) and close
+//! the hybrid mouse+touch latch bug by making slot 0 contact delivery distinguish
+//! touch from the mouse (which always reports [`PointerId::MOUSE`]): when no
+//! capture holds, slot 0 is hit-tested like the mouse, and slot ≥1 contacts are
+//! dropped at the root unless the slot-0 captor opted in.
 
-use frust_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase};
+use std::collections::HashMap;
+
+use frust_core::event::{InputEvent, PointerButton, PointerEvent, PointerId, PointerPhase};
 use winit::dpi::PhysicalPosition;
 use winit::event::TouchPhase as WinitTouchPhase;
 
@@ -47,14 +48,17 @@ pub fn map_touch_phase(phase: WinitTouchPhase) -> PointerPhase {
     }
 }
 
-/// Tracks which single winit touch `id` (if any) is the pointer this shell is
-/// currently forwarding, so a second concurrent finger is dropped rather than
-/// stomping the first one's gesture — see the module doc for why
-/// single-pointer is the deliberate v1 contract here, matching the mobile
-/// shells.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Maps winit touch `id`s to per-sequence slots (0 for first concurrent contact,
+/// 1+ for later, reset when all are up) and emits [`InputEvent::PointerContact`]
+/// for each contact so the root can route multi-finger gestures to widgets that
+/// opted into multi-contact capture — see the module doc for the multi-contact
+/// contract.
+#[derive(Debug, Default, Clone)]
 pub struct TouchTracker {
-    active_id: Option<u64>,
+    /// Maps each active winit `id` to its assigned slot.
+    active_ids: HashMap<u64, u32>,
+    /// The next slot to assign to a new `Started` contact.
+    next_slot: u32,
 }
 
 impl TouchTracker {
@@ -64,19 +68,20 @@ impl TouchTracker {
     }
 
     /// One winit touch contact — its stable per-finger `id`, phase, and
-    /// device-physical location — mapped to an [`InputEvent::Pointer`], or
-    /// `None` when the contact is not the one being tracked.
+    /// device-physical location — mapped to an [`InputEvent::PointerContact`] with
+    /// its assigned slot, or `None` when the contact should be dropped.
     ///
-    /// - A `Started` while nothing is tracked adopts `id` as the pointer and
-    ///   maps through as `Down`. A `Started` while another `id` is already
-    ///   tracked is a second concurrent finger and is dropped.
-    /// - A `Moved`/`Ended`/`Cancelled` maps through only when `id` matches the
-    ///   tracked contact; the tracked id is cleared on `Ended`/`Cancelled` so a
-    ///   later `Started` with a reused id (winit's own contract — ids may be
-    ///   reused once a contact ends) is free to adopt the pointer again.
-    /// - A `Moved`/`Ended`/`Cancelled` for an untracked (dropped-at-`Started`)
-    ///   id is dropped too — its `Started` was never delivered, so delivering
-    ///   any of its later phases would hand the tree an unpaired event.
+    /// - A `Started` assigns this `id` a new slot (starting at 0 when the tracker
+    ///   is empty) and maps through as `Down`. A duplicate `Started` for an `id`
+    ///   that is already active is dropped as a malformed event.
+    /// - A `Moved`/`Ended`/`Cancelled` maps through only when `id` has been
+    ///   assigned a slot; on `Ended`/`Cancelled` the id is cleared and the slot
+    ///   is freed. When all contacts are up, `next_slot` resets to 0 so the next
+    ///   gesture's first contact opens slot 0 again.
+    /// - A `Moved`/`Ended`/`Cancelled` for an id that was never `Started` (or
+    ///   whose `Started` was malformed and dropped) is dropped too — its `Started`
+    ///   was never delivered, so delivering any of its later phases would hand the
+    ///   tree an unpaired event.
     pub fn touch(
         &mut self,
         id: u64,
@@ -87,36 +92,52 @@ impl TouchTracker {
         let core_phase = map_touch_phase(phase);
         match core_phase {
             PointerPhase::Down => {
-                if self.active_id.is_some() {
-                    return None;
+                if self.active_ids.contains_key(&id) {
+                    return None; // Duplicate Started for the same id
                 }
-                self.active_id = Some(id);
+                let slot = self.next_slot;
+                self.active_ids.insert(id, slot);
+                self.next_slot += 1;
             }
             PointerPhase::Move => {
-                if self.active_id != Some(id) {
-                    return None;
+                if !self.active_ids.contains_key(&id) {
+                    return None; // Move for an id that was never started
                 }
             }
             PointerPhase::Up | PointerPhase::Cancel => {
-                if self.active_id != Some(id) {
-                    return None;
+                if !self.active_ids.contains_key(&id) {
+                    return None; // Up/Cancel for an id that was never started
                 }
-                self.active_id = None;
+                // We need the slot before removing the id
             }
         }
         let position = physical_to_logical(location.x, location.y, scale);
-        Some(InputEvent::Pointer(PointerEvent {
-            phase: core_phase,
-            position,
-            button: PointerButton::Primary,
-        }))
+        let slot = self.active_ids[&id];
+
+        // Remove the id after getting the slot (for Up/Cancel only)
+        if matches!(core_phase, PointerPhase::Up | PointerPhase::Cancel) {
+            self.active_ids.remove(&id);
+            // Reset the slot counter when all contacts are up
+            if self.active_ids.is_empty() {
+                self.next_slot = 0;
+            }
+        }
+
+        Some(InputEvent::PointerContact {
+            pointer_id: PointerId::touch(slot),
+            event: PointerEvent {
+                phase: core_phase,
+                position,
+                button: PointerButton::Primary,
+            },
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{TouchTracker, WinitTouchPhase, map_touch_phase};
-    use frust_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase};
+    use frust_core::event::{InputEvent, PointerButton, PointerEvent, PointerId, PointerPhase};
     use kurbo::Point;
     use winit::dpi::PhysicalPosition;
 
@@ -135,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn a_started_contact_is_tracked_and_maps_to_down_at_the_logical_position() {
+    fn a_started_contact_is_assigned_slot_0_and_maps_to_down_at_the_logical_position() {
         let mut tracker = TouchTracker::new();
         let down = tracker
             .touch(
@@ -144,14 +165,17 @@ mod tests {
                 PhysicalPosition::new(200.0, 100.0),
                 2.0,
             )
-            .expect("a first contact starts the tracked pointer");
+            .expect("a first contact is assigned slot 0");
         assert_eq!(
             down,
-            InputEvent::Pointer(PointerEvent {
-                phase: PointerPhase::Down,
-                position: Point::new(100.0, 50.0),
-                button: PointerButton::Primary,
-            })
+            InputEvent::PointerContact {
+                pointer_id: PointerId::touch(0),
+                event: PointerEvent {
+                    phase: PointerPhase::Down,
+                    position: Point::new(100.0, 50.0),
+                    button: PointerButton::Primary,
+                }
+            }
         );
     }
 
@@ -174,13 +198,16 @@ mod tests {
                 PhysicalPosition::new(220.0, 100.0),
                 2.0,
             )
-            .expect("the tracked contact's move maps");
+            .expect("the contact's move maps");
         assert!(matches!(
             moved,
-            InputEvent::Pointer(PointerEvent {
-                phase: PointerPhase::Move,
-                ..
-            })
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                event: PointerEvent {
+                    phase: PointerPhase::Move,
+                    ..
+                }
+            }
         ));
 
         let ended = tracker
@@ -190,86 +217,108 @@ mod tests {
                 PhysicalPosition::new(220.0, 100.0),
                 2.0,
             )
-            .expect("the tracked contact's end maps");
+            .expect("the contact's end maps");
         assert!(matches!(
             ended,
-            InputEvent::Pointer(PointerEvent {
-                phase: PointerPhase::Up,
-                ..
-            })
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                event: PointerEvent {
+                    phase: PointerPhase::Up,
+                    ..
+                }
+            }
         ));
     }
 
     #[test]
-    fn a_second_concurrent_contact_is_dropped_start_to_finish() {
+    fn two_concurrent_contacts_produce_two_different_slot_ids() {
         let mut tracker = TouchTracker::new();
-        tracker
+        let down1 = tracker
             .touch(
                 1,
                 WinitTouchPhase::Started,
                 PhysicalPosition::new(0.0, 0.0),
                 1.0,
             )
-            .expect("the first finger is tracked");
+            .expect("the first finger is assigned slot 0");
+        assert!(matches!(
+            down1,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
 
-        // A second finger starting while the first is still down is dropped.
-        assert!(
-            tracker
-                .touch(
-                    2,
-                    WinitTouchPhase::Started,
-                    PhysicalPosition::new(10.0, 10.0),
-                    1.0,
-                )
-                .is_none()
-        );
-        // Its move and end are dropped too — its `Started` was never
-        // delivered, so nothing about it should reach the tree.
-        assert!(
-            tracker
-                .touch(
-                    2,
-                    WinitTouchPhase::Moved,
-                    PhysicalPosition::new(12.0, 10.0),
-                    1.0,
-                )
-                .is_none()
-        );
-        assert!(
-            tracker
-                .touch(
-                    2,
-                    WinitTouchPhase::Ended,
-                    PhysicalPosition::new(12.0, 10.0),
-                    1.0,
-                )
-                .is_none()
-        );
+        // A second finger starting while the first is still down gets slot 1.
+        let down2 = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(10.0, 10.0),
+                1.0,
+            )
+            .expect("the second finger is assigned slot 1");
+        assert!(matches!(
+            down2,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 1 },
+                ..
+            }
+        ));
 
-        // The first finger's own gesture is unaffected by the dropped second one.
-        assert!(
-            tracker
-                .touch(
-                    1,
-                    WinitTouchPhase::Moved,
-                    PhysicalPosition::new(1.0, 1.0),
-                    1.0,
-                )
-                .is_some()
-        );
+        // Both fingers' moves are forwarded with their respective slots.
+        let moved1 = tracker
+            .touch(
+                1,
+                WinitTouchPhase::Moved,
+                PhysicalPosition::new(1.0, 1.0),
+                1.0,
+            )
+            .expect("the first finger's move maps");
+        assert!(matches!(
+            moved1,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
+
+        let moved2 = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Moved,
+                PhysicalPosition::new(12.0, 10.0),
+                1.0,
+            )
+            .expect("the second finger's move maps");
+        assert!(matches!(
+            moved2,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 1 },
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn a_finished_contact_frees_the_tracker_for_a_reused_id() {
+    fn a_finished_contact_resets_slots_for_a_new_gesture() {
         let mut tracker = TouchTracker::new();
-        tracker
+        let down1 = tracker
             .touch(
                 3,
                 WinitTouchPhase::Started,
                 PhysicalPosition::new(0.0, 0.0),
                 1.0,
             )
-            .expect("the first contact is tracked");
+            .expect("the first contact is assigned slot 0");
+        assert!(matches!(
+            down1,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
+
         tracker
             .touch(
                 3,
@@ -277,24 +326,29 @@ mod tests {
                 PhysicalPosition::new(0.0, 0.0),
                 1.0,
             )
-            .expect("its end maps and frees the tracker");
+            .expect("its end maps and resets the slot counter");
 
         // winit may reuse a finger id once its contact has ended; a fresh
-        // `Started` with the same id must be free to adopt the pointer again.
-        assert!(
-            tracker
-                .touch(
-                    3,
-                    WinitTouchPhase::Started,
-                    PhysicalPosition::new(5.0, 5.0),
-                    1.0,
-                )
-                .is_some()
-        );
+        // `Started` with the same id opens a new gesture at slot 0 again.
+        let down2 = tracker
+            .touch(
+                3,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(5.0, 5.0),
+                1.0,
+            )
+            .expect("the reused id is assigned slot 0 again");
+        assert!(matches!(
+            down2,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn cancel_also_frees_the_tracker() {
+    fn cancel_also_resets_slots_for_a_new_gesture() {
         let mut tracker = TouchTracker::new();
         tracker
             .touch(
@@ -303,7 +357,7 @@ mod tests {
                 PhysicalPosition::new(0.0, 0.0),
                 1.0,
             )
-            .expect("the contact is tracked");
+            .expect("the contact is assigned slot 0");
         let cancelled = tracker
             .touch(
                 9,
@@ -311,25 +365,33 @@ mod tests {
                 PhysicalPosition::new(0.0, 0.0),
                 1.0,
             )
-            .expect("a cancel for the tracked id maps");
+            .expect("a cancel for the contact maps");
         assert!(matches!(
             cancelled,
-            InputEvent::Pointer(PointerEvent {
-                phase: PointerPhase::Cancel,
-                ..
-            })
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                event: PointerEvent {
+                    phase: PointerPhase::Cancel,
+                    ..
+                }
+            }
         ));
 
-        assert!(
-            tracker
-                .touch(
-                    9,
-                    WinitTouchPhase::Started,
-                    PhysicalPosition::new(1.0, 1.0),
-                    1.0,
-                )
-                .is_some()
-        );
+        let down = tracker
+            .touch(
+                9,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(1.0, 1.0),
+                1.0,
+            )
+            .expect("the reused id is assigned slot 0 again");
+        assert!(matches!(
+            down,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -358,5 +420,124 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn releasing_the_first_contact_keeps_the_second_s_slot_id() {
+        let mut tracker = TouchTracker::new();
+        tracker
+            .touch(
+                1,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(0.0, 0.0),
+                1.0,
+            )
+            .expect("contact 1 assigned slot 0");
+        let down2 = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(10.0, 10.0),
+                1.0,
+            )
+            .expect("contact 2 assigned slot 1");
+        let slot_for_2 = match down2 {
+            InputEvent::PointerContact {
+                pointer_id: PointerId { slot, .. },
+                ..
+            } => slot,
+            _ => panic!("expected PointerContact"),
+        };
+        assert_eq!(slot_for_2, 1);
+
+        // Release the first contact.
+        tracker
+            .touch(
+                1,
+                WinitTouchPhase::Ended,
+                PhysicalPosition::new(0.0, 0.0),
+                1.0,
+            )
+            .expect("contact 1 ends");
+
+        // The second contact's slot is still intact.
+        let moved2 = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Moved,
+                PhysicalPosition::new(12.0, 10.0),
+                1.0,
+            )
+            .expect("contact 2 move still maps");
+        assert!(matches!(
+            moved2,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 1 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_third_contact_after_all_are_up_starts_at_slot_0() {
+        let mut tracker = TouchTracker::new();
+        tracker
+            .touch(
+                1,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(0.0, 0.0),
+                1.0,
+            )
+            .expect("contact 1 assigned slot 0");
+        let down2 = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(10.0, 10.0),
+                1.0,
+            )
+            .expect("contact 2 assigned slot 1");
+        assert!(matches!(
+            down2,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 1 },
+                ..
+            }
+        ));
+
+        // Release both contacts.
+        tracker
+            .touch(
+                1,
+                WinitTouchPhase::Ended,
+                PhysicalPosition::new(0.0, 0.0),
+                1.0,
+            )
+            .expect("contact 1 ends");
+        tracker
+            .touch(
+                2,
+                WinitTouchPhase::Ended,
+                PhysicalPosition::new(10.0, 10.0),
+                1.0,
+            )
+            .expect("contact 2 ends");
+
+        // A new contact (even with a reused id) starts at slot 0 again.
+        let down3 = tracker
+            .touch(
+                3,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(5.0, 5.0),
+                1.0,
+            )
+            .expect("contact 3 assigned slot 0");
+        assert!(matches!(
+            down3,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
     }
 }
