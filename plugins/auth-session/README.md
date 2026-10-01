@@ -202,8 +202,8 @@ The listener runs inside `start()` and reserves the one-live-session slot (the s
 - **Desktop (Linux, Windows, macOS):** use [`LoopbackSession`] instead. On
   Linux and Windows, `AuthSession::start` with a custom scheme still answers
   [`AuthSessionError::NoHandler`] (no platform authentication user agent
-  exists; `auth-session-loopback-windows-unrun-v1` in
-  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). On all three platforms,
+  exists; the loopback path has run against a live browser on both — §6). On
+  all three platforms,
   [`is_supported()`](../auth-session/src/lib.rs) is `true` and means the
   loopback path is available. The listener binds on ephemeral loopback
   (`127.0.0.1:<port>` on an ephemeral port; `auth-session-loopback-poll-interval-v1` in
