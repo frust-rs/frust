@@ -115,11 +115,12 @@ let url = request.build(&state, &verifier.challenge())?;
 let outcome = session.start(&url).await?;
 ```
 
-The listener runs inside `start()` and reserves the one-live-session slot (the same one [`AuthSession::start`] claims). Its behaviour follows these rules:
+The one-live-session slot (the same one [`AuthSession::start`] claims) is claimed at [`LoopbackSession::bind`] and released when the session drops. Its behaviour follows these rules:
 
 - **Bind address:** `127.0.0.1` on an ephemeral port, never `localhost`, `::1` or `0.0.0.0`. `LoopbackSession::redirect_uri()` gives the full URI (e.g. `http://127.0.0.1:54321/oauth/callback`).
-- **Request acceptance:** the listener accepts GET requests on the exact reserved path only. Any other method, path, or malformed request answers `404` and the listener **keeps waiting** for the callback (stray local clients cannot end the session).
+- **Request acceptance:** the listener accepts GET requests on the exact reserved path only. Any other method or path answers `404`; a malformed request (a bad request line, a bad/duplicate/mismatched `Host` header, obsolete line folding) answers `400`. Both keep the listener **waiting** for the callback (stray local clients cannot end the session).
 - **Host header:** the listener rejects requests whose `Host` header does not match `127.0.0.1:<port>` (case-insensitive). This is the DNS-rebinding defence — a page that resolves its hostname to `127.0.0.1` sends its own hostname in the `Host` header, not `127.0.0.1`.
+- **Fetch Metadata:** a request carrying a `Sec-Fetch-Mode` other than `navigate` or a `Sec-Fetch-Dest` other than `document` answers `404` and the listener keeps waiting — defence in depth against a no-cors cross-origin request (e.g. a port scan) from any web origin open in the browser. Either header's absence leaves the request allowed.
 - **Response:** a static page with `Cache-Control: no-store`, `Content-Security-Policy: default-src 'none'`, no script, and no echo of the request bytes.
 - **Lifecycle:** the listener accepts exactly one callback, then closes. Cancelling via [`LoopbackCancel::cancel`], dropping the future, or the session timing out all close the listener within about one poll interval (~25 ms), even while a request is being served — the exception is a response write already in progress, bounded by the 2 s connection I/O timeout.
 - **Timeout:** the session waits for the redirect up to [`LoopbackOptions::timeout`] (default 300 s, configurable, at most one hour). When it elapses, the session resolves [`AuthSessionError::TimedOut`] and closes.
