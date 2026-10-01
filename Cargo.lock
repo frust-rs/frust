@@ -2133,6 +2133,7 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "frust-plugin",
+ "frust-url-launcher",
  "jni 0.22.4",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

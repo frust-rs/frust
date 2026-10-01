@@ -17,6 +17,17 @@ thiserror = { workspace = true }
 # Android, so declaring it target-gated would buy nothing.
 frust-plugin = { path = "../../crates/frust-plugin" }
 
+# Desktop (Linux, Windows, macOS): `LoopbackSession` opens the
+# authorization URL in the system browser through `frust-url-launcher`'s
+# `UrlLauncher::open_external` (`src/loopback.rs`). This is the workspace's
+# **first plugin-to-plugin edge** (plan decision D4): `frust-url-launcher` is
+# a platform plugin, not a `frust-*` framework crate, so the platform-plugin
+# charter (`frust-plugin` + FFI crates, no `frust-*` framework dependency)
+# still holds. Target-gated to the three loopback targets — Android/iOS never
+# build the loopback listener, so they never link the launcher either.
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+frust-url-launcher = { path = "../url-launcher" }
+
 # Android: the plugin's own JNI exports the Android backend card defines
 # need `jni` directly — matching `frust-camera`'s/`frust-haptics`'s own
 # Android arm (their own JNI signature calls don't go through
