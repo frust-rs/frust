@@ -654,9 +654,85 @@ restart landed: the alert was replaced by the second session's own alert
 **The `PresentationContextInvalid` race seen on the iOS simulator did not
 reproduce on macOS.**
 
-### Linux desktop (loopback) — NOT YET RUN
+### Linux desktop (loopback) — PASSED (machine-driven, dockur linux-native rig), 2026-10-01
 
-The conductor runs this gate with Ed at a live desktop session on the Linux workstation, using the playground app's Auth page "Desktop loopback" block ([gate/loopback.html](gate/loopback.html)) with the loopback test cases (Loopback login / deny / bad iss / timeout / cancel + Cancel loopback / busy). The transcript will replace this heading when the gate runs.
+Host: the Linux workstation (Manjaro, kernel 6.18) running the `frust-linux-native`
+container desktop (Ubuntu 24.04, KDE Plasma 5.27 on Xorg `:20`, NVIDIA T400): the
+`examples/playground` desktop debug binary (`cargo build` from `examples/playground`,
+feature head `06b520d7`) built and run on the host and presented into the container's
+display through `linux-native/run-on-desktop.sh`, driven with `xdotool` from inside the
+container, screenshots via `import -window root`. Gate pages served from the workstation
+by a self-signed `https` server on `127.0.0.1:8443` (`Base URL` = `https://127.0.0.1:8443/`).
+
+**Browser path, recorded as such.** `LoopbackSession::start` opened the browser through
+`frust-url-launcher`'s Linux arm (`xdg-open <url>`, the whole authorization URL as its
+argument — visible in `ps`, the `auth-session-loopback-url-in-launcher-argv-v1` entry).
+`xdg-open` ignores `$BROWSER` when an `x-scheme-handler/https` default exists, and the
+host's default is the operator's real browser profile, so the app was run with
+`XDG_CONFIG_HOME`/`XDG_DATA_HOME` pointed at a scratch `mimeapps.list` + desktop entry
+resolving `https` to **Mozilla Firefox 156.0 (host build, throwaway profile, `--no-remote`)**
+on `DISPLAY=:20`; the self-signed certificate was accepted once in that profile. Each leg
+started a fresh Firefox instance. `is_supported: true` throughout.
+
+**(1) Login** — Firefox opened `loopback.html?gate_iss=…&response_type=code&client_id=
+frust-playground&redirect_uri=http%3A%2F%2F127.0.0.1%3A39829%2Foauth%2Fcallback&scope=
+openid&state=…&code_challenge=…&code_challenge_method=S256`, redirected, and showed
+`Sign-in complete. You can close this tab and return to the app.` at
+`http://127.0.0.1:39829/oauth/callback?code=gatecode&state=…&iss=…`; the whole round trip
+took under 1.5 s.
+
+```
+status: Loopback login -> code ok len=8, state ok, iss ok, grant body len=212
+loopback port: 39829
+```
+
+`curl -si http://127.0.0.1:39829/oauth/callback` immediately afterwards: `curl: (7)
+Failed to connect` (connection refused — one success, then the socket closes); `ss -ltnp`
+shows no `playground` listener.
+
+**(2) 404 and keep waiting** — during a `gate_mode=stay` session on port `40691`
+(`Loopback timeout (10 s)`):
+
+```
+curl -si http://127.0.0.1:40691/wrong
+HTTP/1.1 404 Not Found … Cache-Control: no-store … Content-Security-Policy: default-src 'none' … Connection: close
+curl -si -X POST http://127.0.0.1:40691/oauth/callback
+HTTP/1.1 404 Not Found
+curl -si -H 'Host: localhost:40691' http://127.0.0.1:40691/oauth/callback
+HTTP/1.1 400 Bad Request
+```
+
+`ss -ltnp` still listed `127.0.0.1:40691 … "playground"` after all three.
+
+**(3) Timeout** — the same session (Firefox showing the gate page's
+`waiting (close this tab to test timeout/cancel)`) resolved
+`Loopback timeout (10 s) -> Err(TimedOut)`; the listener left `ss` 10.2 s after the click.
+
+**(4) Cancel** — `Loopback cancel` (port `42029`, gate page waiting), then
+`Cancel loopback` → `Loopback cancel -> Ok(Cancelled)`; the port was gone 0.11 s after the
+click (`ss` polled at 10 Hz).
+
+**(5) Busy** — `Loopback busy -> Err(Busy)`; no listener left afterwards (the button drops
+its first session).
+
+**(6) Negative controls** — `Loopback deny` (port `32979`; the gate request carried
+`gate_mode=deny`; Firefox landed on
+`…/oauth/callback?error=access_denied&error_description=gate+deny&state=…&iss=…` and
+showed the same static page) → `Loopback deny -> Err(Authorization { error: AccessDenied,
+description: Some("gate deny"), uri: None })`. `Loopback bad iss` (port `34245`; a normal
+successful redirect) → `Loopback bad iss -> Err(IssuerMismatch)`.
+
+**(7) Drop** — a `stay` session on port `34225`; the playground window closed with its
+titlebar close button: the port was gone 0.12 s after the click, the process exited
+cleanly (no panic in its log), no listener left.
+
+**(8) Response page source** — Firefox `view-source:` of the leg-1 success page:
+`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Sign-in complete</title>
+</head><body><p>Sign-in complete. You can close this tab and return to the app.</p></body>
+</html>` — no `<script>`, none of the query values.
+
+This leg also closes `frust-url-launcher`'s Linux browser-out leg: `xdg-open` launched the
+browser from a live X11 session (see `plugins/url-launcher/README.md` §6).
 
 ### Windows desktop (loopback) — NOT YET RUN
 
