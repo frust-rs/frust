@@ -2949,6 +2949,10 @@ impl Widget for TextInputWidget {
             // reaching this arm means the broadcast was addressed to some other
             // owner's surface, which is none of this field's business.
             InputEvent::Overlay(_) => EventResult::Ignored,
+            // `InputEvent` grows (a scale gesture and file drops are planned);
+            // this field handles only the variants named above and ignores the
+            // rest, like the overlay arm.
+            _ => EventResult::Ignored,
         }
     }
 

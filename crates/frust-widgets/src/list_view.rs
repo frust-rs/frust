@@ -2429,6 +2429,10 @@ impl ListViewWidget {
                     EventResult::Handled
                 }
             },
+            // `InputEvent` grows (a scale gesture and file drops are planned);
+            // this widget handles only the variants named above, and hands any
+            // other to its children exactly like the broadcast arm.
+            _ => crate::authoring::route_event(&mut self.children, ctx, event),
         }
     }
 }

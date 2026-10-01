@@ -4,7 +4,7 @@
 
 use frust_core::event::{
     EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
-    PointerEvent, PointerPhase,
+    PointerEvent, PointerId, PointerPhase,
 };
 use frust_reactive::ReactiveRuntime;
 use frust_shell_common::perf;
@@ -58,7 +58,9 @@ impl AndroidAppHandle {
     /// layout never disagree.
     ///
     /// Single-pointer in v1: the Kotlin side forwards only the primary pointer,
-    /// so every contact is a [`PointerButton::Primary`] event. The redraw the
+    /// so every contact is a [`PointerButton::Primary`] event on
+    /// [`PointerId::touch`]`(0)`, delivered as an
+    /// [`InputEvent::PointerContact`]. The redraw the
     /// tree requests is implicit here — the Choreographer loop already posts a
     /// frame every vsync, so the mutated state is picked up on the next
     /// `frame()` without an explicit schedule (contrast the desktop shell's
@@ -102,20 +104,30 @@ impl AndroidAppHandle {
         // frame-boundary-interpolated position; Down/Up/Cancel still pass through
         // losslessly. When the kill switch disabled the resampler, deliver
         // directly instead — pre-resampling behavior verbatim.
+        //
+        // Every contact is `touch(0)` here: the platform side forwards one
+        // contact, and it is the gesture's first. It travels as an identified
+        // `PointerContact` so the root's multi-contact contract (and the
+        // resampler's per-contact lane) apply to it.
+        let pointer_id = PointerId::touch(0);
         if self.resampler.is_enabled() {
             let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.resampler.push(RawPointerSample {
+                pointer_id,
                 phase: core_phase,
                 position,
                 button: PointerButton::Primary,
                 time_nanos,
             });
         } else {
-            let event = InputEvent::Pointer(PointerEvent {
-                phase: core_phase,
-                position,
-                button: PointerButton::Primary,
-            });
+            let event = InputEvent::PointerContact {
+                pointer_id,
+                event: PointerEvent {
+                    phase: core_phase,
+                    position,
+                    button: PointerButton::Primary,
+                },
+            };
             let app = &mut self.app;
             let _ = under_root_owner(|| app.event(&event));
         }

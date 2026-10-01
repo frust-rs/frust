@@ -1505,6 +1505,10 @@ impl Widget for KeyProbeWidget {
             InputEvent::Housekeeping => EventResult::Ignored,
             // A broadcast for some portal owner elsewhere; this probe hosts none.
             InputEvent::Overlay(_) => EventResult::Ignored,
+            // `InputEvent` grows (a scale gesture and file drops are planned);
+            // this probe handles only the variants named above and ignores the
+            // rest, like the broadcast arms.
+            _ => EventResult::Ignored,
         }
     }
 }

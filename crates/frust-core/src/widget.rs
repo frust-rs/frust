@@ -2498,7 +2498,19 @@ impl ChildPod {
 
     /// Set (or clear) the recorded active path — the container clears this on
     /// `Up`/`Cancel` when capture auto-releases.
+    ///
+    /// **The link is keyed on the gesture's claimant.** While the root is
+    /// delivering a *non-claimant* contact down a live capture's path (rule (c)
+    /// of [`InputEvent::PointerContact`](crate::event::InputEvent::PointerContact)'s
+    /// multi-contact contract), a clear is refused: that contact's `Up`/`Cancel`
+    /// reaches every container on the path, and a container clearing its link on
+    /// it would strand the claimant's own follow-ups. Outside such a pass — every
+    /// single-pointer dispatch, a rebuild, a container's own teardown — a clear
+    /// takes effect as always.
     pub fn set_active(&mut self, active: bool) {
+        if !active && crate::event::in_secondary_contact_pass() {
+            return;
+        }
         self.active = active;
     }
 
@@ -2820,7 +2832,10 @@ impl ChildPod {
         // instead and closes the pass to its own subtree.
         let hover_eligible = ctx.is_hover_eligible() && !ctx.is_hover_claimed() && !self.active;
         let claim_epoch = ctx.hover_claim_epoch();
-        let (captured, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {
+        // The child context inherits `ctx.pointer_id()` unchanged (see
+        // `EventCtx::child_ctx`), so every widget on the routed path reports the
+        // same contact.
+        let (captured, contacts, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {
             let mut child_ctx = ctx.child_ctx(
                 self.origin,
                 self.size,
@@ -2831,6 +2846,7 @@ impl ChildPod {
             let result = self.widget.event(&mut child_ctx, &local);
             (
                 child_ctx.is_pointer_captured(),
+                child_ctx.is_contact_capture_requested(),
                 child_ctx.is_hover_claimed(),
                 child_ctx.is_focus_requested(),
                 child_ctx.is_focus_released(),
@@ -2868,7 +2884,17 @@ impl ChildPod {
         if focus_req {
             self.set_focused(true);
         }
-        ctx.absorb_child(redraw, captured, hover_claimed, focus_req, focus_rel, ime);
+        // The contact opt-in bubbles exactly like the capture it accompanies; the
+        // `active` link above stays keyed on the claimant (see `set_active`).
+        ctx.absorb_child(
+            redraw,
+            captured,
+            contacts,
+            hover_claimed,
+            focus_req,
+            focus_rel,
+            ime,
+        );
         result
     }
 

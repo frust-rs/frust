@@ -10,7 +10,10 @@
 //!   [half-frame prediction window](PREDICTION_WINDOW_NANOS). `Down`/`Up`/
 //!   `Cancel` phase transitions pass through **losslessly** — never synthesized,
 //!   never dropped, never repositioned — so only `Move` positions are ever
-//!   resampled (Flutter's `PointerEventResampler` contract, adapted).
+//!   resampled (Flutter's `PointerEventResampler` contract, adapted). Samples
+//!   are kept in one lane per [`PointerId`](frust_core::event::PointerId), so
+//!   simultaneous contacts are each resampled along their own path and never
+//!   mix.
 //! - [`frame_interval_nanos`] / [`deadline_overrun`] — the deadline-aware
 //!   scheduling helpers: estimate a frame-target budget from the
 //!   tick-to-tick timestamp delta, and decide whether a frame's measured work
@@ -42,7 +45,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use frust_core::event::{PointerButton, PointerEvent, PointerPhase};
+use frust_core::event::{PointerButton, PointerEvent, PointerId, PointerPhase};
 use kurbo::Point;
 
 /// The kill-switch environment/compile-time variable: when set to any
@@ -92,12 +95,14 @@ pub const MIN_PLAUSIBLE_INTERVAL_NANOS: u64 = 1_000_000;
 pub const MAX_PLAUSIBLE_INTERVAL_NANOS: u64 = 100_000_000;
 
 /// One raw pointer contact as delivered by a platform touch entry point, before
-/// resampling: the phase transition, the **logical** (density-independent)
-/// position the shell already converted, the button (always
-/// [`PointerButton::Primary`] for single-pointer touch), and a shell-supplied
-/// monotonic timestamp (see the module's *Clock domain* note).
+/// resampling: which contact it is, the phase transition, the **logical**
+/// (density-independent) position the shell already converted, the button
+/// (always [`PointerButton::Primary`] for touch), and a shell-supplied monotonic
+/// timestamp (see the module's *Clock domain* note).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawPointerSample {
+    /// Which contact the sample belongs to — selects its resampling lane.
+    pub pointer_id: PointerId,
     pub phase: PointerPhase,
     pub position: Point,
     pub button: PointerButton,
@@ -117,24 +122,69 @@ impl RawPointerSample {
     }
 }
 
-/// Buffers raw pointer samples and emits frame-boundary-resampled events.
-/// See the module docs for the interpolation/prediction
-/// contract; construct one per app handle and drive it from the shell's touch
-/// and frame paths.
+/// One resampled event and the contact it belongs to — what
+/// [`PointerResampler::resample`] emits, so the shell can rebuild the
+/// [`InputEvent::PointerContact`](frust_core::event::InputEvent::PointerContact)
+/// carrier for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResampledPointer {
+    /// The contact the event belongs to.
+    pub pointer_id: PointerId,
+    /// The (possibly resampled) event.
+    pub event: PointerEvent,
+}
+
+/// A buffered raw sample plus its global arrival sequence number — the
+/// tiebreak that keeps the merged output of several lanes in arrival order.
+#[derive(Debug, Clone, Copy)]
+struct Queued {
+    seq: u64,
+    sample: RawPointerSample,
+}
+
+/// One contact's resampling state: its own buffered samples and the position it
+/// last emitted. Lanes never share samples or positions, so two fingers moving
+/// at once are each interpolated along their own path.
+#[derive(Debug)]
+struct Lane {
+    pointer_id: PointerId,
+    /// This contact's raw samples in arrival (== timestamp) order, drained up to
+    /// each frame's sample instant.
+    queue: VecDeque<Queued>,
+    /// The position of the last event this lane emitted, so a `Move`
+    /// interpolation dedups a no-op re-emit and a query with no bracketing pair
+    /// can hold the pointer where it was. Cleared to `None` on an `Up`/`Cancel`
+    /// (the contact ended — no position to hold), which is also what lets the
+    /// lane be retired once its queue is empty.
+    last_emitted: Option<Point>,
+}
+
+/// One emitted event awaiting the cross-lane merge, keyed by when it happened:
+/// `(time, seq)` of the raw sample it came from (for a coalesced `Move`, the
+/// last move sample of its run).
+type Keyed = ((u64, u64), ResampledPointer);
+
+/// Buffers raw pointer samples and emits frame-boundary-resampled events, one
+/// independent **lane per [`PointerId`]**. See the module docs for the
+/// interpolation/prediction contract; construct one per app handle and drive it
+/// from the shell's touch and frame paths.
+///
+/// A lane opens with its contact's first sample and ends once its `Up`/`Cancel`
+/// has been emitted. Each lane resamples exactly as a single-pointer resampler
+/// would; the events of several lanes are merged back into arrival order.
 #[derive(Debug)]
 pub struct PointerResampler {
     /// When `false`, [`resample`](Self::resample) drains every buffered sample
     /// verbatim in arrival order — the [`NO_RESAMPLE_VAR`] kill switch and
     /// [`disabled`](Self::disabled) path (pre-resampling behavior verbatim).
     enabled: bool,
-    /// Raw samples in arrival (== timestamp) order, drained up to each frame's
-    /// sample instant.
-    queue: VecDeque<RawPointerSample>,
-    /// The position of the last event this resampler emitted, so a `Move`
-    /// interpolation dedups a no-op re-emit and a query with no bracketing pair
-    /// can hold the pointer where it was. Cleared to `None` on an `Up`/`Cancel`
-    /// (the gesture ended — no position to hold).
-    last_emitted: Option<Point>,
+    /// The live lanes, in the order their contacts first appeared.
+    lanes: Vec<Lane>,
+    /// The next arrival sequence number [`push`](Self::push) hands out.
+    next_seq: u64,
+    /// The lanes' keyed output before the merge, reused across frames (cleared,
+    /// not reallocated) so a drag's per-frame resample allocates nothing.
+    merge: Vec<Keyed>,
 }
 
 impl PointerResampler {
@@ -158,8 +208,9 @@ impl PointerResampler {
     pub fn with_enabled(enabled: bool) -> Self {
         Self {
             enabled,
-            queue: VecDeque::new(),
-            last_emitted: None,
+            lanes: Vec::new(),
+            next_seq: 0,
+            merge: Vec::new(),
         }
     }
 
@@ -170,115 +221,183 @@ impl PointerResampler {
         self.enabled
     }
 
-    /// Whether any raw sample is still buffered. The shell ORs this into its
-    /// frame-gate input (`events_since_last_frame`) so a frame that could not
-    /// yet drain a too-new sample still runs on the next tick — the
-    /// "pending buffered input never starves the gate" contract (see the task's
-    /// requirement 2 / `docs/CODE_STANDARDS.md`'s default-to-run rule).
+    /// Whether any raw sample is still buffered, in any lane. The shell ORs
+    /// this into its frame-gate input (`events_since_last_frame`) so a frame
+    /// that could not yet drain a too-new sample still runs on the next tick —
+    /// the "pending buffered input never starves the gate" contract (see
+    /// `docs/CODE_STANDARDS.md`'s default-to-run rule).
     pub fn has_pending(&self) -> bool {
-        !self.queue.is_empty()
+        self.lanes.iter().any(|lane| !lane.queue.is_empty())
     }
 
-    /// Buffer one raw platform sample (a touch entry point calls this per
-    /// contact). Samples must be pushed in nondecreasing timestamp order (the
-    /// natural arrival order of a single pointer's stream).
+    /// Buffer one raw platform sample in its contact's lane (a touch entry
+    /// point calls this per contact). Each contact's samples must be pushed in
+    /// nondecreasing timestamp order (the natural arrival order of one
+    /// pointer's stream).
     pub fn push(&mut self, sample: RawPointerSample) {
-        self.queue.push_back(sample);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        let queued = Queued { seq, sample };
+        match self
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.pointer_id == sample.pointer_id)
+        {
+            Some(lane) => lane.queue.push_back(queued),
+            None => self.lanes.push(Lane {
+                pointer_id: sample.pointer_id,
+                queue: VecDeque::from([queued]),
+                last_emitted: None,
+            }),
+        }
     }
 
     /// Drain the buffered samples up to this frame's sample instant into `out`,
-    /// appending the resampled [`PointerEvent`]s the shell should feed into the
-    /// tree this frame (in order). `out` is appended to, not cleared — the
-    /// caller owns/reuses the buffer.
+    /// appending the resampled events — each tagged with its contact — that the
+    /// shell should feed into the tree this frame, in order. `out` is appended
+    /// to, not cleared — the caller owns/reuses the buffer.
     ///
     /// `frame_time_nanos` is the frame's sample query time in the shell's chosen
     /// monotonic domain (the same domain [`push`](Self::push) stamped with).
     ///
     /// On a **disabled** resampler every buffered sample is emitted verbatim in
-    /// arrival order (direct delivery). On an enabled one:
-    /// - `Down`/`Up`/`Cancel` whose timestamp has reached the sample instant are
-    ///   emitted **losslessly** in order, each at its raw reported position;
-    /// - a run of `Move` samples up to the sample instant is coalesced into a
+    /// arrival order (direct delivery). On an enabled one, each lane
+    /// independently:
+    /// - emits `Down`/`Up`/`Cancel` whose timestamp has reached the sample
+    ///   instant **losslessly** in order, each at its raw reported position;
+    /// - coalesces a run of `Move` samples up to the sample instant into a
     ///   single `Move` at the position interpolated at
     ///   `frame_time − `[`SAMPLE_OFFSET_NANOS`] (or extrapolated within the
     ///   [`PREDICTION_WINDOW_NANOS`] clamp when the finger has outrun its
     ///   samples);
-    /// - samples still ahead of the sample instant stay buffered (see
+    /// - leaves samples still ahead of the sample instant buffered (see
     ///   [`has_pending`](Self::has_pending)).
-    pub fn resample(&mut self, frame_time_nanos: u64, out: &mut Vec<PointerEvent>) {
+    ///
+    /// The lanes' events are then merged by the arrival order of the samples
+    /// they came from, so a second finger's `Down` lands after the first
+    /// finger's `Down` that preceded it. A lane whose `Up`/`Cancel` was emitted
+    /// and that has nothing left buffered is retired.
+    pub fn resample(&mut self, frame_time_nanos: u64, out: &mut Vec<ResampledPointer>) {
         if !self.enabled {
-            for sample in self.queue.drain(..) {
-                out.push(sample.as_event());
+            // Verbatim, in arrival order across every lane.
+            self.merge.clear();
+            for lane in &mut self.lanes {
+                self.merge.extend(lane.queue.drain(..).map(|queued| {
+                    (
+                        (0, queued.seq),
+                        ResampledPointer {
+                            pointer_id: queued.sample.pointer_id,
+                            event: queued.sample.as_event(),
+                        },
+                    )
+                }));
             }
+            self.merge.sort_by_key(|(key, _)| *key);
+            out.extend(self.merge.drain(..).map(|(_, event)| event));
+            self.lanes.clear();
             return;
         }
 
         let sample_time = frame_time_nanos.saturating_sub(SAMPLE_OFFSET_NANOS);
+        self.merge.clear();
+        for lane in &mut self.lanes {
+            lane.resample(sample_time, &mut self.merge);
+        }
+        // Stable, and each lane's own events are already in key order, so this
+        // only interleaves lanes — it never reorders within one (and a single
+        // lane, every gesture today, comes out exactly as it went in).
+        if self.lanes.len() > 1 {
+            self.merge.sort_by_key(|(key, _)| *key);
+        }
+        out.extend(self.merge.drain(..).map(|(_, event)| event));
+        self.lanes
+            .retain(|lane| !lane.queue.is_empty() || lane.last_emitted.is_some());
+    }
+}
+
+impl Lane {
+    /// This lane's half of [`PointerResampler::resample`]: drain its samples up
+    /// to `sample_time` into `out`, each keyed for the cross-lane merge.
+    fn resample(&mut self, sample_time: u64, out: &mut Vec<Keyed>) {
         // Position at the sample instant, computed from the pre-drain queue
         // snapshot so every coalesced Move this frame lands on the same point.
         let sample_pos = self.position_at(sample_time);
 
-        let mut pending_move = false;
-        let mut move_button = PointerButton::Primary;
+        // The last move sample of the run being coalesced, if any.
+        let mut pending_move: Option<Queued> = None;
 
-        // Copy the front's timestamp out (RawPointerSample is Copy) so the
-        // immutable `front()` borrow ends before the body pops/mutates.
-        while let Some(&RawPointerSample { time_nanos, .. }) = self.queue.front() {
+        // Copy the front's timestamp out so the immutable `front()` borrow
+        // ends before the body pops/mutates.
+        while let Some(time_nanos) = self.queue.front().map(|q| q.sample.time_nanos) {
             if time_nanos > sample_time {
                 break; // not yet reached — leave it (and everything after) buffered
             }
-            let sample = self.queue.pop_front().expect("front was just observed");
-            match sample.phase {
+            let queued = self.queue.pop_front().expect("front was just observed");
+            match queued.sample.phase {
                 PointerPhase::Move => {
-                    pending_move = true;
-                    move_button = sample.button;
+                    pending_move = Some(queued);
                 }
                 PointerPhase::Down => {
                     // A transition ends any coalesced Move run before it (a
                     // well-formed stream never nests one, but keep ordering
                     // lossless regardless).
-                    self.flush_move(pending_move, sample_pos, move_button, out);
-                    pending_move = false;
-                    out.push(sample.as_event());
-                    self.last_emitted = Some(sample.position);
+                    self.flush_move(pending_move.take(), sample_pos, out);
+                    self.emit(queued, out);
+                    self.last_emitted = Some(queued.sample.position);
                 }
                 PointerPhase::Up | PointerPhase::Cancel => {
                     // Bring the pointer to its resampled position first, then
                     // lift/cancel at the raw reported position.
-                    self.flush_move(pending_move, sample_pos, move_button, out);
-                    pending_move = false;
-                    out.push(sample.as_event());
-                    self.last_emitted = None; // gesture ended — nothing to hold
+                    self.flush_move(pending_move.take(), sample_pos, out);
+                    self.emit(queued, out);
+                    self.last_emitted = None; // contact ended — nothing to hold
                 }
             }
         }
 
         // Trailing coalesced Moves become one interpolated Move at the sample
         // position.
-        self.flush_move(pending_move, sample_pos, move_button, out);
+        self.flush_move(pending_move, sample_pos, out);
     }
 
-    /// Emit the single coalesced `Move` for a run of buffered move samples, at
-    /// the frame's resampled position — skipped when there was no move, no
-    /// resolvable position, or the position is unchanged from the last emit.
+    /// Emit one raw transition verbatim.
+    fn emit(&self, queued: Queued, out: &mut Vec<Keyed>) {
+        out.push((
+            (queued.sample.time_nanos, queued.seq),
+            ResampledPointer {
+                pointer_id: self.pointer_id,
+                event: queued.sample.as_event(),
+            },
+        ));
+    }
+
+    /// Emit the single coalesced `Move` for a run of buffered move samples
+    /// (`last` is the run's final sample), at the frame's resampled position —
+    /// skipped when there was no move, no resolvable position, or the position
+    /// is unchanged from the last emit.
     fn flush_move(
         &mut self,
-        pending: bool,
+        last: Option<Queued>,
         sample_pos: Option<Point>,
-        button: PointerButton,
-        out: &mut Vec<PointerEvent>,
+        out: &mut Vec<Keyed>,
     ) {
-        if !pending {
+        let Some(last) = last else {
             return;
-        }
+        };
         if let Some(pos) = sample_pos
             && self.last_emitted != Some(pos)
         {
-            out.push(PointerEvent {
-                phase: PointerPhase::Move,
-                position: pos,
-                button,
-            });
+            out.push((
+                (last.sample.time_nanos, last.seq),
+                ResampledPointer {
+                    pointer_id: self.pointer_id,
+                    event: PointerEvent {
+                        phase: PointerPhase::Move,
+                        position: pos,
+                        button: last.sample.button,
+                    },
+                },
+            ));
             self.last_emitted = Some(pos);
         }
     }
@@ -294,7 +413,8 @@ impl PointerResampler {
         // The last sample at/before the instant, and the first strictly after.
         let mut before: Option<&RawPointerSample> = None;
         let mut after: Option<&RawPointerSample> = None;
-        for sample in &self.queue {
+        for queued in &self.queue {
+            let sample = &queued.sample;
             if sample.time_nanos <= sample_time {
                 before = Some(sample);
             } else {
@@ -325,7 +445,7 @@ impl PointerResampler {
     /// prior sample to derive a velocity from (a single-sample queue).
     fn predict_forward(&self, newest: &RawPointerSample, sample_time: u64) -> Point {
         // The sample immediately before `newest` (the second-to-last element).
-        match self.queue.iter().rev().nth(1) {
+        match self.queue.iter().rev().nth(1).map(|queued| &queued.sample) {
             Some(prior) if newest.time_nanos > prior.time_nanos => {
                 let ahead = (sample_time - newest.time_nanos).min(PREDICTION_WINDOW_NANOS);
                 let span = newest.time_nanos - prior.time_nanos;
@@ -416,7 +536,18 @@ mod tests {
     use super::*;
 
     fn sample(phase: PointerPhase, x: f64, y: f64, time_nanos: u64) -> RawPointerSample {
+        sample_for(PointerId::touch(0), phase, x, y, time_nanos)
+    }
+
+    fn sample_for(
+        pointer_id: PointerId,
+        phase: PointerPhase,
+        x: f64,
+        y: f64,
+        time_nanos: u64,
+    ) -> RawPointerSample {
         RawPointerSample {
+            pointer_id,
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
@@ -430,10 +561,19 @@ mod tests {
         sample_time + SAMPLE_OFFSET_NANOS
     }
 
-    fn drain(resampler: &mut PointerResampler, sample_time: u64) -> Vec<PointerEvent> {
+    /// The resampled events of one frame, with their contact ids.
+    fn drain_tagged(resampler: &mut PointerResampler, sample_time: u64) -> Vec<ResampledPointer> {
         let mut out = Vec::new();
         resampler.resample(frame_time_for(sample_time), &mut out);
         out
+    }
+
+    /// The resampled events of one frame — the single-contact tests' view.
+    fn drain(resampler: &mut PointerResampler, sample_time: u64) -> Vec<PointerEvent> {
+        drain_tagged(resampler, sample_time)
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
     }
 
     // -----------------------------------------------------------------
@@ -645,6 +785,103 @@ mod tests {
         let out = drain(&mut r, 4_000_000);
         assert_eq!(out.len(), 1, "only the Down; the no-op moves are deduped");
         assert_eq!(out[0].phase, PointerPhase::Down);
+    }
+
+    // -----------------------------------------------------------------
+    // Per-contact lanes
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn two_interleaved_contacts_resample_in_separate_lanes() {
+        let a = PointerId::touch(0);
+        let b = PointerId::touch(1);
+        let mut r = PointerResampler::with_enabled(true);
+        // Two fingers moving in opposite directions, samples interleaved in
+        // arrival order. A shared lane would interpolate between the two
+        // fingers' positions; separate lanes keep each on its own path.
+        r.push(sample_for(a, PointerPhase::Down, 0.0, 0.0, 0));
+        r.push(sample_for(b, PointerPhase::Down, 100.0, 0.0, 1_000_000));
+        r.push(sample_for(a, PointerPhase::Move, 10.0, 0.0, 10_000_000));
+        r.push(sample_for(b, PointerPhase::Move, 90.0, 0.0, 11_000_000));
+        r.push(sample_for(a, PointerPhase::Move, 20.0, 0.0, 20_000_000));
+        r.push(sample_for(b, PointerPhase::Move, 80.0, 0.0, 21_000_000));
+
+        // Sample at 15ms: lane a interpolates halfway between 10 and 20; lane b
+        // between its own 11ms/21ms samples (90 → 80, 40% of the way).
+        let out = drain_tagged(&mut r, 15_000_000);
+        let ids: Vec<PointerId> = out.iter().map(|e| e.pointer_id).collect();
+        let phases: Vec<PointerPhase> = out.iter().map(|e| e.event.phase).collect();
+        assert_eq!(ids, vec![a, b, a, b], "merged back into arrival order");
+        assert_eq!(
+            phases,
+            vec![
+                PointerPhase::Down,
+                PointerPhase::Down,
+                PointerPhase::Move,
+                PointerPhase::Move
+            ]
+        );
+        assert_eq!(out[0].event.position, Point::new(0.0, 0.0));
+        assert_eq!(out[1].event.position, Point::new(100.0, 0.0));
+        assert_eq!(out[2].event.position, Point::new(15.0, 0.0));
+        let b_x = out[3].event.position.x;
+        assert!((b_x - 86.0).abs() < 1e-9, "lane b moved to {b_x}, not 86");
+        assert!(r.has_pending(), "both lanes still hold a too-new sample");
+    }
+
+    #[test]
+    fn a_lane_ends_on_its_own_up_without_ending_the_other() {
+        let a = PointerId::touch(0);
+        let b = PointerId::touch(1);
+        let mut r = PointerResampler::with_enabled(true);
+        r.push(sample_for(a, PointerPhase::Down, 0.0, 0.0, 0));
+        r.push(sample_for(b, PointerPhase::Down, 50.0, 50.0, 1_000_000));
+        r.push(sample_for(b, PointerPhase::Up, 50.0, 50.0, 2_000_000));
+        let out = drain_tagged(&mut r, 2_000_000);
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            (out[2].pointer_id, out[2].event.phase),
+            (b, PointerPhase::Up)
+        );
+        assert_eq!(r.lanes.len(), 1, "b's lane retired on its Up; a's lives on");
+        assert_eq!(r.lanes[0].pointer_id, a);
+
+        // Lane a still holds its own position: a later move interpolates from
+        // a's Down, never from b's.
+        r.push(sample_for(a, PointerPhase::Move, 10.0, 0.0, 10_000_000));
+        let out = drain_tagged(&mut r, 10_000_000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pointer_id, a);
+        assert_eq!(out[0].event.position, Point::new(10.0, 0.0));
+
+        r.push(sample_for(a, PointerPhase::Cancel, 10.0, 0.0, 12_000_000));
+        let out = drain_tagged(&mut r, 12_000_000);
+        assert_eq!(out[0].event.phase, PointerPhase::Cancel);
+        assert!(r.lanes.is_empty(), "a's lane retired on its Cancel");
+    }
+
+    #[test]
+    fn disabled_resampler_keeps_arrival_order_across_contacts() {
+        let a = PointerId::touch(0);
+        let b = PointerId::touch(1);
+        let mut r = PointerResampler::disabled();
+        r.push(sample_for(a, PointerPhase::Down, 0.0, 0.0, 0));
+        r.push(sample_for(b, PointerPhase::Down, 9.0, 9.0, 1));
+        r.push(sample_for(a, PointerPhase::Move, 1.0, 0.0, 2));
+        r.push(sample_for(b, PointerPhase::Up, 9.0, 9.0, 3));
+        let out = drain_tagged(&mut r, 0);
+        let order: Vec<(PointerId, PointerPhase)> =
+            out.iter().map(|e| (e.pointer_id, e.event.phase)).collect();
+        assert_eq!(
+            order,
+            vec![
+                (a, PointerPhase::Down),
+                (b, PointerPhase::Down),
+                (a, PointerPhase::Move),
+                (b, PointerPhase::Up),
+            ]
+        );
+        assert!(!r.has_pending());
     }
 
     // -----------------------------------------------------------------
