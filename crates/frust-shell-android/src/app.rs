@@ -59,6 +59,7 @@ use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
 use ndk::native_window::NativeWindow;
 
+use crate::ffi_support::TouchSlotMap;
 use crate::sync_tail::ScrollSyncTail;
 
 use self::a11y::AndroidA11y;
@@ -277,6 +278,11 @@ pub struct AndroidAppHandle {
     /// into the frame gate's `events_since_last_frame` so a too-new sample never
     /// starves the gate (see `PointerResampler::has_pending`).
     resampler: PointerResampler,
+    /// Maps each currently-down Android `MotionEvent.pointerId` onto the small
+    /// gesture-local slot [`Self::dispatch_touch`] stamps into
+    /// `PointerId::touch` — see [`TouchSlotMap`]'s doc for the
+    /// first-contact-is-0 / no-renumber-on-release contract.
+    touch_slots: TouchSlotMap,
     /// The monotonic epoch every resampler timestamp is measured from — the raw
     /// samples ([`Self::dispatch_touch`]) and the per-frame sample query
     /// ([`Self::frame`]) are both stamped from this one `Instant`, so they share
@@ -641,6 +647,7 @@ impl AndroidAppHandle {
             last_paced_interval: None,
             first_layout_done: false,
             resampler: PointerResampler::new(),
+            touch_slots: TouchSlotMap::new(),
             resample_clock: Instant::now(),
             pointer_scratch: Vec::new(),
             last_frame_time_nanos: None,

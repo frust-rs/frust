@@ -57,15 +57,28 @@ impl AndroidAppHandle {
     /// in — the same `sanitize_scale` value `frame()` uses, so hit-testing and
     /// layout never disagree.
     ///
-    /// Single-pointer in v1: the Kotlin side forwards only the primary pointer,
-    /// so every contact is a [`PointerButton::Primary`] event on
-    /// [`PointerId::touch`]`(0)`, delivered as an
+    /// The Kotlin side forwards every active contact (one `nativeOnTouch` call
+    /// per pointer — see `FrustSurfaceView.onTouchEvent`), each carrying its own
+    /// Android `MotionEvent.pointerId` in `android_pointer_id`. That id is
+    /// stable for a contact's lifetime but platform-chosen and not small, so
+    /// `self.touch_slots` ([`crate::ffi_support::TouchSlotMap`]) maps it onto
+    /// the gesture-local slot [`PointerId::touch`] takes: assigned on `Down`,
+    /// freed on `Up`/`Cancel`, with the gesture's first contact always landing
+    /// on slot `0` (the primary-sequence latch `frust_core`'s multi-contact
+    /// contract keys capture off). Every contact is a
+    /// [`PointerButton::Primary`] event, delivered as an
     /// [`InputEvent::PointerContact`]. The redraw the
     /// tree requests is implicit here — the Choreographer loop already posts a
     /// frame every vsync, so the mutated state is picked up on the next
     /// `frame()` without an explicit schedule (contrast the desktop shell's
     /// `request_redraw`).
-    pub(crate) fn dispatch_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
+    pub(crate) fn dispatch_touch(
+        &mut self,
+        phase: TouchPhase,
+        android_pointer_id: i32,
+        x: f32,
+        y: f32,
+    ) {
         let scale = sanitize_scale(self.scale);
         let position = Point::new(x as f64 / scale, y as f64 / scale);
         let core_phase = match phase {
@@ -99,17 +112,34 @@ impl AndroidAppHandle {
             );
         }
 
+        // Resolve this Android pointer id onto its gesture-local slot: a `Down`
+        // assigns one (the gesture's first contact always lands on slot 0 —
+        // see `TouchSlotMap`'s doc); every other phase looks up the slot that
+        // contact's own `Down` already assigned, falling back to a fresh
+        // assignment if none was recorded (a corrupt/out-of-order event
+        // sequence — the safe default is to still deliver the contact rather
+        // than drop it silently). `Up`/`Cancel` free the slot afterward so a
+        // later `Down` may reuse it.
+        let slot = match phase {
+            TouchPhase::Down => self.touch_slots.assign(android_pointer_id),
+            _ => self
+                .touch_slots
+                .slot_for(android_pointer_id)
+                .unwrap_or_else(|| self.touch_slots.assign(android_pointer_id)),
+        };
+        if matches!(phase, TouchPhase::Up | TouchPhase::Cancel) {
+            self.touch_slots.release(android_pointer_id);
+        }
+
         // Pointer resampling: buffer the raw sample (stamped
         // on the shared resample clock) so [`Self::frame`] can emit a
         // frame-boundary-interpolated position; Down/Up/Cancel still pass through
         // losslessly. When the kill switch disabled the resampler, deliver
         // directly instead — pre-resampling behavior verbatim.
         //
-        // Every contact is `touch(0)` here: the platform side forwards one
-        // contact, and it is the gesture's first. It travels as an identified
-        // `PointerContact` so the root's multi-contact contract (and the
-        // resampler's per-contact lane) apply to it.
-        let pointer_id = PointerId::touch(0);
+        // Travels as an identified `PointerContact` so the root's multi-contact
+        // contract (and the resampler's per-contact lane) apply to it.
+        let pointer_id = PointerId::touch(slot);
         if self.resampler.is_enabled() {
             let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.resampler.push(RawPointerSample {

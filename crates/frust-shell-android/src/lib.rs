@@ -246,17 +246,22 @@ macro_rules! android_app {
         ///
         /// `action` is the normalised phase code (`0`=down, `1`=move, `2`=up,
         /// `3`=cancel — an ABI shared with the Kotlin `FrustSurfaceView`);
-        /// `x`/`y` are physical view-local pixels.
+        /// `pointer_id` is that contact's own `MotionEvent.pointerId`; `x`/`y`
+        /// are physical view-local pixels. A BREAKING signature change
+        /// (`(JIIFF)V`, was `(JIFF)V`) — the Kotlin `external` declaration
+        /// gains the `pointerId` argument alongside it, carrying every active
+        /// contact rather than only the primary one.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnTouch<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
             _class: $crate::__jni::JClass<'local>,
             handle: $crate::__jni::jlong,
             action: $crate::__jni::jint,
+            pointer_id: $crate::__jni::jint,
             x: $crate::__jni::jfloat,
             y: $crate::__jni::jfloat,
         ) {
-            $crate::jni_glue::native_on_touch(handle, action, x, y)
+            $crate::jni_glue::native_on_touch(handle, action, pointer_id, x, y)
         }
 
         /// JNI `nativeOnResume`: activity resumed (bookkeeping only in v0).

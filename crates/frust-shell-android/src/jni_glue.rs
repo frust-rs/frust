@@ -1488,17 +1488,24 @@ pub fn native_on_frame(handle: jlong, frame_time_nanos: jlong) -> jboolean {
 ///
 /// `action` is the normalised phase code the Kotlin side sends
 /// (`0`=down, `1`=move, `2`=up, `3`=cancel — see
-/// [`crate::ffi_support::touch_phase_from_action`]); `x`/`y` are physical,
-/// view-local pixels (`MotionEvent.x`/`.y`), converted to logical space inside
-/// [`AndroidAppHandle::dispatch_touch`]. Single-pointer in v1: Kotlin forwards
-/// only the primary pointer.
-pub fn native_on_touch(handle: jlong, action: jint, x: jfloat, y: jfloat) {
+/// [`crate::ffi_support::touch_phase_from_action`]); `pointer_id` is that
+/// contact's own `MotionEvent.pointerId` (Android's device-wide identity for
+/// this contact, not yet the small gesture-local slot
+/// [`frust_core::event::PointerId::touch`] takes — `dispatch_touch` maps one
+/// onto the other); `x`/`y` are physical, view-local pixels (the same
+/// contact's own `MotionEvent.getX/getY(index)`), converted to logical space
+/// inside [`AndroidAppHandle::dispatch_touch`]. Kotlin forwards every active
+/// contact: one call per pointer for `ACTION_MOVE`/`ACTION_CANCEL`, and the
+/// single changed pointer (`event.actionIndex`) for
+/// `ACTION_DOWN`/`ACTION_POINTER_DOWN`/`ACTION_UP`/`ACTION_POINTER_UP` — see
+/// `FrustSurfaceView.onTouchEvent`.
+pub fn native_on_touch(handle: jlong, action: jint, pointer_id: jint, x: jfloat, y: jfloat) {
     guard("nativeOnTouch", (), || {
         pump_reactive_runtime();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let phase = crate::ffi_support::touch_phase_from_action(action);
-            app.dispatch_touch(phase, x, y);
+            app.dispatch_touch(phase, pointer_id, x, y);
         }
     });
 }
