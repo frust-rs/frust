@@ -5850,9 +5850,9 @@ one of them compiles into any one linked test binary.
 
 **Why not fixed**: nothing to report elsewhere. The notched-edge case has no producer. Android's edge-to-edge model has no corner control. Automatic placement detection to disable shifting would require a scoped context cleared by split views and sheets — a design change deferred to a follow-up plan.
 
-**Watch item** (unconfirmed): a developer-forum report that UIKit's corner layout guide does not reset to zero when a window returns to full screen.
+**Watch item** (not reproduced on iOS 26.2): a developer-forum report that UIKit's corner layout guide does not reset to zero when a window returns to full screen — gate g4-01 observed the guide reset to zero on entering full screen and come back non-zero on return to a window; `.minimal` reports zero corners because the control takes a safe-area strip instead.
 
-**Evidence**: plan fplan_000001a0ed6d3e3a5vOFrNW1, research rsa_000001a0ed6cf8b2zqGLZEkL + rsa_000001a0ed7142ce7O3dRUAf, review round rvr_000001a0f44e80abuPyeN2C3, action items act_000001a0f44f6894QCZiX1iA + act_000001a0f44f6bd9CVDGKOj3, gate g4-01 (pending).
+**Evidence**: plan fplan_000001a0ed6d3e3a5vOFrNW1, research rsa_000001a0ed6cf8b2zqGLZEkL + rsa_000001a0ed7142ce7O3dRUAf, review round rvr_000001a0f44e80abuPyeN2C3, action items act_000001a0f44f6894QCZiX1iA + act_000001a0f44f6bd9CVDGKOj3, gate g4-01 PASSED 2026-10-01 on the iPad Pro 13-inch (M5) iOS 26.2 Simulator (Xcode 27.0; 12 legs — windowed readout TL 66x43 / TR 10x43, bar slot clear, full screen zeros, rotation, Stage Manager resize, automatic/unified/minimal styles, RTL, no-regression).
 
 ---
 
