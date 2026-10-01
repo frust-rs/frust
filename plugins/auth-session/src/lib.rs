@@ -2,7 +2,10 @@
 //! browser session — Android Custom Tabs / macOS+iOS
 //! `ASWebAuthenticationSession` presented over the request's `https` URL,
 //! resolving to the redirect the identity provider sends back to
-//! `callback_scheme://…` (or the user cancelling).
+//! `callback_scheme://…` (or the user cancelling) — plus, for desktop Linux,
+//! Windows and macOS, an RFC 8252 loopback-redirect listener
+//! ([`LoopbackSession`]) that opens the system browser and receives the
+//! redirect on `http://127.0.0.1:<port>/<path>` (*Desktop loopback* below).
 //!
 //! # Charter: a platform plugin
 //!
@@ -47,7 +50,11 @@
 //! second [`AuthSession::start`] call while one is still live resolves
 //! immediately to [`AuthSessionError::Busy`] rather than queuing or
 //! replacing the first (an in-app browser tab is a modal, single-instance
-//! UI surface on every backend platform). Each accepted `start` is stamped
+//! UI surface on every backend platform). The busy slot is **shared across
+//! both backends**: a bound [`LoopbackSession`] holds the same slot from
+//! [`LoopbackSession::bind`] until it resolves or is dropped, so while one is
+//! live both [`AuthSession::start`] and a second [`LoopbackSession::bind`]
+//! answer [`AuthSessionError::Busy`], and vice versa. Each accepted `start` is stamped
 //! with a fresh, process-wide **generation**, and a platform result completes
 //! a session only while that session's generation is still the live one — a
 //! result reported after the session finished or was abandoned is discarded
@@ -64,7 +71,8 @@
 //! calling back (this crate's `oneshot` module's own drop-without-send
 //! fallback), **or** when the caller drops the future
 //! [`AuthSession::start`] returned. That last one is the only bound on a
-//! wedged session: this crate runs no timeout of its own, so a platform
+//! wedged custom-scheme session: [`AuthSession`] runs no timeout of its own
+//! ([`LoopbackSession`] does — [`LoopbackOptions::timeout`]), so a platform
 //! that presents a session and then never calls back keeps the slot claimed
 //! for exactly as long as the caller holds that future alive — dropping it
 //! (or the task awaiting it) frees the slot for the next `start`.
@@ -94,15 +102,67 @@
 //! callback to the request this app made; without both, a callback that
 //! reaches this future is enough to complete someone else's flow.
 //!
+//! # Desktop loopback
+//!
+//! [`LoopbackSession`] is RFC 8252 §7.3's loopback interface redirection,
+//! for targets with no in-app browser tab (desktop Linux and Windows) and
+//! for macOS apps that prefer the system browser:
+//!
+//! 1. [`LoopbackSession::bind`] validates [`LoopbackOptions`] (a reserved
+//!    path of 2-256 bytes of ASCII alphanumerics and `-._~/`, starting with
+//!    `/`, with no `//`, `.` or `..` segment and no `?`, `#` or `%`; a
+//!    timeout above zero and at most one hour — else
+//!    [`AuthSessionError::InvalidUrl`]), answers
+//!    [`AuthSessionError::NoHandler`] off desktop without opening a socket,
+//!    claims the shared busy slot (*Exactly one live session*), and binds the
+//!    literal `127.0.0.1` on an ephemeral port — never `localhost`,
+//!    `0.0.0.0` or `::`. [`LoopbackSession::redirect_uri`] is then exactly
+//!    `http://127.0.0.1:<port><path>`.
+//! 2. [`LoopbackSession::start`] checks the authorization URL with the same
+//!    `https`-only rule as [`AuthSession::start`], spawns one thread that
+//!    owns the listener, and opens the URL in the system browser via
+//!    `frust-url-launcher`. The future resolves to the full callback URL
+//!    (query intact byte-for-byte), [`AuthSessionOutcome::Cancelled`] after
+//!    [`LoopbackCancel::cancel`], [`AuthSessionError::TimedOut`], or the
+//!    browser launch's own error. Dropping it stops the listener.
+//! 3. A cancel, dropping the future, or [`LoopbackOptions::timeout`] all
+//!    take effect within about one poll interval (25 ms), even while a
+//!    connection is being served — the one exception is a response write
+//!    already in progress, bounded by the 2 s connection I/O timeout (see
+//!    [`LoopbackSession::start`] and [`LoopbackCancel`] for the residual
+//!    local-stall bound). The listener accepts exactly one callback, then stops.
+//! 4. Connections are served one at a time, each with a 2 s / 8 KiB budget
+//!    for its request head. A request must be a well-formed
+//!    `HTTP/1.0`/`HTTP/1.1` request line with a printable-ASCII,
+//!    `#`-free target and exactly one `Host: 127.0.0.1:<port>` header (the
+//!    DNS-rebinding defence) — else `400`; a non-`GET` method or a path
+//!    other than the reserved one is `404`. After a `400`/`404` the listener
+//!    keeps waiting, so a stray local client cannot end the session.
+//! 5. Every response is a static page with `Cache-Control: no-store`,
+//!    `Content-Security-Policy: default-src 'none'`, `Referrer-Policy:
+//!    no-referrer`, `X-Content-Type-Options: nosniff` and `Connection:
+//!    close`; nothing from the request is ever echoed, and the success page
+//!    carries no script.
+//! 6. No `Debug`/`Display` output or error string names the callback URL or
+//!    its query; [`LoopbackSession`]'s `Debug` prints only port and path.
+//!
+//! Any local process can reach the port while it is open, so *Security*'s
+//! PKCE + `state` requirement applies unchanged.
+//!
 //! # Platform notes
 //!
-//! Android (Chrome Custom Tabs) and Apple — iOS + macOS, both on
-//! `ASWebAuthenticationSession` — each ship a backend module (`android`,
-//! `apple`) presenting a real in-app browser tab. Every other target
-//! (desktop Linux, Windows, … — see `unsupported`) has no platform
-//! authentication user agent at all and always resolves
-//! [`AuthSessionError::NoHandler`]; see that module's own doc for the
-//! recommended fallback.
+//! | Target | [`AuthSession`] (custom scheme) | [`LoopbackSession`] |
+//! |---|---|---|
+//! | Android | Chrome Custom Tabs (`android` module) | [`AuthSessionError::NoHandler`] |
+//! | iOS | `ASWebAuthenticationSession` (`apple` module) | [`AuthSessionError::NoHandler`] |
+//! | macOS | `ASWebAuthenticationSession` (`apple` module) | system browser + `127.0.0.1` listener |
+//! | Linux, Windows | [`AuthSessionError::NoHandler`] (`unsupported` module) | system browser + `127.0.0.1` listener |
+//! | anything else | [`AuthSessionError::NoHandler`] | [`AuthSessionError::NoHandler`] |
+//!
+//! [`AuthSession::is_supported`] answers the first column only — `true` on
+//! the Android, iOS and macOS rows, `false` on Linux and Windows. The second
+//! column has its own predicate, [`LoopbackSession::is_supported`] (`true`
+//! on the macOS and Linux/Windows rows); a desktop caller asks that one.
 //!
 //! # The Android double-delivery note
 //!
@@ -153,6 +213,9 @@ type UrlLauncherError = AuthSessionError;
 mod url;
 
 mod oneshot;
+
+mod loopback;
+pub use loopback::{DEFAULT_LOOPBACK_TIMEOUT, LoopbackCancel, LoopbackOptions, LoopbackSession};
 
 #[cfg(target_os = "android")]
 mod android;
@@ -272,9 +335,16 @@ pub enum AuthSessionError {
     PlatformNotInitialized,
 
     /// No platform authentication user agent exists on this target (see
-    /// `unsupported`'s module doc for the recommended fallback).
+    /// `unsupported`'s module doc — on desktop Linux and Windows, use
+    /// [`LoopbackSession`]), or [`LoopbackSession`]'s browser launch found no
+    /// handler for `https` URLs.
     #[error("auth session: no authentication user agent on this platform")]
     NoHandler,
+
+    /// A started [`LoopbackSession`] received no matching redirect within its
+    /// [`LoopbackOptions::timeout`]; the listener has been closed.
+    #[error("auth session: timed out waiting for the authorization redirect")]
+    TimedOut,
 
     /// A backend-specific failure that isn't a not-yet-initialized/
     /// no-handler condition — a platform JNI/Objective-C error this crate
@@ -469,20 +539,28 @@ fn checked_callback(
 /// Validate `req` against this crate's URL and callback-scheme rule tables.
 /// `Ok(())` means `req` is safe to hand to a backend.
 fn validate(req: &AuthSessionRequest) -> Result<(), AuthSessionError> {
-    url::validate(&req.url)?;
+    validate_https_url(&req.url)?;
+    validate_callback_scheme(&req.callback_scheme)
+}
+
+/// Validate an authorization URL: the `url` module's rule table, narrowed to
+/// `https`. Shared by [`AuthSession::start`] (through [`validate`]) and
+/// [`LoopbackSession::start`].
+fn validate_https_url(url: &str) -> Result<(), AuthSessionError> {
+    url::validate(url)?;
 
     // `url::validate` (the `url` module's rule table) accepts `http` or
     // `https`; RFC 8252's in-app browser tab additionally requires `https`
     // specifically (an OAuth authorization endpoint is never plain `http`).
-    let colon = req
-        .url
-        .find(':')
-        .expect("url::validate already proved a scheme is present");
-    if !req.url[..colon].eq_ignore_ascii_case("https") {
+    // `url::validate` already proved a scheme is present, so the `else` arm
+    // is unreachable; it answers `InvalidUrl` rather than panicking.
+    let Some(colon) = url.find(':') else {
+        return Err(AuthSessionError::InvalidUrl);
+    };
+    if !url[..colon].eq_ignore_ascii_case("https") {
         return Err(AuthSessionError::InvalidUrl);
     }
-
-    validate_callback_scheme(&req.callback_scheme)
+    Ok(())
 }
 
 /// Well-known schemes a callback must not claim — each already has its own
@@ -634,33 +712,40 @@ impl AuthSession {
         StartFuture::new(req)
     }
 
-    /// Whether this build target has a platform authentication user agent
-    /// at all — Android (Chrome Custom Tabs) or Apple (`target_vendor =
-    /// "apple"`, so iOS and macOS both, on
-    /// `ASWebAuthenticationSession`). A compile-time answer about the
-    /// backend module this target builds, not a runtime probe: `true` on
-    /// Android still leaves [`AuthSessionError::NoHandler`] reachable at
-    /// `start` time on a device with no Custom Tabs-capable browser
-    /// installed.
+    /// Whether [`Self::start`] (a custom-scheme callback) has a backend on
+    /// this build target: Android (Chrome Custom Tabs) and Apple
+    /// (`target_vendor = "apple"`, so iOS and macOS both, on
+    /// `ASWebAuthenticationSession`). `false` on Linux and Windows, where
+    /// [`Self::start`] answers [`AuthSessionError::NoHandler`] — the desktop
+    /// path is [`LoopbackSession`], which has its own
+    /// [`LoopbackSession::is_supported`] (the crate doc's *Platform notes*
+    /// table). The two predicates answer two different questions on purpose;
+    /// this one never says `true` for a target where `start` cannot work.
+    ///
+    /// A compile-time answer about the backends this target builds, not a
+    /// runtime probe: `true` on Android still leaves
+    /// [`AuthSessionError::NoHandler`] reachable at `start` time on a device
+    /// with no Custom Tabs-capable browser installed.
     pub fn is_supported() -> bool {
         cfg!(any(target_os = "android", target_vendor = "apple"))
     }
 }
 
+/// Serializes every test in this crate that touches [`ACTIVE`] — it is one
+/// process-global static, so two tests racing on it (Rust runs `#[test]`s on
+/// separate threads within one binary by default) would flake into each
+/// other's `Busy`/`NoHandler` outcomes. Shared by this file's tests and the
+/// `loopback` module's, since both backends claim the same slot. Matches
+/// `plugins/iap/src/event.rs`'s own `TEST_LOCK` precedent for the same
+/// reason.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex as StdMutex;
     use std::task::{RawWaker, RawWakerVTable, Waker};
 
     use super::*;
-
-    /// Serializes every test in this module — [`ACTIVE`] is one
-    /// process-global static, so two tests racing on it (Rust runs
-    /// `#[test]`s on separate threads within one binary by default) would
-    /// flake into each other's `Busy`/`NoHandler` outcomes. Matches
-    /// `plugins/iap/src/event.rs`'s own `TEST_LOCK` precedent for the same
-    /// reason.
-    static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     /// Run `f` with the `TEST_LOCK` held and [`ACTIVE`] guaranteed empty
     /// both before and after — a test that leaves a stray session live
@@ -716,6 +801,53 @@ mod tests {
         });
     }
 
+    /// A reverse-DNS callback scheme — the shape Apple and Android apps
+    /// conventionally register — is accepted.
+    #[test]
+    fn reverse_dns_callback_scheme_is_accepted() {
+        assert_eq!(validate_callback_scheme("io.example.console"), Ok(()));
+        assert_eq!(validate_callback_scheme("com.example.app"), Ok(()));
+    }
+
+    #[test]
+    fn is_supported_answers_the_custom_scheme_column_only() {
+        assert_eq!(
+            AuthSession::is_supported(),
+            cfg!(any(target_os = "android", target_vendor = "apple"))
+        );
+        if cfg!(any(target_os = "linux", target_os = "windows")) {
+            // Desktop without an in-app browser tab: `start` cannot work, the
+            // loopback path can — two predicates, two answers.
+            assert!(!AuthSession::is_supported());
+            assert!(LoopbackSession::is_supported());
+        }
+        if cfg!(target_os = "macos") {
+            assert!(AuthSession::is_supported());
+            assert!(LoopbackSession::is_supported());
+        }
+    }
+
+    #[test]
+    fn https_url_rule_is_shared_by_both_backends() {
+        assert_eq!(
+            validate_https_url("https://issuer.example/authorize"),
+            Ok(())
+        );
+        assert_eq!(validate_https_url("HTTPS://issuer.example/a?b=c"), Ok(()));
+        for url in [
+            "http://issuer.example/",
+            "javascript:alert(1)",
+            "",
+            "https://u@h/",
+        ] {
+            assert_eq!(
+                validate_https_url(url),
+                Err(AuthSessionError::InvalidUrl),
+                "{url:?}"
+            );
+        }
+    }
+
     #[test]
     fn callback_scheme_rule_table() {
         for scheme in ["loop", "frustplay", "com.example.app"] {
@@ -757,9 +889,11 @@ mod tests {
         (generation, StartFuture::Pending(receiver))
     }
 
-    /// On a target with no authentication user agent, `start` refuses
-    /// before presenting anything: the future resolves on its first poll
-    /// and the slot is released rather than leaked.
+    /// On a target with no in-app browser tab (desktop Linux and Windows,
+    /// where [`LoopbackSession`] is the supported path instead, and every
+    /// other non-Android, non-Apple target), the custom-scheme `start`
+    /// refuses before presenting anything: the future resolves on its first
+    /// poll and the slot is released rather than leaked.
     #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
     #[test]
     fn unsupported_backend_reports_no_handler_on_first_poll_and_releases_the_slot() {

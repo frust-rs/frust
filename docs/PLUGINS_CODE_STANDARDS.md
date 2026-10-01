@@ -19,7 +19,13 @@ is additional or different for a plugin.
 - **No panics/unwinds near an FFI boundary**, the same rule as shell exports
   ([CODE_STANDARDS.md](CODE_STANDARDS.md)'s Language Idioms).
 - **Platform plugins never depend on `frust-*` framework crates** (`frust-plugin` +
-  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone**. The three
+  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone**. A platform
+  plugin MAY depend on another platform plugin instead, provided the edge is target-gated,
+  the capability is literally reused rather than re-implemented, and it never forms a cycle —
+  the forbidden thing is a dependency on a *framework* crate, and a sibling platform plugin has
+  none. The first such edge: `frust-auth-session` → `frust-url-launcher`, target-gated to
+  linux/windows/macos, for the desktop loopback flow's browser launch (see
+  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s Layer Dependencies). The three
   design-system plugins (`frust-glyph`/`frust-material`/`frust-cupertino`) are facade plugins
   that also name `kurbo`/`peniko` directly (mirroring `frust-widgets`' own manifest, since a
   catalog builds custom widgets over `frust::authoring` the same way `frust-widgets` builds its

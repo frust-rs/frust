@@ -55,8 +55,8 @@ needs nothing extra — the objc2 binding's own link attribute applies there.
 use frust_auth_session::{AuthSession, AuthSessionOutcome, AuthSessionRequest};
 
 let req = AuthSessionRequest {
-    url: "https://issuer.example/authorize?client_id=…&redirect_uri=myapp://cb".to_string(),
-    callback_scheme: "myapp".to_string(),
+    url: "https://issuer.example/authorize?client_id=…&redirect_uri=com.example.app:/oauth2redirect".to_string(),
+    callback_scheme: "com.example.app".to_string(),
     ephemeral: false,
 };
 
@@ -77,7 +77,7 @@ match AuthSession::start(req).await {
         // ... verify PKCE challenge ...
     }
     Ok(AuthSessionOutcome::Cancelled) => { /* user dismissed the tab */ }
-    Err(err) => { /* AuthSessionError::{InvalidUrl,Busy,PlatformNotInitialized,NoHandler,Platform} */ }
+    Err(err) => { /* AuthSessionError::{InvalidUrl,Busy,PlatformNotInitialized,NoHandler,TimedOut,Platform} */ }
 }
 ```
 
@@ -87,6 +87,43 @@ lowercase-alnum/`+`/`-`/`.` thereafter, not one of the well-known schemes
 `http`/`https`/`file`/`javascript`/`data`/`blob`/`intent`/`content`/`about`)
 before touching any platform API — a rejected request resolves
 `Err(AuthSessionError::InvalidUrl)` on the future's very first poll.
+The validator accepts dotted reverse-DNS schemes such as `io.example.console` (pinned by the test `reverse_dns_callback_scheme_is_accepted`), and `callback_scheme` is the scheme only, not the full redirect URI.
+
+### Desktop loopback (Linux, Windows, macOS)
+
+On desktop, redirect to a loopback HTTP listener instead of a custom scheme (RFC 8252 §7.3):
+
+```rust
+use frust_auth_session::{AuthSession, AuthSessionOutcome, AuthSessionRequest, LoopbackSession, LoopbackOptions};
+use frust_oauth_native::AuthorizationRequest;
+
+let session = LoopbackSession::bind(LoopbackOptions::new("/oauth/callback"))?;
+let redirect_uri = session.redirect_uri().to_string();
+
+// Build the authorization URL with the loopback redirect URI as the target.
+let request = AuthorizationRequest {
+    authorization_endpoint: "https://as.example/authorize".to_string(),
+    client_id: "example-app".to_string(),
+    redirect_uri: redirect_uri.clone(),
+    scope: Some("openid profile offline_access".to_string()),
+    resources: Vec::new(),
+};
+let url = request.build(&state, &verifier.challenge())?;
+
+// Start the session — it opens the URL in the system browser (via
+// frust-url-launcher) and waits for the redirect.
+let outcome = session.start(&url).await?;
+```
+
+The one-live-session slot (the same one [`AuthSession::start`] claims) is claimed at [`LoopbackSession::bind`] and released when the session drops. Its behaviour follows these rules:
+
+- **Bind address:** `127.0.0.1` on an ephemeral port, never `localhost`, `::1` or `0.0.0.0`. `LoopbackSession::redirect_uri()` gives the full URI (e.g. `http://127.0.0.1:54321/oauth/callback`).
+- **Request acceptance:** the listener accepts GET requests on the exact reserved path only. Any other method or path answers `404`; a malformed request (a bad request line, a bad/duplicate/mismatched `Host` header, obsolete line folding) answers `400`. Both keep the listener **waiting** for the callback (stray local clients cannot end the session).
+- **Host header:** the listener rejects requests whose `Host` header does not match `127.0.0.1:<port>` (case-insensitive). This is the DNS-rebinding defence — a page that resolves its hostname to `127.0.0.1` sends its own hostname in the `Host` header, not `127.0.0.1`.
+- **Fetch Metadata:** a request carrying a `Sec-Fetch-Mode` other than `navigate` or a `Sec-Fetch-Dest` other than `document` answers `404` and the listener keeps waiting — defence in depth against a no-cors cross-origin request (e.g. a port scan) from any web origin open in the browser. Either header's absence leaves the request allowed.
+- **Response:** a static page with `Cache-Control: no-store`, `Content-Security-Policy: default-src 'none'`, no script, and no echo of the request bytes.
+- **Lifecycle:** the listener accepts exactly one callback, then closes. Cancelling via [`LoopbackCancel::cancel`], dropping the future, or the session timing out all close the listener within about one poll interval (~25 ms), even while a request is being served — the exception is a response write already in progress, bounded by the 2 s connection I/O timeout.
+- **Timeout:** the session waits for the redirect up to [`LoopbackOptions::timeout`] (default 300 s, configurable, at most one hour). When it elapses, the session resolves [`AuthSessionError::TimedOut`] and closes.
 
 ---
 
@@ -163,15 +200,23 @@ before touching any platform API — a rejected request resolves
     [LIMITATIONS.md](../../docs/LIMITATIONS.md)). PKCE + `state` (§ 3.4) are
     the caller's defence. Dropping the awaited future releases the Busy slot
     but does not close the tab (`auth-session-no-cancel-v1`).
-- **Desktop (Linux, Windows):** permanent — no platform authentication user
-  agent exists; every session rejects with `AuthSessionError::NoHandler`
-  (`auth-session-linux-windows-unavailable-v1` in
-  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). Drive the same OAuth flow
-  through [`frust-url-launcher`](../url-launcher/README.md)'s ordinary
-  system-browser launch instead, with a local loopback HTTP listener (or an
-  equivalent out-of-band step) receiving the redirect — RFC 8252's own
-  "loopback IP redirection" pattern for platforms with no in-app
-  browser-tab primitive.
+- **Desktop (Linux, Windows, macOS):** use [`LoopbackSession`] instead. On
+  Linux and Windows, `AuthSession::start` with a custom scheme still answers
+  [`AuthSessionError::NoHandler`] (no platform authentication user agent
+  exists; the loopback path has run against a live browser on both — §6), and
+  [`AuthSession::is_supported()`](../auth-session/src/lib.rs) is `false`
+  there (`true` on macOS, where `ASWebAuthenticationSession` serves the
+  custom-scheme path). Ask `LoopbackSession::is_supported()` for the loopback
+  path — `true` on all three. The §6 desktop transcripts predate this split
+  and record the earlier `is_supported: true` answer. The listener binds on ephemeral loopback
+  (`127.0.0.1:<port>` on an ephemeral port; `auth-session-loopback-poll-interval-v1` in
+  [LIMITATIONS.md](../../docs/LIMITATIONS.md)), opens the authorization URL in
+  the system browser (via [`frust-url-launcher`](../url-launcher/README.md)),
+  and receives the redirect — RFC 8252 §7.3's "loopback IP redirection" pattern
+  for platforms with no in-app browser-tab primitive
+  (`auth-session-loopback-first-match-wins-v1`, `auth-session-loopback-local-stall-v1` in
+  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). See the Desktop loopback subsection
+  above for the complete listener contract and example.
 
 ---
 
@@ -189,21 +234,42 @@ redirect itself is unauthenticated — the crate has no way to prove it came fro
 provider rather than the browser or another app. PKCE and state verification are essential on all
 three platforms to prevent authorization code theft.
 
+The loopback listener has its own attack surface. Any local process can connect to the loopback
+port while the session is live and the authorization response is plain `http`. A same-user local
+process can race the real redirect to the reserved path and send its own request — it does not
+matter which request arrives first. A well-formed callback proves only that *a* local client sent
+a request to the reserved path, never that it came from the browser. **The crate's PKCE and `state`
+requirement binds here exactly as for a custom-scheme callback** (RFC 8252 § 8.3): the app's own
+state and PKCE check are the sole defence against accepting a forged response.
+
+The loopback listener also checks the `Host` header (must match `127.0.0.1:<port>`) to defend
+against DNS rebinding: a web page can resolve its hostname to `127.0.0.1`, but the browser still
+sends its own hostname in the `Host` header, not `127.0.0.1`, so the request is rejected. Lastly,
+every response is a static page with no echo of request bytes and a `no-store` cache policy.
+
+On Linux and macOS, the authorization URL (its state parameter, PKCE code challenge, and the
+redirect listener's port) is handed to `xdg-open` or `open` as a command-line argument and is
+readable by other local users via `/proc/<pid>/cmdline` on Linux or `ps` on macOS. The S256 PKCE
+challenge does not reveal the verifier, so the authorization code exchange cannot be completed by
+a reader, but the `state` parameter itself is not secret from other users on a shared host.
+
 ---
 
 ## 4. One-session contract
 
-At most one `AuthSession` runs at a time, process-wide: starting a second one
-while the first is still live resolves immediately to
-`AuthSessionError::Busy` rather than queuing or replacing it (an in-app
-browser tab is a modal, single-instance UI surface on every backend
-platform). The slot frees the moment the live session resolves — by outcome,
-by error, or by a backend module failing without ever calling back — so a
-stuck session can never wedge every later one behind it. Dropping the awaited
-future frees the slot too, but frees only this crate's bookkeeping: the
-platform UI stays up (Android: until the user closes the tab; iOS/macOS: until
-the user dismisses the sheet or the next `start` cancels it) —
-`auth-session-no-cancel-v1` in [LIMITATIONS.md](../../docs/LIMITATIONS.md).
+At most one session runs at a time, process-wide: the one-live-session slot is **shared across
+both backends** (custom-scheme [`AuthSession`] and loopback [`LoopbackSession`]). Starting a second
+one while the first is still live resolves immediately to [`AuthSessionError::Busy`] rather than
+queuing or replacing it. A bound [`LoopbackSession`] (even if not yet started) holds the slot, so
+both [`AuthSession::start`] and a second [`LoopbackSession::bind`] answer [`Busy`] while one is
+live, and vice versa.
+
+The slot frees the moment the live session resolves — by outcome, by error, or by a backend module
+failing without ever calling back — so a stuck session can never wedge every later one behind it.
+Dropping the awaited future frees the slot too, but frees only this crate's bookkeeping: the
+platform UI stays up (Android: until the user closes the tab; iOS/macOS: until the user dismisses
+the sheet or the next `start` cancels it) — `auth-session-no-cancel-v1` in
+[LIMITATIONS.md](../../docs/LIMITATIONS.md).
 
 ---
 
@@ -590,3 +656,157 @@ restart landed: the alert was replaced by the second session's own alert
 `Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`.
 **The `PresentationContextInvalid` race seen on the iOS simulator did not
 reproduce on macOS.**
+
+### Linux desktop (loopback) — PASSED (machine-driven, dockur linux-native rig), 2026-10-01
+
+Host: the Linux workstation (Manjaro, kernel 6.18) running the `frust-linux-native`
+container desktop (Ubuntu 24.04, KDE Plasma 5.27 on Xorg `:20`, NVIDIA T400): the
+`examples/playground` desktop debug binary (`cargo build` from `examples/playground`,
+feature head `06b520d7`) built and run on the host and presented into the container's
+display through `linux-native/run-on-desktop.sh`, driven with `xdotool` from inside the
+container, screenshots via `import -window root`. Gate pages served from the workstation
+by a self-signed `https` server on `127.0.0.1:8443` (`Base URL` = `https://127.0.0.1:8443/`).
+
+**Browser path, recorded as such.** `LoopbackSession::start` opened the browser through
+`frust-url-launcher`'s Linux arm (`xdg-open <url>`, the whole authorization URL as its
+argument — visible in `ps`, the `auth-session-loopback-url-in-launcher-argv-v1` entry).
+`xdg-open` ignores `$BROWSER` when an `x-scheme-handler/https` default exists, and the
+host's default is the operator's real browser profile, so the app was run with
+`XDG_CONFIG_HOME`/`XDG_DATA_HOME` pointed at a scratch `mimeapps.list` + desktop entry
+resolving `https` to **Mozilla Firefox 156.0 (host build, throwaway profile, `--no-remote`)**
+on `DISPLAY=:20`; the self-signed certificate was accepted once in that profile. Each leg
+started a fresh Firefox instance. `is_supported: true` throughout.
+
+**(1) Login** — Firefox opened `loopback.html?gate_iss=…&response_type=code&client_id=
+frust-playground&redirect_uri=http%3A%2F%2F127.0.0.1%3A39829%2Foauth%2Fcallback&scope=
+openid&state=…&code_challenge=…&code_challenge_method=S256`, redirected, and showed
+`Sign-in complete. You can close this tab and return to the app.` at
+`http://127.0.0.1:39829/oauth/callback?code=gatecode&state=…&iss=…`; the whole round trip
+took under 1.5 s.
+
+```
+status: Loopback login -> code ok len=8, state ok, iss ok, grant body len=212
+loopback port: 39829
+```
+
+`curl -si http://127.0.0.1:39829/oauth/callback` immediately afterwards: `curl: (7)
+Failed to connect` (connection refused — one success, then the socket closes); `ss -ltnp`
+shows no `playground` listener.
+
+**(2) 404 and keep waiting** — during a `gate_mode=stay` session on port `40691`
+(`Loopback timeout (10 s)`):
+
+```
+curl -si http://127.0.0.1:40691/wrong
+HTTP/1.1 404 Not Found … Cache-Control: no-store … Content-Security-Policy: default-src 'none' … Connection: close
+curl -si -X POST http://127.0.0.1:40691/oauth/callback
+HTTP/1.1 404 Not Found
+curl -si -H 'Host: localhost:40691' http://127.0.0.1:40691/oauth/callback
+HTTP/1.1 400 Bad Request
+```
+
+`ss -ltnp` still listed `127.0.0.1:40691 … "playground"` after all three.
+
+**(3) Timeout** — the same session (Firefox showing the gate page's
+`waiting (close this tab to test timeout/cancel)`) resolved
+`Loopback timeout (10 s) -> Err(TimedOut)`; the listener left `ss` 10.2 s after the click.
+
+**(4) Cancel** — `Loopback cancel` (port `42029`, gate page waiting), then
+`Cancel loopback` → `Loopback cancel -> Ok(Cancelled)`; the port was gone 0.11 s after the
+click (`ss` polled at 10 Hz).
+
+**(5) Busy** — `Loopback busy -> Err(Busy)`; no listener left afterwards (the button drops
+its first session).
+
+**(6) Negative controls** — `Loopback deny` (port `32979`; the gate request carried
+`gate_mode=deny`; Firefox landed on
+`…/oauth/callback?error=access_denied&error_description=gate+deny&state=…&iss=…` and
+showed the same static page) → `Loopback deny -> Err(Authorization { error: AccessDenied,
+description: Some("gate deny"), uri: None })`. `Loopback bad iss` (port `34245`; a normal
+successful redirect) → `Loopback bad iss -> Err(IssuerMismatch)`.
+
+**(7) Drop** — a `stay` session on port `34225`; the playground window closed with its
+titlebar close button: the port was gone 0.12 s after the click, the process exited
+cleanly (no panic in its log), no listener left.
+
+**(8) Response page source** — Firefox `view-source:` of the leg-1 success page:
+`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Sign-in complete</title>
+</head><body><p>Sign-in complete. You can close this tab and return to the app.</p></body>
+</html>` — no `<script>`, none of the query values.
+
+This leg also closes `frust-url-launcher`'s Linux browser-out leg: `xdg-open` launched the
+browser from a live X11 session (see `plugins/url-launcher/README.md` §6).
+
+### Windows desktop (loopback) — PASSED (machine-driven over ssh + devtools, `dell_mini_pc`), 2026-10-01
+
+Host: the Windows 11 Pro rig (10.0.26200.9457, Intel UHD Graphics 730, user `cpu`, desktop session
+2 connected by the operator over RDP for the run): the `examples/playground` desktop debug binary
+built natively on the rig from feature head `06b520d7` with `--features frust/devtools` (plus an
+uncommitted two-line scratch patch to the playground's Auth page echoing every status-line write to
+stderr and defaulting `Base URL` to the gate origin — the backend under test was not touched),
+launched in the desktop session through a one-shot `schtasks /IT /RU cpu` task with
+`FRUST_DEVTOOLS=1`, and driven from the Linux workstation through the devtools wire protocol over an
+`ssh -L` forward (`input_tap`/`input_scroll`; status lines read from the stderr log, listeners from
+`netstat -ano`, probes with `curl.exe` on the rig). Gate pages served from the workstation at
+`https://192.168.1.109:8443/` (`Base URL`) by a `python3 http.server` behind a throwaway CA-signed
+leaf certificate (SAN `192.168.1.109`); the throwaway CA sat in the rig's machine Root store for the
+run only.
+**Browser path, recorded as such.** `LoopbackSession::start` opened the browser through
+`frust-url-launcher`'s Windows arm (`ShellExecuteW("open", <url>)`): the rig's registered `https`
+handler is **Zen Browser 1.22.3b** (Firefox-based, the operator's own profile — Edge is installed
+but not the default), which started at the click (twelve `zen.exe` processes whose start times match
+the tap) and fetched the gate page from the workstation. This closes `frust-url-launcher`'s Windows
+browser-out leg. `is_supported: true` throughout.
+Two things the run had to get past, recorded for the next operator: (a) a self-signed `CA:TRUE`
+certificate used directly as the server certificate is rejected by Firefox-family browsers (the Linux
+run only passed because the override was clicked there) — serve a CA + non-CA leaf instead; (b) in
+a **disconnected** desktop session the shell paints no frames (`frame_stats_subscribe` delivered none
+in 4 s), so `spawn_local` futures — the loopback session included — neither resolve nor time out
+until the session is connected again: the first login attempt sat on its listener nine minutes past
+its 300 s deadline and timed out within a second of the RDP connection. Every leg below ran with the
+session connected.
+**(1) Login** — Zen opened `loopback.html?gate_iss=…&response_type=code&client_id=frust-playground&
+redirect_uri=http%3A%2F%2F127.0.0.1%3A61403%2Foauth%2Fcallback&scope=openid&state=…&code_challenge=…
+&code_challenge_method=S256` and redirected to the loopback callback.
+```
+status: Loopback login -> code ok len=8, state ok, iss ok, grant body len=212
+```
+`netstat -ano | findstr 127.0.0.1 | findstr LISTEN` immediately afterwards: no `playground.exe`
+listener. A second login later in the run passed identically.
+**(2) 404 and keep waiting** — during a `gate_mode=stay` session on port `61553`
+(`Loopback timeout (10 s)`):
+```
+curl.exe -si http://127.0.0.1:61553/wrong
+HTTP/1.1 404 Not Found … Cache-Control: no-store … Content-Security-Policy: default-src 'none' … Connection: close
+curl.exe -si -X POST http://127.0.0.1:61553/oauth/callback
+HTTP/1.1 404 Not Found
+curl.exe -si -H "Host: localhost:61553" http://127.0.0.1:61553/oauth/callback
+HTTP/1.1 400 Bad Request
+```
+`netstat` still listed `127.0.0.1:61553 … LISTENING 15700` (the playground's pid) after all three.
+**(3) Timeout** — the same session resolved `Loopback timeout (10 s) -> Err(TimedOut)`; the listener
+was gone 10.4 s after the click (polled over ssh, ~0.3 s resolution). An earlier run on port `61438`
+timed out identically.
+**(4) Cancel** — `Loopback cancel` (port `61572`, gate page waiting), then `Cancel loopback` →
+`Loopback cancel -> Ok(Cancelled)`; the listener was already gone at the first poll after the click
+(0.5 s including one ssh round trip).
+**(5) Busy** — `Loopback busy -> Err(Busy)`; no listener left afterwards.
+**(6) Negative controls** — `Loopback deny` (port `61427`; the gate request carried
+`gate_mode=deny`) → `Loopback deny -> Err(Authorization { error: AccessDenied, description:
+Some("gate deny"), uri: None })`. `Loopback bad iss` (port `61431`; a normal successful redirect) →
+`Loopback bad iss -> Err(IssuerMismatch)`.
+**(7) Drop** — a `stay` session on port `61602`; the playground window closed from inside the desktop
+session with `Process.CloseMainWindow()` (the titlebar close message): the listener was gone 0.31 s
+later, the process had exited 0.32 s after the call, no panic in its log, no listener left.
+**(8) Response page source** — fetched with `curl.exe` on the rig by completing a `stay` session on
+port `61586` with the gate's own `code=gatecode&state=<that request's state>&iss=…` query: `200 OK`,
+`Content-Length: 189`, the same hardening headers, body `<!DOCTYPE html><html lang="en"><head><meta
+charset="utf-8"><title>Sign-in complete</title></head><body><p>Sign-in complete. You can close this
+tab and return to the app.</p></body></html>` — no `<script>`, none of the query values; the session
+resolved `code ok len=8, state ok, iss ok, grant body len=212`.
+**Extra — trickled request head** (the Winsock `SO_RCVTIMEO`-reuse question): the 177-byte callback
+head sent from a `TcpClient` in 8-byte pieces 50 ms apart (23 writes, 1.46 s) and in 3-byte pieces
+30 ms apart (59 writes, 1.96 s, just inside the 2 s per-connection budget) — roughly sixty to eighty
+timed-out 25 ms read passes on one stream each time — was answered `200 OK` both times and the
+session validated the callback: no lost head bytes observed.
+

@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — seventeen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — eighteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -34,8 +34,13 @@
 //! manifest permission or plist key, since Custom Tabs carry no permission,
 //! the `<queries>` element comes from the module's own manifest via the
 //! manifest merger, and ASWebAuthenticationSession needs no plist key;
-//! desktop reports NoHandler — see `AUTH_SESSION_BASE`'s doc comment), `iap`
-//! (dependency, the plugin's own Android library module, and its own iOS
+//! desktop uses the RFC 8252 loopback backend (`LoopbackSession`) on Linux, Windows and
+//! macOS, and custom-scheme start on Linux/Windows still reports NoHandler — see
+//! `AUTH_SESSION_BASE`'s doc comment),
+//! `oauth-native` (dependency only — OAuth 2.0 native-app helper with PKCE,
+//! state, authorization URL, and callback/token-response parsing; pure Rust,
+//! no HTTP client or async; the app owns the token endpoint's transport),
+//! `iap` (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
 //! comment for why), `database` (dependency only — pure-Rust plugin, no
 //! OS-side integration), and `i18n` (dependency, a seeded starter
@@ -347,8 +352,10 @@ const URL_LAUNCHER: PluginSpec = PluginSpec {
 /// (see [`Contribution::IosFramework`]); the a3-03 device gate's very first Xcode
 /// link of this plugin failed on that symbol. The `<queries>` element for the
 /// CustomTabsService comes from the module's own manifest via the manifest merger
-/// — the app's manifest is never touched. Desktop backends report `NoHandler` (no
-/// platform API available).
+/// — the app's manifest is never touched. Desktop (Linux/Windows/macOS) uses the
+/// RFC 8252 loopback backend (`LoopbackSession`); on Linux and Windows a
+/// custom-scheme `AuthSession::start` still reports `NoHandler` (macOS answers
+/// it with ASWebAuthenticationSession).
 const AUTH_SESSION_BASE: &[Contribution] = &[
     Contribution::CargoDep {
         name: "frust-auth-session",
@@ -366,10 +373,23 @@ const AUTH_SESSION: PluginSpec = PluginSpec {
     id: "auth-session",
     summary: "OAuth round trip in the platform auth user agent — ASWebAuthenticationSession \
               (iOS/macOS, in-process callback) or Chrome Custom Tabs (Android, Gradle module) — \
-              resolving Callback(url)/Cancelled with an ephemeral mode; Linux/Windows report \
-              NoHandler.",
+              resolving Callback(url)/Cancelled with an ephemeral mode; desktop (Linux/Windows/macOS) \
+              uses the RFC 8252 loopback backend (`LoopbackSession`); on Linux/Windows a \
+              custom-scheme start still reports NoHandler.",
     crate_dir: "auth-session",
     base: AUTH_SESSION_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+const OAUTH_NATIVE: PluginSpec = PluginSpec {
+    id: "oauth-native",
+    summary: "OAuth 2.0 native-app helper: PKCE (S256), state, authorization URL, callback + \
+              token-response parsing (pure Rust, no HTTP).",
+    crate_dir: "oauth-native",
+    base: &[Contribution::CargoDep {
+        name: "frust-oauth-native",
+    }],
     optional_features: &[],
     requires_sibling: None,
 };
@@ -609,6 +629,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         HAPTICS,
         URL_LAUNCHER,
         AUTH_SESSION,
+        OAUTH_NATIVE,
         IAP,
         VIDEO_PLAYER,
         DATABASE,
@@ -636,7 +657,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_seventeen_v1_plugins() {
+    fn registry_lists_the_eighteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -650,6 +671,7 @@ mod tests {
                 "haptics",
                 "url-launcher",
                 "auth-session",
+                "oauth-native",
                 "iap",
                 "video-player",
                 "database",

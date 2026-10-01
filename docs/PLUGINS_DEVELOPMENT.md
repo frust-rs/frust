@@ -117,8 +117,8 @@ URL and, for the round-trip cases below, a `frustplay://` return link:
   -D warnings` and `cargo clippy -p frust-url-launcher --target aarch64-apple-ios-sim -- -D
   warnings`; the Windows arm (`windows-sys 0.61`, pinned in [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md))
   gets `cargo check --target x86_64-pc-windows-gnu -p frust-url-launcher` per
-  [DEVELOPMENT.md](DEVELOPMENT.md)'s cross-target Prerequisites — compile-checked only, until a real
-  Windows rig runs it (`url-launcher-windows-leg-unrun` in [LIMITATIONS.md](LIMITATIONS.md)).
+  [DEVELOPMENT.md](DEVELOPMENT.md)'s cross-target Prerequisites; the arm itself has also built and
+  run natively on the Windows 11 rig (`plugins/url-launcher/README.md` §6, *Windows*, 2026-10-01).
 
 ## Auth-session manual test (Android + iOS + macOS)
 
@@ -217,6 +217,10 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `sys-locale =0.3.2` exact | `frust-i18n`'s desktop (macOS/Linux/Windows) system-locale detection backend — a small, young surface with no minor-version API-stability track record yet | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |
 | `trybuild 1` (dev-only) | `frust-i18n`'s dev-only compile-fail harness for the `locales!` macro's diagnostics (`tests/macro_diagnostics.rs`); never reaches a shipped dependency graph | `cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ignored` (regenerate expectations with `TRYBUILD=overwrite`) |
 | `junit:junit 4.13.2` exact (Gradle, `testImplementation`, `plugins/auth-session/platform/android/build.gradle.kts`) | `frust-auth-session`'s `ProviderSelectionTest` — JVM-only coverage of the pure `chooseCustomTabsProvider` decision function; dev-only, never reaches a shipped AAR | `(cd examples/playground/android && ./gradlew :frust-auth-session:testDebugUnitTest)` |
+| `getrandom 0.3` minor | `frust-oauth-native`'s PKCE verifier and `state` randomness (OS CSPRNG via `getrandom::fill`) | already locked at 0.3.4 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
+| `sha2 0.10` minor | `frust-oauth-native`'s PKCE S256 challenge (SHA-256 of the verifier) | already locked at 0.10.9 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
+| `subtle 2` stable | `frust-oauth-native`'s constant-time `state` comparison on the callback path | already locked at 2.6.1 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
+| `percent-encoding 2` stable | `frust-oauth-native`'s RFC 3986 component and form-urlencoded encoders | already locked at 2.3.2 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
 
 ## See Also
 

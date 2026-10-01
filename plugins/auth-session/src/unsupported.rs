@@ -1,26 +1,24 @@
-//! No platform authentication user agent on this target (Linux, Windows,
-//! wasm, tvOS, …) — every session rejects immediately with
-//! [`crate::AuthSessionError::NoHandler`], with no `oneshot` channel ever
-//! genuinely left live (see [`crate::AuthSession::start`]'s doc's
-//! *Ready-on-first-poll errors*).
+//! No in-app browser tab on this target (Linux, Windows, wasm, tvOS, …) —
+//! every custom-scheme [`crate::AuthSession::start`] rejects immediately
+//! with [`crate::AuthSessionError::NoHandler`], with no `oneshot` channel
+//! ever genuinely left live (the future resolves on its first poll and the
+//! slot is released).
 //!
-//! Neither desktop Linux nor desktop Windows ships a first-class in-app
-//! browser-tab API the way Android's Custom Tabs or Apple's
-//! `ASWebAuthenticationSession` do, and this crate has no plan to build one
-//! (unlike, say, `frust-iap`'s desktop gap, which is a deliberate *v1*
-//! deferral of a real, buildable platform API — see that crate's own
-//! `Cargo.toml` comment). Callers on these targets should drive the same
-//! RFC 8252 flow through
-//! [`frust-url-launcher`](../frust_url_launcher/index.html)'s ordinary
-//! system-browser launch instead, running a local loopback HTTP listener (or
-//! an equivalent out-of-band code-retrieval step) to receive the identity
-//! provider's redirect and hand the app a typed authorization code — the
-//! same "loopback IP redirection" pattern RFC 8252 itself documents for
-//! platforms with no in-app browser-tab primitive.
+//! Desktop Linux and Windows ship no first-class in-app browser-tab API the
+//! way Android's Custom Tabs or Apple's `ASWebAuthenticationSession` do, so
+//! a custom-scheme callback has nothing to arrive through there. **On Linux
+//! and Windows, use [`crate::LoopbackSession`] instead**: RFC 8252's
+//! loopback interface redirection, which opens the system browser through
+//! `frust-url-launcher` and receives the identity provider's redirect on
+//! `http://127.0.0.1:<port>/<path>` (see the crate doc's *Desktop loopback*
+//! section). [`crate::AuthSession::is_supported`] answers `false` on those
+//! two targets — it describes this module's custom-scheme path, which cannot
+//! work — and [`crate::LoopbackSession::is_supported`] answers `true` there.
+//! Every other target this module builds for has neither backend.
 
 use crate::{AuthSessionError, AuthSessionRequest, SessionToken};
 
-/// Reject every session — see this module's own doc.
+/// Reject every custom-scheme session — see this module's own doc.
 pub(crate) fn start(
     _req: AuthSessionRequest,
     _token: SessionToken,

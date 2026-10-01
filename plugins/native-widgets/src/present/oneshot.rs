@@ -136,6 +136,9 @@ impl<T> Sender<T> {
     /// Answers `false` when the [`Receiver`] was already dropped: the value
     /// is discarded (the module doc's late-send rule). An arm needs no
     /// special handling for that case.
+    ///
+    /// Only called by the Apple and Android arms; dead code on other targets.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn send(mut self, value: Value<T>) -> bool {
         self.sent = true;
         complete(&self.inner, self.generation, value)

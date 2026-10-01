@@ -22,11 +22,15 @@ rather than painting a frame itself.
 
 `clean-signals-frust` is a facade-tier plugin gluing the external `clean_signals`
 clean-architecture core into Frust's `Component`/reactive model; it is a standalone workspace
-excluded from the root Cargo graph pending a crates.io publication of its dependency. Two further
+excluded from the root Cargo graph pending a crates.io publication of its dependency. Three further
 crates reach no real OS capability at all: `plugins/database` (`frust-database`), the tier's first
-such, a synchronous embedded SQL API over a swappable SQLite/Turso engine seam; and `plugins/i18n`
+such, a synchronous embedded SQL API over a swappable SQLite/Turso engine seam; `plugins/i18n`
 (`frust-i18n` plus its `frust-i18n-macros` companion — the tier's first proc-macro crate), a
-Fluent Project + ICU4X internationalization plugin reaching the OS only for a locale read.
+Fluent Project + ICU4X internationalization plugin reaching the OS only for a locale read; and
+`plugins/oauth-native` (`frust-oauth-native`), a pure-Rust RFC 8252 native-client helper (PKCE S256,
+`state`, the authorization URL, callback and token-response parsing) with no HTTP client, no async,
+and no `frust-*` dependency at all — the tier's only crate with zero framework coupling — pairing
+with `auth-session`'s browser-tab/loopback transport.
 
 `plugins/glyph`, `plugins/material`, `plugins/cupertino`, `plugins/shadcn`, and `plugins/beui`
 (`frust-glyph`/`frust-material`/`frust-cupertino`/`frust-shadcn`/`frust-beui`) are the tier's
@@ -54,7 +58,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
 | `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot, never a frame this crate paints |
 | `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()` |
-| `plugins/auth-session` | OAuth authorization round trip in the platform auth user agent — `ASWebAuthenticationSession` (iOS/macOS; the callback URL returns in-process, no custom-scheme intent) or Chrome Custom Tabs (Android; a Gradle module whose Kotlin host launches from the resumed Activity and reads the callback Intent on resume) — resolving an awaitable `Callback(url)`/`Cancelled` with a one-session (Busy) guard and an ephemeral mode; Linux/Windows report `NoHandler` |
+| `plugins/auth-session` | OAuth authorization round trip in the platform auth user agent — `ASWebAuthenticationSession` (iOS/macOS; the callback URL returns in-process, no custom-scheme intent) or Chrome Custom Tabs (Android; a Gradle module whose Kotlin host launches from the resumed Activity and reads the callback Intent on resume) — resolving an awaitable `Callback(url)`/`Cancelled` with a one-session (Busy) guard and an ephemeral mode; plus a desktop RFC 8252 loopback-redirect backend (`LoopbackSession`, Linux/Windows/macOS) sharing the same Busy slot through `frust-url-launcher`'s system-browser launch — the custom-scheme `AuthSession::start` itself still reports `NoHandler` on Linux/Windows |
+| `plugins/oauth-native` | Pure-Rust RFC 8252 native-client helper: PKCE (S256), `state`, the authorization URL, and callback/token-response parsing (incl. RFC 9207 `iss`); no OS integration, no HTTP client, no `frust-*` dependency — pairs with `auth-session`'s or `url-launcher`'s transport |
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
@@ -82,7 +87,7 @@ preview or a `frust build macos|windows|linux`. See
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback |
-| `auth-session` | macOS-native only | `ASWebAuthenticationSession` with an AppKit key-window anchor; Linux/Windows have no auth user agent (`auth-session-linux-windows-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
+| `auth-session` | generic-desktop (loopback) plus macOS-native (custom scheme) | `ASWebAuthenticationSession` with an AppKit key-window anchor answers the custom-scheme `AuthSession::start` on macOS only (`NoHandler` on Linux/Windows); `LoopbackSession`'s RFC 8252 §7.3 listener (`127.0.0.1`, ephemeral port) plus `frust-url-launcher`'s system-browser launch backs all three desktop targets instead (Linux and Windows runtime legs run 2026-10-01, `plugins/auth-session/README.md` §6) |
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
@@ -135,6 +140,14 @@ dependency always runs from an app's own manifest into the plugin, never through
 substrate is directional in both halves — **shells write platform handles and plugins read them;
 plugins write desktop view factories and desktop shells read them** — which is what keeps
 `frust-plugin` a leaf either way, with neither side ever naming the other.
+`auth-session` is the tier's first plugin-to-plugin edge: its desktop `LoopbackSession` backend
+depends on `frust-url-launcher` (target-gated to `linux`/`windows`/`macos`) to open the
+authorization URL in the system browser rather than re-implementing that launch itself. The
+charter above extends to cover it without bending: a plugin may depend on another `frust-*` crate
+only when that crate is itself a platform plugin with no `frust-*` dependency of its own (never a
+framework crate), only target-gated to the targets where the capability is actually reused, and
+never forming a cycle — `url-launcher` depends on nothing but `frust-plugin` and FFI crates, so the
+leaf property above still holds two levels deep.
 `database` is the first plugin to need neither `frust-plugin` nor an FFI crate at all — a pure-Rust
 plugin whose "platform" is the filesystem — which the charter accommodates rather than exempts: it
 still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. On
