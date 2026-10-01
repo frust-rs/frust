@@ -157,11 +157,11 @@ pub trait PaintScene {
     /// recorder scenes stay valid; the `SceneBuilder` implementation records a
     /// real shader-quad command.
     ///
-    /// **Currently paints nothing on the engine renderer** — the command is
-    /// recognised and dropped with a once-per-process warning; see
-    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` (removed when the
-    /// GPU-seam work wires the command through). The contract below still
-    /// binds: it is the correct usage the wiring will serve.
+    /// **Renders on the engine renderer** via the external-texture path (see
+    /// `crates/frust-engine/src/effects/shader_quad.rs`); there is no CPU-oracle
+    /// golden for a user-supplied fragment shader, so engine-side correctness
+    /// is proven on a real device instead — see `docs/LIMITATIONS.md`'s
+    /// `engine-shader-quad-goldens-uncomparable`.
     ///
     /// # Cache-once contract
     ///
