@@ -1,7 +1,9 @@
 # frust-auth-session gate pages
 
-Two static pages the playground app's "Auth" section (`examples/playground/src/pages/auth_session.rs`)
-drives an [`AuthSession`](../src/lib.rs) round trip against:
+Three static pages the playground app's "Auth" section (`examples/playground/src/pages/auth_session.rs`)
+drives a round trip against: two for an [`AuthSession`](../src/lib.rs) custom-scheme session, one for
+a desktop [`LoopbackSession`](../src/loopback.rs) session paired with
+[`frust-oauth-native`](../../oauth-native/README.md)'s PKCE/`state`/callback builders.
 
 - **`callback.html`** — reads a `?scheme=` query parameter (falling back to `frustplay`, the scheme
   the playground app registers), validates it against a custom-scheme allow-list (see the page's own
@@ -12,11 +14,27 @@ drives an [`AuthSession`](../src/lib.rs) round trip against:
   `document.cookie` string (or `no cookie`) in a large `<pre>` block. Useful two ways: as a page a tester
   manually dismisses the in-app browser tab from (any page works for that), and as a way to confirm
   cookies persist across a non-ephemeral session and do not across an ephemeral one.
+- **`loopback.html`** — a fake authorization server for the desktop loopback flow, never a real
+  identity provider. It reads `redirect_uri`, `state`, `gate_iss`, the optional `gate_mode`, and the
+  PKCE `code_challenge`/`code_challenge_method` the playground's `AuthorizationRequest::build` already
+  appended. It renders a visible `bad redirect_uri` error (and stops) unless `redirect_uri` matches
+  the RFC 8252 §7.3 loopback shape `http://127.0.0.1:<port>/<reserved path>`, and a `bad PKCE
+  parameters` error unless `code_challenge_method` is exactly `S256` and `code_challenge` is 43
+  characters. Otherwise it dispatches on `gate_mode`: absent (or anything other than `deny`/`stay`)
+  redirects to `redirect_uri?code=gatecode&state=<state>&iss=<gate_iss>` (the success path);
+  `gate_mode=deny` redirects to `redirect_uri?error=access_denied&error_description=gate+deny&
+  state=<state>&iss=<gate_iss>` instead; `gate_mode=stay` never redirects at all, rendering `waiting
+  (close this tab to test timeout/cancel)` — the fixture for the app side's listener-timeout and
+  cancel exit paths. Every redirect also carries a fallback link, for the same Chrome
+  script-initiated-navigation prompt `callback.html`'s own section above documents (loopback
+  redirects are plain `http`, not a custom scheme, so most browsers follow them automatically in
+  practice, but the link costs nothing to keep).
 
 ## Hosting
 
-Either page works from any `https` origin — [`AuthSession::start`](../src/lib.rs) requires an absolute
-`https` URL, nothing about the page content is origin-specific. Two options:
+Every page works from any `https` origin — [`AuthSession::start`](../src/lib.rs) and
+[`LoopbackSession::start`](../src/loopback.rs) both require an absolute `https` authorization URL,
+nothing about the page content is origin-specific. Two options:
 
 1. **A real https origin you control** — e.g. serve this directory under `https://frust.dev/gate/auth-session/`
    (or any other host) and point the playground app's `Base URL` field at that origin. This is the
@@ -65,3 +83,37 @@ Expected per platform:
 - **Every other target** (desktop Linux/Windows without an Apple backend): every button resolves to
   `Err(NoHandler)` immediately — no platform authentication user agent exists there
   (`plugins/auth-session/src/unsupported.rs`'s own doc documents the recommended fallback).
+
+## Manual gate script — Desktop loopback
+
+The playground's "Desktop loopback" block (below the four buttons above, shown only when
+[`LoopbackSession::is_supported`](../src/loopback.rs) reads `true` — desktop Linux, Windows and macOS)
+runs these five steps, `Base URL` pointed at a hosted copy of this directory (the httpbin alternative
+above has no stand-in for `loopback.html`, so this block needs a real hosted origin):
+
+1. **Loopback login.** Tap `Loopback login`. Expected: the system browser opens `loopback.html`,
+   which redirects immediately back to the loopback listener, and the status line reads `Loopback
+   login -> code ok len=8, state ok, iss ok, grant body len=<N>` (`gatecode` is 8 characters; `<N>`
+   is `authorization_code_grant`'s form body length — proving the builder, since nothing on this page
+   ever sends it over HTTP). The `loopback port:` line below updates to the bound port.
+2. **Loopback deny.** Tap `Loopback deny`. Expected: the gate page redirects with
+   `error=access_denied`, and the status line reads `Loopback deny -> Err(Authorization { error:
+   AccessDenied, description: Some("gate deny"), uri: None })`.
+3. **Loopback bad iss.** Tap `Loopback bad iss`. Expected: the gate page's redirect succeeds, but the
+   playground validates it against `<issuer>/wrong` on purpose, so the status line reads `Loopback
+   bad iss -> Err(IssuerMismatch)` — the negative control proving the issuer check actually runs.
+4. **Loopback timeout, then Loopback cancel.** Tap `Loopback timeout (10 s)`: the gate page shows
+   `waiting (close this tab to test timeout/cancel)` and never redirects, so after 10 s the status
+   line reads `Loopback timeout (10 s) -> Err(TimedOut)`. Next tap `Loopback cancel` (same `waiting`
+   page), then tap `Cancel loopback` before it times out: the status line reads `Loopback cancel ->
+   Ok(Cancelled)` within about a second.
+5. **Loopback busy.** Tap `Loopback busy`. Expected: the status line reads `Loopback busy ->
+   Err(Busy)` — the first bind is still holding the shared slot when the second one is attempted
+   (`frust-auth-session`'s crate doc's *Exactly one live session* section, which the loopback and
+   custom-scheme backends share); the first session is dropped as soon as the handler returns, so a
+   later button press sees a clear slot again.
+
+Expected per platform: **Linux, Windows and macOS** (`LoopbackSession::is_supported()` reads `true`)
+run all five steps as described; every other target (Android, iOS) shows the single `loopback: not
+supported on this target` line instead of the block, and `AuthSession::is_supported()`'s own line
+above still answers for the custom-scheme flow there.

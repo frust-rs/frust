@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frust-auth-session gate: loopback</title>
+</head>
+<body>
+<p id="message">Redirecting back to the app&hellip;</p>
+<p>
+  If nothing happens, tap the link below:
+  <a id="fallback" href="#">continue</a>
+</p>
+<script>
+  const params = new URLSearchParams(location.search);
+  const redirectUri = params.get('redirect_uri') || '';
+  const state = params.get('state') || '';
+  const gateIss = params.get('gate_iss') || '';
+  const gateMode = params.get('gate_mode');
+  const codeChallenge = params.get('code_challenge') || '';
+  const codeChallengeMethod = params.get('code_challenge_method') || '';
+
+  // The redirect URI must be an RFC 8252 §7.3 loopback URI on the literal
+  // 127.0.0.1 address with a reserved path — the same shape
+  // frust-auth-session's LoopbackOptions validates on the app side
+  // (plugins/auth-session/src/loopback.rs's validate_path).
+  const redirectPattern = /^http:\/\/127\.0\.0\.1:\d{1,5}\/[A-Za-z0-9\-._~\/]+$/;
+
+  if (!redirectPattern.test(redirectUri)) {
+    // Reject the redirect URI: render a visible error and do not navigate.
+    document.body.innerHTML = '<p style="color: red; font-weight: bold;">bad redirect_uri</p>';
+  } else if (codeChallengeMethod !== 'S256' || codeChallenge.length !== 43) {
+    // PKCE is mandatory and S256-only (RFC 7636 §4.2) — a request missing
+    // or malforming it never reaches a redirect.
+    document.body.innerHTML = '<p style="color: red; font-weight: bold;">bad PKCE parameters</p>';
+  } else if (gateMode === 'stay') {
+    // Simulate a sign-in that never completes, for the app's own
+    // listener-timeout and cancel exit paths to exercise.
+    document.body.innerHTML = '<p>waiting (close this tab to test timeout/cancel)</p>';
+  } else {
+    // Either the plain success redirect, or gate_mode=deny's error
+    // response — both are a single navigation back to redirect_uri.
+    const target = gateMode === 'deny'
+      ? redirectUri + '?error=access_denied&error_description=gate+deny&state=' +
+          encodeURIComponent(state) + '&iss=' + encodeURIComponent(gateIss)
+      : redirectUri + '?code=gatecode&state=' + encodeURIComponent(state) +
+          '&iss=' + encodeURIComponent(gateIss);
+    document.getElementById('fallback').href = target;
+    location.replace(target);
+  }
+</script>
+</body>
+</html>
