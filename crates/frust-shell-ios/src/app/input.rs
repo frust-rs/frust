@@ -52,27 +52,56 @@ pub(super) fn under_root_owner<R>(pass: impl FnOnce() -> R) -> R {
     }
 }
 
+/// Map the shell's FFI-facing [`TouchPhase`] onto the core event's
+/// [`PointerPhase`].
+///
+/// The one piece of [`IosAppHandle::dispatch_touch`] that needs neither a live
+/// handle nor the reactive runtime, so it is unit-tested on its own below.
+fn core_phase_from_touch_phase(phase: TouchPhase) -> PointerPhase {
+    match phase {
+        TouchPhase::Began => PointerPhase::Down,
+        TouchPhase::Moved => PointerPhase::Move,
+        TouchPhase::Ended => PointerPhase::Up,
+        TouchPhase::Cancelled => PointerPhase::Cancel,
+    }
+}
+
+/// Stamp the Swift-supplied per-sequence `slot` as a touch [`PointerId`] — the
+/// id-slot map [`IosAppHandle::dispatch_touch`] applies to every contact.
+///
+/// `slot` is already derived on the Swift side (`FrustView`'s
+/// `ObjectIdentifier(UITouch)`-keyed map): `0` for a gesture's first-down
+/// touch, counting up for each additional simultaneous contact. This is the
+/// thin, host-testable wiring between that raw `u32` and
+/// [`PointerId::touch`] — the shared shell convention (mirrored by the
+/// Android shell) is that the first contact of a sequence is always slot `0`.
+fn pointer_id_for_slot(slot: u32) -> PointerId {
+    PointerId::touch(slot)
+}
+
 impl IosAppHandle {
     /// Deliver one touch contact to the tree.
     ///
     /// **Coordinate asymmetry vs Android:** UIKit's `touch.location(in:)` is
     /// already in **logical points**, so — unlike the Android shell, which
     /// receives physical pixels and divides by the display density — this path
-    /// passes `x`/`y` straight through with no scale division. First-touch only
-    /// in v1: the Swift side forwards a single contact as
-    /// [`PointerButton::Primary`] on [`PointerId::touch`]`(0)`, delivered as an
-    /// [`InputEvent::PointerContact`]. The redraw is implicit — the `CADisplayLink`
+    /// passes `x`/`y` straight through with no scale division.
+    ///
+    /// `slot` is the Swift side's per-sequence contact index — `FrustView`
+    /// maintains an `ObjectIdentifier(UITouch)`-keyed map, assigning `0` to a
+    /// gesture's first-down touch and counting up for each additional live
+    /// contact, resetting once no touches remain (the same first-contact-is-0
+    /// convention the Android shell uses). It is forwarded verbatim as
+    /// [`PointerId::touch`]`(slot)` on an [`InputEvent::PointerContact`], so the
+    /// root's multi-contact contract (and the resampler's per-contact lane)
+    /// apply to every contact, not just the first. The single-touch story is
+    /// unchanged for `slot == 0`. The redraw is implicit — the `CADisplayLink`
     /// loop posts a frame every vsync, so the mutated state is picked up on the
     /// next `frame()` without an explicit schedule (contrast the desktop shell's
     /// `request_redraw`).
-    pub(crate) fn dispatch_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
+    pub(crate) fn dispatch_touch(&mut self, phase: TouchPhase, slot: u32, x: f32, y: f32) {
         let position = Point::new(x as f64, y as f64);
-        let core_phase = match phase {
-            TouchPhase::Began => PointerPhase::Down,
-            TouchPhase::Moved => PointerPhase::Move,
-            TouchPhase::Ended => PointerPhase::Up,
-            TouchPhase::Cancelled => PointerPhase::Cancel,
-        };
+        let core_phase = core_phase_from_touch_phase(phase);
         // Latch for the frame gate: a touch between frames must force the next
         // frame to run so the mutated state is reflected.
         self.events_since_last_frame = true;
@@ -82,12 +111,7 @@ impl IosAppHandle {
         // frame-boundary-interpolated position; Down/Up/Cancel still pass
         // through losslessly. When the kill switch disabled the resampler,
         // deliver directly instead — pre-resampling behavior verbatim.
-        //
-        // Every contact is `touch(0)` here: the platform side forwards one
-        // contact, and it is the gesture's first. It travels as an identified
-        // `PointerContact` so the root's multi-contact contract (and the
-        // resampler's per-contact lane) apply to it.
-        let pointer_id = PointerId::touch(0);
+        let pointer_id = pointer_id_for_slot(slot);
         if self.resampler.is_enabled() {
             let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.resampler.push(RawPointerSample {
@@ -216,5 +240,52 @@ impl frust_shell_common::devtools::DevtoolsUi for IosAppHandle {
         self.events_since_last_frame = true;
         let app = &mut self.app;
         let _ = under_root_owner(|| app.event(&event));
+    }
+}
+
+// This whole module is `#[cfg(target_os = "ios")]` (see `crate`'s `lib.rs`),
+// so these tests compile and run only under an iOS target — never in a host
+// `cargo test --workspace` — the same reason the module doc above points at
+// the desktop shell for this shape's host-testable coverage. They are still
+// written here, against the real types, as the id-slot map's regression guard
+// for the owed iOS-target/simulator gate.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_phase_from_touch_phase_maps_every_variant() {
+        assert_eq!(
+            core_phase_from_touch_phase(TouchPhase::Began),
+            PointerPhase::Down
+        );
+        assert_eq!(
+            core_phase_from_touch_phase(TouchPhase::Moved),
+            PointerPhase::Move
+        );
+        assert_eq!(
+            core_phase_from_touch_phase(TouchPhase::Ended),
+            PointerPhase::Up
+        );
+        assert_eq!(
+            core_phase_from_touch_phase(TouchPhase::Cancelled),
+            PointerPhase::Cancel
+        );
+    }
+
+    #[test]
+    fn pointer_id_for_slot_stamps_a_touch_id() {
+        // Slot 0 is the shared shell convention (mirrored by the Android
+        // shell): a gesture's first-down touch is always slot 0 — the same
+        // identity the single-touch story stamped before multi-contact
+        // forwarding existed.
+        assert_eq!(pointer_id_for_slot(0), PointerId::touch(0));
+        assert_eq!(pointer_id_for_slot(1), PointerId::touch(1));
+        assert_eq!(pointer_id_for_slot(7), PointerId::touch(7));
+    }
+
+    #[test]
+    fn pointer_id_for_slot_keeps_distinct_slots_distinct() {
+        assert_ne!(pointer_id_for_slot(0), pointer_id_for_slot(1));
     }
 }

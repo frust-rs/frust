@@ -96,6 +96,10 @@ final class FrustView: UIView {
         metalLayer.delegate = metalLayerActions
         metalLayer.frame = bounds
         layer.insertSublayer(metalLayer, at: 0)
+        // Required for `touchesBegan`/`touchesMoved`/… to ever report more
+        // than one simultaneous `UITouch` — UIKit drops every contact past
+        // the first on a view that doesn't opt in. See Touch delivery below.
+        isMultipleTouchEnabled = true
     }
 
     /// Keeps the Metal layer at the view's bounds. Runs before the
@@ -376,8 +380,36 @@ final class FrustView: UIView {
     // have installed for itself (disabled above). The controller sets
     // `onTouch` to bridge into the `frust_dispatch_touch` FFI call; `phase` is
     // the fixed ABI shared with the Rust side (0 = began, 1 = moved, 2 = ended,
-    // 3 = cancelled).
-    var onTouch: ((UInt32, CGPoint) -> Void)?
+    // 3 = cancelled); `pointer_id` is the per-sequence slot `forward(_:phase:)`
+    // assigns below (0 for a gesture's first-down touch, counting up for each
+    // additional live contact — the convention the Android shell shares).
+    var onTouch: ((UInt32, UInt32, CGPoint) -> Void)?
+
+    /// Per-gesture touch identity → slot map. `UITouch` isn't `Hashable`, but
+    /// UIKit reuses the same instance for a contact's whole
+    /// began/moved/…/ended lifetime, so `ObjectIdentifier(touch)` is a stable
+    /// key for exactly that long. Cleared once no touch remains live, so the
+    /// next gesture's first-down touch restarts at slot 0 — the identity a
+    /// bare single-touch gesture has always reported.
+    private var touchSlots: [ObjectIdentifier: UInt32] = [:]
+    /// The next unused slot in the current gesture — monotonic within a
+    /// gesture (never reused while any contact from it is still live), reset
+    /// to 0 alongside [touchSlots] when the gesture ends.
+    private var nextTouchSlot: UInt32 = 0
+
+    /// The stable slot for `touch`: its existing one if this isn't the first
+    /// callback to see it, otherwise the next free slot (first-down touch of
+    /// a gesture is always 0; see [touchSlots]).
+    private func slot(for touch: UITouch) -> UInt32 {
+        let id = ObjectIdentifier(touch)
+        if let existing = touchSlots[id] {
+            return existing
+        }
+        let assigned = nextTouchSlot
+        touchSlots[id] = assigned
+        nextTouchSlot += 1
+        return assigned
+    }
 
     /// Mode B input forwarding: set by the
     /// controller to `FrustViewHost.interactiveSlotContains`. When a touch
@@ -411,11 +443,24 @@ final class FrustView: UIView {
         forward(touches, phase: 3)
     }
 
-    /// Forward the first touch's location (logical points, in this view's space)
-    /// to the Rust side. First-touch only in v1 — multi-touch is future work.
+    /// Forward every touch in `touches` (logical points, in this view's
+    /// space) to the Rust side, each tagged with its stable per-sequence
+    /// slot (see [slot(for:)]).
+    ///
+    /// A `touchesEnded`/`touchesCancelled` callback additionally retires the
+    /// touch's slot — it will never be seen again — and once no touch is
+    /// left live, resets [nextTouchSlot] so the next gesture's first contact
+    /// is slot 0 again.
     private func forward(_ touches: Set<UITouch>, phase: UInt32) {
-        guard let touch = touches.first else { return }
-        onTouch?(phase, touch.location(in: self))
+        for touch in touches {
+            onTouch?(phase, slot(for: touch), touch.location(in: self))
+            if phase == 2 || phase == 3 {
+                touchSlots.removeValue(forKey: ObjectIdentifier(touch))
+            }
+        }
+        if touchSlots.isEmpty {
+            nextTouchSlot = 0
+        }
     }
 }
 
