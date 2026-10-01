@@ -75,7 +75,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::thread::LocalKey;
 
-use kurbo::{Point, Rect, Size, Vec2};
+use kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use crate::overlay::OverlayKey;
 
@@ -820,6 +820,56 @@ impl InputEvent {
             },
             InputEvent::Scale(scale) => InputEvent::Scale(ScaleEvent {
                 focal: scale.focal + offset,
+                ..*scale
+            }),
+            InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_)
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => self.clone(),
+        }
+    }
+
+    /// Return a copy of this event with its position mapped through `affine` —
+    /// the general form of [`InputEvent::translated`], for a container that
+    /// places a child under an arbitrary transform
+    /// ([`crate::widget::ChildPod::set_transform`]).
+    ///
+    /// Maps exactly the positions `translated` shifts, and leaves alone exactly
+    /// what it leaves alone: [`InputEvent::Pointer`]'s position, the inner event
+    /// of an [`InputEvent::PointerContact`], [`InputEvent::Scroll`]'s `position`
+    /// and [`InputEvent::Scale`]'s [`ScaleEvent::focal`] are mapped; the
+    /// focus-routed events, the [`Housekeeping`](InputEvent::Housekeeping)
+    /// broadcast and the window-space [`Overlay`](InputEvent::Overlay) payload are
+    /// returned unchanged (cloned), for the reasons `translated` gives.
+    ///
+    /// Only *positions* are mapped. A scroll `delta`, a scale's multiplicative
+    /// `scale_delta` and its `velocity` are carried over as-is: they describe the
+    /// gesture's magnitude in the input device's terms, not a point in the
+    /// receiver's space.
+    ///
+    /// A container routing into a transformed child passes the **inverse** of the
+    /// child's local→container mapping here; the caller owns checking that the
+    /// inverse exists (see [`crate::hit::checked_inverse`]).
+    pub fn transformed(&self, affine: &Affine) -> InputEvent {
+        match self {
+            InputEvent::Pointer(p) => InputEvent::Pointer(PointerEvent {
+                position: *affine * p.position,
+                ..*p
+            }),
+            InputEvent::PointerContact { pointer_id, event } => InputEvent::PointerContact {
+                pointer_id: *pointer_id,
+                event: PointerEvent {
+                    position: *affine * event.position,
+                    ..*event
+                },
+            },
+            InputEvent::Scroll { position, delta } => InputEvent::Scroll {
+                position: *affine * *position,
+                delta: *delta,
+            },
+            InputEvent::Scale(scale) => InputEvent::Scale(ScaleEvent {
+                focal: *affine * scale.focal,
                 ..*scale
             }),
             InputEvent::Key(_)
@@ -2644,6 +2694,77 @@ mod tests {
         assert_eq!(local.position(), Point::new(15.0, 23.0));
         // The original is untouched.
         assert_eq!(e.position(), Point::new(20.0, 30.0));
+    }
+
+    #[test]
+    fn transformed_maps_every_positioned_variant_like_translated() {
+        // A pure translation through `transformed` must agree with `translated`
+        // for every variant, positioned or not.
+        let offset = Vec2::new(-5.0, -7.0);
+        let affine = Affine::translate(offset);
+        let scale = ScaleEvent {
+            phase: ScalePhase::Update,
+            scale_delta: 1.5,
+            focal: Point::new(20.0, 30.0),
+            velocity: 0.25,
+        };
+        let events = [
+            down(20.0, 30.0),
+            InputEvent::PointerContact {
+                pointer_id: PointerId::touch(1),
+                event: PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: Point::new(20.0, 30.0),
+                    button: PointerButton::Primary,
+                },
+            },
+            InputEvent::Scroll {
+                position: Point::new(20.0, 30.0),
+                delta: ScrollDelta::Pixels(3.0, 4.0),
+            },
+            InputEvent::Scale(scale),
+            InputEvent::Housekeeping,
+        ];
+        for event in &events {
+            assert_eq!(event.transformed(&affine), event.translated(offset));
+        }
+    }
+
+    #[test]
+    fn transformed_maps_positions_through_scale_and_keeps_magnitudes() {
+        // Inverse of scale(2) then translate(10, 20): container (30, 60) is
+        // local (10, 20).
+        let inverse = (Affine::translate(Vec2::new(10.0, 20.0)) * Affine::scale(2.0)).inverse();
+        assert_eq!(
+            down(30.0, 60.0).transformed(&inverse).position(),
+            Point::new(10.0, 20.0)
+        );
+        let scroll = InputEvent::Scroll {
+            position: Point::new(30.0, 60.0),
+            delta: ScrollDelta::Pixels(3.0, 4.0),
+        };
+        assert_eq!(
+            scroll.transformed(&inverse),
+            InputEvent::Scroll {
+                position: Point::new(10.0, 20.0),
+                delta: ScrollDelta::Pixels(3.0, 4.0),
+            }
+        );
+        let scale = InputEvent::Scale(ScaleEvent {
+            phase: ScalePhase::Begin,
+            scale_delta: 1.25,
+            focal: Point::new(30.0, 60.0),
+            velocity: 2.0,
+        });
+        assert_eq!(
+            scale.transformed(&inverse),
+            InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Begin,
+                scale_delta: 1.25,
+                focal: Point::new(10.0, 20.0),
+                velocity: 2.0,
+            })
+        );
     }
 
     #[test]
