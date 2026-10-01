@@ -456,7 +456,11 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
     } else {
         format!("status: {status}")
     };
-    let supported_line = format!("is_supported: {}", AuthSession::is_supported());
+    let supported_line = format!(
+        "is_supported: {} loopback: {}",
+        AuthSession::is_supported(),
+        LoopbackSession::is_supported()
+    );
     let loopback_port_line = match loopback_port_sig().get() {
         Some(port) => format!("loopback port: {port}"),
         None => "loopback port: none".to_string(),

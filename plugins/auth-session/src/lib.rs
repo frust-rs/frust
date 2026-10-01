@@ -159,8 +159,10 @@
 //! | Linux, Windows | [`AuthSessionError::NoHandler`] (`unsupported` module) | system browser + `127.0.0.1` listener |
 //! | anything else | [`AuthSessionError::NoHandler`] | [`AuthSessionError::NoHandler`] |
 //!
-//! [`AuthSession::is_supported`] is `true` on the first four rows — on Linux
-//! and Windows that means the [`LoopbackSession`] path.
+//! [`AuthSession::is_supported`] answers the first column only — `true` on
+//! the Android, iOS and macOS rows, `false` on Linux and Windows. The second
+//! column has its own predicate, [`LoopbackSession::is_supported`] (`true`
+//! on the macOS and Linux/Windows rows); a desktop caller asks that one.
 //!
 //! # The Android double-delivery note
 //!
@@ -710,27 +712,22 @@ impl AuthSession {
         StartFuture::new(req)
     }
 
-    /// Whether this build target can run an authentication session at all —
-    /// Android (Chrome Custom Tabs), Apple (`target_vendor = "apple"`, so iOS
-    /// and macOS both, on `ASWebAuthenticationSession`), or desktop Linux
-    /// and Windows. On **Linux and Windows "supported" means the
-    /// [`LoopbackSession`] path**: those targets have no in-app browser tab,
-    /// so [`Self::start`] (a custom-scheme callback) still answers
-    /// [`AuthSessionError::NoHandler`] there (the crate doc's *Platform
-    /// notes* table).
+    /// Whether [`Self::start`] (a custom-scheme callback) has a backend on
+    /// this build target: Android (Chrome Custom Tabs) and Apple
+    /// (`target_vendor = "apple"`, so iOS and macOS both, on
+    /// `ASWebAuthenticationSession`). `false` on Linux and Windows, where
+    /// [`Self::start`] answers [`AuthSessionError::NoHandler`] — the desktop
+    /// path is [`LoopbackSession`], which has its own
+    /// [`LoopbackSession::is_supported`] (the crate doc's *Platform notes*
+    /// table). The two predicates answer two different questions on purpose;
+    /// this one never says `true` for a target where `start` cannot work.
     ///
     /// A compile-time answer about the backends this target builds, not a
     /// runtime probe: `true` on Android still leaves
     /// [`AuthSessionError::NoHandler`] reachable at `start` time on a device
-    /// with no Custom Tabs-capable browser installed, and `true` on desktop
-    /// still leaves it reachable when no system browser is registered.
+    /// with no Custom Tabs-capable browser installed.
     pub fn is_supported() -> bool {
-        cfg!(any(
-            target_os = "android",
-            target_vendor = "apple",
-            target_os = "linux",
-            target_os = "windows"
-        ))
+        cfg!(any(target_os = "android", target_vendor = "apple"))
     }
 }
 
@@ -813,17 +810,18 @@ mod tests {
     }
 
     #[test]
-    fn is_supported_covers_the_custom_scheme_and_loopback_targets() {
+    fn is_supported_answers_the_custom_scheme_column_only() {
         assert_eq!(
             AuthSession::is_supported(),
-            cfg!(any(
-                target_os = "android",
-                target_vendor = "apple",
-                target_os = "linux",
-                target_os = "windows"
-            ))
+            cfg!(any(target_os = "android", target_vendor = "apple"))
         );
         if cfg!(any(target_os = "linux", target_os = "windows")) {
+            // Desktop without an in-app browser tab: `start` cannot work, the
+            // loopback path can — two predicates, two answers.
+            assert!(!AuthSession::is_supported());
+            assert!(LoopbackSession::is_supported());
+        }
+        if cfg!(target_os = "macos") {
             assert!(AuthSession::is_supported());
             assert!(LoopbackSession::is_supported());
         }
