@@ -73,7 +73,9 @@
 //! [`UrlLauncherError::NoHandler`]; any other code maps to
 //! [`UrlLauncherError::Platform`], carrying only the numeric code.
 
+#[cfg(not(target_os = "windows"))]
 use std::io;
+#[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 
 use crate::UrlLauncherError;
