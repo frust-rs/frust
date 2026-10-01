@@ -112,6 +112,14 @@ frust-url-launcher = { path = "../../plugins/url-launcher" }
 # surface.
 frust-auth-session = { path = "../../plugins/auth-session" }
 
+# frust-oauth-native: pairs with `frust-auth-session` above for the "Auth"
+# section's Desktop loopback block (`src/pages/auth_session.rs`) — PKCE,
+# `state`, the authorization URL and callback/token-grant builders behind
+# `LoopbackSession`. Same hand-added-path-dep shape as the plugins above
+# (not yet a `frust tui` Add Plugin contribution); a pure-Rust crate with no
+# features of its own (see its own README's charter).
+frust-oauth-native = { path = "../../plugins/oauth-native" }
+
 # frust-database: playground is the device-gate vehicle for the "DB"
 # section — `src/pages/database.rs`. Same hand-added-path-dep shape as
 # `frust-camera`/`frust-i18n`/`frust-video-player`/`frust-url-launcher`/
