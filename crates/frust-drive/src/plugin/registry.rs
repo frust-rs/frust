@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — seventeen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — eighteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -34,8 +34,11 @@
 //! manifest permission or plist key, since Custom Tabs carry no permission,
 //! the `<queries>` element comes from the module's own manifest via the
 //! manifest merger, and ASWebAuthenticationSession needs no plist key;
-//! desktop reports NoHandler — see `AUTH_SESSION_BASE`'s doc comment), `iap`
-//! (dependency, the plugin's own Android library module, and its own iOS
+//! desktop reports NoHandler — see `AUTH_SESSION_BASE`'s doc comment),
+//! `oauth-native` (dependency only — OAuth 2.0 native-app helper with PKCE,
+//! state, authorization URL, and callback/token-response parsing; pure Rust,
+//! no HTTP client or async; the app owns the token endpoint's transport),
+//! `iap` (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
 //! comment for why), `database` (dependency only — pure-Rust plugin, no
 //! OS-side integration), and `i18n` (dependency, a seeded starter
@@ -374,6 +377,18 @@ const AUTH_SESSION: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+const OAUTH_NATIVE: PluginSpec = PluginSpec {
+    id: "oauth-native",
+    summary: "OAuth 2.0 native-app helper: PKCE (S256), state, authorization URL, callback + \
+              token-response parsing (pure Rust, no HTTP).",
+    crate_dir: "oauth-native",
+    base: &[Contribution::CargoDep {
+        name: "frust-oauth-native",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// `iap`'s base contributions — a Cargo dependency plus its own Android
 /// library module and its own iOS Swift package, the `camera`/`native-widgets`
 /// shape (a plugin's Kotlin/Swift never copied into the app).
@@ -609,6 +624,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         HAPTICS,
         URL_LAUNCHER,
         AUTH_SESSION,
+        OAUTH_NATIVE,
         IAP,
         VIDEO_PLAYER,
         DATABASE,
@@ -636,7 +652,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_seventeen_v1_plugins() {
+    fn registry_lists_the_eighteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -650,6 +666,7 @@ mod tests {
                 "haptics",
                 "url-launcher",
                 "auth-session",
+                "oauth-native",
                 "iap",
                 "video-player",
                 "database",
