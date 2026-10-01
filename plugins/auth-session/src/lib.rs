@@ -125,8 +125,12 @@
 //!    (query intact byte-for-byte), [`AuthSessionOutcome::Cancelled`] after
 //!    [`LoopbackCancel::cancel`], [`AuthSessionError::TimedOut`], or the
 //!    browser launch's own error. Dropping it stops the listener.
-//! 3. The listener polls every 25 ms and closes its socket on every exit
-//!    path; it accepts exactly one callback, then stops.
+//! 3. A cancel, dropping the future, or [`LoopbackOptions::timeout`] all
+//!    take effect within about one poll interval (25 ms), even while a
+//!    connection is being served — the one exception is a response write
+//!    already in progress, bounded by the 2 s connection I/O timeout (see
+//!    [`LoopbackSession::start`] and [`LoopbackCancel`] for the residual
+//!    local-stall bound). The listener accepts exactly one callback, then stops.
 //! 4. Connections are served one at a time, each with a 2 s / 8 KiB budget
 //!    for its request head. A request must be a well-formed
 //!    `HTTP/1.0`/`HTTP/1.1` request line with a printable-ASCII,
@@ -800,7 +804,7 @@ mod tests {
         });
     }
 
-    /// a reverse-DNS callback scheme — the shape Apple and Android apps
+    /// A reverse-DNS callback scheme — the shape Apple and Android apps
     /// conventionally register — is accepted.
     #[test]
     fn reverse_dns_callback_scheme_is_accepted() {
