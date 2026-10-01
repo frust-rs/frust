@@ -734,6 +734,76 @@ cleanly (no panic in its log), no listener left.
 This leg also closes `frust-url-launcher`'s Linux browser-out leg: `xdg-open` launched the
 browser from a live X11 session (see `plugins/url-launcher/README.md` §6).
 
-### Windows desktop (loopback) — NOT YET RUN
+### Windows desktop (loopback) — PASSED (machine-driven over ssh + devtools, `dell_mini_pc`), 2026-10-01
 
-The conductor runs this gate over ssh on the Windows 11 rig with Ed or via scheduled-task launch for the browser legs, using the playground app's Auth page "Desktop loopback" block ([gate/loopback.html](gate/loopback.html)) with the loopback test cases (Loopback login / deny / bad iss / timeout / cancel + Cancel loopback / busy). The transcript will replace this heading when the gate runs.
+Host: the Windows 11 Pro rig (10.0.26200.9457, Intel UHD Graphics 730, user `cpu`, desktop session
+2 connected by the operator over RDP for the run): the `examples/playground` desktop debug binary
+built natively on the rig from feature head `06b520d7` with `--features frust/devtools` (plus an
+uncommitted two-line scratch patch to the playground's Auth page echoing every status-line write to
+stderr and defaulting `Base URL` to the gate origin — the backend under test was not touched),
+launched in the desktop session through a one-shot `schtasks /IT /RU cpu` task with
+`FRUST_DEVTOOLS=1`, and driven from the Linux workstation through the devtools wire protocol over an
+`ssh -L` forward (`input_tap`/`input_scroll`; status lines read from the stderr log, listeners from
+`netstat -ano`, probes with `curl.exe` on the rig). Gate pages served from the workstation at
+`https://192.168.1.109:8443/` (`Base URL`) by a `python3 http.server` behind a throwaway CA-signed
+leaf certificate (SAN `192.168.1.109`); the throwaway CA sat in the rig's machine Root store for the
+run only.
+**Browser path, recorded as such.** `LoopbackSession::start` opened the browser through
+`frust-url-launcher`'s Windows arm (`ShellExecuteW("open", <url>)`): the rig's registered `https`
+handler is **Zen Browser 1.22.3b** (Firefox-based, the operator's own profile — Edge is installed
+but not the default), which started at the click (twelve `zen.exe` processes whose start times match
+the tap) and fetched the gate page from the workstation. This closes `frust-url-launcher`'s Windows
+browser-out leg. `is_supported: true` throughout.
+Two things the run had to get past, recorded for the next operator: (a) a self-signed `CA:TRUE`
+certificate used directly as the server certificate is rejected by Firefox-family browsers (the Linux
+run only passed because the override was clicked there) — serve a CA + non-CA leaf instead; (b) in
+a **disconnected** desktop session the shell paints no frames (`frame_stats_subscribe` delivered none
+in 4 s), so `spawn_local` futures — the loopback session included — neither resolve nor time out
+until the session is connected again: the first login attempt sat on its listener nine minutes past
+its 300 s deadline and timed out within a second of the RDP connection. Every leg below ran with the
+session connected.
+**(1) Login** — Zen opened `loopback.html?gate_iss=…&response_type=code&client_id=frust-playground&
+redirect_uri=http%3A%2F%2F127.0.0.1%3A61403%2Foauth%2Fcallback&scope=openid&state=…&code_challenge=…
+&code_challenge_method=S256` and redirected to the loopback callback.
+```
+status: Loopback login -> code ok len=8, state ok, iss ok, grant body len=212
+```
+`netstat -ano | findstr 127.0.0.1 | findstr LISTEN` immediately afterwards: no `playground.exe`
+listener. A second login later in the run passed identically.
+**(2) 404 and keep waiting** — during a `gate_mode=stay` session on port `61553`
+(`Loopback timeout (10 s)`):
+```
+curl.exe -si http://127.0.0.1:61553/wrong
+HTTP/1.1 404 Not Found … Cache-Control: no-store … Content-Security-Policy: default-src 'none' … Connection: close
+curl.exe -si -X POST http://127.0.0.1:61553/oauth/callback
+HTTP/1.1 404 Not Found
+curl.exe -si -H "Host: localhost:61553" http://127.0.0.1:61553/oauth/callback
+HTTP/1.1 400 Bad Request
+```
+`netstat` still listed `127.0.0.1:61553 … LISTENING 15700` (the playground's pid) after all three.
+**(3) Timeout** — the same session resolved `Loopback timeout (10 s) -> Err(TimedOut)`; the listener
+was gone 10.4 s after the click (polled over ssh, ~0.3 s resolution). An earlier run on port `61438`
+timed out identically.
+**(4) Cancel** — `Loopback cancel` (port `61572`, gate page waiting), then `Cancel loopback` →
+`Loopback cancel -> Ok(Cancelled)`; the listener was already gone at the first poll after the click
+(0.5 s including one ssh round trip).
+**(5) Busy** — `Loopback busy -> Err(Busy)`; no listener left afterwards.
+**(6) Negative controls** — `Loopback deny` (port `61427`; the gate request carried
+`gate_mode=deny`) → `Loopback deny -> Err(Authorization { error: AccessDenied, description:
+Some("gate deny"), uri: None })`. `Loopback bad iss` (port `61431`; a normal successful redirect) →
+`Loopback bad iss -> Err(IssuerMismatch)`.
+**(7) Drop** — a `stay` session on port `61602`; the playground window closed from inside the desktop
+session with `Process.CloseMainWindow()` (the titlebar close message): the listener was gone 0.31 s
+later, the process had exited 0.32 s after the call, no panic in its log, no listener left.
+**(8) Response page source** — fetched with `curl.exe` on the rig by completing a `stay` session on
+port `61586` with the gate's own `code=gatecode&state=<that request's state>&iss=…` query: `200 OK`,
+`Content-Length: 189`, the same hardening headers, body `<!DOCTYPE html><html lang="en"><head><meta
+charset="utf-8"><title>Sign-in complete</title></head><body><p>Sign-in complete. You can close this
+tab and return to the app.</p></body></html>` — no `<script>`, none of the query values; the session
+resolved `code ok len=8, state ok, iss ok, grant body len=212`.
+**Extra — trickled request head** (the Winsock `SO_RCVTIMEO`-reuse question): the 177-byte callback
+head sent from a `TcpClient` in 8-byte pieces 50 ms apart (23 writes, 1.46 s) and in 3-byte pieces
+30 ms apart (59 writes, 1.96 s, just inside the 2 s per-connection budget) — roughly sixty to eighty
+timed-out 25 ms read passes on one stream each time — was answered `200 OK` both times and the
+session validated the callback: no lost head bytes observed.
+
