@@ -800,7 +800,7 @@ mod tests {
         });
     }
 
-    /// N4: a reverse-DNS callback scheme — the shape Apple and Android apps
+    /// a reverse-DNS callback scheme — the shape Apple and Android apps
     /// conventionally register — is accepted.
     #[test]
     fn reverse_dns_callback_scheme_is_accepted() {

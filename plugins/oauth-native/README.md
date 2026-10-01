@@ -88,19 +88,32 @@ On desktop the redirect lands on a loopback listener instead of a custom
 scheme (RFC 8252 §7.3). Only the redirect URI's source changes; everything
 else is the same as above.
 
-> **Depends on `frust-auth-session`'s loopback API**, which is landing
-> alongside this crate — the `LoopbackSession` names below follow that API
-> and may shift until it ships.
-
 ```rust
-let loopback = LoopbackSession::bind(/* … */)?;
-let redirect_uri = loopback.redirect_uri(); // e.g. http://127.0.0.1:53121/oauth/callback
+let session = LoopbackSession::bind(LoopbackOptions::new("/oauth/callback"))?;
+let redirect_uri = session.redirect_uri().to_string();
 
-let request = AuthorizationRequest { redirect_uri: redirect_uri.clone(), /* … */ };
-// … open the URL, receive the callback URL from the loopback session …
-let expectations = CallbackExpectations { redirect_uri, state, issuer };
+let request = AuthorizationRequest {
+    authorization_endpoint: "https://as.example/authorize".to_string(),
+    client_id: "example-app".to_string(),
+    redirect_uri: redirect_uri.clone(),
+    scope: Some("openid profile offline_access".to_string()),
+    resources: Vec::new(),
+};
+let url = request.build(&state, &verifier.challenge())?;
+
+let outcome = session.start(&url).await?;
+let AuthSessionOutcome::Callback(callback_url) = outcome else {
+    return Ok(()); // the user cancelled
+};
+
+let expectations = CallbackExpectations {
+    redirect_uri,
+    state,
+    issuer: IssuerCheck::from_metadata("https://as.example".to_string(), true),
+};
 let code = parse_callback(&callback_url, &expectations)?;
 ```
+
 
 `parse_callback` compares the callback with the redirect URI exactly, except
 that the scheme and (for `http`/`https`) the host compare case-insensitively,
