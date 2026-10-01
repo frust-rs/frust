@@ -6605,9 +6605,9 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `url-launcher-windows-leg-unrun` — the `ShellExecuteW` backend has never been compiled or run in this repo
+### `url-launcher-windows-leg-unrun` — the `ShellExecuteW` backend has never run against a real browser in this repo
 
-**Observed**: `desktop::open_external`'s `#[cfg(target_os = "windows")]` arm (`ShellExecuteW("open", url)`) has never been cross-compile-checked on the Linux dev host this crate was built on (`rustup target list --installed` there shows no `x86_64-pc-windows-gnu`), so the arm has never been compiled, let alone run against a real Windows shell association.
+**Observed**: `desktop::open_external`'s `#[cfg(target_os = "windows")]` arm (`ShellExecuteW("open", url)`) has never been cross-compile-checked on the Linux dev host this crate was built on (`rustup target list --installed` there shows no `x86_64-pc-windows-gnu`); the arm has since compiled and passed clippy natively on a Windows 11 msvc rig as a transitive dependency of `auth-session`'s `LoopbackSession` backend (this plan's `wave-3-windows-clippy`/`wave-5-windows-clippy`), but it has still never run against a real Windows shell association.
 
 **Applies to**: Windows only — the `SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`/generic-failure mapping in that arm is unverified in any form.
 
@@ -6661,17 +6661,45 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `auth-session-linux-windows-unavailable-v1` — no in-app auth user agent on desktop Linux/Windows
+### `auth-session-loopback-first-match-wins-v1` — the loopback listener accepts the first well-formed callback request, not a verified one
 
-**Observed**: `AuthSession::start` reports `AuthSessionError::NoHandler` immediately on every target that is not Android, iOS, or macOS — Linux and Windows desktop included; `unsupported::start` never presents a session at all.
+**Observed**: `LoopbackSession`'s accept loop resolves on the first request to the reserved path that passes its structural checks (well-formed request line, an exact `Host: 127.0.0.1:<port>` match, `GET`, the reserved path, a URL that passes the crate's validator) — from *any* local client able to reach the loopback interface, another local process or a local web page, not provably the system browser tab this session opened. The listener has no way to tell that tab's own request apart from one any other local process sends to the same port first.
 
-**Applies to**: Linux and Windows desktop.
+**Applies to**: every `LoopbackSession`, on Linux, Windows, and macOS alike.
 
-**Why accepted**: neither platform ships a first-class in-app browser-tab primitive the way Android's Custom Tabs or Apple's `ASWebAuthenticationSession` do, and this crate has no plan to build one — the documented fallback is driving the same RFC 8252 flow through `frust-url-launcher`'s ordinary system-browser launch plus a local loopback HTTP listener (or an equivalent out-of-band step), RFC 8252's own "loopback IP redirection" pattern for platforms with no in-app browser-tab primitive.
+**Why accepted**: this is RFC 8252 §8.3's own documented loopback-interface risk, not a defect this crate introduces; the defence is the same PKCE + `state` check every custom-scheme callback already requires (`frust_oauth_native::parse_callback`), binding the accepted request to the authorization request this app made — a forged or racing hit still fails that check, and the one success the session was ever going to report is consumed by whichever request got there first.
 
-**Trigger for removal**: none anticipated — this is a permanent platform gap, not a deferral.
+**Trigger for removal**: none anticipated — this is RFC 8252's own loopback-redirection trust model, not a deferral.
 
-**Evidence**: `plugins/auth-session/src/unsupported.rs`'s module doc; `plugins/auth-session/README.md` §3 (*Desktop (Linux, Windows)*).
+**Evidence**: `plugins/auth-session/src/loopback.rs`'s module doc (*What the listener answers*, *Security*); `plugins/oauth-native/src/callback.rs`'s `parse_callback` (re-exported from `plugins/oauth-native/src/lib.rs`).
+
+---
+
+### `auth-session-loopback-windows-unrun-v1` — the desktop loopback backend's Windows browser-driven runtime leg has not run
+
+**Observed**: `LoopbackSession`'s Windows arm (sharing `frust-url-launcher`'s `ShellExecuteW` system-browser launch, target-gated to `linux`/`windows`/`macos`) has run this plan's full host test suite and clippy natively on a Windows 11 msvc rig (`dell_mini_pc`) — 52/52 `auth-session` tests, including the TCP-socket suite, across wave gates `wave-2-windows-host-tests`, `wave-3-windows-host-tests`, and `wave-5-windows-host-tests`, plus `wave-3-windows-clippy`/`wave-5-windows-clippy` — but the browser-driven runtime legs have not: launching Edge via `ShellExecuteW`, and the playground window driving a live callback round trip back into the listener.
+
+**Applies to**: Windows desktop specifically — the host suite proves the listener's HTTP/TCP logic end to end against a synthetic client, never against a real browser process.
+
+**Why accepted**: card p2-05 (the Windows desktop device gate) has not run yet; it is the first card scoped to drive a live browser against this listener rather than the test harness's own `TcpStream` clients.
+
+**Trigger for removal**: card p2-05 runs the playground's desktop loopback flow on a Windows rig against a live browser and the callback round trip completes.
+
+**Evidence**: `plugins/auth-session/src/loopback.rs` (the Windows arm's browser launch via `frust-url-launcher`); `plugins/url-launcher/src/desktop.rs` (the `#[cfg(target_os = "windows")]` `ShellExecuteW` arm, also unverified against a live browser per `url-launcher-windows-leg-unrun`); `plugins/auth-session/Cargo.toml` (the target-gated `frust-url-launcher` dependency, D4).
+
+---
+
+### `auth-session-loopback-poll-interval-v1` — the loopback accept loop's 25 ms poll bounds cancel/timeout/drop latency, not instant
+
+**Observed**: `LoopbackSession`'s accept loop polls its shutdown flag every 25 ms; a cancel (`LoopbackCancel::cancel`), a dropped future, or `LoopbackOptions::timeout` elapsing therefore closes the listener socket within about one poll interval — including while a connection is already being served, since each connection's reads also run in 25 ms passes (since commit `5e686576`) rather than blocking for the full request-head budget. The one exception is a response write already in progress, bounded by `CONNECTION_IO_TIMEOUT` (2 s) rather than the poll interval. While idle, the loop wakes 40 times a second whether or not a client ever connects.
+
+**Applies to**: every `LoopbackSession`, on every target it runs on.
+
+**Why accepted**: a self-connect wake (opening a throwaway loopback connection to interrupt `accept()` immediately) would close the gap but adds its own connect-to-self race and extra firewall/antivirus surface on Windows; polling is the portable choice, and 25 ms is well under human-perceptible latency for a cancel button or a timeout deadline.
+
+**Trigger for removal**: none anticipated — a deliberate portability trade, not a deferral.
+
+**Evidence**: `plugins/auth-session/src/loopback.rs`'s module doc (*Lifecycle* step 3, *Security*'s last paragraph) and its accept-loop poll interval.
 
 ---
 
@@ -6679,9 +6707,9 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Observed**: `AuthSession` exposes no `cancel` method — once `start` returns a pending future, it only resolves when the identity provider redirects, the user dismisses the platform tab themselves, or a platform-level failure occurs; there is no programmatic way for an app to dismiss a live session (e.g. on its own timeout or navigation-away). Dropping the awaited future (not awaiting it, or awaiting and then discarding the result) releases the session Busy slot immediately without waiting for platform resolution — but it does **not** end the platform UI: on Android the Custom Tab stays on screen until the user closes it (a redirect it delivers afterwards finds no pending session and is dropped); on iOS/macOS the presented `ASWebAuthenticationSession` sheet stays up until the user dismisses it or the next `AuthSession::start` `-cancel`s it in favour of the new session (its `CanceledLogin` completion is then discarded as a stale generation).
 
-**Applies to**: every platform with a real backend (Android, iOS, macOS).
+**Applies to**: `AuthSession::start`'s platform backends only — Android, iOS, macOS (the in-app browser-tab path). `LoopbackSession` is unaffected: it exposes `LoopbackCancel::cancel` plus a mandatory `LoopbackOptions::timeout`, so a desktop loopback session always has a programmatic way out.
 
-**Why accepted**: v1 scope — the one-session `Busy` guard (this crate's *Exactly one live session* doc section) means a stuck session still cannot wedge a later one forever, even with no cancel path and no forced cleanup — dropping the future frees the slot for a new session. Neither this crate's originating task nor its gate script called for a programmatic cancel.
+**Why accepted**: v1 scope — the one-session `Busy` guard (this crate's *Exactly one live session* doc section) means a stuck session still cannot wedge a later one forever, even with no cancel path and no forced cleanup — dropping the future frees the slot for a new session. Neither this crate's originating task nor its gate script called for a programmatic cancel on the platform-backend side.
 
 **Trigger for removal**: a follow-on task adds `AuthSession::cancel` (dismissing `ASWebAuthenticationSession` via `-cancel`, finishing the Android Custom Tab activity) and resolves the live session with `AuthSessionOutcome::Cancelled`.
 
@@ -6695,7 +6723,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Applies to**: iOS and macOS alike (both route through the same `apple.rs` module).
 
-**Why accepted**: this crate's deployment floor is iOS 15, where the newer initializer does not exist at all — supporting the HTTPS-callback form would need a second, floor-gated code path for a callback shape this crate's originating task did not ask for.
+**Why accepted**: this crate's deployment floor is iOS 15, where the newer initializer does not exist at all — supporting the HTTPS-callback form would need a second, floor-gated code path for a callback shape this crate's originating task did not ask for. A downstream app asked for HTTPS App-Link callback support (2026-09-23) as a wanted, non-blocking enhancement — v1 ships served instead by the private-use-scheme `AuthSession::start` path, or, on desktop, by `LoopbackSession`'s plain-`http` loopback redirect.
 
 **Trigger for removal**: raising the crate's deployment floor to iOS 17.4, or adding a floor-gated second path that uses the newer initializer when available.
 
