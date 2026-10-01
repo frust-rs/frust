@@ -5840,6 +5840,22 @@ iOS target, and no real `cdylib`/app binary ever links this crate's own test har
 **Trigger for removal**: gating the macro-expansion test modules behind a dedicated cfg so at most
 one of them compiles into any one linked test binary.
 
+---
+
+### `corner-insets-ios-26-only` — `WindowInsets::corner_insets` reports zero on all platforms except iPadOS 26+
+
+**Observed**: `WindowInsets::corner_insets` is non-zero only on iPadOS 26+ under the system window control. Android, desktop, web, and iOS < 26 always report zero (by construction: no other shell reads a corner region), so the Glyph and Material app bar shifts never fire there. Bars do not consume the horizontal safe-area insets; corner widths are measured from the safe-area edge, so a hypothetical control on a notched horizontal edge would under-shift (no platform draws one there). Additionally, a bar hosted in a detail pane, sheet, dialog, or below other content cannot detect its window-space origin and still receives the window-wide corner values, causing over-shift; `corner_shift(false)` is exposed as the author's opt-out. Several bars do not honour corner insets at all: the `frust_cupertino::navbar`, `frust_material::selection_app_bar`'s contextual face, and shadcn/beUI header components.
+
+**Applies to**: Android, desktop, web, and iOS < 26; the `frust_glyph::app_bar` and `frust_material::{app_bar, search_app_bar, sliver_app_bar}` widget implementations; also `frust_cupertino::navbar`, `frust_material::selection_app_bar`, and shadcn/beUI headers.
+
+**Why not fixed**: nothing to report elsewhere. The notched-edge case has no producer. Android's edge-to-edge model has no corner control. Automatic placement detection to disable shifting would require a scoped context cleared by split views and sheets — a design change deferred to a follow-up plan.
+
+**Watch item** (not reproduced on iOS 26.2): a developer-forum report that UIKit's corner layout guide does not reset to zero when a window returns to full screen — gate g4-01 observed the guide reset to zero on entering full screen and come back non-zero on return to a window; `.minimal` reports zero corners because the control takes a safe-area strip instead.
+
+**Evidence**: plan fplan_000001a0ed6d3e3a5vOFrNW1, research rsa_000001a0ed6cf8b2zqGLZEkL + rsa_000001a0ed7142ce7O3dRUAf, review round rvr_000001a0f44e80abuPyeN2C3, action items act_000001a0f44f6894QCZiX1iA + act_000001a0f44f6bd9CVDGKOj3, gate g4-01 PASSED 2026-10-01 on the iPad Pro 13-inch (M5) iOS 26.2 Simulator (Xcode 27.0; 12 legs — windowed readout TL 66x43 / TR 10x43, bar slot clear, full screen zeros, rotation, Stage Manager resize, automatic/unified/minimal styles, RTL, no-regression).
+
+---
+
 ### `bench-sub-markers-off-frame-thread-never-emitted` — a scenario sub-marker raised from a pool thread is dropped, not queued
 
 **Observed**: `frust-shell-common`'s scenario-marker route (`crates/frust-shell-common/src/perf.rs`)

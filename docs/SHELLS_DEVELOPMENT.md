@@ -72,6 +72,12 @@ is a person-driven check:
 - **Bar region (Android):** confirm no black band shows behind the status bar or gesture/nav bar
   in either orientation — `scripts/testing/android-smoke.sh` is the automated equivalent of this
   leg (see [TESTING.md](TESTING.md) § Android Emulator GPU Lab).
+- **iPad (iPadOS 26+):** run the playground on the iOS 27.0 iPad Simulator with a local, uncommitted
+  opaque-surface flip (translucent Mode B has rendered black on the Simulator — consistently on iOS
+  26.2, intermittently on 27.0 — so the opaque flip is the deterministic recipe): set
+  `translucentSurface` to `false` in `examples/playground/ios/Runner/SceneDelegate.swift`. Open
+  Responsive: in a windowed scene the corner-insets line shows a non-zero TL (TR under RTL) and the
+  home bar's brand slot sits clear of the window control; full screen reads zeros.
 
 ## Clipboard manual test (Android + iOS)
 

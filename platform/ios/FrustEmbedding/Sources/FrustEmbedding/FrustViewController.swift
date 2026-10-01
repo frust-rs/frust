@@ -392,6 +392,7 @@ open class FrustViewController: UIViewController {
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateSurface()
+        pushCornerInsets()
     }
 
     /// SafeArea change (rotation, notch/Dynamic Island layout change, a
@@ -444,6 +445,49 @@ open class FrustViewController: UIViewController {
             Float(insets.left), Float(insets.top), Float(insets.right), Float(insets.bottom),
             0, 0, 0, Float(keyboardViewInsetBottom)
         )
+        pushCornerInsets()
+    }
+
+    /// Pushes the iPadOS 26+ window control's footprint to
+    /// `frust_set_corner_insets`: per physical corner, how far the control
+    /// protrudes beyond `view.safeAreaInsets`, read from the corner-adapted
+    /// safe-area layout regions (`.horizontal` adaptation widens the
+    /// left/right insets, `.vertical` deepens the top/bottom ones).
+    ///
+    /// A `UIEdgeInsets` cannot express a corner, so the horizontal region's
+    /// left inset applies to the whole left edge; what makes an empty corner
+    /// inert is its zero height. A corner with EITHER dimension 0 is therefore
+    /// normalised to 0x0 here so the Rust-side readout is honest.
+    ///
+    /// The regions move on windowed ⇄ full-screen and window-control-style
+    /// changes WITHOUT a safe-area change, hence the extra call from
+    /// `viewDidLayoutSubviews` besides `pushInsets`. The accessors are
+    /// main-thread and read after layout; the Rust side's no-op guard makes the
+    /// per-layout push free. Below iOS 26 nothing is pushed (the Rust default
+    /// is zero). A missing handle is a no-op.
+    private func pushCornerInsets() {
+        guard let handle else { return }
+        if #available(iOS 26.0, *) {
+            let safe = view.safeAreaInsets
+            let h = view.edgeInsets(for: .safeArea(cornerAdaptation: .horizontal))
+            let v = view.edgeInsets(for: .safeArea(cornerAdaptation: .vertical))
+            let wl = max(0, h.left - safe.left)
+            let wr = max(0, h.right - safe.right)
+            let ht = max(0, v.top - safe.top)
+            let hb = max(0, v.bottom - safe.bottom)
+            func corner(_ width: CGFloat, _ height: CGFloat) -> (Float, Float) {
+                width > 0 && height > 0 ? (Float(width), Float(height)) : (0, 0)
+            }
+            let tl = corner(wl, ht)
+            let tr = corner(wr, ht)
+            let bl = corner(wl, hb)
+            let br = corner(wr, hb)
+            frust_set_corner_insets(
+                handle,
+                tl.0, tl.1, tr.0, tr.1,
+                bl.0, bl.1, br.0, br.1
+            )
+        }
     }
 
     public override func viewWillTransition(

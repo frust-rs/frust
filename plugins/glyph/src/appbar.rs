@@ -18,6 +18,23 @@
 //! bar. Content beneath a Glyph AppBar therefore never needs a top `SafeArea`
 //! edge — exactly Flutter's `AppBar` behavior.
 //!
+//! # Window-control corners (iPadOS 26+)
+//!
+//! A windowed iPadOS 26+ app has a window control (traffic-light cluster) that
+//! protrudes into the bar's top corners. Layout reads
+//! `ctx.window_insets().corner_insets` (physical corners, never consumed): a
+//! corner whose `height > 0.0` shifts that side's slot edge inward by the
+//! corner's `width` — the leading edge starts at `PAD_X + left` and the trailing
+//! edge ends at `width - PAD_X - right`. The bar's height never changes, and the
+//! title anchoring rules are unchanged (they simply see the shifted edges). A
+//! corner with zero height (full screen, every other platform) shifts nothing.
+//!
+//! The shift assumes the bar spans the window's top edge (its content band
+//! starts at the safe-area top and its left/right edges are the window's). A bar
+//! placed elsewhere (detail pane, sheet, dialog) opts out with
+//! [`AppBarView::corner_shift`]`(false)`; no automatic detection exists (corners
+//! are never consumed; see the `CornerInsets` rustdoc).
+//!
 //! # Elevation
 //!
 //! [`AppBarView::elevated`] is an app-fed flag (the app toggles it off its own
@@ -593,6 +610,7 @@ pub struct AppBarView<State: 'static> {
     leading: Option<AnyView<State>>,
     actions: Vec<AnyView<State>>,
     elevated: bool,
+    corner_shift: bool,
     title_direction: TitleDirection,
     title_position: TitlePosition,
     selection: Option<SelectionBar<State>>,
@@ -610,6 +628,7 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         leading: None,
         actions: Vec::new(),
         elevated: false,
+        corner_shift: true,
         title_direction: TitleDirection::Forward,
         title_position: TitlePosition::Leading,
         selection: None,
@@ -651,6 +670,19 @@ impl<State: 'static> AppBarView<State> {
     /// `on_scroll`; see the [module docs](self)).
     pub fn elevated(mut self, elevated: bool) -> Self {
         self.elevated = elevated;
+        self
+    }
+
+    /// Whether the bar moves its leading/trailing slots out from under the
+    /// iPadOS 26+ window control (`WindowInsets::corner_insets`). Default on;
+    /// pass `false` for a bar that does NOT span the window's top edge (a bar in
+    /// a detail pane of a split view, in a sheet, a dialog or below other
+    /// content): layout cannot see the bar's window-space position and the
+    /// corner value is never consumed, so such a bar would otherwise shift for a
+    /// control it does not sit under.
+    #[must_use]
+    pub fn corner_shift(mut self, enabled: bool) -> Self {
+        self.corner_shift = enabled;
         self
     }
 
@@ -771,6 +803,11 @@ pub struct AppBarWidget {
     last_time: Option<FrameTime>,
     // --- layout-cached geometry (local coordinates) ---
     top_inset: f64,
+    /// Leading/trailing slot shifts from the window-control corners (zero when
+    /// a corner has no height); set each layout pass.
+    corner_shift: (f64, f64),
+    /// Whether the corner shift is applied (`AppBarView::corner_shift`).
+    corner_shift_enabled: bool,
     total_size: Size,
     /// The bar's own height (inset + content, excluding any banner strip). The
     /// surface/shadow/elevation border paint to this, so the banner area below
@@ -857,6 +894,8 @@ impl<State: 'static> View<State> for AppBarView<State> {
             title_stage: None,
             last_time: None,
             top_inset: 0.0,
+            corner_shift: (0.0, 0.0),
+            corner_shift_enabled: self.corner_shift,
             total_size: Size::ZERO,
             bar_height: 0.0,
             title_pos: Point::ZERO,
@@ -918,6 +957,11 @@ impl<State: 'static> View<State> for AppBarView<State> {
         if prev.elevated != self.elevated {
             element.elevated_target = self.elevated;
             flags |= ChangeFlags::PAINT;
+        }
+
+        if prev.corner_shift != self.corner_shift {
+            element.corner_shift_enabled = self.corner_shift;
+            flags |= ChangeFlags::LAYOUT;
         }
 
         // Face reconcile. A selection-presence toggle is a full face swap: tear
@@ -1138,6 +1182,23 @@ impl Widget for AppBarWidget {
         };
         let top_inset = ctx.window_insets().padding().top;
         self.top_inset = top_inset;
+        self.corner_shift = if self.corner_shift_enabled {
+            let corners = ctx.window_insets().corner_insets;
+            (
+                if corners.top_left.height > 0.0 {
+                    corners.top_left.width
+                } else {
+                    0.0
+                },
+                if corners.top_right.height > 0.0 {
+                    corners.top_right.width
+                } else {
+                    0.0
+                },
+            )
+        } else {
+            (0.0, 0.0)
+        };
 
         // The bar's own height, laid out either as the large scroll-collapse
         // variant or the compact three-zone bar. Selection mode
@@ -1193,12 +1254,14 @@ impl AppBarWidget {
 
         // Leading edge: the selection close button (owned) or the normal-face
         // leading child, whichever this face uses.
-        let mut left = PAD_X;
+        let (shift_l, shift_r) = self.corner_shift;
+        let lead_x = PAD_X + shift_l;
+        let mut left = lead_x;
         let action_start;
         if self.selection_present {
             self.close_rect =
-                Rect::from_origin_size(Point::new(PAD_X, icon_y), Size::new(ICON_SIZE, ICON_SIZE));
-            left = PAD_X + ICON_SIZE + SLOT_GAP;
+                Rect::from_origin_size(Point::new(lead_x, icon_y), Size::new(ICON_SIZE, ICON_SIZE));
+            left = lead_x + ICON_SIZE + SLOT_GAP;
             action_start = 0;
         } else {
             self.close_rect = Rect::ZERO;
@@ -1217,7 +1280,7 @@ impl AppBarWidget {
 
         // Trailing actions, laid out right-to-left so the last lands flush
         // against the trailing edge (reading order preserved).
-        let mut right = width - PAD_X;
+        let mut right = width - PAD_X - shift_r;
         for pod in self.interactive[action_start..].iter_mut().rev() {
             let size = pod.layout_child(ctx, &slot_bc);
             right -= size.width;
@@ -1322,17 +1385,18 @@ impl AppBarWidget {
         // big title (below) is the title zone, so row 1 carries no compact title.
         self.close_rect = Rect::ZERO;
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, ICON_SIZE));
+        let (shift_l, shift_r) = self.corner_shift;
         let action_start = if self.has_leading {
             let size = self.interactive[0].layout_child(ctx, &slot_bc);
             self.interactive[0].set_origin(Point::new(
-                PAD_X,
+                PAD_X + shift_l,
                 row1_top + (ICON_SIZE - size.height) / 2.0,
             ));
             1
         } else {
             0
         };
-        let mut right = width - PAD_X;
+        let mut right = width - PAD_X - shift_r;
         for pod in self.interactive[action_start..].iter_mut().rev() {
             let size = pod.layout_child(ctx, &slot_bc);
             right -= size.width;
@@ -1907,6 +1971,206 @@ mod tests {
             "leading below the inset"
         );
         assert!(w.title_pos.y >= 24.0, "title below the inset");
+    }
+
+    // -- Window-control corners (iPadOS 26+) ---------------------------------
+
+    use frust::authoring::{CornerInset, CornerInsets};
+
+    /// Lay `view` out through a `RenderRoot` under `insets`, returning the
+    /// laid-out size and the root widget for inspection.
+    fn laid_out_with_insets(
+        view: AppBarView<()>,
+        insets: WindowInsets,
+        width: f64,
+    ) -> (Size, RenderRoot<(), AppBarView<()>>) {
+        let mut tcx = TextContext::new();
+        laid_out_with_insets_in(view, insets, width, &mut tcx)
+    }
+
+    /// Like [`laid_out_with_insets`] but shaping through the caller's
+    /// `TextContext`. A byte-identical comparison of two layouts must share one
+    /// context: sibling tests in this binary register the Glyph faces
+    /// process-wide, and a `TextContext` picks those fonts up only when it is
+    /// constructed, so two contexts created on either side of that registration
+    /// shape the title with different metrics (observed: title y 38.0 vs 34.55).
+    fn laid_out_with_insets_in(
+        view: AppBarView<()>,
+        insets: WindowInsets,
+        width: f64,
+        tcx: &mut TextContext,
+    ) -> (Size, RenderRoot<(), AppBarView<()>>) {
+        let mut view = Some(view);
+        let mut logic = move |_: &mut ()| view.take().expect("built once");
+        let mut root: RenderRoot<(), AppBarView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(insets);
+        let size = root.layout_with_text(Size::new(width, 300.0), tcx as &mut dyn Any);
+        (size, root)
+    }
+
+    fn root_bar(root: &RenderRoot<(), AppBarView<()>>) -> &AppBarWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("pod").widget() as &dyn Any)
+            .downcast_ref::<AppBarWidget>()
+            .expect("root is an AppBarWidget")
+    }
+
+    fn corners(tl: (f64, f64), tr: (f64, f64)) -> CornerInsets {
+        CornerInsets::new(
+            CornerInset::new(tl.0, tl.1),
+            CornerInset::new(tr.0, tr.1),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        )
+    }
+
+    fn top_padding(top: f64) -> WindowEdgeInsets {
+        WindowEdgeInsets::new(0.0, top, 0.0, 0.0)
+    }
+
+    #[test]
+    fn corner_shift_moves_leading_and_trailing_slots_out_from_under_the_control() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(40.0, 40.0), leaf_any(40.0, 40.0)]);
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (52.0, 30.0)));
+        let (size, root) = laid_out_with_insets(view, insets, 400.0);
+        let w = root_bar(&root);
+        assert_eq!(size.height, BAR_HEIGHT);
+        assert_eq!(w.interactive[0].origin().x, PAD_X + 44.0);
+        let last = w.interactive.last().expect("trailing action");
+        let right_edge = last.origin().x + 40.0;
+        assert_eq!(right_edge, 400.0 - PAD_X - 52.0);
+    }
+
+    #[test]
+    fn corner_with_zero_height_shifts_nothing() {
+        let view: AppBarView<()> = app_bar("Home").leading(leaf_any(40.0, 40.0));
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 0.0), (52.0, 0.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 400.0);
+        assert_eq!(root_bar(&root).interactive[0].origin().x, PAD_X);
+    }
+
+    #[test]
+    fn corner_shift_stacks_with_the_top_inset() {
+        let view: AppBarView<()> = app_bar("Home").leading(leaf_any(40.0, 40.0));
+        let insets = WindowInsets::new(top_padding(24.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (0.0, 0.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 400.0);
+        let w = root_bar(&root);
+        assert_eq!(w.interactive[0].origin().x, PAD_X + 44.0);
+        assert!(w.interactive[0].origin().y >= 24.0);
+    }
+
+    #[test]
+    fn corner_shift_moves_the_selection_close_button() {
+        let view: AppBarView<()> = app_bar("Home").selection(Some(selection_bar(3, |_| {})));
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (0.0, 0.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 400.0);
+        assert_eq!(root_bar(&root).close_rect.x0, PAD_X + 44.0);
+    }
+
+    #[test]
+    fn corner_shift_moves_the_large_variants_row_one() {
+        let view: AppBarView<()> = app_bar("host")
+            .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+            .leading(leaf_any(40.0, 40.0));
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (0.0, 0.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 400.0);
+        assert_eq!(root_bar(&root).interactive[0].origin().x, PAD_X + 44.0);
+    }
+
+    #[test]
+    fn centered_title_stays_centered_on_the_full_width_when_it_fits_beside_shifted_slots() {
+        let view: AppBarView<()> = app_bar("Hi").title_position(TitlePosition::Center);
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (44.0, 30.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 600.0);
+        let w = root_bar(&root);
+        let run_width = w.title.size().width;
+        let expected = (600.0 - run_width) / 2.0;
+        assert!(
+            (w.title_pos.x - expected).abs() < 0.5,
+            "expected {expected}, got {}",
+            w.title_pos.x
+        );
+    }
+
+    #[test]
+    fn zero_corners_are_byte_identical_to_todays_layout() {
+        let build_view = || -> AppBarView<()> {
+            app_bar("Home")
+                .subtitle("sub")
+                .leading(leaf_any(40.0, 40.0))
+                .actions(vec![leaf_any(40.0, 40.0), leaf_any(30.0, 30.0)])
+        };
+        let plain = WindowInsets::new(top_padding(24.0), WindowEdgeInsets::ZERO);
+        let zeroed = plain.with_corner_insets(CornerInsets::ZERO);
+        let mut tcx = TextContext::new();
+        let (sa, ra) = laid_out_with_insets_in(build_view(), plain, 400.0, &mut tcx);
+        let (sb, rb) = laid_out_with_insets_in(build_view(), zeroed, 400.0, &mut tcx);
+        let (a, b) = (root_bar(&ra), root_bar(&rb));
+        assert_eq!(sa, sb);
+        assert_eq!(a.interactive.len(), b.interactive.len());
+        for (pa, pb) in a.interactive.iter().zip(b.interactive.iter()) {
+            assert_eq!(pa.origin(), pb.origin());
+            assert_eq!(pa.size(), pb.size());
+        }
+        assert_eq!(a.close_rect, b.close_rect);
+        assert_eq!(a.title_pos, b.title_pos);
+    }
+
+    #[test]
+    fn corner_shift_opt_out_is_byte_identical_with_nonzero_corners() {
+        let build_view = |shift: bool| -> AppBarView<()> {
+            app_bar("Home")
+                .subtitle("sub")
+                .corner_shift(shift)
+                .leading(leaf_any(40.0, 40.0))
+                .actions(vec![leaf_any(40.0, 40.0), leaf_any(30.0, 30.0)])
+        };
+        let plain = WindowInsets::new(top_padding(24.0), WindowEdgeInsets::ZERO);
+        let cornered = plain.with_corner_insets(corners((44.0, 30.0), (52.0, 30.0)));
+        let mut tcx = TextContext::new();
+        let (sa, ra) = laid_out_with_insets_in(build_view(true), plain, 400.0, &mut tcx);
+        let (sb, rb) = laid_out_with_insets_in(build_view(false), cornered, 400.0, &mut tcx);
+        let (a, b) = (root_bar(&ra), root_bar(&rb));
+        assert_eq!(sa, sb);
+        assert_eq!(a.interactive.len(), b.interactive.len());
+        for (pa, pb) in a.interactive.iter().zip(b.interactive.iter()) {
+            assert_eq!(pa.origin(), pb.origin());
+            assert_eq!(pa.size(), pb.size());
+        }
+        assert_eq!(a.close_rect, b.close_rect);
+        assert_eq!(a.title_pos, b.title_pos);
+    }
+
+    #[test]
+    fn corner_shift_defaults_on() {
+        let view: AppBarView<()> = app_bar("Home").leading(leaf_any(40.0, 40.0));
+        let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
+            .with_corner_insets(corners((44.0, 30.0), (52.0, 30.0)));
+        let (_, root) = laid_out_with_insets(view, insets, 400.0);
+        let w = root_bar(&root);
+        assert!(w.corner_shift_enabled);
+        assert_eq!(w.interactive[0].origin().x, PAD_X + 44.0);
+    }
+
+    #[test]
+    fn corner_shift_prop_change_marks_layout() {
+        let prev = app_bar("Home");
+        let mut w = build(&prev);
+        assert!(w.corner_shift_enabled);
+        let next = app_bar("Home").corner_shift(false);
+        let flags = rebuild(&prev, &next, &mut w);
+        assert!(!w.corner_shift_enabled);
+        assert!(flags.contains(ChangeFlags::LAYOUT));
     }
 
     // -- Title crossfade staging ---------------------------------------------

@@ -195,15 +195,23 @@ pub struct IosAppHandle {
     /// guess what the theme originally asked for.
     authored_reduce_motion: bool,
     /// The last window insets pushed to the render root, in logical px. Retained
-    /// so [`Self::set_insets`] skips a no-op push
+    /// so [`Self::set_insets`] / [`Self::set_corner_insets`] skip a no-op push
     /// (`WindowInsets` is `PartialEq`) — both the relayout and the app-side
-    /// `provide_context` re-provide only fire on a real change. Starts zero until
-    /// Swift's first `frust_set_insets` (safe-area / keyboard-frame report).
+    /// `provide_context` re-provide only fire on a real change.
+    ///
+    /// A composite fed by **two** FFI calls carrying disjoint halves:
+    /// `frust_set_insets` delivers the edges (`view_padding` from the safe
+    /// area, `view_insets` from the keyboard frame) and
+    /// `frust_set_corner_insets` delivers `corner_insets` (the iPadOS 26+ window
+    /// control). Each call replaces only its own half and keeps the other.
+    /// Starts zero until Swift's first push; the corners stay zero below
+    /// iOS 26.
     insets: WindowInsets,
     /// Change detector for the app-facing [`WindowMetrics`](frust_core::WindowMetrics)
     /// context: seeded before the first rebuild in [`Self::new`] and re-polled
     /// from every entry point where one of its inputs actually moves
-    /// ([`Self::resize`]/[`Self::set_surface`], and [`Self::set_insets`]) —
+    /// ([`Self::resize`]/[`Self::set_surface`], [`Self::set_insets`] and
+    /// [`Self::set_corner_insets`]) —
     /// never from [`Self::frame`], which only reads values those entry points
     /// stored. See `surface::IosAppHandle::push_window_metrics` for why the
     /// guard is load-bearing.

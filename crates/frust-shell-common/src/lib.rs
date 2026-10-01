@@ -5,8 +5,10 @@
 //! native handle drive any app's `State`/`app_logic`, a handful of pure
 //! helpers for crossing an FFI boundary safely ([`guard`]) and turning an
 //! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]/
-//! [`logical_insets`], the last converting platform per-edge insets into a
-//! logical [`WindowInsets`](frust_core::insets::WindowInsets)),
+//! [`logical_insets`]/[`logical_corner_insets`], the last two converting platform
+//! per-edge insets and window-control corners into a logical
+//! [`WindowInsets`](frust_core::insets::WindowInsets) /
+//! [`CornerInsets`](frust_core::insets::CornerInsets)),
 //! the shared window-shape publish path ([`window_metrics`] assembling a
 //! logical [`WindowMetrics`](frust_core::WindowMetrics) and
 //! [`WindowMetricsPublisher`] deciding — on all three shells — whether it
@@ -81,8 +83,8 @@ mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
 pub use ffi_support::{
-    WindowMetricsPublisher, guard, logical_insets, logical_size, run_guarded_thread,
-    sanitize_scale, window_metrics,
+    WindowMetricsPublisher, guard, logical_corner_insets, logical_insets, logical_size,
+    run_guarded_thread, sanitize_scale, window_metrics,
 };
 pub use frame_gate::{
     FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,

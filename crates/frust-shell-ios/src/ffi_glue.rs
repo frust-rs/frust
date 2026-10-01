@@ -1786,6 +1786,46 @@ pub fn set_insets(
     });
 }
 
+/// `frust_set_corner_insets`: deliver the iPadOS 26+ window control's corner
+/// footprint. The eight `f32`s are the control's protrusion beyond the safe
+/// area per **physical** corner, in the order
+/// [`logical_corner_insets`](frust_shell_common::logical_corner_insets)
+/// expects — `tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h`.
+///
+/// Values are **logical points** (the same no-scale-division contract as
+/// [`set_insets`]), merged into the stored composite `WindowInsets` by
+/// [`IosAppHandle::set_corner_insets`] — which keeps the edge half
+/// `frust_set_insets` delivered and no-op-guards an unchanged value, so Swift's
+/// per-layout push is free. A missing handle is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub fn set_corner_insets(
+    handle: *mut c_void,
+    tl_w: f32,
+    tl_h: f32,
+    tr_w: f32,
+    tr_h: f32,
+    bl_w: f32,
+    bl_h: f32,
+    br_w: f32,
+    br_h: f32,
+) {
+    guard("frust_set_corner_insets", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_corner_insets([
+                tl_w as f64,
+                tl_h as f64,
+                tr_w as f64,
+                tr_h as f64,
+                bl_w as f64,
+                bl_h as f64,
+                br_w as f64,
+                br_h as f64,
+            ]);
+        }
+    });
+}
+
 /// `frust_on_deep_link`: deliver a platform deep link (cold-start, from
 /// `SceneDelegate.scene(_:willConnectTo:options:)`'s
 /// `connectionOptions.urlContexts`, or running, from

@@ -19,6 +19,15 @@ import UIKit
 // therefore not used for this. Both paths funnel into the same
 // `FrustViewController.handleDeepLink(_:)`, which queues until `frust_init`
 // has a handle.
+//
+// Windowing (iPadOS 26+): an app subclass may override
+// `preferredWindowingControlStyle(for:)` (returning `.automatic`, `.unified`
+// or `.minimal`; gate it with `#available(iOS 26.0, *)`) and set
+// `windowScene.sizeRestrictions?.minimumSize` inside its own
+// `scene(_:willConnectTo:options:)` after calling `super`. No shell support is
+// needed for either. Whatever style is in effect, the shell reports the window
+// control's footprint to Rust as `WindowInsets.corner_insets` (see the rustdoc
+// on `CornerInsets`), which is how a bar keeps its slots out from under it.
 open class FrustSceneDelegate: UIResponder, UIWindowSceneDelegate {
     public var window: UIWindow?
 

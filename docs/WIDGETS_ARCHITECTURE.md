@@ -178,6 +178,10 @@ build from.
   through the overlay portal carries its owner's consumed `WindowInsets` along in its
   `OverlayEntry`, so a paint-time read inside floated content still agrees with the layout-time one
   it saw under its owner's `LayoutCtx`; hit testing and event routing are unaffected.
+  `WindowInsets` also carries `corner_insets: CornerInsets` — four physical corners (`top_left`,
+  `top_right`, `bottom_left`, `bottom_right`), each the window control's protrusion beyond the safe
+  area in logical px; `safe_area` neither pads by nor removes them (`consuming` copies them) and
+  `padding()` ignores them.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
   most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
   slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
@@ -185,7 +189,14 @@ build from.
   `layout` — Material's `navigation_bar` is one such self-insetting `bottom_bar`, see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)), and `body` is never pre-inset; `fab` is the one slot
   the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw
-  window edge otherwise.
+  window edge otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars
+  (listed in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by
+  `top_left.width` and their trailing edge left by `top_right.width` whenever that corner's height > 0;
+  the Scaffold is unchanged. The shift assumes the bar spans the window's top edge: layout cannot see a
+  bar's window-space position and corners are never consumed, so there is no automatic detection — a bar
+  hosted in a pane, sheet or dialog opts out with `corner_shift(false)`. Other catalogs' top bars
+  (Cupertino's navigation bar, the shadcn/beUI headers) do not yet apply the rule; see
+  `corner-insets-ios-26-only` in [LIMITATIONS.md](LIMITATIONS.md).
 - Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)`
   and `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
   clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface

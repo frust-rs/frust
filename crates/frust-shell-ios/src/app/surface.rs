@@ -6,11 +6,12 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use frust_core::insets::WindowInsets;
+use frust_core::insets::{CornerInsets, WindowInsets};
 use frust_reactive::{ReactiveRuntime, provide_context};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_shell_common::{
-    AppTree, SurfaceSize, logical_insets, publish_resolved_surface_mode, sanitize_scale,
+    AppTree, SurfaceSize, logical_corner_insets, logical_insets, publish_resolved_surface_mode,
+    sanitize_scale,
 };
 
 use super::IosAppHandle;
@@ -37,6 +38,26 @@ pub(super) fn seed_resolved_translucency(app: &mut dyn AppTree, translucent_reso
     let resolved_translucent = crate::ffi_support::read_resolved_translucency(translucent_resolved);
     app.set_surface_translucent(resolved_translucent);
     publish_resolved_surface_mode(resolved_translucent);
+}
+
+/// Merge a fresh corner half (`frust_set_corner_insets`) into the stored
+/// composite, keeping `current`'s edge half. `None` when the result equals
+/// `current` — the caller's no-op guard.
+///
+/// The iOS composite [`WindowInsets`] is fed by two FFI calls carrying disjoint
+/// halves (edges from `frust_set_insets`, corners from
+/// `frust_set_corner_insets`); each push must replace only its own half.
+fn merge_corner_insets(current: WindowInsets, corners: CornerInsets) -> Option<WindowInsets> {
+    let merged = current.with_corner_insets(corners);
+    (merged != current).then_some(merged)
+}
+
+/// Merge a fresh edge half (`frust_set_insets`: `view_padding` +
+/// `view_insets`) into the stored composite, keeping `current.corner_insets`.
+/// `None` when the result equals `current`. See [`merge_corner_insets`].
+fn merge_edge_insets(current: WindowInsets, edges: WindowInsets) -> Option<WindowInsets> {
+    let merged = edges.with_corner_insets(current.corner_insets);
+    (merged != current).then_some(merged)
 }
 
 impl IosAppHandle {
@@ -91,17 +112,64 @@ impl IosAppHandle {
     /// PAINT` pending, which the frame gate already treats as dirty —
     /// no new gate input needed. The continuous `CADisplayLink` loop repaints the
     /// next tick with no extra wake.
+    ///
+    /// Only the edge half is replaced: the stored `corner_insets` (delivered
+    /// separately by [`Self::set_corner_insets`]) are carried over before the
+    /// equality check, so a safe-area push never zeroes the window-control
+    /// corners.
     pub(crate) fn set_insets(&mut self, logical: [f64; 8]) {
         // iOS insets are already logical points (see the method doc): identity
         // scale, unlike Android's device-px `sanitize_scale(self.scale)` divisor.
-        let insets = logical_insets(logical, 1.0);
-        if insets == self.insets {
+        let Some(insets) = merge_edge_insets(self.insets, logical_insets(logical, 1.0)) else {
             return; // no-op push — skip both the relayout and the re-provide
-        }
+        };
         self.insets = insets;
         self.push_insets(insets);
         // The composite window-shape context carries a copy of these insets, so
         // an insets change is also a metrics change (self-guarded).
+        self.push_window_metrics();
+    }
+
+    /// `frust_set_corner_insets`: merge the iPadOS 26+ window control's corner
+    /// footprint into the stored composite [`WindowInsets`] and push it on a
+    /// real change.
+    ///
+    /// `logical` is the eight-value pack [`logical_corner_insets`] expects
+    /// (`tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h`, physical corners),
+    /// already in logical points — identity scale, for the same reason as
+    /// [`Self::set_insets`]. Only the corner half is replaced; the edge half
+    /// `frust_set_insets` delivered is kept. No-op-guarded on `PartialEq`:
+    /// Swift pushes from every `viewDidLayoutSubviews`, so an unchanged value
+    /// must cost nothing — no relayout, no re-provide, no log.
+    ///
+    /// On a real change, debug builds emit an **`info`**-level line (target
+    /// `frust`), `frust-corner-insets tl={:.1}x{:.1} tr={:.1}x{:.1}
+    /// bl={:.1}x{:.1} br={:.1}x{:.1}` (width x height), mirroring Android's
+    /// `frust-insets` line. `info`, not `debug`: this shell's stderr logger
+    /// installs `Info` unless `FRUST_LOG` overrides it, so a `debug!` line would
+    /// never surface in a default debug build; release builds omit it.
+    pub(crate) fn set_corner_insets(&mut self, logical: [f64; 8]) {
+        let corners = logical_corner_insets(logical, 1.0);
+        let Some(insets) = merge_corner_insets(self.insets, corners) else {
+            return; // unchanged — the per-layout push is free
+        };
+        self.insets = insets;
+        if cfg!(debug_assertions) {
+            log::info!(
+                target: "frust",
+                "frust-corner-insets tl={:.1}x{:.1} tr={:.1}x{:.1} bl={:.1}x{:.1} br={:.1}x{:.1}",
+                corners.top_left.width,
+                corners.top_left.height,
+                corners.top_right.width,
+                corners.top_right.height,
+                corners.bottom_left.width,
+                corners.bottom_left.height,
+                corners.bottom_right.width,
+                corners.bottom_right.height,
+            );
+        }
+        self.push_insets(insets);
+        // The composite window-shape context carries a copy of these insets.
         self.push_window_metrics();
     }
 
@@ -136,9 +204,10 @@ impl IosAppHandle {
     ///   is what keeps a static window quiet.
     /// - **Called from the entry points where the inputs move**, not from
     ///   [`Self::frame`]: `frust_resize` → [`Self::resize`] /
-    ///   [`Self::set_surface`] (drawable size + scale) and `frust_set_insets` →
-    ///   [`Self::set_insets`] (safe area / keyboard). `frame` only reads what
-    ///   those already stored.
+    ///   [`Self::set_surface`] (drawable size + scale), `frust_set_insets` →
+    ///   [`Self::set_insets`] (safe area / keyboard) and
+    ///   `frust_set_corner_insets` → [`Self::set_corner_insets`] (window-control
+    ///   corners). `frame` only reads what those already stored.
     ///
     /// Units: the size is converted from the drawable's physical px with the
     /// same `sanitize_scale`d display scale layout uses, and `self.insets` is
@@ -363,5 +432,74 @@ impl IosAppHandle {
             FrameExecutor::Inline(inline) => Some(inline.renderer.phase()),
             FrameExecutor::Split(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_core::insets::{CornerInset, EdgeInsets};
+
+    fn edges() -> WindowInsets {
+        WindowInsets::new(
+            EdgeInsets::new(0.0, 24.0, 0.0, 20.0),
+            EdgeInsets::new(0.0, 0.0, 0.0, 300.0),
+        )
+    }
+
+    fn corners() -> CornerInsets {
+        CornerInsets::new(
+            CornerInset::new(80.0, 20.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        )
+    }
+
+    #[test]
+    fn edge_push_after_corner_push_keeps_corners() {
+        let after_corners = merge_corner_insets(WindowInsets::default(), corners())
+            .expect("a corner change is a change");
+        let after_edges =
+            merge_edge_insets(after_corners, edges()).expect("an edge change is a change");
+        assert_eq!(after_edges.corner_insets, corners());
+        assert_eq!(after_edges.view_padding, edges().view_padding);
+        assert_eq!(after_edges.view_insets, edges().view_insets);
+    }
+
+    #[test]
+    fn corner_push_after_edge_push_keeps_edges() {
+        let after_edges = merge_edge_insets(WindowInsets::default(), edges())
+            .expect("an edge change is a change");
+        let after_corners =
+            merge_corner_insets(after_edges, corners()).expect("a corner change is a change");
+        assert_eq!(after_corners.view_padding, edges().view_padding);
+        assert_eq!(after_corners.view_insets, edges().view_insets);
+        assert_eq!(after_corners.corner_insets, corners());
+    }
+
+    #[test]
+    fn unchanged_pushes_merge_to_none() {
+        let current = edges().with_corner_insets(corners());
+        assert_eq!(merge_corner_insets(current, corners()), None);
+        // The edge half carries zero corners on the wire; the merge must still
+        // see the composite as unchanged.
+        assert_eq!(merge_edge_insets(current, edges()), None);
+        assert_eq!(
+            merge_corner_insets(WindowInsets::default(), CornerInsets::ZERO),
+            None
+        );
+        assert_eq!(
+            merge_edge_insets(WindowInsets::default(), WindowInsets::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn corner_push_to_zero_is_a_change() {
+        let current = edges().with_corner_insets(corners());
+        let cleared =
+            merge_corner_insets(current, CornerInsets::ZERO).expect("clearing is a change");
+        assert_eq!(cleared, edges());
     }
 }

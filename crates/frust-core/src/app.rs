@@ -3920,6 +3920,38 @@ mod tests {
         assert!(!root.take_change_flags().is_empty());
     }
 
+    #[test]
+    fn set_insets_round_trips_corner_insets() {
+        use crate::insets::{CornerInset, CornerInsets};
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let corners = CornerInsets::new(
+            CornerInset::ZERO,
+            CornerInset::new(72.0, 24.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        );
+        let insets = WindowInsets::default().with_corner_insets(corners);
+        root.set_insets(insets);
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
+        assert_eq!(root.insets().corner_insets, corners);
+        // Identical re-push marks nothing.
+        root.set_insets(insets);
+        assert!(root.take_change_flags().is_empty());
+        // A push differing only in corners dirties again.
+        let moved = insets.with_corner_insets(CornerInsets::new(
+            CornerInset::new(72.0, 24.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        ));
+        root.set_insets(moved);
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
+    }
+
     // --- Presented-frame count: pushed value reaches the paint context, unset
     //     yields `None`, and — unlike theme/insets — the setter dirties nothing. ---
 
