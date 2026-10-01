@@ -58,6 +58,9 @@
 //! - the method is `GET` — `HEAD`, `POST` and everything else are `404`;
 //! - the target's path (the bytes before the first `?`) equals the reserved
 //!   path exactly (else `404`);
+//! - `Sec-Fetch-Mode`, if present, is `navigate`, and `Sec-Fetch-Dest`, if
+//!   present, is `document` (else `404`) — see the *Security* section's
+//!   Fetch Metadata rule;
 //! - the reconstructed callback URL passes the crate's shared `url`
 //!   validator (else `400`).
 //!
@@ -91,6 +94,20 @@
 //! on time regardless, within about one poll interval, because they
 //! interrupt a connection that is mid-read rather than waiting for it to
 //! finish.
+//!
+//! **Fetch Metadata.** Any web origin open in the browser can end a loopback
+//! session with a no-cors `GET http://127.0.0.1:<port>/<path>` request (a
+//! port scan inside the timeout) — no PKCE/`state` check runs until the
+//! caller sees a callback, so this is defence in depth, not the crate's only
+//! defence. A browser tags such a cross-origin, non-navigation request with
+//! `Sec-Fetch-Mode`/`Sec-Fetch-Dest`; [`Server::check`] answers `404` (and
+//! keeps waiting) when `Sec-Fetch-Mode` is present and is not `navigate`, or
+//! `Sec-Fetch-Dest` is present and is not `document` — the same family as a
+//! wrong path, since a well-formed request from a forbidden context has
+//! nothing to reveal. Either header's absence (curl, older browsers that
+//! predate Fetch Metadata, the test harness) leaves the request allowed
+//! unchanged; a duplicated `Sec-Fetch-Mode`/`Sec-Fetch-Dest` header is `400`,
+//! like a duplicated `Host`.
 
 use std::fmt;
 use std::future::Future;
@@ -789,6 +806,10 @@ impl Server {
 
         let mut host = None;
         let mut host_count = 0usize;
+        let mut sec_fetch_mode = None;
+        let mut sec_fetch_mode_count = 0usize;
+        let mut sec_fetch_dest = None;
+        let mut sec_fetch_dest_count = 0usize;
         for line in lines {
             let colon = line
                 .iter()
@@ -803,6 +824,12 @@ impl Server {
             if name.eq_ignore_ascii_case(b"host") {
                 host_count += 1;
                 host = Some(trim_ows(&line[colon + 1..]));
+            } else if name.eq_ignore_ascii_case(b"sec-fetch-mode") {
+                sec_fetch_mode_count += 1;
+                sec_fetch_mode = Some(trim_ows(&line[colon + 1..]));
+            } else if name.eq_ignore_ascii_case(b"sec-fetch-dest") {
+                sec_fetch_dest_count += 1;
+                sec_fetch_dest = Some(trim_ows(&line[colon + 1..]));
             }
         }
         let expected_host = format!("127.0.0.1:{}", self.port);
@@ -810,6 +837,11 @@ impl Server {
             Some(value)
                 if host_count == 1 && value.eq_ignore_ascii_case(expected_host.as_bytes()) => {}
             _ => return Err(Status::BadRequest),
+        }
+        // A duplicated Fetch Metadata header is malformed, same as a
+        // duplicated Host.
+        if sec_fetch_mode_count > 1 || sec_fetch_dest_count > 1 {
+            return Err(Status::BadRequest);
         }
 
         if method != b"GET" {
@@ -820,6 +852,18 @@ impl Server {
             .position(|&byte| byte == b'?')
             .unwrap_or(target.len());
         if &target[..path_end] != self.path.as_bytes() {
+            return Err(Status::NotFound);
+        }
+        // Fetch Metadata defence in depth: a no-cors cross-origin request
+        // (e.g. a port scan from any open web origin) carries a
+        // `Sec-Fetch-Mode` other than `navigate` or a `Sec-Fetch-Dest` other
+        // than `document`. A well-formed request from a forbidden context
+        // has nothing to reveal, so it is answered the same as a wrong path.
+        // Either header's absence (curl, older browsers, the test harness)
+        // leaves the request allowed.
+        if sec_fetch_mode.is_some_and(|value| !value.eq_ignore_ascii_case(b"navigate"))
+            || sec_fetch_dest.is_some_and(|value| !value.eq_ignore_ascii_case(b"document"))
+        {
             return Err(Status::NotFound);
         }
         std::str::from_utf8(target).map_err(|_| Status::BadRequest)
@@ -1295,6 +1339,81 @@ mod tests {
             succeed(port, &mut fut);
         }
 
+        /// A no-cors cross-origin request — the browser's own Fetch
+        /// Metadata tag for a context that can never be a top-level
+        /// navigation, e.g. a port scan from any open web origin — is `404`
+        /// and the session keeps waiting.
+        #[test]
+        fn sec_fetch_metadata_from_a_forbidden_context_is_404_and_the_session_keeps_waiting() {
+            let _guard = serial();
+            let session = bind("/callback");
+            let port = session.port;
+            let mut fut = start(session);
+            let response = exchange(
+                port,
+                format!(
+                    "GET /callback?{QUERY} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Sec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: empty\r\n\
+                     Sec-Fetch-Site: cross-site\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            assert!(
+                response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "{response:?}"
+            );
+            assert!(response.ends_with(NOT_FOUND_BODY));
+            succeed(port, &mut fut);
+        }
+
+        /// A browser's top-level navigation carries `Sec-Fetch-Mode:
+        /// navigate` and `Sec-Fetch-Dest: document` — accepted exactly as a
+        /// request with no Fetch Metadata headers at all.
+        #[test]
+        fn sec_fetch_metadata_matching_a_top_level_navigation_resolves_the_callback() {
+            let _guard = serial();
+            let session = bind("/callback");
+            let port = session.port;
+            let mut fut = start(session);
+            let response = exchange(
+                port,
+                format!(
+                    "GET /callback?{QUERY} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\
+                     Sec-Fetch-Site: cross-site\r\nSec-Fetch-User: ?1\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+            assert_eq!(
+                block_on(&mut fut),
+                Ok(AuthSessionOutcome::Callback(callback_url(port)))
+            );
+        }
+
+        /// `Sec-Fetch-Mode: cors` alone (no `Sec-Fetch-Dest`) is still `404`
+        /// — one mismatching Fetch Metadata header is enough.
+        #[test]
+        fn sec_fetch_mode_cors_alone_is_404_and_the_session_keeps_waiting() {
+            let _guard = serial();
+            let session = bind("/callback");
+            let port = session.port;
+            let mut fut = start(session);
+            let response = exchange(
+                port,
+                format!(
+                    "GET /callback?{QUERY} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Sec-Fetch-Mode: cors\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            assert!(
+                response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "{response:?}"
+            );
+            succeed(port, &mut fut);
+        }
+
         /// The opener sees exactly the authorization URL, and the completed
         /// future stays `Pending`.
         #[test]
@@ -1464,6 +1583,14 @@ mod tests {
                 format!("GET /callback?a=%zz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
                 format!("GET /callback HTTP/1.1\r\nHost 127.0.0.1:{port}\r\n\r\n"),
                 format!("GET /callback HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n folded\r\n\r\n"),
+                format!(
+                    "GET /callback?{QUERY} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Sec-Fetch-Mode: navigate\r\nSec-Fetch-Mode: navigate\r\n\r\n"
+                ),
+                format!(
+                    "GET /callback?{QUERY} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Sec-Fetch-Dest: document\r\nSec-Fetch-Dest: document\r\n\r\n"
+                ),
                 "garbage\r\n\r\n".to_string(),
             ];
             for request in &requests {
