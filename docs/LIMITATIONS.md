@@ -6675,6 +6675,34 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
+### `auth-session-loopback-local-stall-v1` — a same-user local process can stall acceptance of the real browser redirect
+
+**Observed**: `LoopbackSession`'s accept loop serves one connection at a time; a same-user local process that opens silent or slow connections to the port delays acceptance of the real browser redirect by up to one request-head budget (`CONNECTION_IO_TIMEOUT`, 2 s) per connection it opens, for as long as it keeps doing so. Since commit `5e686576` each connection's read runs in 25 ms polling passes rather than blocking for the full budget, so cancel, a dropped future, and `LoopbackOptions::timeout` still take effect within about one poll interval even mid-connection — the stalling process delays the real callback, it cannot wedge the `Busy` slot past the app's own timeout.
+
+**Applies to**: every `LoopbackSession`, on Linux, Windows, and macOS alike.
+
+**Why accepted**: RFC 8252 §8.3 already concedes any local process can reach the loopback port; serving one connection at a time keeps the hand-written HTTP handling minimal (no per-connection threads, no HTTP crate dependency), and a hostile same-user process that can open sockets can already do worse than this. `state` + PKCE still protect the result the session reports, and the interruptible per-connection read bounds the UX damage to the app's own cancel/timeout path rather than the full request-head budget.
+
+**Trigger for removal**: a redesign that accepts a bounded number of connections concurrently, or rate-limits repeat connections from the same peer.
+
+**Evidence**: `plugins/auth-session/src/loopback.rs`'s `accept_loop`/`serve`/`read_head` and its module doc's *Security* section; its tests `cancel_resolves_promptly_despite_a_silent_connection`, `timeout_resolves_promptly_despite_a_silent_connection`, `dropping_the_future_closes_the_port_promptly_despite_a_silent_connection`, `five_silent_clients_do_not_starve_a_later_request`; review round 0 of this plan.
+
+---
+
+### `auth-session-loopback-url-in-launcher-argv-v1` — the authorization URL is briefly visible in another local user's process listing
+
+**Observed**: on Linux and macOS, `LoopbackSession::start` hands the full authorization URL (including `state` and `code_challenge`) to `frust-url-launcher`'s `open_external`, which passes it as a `Command` argument to `xdg-open`/`open` — readable by other local users through `/proc/<pid>/cmdline` on Linux or `ps` on macOS for the launcher process's short lifetime. The S256 `code_challenge` does not reveal the PKCE verifier, so a reader cannot complete the token exchange, but `state` is not secret from other users on a shared host.
+
+**Applies to**: Linux and macOS. Windows' `ShellExecuteW` arm does not spawn an argv-visible helper process.
+
+**Why accepted**: inherent to launching a browser by URL through an external opener; RFC 8252 already treats the authorization request URL as visible to the user agent. No part of this crate's threat model assumes privacy from other local users on a shared host.
+
+**Trigger for removal**: none anticipated; an app on a shared host should treat the signed-in identity as the trust boundary and surface it to the user after the exchange completes.
+
+**Evidence**: `plugins/url-launcher/src/desktop.rs`'s `open_external` (the `Command::new(program).arg(url)` call on the `xdg-open`/`open` arms); `plugins/auth-session/src/loopback.rs`'s `open_in_browser`/`start` (the `frust_url_launcher::UrlLauncher::open_external` call).
+
+---
+
 ### `auth-session-loopback-windows-unrun-v1` — the desktop loopback backend's Windows browser-driven runtime leg has not run
 
 **Observed**: `LoopbackSession`'s Windows arm (sharing `frust-url-launcher`'s `ShellExecuteW` system-browser launch, target-gated to `linux`/`windows`/`macos`) has run this plan's full host test suite and clippy natively on a Windows 11 msvc rig (`dell_mini_pc`) — 52/52 `auth-session` tests, including the TCP-socket suite, across wave gates `wave-2-windows-host-tests`, `wave-3-windows-host-tests`, and `wave-5-windows-host-tests`, plus `wave-3-windows-clippy`/`wave-5-windows-clippy` — but the browser-driven runtime legs have not: launching Edge via `ShellExecuteW`, and the playground window driving a live callback round trip back into the listener.
