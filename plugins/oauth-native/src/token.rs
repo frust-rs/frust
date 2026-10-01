@@ -99,7 +99,11 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     /// The granted scope, if it differs from the requested one.
     pub scope: Option<String>,
-    /// An OpenID Connect ID token, if issued.
+    /// An OpenID Connect ID token, if issued. Returned exactly as the server
+    /// sent it, unvalidated: before trusting it, validate it per OpenID
+    /// Connect Core §3.1.3.7 (signature against the issuer's keys, `iss`,
+    /// `aud`, `exp`, and `nonce` if you sent one). This crate sends no `nonce`
+    /// and performs no ID-token validation.
     pub id_token: Option<String>,
 }
 
@@ -267,14 +271,15 @@ mod tests {
 
     const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     const REDIRECT: &str = "com.example.app:/oauth/callback";
+    const STATE: &str = "state-value-minimum-22chars";
 
     fn code(value: &str) -> AuthorizationCode {
         let exp = CallbackExpectations {
             redirect_uri: REDIRECT.to_string(),
-            state: State::from_string("s".to_string()).unwrap(),
+            state: State::from_string(STATE.to_string()).unwrap(),
             issuer: IssuerCheck::IfPresent("https://as.example".to_string()),
         };
-        parse_callback(&format!("{REDIRECT}?code={value}&state=s"), &exp).unwrap()
+        parse_callback(&format!("{REDIRECT}?code={value}&state={STATE}"), &exp).unwrap()
     }
 
     #[test]
