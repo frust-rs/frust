@@ -6605,20 +6605,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `url-launcher-windows-leg-unrun` — the `ShellExecuteW` backend has never run against a real browser in this repo
-
-**Observed**: `desktop::open_external`'s `#[cfg(target_os = "windows")]` arm (`ShellExecuteW("open", url)`) has never been cross-compile-checked on the Linux dev host this crate was built on (`rustup target list --installed` there shows no `x86_64-pc-windows-gnu`); the arm has since compiled and passed clippy natively on a Windows 11 msvc rig as a transitive dependency of `auth-session`'s `LoopbackSession` backend (this plan's `wave-3-windows-clippy`/`wave-5-windows-clippy`), but it has still never run against a real Windows shell association.
-
-**Applies to**: Windows only — the `SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`/generic-failure mapping in that arm is unverified in any form.
-
-**Why accepted**: the crate's device gate as a whole has not run yet (`plugins/url-launcher/README.md` §6); the Windows leg specifically is behind even that bar, since it lacks the cross-target compile check the sibling `windows-sys`-pinned shells get (see `windows-sys 0.61`'s tripwire in [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)).
-
-**Trigger for removal**: `cargo check --target x86_64-pc-windows-gnu -p frust-url-launcher` passes once the target is installed, and a Windows rig runs the plugin's device gate against a real registered `http`/`https` handler.
-
-**Evidence**: `plugins/url-launcher/src/desktop.rs` (the `#[cfg(target_os = "windows")]` arm); `plugins/url-launcher/README.md` §6 (*Device gate*).
-
----
-
 ### `auth-session-android-callback-rides-intent-filter` — Android cannot prove the OAuth callback scheme is bound to this app
 
 **Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme. The session generation does not narrow any of this: the host keeps only the latest launch's generation in its single `pending` slot and stamps whichever callback-scheme `Intent` it observes on the next Activity resume with that value — the generation never travels through the browser or the redirect URL, so a superseded tab's late redirect, or an injected `Intent`, is attributed to the live session by timing rather than evidence. The generation only lets the Rust side discard a result for a session that is no longer live (dropped future, already resolved).
@@ -6700,20 +6686,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: none anticipated; an app on a shared host should treat the signed-in identity as the trust boundary and surface it to the user after the exchange completes.
 
 **Evidence**: `plugins/url-launcher/src/desktop.rs`'s `open_external` (the `Command::new(program).arg(url)` call on the `xdg-open`/`open` arms); `plugins/auth-session/src/loopback.rs`'s `open_in_browser`/`start` (the `frust_url_launcher::UrlLauncher::open_external` call).
-
----
-
-### `auth-session-loopback-windows-unrun-v1` — the desktop loopback backend's Windows browser-driven runtime leg has not run
-
-**Observed**: `LoopbackSession`'s Windows arm (sharing `frust-url-launcher`'s `ShellExecuteW` system-browser launch, target-gated to `linux`/`windows`/`macos`) has run this plan's full host test suite and clippy natively on a Windows 11 msvc rig (`dell_mini_pc`) — 52/52 `auth-session` tests, including the TCP-socket suite, across wave gates `wave-2-windows-host-tests`, `wave-3-windows-host-tests`, and `wave-5-windows-host-tests`, plus `wave-3-windows-clippy`/`wave-5-windows-clippy` — but the browser-driven runtime legs have not: launching Edge via `ShellExecuteW`, and the playground window driving a live callback round trip back into the listener.
-
-**Applies to**: Windows desktop specifically — the host suite proves the listener's HTTP/TCP logic end to end against a synthetic client, never against a real browser process.
-
-**Why accepted**: the Windows desktop device gate has not run yet; it is the first gate scoped to drive a live browser against this listener rather than the test harness's own `TcpStream` clients.
-
-**Trigger for removal**: the Windows desktop device gate runs the playground's desktop loopback flow on a Windows rig against a live browser and the callback round trip completes.
-
-**Evidence**: `plugins/auth-session/src/loopback.rs` (the Windows arm's browser launch via `frust-url-launcher`); `plugins/url-launcher/src/desktop.rs` (the `#[cfg(target_os = "windows")]` `ShellExecuteW` arm, also unverified against a live browser per `url-launcher-windows-leg-unrun`); `plugins/auth-session/Cargo.toml` (the target-gated `frust-url-launcher` dependency, D4).
 
 ---
 

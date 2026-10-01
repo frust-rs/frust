@@ -420,12 +420,38 @@ leak, with a passing negative control, not just a passing observation.
 0 ignored (`url::tests::*` × 7, `desktop::tests::*` × 3, the latter only
 compiled `#[cfg(all(test, target_os = "linux"))]`).
 
+### Windows — browser-out leg PASSED, 2026-10-01; error-mapping legs not run
+
+Host: `dell_mini_pc`, Windows 11 Pro 10.0.26200.9457 (`x86_64-pc-windows-msvc`,
+rustc 1.97.1), the registered `https` handler being Zen Browser 1.22.3b (Edge
+installed, not the default). Run as part of the `auth-session` desktop
+loopback gate rather than from a scratch binary: `LoopbackSession::start`
+calls [`open_external`] on the whole authorization URL, so the evidence is
+that gate's transcript — `plugins/auth-session/README.md` §6, *Windows
+desktop (loopback)*.
+
+**Leg 1 — success path — PASSED.** From a live (RDP-connected) desktop
+session, `ShellExecuteW("open", <url>)` returned success and the registered
+handler started at the click (twelve `zen.exe` processes whose start times
+match the tap) with the full `https://…/loopback.html?…&redirect_uri=…&
+state=…&code_challenge=…` URL as its argument; it fetched the page and
+followed the redirect to the loopback listener. Repeated for every one of the
+eight loopback legs. Note for operators: in a *disconnected* session the call
+still succeeds and the browser still launches — only the calling app's frames
+stall (see the auth-session transcript).
+
+**Legs 2–3 — `SE_ERR_NOASSOC` / `SE_ERR_ASSOCINCOMPLETE` mapping — NOT RUN.**
+The rig has a registered handler and unregistering it was out of scope; the
+`NoHandler`/`Platform` mapping of those return codes remains verified by
+reading only.
+
 ### Desktop — partially covered
 
-Linux spawn-and-reap and no-handler behaviour is now covered by both this
-crate's own unit tests and the on-host device gate above. The macOS `open`
-arm and the Windows `ShellExecuteW` arm have never been compiled or run —
-see `url-launcher-windows-leg-unrun` in `docs/LIMITATIONS.md` (Windows) and
-file a matching entry for macOS if one does not already exist.
+Linux spawn-and-reap and no-handler behaviour is covered by both this crate's
+own unit tests and the on-host device gate above; the Windows `ShellExecuteW`
+arm's browser-out leg has run against a real registered handler (previous
+subsection). Still unrun: the macOS `open` arm in any form, and the Windows
+arm's `SE_ERR_*` error mapping — file a LIMITATIONS entry for macOS if one
+does not already exist.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
