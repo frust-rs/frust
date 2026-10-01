@@ -46,6 +46,7 @@ pub mod nav;
 mod overlay;
 mod padding;
 pub mod physics;
+pub mod pinch;
 mod platform_view;
 mod radio;
 mod safe_area;
@@ -102,6 +103,9 @@ pub use physics::rubber_band::RubberBand;
 pub use physics::{
     MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, ScrollMetrics, ScrollPhysics, Simulation,
     SpringDescription, Tolerance,
+};
+pub use pinch::{
+    PINCH_SLOP, PinchDetectorView, PinchDetectorWidget, PinchRecognizer, pinch_detector,
 };
 pub use platform_view::{
     PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,
