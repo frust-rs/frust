@@ -7,9 +7,9 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (9-17 of 17)        │▓▓                
- DEVICES ↻ r      │    ( ) auth-session                                          │▓▓                
-   none found     │        OAuth round trip in the platform auth user agent —    │▓▓                
+                  │  Choose a plugin to add to this project  (10-18 of 18)       │▓▓                
+ DEVICES ↻ r      │    ( ) oauth-native                                          │▓▓                
+   none found     │        OAuth 2.0 native-app helper: PKCE (S256), state,      │▓▓                
                   │    ( ) iap                                                   │▓▓                
  SESSIONS         │        In-app purchases and subscriptions over Play Billing  │▓▓                
    none running   │    ( ) video-player                                          │▓▓                
