@@ -55,8 +55,8 @@ needs nothing extra — the objc2 binding's own link attribute applies there.
 use frust_auth_session::{AuthSession, AuthSessionOutcome, AuthSessionRequest};
 
 let req = AuthSessionRequest {
-    url: "https://issuer.example/authorize?client_id=…&redirect_uri=myapp://cb".to_string(),
-    callback_scheme: "myapp".to_string(),
+    url: "https://issuer.example/authorize?client_id=…&redirect_uri=com.example.app:/oauth2redirect".to_string(),
+    callback_scheme: "com.example.app".to_string(),
     ephemeral: false,
 };
 
@@ -77,7 +77,7 @@ match AuthSession::start(req).await {
         // ... verify PKCE challenge ...
     }
     Ok(AuthSessionOutcome::Cancelled) => { /* user dismissed the tab */ }
-    Err(err) => { /* AuthSessionError::{InvalidUrl,Busy,PlatformNotInitialized,NoHandler,Platform} */ }
+    Err(err) => { /* AuthSessionError::{InvalidUrl,Busy,PlatformNotInitialized,NoHandler,TimedOut,Platform} */ }
 }
 ```
 
@@ -87,6 +87,42 @@ lowercase-alnum/`+`/`-`/`.` thereafter, not one of the well-known schemes
 `http`/`https`/`file`/`javascript`/`data`/`blob`/`intent`/`content`/`about`)
 before touching any platform API — a rejected request resolves
 `Err(AuthSessionError::InvalidUrl)` on the future's very first poll.
+The validator accepts dotted reverse-DNS schemes such as `io.example.console` (pinned by the test `reverse_dns_callback_scheme_is_accepted`), and `callback_scheme` is the scheme only, not the full redirect URI.
+
+### Desktop loopback (Linux, Windows, macOS)
+
+On desktop, redirect to a loopback HTTP listener instead of a custom scheme (RFC 8252 §7.3):
+
+```rust
+use frust_auth_session::{AuthSession, AuthSessionOutcome, AuthSessionRequest, LoopbackSession, LoopbackOptions};
+use frust_oauth_native::AuthorizationRequest;
+
+let session = LoopbackSession::bind(LoopbackOptions::new("/oauth/callback"))?;
+let redirect_uri = session.redirect_uri().to_string();
+
+// Build the authorization URL with the loopback redirect URI as the target.
+let request = AuthorizationRequest {
+    authorization_endpoint: "https://as.example/authorize".to_string(),
+    client_id: "example-app".to_string(),
+    redirect_uri: redirect_uri.clone(),
+    scope: Some("openid profile offline_access".to_string()),
+    resources: Vec::new(),
+};
+let url = request.build(&state, &verifier.challenge())?;
+
+// Start the session — it opens the URL in the system browser (via
+// frust-url-launcher) and waits for the redirect.
+let outcome = session.start(&url).await?;
+```
+
+The listener runs inside `start()` and reserves the one-live-session slot (the same one [`AuthSession::start`] claims). Its behaviour follows these rules:
+
+- **Bind address:** `127.0.0.1` on an ephemeral port, never `localhost`, `::1` or `0.0.0.0`. `LoopbackSession::redirect_uri()` gives the full URI (e.g. `http://127.0.0.1:54321/oauth/callback`).
+- **Request acceptance:** the listener accepts GET requests on the exact reserved path only. Any other method, path, or malformed request answers `404` and the listener **keeps waiting** for the callback (stray local clients cannot end the session).
+- **Host header:** the listener rejects requests whose `Host` header does not match `127.0.0.1:<port>` (case-insensitive). This is the DNS-rebinding defence — a page that resolves its hostname to `127.0.0.1` sends its own hostname in the `Host` header, not `127.0.0.1`.
+- **Response:** a static page with `Cache-Control: no-store`, `Content-Security-Policy: default-src 'none'`, no script, and no echo of the request bytes.
+- **Lifecycle:** the listener accepts exactly one callback, then closes. Cancelling via [`LoopbackCancel::cancel`], dropping the future, or the session timing out all close the listener within about one poll interval (~25 ms), even while a request is being served — the exception is a response write already in progress, bounded by the 2 s connection I/O timeout.
+- **Timeout:** the session waits for the redirect up to [`LoopbackOptions::timeout`] (default 300 s, configurable, at most one hour). When it elapses, the session resolves [`AuthSessionError::TimedOut`] and closes.
 
 ---
 
@@ -163,15 +199,17 @@ before touching any platform API — a rejected request resolves
     [LIMITATIONS.md](../../docs/LIMITATIONS.md)). PKCE + `state` (§ 3.4) are
     the caller's defence. Dropping the awaited future releases the Busy slot
     but does not close the tab (`auth-session-no-cancel-v1`).
-- **Desktop (Linux, Windows):** permanent — no platform authentication user
-  agent exists; every session rejects with `AuthSessionError::NoHandler`
-  (`auth-session-linux-windows-unavailable-v1` in
-  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). Drive the same OAuth flow
-  through [`frust-url-launcher`](../url-launcher/README.md)'s ordinary
-  system-browser launch instead, with a local loopback HTTP listener (or an
-  equivalent out-of-band step) receiving the redirect — RFC 8252's own
-  "loopback IP redirection" pattern for platforms with no in-app
-  browser-tab primitive.
+- **Desktop (Linux, Windows, macOS):** use [`LoopbackSession`] instead. On
+  Linux and Windows, `AuthSession::start` with a custom scheme still answers
+  [`AuthSessionError::NoHandler`] (no platform authentication user agent
+  exists). On all three platforms, [`is_supported()`](../auth-session/src/lib.rs)
+  is `true` and means the loopback path is available. The listener binds on
+  ephemeral loopback (`127.0.0.1:<port>` on an ephemeral port), opens the
+  authorization URL in the system browser (via
+  [`frust-url-launcher`](../url-launcher/README.md)), and receives the
+  redirect — RFC 8252 §7.3's "loopback IP redirection" pattern for platforms
+  with no in-app browser-tab primitive. See the Desktop loopback subsection
+  above for the complete listener contract and example.
 
 ---
 
@@ -189,21 +227,42 @@ redirect itself is unauthenticated — the crate has no way to prove it came fro
 provider rather than the browser or another app. PKCE and state verification are essential on all
 three platforms to prevent authorization code theft.
 
+The loopback listener has its own attack surface. Any local process can connect to the loopback
+port while the session is live and the authorization response is plain `http`. A same-user local
+process can race the real redirect to the reserved path and send its own request — it does not
+matter which request arrives first. A well-formed callback proves only that *a* local client sent
+a request to the reserved path, never that it came from the browser. **The crate's PKCE and `state`
+requirement binds here exactly as for a custom-scheme callback** (RFC 8252 § 8.3): the app's own
+state and PKCE check are the sole defence against accepting a forged response.
+
+The loopback listener also checks the `Host` header (must match `127.0.0.1:<port>`) to defend
+against DNS rebinding: a web page can resolve its hostname to `127.0.0.1`, but the browser still
+sends its own hostname in the `Host` header, not `127.0.0.1`, so the request is rejected. Lastly,
+every response is a static page with no echo of request bytes and a `no-store` cache policy.
+
+On Linux and macOS, the authorization URL (its state parameter, PKCE code challenge, and the
+redirect listener's port) is handed to `xdg-open` or `open` as a command-line argument and is
+readable by other local users via `/proc/<pid>/cmdline` on Linux or `ps` on macOS. The S256 PKCE
+challenge does not reveal the verifier, so the authorization code exchange cannot be completed by
+a reader, but the `state` parameter itself is not secret from other users on a shared host.
+
 ---
 
 ## 4. One-session contract
 
-At most one `AuthSession` runs at a time, process-wide: starting a second one
-while the first is still live resolves immediately to
-`AuthSessionError::Busy` rather than queuing or replacing it (an in-app
-browser tab is a modal, single-instance UI surface on every backend
-platform). The slot frees the moment the live session resolves — by outcome,
-by error, or by a backend module failing without ever calling back — so a
-stuck session can never wedge every later one behind it. Dropping the awaited
-future frees the slot too, but frees only this crate's bookkeeping: the
-platform UI stays up (Android: until the user closes the tab; iOS/macOS: until
-the user dismisses the sheet or the next `start` cancels it) —
-`auth-session-no-cancel-v1` in [LIMITATIONS.md](../../docs/LIMITATIONS.md).
+At most one session runs at a time, process-wide: the one-live-session slot is **shared across
+both backends** (custom-scheme [`AuthSession`] and loopback [`LoopbackSession`]). Starting a second
+one while the first is still live resolves immediately to [`AuthSessionError::Busy`] rather than
+queuing or replacing it. A bound [`LoopbackSession`] (even if not yet started) holds the slot, so
+both [`AuthSession::start`] and a second [`LoopbackSession::bind`] answer [`Busy`] while one is
+live, and vice versa.
+
+The slot frees the moment the live session resolves — by outcome, by error, or by a backend module
+failing without ever calling back — so a stuck session can never wedge every later one behind it.
+Dropping the awaited future frees the slot too, but frees only this crate's bookkeeping: the
+platform UI stays up (Android: until the user closes the tab; iOS/macOS: until the user dismisses
+the sheet or the next `start` cancels it) — `auth-session-no-cancel-v1` in
+[LIMITATIONS.md](../../docs/LIMITATIONS.md).
 
 ---
 
@@ -590,3 +649,11 @@ restart landed: the alert was replaced by the second session's own alert
 `Drop+restart -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`.
 **The `PresentationContextInvalid` race seen on the iOS simulator did not
 reproduce on macOS.**
+
+### Linux desktop (loopback) — NOT YET RUN
+
+Gate card: [p2-04](../../..).
+
+### Windows desktop (loopback) — NOT YET RUN
+
+Gate card: [p2-05](../../..).
