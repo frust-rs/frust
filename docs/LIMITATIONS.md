@@ -6709,9 +6709,9 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Applies to**: Windows desktop specifically — the host suite proves the listener's HTTP/TCP logic end to end against a synthetic client, never against a real browser process.
 
-**Why accepted**: card p2-05 (the Windows desktop device gate) has not run yet; it is the first card scoped to drive a live browser against this listener rather than the test harness's own `TcpStream` clients.
+**Why accepted**: the Windows desktop device gate has not run yet; it is the first gate scoped to drive a live browser against this listener rather than the test harness's own `TcpStream` clients.
 
-**Trigger for removal**: card p2-05 runs the playground's desktop loopback flow on a Windows rig against a live browser and the callback round trip completes.
+**Trigger for removal**: the Windows desktop device gate runs the playground's desktop loopback flow on a Windows rig against a live browser and the callback round trip completes.
 
 **Evidence**: `plugins/auth-session/src/loopback.rs` (the Windows arm's browser launch via `frust-url-launcher`); `plugins/url-launcher/src/desktop.rs` (the `#[cfg(target_os = "windows")]` `ShellExecuteW` arm, also unverified against a live browser per `url-launcher-windows-leg-unrun`); `plugins/auth-session/Cargo.toml` (the target-gated `frust-url-launcher` dependency, D4).
 
