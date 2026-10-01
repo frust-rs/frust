@@ -11,10 +11,10 @@
 //! loopback interface redirection, which opens the system browser through
 //! `frust-url-launcher` and receives the identity provider's redirect on
 //! `http://127.0.0.1:<port>/<path>` (see the crate doc's *Desktop loopback*
-//! section). That is why [`crate::AuthSession::is_supported`] answers `true`
-//! on those two targets even though this module still refuses every
-//! custom-scheme request. Every other target this module builds for has
-//! neither backend.
+//! section). [`crate::AuthSession::is_supported`] answers `false` on those
+//! two targets — it describes this module's custom-scheme path, which cannot
+//! work — and [`crate::LoopbackSession::is_supported`] answers `true` there.
+//! Every other target this module builds for has neither backend.
 
 use crate::{AuthSessionError, AuthSessionRequest, SessionToken};
 

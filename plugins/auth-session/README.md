@@ -203,10 +203,12 @@ The one-live-session slot (the same one [`AuthSession::start`] claims) is claime
 - **Desktop (Linux, Windows, macOS):** use [`LoopbackSession`] instead. On
   Linux and Windows, `AuthSession::start` with a custom scheme still answers
   [`AuthSessionError::NoHandler`] (no platform authentication user agent
-  exists; the loopback path has run against a live browser on both — §6). On
-  all three platforms,
-  [`is_supported()`](../auth-session/src/lib.rs) is `true` and means the
-  loopback path is available. The listener binds on ephemeral loopback
+  exists; the loopback path has run against a live browser on both — §6), and
+  [`AuthSession::is_supported()`](../auth-session/src/lib.rs) is `false`
+  there (`true` on macOS, where `ASWebAuthenticationSession` serves the
+  custom-scheme path). Ask `LoopbackSession::is_supported()` for the loopback
+  path — `true` on all three. The §6 desktop transcripts predate this split
+  and record the earlier `is_supported: true` answer. The listener binds on ephemeral loopback
   (`127.0.0.1:<port>` on an ephemeral port; `auth-session-loopback-poll-interval-v1` in
   [LIMITATIONS.md](../../docs/LIMITATIONS.md)), opens the authorization URL in
   the system browser (via [`frust-url-launcher`](../url-launcher/README.md)),
