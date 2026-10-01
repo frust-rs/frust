@@ -34,8 +34,11 @@
 //! 3. The listener socket closes on **every** exit path: success, cancel,
 //!    timeout, an accept failure, the caller dropping the future (its `Drop`
 //!    raises a shutdown flag the accept loop polls), or the caller dropping
-//!    an unstarted [`LoopbackSession`]. Exactly one callback is ever
-//!    accepted — the loop exits right after it.
+//!    an unstarted [`LoopbackSession`]. A cancel, dropping the future and the
+//!    timeout all take effect within about one poll interval (25 ms), even
+//!    while a connection is being served — the one exception is a response
+//!    write already in progress, bounded by [`CONNECTION_IO_TIMEOUT`].
+//!    Exactly one callback is ever accepted — the loop exits right after it.
 //!
 //! # What the listener answers
 //!
@@ -80,6 +83,14 @@
 //! it does for a custom-scheme callback: a [`AuthSessionOutcome::Callback`]
 //! proves only that *some* local client sent a well-formed request to the
 //! reserved path.
+//!
+//! A same-user local process can still delay the real redirect by at most
+//! one request-head budget ([`CONNECTION_IO_TIMEOUT`], 2 s) per silent
+//! connection it opens, by holding the listener through each one's cutoff —
+//! cancel, a dropped future and [`LoopbackOptions::timeout`] all still fire
+//! on time regardless, within about one poll interval, because they
+//! interrupt a connection that is mid-read rather than waiting for it to
+//! finish.
 
 use std::fmt;
 use std::future::Future;
@@ -88,6 +99,8 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::thread;
@@ -319,7 +332,10 @@ impl LoopbackSession {
     /// The returned future follows the crate doc's *The awaitable-future
     /// contract*: poll it from any executor; it keeps returning
     /// [`Poll::Pending`] after it has completed; dropping it stops the
-    /// listener (within one 25 ms poll interval) and frees the slot.
+    /// listener (within about one poll interval — 25 ms — even while a
+    /// connection is being served; the one exception is a response write
+    /// already in progress, bounded by the 2 s connection I/O timeout) and
+    /// frees the slot.
     ///
     /// # Errors
     /// The future resolves [`AuthSessionError::InvalidUrl`] when
@@ -378,7 +394,7 @@ impl LoopbackSession {
             generation,
             port,
             path,
-            timeout,
+            deadline: Instant::now() + timeout,
             flags: Arc::clone(&flags),
         };
         let spawned = thread::Builder::new()
@@ -405,10 +421,12 @@ impl LoopbackSession {
 }
 
 /// Cancels a [`LoopbackSession`] from any thread: a started session resolves
-/// [`AuthSessionOutcome::Cancelled`] within one 25 ms poll interval and
-/// closes its socket; a session cancelled before [`LoopbackSession::start`]
-/// resolves `Cancelled` from `start` without opening the browser. A no-op
-/// once the session has resolved.
+/// [`AuthSessionOutcome::Cancelled`] within about one poll interval (25 ms),
+/// even while a connection is being served — the one exception is a
+/// response write already in progress, bounded by the 2 s connection I/O
+/// timeout — and closes its socket; a session cancelled before
+/// [`LoopbackSession::start`] resolves `Cancelled` from `start` without
+/// opening the browser. A no-op once the session has resolved.
 #[derive(Clone)]
 pub struct LoopbackCancel {
     flags: Arc<Flags>,
@@ -508,6 +526,11 @@ fn validate_path(path: &str) -> Result<(), AuthSessionError> {
 enum Served {
     /// Answered `400`/`404` (or dropped) — keep accepting.
     KeepWaiting,
+    /// Closed without a response because the accept loop's own shutdown,
+    /// cancel or deadline condition fired while this connection was still
+    /// being read or drained — nothing to say, so the loop's own
+    /// top-of-loop checks resolve or exit on the very next pass.
+    Interrupted,
     /// The callback was resolved (or the session was abandoned meanwhile) —
     /// stop.
     Done,
@@ -528,7 +551,11 @@ struct Server {
     generation: u64,
     port: u16,
     path: String,
-    timeout: Duration,
+    /// The absolute instant [`LoopbackOptions::timeout`] elapses — computed
+    /// once when the thread is spawned rather than re-derived from an
+    /// elapsed-since-start duration, so [`Self::interrupted`] can read it
+    /// from `read_head`/`linger` as well as the accept loop itself.
+    deadline: Instant,
     flags: Arc<Flags>,
 }
 
@@ -552,7 +579,6 @@ impl Server {
             resolve(self.generation, Err(listener_error(&err)));
             return;
         }
-        let started = Instant::now();
         loop {
             if self.flags.shutdown.load(Ordering::SeqCst) {
                 // The caller dropped the future: its receiver already
@@ -563,16 +589,18 @@ impl Server {
                 resolve(self.generation, Ok(AuthSessionOutcome::Cancelled));
                 return;
             }
-            if started.elapsed() >= self.timeout {
+            if Instant::now() >= self.deadline {
                 resolve(self.generation, Err(AuthSessionError::TimedOut));
                 return;
             }
             match self.listener.accept() {
-                Ok((stream, _peer)) => {
-                    if let Served::Done = self.serve(stream) {
-                        return;
-                    }
-                }
+                Ok((stream, _peer)) => match self.serve(stream) {
+                    Served::Done => return,
+                    // `Interrupted` answered nothing and closed already;
+                    // the checks above resolve or exit on the very next
+                    // pass rather than this one re-deriving which flag won.
+                    Served::KeepWaiting | Served::Interrupted => {}
+                },
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL_INTERVAL),
                 // A signal, or a client that gave up before it was
                 // accepted: a per-connection event, not a listener failure.
@@ -591,6 +619,21 @@ impl Server {
         }
     }
 
+    /// Whether the accept loop's own exit conditions have fired — shutdown,
+    /// cancel or the session deadline. `read_head` and `linger` check this
+    /// once per [`POLL_INTERVAL`] pass so a cancel, a dropped future or
+    /// [`LoopbackOptions::timeout`] interrupts a connection that is
+    /// mid-read/mid-drain, rather than waiting out that connection's own I/O
+    /// timeout first. All three conditions are monotonic (`cancel`/
+    /// `shutdown` only ever go false→true; `deadline` only moves closer),
+    /// so a caller that sees `true` here can act on it immediately — it
+    /// never flips back to `false`.
+    fn interrupted(&self) -> bool {
+        self.flags.shutdown.load(Ordering::SeqCst)
+            || self.flags.cancel.load(Ordering::SeqCst)
+            || Instant::now() >= self.deadline
+    }
+
     /// Serve one connection (the module doc's *What the listener answers*).
     fn serve(&self, mut stream: TcpStream) -> Served {
         if stream.set_nonblocking(false).is_err()
@@ -600,16 +643,18 @@ impl Server {
         {
             return Served::KeepWaiting;
         }
-        let Some(head) = read_head(&mut stream) else {
-            return reject(stream, Status::BadRequest);
+        let head = match self.read_head(&mut stream) {
+            ReadOutcome::Head(head) => head,
+            ReadOutcome::BadRequest => return self.reject(stream, Status::BadRequest),
+            ReadOutcome::Interrupted => return Served::Interrupted,
         };
         let target = match self.check(&head) {
             Ok(target) => target,
-            Err(status) => return reject(stream, status),
+            Err(status) => return self.reject(stream, status),
         };
         let callback = format!("http://127.0.0.1:{}{target}", self.port);
         if url::validate(&callback).is_err() {
-            return reject(stream, Status::BadRequest);
+            return self.reject(stream, Status::BadRequest);
         }
         if self.flags.shutdown.load(Ordering::SeqCst) {
             // Abandoned while this request was being read: answer nothing.
@@ -617,8 +662,103 @@ impl Server {
         }
         respond(&mut stream, Status::Ok);
         resolve(self.generation, Ok(AuthSessionOutcome::Callback(callback)));
-        linger(stream);
+        self.linger(stream);
         Served::Done
+    }
+
+    /// Read one request head — everything before the first `\r\n\r\n` —
+    /// within [`head_budget`] and [`MAX_REQUEST_HEAD`] bytes, in passes no
+    /// longer than [`POLL_INTERVAL`] so [`Self::interrupted`] is checked
+    /// well before a silent connection could otherwise hold the listener
+    /// for the whole head budget. [`ReadOutcome::BadRequest`] on a timeout,
+    /// an oversized head, EOF or any read error — the existing `400`
+    /// contract, unchanged; [`ReadOutcome::Interrupted`] only when
+    /// [`Self::interrupted`] fires first.
+    fn read_head(&self, stream: &mut TcpStream) -> ReadOutcome {
+        let head_deadline = Instant::now() + head_budget();
+        let mut head = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+        loop {
+            if self.interrupted() {
+                return ReadOutcome::Interrupted;
+            }
+            let room = MAX_REQUEST_HEAD - head.len();
+            let remaining = head_deadline.saturating_duration_since(Instant::now());
+            if room == 0 || remaining.is_zero() {
+                return ReadOutcome::BadRequest;
+            }
+            let pass = remaining.min(POLL_INTERVAL);
+            if stream.set_read_timeout(Some(pass)).is_err() {
+                return ReadOutcome::BadRequest;
+            }
+            let want = room.min(chunk.len());
+            match stream.read(&mut chunk[..want]) {
+                Ok(0) => return ReadOutcome::BadRequest,
+                Ok(read) => {
+                    let scan_from = head.len().saturating_sub(3);
+                    head.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = head[scan_from..]
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                    {
+                        head.truncate(scan_from + end);
+                        return ReadOutcome::Head(head);
+                    }
+                }
+                // One poll pass elapsed with no data: loop back to the top,
+                // which re-checks `interrupted()` before trying again.
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return ReadOutcome::BadRequest,
+            }
+        }
+    }
+
+    /// Answer a non-matching request and keep waiting.
+    fn reject(&self, mut stream: TcpStream, status: Status) -> Served {
+        respond(&mut stream, status);
+        self.linger(stream);
+        Served::KeepWaiting
+    }
+
+    /// Drain whatever the client still sends for at most [`LINGER`] /
+    /// [`LINGER_MAX_BYTES`], then close — see [`LINGER`]. Like
+    /// [`Self::read_head`], this reads in [`POLL_INTERVAL`]-sized passes and
+    /// checks [`Self::interrupted`] between them, so a cancel, a dropped
+    /// future or the session deadline closes a lingering connection
+    /// promptly rather than waiting out the whole drain window.
+    fn linger(&self, mut stream: TcpStream) {
+        let drain_deadline = Instant::now() + LINGER;
+        let mut sink = [0u8; 1024];
+        let mut drained = 0usize;
+        while drained < LINGER_MAX_BYTES {
+            if self.interrupted() {
+                return;
+            }
+            let remaining = drain_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let pass = remaining.min(POLL_INTERVAL);
+            if stream.set_read_timeout(Some(pass)).is_err() {
+                return;
+            }
+            match stream.read(&mut sink) {
+                Ok(0) => return,
+                Ok(read) => drained += read,
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
     }
 
     /// Check a request head, returning the request target of a matching
@@ -691,39 +831,42 @@ fn listener_error(err: &io::Error) -> AuthSessionError {
     AuthSessionError::Platform(format!("loopback listener failed: {:?}", err.kind()))
 }
 
-/// Read one request head — everything before the first `\r\n\r\n` — within
-/// [`CONNECTION_IO_TIMEOUT`] and [`MAX_REQUEST_HEAD`] bytes. `None` on a
-/// timeout, an oversized head, EOF or any read error.
-fn read_head(stream: &mut TcpStream) -> Option<Vec<u8>> {
-    let deadline = Instant::now() + CONNECTION_IO_TIMEOUT;
-    let mut head = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 1024];
-    loop {
-        let room = MAX_REQUEST_HEAD - head.len();
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if room == 0 || remaining.is_zero() {
-            return None;
-        }
-        stream.set_read_timeout(Some(remaining)).ok()?;
-        let want = room.min(chunk.len());
-        match stream.read(&mut chunk[..want]) {
-            Ok(0) => return None,
-            Ok(read) => {
-                let scan_from = head.len().saturating_sub(3);
-                head.extend_from_slice(&chunk[..read]);
-                if let Some(end) = head[scan_from..]
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                {
-                    head.truncate(scan_from + end);
-                    return Some(head);
-                }
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return None,
+/// What [`Server::read_head`] found.
+enum ReadOutcome {
+    /// The full head, terminator stripped.
+    Head(Vec<u8>),
+    /// Malformed, oversized, EOF, a read error, or the per-connection head
+    /// budget ([`head_budget`]) expired — the existing `400` contract,
+    /// unchanged.
+    BadRequest,
+    /// [`Server::interrupted`] fired mid-read — close without a response;
+    /// nothing to say, and nothing to gain by finishing the read.
+    Interrupted,
+}
+
+/// The per-connection head budget [`Server::read_head`] honours —
+/// [`CONNECTION_IO_TIMEOUT`] in production. **Test-only seam**: the `live`
+/// test module's flood test
+/// (`five_silent_clients_do_not_starve_a_later_request`) shrinks this via
+/// `TEST_HEAD_BUDGET_MS` to keep five sequential cutoffs out of the test
+/// suite's wall-clock budget; every other test — and every non-test build —
+/// sees the real [`CONNECTION_IO_TIMEOUT`], since the override defaults to
+/// `0` (meaning "unset") and is only ever changed, then reset, inside that
+/// one test's body while `serial()` holds the crate's one test-wide lock.
+fn head_budget() -> Duration {
+    #[cfg(test)]
+    {
+        let millis = TEST_HEAD_BUDGET_MS.load(Ordering::SeqCst);
+        if millis != 0 {
+            return Duration::from_millis(millis);
         }
     }
+    CONNECTION_IO_TIMEOUT
 }
+
+/// [`head_budget`]'s test-only override, in milliseconds; `0` means unset.
+#[cfg(test)]
+static TEST_HEAD_BUDGET_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Split a request head into its `\r\n`-separated lines. A bare `\r` or `\n`
 /// inside a line is malformed (`400`).
@@ -818,33 +961,6 @@ fn respond(stream: &mut TcpStream, status: Status) {
     let _ = stream.shutdown(Shutdown::Write);
 }
 
-/// Answer a non-matching request and keep waiting.
-fn reject(mut stream: TcpStream, status: Status) -> Served {
-    respond(&mut stream, status);
-    linger(stream);
-    Served::KeepWaiting
-}
-
-/// Drain whatever the client still sends for at most [`LINGER`] /
-/// [`LINGER_MAX_BYTES`], then close — see [`LINGER`].
-fn linger(mut stream: TcpStream) {
-    let deadline = Instant::now() + LINGER;
-    let mut sink = [0u8; 1024];
-    let mut drained = 0usize;
-    while drained < LINGER_MAX_BYTES {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
-            return;
-        }
-        match stream.read(&mut sink) {
-            Ok(0) => return,
-            Ok(read) => drained += read,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,8 +1032,8 @@ mod tests {
         assert!(response(Status::NotFound).starts_with("HTTP/1.1 404 Not Found\r\n"));
     }
 
-    /// (n), the options half — rejected before any slot or socket, on every
-    /// target.
+    /// The options half of the invalid-input rule table — rejected before
+    /// any slot or socket, on every target.
     #[test]
     fn invalid_options_are_rejected_with_invalid_url() {
         let _guard = serial();
@@ -1063,8 +1179,16 @@ mod tests {
         /// A closed port answers `ConnectionRefused` or `ConnectionReset`
         /// depending on the OS; a still-open one is retried every 25 ms.
         fn assert_port_closes(port: u16) {
+            assert_port_closes_within(port, Duration::from_secs(2));
+        }
+
+        /// [`assert_port_closes`], parameterized on how soon the port must
+        /// close — the interruptible-I/O tests need a tight bound (the
+        /// cancel/drop/timeout cases should close well under their
+        /// mid-connection head budget, not merely by the time it expires).
+        fn assert_port_closes_within(port: u16, within: Duration) {
             let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + within;
             loop {
                 match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
                     Err(err)
@@ -1079,7 +1203,7 @@ mod tests {
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "port {port} still accepts connections"
+                    "port {port} still accepts connections after {within:?}"
                 );
                 thread::sleep(POLL_INTERVAL);
             }
@@ -1089,7 +1213,26 @@ mod tests {
             drop(LoopbackSession::bind(LoopbackOptions::new("/callback")).expect("slot free"));
         }
 
-        /// (a)
+        /// [`head_budget`]'s test-only seam: shrinks the per-connection head
+        /// budget for the lifetime of the guard, resetting it to the real
+        /// [`CONNECTION_IO_TIMEOUT`] on drop. Used only by the flood test
+        /// below, under `serial()`'s exclusive lock, so no other test ever
+        /// observes the shrunk value.
+        struct HeadBudgetOverride;
+
+        impl HeadBudgetOverride {
+            fn millis(millis: u64) -> Self {
+                TEST_HEAD_BUDGET_MS.store(millis, Ordering::SeqCst);
+                Self
+            }
+        }
+
+        impl Drop for HeadBudgetOverride {
+            fn drop(&mut self) {
+                TEST_HEAD_BUDGET_MS.store(0, Ordering::SeqCst);
+            }
+        }
+
         #[test]
         fn bind_yields_a_127_0_0_1_redirect_uri() {
             let _guard = serial();
@@ -1105,7 +1248,6 @@ mod tests {
             );
         }
 
-        /// (b)
         #[test]
         fn wrong_path_is_404_and_the_session_keeps_waiting() {
             let _guard = serial();
@@ -1130,7 +1272,6 @@ mod tests {
             succeed(port, &mut fut);
         }
 
-        /// (c)
         #[test]
         fn post_and_head_are_404_and_the_session_keeps_waiting() {
             let _guard = serial();
@@ -1154,8 +1295,8 @@ mod tests {
             succeed(port, &mut fut);
         }
 
-        /// (d), plus the opener seeing exactly the authorization URL and the
-        /// completed future staying `Pending`.
+        /// The opener sees exactly the authorization URL, and the completed
+        /// future stays `Pending`.
         #[test]
         fn success_resolves_the_callback_with_its_query_intact() {
             let _guard = serial();
@@ -1185,7 +1326,6 @@ mod tests {
             assert!(lock_active().is_none(), "success releases the slot");
         }
 
-        /// (e)
         #[test]
         fn a_second_connection_after_success_is_refused() {
             let _guard = serial();
@@ -1196,7 +1336,6 @@ mod tests {
             assert_port_closes(port);
         }
 
-        /// (f)
         #[test]
         fn timeout_resolves_timed_out_and_closes_the_port() {
             let _guard = serial();
@@ -1212,7 +1351,6 @@ mod tests {
             assert_slot_free();
         }
 
-        /// (g)
         #[test]
         fn dropping_the_future_closes_the_port_and_frees_the_slot() {
             let _guard = serial();
@@ -1225,7 +1363,6 @@ mod tests {
             assert_slot_free();
         }
 
-        /// (h)
         #[test]
         fn dropping_an_unstarted_session_closes_the_port_and_frees_the_slot() {
             let _guard = serial();
@@ -1237,7 +1374,6 @@ mod tests {
             assert_slot_free();
         }
 
-        /// (i)
         #[test]
         fn cancel_resolves_cancelled_and_closes_the_port() {
             let _guard = serial();
@@ -1271,7 +1407,6 @@ mod tests {
             assert_port_closes(port);
         }
 
-        /// (j)
         #[test]
         fn a_bound_session_makes_both_backends_busy() {
             let _guard = serial();
@@ -1302,7 +1437,7 @@ mod tests {
             );
         }
 
-        /// (k), plus the other `400` request shapes.
+        /// Also covers the other `400` request shapes.
         #[test]
         fn malformed_requests_are_400_and_the_session_keeps_waiting() {
             let _guard = serial();
@@ -1353,7 +1488,6 @@ mod tests {
             );
         }
 
-        /// (l)
         #[test]
         fn an_oversized_head_is_400_and_the_session_keeps_waiting() {
             let _guard = serial();
@@ -1372,7 +1506,6 @@ mod tests {
             succeed(port, &mut fut);
         }
 
-        /// (m)
         #[test]
         fn a_silent_client_is_cut_off_and_a_later_request_succeeds() {
             let _guard = serial();
@@ -1398,7 +1531,103 @@ mod tests {
             succeed(port, &mut fut);
         }
 
-        /// (n), the authorization-URL half.
+        /// A cancel fired while a silent client is connected still resolves
+        /// `Cancelled` and closes the port promptly — within about one poll
+        /// interval of the cancel, not the connection's 2 s head budget —
+        /// because the accept loop's read of that connection is itself
+        /// interruptible.
+        #[test]
+        fn cancel_resolves_promptly_despite_a_silent_connection() {
+            let _guard = serial();
+            let session = bind("/callback");
+            let port = session.port;
+            let cancel = session.cancel_handle();
+            let mut fut = start(session);
+            let silent = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect");
+            thread::sleep(Duration::from_millis(50));
+
+            let started = Instant::now();
+            cancel.cancel();
+            assert_eq!(block_on(&mut fut), Ok(AuthSessionOutcome::Cancelled));
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(200),
+                "resolved after {elapsed:?}"
+            );
+            assert_port_closes_within(port, Duration::from_millis(200));
+            drop(silent);
+        }
+
+        /// The session deadline fires on time despite a silent connection
+        /// sitting in the accept loop: `TimedOut` resolves within the
+        /// configured timeout plus about one poll interval, not the
+        /// connection's own 2 s head budget.
+        #[test]
+        fn timeout_resolves_promptly_despite_a_silent_connection() {
+            let _guard = serial();
+            let session = LoopbackSession::bind(LoopbackOptions {
+                path: "/callback".to_string(),
+                timeout: Duration::from_millis(300),
+            })
+            .expect("bind");
+            let port = session.port;
+            let started = Instant::now();
+            let mut fut = start(session);
+            let silent = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect");
+            assert_eq!(block_on(&mut fut), Err(AuthSessionError::TimedOut));
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(300 + 200),
+                "resolved after {elapsed:?}"
+            );
+            assert_port_closes_within(port, Duration::from_millis(200));
+            drop(silent);
+        }
+
+        /// Dropping the future while a silent client is connected closes
+        /// the port promptly rather than waiting out that connection's own
+        /// 2 s head budget.
+        #[test]
+        fn dropping_the_future_closes_the_port_promptly_despite_a_silent_connection() {
+            let _guard = serial();
+            let session = bind("/callback");
+            let port = session.port;
+            let fut = start(session);
+            let silent = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect");
+            drop(fut);
+            assert_port_closes_within(port, Duration::from_millis(200));
+            drop(silent);
+        }
+
+        /// A flood of sequential silent clients that each hang does not
+        /// starve a later well-formed request — each one is still cut off
+        /// at its own head budget and the listener keeps waiting, exactly
+        /// as a single silent client is in
+        /// `a_silent_client_is_cut_off_and_a_later_request_succeeds` above.
+        /// Uses [`HeadBudgetOverride`] to shrink that budget for this test
+        /// only, so five sequential cutoffs don't add 10 s to the suite.
+        #[test]
+        fn five_silent_clients_do_not_starve_a_later_request() {
+            let _guard = serial();
+            let _budget = HeadBudgetOverride::millis(300);
+            let session = bind("/callback");
+            let port = session.port;
+            let mut fut = start(session);
+            for _ in 0..5 {
+                let mut silent = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect");
+                silent
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                let response = read_all(&mut silent);
+                assert!(
+                    response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                    "{response:?}"
+                );
+            }
+            succeed(port, &mut fut);
+        }
+
+        /// The authorization-URL half of the invalid-input rule table.
         #[test]
         fn a_non_https_authorization_url_is_invalid_and_closes_the_port() {
             let _guard = serial();
@@ -1418,7 +1647,6 @@ mod tests {
             }
         }
 
-        /// (o)
         #[test]
         fn an_opener_failure_resolves_its_error_and_closes_the_port() {
             let _guard = serial();
@@ -1431,7 +1659,6 @@ mod tests {
             assert_slot_free();
         }
 
-        /// (p)
         #[test]
         fn debug_output_never_contains_the_query() {
             let _guard = serial();
