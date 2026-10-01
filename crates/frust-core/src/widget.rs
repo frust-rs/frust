@@ -2164,6 +2164,12 @@ pub struct ChildPod {
     widget: Box<dyn Widget>,
     origin: Point,
     size: Size,
+    /// An optional transform placing the child under an arbitrary
+    /// [`Affine`] relative to its `origin` — `None` (the default) for every pod
+    /// that never calls [`ChildPod::set_transform`], which then takes exactly the
+    /// untransformed paint/event/hit-test/semantics path. See
+    /// [`ChildPod::set_transform`] for the mapping contract.
+    transform: Option<Affine>,
     /// Set when the child captured the pointer, so the container can route
     /// subsequent moves/releases straight to it (capture-by-recorded-path).
     /// Cleared by the container on `Up`/`Cancel` via [`ChildPod::set_active`].
@@ -2389,6 +2395,7 @@ impl ChildPod {
             widget,
             origin: Point::ZERO,
             size: Size::ZERO,
+            transform: None,
             active: false,
             focused: false,
             focus_epoch: 0,
@@ -2489,6 +2496,58 @@ impl ChildPod {
     /// Place the child at `origin` within the container's coordinate space.
     pub fn set_origin(&mut self, origin: Point) {
         self.origin = origin;
+    }
+
+    /// The child's transform, if any (see [`ChildPod::set_transform`]).
+    pub fn transform(&self) -> Option<Affine> {
+        self.transform
+    }
+
+    /// Place the child under an arbitrary `transform`, or clear it with `None`.
+    ///
+    /// The transform is applied in the child's own local space, **before** the
+    /// `origin` offset: a child-local point `p` lands at
+    /// `origin + transform * p` in the container's space. So
+    /// `Affine::scale_about(2.0, center)` zooms the child about its own local
+    /// `center`, and a pan/zoom container can leave `origin` at zero and drive
+    /// the whole placement through the transform.
+    ///
+    /// While one is set:
+    ///
+    /// * [`ChildPod::paint_child`] wraps the child's paint in
+    ///   [`PaintScene::push_transform`]/[`PaintScene::pop_transform`], and maps
+    ///   an ancestor's visible rect back into the child's frame (the bounding box
+    ///   of its inverse image), so a culling descendant still culls against what
+    ///   is really on screen;
+    /// * [`ChildPod::contains`] maps the point through the inverse before the
+    ///   bounds test, so it hits exactly what paint drew — a rotated child hits
+    ///   along its rotated edges, not its axis-aligned bounding box (the same
+    ///   test as [`crate::hit::point_in_transformed_rect`]);
+    /// * [`ChildPod::event_child`] maps pointer, scroll and scale positions
+    ///   through the inverse ([`InputEvent::transformed`]), so the child sees
+    ///   local coordinates exactly as an untransformed child does;
+    /// * [`ChildPod::semantics_child`] reports the subtree at the
+    ///   **axis-aligned bounding box** of the transformed child rect. This is an
+    ///   approximation (v1): the pod's frame becomes that box, and descendants
+    ///   are offset from its corner unscaled and unrotated.
+    ///
+    /// A transform with no inverse (a zero scale, a collapsed axis, a non-finite
+    /// coefficient — see [`crate::hit::checked_inverse`]) draws nothing and hits
+    /// nothing: `contains` is `false` and paint skips the subtree. An event that
+    /// still reaches the child through a recorded capture or focus path is
+    /// delivered translated by `-origin` only, so a capture can always release.
+    ///
+    /// Out of v1's reach: rects a descendant reports in window space from
+    /// `paint` (platform-view frames, input shields, hero rects, overlay anchors)
+    /// are not mapped through the transform.
+    pub fn set_transform(&mut self, transform: Option<Affine>) {
+        self.transform = transform;
+    }
+
+    /// The child's local→container mapping for a set `transform`:
+    /// `translate(origin) * transform`.
+    fn local_to_container(&self, transform: Affine) -> Affine {
+        Affine::translate(self.origin.to_vec2()) * transform
     }
 
     /// Whether this child currently holds the recorded active (captured) path.
@@ -2646,7 +2705,51 @@ impl ChildPod {
     /// back into the parent `ctx`, mirroring [`ChildPod::event_child`]'s absorb of
     /// the child's redraw/capture flags — so a nested flinging widget keeps the
     /// whole tree's frames coming.
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) additionally wraps
+    /// that paint in [`PaintScene::push_transform`]/[`PaintScene::pop_transform`]
+    /// (and skips it entirely when the transform has no inverse); an
+    /// untransformed pod pushes nothing.
     pub fn paint_child(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Fast path first: an untransformed pod is the pre-transform code path,
+        // threading the ancestor's visible rect down unchanged.
+        let Some(transform) = self.transform else {
+            let visible_rect = ctx.visible_rect_ref();
+            self.paint_child_in(ctx, scene, visible_rect);
+            return;
+        };
+        // A singular transform collapses the child to a line or a point: there is
+        // nothing to draw, and no inverse to map the visible rect through.
+        if crate::hit::checked_inverse(&transform).is_none() {
+            return;
+        }
+        // The scene speaks absolute coordinates, and the child paints at its
+        // absolute origin, so conjugate the child-local transform by that
+        // origin: a local point `p` drawn at `abs + p` lands at
+        // `abs + transform * p`.
+        let abs = (ctx.origin() + self.origin.to_vec2()).to_vec2();
+        let around = Affine::translate(abs) * transform * Affine::translate(-abs);
+        // Culling descendants compare their own (untransformed) absolute rects
+        // against the visible rect, so hand them its preimage: the bounding box
+        // of the visible rect mapped back through the inverse — conservative,
+        // never culling anything actually on screen.
+        let visible_rect = match (ctx.visible_rect_ref(), crate::hit::checked_inverse(&around)) {
+            (Some(rect), Some(inverse)) => Some(inverse.transform_rect_bbox(rect)),
+            _ => None,
+        };
+        scene.push_transform(around);
+        self.paint_child_in(ctx, scene, visible_rect);
+        scene.pop_transform();
+    }
+
+    /// [`ChildPod::paint_child`]'s body: paint the child at its absolute origin
+    /// with `visible_rect` as the child's culling rect.
+    fn paint_child_in(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        visible_rect: Option<Rect>,
+    ) {
         let child_origin = ctx.origin() + self.origin.to_vec2();
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
         // Thread the shared shell clock down unchanged so every widget in the
@@ -2668,8 +2771,9 @@ impl ChildPod {
         // Thread the scroll ancestor's visible rect down unchanged (absolute
         // coords, so a nested container tests its children directly against it),
         // mirroring the theme/insets. `None` in the normal case (no scroll
-        // ancestor culling), so paint descends into every child as before.
-        child_ctx.set_visible_rect(ctx.visible_rect_ref());
+        // ancestor culling), so paint descends into every child as before. A
+        // transformed pod passes the rect's preimage instead (see `paint_child`).
+        child_ctx.set_visible_rect(visible_rect);
         // Thread the shell's surface-translucency flag down unchanged (copied
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
@@ -2782,9 +2886,29 @@ impl ChildPod {
     /// [`ChildPod`]s so their nodes attach under the container's node (or, for a
     /// transparent container, under whatever encloses it — see
     /// [`crate::semantics`]).
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) reports its subtree at
+    /// the axis-aligned bounding box of the transformed child rect — an
+    /// approximation: descendants are offset from that box's corner, unscaled
+    /// and unrotated.
     pub fn semantics_child(&self, ctx: &mut SemanticsCtx) {
         let base = self.semantics_base(ctx);
-        ctx.descend_into_pod(base, self.origin.to_vec2(), self.size, |ctx| {
+        let (offset, size) = match self.transform {
+            None => (self.origin.to_vec2(), self.size),
+            Some(transform) => {
+                let bounds = self
+                    .local_to_container(transform)
+                    .transform_rect_bbox(self.size.to_rect());
+                if bounds.is_finite() {
+                    (bounds.origin().to_vec2(), bounds.size())
+                } else {
+                    // A non-finite transform has no meaningful box: report an
+                    // empty frame at the origin rather than NaN bounds.
+                    (self.origin.to_vec2(), Size::ZERO)
+                }
+            }
+        };
+        ctx.descend_into_pod(base, offset, size, |ctx| {
             self.widget.semantics(ctx);
         });
     }
@@ -2816,8 +2940,24 @@ impl ChildPod {
     /// `route_event`/`route_event_single` helpers instead, which check
     /// [`ChildPod::is_active`] first and forward unconditionally to a captured
     /// child.
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) maps positions
+    /// through the inverse of its local→container mapping instead
+    /// ([`InputEvent::transformed`]); everything else about the dispatch —
+    /// capture, contact and focus bookkeeping, hover — is identical.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let local = event.translated(-self.origin.to_vec2());
+        let local = match self.transform {
+            None => event.translated(-self.origin.to_vec2()),
+            Some(transform) => {
+                match crate::hit::checked_inverse(&self.local_to_container(transform)) {
+                    Some(inverse) => event.transformed(&inverse),
+                    // No inverse: `contains` never hits such a pod, so only a
+                    // recorded capture/focus path reaches here. Deliver the event
+                    // translated as if untransformed so that path can still end.
+                    None => event.translated(-self.origin.to_vec2()),
+                }
+            }
+        };
         // The child's hover link, composed with the ancestor chain exactly like
         // `focused` (see `paint_child`).
         let hovered = self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered();
@@ -2906,7 +3046,18 @@ impl ChildPod {
     /// ([`ChildPod::is_active`]), subsequent events must bypass this check and
     /// go straight to the captured child regardless of where the point now
     /// falls — see `frust-widgets`' `route_event`/`route_event_single`.
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) maps `point` back
+    /// through the transform first, so the test agrees with what paint drew; a
+    /// transform with no inverse hits nothing.
     pub fn contains(&self, point: Point) -> bool {
+        if let Some(transform) = self.transform {
+            return crate::hit::point_in_transformed_rect(
+                point,
+                self.size.to_rect(),
+                &self.local_to_container(transform),
+            );
+        }
         point.x >= self.origin.x
             && point.x < self.origin.x + self.size.width
             && point.y >= self.origin.y
@@ -5026,6 +5177,389 @@ mod tests {
             matches!(commands[2], frust_scene::Command::PopSnapshot),
             "expected PopSnapshot, got {:?}",
             commands[2]
+        );
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use std::f64::consts::FRAC_PI_4;
+
+    use kurbo::Vec2;
+
+    use super::*;
+    use crate::event::{
+        PointerButton, PointerEvent, PointerId, PointerPhase, ScaleEvent, ScalePhase, ScrollDelta,
+    };
+
+    /// One recorded paint operation, in order.
+    #[derive(Clone, Debug, PartialEq)]
+    enum Op {
+        Rect(Point, Size),
+        Push(Affine),
+        Pop,
+    }
+
+    /// A scene recorder that keeps the transform stack interleaved with draws,
+    /// so a test can see exactly what a pod pushed around its child.
+    #[derive(Default)]
+    struct OpLog(Vec<Op>);
+
+    impl PaintScene for OpLog {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
+            self.0.push(Op::Rect(origin, size));
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_transform(&mut self, transform: Affine) {
+            self.0.push(Op::Push(transform));
+        }
+        fn pop_transform(&mut self) {
+            self.0.push(Op::Pop);
+        }
+    }
+
+    /// A leaf that fills its whole box, records every event it receives (in
+    /// local space), captures on `Down`, and contributes one semantics node.
+    #[derive(Default)]
+    struct Recorder {
+        events: Vec<InputEvent>,
+    }
+
+    impl Widget for Recorder {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.events.push(event.clone());
+            if matches!(
+                event,
+                InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    ..
+                })
+            ) {
+                ctx.capture_pointer();
+            }
+            EventResult::Handled
+        }
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            ctx.push_node(accesskit::Role::Label, |_| {});
+        }
+    }
+
+    /// A leaf that records the visible rect its paint context carries.
+    struct VisibleProbe(std::rc::Rc<Cell<Option<Rect>>>);
+
+    impl Widget for VisibleProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.0.set(ctx.visible_rect());
+        }
+    }
+
+    fn pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// A laid-out `Recorder` pod of `size` at `origin`.
+    fn recorder_pod(origin: Point, size: Size) -> ChildPod {
+        let mut pod = ChildPod::new(Box::new(Recorder::default()));
+        pod.layout_child(&mut LayoutCtx::new(), &BoxConstraints::tight(size));
+        pod.set_origin(origin);
+        pod
+    }
+
+    fn recorded(pod: &mut ChildPod) -> Vec<InputEvent> {
+        pod.widget_mut()
+            .downcast_mut::<Recorder>()
+            .expect("recorder pod")
+            .events
+            .clone()
+    }
+
+    fn paint(pod: &mut ChildPod, visible: Option<Rect>) -> (Vec<Op>, Option<Rect>) {
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        ctx.set_visible_rect(visible);
+        let mut scene = OpLog::default();
+        pod.paint_child(&mut ctx, &mut scene);
+        (scene.0, ctx.visible_rect_ref())
+    }
+
+    fn dispatch(pod: &mut ChildPod, event: &InputEvent) -> EventResult {
+        let mut state = 0u32;
+        let mut ctx = EventCtx::new(&mut state, Point::ZERO, Size::new(400.0, 400.0));
+        pod.event_child(&mut ctx, event)
+    }
+
+    #[test]
+    fn a_child_under_scale_and_translate_receives_down_at_its_local_point() {
+        let mut pod = recorder_pod(Point::new(10.0, 20.0), Size::new(50.0, 50.0));
+        // Local p lands at origin + translate(5, 5) * scale(2) * p.
+        pod.set_transform(Some(
+            Affine::translate(Vec2::new(5.0, 5.0)) * Affine::scale(2.0),
+        ));
+        // Local (7, 9) is drawn at (10 + 5 + 14, 20 + 5 + 18) = (29, 43).
+        let at = Point::new(29.0, 43.0);
+        assert!(pod.contains(at));
+        assert_eq!(
+            dispatch(&mut pod, &pointer(PointerPhase::Down, at.x, at.y)),
+            EventResult::Handled
+        );
+        assert!(pod.is_active(), "capture bookkeeping is unchanged");
+        // Scroll positions and scale focal points take the same mapping; their
+        // magnitudes do not.
+        dispatch(
+            &mut pod,
+            &InputEvent::Scroll {
+                position: at,
+                delta: ScrollDelta::Pixels(0.0, 12.0),
+            },
+        );
+        dispatch(
+            &mut pod,
+            &InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Update,
+                scale_delta: 1.1,
+                focal: at,
+                velocity: 0.0,
+            }),
+        );
+        let local = Point::new(7.0, 9.0);
+        assert_eq!(
+            recorded(&mut pod),
+            vec![
+                pointer(PointerPhase::Down, local.x, local.y),
+                InputEvent::Scroll {
+                    position: local,
+                    delta: ScrollDelta::Pixels(0.0, 12.0),
+                },
+                InputEvent::Scale(ScaleEvent {
+                    phase: ScalePhase::Update,
+                    scale_delta: 1.1,
+                    focal: local,
+                    velocity: 0.0,
+                }),
+            ]
+        );
+        // The child now covers (15..115, 25..125): the untransformed box's
+        // corner misses, and a point past its untransformed extent hits.
+        assert!(!pod.contains(Point::new(12.0, 22.0)));
+        assert!(pod.contains(Point::new(100.0, 100.0)));
+        assert!(!pod.contains(Point::new(116.0, 60.0)));
+        // A contact's inner event is mapped the same way.
+        let contact = InputEvent::PointerContact {
+            pointer_id: PointerId::touch(1),
+            event: PointerEvent {
+                phase: PointerPhase::Move,
+                position: at,
+                button: PointerButton::Primary,
+            },
+        };
+        dispatch(&mut pod, &contact);
+        assert_eq!(
+            recorded(&mut pod).last(),
+            Some(&InputEvent::PointerContact {
+                pointer_id: PointerId::touch(1),
+                event: PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: local,
+                    button: PointerButton::Primary,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn contains_agrees_with_paint_for_rotated_content_at_the_corners() {
+        let size = Size::new(100.0, 100.0);
+        let mut pod = recorder_pod(Point::new(40.0, 40.0), size);
+        pod.set_transform(Some(Affine::rotate_about(
+            FRAC_PI_4,
+            Point::new(50.0, 50.0),
+        )));
+        let (ops, _) = paint(&mut pod, None);
+        let [Op::Push(drawn), Op::Rect(rect_origin, rect_size), Op::Pop] = ops.as_slice() else {
+            panic!("expected push/rect/pop, got {ops:?}");
+        };
+        assert_eq!((*rect_origin, *rect_size), (Point::new(40.0, 40.0), size));
+        let rect = Rect::from_origin_size(*rect_origin, *rect_size);
+        let center = *drawn * rect.center();
+        for corner in [
+            Point::new(rect.x0, rect.y0),
+            Point::new(rect.x1, rect.y0),
+            Point::new(rect.x1, rect.y1),
+            Point::new(rect.x0, rect.y1),
+        ] {
+            // Where paint actually put this corner (the parent paints at the
+            // absolute origin zero, so absolute space is the container's space).
+            let painted = *drawn * corner;
+            let inward = (center - painted).normalize();
+            assert!(
+                pod.contains(painted + inward),
+                "just inside painted corner {painted:?}"
+            );
+            assert!(
+                !pod.contains(painted - inward),
+                "just outside painted corner {painted:?}"
+            );
+            // The untransformed box's own corner is outside the painted
+            // diamond: the hit test is not an AABB test.
+            let unrotated = corner + (rect.center() - corner) * 0.02;
+            assert!(!pod.contains(unrotated), "AABB corner {unrotated:?}");
+        }
+    }
+
+    #[test]
+    fn an_untransformed_pod_paints_and_routes_exactly_as_before() {
+        let origin = Point::new(12.0, 34.0);
+        let size = Size::new(60.0, 40.0);
+        let events = [
+            pointer(PointerPhase::Down, 20.0, 40.0),
+            pointer(PointerPhase::Move, 90.0, 10.0),
+            pointer(PointerPhase::Up, 30.0, 50.0),
+            InputEvent::Scroll {
+                position: Point::new(25.0, 45.0),
+                delta: ScrollDelta::Lines(0.0, 1.0),
+            },
+            InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Begin,
+                scale_delta: 1.0,
+                focal: Point::new(15.0, 35.0),
+                velocity: 0.0,
+            }),
+            InputEvent::Housekeeping,
+        ];
+        let visible = Some(Rect::new(0.0, 0.0, 50.0, 50.0));
+
+        // Baseline: a pod that never had a transform.
+        let mut baseline = recorder_pod(origin, size);
+        let baseline_paint = paint(&mut baseline, visible);
+        for event in &events {
+            dispatch(&mut baseline, event);
+        }
+        let baseline_events = recorded(&mut baseline);
+        // The baseline is the pre-transform contract: no transform pushed, the
+        // child drawn at its origin, the visible rect threaded unchanged, and
+        // every event translated by `-origin` and nothing else.
+        assert_eq!(baseline_paint.0, vec![Op::Rect(origin, size)]);
+        assert_eq!(baseline_paint.1, visible);
+        let translated: Vec<_> = events
+            .iter()
+            .map(|e| e.translated(-origin.to_vec2()))
+            .collect();
+        assert_eq!(baseline_events, translated);
+
+        // A pod whose transform was set and then cleared is indistinguishable.
+        let mut cleared = recorder_pod(origin, size);
+        cleared.set_transform(Some(Affine::rotate(1.0) * Affine::scale(3.0)));
+        cleared.set_transform(None);
+        assert_eq!(cleared.transform(), None);
+        assert_eq!(paint(&mut cleared, visible), baseline_paint);
+        for event in &events {
+            dispatch(&mut cleared, event);
+        }
+        assert_eq!(recorded(&mut cleared), baseline_events);
+        for point in [
+            Point::new(12.0, 34.0),
+            Point::new(71.9, 73.9),
+            Point::new(72.0, 50.0),
+            Point::new(11.9, 50.0),
+        ] {
+            assert_eq!(cleared.contains(point), baseline.contains(point));
+        }
+    }
+
+    #[test]
+    fn a_singular_transform_hits_nothing_and_never_panics() {
+        let origin = Point::new(10.0, 10.0);
+        for singular in [
+            Affine::scale(0.0),
+            Affine::scale_non_uniform(2.0, 0.0),
+            Affine::new([1.0, 2.0, 2.0, 4.0, 0.0, 0.0]),
+            Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        ] {
+            let mut pod = recorder_pod(origin, Size::new(50.0, 50.0));
+            pod.set_transform(Some(singular));
+            for point in [origin, Point::new(20.0, 20.0), Point::new(10.0, 30.0)] {
+                assert!(!pod.contains(point), "{singular:?} hit {point:?}");
+            }
+            // Paint skips the collapsed subtree entirely.
+            assert_eq!(
+                paint(&mut pod, Some(Rect::new(0.0, 0.0, 99.0, 99.0))).0,
+                vec![]
+            );
+            // An event reaching it through a recorded path still arrives,
+            // translated as if untransformed, so a capture can end.
+            dispatch(&mut pod, &pointer(PointerPhase::Up, 20.0, 25.0));
+            assert_eq!(
+                recorded(&mut pod),
+                vec![pointer(PointerPhase::Up, 10.0, 15.0)]
+            );
+            // Semantics never reports NaN bounds.
+            let mut sem = SemanticsCtx::new(Size::new(200.0, 200.0), 2);
+            pod.semantics_child(&mut sem);
+            let update = sem.finish(accesskit::NodeId(1));
+            let bounds = update.nodes[0].1.bounds().expect("bounds");
+            assert!(
+                [bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+                    .iter()
+                    .all(|v| v.is_finite()),
+                "{singular:?} gave {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transformed_pod_maps_the_visible_rect_and_reports_its_bounding_box() {
+        let mut pod = recorder_pod(Point::new(10.0, 20.0), Size::new(50.0, 50.0));
+        pod.set_transform(Some(Affine::scale(2.0)));
+        // Paint: the transform is conjugated by the absolute origin, and the
+        // visible rect reaches the child as its preimage. The parent's own
+        // visible rect is untouched.
+        let visible = Some(Rect::new(10.0, 20.0, 110.0, 120.0));
+        let (ops, parent_visible) = paint(&mut pod, visible);
+        assert_eq!(parent_visible, visible);
+        assert_eq!(
+            ops,
+            vec![
+                Op::Push(
+                    Affine::translate(Vec2::new(10.0, 20.0))
+                        * Affine::scale(2.0)
+                        * Affine::translate(Vec2::new(-10.0, -20.0))
+                ),
+                Op::Rect(Point::new(10.0, 20.0), Size::new(50.0, 50.0)),
+                Op::Pop,
+            ]
+        );
+        // What the child itself culls against: the visible rect mapped back
+        // through the inverse — (10, 20) .. (60, 70) in its own absolute frame.
+        let seen = std::rc::Rc::new(Cell::new(None));
+        let mut probe = ChildPod::new(Box::new(VisibleProbe(seen.clone())));
+        probe.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(50.0, 50.0)),
+        );
+        probe.set_origin(Point::new(10.0, 20.0));
+        probe.set_transform(Some(Affine::scale(2.0)));
+        paint(&mut probe, visible);
+        assert_eq!(seen.get(), Some(Rect::new(10.0, 20.0, 60.0, 70.0)));
+        // Semantics: the transformed box, (10, 20) .. (110, 120).
+        let mut sem = SemanticsCtx::new(Size::new(400.0, 400.0), 2);
+        pod.semantics_child(&mut sem);
+        let update = sem.finish(accesskit::NodeId(1));
+        let bounds = update.nodes[0].1.bounds().expect("bounds");
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (10.0, 20.0, 110.0, 120.0)
         );
     }
 }
