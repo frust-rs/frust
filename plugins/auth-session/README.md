@@ -202,13 +202,17 @@ The listener runs inside `start()` and reserves the one-live-session slot (the s
 - **Desktop (Linux, Windows, macOS):** use [`LoopbackSession`] instead. On
   Linux and Windows, `AuthSession::start` with a custom scheme still answers
   [`AuthSessionError::NoHandler`] (no platform authentication user agent
-  exists). On all three platforms, [`is_supported()`](../auth-session/src/lib.rs)
-  is `true` and means the loopback path is available. The listener binds on
-  ephemeral loopback (`127.0.0.1:<port>` on an ephemeral port), opens the
-  authorization URL in the system browser (via
-  [`frust-url-launcher`](../url-launcher/README.md)), and receives the
-  redirect — RFC 8252 §7.3's "loopback IP redirection" pattern for platforms
-  with no in-app browser-tab primitive. See the Desktop loopback subsection
+  exists; `auth-session-loopback-windows-unrun-v1` in
+  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). On all three platforms,
+  [`is_supported()`](../auth-session/src/lib.rs) is `true` and means the
+  loopback path is available. The listener binds on ephemeral loopback
+  (`127.0.0.1:<port>` on an ephemeral port; `auth-session-loopback-poll-interval-v1` in
+  [LIMITATIONS.md](../../docs/LIMITATIONS.md)), opens the authorization URL in
+  the system browser (via [`frust-url-launcher`](../url-launcher/README.md)),
+  and receives the redirect — RFC 8252 §7.3's "loopback IP redirection" pattern
+  for platforms with no in-app browser-tab primitive
+  (`auth-session-loopback-first-match-wins-v1`, `auth-session-loopback-local-stall-v1` in
+  [LIMITATIONS.md](../../docs/LIMITATIONS.md)). See the Desktop loopback subsection
   above for the complete listener contract and example.
 
 ---
@@ -652,8 +656,8 @@ reproduce on macOS.**
 
 ### Linux desktop (loopback) — NOT YET RUN
 
-Gate card: [p2-04](../../..).
+The conductor runs this gate with Ed at a live desktop session on the Linux workstation, using the playground app's Auth page "Desktop loopback" block ([gate/loopback.html](gate/loopback.html)) with the loopback test cases (Loopback login / deny / bad iss / timeout / cancel + Cancel loopback / busy). The transcript will replace this heading when the gate runs.
 
 ### Windows desktop (loopback) — NOT YET RUN
 
-Gate card: [p2-05](../../..).
+The conductor runs this gate over ssh on the Windows 11 rig with Ed or via scheduled-task launch for the browser legs, using the playground app's Auth page "Desktop loopback" block ([gate/loopback.html](gate/loopback.html)) with the loopback test cases (Loopback login / deny / bad iss / timeout / cancel + Cancel loopback / busy). The transcript will replace this heading when the gate runs.
