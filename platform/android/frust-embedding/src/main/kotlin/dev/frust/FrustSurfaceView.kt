@@ -286,9 +286,12 @@ class FrustSurfaceView(
     //   1 = move (ACTION_MOVE)
     //   2 = up   (ACTION_UP / ACTION_POINTER_UP)
     //   3 = cancel (ACTION_CANCEL)
-    // `x`/`y` are physical, view-local pixels (`MotionEvent.x`/`.y`); the Rust
-    // side divides by the display density to get logical coordinates.
-    private external fun nativeOnTouch(handle: Long, action: Int, x: Float, y: Float)
+    // `pointerId` is that contact's own `MotionEvent.getPointerId(index)` —
+    // one call per active contact, never just the primary one (see
+    // [onTouchEvent]). `x`/`y` are physical, view-local pixels
+    // (`MotionEvent.getX/getY(index)`); the Rust side divides by the display
+    // density to get logical coordinates.
+    private external fun nativeOnTouch(handle: Long, action: Int, pointerId: Int, x: Float, y: Float)
 
     private external fun nativeOnResume(handle: Long)
 
@@ -1030,16 +1033,34 @@ class FrustSurfaceView(
             }
             return true
         }
-        // Map Android's masked action to our fixed 0..3 ABI (see `nativeOnTouch`).
-        // Single-pointer in v1: we forward the primary pointer's location only.
-        val action = when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> 0
-            MotionEvent.ACTION_MOVE -> 1
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> 2
-            MotionEvent.ACTION_CANCEL -> 3
+        // Map Android's masked action to our fixed 0..3 ABI (see `nativeOnTouch`)
+        // and forward every active contact, not just the primary one:
+        // ACTION_DOWN/ACTION_POINTER_DOWN and ACTION_UP/ACTION_POINTER_UP each
+        // carry exactly one changed pointer (`event.actionIndex`); ACTION_MOVE
+        // reports every currently-down pointer in the one `MotionEvent`, so it
+        // is forwarded as one `nativeOnTouch` call per pointer; ACTION_CANCEL
+        // ends every pointer still down, forwarded the same way.
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val index = event.actionIndex
+                nativeOnTouch(handle, 0, event.getPointerId(index), event.getX(index), event.getY(index))
+            }
+            MotionEvent.ACTION_MOVE -> {
+                for (i in 0 until event.pointerCount) {
+                    nativeOnTouch(handle, 1, event.getPointerId(i), event.getX(i), event.getY(i))
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                val index = event.actionIndex
+                nativeOnTouch(handle, 2, event.getPointerId(index), event.getX(index), event.getY(index))
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                for (i in 0 until event.pointerCount) {
+                    nativeOnTouch(handle, 3, event.getPointerId(i), event.getX(i), event.getY(i))
+                }
+            }
             else -> return false
         }
-        nativeOnTouch(handle, action, event.x, event.y)
         // The tree may have taken/dropped focus in response to this contact; poll
         // the IME surface and show/hide the keyboard accordingly. Polling after
         // the dispatch keeps the JNI ABI one-directional (no native up-calls).
