@@ -14,8 +14,19 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, with a bottom `navigation_bar`
-selecting between ten sections:
+`pattern_switcher`-hosted section body, selecting between eleven sections
+through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
+against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
+convention, applied to the shell itself):
+
+- **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
+  first five sections directly, plus a trailing "More" destination that opens
+  an overlay listing every section.
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all eleven
+  sections directly, in a column beside the page body — nothing is ever
+  behind an overflow menu at this width.
+
+The sections, in order:
 
 1. **Platform Views** — the real `frust::platform_view` embedding contract: a
    300×400 `dev.frust.DemoStreamFactory` Mode B slot with chrome overlapping
@@ -88,6 +99,16 @@ selecting between ten sections:
     logs the migration warning (see
     `docs/SHELLS_DEVELOPMENT.md`). Xiaomi 12 / Android 16 shows no regression
     (`t=39.3, b=0.0` — its gesture bar is hidden).
+11. **Graph** — a `CanvasView`/`PanZoomView` widget demo, not a plugin gate: a
+    toy node-and-edge graph (12 nodes, a spiral layout, 13 edges) painted by a
+    `frust::canvas` closure (edges via `stroke_line`, nodes as
+    `fill_rounded_rect` circles) hosted inside a `frust::pan_zoom` viewport.
+    Drag pans, ctrl/⌘+wheel or trackpad-pinch (desktop) or a touch pinch
+    zooms, both focal-point-correct; tapping a node selects it (highlighted on
+    the next repaint via `CanvasView::repaint_key`) through `on_hit`/
+    `on_pointer` rather than `on_tap`, since only the raw event carries the
+    tap's position; a readout below shows the live scale/offset, and "Fit"
+    drives the attached `PanZoomController` to frame the whole graph.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -135,3 +156,15 @@ liveness — it cannot prove any of the on-device behaviour these pages exist
 for (a real native view compositing, a real camera session delivering frames,
 real platform controls responding to touch). That remains a human-run device
 gate.
+
+## Gate checklist (human-run, hardware-owed)
+
+The headless suite above proves the Graph page builds/lays out/paints and
+that the node-hit/selection math is correct; it cannot drive a real pointer,
+trackpad, or touchscreen. The following are **owed** — not yet run:
+
+| Gate | Platform | Status |
+|------|----------|--------|
+| Desktop ctrl/⌘+wheel zoom + drag pan | Linux (local) | OWED |
+| Touch pinch zoom + drag pan | Pixel 5 / Xiaomi 12 (Android) | OWED |
+| Touch pinch zoom + drag pan | iOS Simulator | OWED |
