@@ -2467,6 +2467,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-oauth-native"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.3.4",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-paths"
 version = "0.1.0"
 dependencies = [

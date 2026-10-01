@@ -11,7 +11,10 @@ resolver = "2"
 # plugins/video-player is a platform plugin like the ones before it (one Rust
 # video API over a per-OS player backend), listed explicitly for the same
 # reason.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
+# plugins/oauth-native is a pure-Rust protocol crate (RFC 8252 PKCE, state,
+# authorization URL, callback and token-grant helpers) with no platform code
+# and no frust-* dependency, listed explicitly beside plugins/auth-session.
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
 # plugins/{beui,cupertino,glyph,material,shadcn} are the design-system plugin
 # tier (listed alphabetically): the three catalogs that used to live in-tree
 # behind `frust-widgets` cargo features, plus two external-origin catalogs,
@@ -621,6 +624,19 @@ axum = "0.8"
 base64 = "0.22"
 # frust-mcp: the `CancellationToken` graceful-shutdown seam wired to ctrl-c.
 tokio-util = "0.7"
+# frust-oauth-native's PKCE verifier and `state` randomness — the OS CSPRNG
+# via `getrandom::fill`. Pinned to minor per the Version-Pin Policy (pre-1.0);
+# 0.3.4 is already in Cargo.lock through other crates.
+getrandom = "0.3"
+# frust-oauth-native's PKCE S256 challenge (SHA-256 of the verifier). Pinned
+# to minor per the Version-Pin Policy (pre-1.0); 0.10.9 is already locked.
+sha2 = "0.10"
+# frust-oauth-native's constant-time `state` comparison on the callback path.
+# Stable 2.x API; 2.6.1 is already locked.
+subtle = "2"
+# frust-oauth-native's RFC 3986 component and form-urlencoded encoders.
+# Stable 2.x API; 2.3.2 is already locked.
+percent-encoding = "2"
 # frust-engine's diagnostic microbenches (harness = false) — pinned to the
 # current release (0.8.2); never a compile or test gate.
 criterion = "0.8.2"
