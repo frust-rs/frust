@@ -52,8 +52,10 @@ use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
     CursorIcon, EditCommand, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent,
-    Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScaleEvent, ScalePhase,
+    ScrollDelta,
 };
+use frust_core::input::WHEEL_LINE_PX;
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
@@ -69,7 +71,7 @@ use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{
@@ -1217,6 +1219,78 @@ fn map_scroll_delta(delta: MouseScrollDelta, scale: f64) -> ScrollDelta {
     match delta {
         MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(-(x as f64), -(y as f64)),
         MouseScrollDelta::PixelDelta(px) => ScrollDelta::Pixels(-px.x / scale, -px.y / scale),
+    }
+}
+
+/// Multiplicative rate for the ctrl/⌘+wheel desktop zoom mapping: each
+/// wheel-notch "line" of vertical delta scales the view by a factor of
+/// `exp(WHEEL_SCALE_RATE_PER_LINE)` (~10% per notch).
+///
+/// **Community-approximate**: there is no published "the" wheel-zoom rate —
+/// this is chosen to match the feel of ctrl+wheel zoom in mainstream
+/// browsers and image viewers, where a handful of notches noticeably zooms
+/// the view without a single notch feeling abrupt.
+const WHEEL_SCALE_RATE_PER_LINE: f64 = 0.1;
+
+/// Map a winit [`MouseScrollDelta`] to a multiplicative
+/// [`ScaleEvent::scale_delta`] for the ctrl/⌘+wheel desktop zoom mapping.
+///
+/// Both delta shapes are first reduced to a line-equivalent vertical count —
+/// a `LineDelta` is already in lines; a `PixelDelta` is physical, so it is
+/// converted to logical px via `scale` and then to a line-equivalent count by
+/// dividing by [`WHEEL_LINE_PX`], the same constant `ScrollView` uses for a
+/// precision-trackpad delta — then fed through
+/// `exp(WHEEL_SCALE_RATE_PER_LINE * lines)`.
+///
+/// Sign: unlike [`map_scroll_delta`], the vertical component is **not**
+/// negated here. Winit's raw positive `y` is the wheel-up gesture (see that
+/// function's sign note — it is what `map_scroll_delta` negates into a
+/// negative `ScrollDelta`, which this function never produces), and wheel up
+/// must zoom in, so a positive raw `y` must map directly to a
+/// `scale_delta > 1.0`.
+///
+/// Pulled out as a free function, the same shape as [`map_scroll_delta`], so
+/// the mapping stays pure and directly unit-testable.
+fn map_wheel_scale_delta(delta: MouseScrollDelta, scale: f64) -> f64 {
+    let lines = match delta {
+        MouseScrollDelta::LineDelta(_, y) => y as f64,
+        MouseScrollDelta::PixelDelta(px) => (px.y / scale) / WHEEL_LINE_PX,
+    };
+    (WHEEL_SCALE_RATE_PER_LINE * lines).exp()
+}
+
+/// Whether `modifiers` holds the desktop ctrl/⌘+wheel zoom chord: ⌘ (`meta`)
+/// on macOS, `ctrl` on every other desktop OS (Linux, Windows) — the
+/// convention mainstream browsers and image viewers use for a discrete wheel
+/// zoom step.
+///
+/// Takes `is_macos` as a plain `bool` rather than gating the whole function
+/// behind `#[cfg(target_os = "macos")]`, so the OS branch itself stays
+/// directly unit-testable on any host — the same split `frust-paths`' per-OS
+/// directory-resolution helpers use. The call site passes `cfg!(target_os =
+/// "macos")`.
+fn wheel_zoom_chord_held(modifiers: Modifiers, is_macos: bool) -> bool {
+    if is_macos {
+        modifiers.meta
+    } else {
+        modifiers.ctrl
+    }
+}
+
+/// Map winit's wheel/pinch gesture bracket ([`TouchPhase`]) to [`ScalePhase`].
+///
+/// Shared by the `MouseWheel` zoom mapping and macOS's `PinchGesture`: an
+/// ordinary notch wheel reports `Moved` for every tick with no bracket of its
+/// own (a lone [`ScalePhase::Update`] stream), while a bracketed gesture —
+/// trackpad-driven scroll momentum, or a real pinch — reports `Started`/
+/// `Ended` around it. [`TouchPhase::Cancelled`] maps to
+/// [`ScalePhase::End`] too: [`ScalePhase`] carries no cancelled variant (see
+/// its docs).
+fn map_gesture_phase(phase: TouchPhase) -> ScalePhase {
+    match phase {
+        TouchPhase::Started => ScalePhase::Begin,
+        TouchPhase::Moved => ScalePhase::Update,
+        TouchPhase::Ended | TouchPhase::Cancelled => ScalePhase::End,
     }
 }
 
@@ -2655,15 +2729,59 @@ where
                 }
             }
 
-            // Both the unit and the sign conversion live in `map_scroll_delta`.
-            WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = map_scroll_delta(delta, window.scale_factor());
+            // ctrl (Linux/Windows) / ⌘ (macOS) held turns a wheel tick into a
+            // desktop zoom gesture instead of a scroll — see
+            // `wheel_zoom_chord_held`/`map_wheel_scale_delta`. The wheel's own
+            // gesture bracket (`phase`, discarded on the plain-scroll arm
+            // above a moment ago but read here) becomes the `Scale` event's
+            // phase via `map_gesture_phase`; the focal point is the last
+            // known cursor position, exactly like the plain scroll's.
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                if wheel_zoom_chord_held(self.modifiers, cfg!(target_os = "macos")) {
+                    let scale_delta = map_wheel_scale_delta(delta, window.scale_factor());
+                    self.dispatch(
+                        &window,
+                        InputEvent::Scale(ScaleEvent {
+                            phase: map_gesture_phase(phase),
+                            scale_delta,
+                            focal: self.cursor,
+                            // Neither a notch wheel nor a precision trackpad's
+                            // `MouseWheel` delta carries a rate — only
+                            // winit's `PinchGesture`/a touch recognizer would.
+                            velocity: 0.0,
+                        }),
+                    );
+                } else {
+                    let scroll = map_scroll_delta(delta, window.scale_factor());
+                    self.dispatch(
+                        &window,
+                        InputEvent::Scroll {
+                            position: self.cursor,
+                            delta: scroll,
+                        },
+                    );
+                }
+            }
+
+            // macOS/iOS-only two-finger trackpad pinch (see winit's
+            // `PinchGesture` docs). Winit never emits this variant on
+            // Linux/Windows at this winit pin, so a trackpad pinch there has
+            // no desktop `Scale` source yet — only the ctrl/⌘+wheel mapping
+            // above (a `docs/LIMITATIONS.md` row to add, not yet recorded).
+            // `delta` is already the multiplicative increment winit reports
+            // (positive magnifies), so `scale_delta = 1.0 + delta` turns it
+            // into the same "multiply the running scale" contract the wheel
+            // mapping above produces.
+            WindowEvent::PinchGesture { delta, phase, .. } => {
                 self.dispatch(
                     &window,
-                    InputEvent::Scroll {
-                        position: self.cursor,
-                        delta: scroll,
-                    },
+                    InputEvent::Scale(ScaleEvent {
+                        phase: map_gesture_phase(phase),
+                        scale_delta: 1.0 + delta,
+                        focal: self.cursor,
+                        // winit's `PinchGesture` carries no velocity either.
+                        velocity: 0.0,
+                    }),
                 );
             }
 
@@ -2967,15 +3085,16 @@ mod tests {
     use super::{
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, LogicalSize,
-        MouseScrollDelta, NoExtensions, PasteText, ShellUserEvent, Tree, TreeId, WindowKnobSource,
-        WinitCursorIcon, WinitKey, WinitNamedKey, WinitTheme, apply_window_size, base_theme,
-        brightness_change_to_notify, brightness_from_winit, build_tree_update, clipboard_loop,
-        clipboard_warning, cursor_change_to_apply, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers,
-        map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
+        MouseScrollDelta, NoExtensions, PasteText, ShellUserEvent, Tree, TreeId,
+        WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey, WinitNamedKey,
+        WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
+        brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
+        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
+        map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
+        map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
         parse_window_maximized, parse_window_size, paste_answer_dispatch, paste_input_event,
-        physical_to_logical, resolved_window_knob, theme_after_override_poll, window_attributes,
-        winit_cursor_for,
+        physical_to_logical, resolved_window_knob, theme_after_override_poll,
+        wheel_zoom_chord_held, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
@@ -2987,12 +3106,13 @@ mod tests {
     // down already imports it from `super`, and this module is one scope.
     use frust_core::event::{
         CursorIcon, EditCommand, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey,
-        PointerButton, ScrollDelta,
+        PointerButton, ScalePhase, ScrollDelta,
     };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
     use winit::dpi::PhysicalPosition;
     use winit::event::MouseButton;
+    use winit::event::TouchPhase;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
 
@@ -3709,6 +3829,74 @@ mod tests {
             ),
             ScrollDelta::Pixels(-10.0, -30.0)
         );
+    }
+
+    // --- map_wheel_scale_delta / wheel_zoom_chord_held / map_gesture_phase ---
+
+    #[test]
+    fn map_wheel_scale_delta_wheel_up_zooms_in() {
+        // Unlike `map_scroll_delta`, the sign is NOT flipped: winit's raw
+        // positive `y` (the wheel-up gesture) must map directly to
+        // `scale_delta > 1.0`.
+        let zoom_in = map_wheel_scale_delta(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
+        assert!(zoom_in > 1.0, "wheel up must zoom in, got {zoom_in}");
+        assert_eq!(zoom_in, (WHEEL_SCALE_RATE_PER_LINE).exp());
+    }
+
+    #[test]
+    fn map_wheel_scale_delta_wheel_down_zooms_out() {
+        let zoom_out = map_wheel_scale_delta(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
+        assert!(zoom_out < 1.0, "wheel down must zoom out, got {zoom_out}");
+        assert_eq!(zoom_out, (-WHEEL_SCALE_RATE_PER_LINE).exp());
+    }
+
+    #[test]
+    fn map_wheel_scale_delta_is_a_no_op_at_zero_lines() {
+        assert_eq!(
+            map_wheel_scale_delta(MouseScrollDelta::LineDelta(0.0, 0.0), 1.0),
+            1.0
+        );
+    }
+
+    #[test]
+    fn map_wheel_scale_delta_scales_pixel_deltas_by_the_line_height() {
+        // A 2x HiDPI display: a physical 80px vertical delta is logical 40px,
+        // which is exactly one `WHEEL_LINE_PX` (40.0) — one line-equivalent.
+        let one_line = map_wheel_scale_delta(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 80.0)),
+            2.0,
+        );
+        assert_eq!(one_line, WHEEL_SCALE_RATE_PER_LINE.exp());
+    }
+
+    #[test]
+    fn wheel_zoom_chord_held_gates_on_meta_for_macos_and_ctrl_elsewhere() {
+        let ctrl_only = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let meta_only = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        // macOS: ⌘ (meta) holds the chord, ctrl alone does not.
+        assert!(wheel_zoom_chord_held(meta_only, true));
+        assert!(!wheel_zoom_chord_held(ctrl_only, true));
+        // Linux/Windows: ctrl holds the chord, meta (Super) alone does not —
+        // Super+wheel is left for the host's own window-management shortcuts.
+        assert!(wheel_zoom_chord_held(ctrl_only, false));
+        assert!(!wheel_zoom_chord_held(meta_only, false));
+        // Neither modifier held zooms nothing, on either OS.
+        assert!(!wheel_zoom_chord_held(Modifiers::default(), true));
+        assert!(!wheel_zoom_chord_held(Modifiers::default(), false));
+    }
+
+    #[test]
+    fn map_gesture_phase_brackets_started_moved_ended() {
+        assert_eq!(map_gesture_phase(TouchPhase::Started), ScalePhase::Begin);
+        assert_eq!(map_gesture_phase(TouchPhase::Moved), ScalePhase::Update);
+        assert_eq!(map_gesture_phase(TouchPhase::Ended), ScalePhase::End);
+        assert_eq!(map_gesture_phase(TouchPhase::Cancelled), ScalePhase::End);
     }
 
     #[test]

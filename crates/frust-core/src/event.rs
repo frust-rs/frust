@@ -248,6 +248,54 @@ pub enum ScrollDelta {
     Pixels(f64, f64),
 }
 
+/// The lifecycle phase of a scale (pinch/zoom) gesture.
+///
+/// No `Cancel`: every shipped source — the desktop ctrl/⌘+wheel mapping and
+/// macOS's `PinchGesture` — reports a clean bracket (or, for an ordinary
+/// notch wheel, a lone [`Update`](ScalePhase::Update) with no bracket at
+/// all), so there is nothing yet for a cancelled variant to mean. Widened the
+/// day a source needs one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalePhase {
+    /// The gesture began.
+    Begin,
+    /// The gesture continued; the event's `scale_delta`/`focal`/`velocity`
+    /// describe this increment.
+    Update,
+    /// The gesture ended normally.
+    End,
+}
+
+/// A scale (pinch/zoom) gesture event — [`InputEvent::Scroll`]'s hit-tested
+/// sibling, carrying a *multiplicative* delta and a focal point rather than
+/// an additive one.
+///
+/// Any source that reports a scale-factor change rather than individual
+/// contact moves reduces to this one event — a desktop shell's ctrl/⌘+wheel
+/// mapping, macOS's `PinchGesture`, and eventually a touch two-finger pinch
+/// recognizer — so a widget reacts to pinch-to-zoom the same way regardless
+/// of input device.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScaleEvent {
+    /// The gesture phase.
+    pub phase: ScalePhase,
+    /// The multiplicative scale change this event represents — not a running
+    /// total. A consumer multiplies its own accumulated scale by this value
+    /// each time an event arrives: `1.0` is a no-op, `>1.0` zooms in, `<1.0`
+    /// zooms out.
+    pub scale_delta: f64,
+    /// Where the gesture is centered, in the receiving widget's local
+    /// logical space — the point that must stay visually fixed while scale
+    /// changes. Translated like [`InputEvent::Pointer`]'s position by the
+    /// container chain that routes it (see [`InputEvent::translated`]).
+    pub focal: Point,
+    /// The gesture's current rate of scale change, per second. `0.0` when the
+    /// source reports none — every shipped desktop source today, since
+    /// neither a wheel notch nor winit's `PinchGesture` carries a velocity —
+    /// reserved for a recognizer that tracks contact velocity directly.
+    pub velocity: f64,
+}
+
 /// A named (non-character) key: the control keys an editable widget reacts to.
 ///
 /// Character-producing keys arrive as [`Key::Character`] (already resolved to the
@@ -518,6 +566,19 @@ pub enum OverlayEventKind {
         /// How much to scroll.
         delta: ScrollDelta,
     },
+    /// A scale gesture inside the surface's rect, focal point in window
+    /// space — the overlay mirror of [`InputEvent::Scale`], routed here on
+    /// exactly the same hit-test terms as [`Scroll`](OverlayEventKind::Scroll).
+    Scale {
+        /// Where the gesture is centered, in absolute window space.
+        focal: Point,
+        /// The gesture phase.
+        phase: ScalePhase,
+        /// The multiplicative scale change this event represents.
+        scale_delta: f64,
+        /// The gesture's current rate of scale change, per second.
+        velocity: f64,
+    },
     /// A primary press landed outside **every** registered surface — the
     /// light-dismiss notification, delivered only to entries registered
     /// [`OutsideTap::Notify`](crate::overlay::OutsideTap::Notify). It carries no
@@ -529,12 +590,13 @@ pub enum OverlayEventKind {
 
 /// An input event delivered to the widget tree.
 ///
-/// Pointer gestures and scroll are **hit-tested** (routed by position); keyboard,
-/// IME, and edit-command events are **focus-routed** — delivered straight down
-/// the recorded focus chain with no hit test and no meaningful position (see
-/// [`crate::widget::ChildPod`]'s focus bookkeeping and `frust-widgets`'
-/// `route_event`). [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`] are
-/// neither: they are **broadcasts** that reach every child unconditionally.
+/// Pointer gestures, scroll, and scale are **hit-tested** (routed by position);
+/// keyboard, IME, and edit-command events are **focus-routed** — delivered
+/// straight down the recorded focus chain with no hit test and no meaningful
+/// position (see [`crate::widget::ChildPod`]'s focus bookkeeping and
+/// `frust-widgets`' `route_event`). [`InputEvent::Housekeeping`] and
+/// [`InputEvent::Overlay`] are neither: they are **broadcasts** that reach
+/// every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A pointer (mouse/touch/pen) gesture event.
@@ -606,6 +668,11 @@ pub enum InputEvent {
         /// How much to scroll.
         delta: ScrollDelta,
     },
+    /// A scale (pinch/zoom) gesture event — hit-tested exactly like
+    /// [`Scroll`](InputEvent::Scroll), by its [`ScaleEvent::focal`] point, and
+    /// bubbles up the tree until a widget reports [`EventResult::Handled`].
+    /// See [`ScaleEvent`] for the field contract.
+    Scale(ScaleEvent),
     /// A keyboard key event, routed down the focus path (no hit test).
     Key(KeyEvent),
     /// An IME event, routed down the focus path (no hit test).
@@ -693,7 +760,9 @@ pub enum InputEvent {
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
-    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
+    /// [`InputEvent::Scale`] reports its [`ScaleEvent::focal`] point here, the
+    /// same way [`InputEvent::Scroll`] reports `position`. Focus-routed events
+    /// ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the two broadcasts
     /// ([`Housekeeping`](InputEvent::Housekeeping) and
     /// [`Overlay`](InputEvent::Overlay)) have no spatial position — they are
@@ -707,6 +776,7 @@ impl InputEvent {
         match self {
             InputEvent::Pointer(p) | InputEvent::PointerContact { event: p, .. } => p.position,
             InputEvent::Scroll { position, .. } => *position,
+            InputEvent::Scale(scale) => scale.focal,
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -719,7 +789,9 @@ impl InputEvent {
     ///
     /// Containers use this (with `offset = -child_origin`) to translate an event
     /// from their own coordinate space into a child's local space before
-    /// forwarding it — see [`crate::widget::ChildPod::event_child`]. Focus-routed
+    /// forwarding it — see [`crate::widget::ChildPod::event_child`].
+    /// [`InputEvent::Scale`] shifts its [`ScaleEvent::focal`] point the same way
+    /// [`InputEvent::Scroll`] shifts its `position`. Focus-routed
     /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the
     /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
@@ -746,6 +818,10 @@ impl InputEvent {
                 position: *position + offset,
                 delta: *delta,
             },
+            InputEvent::Scale(scale) => InputEvent::Scale(ScaleEvent {
+                focal: scale.focal + offset,
+                ..*scale
+            }),
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
