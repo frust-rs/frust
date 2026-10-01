@@ -34,7 +34,9 @@
 //! manifest permission or plist key, since Custom Tabs carry no permission,
 //! the `<queries>` element comes from the module's own manifest via the
 //! manifest merger, and ASWebAuthenticationSession needs no plist key;
-//! desktop uses the RFC 8252 loopback backend (`LoopbackSession`) — see `AUTH_SESSION_BASE`'s doc comment),
+//! desktop uses the RFC 8252 loopback backend (`LoopbackSession`) on Linux, Windows and
+//! macOS, and custom-scheme start on Linux/Windows still reports NoHandler — see
+//! `AUTH_SESSION_BASE`'s doc comment),
 //! `oauth-native` (dependency only — OAuth 2.0 native-app helper with PKCE,
 //! state, authorization URL, and callback/token-response parsing; pure Rust,
 //! no HTTP client or async; the app owns the token endpoint's transport),
@@ -351,8 +353,9 @@ const URL_LAUNCHER: PluginSpec = PluginSpec {
 /// link of this plugin failed on that symbol. The `<queries>` element for the
 /// CustomTabsService comes from the module's own manifest via the manifest merger
 /// — the app's manifest is never touched. Desktop (Linux/Windows/macOS) uses the
-/// RFC 8252 loopback backend (`LoopbackSession`), with custom-scheme start
-/// reporting `NoHandler`.
+/// RFC 8252 loopback backend (`LoopbackSession`); on Linux and Windows a
+/// custom-scheme `AuthSession::start` still reports `NoHandler` (macOS answers
+/// it with ASWebAuthenticationSession).
 const AUTH_SESSION_BASE: &[Contribution] = &[
     Contribution::CargoDep {
         name: "frust-auth-session",
@@ -371,8 +374,8 @@ const AUTH_SESSION: PluginSpec = PluginSpec {
     summary: "OAuth round trip in the platform auth user agent — ASWebAuthenticationSession \
               (iOS/macOS, in-process callback) or Chrome Custom Tabs (Android, Gradle module) — \
               resolving Callback(url)/Cancelled with an ephemeral mode; desktop (Linux/Windows/macOS) \
-              uses the RFC 8252 loopback backend (`LoopbackSession`), custom-scheme start there \
-              reports NoHandler.",
+              uses the RFC 8252 loopback backend (`LoopbackSession`); on Linux/Windows a \
+              custom-scheme start still reports NoHandler.",
     crate_dir: "auth-session",
     base: AUTH_SESSION_BASE,
     optional_features: &[],
