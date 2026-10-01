@@ -117,8 +117,8 @@ URL and, for the round-trip cases below, a `frustplay://` return link:
   -D warnings` and `cargo clippy -p frust-url-launcher --target aarch64-apple-ios-sim -- -D
   warnings`; the Windows arm (`windows-sys 0.61`, pinned in [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md))
   gets `cargo check --target x86_64-pc-windows-gnu -p frust-url-launcher` per
-  [DEVELOPMENT.md](DEVELOPMENT.md)'s cross-target Prerequisites — compile-checked only, until a real
-  Windows rig runs it (`url-launcher-windows-leg-unrun` in [LIMITATIONS.md](LIMITATIONS.md)).
+  [DEVELOPMENT.md](DEVELOPMENT.md)'s cross-target Prerequisites; the arm itself has also built and
+  run natively on the Windows 11 rig (`plugins/url-launcher/README.md` §6, *Windows*, 2026-10-01).
 
 ## Auth-session manual test (Android + iOS + macOS)
 
