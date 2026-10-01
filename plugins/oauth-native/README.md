@@ -133,8 +133,14 @@ let form = refresh_token_grant(&refresh_token, "example-app", None, &[]);
 
 - **S256 only.** There is no `plain` PKCE method anywhere in the API. A
   generated verifier is 64 characters (384 bits).
-- **`state` is 256 bits** from the OS random source, and the callback
-  compares it in constant time.
+- **`state` is 256 bits** from the OS random source when generated; for
+  caller-supplied values, a minimum of 22 characters (128 bits of entropy) is
+  enforced. The callback compares it in constant time.
+- **ID tokens are unvalidated.** The `id_token` field is returned exactly as
+  the server sent it. Before trusting it, validate it per OpenID Connect Core
+  §3.1.3.7 (signature against the issuer's keys, `iss`, `aud`, `exp`, and
+  `nonce` if present). This crate sends no `nonce` and performs no ID-token
+  validation.
 - **The `iss` policy has no skip.** `IssuerCheck::Required` demands a
   matching `iss`; `IssuerCheck::IfPresent` accepts its absence but still
   rejects a mismatch (RFC 9207 §2.4). Use `from_metadata` so the server's

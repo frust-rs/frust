@@ -53,6 +53,9 @@ pub enum PkceError {
     /// An empty `state` value.
     #[error("state value is empty")]
     EmptyState,
+    /// A `state` value shorter than 22 characters (128 bits of entropy).
+    #[error("state value length {0} is below the 22-character floor")]
+    ShortState(usize),
     /// The random source failed while generating a value.
     #[error(transparent)]
     Random(#[from] RandomError),
@@ -158,11 +161,15 @@ impl State {
         Ok(Self(URL_SAFE_NO_PAD.encode(bytes)))
     }
 
-    /// Wraps an existing `state` value, which must be non-empty and drawn
-    /// from `[A-Za-z0-9-._~]`.
+    /// Wraps an existing `state` value, which must be at least 22 characters
+    /// (128 bits of entropy) and drawn from `[A-Za-z0-9-._~]`.
     pub fn from_string(state: String) -> Result<Self, PkceError> {
         if state.is_empty() {
             return Err(PkceError::EmptyState);
+        }
+        let len = state.chars().count();
+        if len < 22 {
+            return Err(PkceError::ShortState(len));
         }
         if !is_unreserved(&state) {
             return Err(PkceError::InvalidCharacter);
@@ -268,18 +275,43 @@ mod tests {
             State::from_string(String::new()).unwrap_err(),
             PkceError::EmptyState
         );
+        // Short strings are rejected for length before character validation
         assert_eq!(
             State::from_string("a b".to_string()).unwrap_err(),
+            PkceError::ShortState(3)
+        );
+        // Long strings with invalid characters are rejected for charset
+        assert_eq!(
+            State::from_string("a".repeat(22) + " ").unwrap_err(),
             PkceError::InvalidCharacter
         );
         assert_eq!(
-            State::from_string("a&b".to_string()).unwrap_err(),
+            State::from_string("a".repeat(22) + "&").unwrap_err(),
             PkceError::InvalidCharacter
         );
+    }
+
+    #[test]
+    fn state_from_string_rejects_too_short() {
         assert_eq!(
-            State::from_string("xyz".to_string()).unwrap().as_str(),
-            "xyz"
+            State::from_string("a".repeat(21)).unwrap_err(),
+            PkceError::ShortState(21)
         );
+    }
+
+    #[test]
+    fn state_from_string_accepts_22_chars_unreserved() {
+        let state = State::from_string("a".repeat(22)).unwrap();
+        assert_eq!(state.as_str().len(), 22);
+        let state = State::from_string("-._~".repeat(6)).unwrap(); // 24 chars
+        assert_eq!(state.as_str().len(), 24);
+    }
+
+    #[test]
+    fn generated_state_roundtrips_through_from_string() {
+        let generated = State::generate().unwrap();
+        let state = State::from_string(generated.as_str().to_string()).unwrap();
+        assert_eq!(state.as_str(), generated.as_str());
     }
 
     #[test]
@@ -289,9 +321,9 @@ mod tests {
         assert_eq!(shown, "PkceVerifier(<redacted>)");
         assert!(!shown.contains(RFC_VERIFIER));
 
-        let state = State::from_string("secret-state-value".to_string()).unwrap();
+        let state = State::from_string("secret-state-value-minimum22".to_string()).unwrap();
         let shown = format!("{state:?}");
         assert_eq!(shown, "State(<redacted>)");
-        assert!(!shown.contains("secret-state-value"));
+        assert!(!shown.contains("secret-state-value-minimum22"));
     }
 }

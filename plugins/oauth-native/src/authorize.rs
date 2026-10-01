@@ -172,7 +172,7 @@ mod tests {
     const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
     fn fixtures() -> (State, PkceChallenge) {
-        let state = State::from_string("st4te-value_~".to_string()).unwrap();
+        let state = State::from_string("st4te-value_~.st4te-value".to_string()).unwrap();
         let challenge = PkceVerifier::from_string(VERIFIER.to_string())
             .unwrap()
             .challenge();
@@ -200,7 +200,7 @@ mod tests {
             format!(
                 "https://as.example/authorize?response_type=code&client_id=client%201\
                  &redirect_uri=com.example.app%3A%2Foauth%2Fcallback\
-                 &scope=openid%20profile%20caf%C3%A9&state=st4te-value_~\
+                 &scope=openid%20profile%20caf%C3%A9&state=st4te-value_~.st4te-value\
                  &code_challenge={CHALLENGE}&code_challenge_method=S256"
             )
         );

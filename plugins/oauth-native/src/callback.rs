@@ -362,7 +362,7 @@ mod tests {
     const LOOPBACK: &str = "http://127.0.0.1:53121/oauth/callback";
     const ISSUER: &str = "https://as.example";
     const ISS_ENC: &str = "https%3A%2F%2Fas.example";
-    const STATE: &str = "xyzSTATE-123_~";
+    const STATE: &str = "xyzSTATE-123_~xyzSTATE-123";
     const CODE: &str = "SplxlOBeZQQYbYS6WxSbIA";
 
     fn exp(redirect: &str, issuer: IssuerCheck) -> CallbackExpectations {
