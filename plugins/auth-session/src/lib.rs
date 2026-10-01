@@ -128,8 +128,9 @@
 //! 3. A cancel, dropping the future, or [`LoopbackOptions::timeout`] all
 //!    take effect within about one poll interval (25 ms), even while a
 //!    connection is being served — the one exception is a response write
-//!    already in progress. The listener accepts exactly one callback,
-//!    then stops.
+//!    already in progress, bounded by the 2 s connection I/O timeout (see
+//!    [`LoopbackSession::start`] and [`LoopbackCancel`] for the residual
+//!    local-stall bound). The listener accepts exactly one callback, then stops.
 //! 4. Connections are served one at a time, each with a 2 s / 8 KiB budget
 //!    for its request head. A request must be a well-formed
 //!    `HTTP/1.0`/`HTTP/1.1` request line with a printable-ASCII,
