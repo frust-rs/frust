@@ -277,6 +277,47 @@ pub use frust_core::{
 /// with the slot's placement.
 pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 
+/// Declarative custom painting over the [`PaintScene`] trait object — a chart,
+/// a node-and-edge graph, a game board — without hand-rolling a `View`/
+/// `Widget` pair. [`canvas`] takes a paint closure that runs in **local
+/// space** (the widget's own top-left is always `(0, 0)`, and painting past
+/// its own size is clipped, never a bug to chase) — flat-re-exported from
+/// `frust-widgets` so app code never names that crate directly. See
+/// [`CanvasView`]'s own doc for the full builder contract (`.size`/`.expand`
+/// sizing, `.on_hit`-gated `.on_tap`/`.on_pointer`, and `.repaint_key` for
+/// paint-only dirtying driven by data outside the ordinary `View` diff).
+///
+/// ```no_run
+/// use frust::authoring::{PaintCtx, PaintScene};
+/// use frust::{AnyView, Component, any, canvas};
+/// use kurbo::{Point, Size};
+/// use peniko::Color;
+///
+/// #[derive(Default)]
+/// struct Clock;
+///
+/// impl Component for Clock {
+///     type State = u32;
+///
+///     fn init(&self) -> Self::State {
+///         0
+///     }
+///
+///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///         let ticks = *state;
+///         any(canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x10, 0x10, 0x10));
+///         })
+///         .expand()
+///         .repaint_key(ticks))
+///     }
+/// }
+///
+/// frust::app!(Clock);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
+
 /// The vendored Material Symbols starter icon set,
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
 /// underlying `frust-widgets` crate. Each entry is an

@@ -30,6 +30,7 @@
 mod align;
 pub mod authoring;
 mod button;
+mod canvas;
 mod checkbox;
 mod container;
 mod divider;
@@ -61,6 +62,7 @@ use std::hash::{Hash, Hasher};
 
 pub use align::{Align, AlignView, AlignWidget, Alignment};
 pub use button::{Button, ButtonStyle, ButtonView, ButtonWidget, button};
+pub use canvas::{CanvasView, CanvasWidget, canvas};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use container::{BorderStyle, ContainerView, ContainerWidget, colored_box, container};
 pub use divider::{DividerView, DividerWidget, divider};
