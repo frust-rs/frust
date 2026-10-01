@@ -54,7 +54,8 @@
 //! - exactly one `Host` header is present and it equals `127.0.0.1:<port>`
 //!   (ASCII-case-insensitively) — this is the DNS-rebinding defence: a web
 //!   page that resolves its own hostname to `127.0.0.1` still sends its own
-//!   hostname as `Host` (else `400`);
+//!   hostname as `Host` (else `400`); a duplicated `Sec-Fetch-Mode` or
+//!   `Sec-Fetch-Dest` header is likewise `400`;
 //! - the method is `GET` — `HEAD`, `POST` and everything else are `404`;
 //! - the target's path (the bytes before the first `?`) equals the reserved
 //!   path exactly (else `404`);
