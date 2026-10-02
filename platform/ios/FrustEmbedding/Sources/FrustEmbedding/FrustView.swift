@@ -405,19 +405,11 @@ final class FrustView: UIView {
         if let existing = touchSlots[id] {
             return existing
         }
-        // Find the lowest free slot
         let assigned: UInt32
-        var foundFreeSlot = false
-        for (i, isFree) in freeSlots.enumerated() {
-            if isFree {
-                assigned = UInt32(i)
-                freeSlots[i] = false
-                foundFreeSlot = true
-                break
-            }
-        }
-        if !foundFreeSlot {
-            // No free slot found, assign the next slot after all current ones
+        if let free = freeSlots.firstIndex(of: true) {
+            freeSlots[free] = false
+            assigned = UInt32(free)
+        } else {
             assigned = UInt32(freeSlots.count)
             freeSlots.append(false)
         }
