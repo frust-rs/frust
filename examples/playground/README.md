@@ -186,7 +186,7 @@ Simulator app for Option-drag, and `idb` injects one contact only.
 | Graph: Fit reframes the whole graph | PASS | PASS |
 
 Android legs, Pixel 5 (redfin), Android 14. The first legs below ran at build
-`8a263d79`; the node-first pinch leg, exercising the f3-01/f3-02 live
+`8a263d79`; the node-first pinch leg, exercising the live
 multi-contact veto fix, ran at build `2e084ef5`.
 
 | Leg | Pixel 5 |
