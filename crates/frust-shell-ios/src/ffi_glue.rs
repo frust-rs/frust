@@ -1285,19 +1285,16 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
 /// (`0`=began, `1`=moved, `2`=ended, `3`=cancelled — see
 /// [`crate::ffi_support::touch_phase_from_code`]); `pointer_id` is the
 /// Swift-derived per-sequence slot (`0` for a gesture's first-down touch,
-/// counting up for each additional live contact — the shared shell convention
-/// mirrored by Android) that [`IosAppHandle::dispatch_touch`] stamps onto a
+/// reusing the lowest free slot for each additional live contact — matching
+/// Android's slot-assignment rule) that [`IosAppHandle::dispatch_touch`] stamps onto a
 /// [`frust_core::event::PointerId::touch`]; `x`/`y` are logical points
 /// (`touch.location(in:)`), passed straight through (no scale division — see the
 /// asymmetry note on [`IosAppHandle::dispatch_touch`]).
 ///
-/// **ABI note:** this is the signature the *internal* Rust helper takes; the
-/// `#[no_mangle] extern "C" fn frust_dispatch_touch` the Swift side actually
-/// calls is stamped out by [`crate::ios_app!`] in `lib.rs`, and the C
-/// declaration lives in the generated app's hand-kept header
-/// (`platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`) —
-/// both still need the matching `pointer_id: u32` parameter added, in the
-/// same position, as a follow-up (tracked outside this change).
+/// **ABI note:** this internal helper, the `#[no_mangle] extern "C" fn frust_dispatch_touch`
+/// export stamped out by [`crate::ios_app!`] in `lib.rs`, and the C declaration in the
+/// generated app's hand-kept header (`platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`)
+/// must have matching signatures and must change together.
 pub fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x: f32, y: f32) {
     guard("frust_dispatch_touch", (), || {
         // Cheap; keeps controller-driven updates fresh between CADisplayLink

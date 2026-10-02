@@ -392,22 +392,36 @@ final class FrustView: UIView {
     /// next gesture's first-down touch restarts at slot 0 — the identity a
     /// bare single-touch gesture has always reported.
     private var touchSlots: [ObjectIdentifier: UInt32] = [:]
-    /// The next unused slot in the current gesture — monotonic within a
-    /// gesture (never reused while any contact from it is still live), reset
-    /// to 0 alongside [touchSlots] when the gesture ends.
-    private var nextTouchSlot: UInt32 = 0
+    /// Tracks which slots are free in the current gesture. Index = slot number;
+    /// value = whether free. When all contacts are up, this is cleared and slot
+    /// assignment resets to 0 naturally (see [slot(for:)]).
+    private var freeSlots: [Bool] = []
 
     /// The stable slot for `touch`: its existing one if this isn't the first
-    /// callback to see it, otherwise the next free slot (first-down touch of
-    /// a gesture is always 0; see [touchSlots]).
+    /// callback to see it, otherwise the lowest currently-free slot (first-down
+    /// touch of a gesture is always 0; see [touchSlots]).
     private func slot(for touch: UITouch) -> UInt32 {
         let id = ObjectIdentifier(touch)
         if let existing = touchSlots[id] {
             return existing
         }
-        let assigned = nextTouchSlot
+        // Find the lowest free slot
+        let assigned: UInt32
+        var foundFreeSlot = false
+        for (i, isFree) in freeSlots.enumerated() {
+            if isFree {
+                assigned = UInt32(i)
+                freeSlots[i] = false
+                foundFreeSlot = true
+                break
+            }
+        }
+        if !foundFreeSlot {
+            // No free slot found, assign the next slot after all current ones
+            assigned = UInt32(freeSlots.count)
+            freeSlots.append(false)
+        }
         touchSlots[id] = assigned
-        nextTouchSlot += 1
         return assigned
     }
 
@@ -448,18 +462,24 @@ final class FrustView: UIView {
     /// slot (see [slot(for:)]).
     ///
     /// A `touchesEnded`/`touchesCancelled` callback additionally retires the
-    /// touch's slot — it will never be seen again — and once no touch is
-    /// left live, resets [nextTouchSlot] so the next gesture's first contact
-    /// is slot 0 again.
+    /// touch's slot by marking it free — it can be reused by a later touch.
+    /// Once no touch is left live, resets [freeSlots] so the next gesture's
+    /// first contact is slot 0 again.
     private func forward(_ touches: Set<UITouch>, phase: UInt32) {
         for touch in touches {
-            onTouch?(phase, slot(for: touch), touch.location(in: self))
+            let touchSlot = slot(for: touch)
+            onTouch?(phase, touchSlot, touch.location(in: self))
             if phase == 2 || phase == 3 {
-                touchSlots.removeValue(forKey: ObjectIdentifier(touch))
+                let id = ObjectIdentifier(touch)
+                touchSlots.removeValue(forKey: id)
+                // Mark the slot as free
+                if touchSlot < UInt32(freeSlots.count) {
+                    freeSlots[Int(touchSlot)] = true
+                }
             }
         }
         if touchSlots.isEmpty {
-            nextTouchSlot = 0
+            freeSlots.removeAll()
         }
     }
 }

@@ -16,13 +16,13 @@
 //!
 //! A browser's `WindowEvent::Touch` carries a per-finger `id` (multiple
 //! concurrent contacts are routine — two-finger scroll, pinch). [`TouchTracker`]
-//! maps every winit touch `id` to a per-sequence **slot**: the first concurrent
-//! contact opens slot 0, later contacts get slots 1, 2, etc., and all slots
-//! reset to zero when the last contact ends. Each contact emits
+//! maps every winit touch `id` to a per-sequence **slot**: the lowest currently-free
+//! slot is assigned to a new contact (0 for the first, any vacated slot for a later one),
+//! and all slots reset to zero when the last contact ends. Each contact emits
 //! [`InputEvent::PointerContact`] with [`PointerId::touch(slot)`], so the root
 //! can route multi-finger gestures to widgets that opted into
 //! [`EventCtx::capture_contacts`]. The slot semantics match the mobile shells'
-//! multi-contact model (see `frust-shell-android`'s `dispatch_touch`) and close
+//! multi-contact model (see `frust-shell-android`'s `TouchSlotMap::assign`) and close
 //! the hybrid mouse+touch latch bug by making slot 0 contact delivery distinguish
 //! touch from the mouse (which always reports [`PointerId::MOUSE`]): when no
 //! capture holds, slot 0 is hit-tested like the mouse, and slot ≥1 contacts are
@@ -48,17 +48,17 @@ pub fn map_touch_phase(phase: WinitTouchPhase) -> PointerPhase {
     }
 }
 
-/// Maps winit touch `id`s to per-sequence slots (0 for first concurrent contact,
-/// 1+ for later, reset when all are up) and emits [`InputEvent::PointerContact`]
-/// for each contact so the root can route multi-finger gestures to widgets that
-/// opted into multi-contact capture — see the module doc for the multi-contact
-/// contract.
+/// Maps winit touch `id`s to per-sequence slots (lowest-free-slot reuse, reset when
+/// all are up) and emits [`InputEvent::PointerContact`] for each contact so the root
+/// can route multi-finger gestures to widgets that opted into multi-contact capture
+/// — see the module doc for the multi-contact contract.
 #[derive(Debug, Default, Clone)]
 pub struct TouchTracker {
     /// Maps each active winit `id` to its assigned slot.
     active_ids: HashMap<u64, u32>,
-    /// The next slot to assign to a new `Started` contact.
-    next_slot: u32,
+    /// Tracks which slots are currently free. Index = slot number; value = whether free.
+    /// Only slots up to the highest assigned slot are meaningful.
+    free_slots: Vec<bool>,
 }
 
 impl TouchTracker {
@@ -71,17 +71,17 @@ impl TouchTracker {
     /// device-physical location — mapped to an [`InputEvent::PointerContact`] with
     /// its assigned slot, or `None` when the contact should be dropped.
     ///
-    /// - A `Started` assigns this `id` a new slot (starting at 0 when the tracker
-    ///   is empty) and maps through as `Down`. A duplicate `Started` for an `id`
-    ///   that is already active is dropped as a malformed event.
-    /// - A `Moved`/`Ended`/`Cancelled` maps through only when `id` has been
-    ///   assigned a slot; on `Ended`/`Cancelled` the id is cleared and the slot
-    ///   is freed. When all contacts are up, `next_slot` resets to 0 so the next
-    ///   gesture's first contact opens slot 0 again.
-    /// - A `Moved`/`Ended`/`Cancelled` for an id that was never `Started` (or
-    ///   whose `Started` was malformed and dropped) is dropped too — its `Started`
-    ///   was never delivered, so delivering any of its later phases would hand the
-    ///   tree an unpaired event.
+    /// - A `Started` assigns this `id` the lowest currently-free slot and maps through
+    ///   as `Down`. A duplicate `Started` for an `id` that is already active is dropped
+    ///   as a malformed event.
+    /// - A `Moved`/`Ended`/`Cancelled` maps through only when `id` has been assigned
+    ///   a slot; on `Ended`/`Cancelled` the id is cleared and its slot is freed for
+    ///   reuse. When all contacts are up, the free-slot tracking resets (naturally
+    ///   falling out as a consequence of all slots becoming free).
+    /// - A `Moved`/`Ended`/`Cancelled` for an id that was never `Started` (or whose
+    ///   `Started` was malformed and dropped) is dropped too — its `Started` was never
+    ///   delivered, so delivering any of its later phases would hand the tree an
+    ///   unpaired event.
     pub fn touch(
         &mut self,
         id: u64,
@@ -95,9 +95,14 @@ impl TouchTracker {
                 if self.active_ids.contains_key(&id) {
                     return None; // Duplicate Started for the same id
                 }
-                let slot = self.next_slot;
+                // Find the lowest free slot
+                let slot = self.find_lowest_free_slot();
                 self.active_ids.insert(id, slot);
-                self.next_slot += 1;
+                // Mark the slot as taken
+                if slot as usize >= self.free_slots.len() {
+                    self.free_slots.resize(slot as usize + 1, false);
+                }
+                self.free_slots[slot as usize] = false;
             }
             PointerPhase::Move => {
                 if !self.active_ids.contains_key(&id) {
@@ -114,12 +119,13 @@ impl TouchTracker {
         let position = physical_to_logical(location.x, location.y, scale);
         let slot = self.active_ids[&id];
 
-        // Remove the id after getting the slot (for Up/Cancel only)
+        // Remove the id and mark the slot as free (for Up/Cancel only)
         if matches!(core_phase, PointerPhase::Up | PointerPhase::Cancel) {
             self.active_ids.remove(&id);
-            // Reset the slot counter when all contacts are up
+            self.free_slots[slot as usize] = true;
+            // Reset when all contacts are up
             if self.active_ids.is_empty() {
-                self.next_slot = 0;
+                self.free_slots.clear();
             }
         }
 
@@ -131,6 +137,17 @@ impl TouchTracker {
                 button: PointerButton::Primary,
             },
         })
+    }
+
+    /// Find the lowest currently-free slot. Returns the first free slot,
+    /// or the next slot after all currently assigned ones if all are taken.
+    fn find_lowest_free_slot(&self) -> u32 {
+        for (i, &is_free) in self.free_slots.iter().enumerate() {
+            if is_free {
+                return i as u32;
+            }
+        }
+        self.free_slots.len() as u32
     }
 }
 
@@ -536,6 +553,88 @@ mod tests {
             down3,
             InputEvent::PointerContact {
                 pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_freed_slot_is_reused_by_a_later_contact() {
+        let mut tracker = TouchTracker::new();
+        // Contact A at slot 0
+        let down_a = tracker
+            .touch(
+                1,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(0.0, 0.0),
+                1.0,
+            )
+            .expect("contact A assigned slot 0");
+        assert!(matches!(
+            down_a,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
+
+        // Contact B at slot 1
+        let down_b = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(10.0, 10.0),
+                1.0,
+            )
+            .expect("contact B assigned slot 1");
+        assert!(matches!(
+            down_b,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 1 },
+                ..
+            }
+        ));
+
+        // Release contact A, freeing slot 0 while B is still at slot 1.
+        tracker
+            .touch(
+                1,
+                WinitTouchPhase::Ended,
+                PhysicalPosition::new(0.0, 0.0),
+                1.0,
+            )
+            .expect("contact A ends");
+
+        // Contact C should take the freed slot 0, not slot 2.
+        let down_c = tracker
+            .touch(
+                3,
+                WinitTouchPhase::Started,
+                PhysicalPosition::new(5.0, 5.0),
+                1.0,
+            )
+            .expect("contact C assigned lowest free slot");
+        assert!(matches!(
+            down_c,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 0 },
+                ..
+            }
+        ));
+
+        // Verify B is still at slot 1.
+        let moved_b = tracker
+            .touch(
+                2,
+                WinitTouchPhase::Moved,
+                PhysicalPosition::new(12.0, 10.0),
+                1.0,
+            )
+            .expect("contact B move still maps");
+        assert!(matches!(
+            moved_b,
+            InputEvent::PointerContact {
+                pointer_id: PointerId { source: _, slot: 1 },
                 ..
             }
         ));
