@@ -10,6 +10,8 @@ Frust is a Rust-native, mobile-first declarative UI framework: write one `View` 
 ship it to Android, iOS, macOS, Windows, Linux, and the web, rendered everywhere by the
 frust-owned `frust-engine` GPU pipeline.
 
+> Status: pre-1.0; APIs may change between minor versions.
+
 ## Documentation
 
 - [frust.dev](https://frust.dev) — docs home
@@ -182,6 +184,12 @@ frame with `FRUST_TRACE=1`), plus a
 verified watchlist of talks and university lectures for the theory —
 after you've seen the mechanism working.
 
+## Contributing
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
-Licensed under MIT OR Apache-2.0.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
+(`MIT OR Apache-2.0`). Some design-system crates bundle fonts under OFL-1.1.
