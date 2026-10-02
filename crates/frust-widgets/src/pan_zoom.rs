@@ -15,7 +15,12 @@
 //! - **Pan.** A primary `Down` is offered to the child first. If the child
 //!   handles it (a draggable node, a button) the gesture is the child's and the
 //!   view does not pan; if the child ignores it (empty canvas, a press outside
-//!   the content) the claimant contact's moves translate the content.
+//!   the content) the claimant contact's moves translate the content. When the
+//!   view is about to pan it also joins `scroll.rs`'s innermost-wins
+//!   nested-scroll claim seam (the same one `ListView` uses), reporting itself
+//!   into an enclosing `ScrollView`/`ListView`'s ambient claim cell so that
+//!   surface defers to the pan past touch-slop instead of taking the gesture
+//!   over — see [`PanZoomWidget::begin_gesture`].
 //! - **Zoom.** An [`InputEvent::Scale`] — the desktop ctrl/⌘+wheel and
 //!   trackpad-pinch mapping — is offered to the child first and applied here
 //!   when the child ignores it. A touch pinch is recognised in-widget by a
@@ -76,6 +81,7 @@ use crate::authoring::{presses, route_event_single};
 use crate::physics::simulation::FrictionSimulation;
 use crate::physics::{MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, Simulation, Tolerance};
 use crate::pinch::PinchRecognizer;
+use crate::scroll::{InnerScrollState, ambient_scroll_claim};
 
 /// The smallest scale a [`PanZoomView`] allows unless
 /// [`min_scale`](PanZoomView::min_scale) says otherwise.
@@ -681,10 +687,37 @@ impl PanZoomWidget {
         }
         if result == EventResult::Handled {
             self.drag = Drag::Child;
+            // The child owns the gesture, not this view — publish nothing.
+            // An enclosing `ScrollView`/`ListView` already wrote its own
+            // default (unregistered) `InnerScrollState` into this cell
+            // before forwarding the `Down` that reached here, and that
+            // default is exactly "nothing claims this drag", so leaving it
+            // untouched is the correct report.
         } else {
             self.drag = Drag::Pan { last: p.position };
             self.tracker_x.record(self.last_frame_ms, p.position.x);
             self.tracker_y.record(self.last_frame_ms, p.position.y);
+            // Innermost-wins nested-scroll arbitration (`scroll.rs` owns the
+            // seam; `ListView` is the other consumer): the child ignored the
+            // `Down`, so this view is about to pan it, and reports that into
+            // whichever cell is ambient — the nearest enclosing scroll
+            // surface's own fresh cell for *this* `Down`
+            // (`with_scroll_claim`), pushed before the forward that reached
+            // this `begin_gesture` and read back synchronously the moment
+            // that forward returns. A single write at `Down` is sufficient
+            // and needs no later reset: the host never reuses a cell across
+            // gestures (a fresh `Rc<Cell<_>>` is made for every `Down`), so
+            // there is nothing stale to clear between gestures. Both
+            // directions are claimed unconditionally — unlike a scrollable,
+            // whose claim depends on remaining content/physics, this view
+            // pans freely on either axis the moment it owns the gesture.
+            if let Some(host) = ambient_scroll_claim() {
+                host.set(InnerScrollState {
+                    registered: true,
+                    can_consume_down_drag: true,
+                    can_consume_up_drag: true,
+                });
+            }
         }
         ctx.capture_pointer();
         ctx.capture_contacts();
@@ -845,7 +878,23 @@ impl Widget for PanZoomWidget {
                 }
                 EventResult::Handled
             }
-            // Plain wheel and focus-routed events belong to the child.
+            InputEvent::Scroll { .. } => {
+                // An open `Scale` bracket (`Begin` seen, no `End` yet) can have
+                // its rest arrive as a plain, unmodified `Scroll` instead — a
+                // macOS trackpad pinch whose ⌘ is released mid-gesture finishes
+                // as wheel events, with no `End` ever delivered. Left set, a
+                // later lone `Update` (an unrelated wheel notch) would read
+                // `last_focal` as that stale bracket's continuation and anchor
+                // its zoom there instead of at its own focal. A `Scroll` can
+                // only reach a view with no bracket genuinely still open —
+                // this widget's own pinch recogniser and the desktop
+                // modified-wheel mapping both route a live bracket's events as
+                // `Scale`, never `Scroll` — so clearing here never cuts off an
+                // in-progress bracket.
+                self.last_focal = None;
+                route_event_single(&mut self.child, ctx, event)
+            }
+            // Focus-routed and any other remaining event belongs to the child.
             _ => route_event_single(&mut self.child, ctx, event),
         }
     }
@@ -873,6 +922,10 @@ mod tests {
     #[derive(Default)]
     struct App {
         transforms: Vec<PanZoomTransform>,
+        /// Every `ScrollInfo::offset` an enclosing `scroll_view` in the
+        /// nested-claim fixtures reported through `on_scroll` — empty means
+        /// that outer surface never scrolled.
+        scroll_offsets: Vec<f64>,
     }
 
     /// A 1000 × 800 content leaf with one "node" at (100, 100)–(200, 200) that
@@ -1396,5 +1449,176 @@ mod tests {
         h.frame();
         assert_eq!(h.transform().scale, 2.0);
         assert!(close(h.transform().to_view(content), centre));
+    }
+
+    // --- Nested-scroll claim: this view joins `scroll.rs`'s innermost-wins
+    //     seam when it is about to pan. See `begin_gesture` and the module
+    //     docs' *Pan* bullet. ---
+
+    use crate::flex::Column;
+    use crate::scroll::{ScrollView, scroll_view};
+    use crate::sized::SizedBox;
+
+    /// The fixed height of the pan_zoom row in the nested-claim fixture.
+    const PAN_H: f64 = 150.0;
+    /// The fixed height of the plain sibling row — tall enough that, added to
+    /// [`PAN_H`], the column exceeds the 300px viewport (so the outer
+    /// `scroll_view` genuinely has somewhere to scroll).
+    const SIBLING_H: f64 = 300.0;
+
+    type NestLogic = Box<dyn FnMut(&mut App) -> ScrollView<App>>;
+
+    /// `scroll_view(Column([pan_zoom(Content), plain sibling]))` — a real tree
+    /// shape (`scroll_view(pan_zoom(canvas))` on a page with other content),
+    /// laid out at the same 400×300 window every other fixture in this module
+    /// uses. Exercises `scroll.rs`'s claim seam from the outside rather than
+    /// reimplementing it.
+    struct NestFixture {
+        root: RenderRoot<App, ScrollView<App>>,
+        state: App,
+        logic: NestLogic,
+        controller: PanZoomController,
+    }
+
+    impl NestFixture {
+        fn new() -> Self {
+            let log = Rc::new(RefCell::new(Log::default()));
+            let controller = PanZoomController::new();
+            let (child_log, child_controller) = (log, controller.clone());
+            let logic: NestLogic = Box::new(move |_: &mut App| {
+                scroll_view(Column(vec![
+                    any(SizedBox(None, Some(PAN_H)).child(
+                        pan_zoom(Content {
+                            log: child_log.clone(),
+                            scrolls: false,
+                            size: Some(Size::new(400.0, PAN_H)),
+                        })
+                        .controller(child_controller.clone()),
+                    )),
+                    any(SizedBox(None, Some(SIBLING_H)).child(Content {
+                        log: child_log.clone(),
+                        scrolls: false,
+                        size: Some(Size::new(400.0, SIBLING_H)),
+                    })),
+                ]))
+                .on_scroll(|s: &mut App, info| s.scroll_offsets.push(info.offset))
+            });
+            let mut fixture = NestFixture {
+                root: RenderRoot::new(),
+                state: App::default(),
+                logic,
+                controller,
+            };
+            fixture.frame();
+            fixture
+        }
+
+        fn frame(&mut self) {
+            self.root.rebuild(&mut self.logic, &mut self.state);
+            self.root.layout(Size::new(400.0, 300.0));
+            self.root.paint(&mut NullScene, FrameTime::from_nanos(0));
+        }
+
+        fn send(&mut self, event: InputEvent) {
+            self.root.event(&mut self.state, &event);
+        }
+
+        fn transform(&self) -> PanZoomTransform {
+            self.controller.transform()
+        }
+    }
+
+    #[test]
+    fn a_pan_inside_a_scroll_view_claims_the_vertical_drag_so_the_outer_defers() {
+        let mut h = NestFixture::new();
+        // Down at (50, 50): inside the pan_zoom row (0–150), outside the
+        // node (x 100–200), so the content ignores it and the view pans.
+        h.send(mouse(PointerPhase::Down, 50.0, 50.0));
+        // 30px down, past TOUCH_SLOP (18).
+        h.send(mouse(PointerPhase::Move, 50.0, 80.0));
+        assert_eq!(
+            h.transform().offset,
+            Vec2::new(0.0, 30.0),
+            "the pan applied the drag"
+        );
+        assert!(
+            h.state.scroll_offsets.is_empty(),
+            "the outer scroll_view never scrolled: {:?}",
+            h.state.scroll_offsets
+        );
+        h.send(mouse(PointerPhase::Up, 50.0, 80.0));
+    }
+
+    #[test]
+    fn a_drag_over_a_sibling_outside_pan_zoom_still_scrolls_the_outer() {
+        let mut h = NestFixture::new();
+        // Down at (50, 200): inside the plain sibling row (150–450 in the
+        // column, i.e. 150–300 of the visible viewport at rest), well clear
+        // of the pan_zoom row entirely.
+        h.send(mouse(PointerPhase::Down, 50.0, 200.0));
+        h.send(mouse(PointerPhase::Move, 50.0, 170.0)); // 30px up, past slop: arms the takeover
+        h.send(mouse(PointerPhase::Move, 50.0, 160.0)); // the move that actually scrolls
+        assert!(
+            !h.state.scroll_offsets.is_empty(),
+            "the outer scroll_view took the drag as it always has"
+        );
+        assert_eq!(
+            h.transform(),
+            PanZoomTransform::IDENTITY,
+            "the pan_zoom row was never touched"
+        );
+        h.send(mouse(PointerPhase::Up, 50.0, 170.0));
+    }
+
+    #[test]
+    fn a_child_claimed_press_inside_pan_zoom_registers_no_claim_and_the_outer_still_takes_over() {
+        let mut h = NestFixture::new();
+        // Down at (150, 120): inside the pan_zoom row and inside the node
+        // (100–200, 100–200) — the content claims it, so the view does not
+        // publish a claim into the outer's cell.
+        h.send(mouse(PointerPhase::Down, 150.0, 120.0));
+        h.send(mouse(PointerPhase::Move, 150.0, 150.0)); // 30px down, past slop: arms the takeover
+        h.send(mouse(PointerPhase::Move, 150.0, 160.0)); // the move that actually scrolls
+        assert!(
+            !h.state.scroll_offsets.is_empty(),
+            "an unregistered claim leaves the outer free to take over, as before"
+        );
+        assert_eq!(
+            h.transform(),
+            PanZoomTransform::IDENTITY,
+            "the pan_zoom row never panned — its child owned (then lost) the gesture"
+        );
+        h.send(mouse(PointerPhase::Up, 150.0, 150.0));
+    }
+
+    // --- Stale `last_focal`: a dead `Scale` bracket must not leak into a
+    //     later lone `Update`. See `apply_scale`'s module doc and the `Scroll`
+    //     arm of `Widget::event`. ---
+
+    #[test]
+    fn a_scroll_between_scale_events_clears_the_stale_focal_so_a_later_update_anchors_at_itself() {
+        let mut h = Harness::new(|v| v);
+        // Open a bracket…
+        h.send(scale(ScalePhase::Begin, 1.0, 50.0, 50.0));
+        // …and let the rest of it arrive as a plain, unmodified wheel Scroll
+        // instead of an `End` — the macOS trackpad-pinch-with-released-⌘
+        // case — reaching the child since nothing here handles `Scroll`.
+        h.send(InputEvent::Scroll {
+            position: Point::new(10.0, 10.0),
+            delta: ScrollDelta::Lines(0.0, 1.0),
+        });
+        // A later lone Update — an ordinary, unrelated wheel notch — must
+        // anchor at its own focal, not read `last_focal` as the dead
+        // bracket's continuation.
+        h.send(scale(ScalePhase::Update, 2.0, 300.0, 200.0));
+        assert_eq!(h.transform().scale, 2.0);
+        assert!(
+            close(
+                h.transform().to_content(Point::new(300.0, 200.0)),
+                Point::new(300.0, 200.0)
+            ),
+            "the update's own focal content point must stay fixed: {:?}",
+            h.transform()
+        );
     }
 }
