@@ -298,7 +298,7 @@ once a live Linux desktop session is available on this host is still owed.
 It does, however, reproduce a live instance of the same blind spot Leg 2
 targets on purpose: `open_external` returned `Ok(())` while nothing opened.
 
-**Leg 2 — no-handler contract (`act_000001a0c493b0f0VxxVfDAE`) — the
+**Leg 2 — no-handler contract — the
 predicted gap CONFIRMED.**
 
 *Sub-case A — opener binary genuinely missing.* `PATH` pointed at an empty
@@ -355,7 +355,7 @@ association" case; that rerun is still owed. **Verdict: PASSED as a
 verification** — the return-value/exit-status mismatch this leg exists to
 confirm was reproduced with real binaries, not simulated.
 
-**Leg 3 — child reap (`act_000001a0c493b0e4l4qTbnrM`) — PASSED, with a
+**Leg 3 — child reap — PASSED, with a
 negative control.** A single long-lived process called the real, fixed
 `UrlLauncher::open_external` 24 times in a loop against the real system
 `xdg-open`, then inspected its own child table:

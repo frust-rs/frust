@@ -1829,8 +1829,7 @@ mod tests {
         rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(ESRCH)
     }
 
-    /// Regression for the orphaned-descendant bug on Windows
-    /// (`act_000001a0d3d1be59PQaZLLht`): `kill()` must terminate the whole
+    /// Regression for the orphaned-descendant bug on Windows: `kill()` must terminate the whole
     /// process **tree**, not just the direct child — the Windows counterpart
     /// of [`spawn_streaming_real_kill_terminates_the_whole_process_group`]
     /// above. The direct child (`cmd /C`) launches `powershell`, which starts
