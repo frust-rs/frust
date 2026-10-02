@@ -166,7 +166,7 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Gate | Platform | Status |
 |------|----------|--------|
 | Desktop ctrl/⌘+wheel zoom + drag pan | Linux (local) | OWED |
-| Touch pinch zoom + drag pan | Pixel 5 / Xiaomi 12 (Android) | OWED |
+| Touch pinch zoom + drag pan | Pixel 5 (redfin), Android 14, 2026-10-02 | PASS (all legs below) |
 | Touch pinch zoom + drag pan, plus tap/scroll/focus regression | iPhone SE (iPhone12,8), iOS 26.7, 2026-10-02 | PASS (all legs below; human-run) |
 | Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
 
@@ -184,6 +184,21 @@ Simulator app for Option-drag, and `idb` injects one contact only.
 | Graph: vertical drag starting on a node | PASS (no anomaly reported) | No pan, by design: the canvas handles the press, so the child owns the gesture (same at `5c078079`, after f3-01) |
 | Graph: two-finger pinch zooms about the fingers; lifting one keeps panning | PASS | NOT RUN |
 | Graph: Fit reframes the whole graph | PASS | PASS |
+
+Android legs, Pixel 5 (redfin), Android 14. The first legs below ran at build
+`8a263d79`; the node-first pinch leg, exercising the f3-01/f3-02 live
+multi-contact veto fix, ran at build `2e084ef5`.
+
+| Leg | Pixel 5 |
+|-----|---------|
+| Gradle/Kotlin build + install | PASS |
+| Deep link to Graph | PASS |
+| Fit reframes the graph | PASS |
+| Graph: tap a node selects and highlights it | PASS |
+| Graph: one-finger drag on empty space pans, page does not scroll | PASS |
+| Graph: vertical drag starting on a node: selects, no pan by design, page does not scroll | PASS |
+| Graph: two-finger pinch zooms about the fingers and a two-finger drag pans | PASS (human-run) |
+| Graph: pinch with the first finger on a node, after the veto fix (build `2e084ef5`) | PASS (human-run, no page scroll) |
 
 On a phone-width viewport the Graph page opens at 1.0x over an empty corner of
 the 1400x1000 content, so press Fit first.

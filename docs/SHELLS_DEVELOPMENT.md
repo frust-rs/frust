@@ -139,7 +139,9 @@ contacts and resampling / Desktop scale gestures), using `examples/playground`'s
 "Graph" section — a `pan_zoom`-wrapped `canvas`) as the vehicle. **iOS: passed 2026-10-02**
 on an iPhone SE (iOS 26.7, human-run, all legs) and the iOS Simulator (iOS 26.2, single-contact
 legs only; pinch not run), against `8a263d79` built with Xcode 27.0 — per-leg results in
-`examples/playground/README.md`'s gate checklist. **Android and desktop: not run yet.**
+`examples/playground/README.md`'s gate checklist. **Android: passed 2026-10-02** on a Pixel 5
+(Android 14; human-run pinch legs, `adb`-driven single-contact legs; Xiaomi 12 not run) — same
+checklist. **Desktop: not run yet.**
 
 - **Android (Pixel 5, Xiaomi 12):** two-finger pinch zooms the graph about the gesture's midpoint
   and drag-pans it with one finger; after lifting to one finger mid-gesture, panning continues with
