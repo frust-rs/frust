@@ -744,7 +744,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beui-demo"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-beui",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "frust"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "any_spawner",
  "anyhow",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "frust-auth-session"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "frust-beui"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2156,7 +2156,7 @@ dependencies = [
 
 [[package]]
 name = "frust-camera"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -2176,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "frust-cli"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "frust-clipboard"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "arboard",
  "frust-plugin",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "frust-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "frust-scene",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "frust-cupertino"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "frust-dap"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-drive",
  "frust-mcp",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "frust-database"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-paths",
  "log",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "frust-devtools"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-devtools-protocol",
  "log",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "frust-devtools-protocol"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "frust-drive"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "frust-engine"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -2306,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "frust-gallery"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-beui",
  "frust-core",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "frust-glyph"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2349,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "frust-haptics"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -2361,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "frust-i18n"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "fluent-bundle",
  "fluent-langneg",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "frust-i18n-macros"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "fluent-syntax",
  "proc-macro2",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "frust-iap"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "frust-plugin",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "frust-material"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "frust-mcp"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "frust-native-widgets"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "frust-oauth-native"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "getrandom 0.3.4",
@@ -2483,14 +2483,14 @@ dependencies = [
 
 [[package]]
 name = "frust-paths"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "frust-plugin"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "jni 0.22.4",
  "ndk-context",
@@ -2499,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "any_spawner",
  "futures",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "frust-render"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "frust-scene"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "kurbo",
  "peniko",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "frust-secure-storage"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-plugin",
  "jni 0.22.4",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shadcn"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shared-preferences"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-paths",
  "frust-plugin",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-android"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit_android",
  "android_logger",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-common"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-devtools",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-desktop"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit_winit",
  "anyhow",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-ios"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "accesskit_ios",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-linux"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-shell-desktop",
  "log",
@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-macos"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-plugin",
  "frust-reactive",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-web"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-windows"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "frust-testing"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "frust-text"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-scene",
  "kurbo",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "frust-theme"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-text",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "frust-tui"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "frust-url-launcher"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "frust-video-player"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -2844,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "frust-widgets"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -6871,7 +6871,7 @@ dependencies = [
 
 [[package]]
 name = "shadcn-demo"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-shadcn",
