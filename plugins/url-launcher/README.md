@@ -6,6 +6,8 @@ A minimal **external URL launcher** plugin for frust apps — Android
 desktop (macOS/Linux/Windows) the platform's own opener (`open`/`xdg-open`/
 `ShellExecuteW`).
 
+**Platform support:** Android, iOS, macOS, Linux and Windows. On any other target the call returns `UrlLauncherError::Platform`.
+
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
@@ -16,7 +18,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # crates.io later
+frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # or the crates.io release, e.g. version = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -296,7 +298,7 @@ once a live Linux desktop session is available on this host is still owed.
 It does, however, reproduce a live instance of the same blind spot Leg 2
 targets on purpose: `open_external` returned `Ok(())` while nothing opened.
 
-**Leg 2 — no-handler contract (`act_000001a0c493b0f0VxxVfDAE`) — the
+**Leg 2 — no-handler contract — the
 predicted gap CONFIRMED.**
 
 *Sub-case A — opener binary genuinely missing.* `PATH` pointed at an empty
@@ -353,7 +355,7 @@ association" case; that rerun is still owed. **Verdict: PASSED as a
 verification** — the return-value/exit-status mismatch this leg exists to
 confirm was reproduced with real binaries, not simulated.
 
-**Leg 3 — child reap (`act_000001a0c493b0e4l4qTbnrM`) — PASSED, with a
+**Leg 3 — child reap — PASSED, with a
 negative control.** A single long-lived process called the real, fixed
 `UrlLauncher::open_external` 24 times in a loop against the real system
 `xdg-open`, then inspected its own child table:
@@ -424,11 +426,10 @@ compiled `#[cfg(all(test, target_os = "linux"))]`).
 
 Host: `dell_mini_pc`, Windows 11 Pro 10.0.26200.9457 (`x86_64-pc-windows-msvc`,
 rustc 1.97.1), the registered `https` handler being Zen Browser 1.22.3b (Edge
-installed, not the default). Run as part of the `auth-session` desktop
-loopback gate rather than from a scratch binary: `LoopbackSession::start`
-calls [`open_external`] on the whole authorization URL, so the evidence is
-that gate's transcript — `plugins/auth-session/README.md` §6, *Windows
-desktop (loopback)*.
+installed, not the default). Exercised through `frust-auth-session`'s desktop
+loopback flow rather than from a scratch binary: `LoopbackSession::start`
+calls [`open_external`] on the whole authorization URL, so every loopback
+sign-in is also a browser-out call.
 
 **Leg 1 — success path — PASSED.** From a live (RDP-connected) desktop
 session, `ShellExecuteW("open", <url>)` returned success and the registered
@@ -438,7 +439,7 @@ state=…&code_challenge=…` URL as its argument; it fetched the page and
 followed the redirect to the loopback listener. Repeated for every one of the
 eight loopback legs. Note for operators: in a *disconnected* session the call
 still succeeds and the browser still launches — only the calling app's frames
-stall (see the auth-session transcript).
+stall.
 
 **Legs 2–3 — `SE_ERR_NOASSOC` / `SE_ERR_ASSOCINCOMPLETE` mapping — NOT RUN.**
 The rig has a registered handler and unregistering it was out of scope; the
@@ -455,3 +456,13 @@ arm's `SE_ERR_*` error mapping — file a LIMITATIONS entry for macOS if one
 does not already exist.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
+
+## Links and license
+
+Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## License
+
+Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`)
+or the MIT license (`LICENSE-MIT`) at your option (SPDX: `MIT OR Apache-2.0`).
+Both license files are included beside this README.

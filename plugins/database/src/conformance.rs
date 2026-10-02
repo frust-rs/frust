@@ -41,7 +41,7 @@
 //! `NULL` and succeeds, and exposes no parameter-count API to enforce the
 //! check in `turso.rs`. See `param_count_mismatch_is_sql_error`'s own doc;
 //! the behavioral divergence is a documented caveat (README, LIMITATIONS),
-//! decided at the conductor level during the db-plugin build (2026-08-09).
+//! accepted during the db-plugin build (2026-08-09).
 //!
 //! # Dual-engine conformance and the cross-engine round trip
 //!

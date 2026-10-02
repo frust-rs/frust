@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Mouse-first terminal workbench for scaffolding, running and debugging Frust apps, built on ratatui."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 # A library only, no standalone binary — consumed by `frust-cli`: both the
 # bare `frust` invocation and the `tui` subcommand call into it. Depends on no
@@ -17,27 +23,27 @@ path = "src/lib.rs"
 # Shared drive pipelines (devices/doctor/run/build/scaffold) — project
 # detection and session supervision consume the same pipelines the `frust`
 # CLI does.
-frust-drive = { path = "../frust-drive" }
+frust-drive = { path = "../frust-drive", version = "0.5.0" }
 # The devtools wire types the DevTools mode speaks (`Discovery`, `FrameStats`,
 # `Capability`) — the protocol leaf is the one sanctioned crossing of the
 # tooling-isolation charter (docs/DEVTOOLS_ARCHITECTURE.md): it depends on
 # `serde`/`serde_json` only, so pulling it in never drags the framework side's
 # graph along. `frust-devtools` itself (the framework-side service) stays out
 # of this crate's graph entirely.
-frust-devtools-protocol = { path = "../frust-devtools-protocol" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.0" }
 # The embedded MCP server: `frust_mcp::serve_embedded` plus the
 # `SessionBackend` seam `supervise::mcp_backend` implements over this
 # workbench's own sessions, so an agent drives the SAME sessions the user
 # sees. Tooling→tooling only (both crates are under the same
 # tooling-isolation charter — docs/ARCHITECTURE.md); it drags in no framework
 # crate.
-frust-mcp = { path = "../frust-mcp" }
+frust-mcp = { path = "../frust-mcp", version = "0.5.0" }
 # The embedded DAP server: `frust_dap::serve_embedded` over the *same*
 # `TuiSessionBackend` the MCP server is handed, so an IDE debugging through
 # DAP, an agent through MCP, and the user in the terminal all drive one
 # session world. The second tooling→tooling crossing (docs/ARCHITECTURE.md);
 # `frust-dap` itself depends on `frust-mcp` and no framework crate.
-frust-dap = { path = "../frust-dap" }
+frust-dap = { path = "../frust-dap", version = "0.5.0" }
 anyhow.workspace = true
 # `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
 # "errors callers match on" rule); already a workspace dependency.
@@ -97,4 +103,4 @@ insta.workspace = true
 # Enables `frust-drive`'s `test-util` feature (its scripted `FakeProcessRunner`)
 # for the supervisor suite — the fake stays out of the shipped build (feature is
 # off in the normal `[dependencies]` entry above; only `cargo test` unifies it in).
-frust-drive = { path = "../frust-drive", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.5.0", features = ["test-util"] }

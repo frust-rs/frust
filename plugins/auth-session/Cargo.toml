@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "In-app browser authentication sessions for Frust apps: Android Custom Tabs, Apple ASWebAuthenticationSession, and a desktop loopback listener."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# `gate/` holds browser fixture pages for the example app, not crate content.
+exclude = ["gate"]
 
 [dependencies]
 # AuthSessionError variants callers match on — thiserror per CODE_STANDARDS.
@@ -15,7 +23,7 @@ thiserror = { workspace = true }
 # Plugin Conventions). Unconditional like `frust-clipboard`'s/
 # `frust-haptics`'s/`frust-url-launcher`'s own copy: the crate is inert off
 # Android, so declaring it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 
 # Desktop (Linux, Windows, macOS): `LoopbackSession` opens the
 # authorization URL in the system browser through `frust-url-launcher`'s
@@ -26,7 +34,7 @@ frust-plugin = { path = "../../crates/frust-plugin" }
 # still holds. Target-gated to the three loopback targets — Android/iOS never
 # build the loopback listener, so they never link the launcher either.
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
-frust-url-launcher = { path = "../url-launcher" }
+frust-url-launcher = { path = "../url-launcher", version = "0.5.0" }
 
 # Android: the plugin's own JNI exports the Android backend card defines
 # need `jni` directly — matching `frust-camera`'s/`frust-haptics`'s own

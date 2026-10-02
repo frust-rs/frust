@@ -100,12 +100,11 @@ fn scaffolded_project_builds_against_the_real_facade() {
 /// actually compiles and is `cargo fmt --check`-clean.
 ///
 /// Ignored for the same reason as the default-template e2e test above: a full
-/// dependency-graph compile from a cold target dir. It no longer needs — and no
-/// longer skips itself over — a sibling `../clean-signals-rs` checkout: the
-/// generated `Cargo.toml` git+rev-pins `clean-signals` to its public repo (see
-/// `docs/DEVELOPMENT.md`'s Version-Pin Policy), so this runs on any host with
-/// network access. The old self-skip silently dropped the fmt assertions below
-/// on every machine without the sibling. Run explicitly:
+/// dependency-graph compile from a cold target dir. It needs no sibling
+/// `../clean-signals-rs` checkout and never skips itself: the generated
+/// `Cargo.toml` requires `clean-signals` from crates.io, so this runs on any
+/// host with network access and always executes the fmt assertions below.
+/// Run explicitly:
 /// `cargo test -p frust-cli --test create_e2e -- --ignored --nocapture`
 #[test]
 #[ignore = "compiles the generated project's full dependency graph (winit/wgpu/frust-engine/clean-signals); run explicitly with `--ignored`"]

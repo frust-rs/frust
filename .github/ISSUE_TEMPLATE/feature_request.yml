@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a new capability or an improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What would you like Frust to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core
+        - rendering
+        - widgets
+        - shells
+        - plugins
+        - CLI/TUI
+        - devtools
+        - docs
+    validations:
+      required: true

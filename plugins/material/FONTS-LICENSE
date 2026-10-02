@@ -1,9 +1,10 @@
 # Bundled Material typography fonts
 
 Raw variable-TTF bytes embedded into `frust-material` via `include_bytes!`
-(`plugins/material/src/tokens/fonts.rs`), unconditionally — the design-system
-plugin *is* the Material opt-in, so the bytes carry no Cargo feature of their
-own (the `plugins/glyph/fonts/` and `plugins/shadcn/fonts/` precedent).
+(`plugins/material/src/tokens/fonts.rs`) behind the crate's `bundled-fonts`
+Cargo feature (default on, the `plugins/glyph/fonts/` and `plugins/shadcn/fonts/`
+precedent). An app that sets `default-features = false` on its `frust-material`
+dependency ships none of these bytes.
 
 This crate bundles two typefaces to ship Material 3 typography out of the box:
 **Roboto Flex** for display/heading/body text and **Roboto Mono** for monospace.

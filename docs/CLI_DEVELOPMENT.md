@@ -16,7 +16,7 @@ host-signal flow.
 
 `--arch clean-signals` scaffolds a clean-architecture variant (controller + use-case +
 `async_view` over `clean-signals-frust`) instead of the default notes-app template;
-`clean-signals` is git+rev-pinned to its public GitHub repo (see
+`clean-signals` is a crates.io dependency (see
 [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)'s version pins), so the scaffold builds on any
 machine with no sibling checkout required.
 

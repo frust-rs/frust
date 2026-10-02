@@ -166,7 +166,7 @@ const MAX_ICON_SIDE: u32 = 4096;
 impl IconData {
     /// Wrap decoded RGBA8 pixels, or `None` when they do not describe a
     /// `width × height` image: either dimension is zero or exceeds
-    /// [`MAX_ICON_SIDE`], or `rgba.len() != width * height * 4`.
+    /// `MAX_ICON_SIDE`, or `rgba.len() != width * height * 4`.
     ///
     /// `Option` rather than a `<Type>Error` enum because there is exactly one
     /// failure mode and nothing to match on — and this crate carries no
@@ -209,12 +209,12 @@ impl IconData {
         &self.rgba
     }
 
-    /// The image width in pixels (never zero, never above [`MAX_ICON_SIDE`]).
+    /// The image width in pixels (never zero, never above `MAX_ICON_SIDE`).
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// The image height in pixels (never zero, never above [`MAX_ICON_SIDE`]).
+    /// The image height in pixels (never zero, never above `MAX_ICON_SIDE`).
     pub fn height(&self) -> u32 {
         self.height
     }

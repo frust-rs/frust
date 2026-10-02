@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "iOS shell for Frust apps: the Rust half of the C-ABI bridge, with the ios_app! macro and the frame pipeline."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # Unconditional: the `ios_app!` macro is defined on every target (its generated
@@ -92,3 +98,7 @@ devtools = ["frust-shell-common/devtools"]
 # the crate's `lib.rs` docs — so today this row only makes the two lower
 # features reachable, with nothing here yet calling `install_gpu_handle`.
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
+
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-ios"
+targets = ["aarch64-apple-ios"]

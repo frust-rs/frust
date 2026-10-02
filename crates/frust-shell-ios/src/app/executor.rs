@@ -40,8 +40,7 @@ use super::present_sync::PresentHandoff;
 /// pool release does not, and instead pins `loop_us` to one period however
 /// early the ask was.
 ///
-/// # What it answered (iPhone SE, A13, iOS 26, 60 Hz — 2026-09-06,
-/// act_000001a070c81738SE728A0X)
+/// # What it answered (iPhone SE, A13, iOS 26, 60 Hz — 2026-09-06)
 ///
 /// Refresh-deadline anchored, not pool starvation: over 7,269 S3 frames
 /// `acq_us` regressed on `idle_us` with a slope of −0.90, so the wait shrinks

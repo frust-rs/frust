@@ -198,7 +198,7 @@ pub fn keys_module(messages: &[Message], span: Span) -> Result<TokenStream, syn:
         ///
         /// Each takes the resolver to format through — an
         /// `Engine::with_chain` pairing, or any other `Resolve`
-        /// implementor — plus one argument per `$variable` the message
+        /// implementation — plus one argument per `$variable` the message
         /// references, and returns the formatted string. A message that
         /// cannot be resolved logs a warning and renders as its own key,
         /// so a translation gap degrades a label rather than a screen.

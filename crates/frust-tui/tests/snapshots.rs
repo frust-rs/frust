@@ -607,8 +607,8 @@ fn run_config_modal_100x30() {
 
 /// A wizard on `step`, with `name`/`directory` filled and `arch_cursor` set.
 /// `clean_signals` is threaded through `set_clean_signals_available` for
-/// completeness, but no arch card is sibling-gated today (`clean-signals` is
-/// git+rev-pinned to its public repo), so it has no visible effect.
+/// completeness, but no arch card is sibling-gated today (`clean-signals` is a
+/// crates.io dependency), so it has no visible effect.
 fn wizard_state(step: WizardStep, name: &str, clean_signals: bool, arch_cursor: usize) -> AppState {
     let mut wizard = CreateWizard::new();
     wizard.set_clean_signals_available(clean_signals);
@@ -635,7 +635,7 @@ fn wizard_name_step_80x24() {
 }
 
 /// The architecture step: the clean-signals card is selectable (no sibling
-/// checkout gates it — `clean-signals` is git+rev-pinned to its public repo).
+/// checkout gates it — `clean-signals` is a crates.io dependency).
 /// One snapshot covers both `clean_signals` probe outcomes since
 /// neither changes the rendering — the former sibling-absent/-present pair
 /// collapsed into this single case when the gating was retired.
@@ -653,8 +653,8 @@ fn wizard_arch_step_clean_signals_enabled_80x24() {
 /// An Add Plugin dialog over a workbench, on `step`, with the sibling probe
 /// resolved to `sibling_available` and the given `cursor`. `sibling_available`
 /// is threaded through `set_sibling_available` for completeness, but no
-/// registry entry is sibling-gated today (`clean-signals-frust` was the sole
-/// `requires_sibling` user before `clean-signals` moved to a git+rev pin),
+/// registry entry is sibling-gated today (`clean-signals-frust` needs no
+/// `requires_sibling` because `clean-signals` is a crates.io dependency),
 /// so it has no visible effect.
 fn add_plugin_state(step: AddPluginStep, sibling_available: bool, cursor: usize) -> AppState {
     let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/huddle"));

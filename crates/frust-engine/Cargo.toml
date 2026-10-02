@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Sparse-strip GPU render pipeline for Frust: compiles a scene display list into strips and records the draw passes on wgpu."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 # `benches/scenes.rs` is a module `benches/main.rs` pulls in (fixture
 # builders), not a bench target of its own — autodiscovery would otherwise
 # register it as a second libtest-harnessed target and `cargo bench`'s

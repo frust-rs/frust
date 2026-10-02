@@ -78,9 +78,9 @@
 
 - Benchmark median deltas without tail data — in this project the tails carry the regression
   signal; a median-only perf claim is not a finding.
-- The `clean-signals`/`clean-signals-frust` strings and the sibling-checkout path dependencies
-  around them — load-bearing compatibility surface, not typos to "fix".
-- `workflow/` — a separate nested repo, not part of this build; out of scope entirely.
+- The `clean-signals`/`clean-signals-frust` strings and the identical `clean-signals` registry
+  requirement at its three consumer sites — load-bearing, not typos to "fix".
+- Any nested working-notes repository checked out beside the sources — not part of this build; out of scope entirely.
 - Generated Android/iOS project trees under `examples/*` — scaffold output. Review the templates
   in `frust-drive` instead of the generated artifacts.
 - Anything already entered in `docs/LIMITATIONS.md` — accepted, measured degrades. Do not re-flag

@@ -717,7 +717,7 @@ fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {
 /// - `envMap` keeps its `smoothstep(0,1,tpl(...))` shape, just fed the
 ///   procedural `tpl` above instead of `iChannel1`.
 /// - **The texture bump-mapping (`db`) is dropped**, using the un-bumped
-///   surface normal (`svn`) directly — the rule's implementor's-call
+///   surface normal (`svn`) directly — the rule's discretionary
 ///   option. The procedural noise amplified through `db`'s `1/e.x` (≈1000×)
 ///   gradient scale produced a visibly noisy, high-frequency shimmer, and
 ///   `db`'s only other input (`iChannel0`) has no real texture to bump

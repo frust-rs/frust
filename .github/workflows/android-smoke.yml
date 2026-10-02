@@ -8,15 +8,15 @@
 # The workflow is MANUAL + NIGHTLY by design: an x86_64 Android emulator with
 # the NDK + SDK toolchain takes 20-25 minutes of wall-clock runner time per
 # run. The build targets only the x86_64 ABI for the emulator and publishes
-# diagnostics to build/android-smoke/ on failure. In a private repository, that
-# is a budgeted cost, not a free-tier case. The owner may enable, edit, or delete
-# this workflow at any time; it is delivered as a template, not a required gate.
+# diagnostics to build/android-smoke/ on failure. Those runner minutes are a
+# real cost, which is why the run is manual and nightly rather than per-push.
+# The owner may enable, edit, or delete this workflow at any time; it is
+# delivered as a template, not a required gate.
 #
-# IMPORTANT: This workflow is registered by GitHub only from the default branch
-# (currently main). Until dev is promoted to main, the workflow cannot be
-# dispatched or scheduled, and has never been executed. Artifacts are published
-# to build/android-smoke/** on failure; the emulator is x86_64, so only one
-# ABI (x86_64-linux-android) is built.
+# GitHub registers a scheduled or manually dispatched workflow from the default
+# branch (main), so this file takes effect there. Artifacts are published to
+# build/android-smoke/** on failure; the emulator is x86_64, so only one ABI
+# (x86_64-linux-android) is built.
 #
 # This workflow is NOT part of the plan's acceptance criteria and must never be
 # assumed in docs or tests.

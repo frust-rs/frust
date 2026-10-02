@@ -38,9 +38,7 @@
 //! its own row is always the same `FlexView` wrapping the field plus a clear
 //! button, rather than being a bare `TextInput` while the query is empty and
 //! swapping to the `FlexView` wrapper the moment it isn't — a fix for a
-//! sibling defect the `12-huddle-search-structure` task's own completion
-//! summary first surfaced (see that task's Risks item 1): a genuine `AnyView`
-//! type change at `Padding`'s single `ChildPod` on that transition dropped
+//! sibling defect: a genuine `AnyView` type change at `Padding`'s single `ChildPod` on that transition dropped
 //! the field's recorded focus/IME path, silently swallowing the very next
 //! keystroke on the real per-frame pipeline.
 
@@ -130,9 +128,7 @@ fn results_container(
 /// tears down and rebuilds the child, dropping the `TextInput`'s recorded
 /// focus/IME path the instant the query crossed the empty/non-empty boundary
 /// (silently swallowing the very next keystroke on the real per-frame
-/// mobile/desktop pipeline — see `12b-search-field-stable-row`'s task file
-/// for the full mechanism, first surfaced as a Risk in
-/// `12-huddle-search-structure`'s completion summary).
+/// mobile/desktop pipeline).
 fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleState> {
     let field = TextInput::<HuddleState, _>(
         query.to_string(),

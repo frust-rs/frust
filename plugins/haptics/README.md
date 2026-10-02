@@ -5,6 +5,8 @@ A minimal, general-purpose **haptic-feedback** plugin for frust apps — Android
 `UIImpactFeedbackGenerator`/`UINotificationFeedbackGenerator` via `objc2-ui-kit`,
 desktop (macOS/Linux/Windows) unavailable by design.
 
+**Platform support:** Android and iOS. On macOS, Linux and Windows, and on any other target, every call returns `HapticsError::NotAvailable(Unavailability::UnsupportedPlatform)`.
+
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
@@ -15,7 +17,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-haptics = { path = "<frust>/plugins/haptics" }  # crates.io later
+frust-haptics = { path = "<frust>/plugins/haptics" }  # or the crates.io release, e.g. version = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -125,3 +127,13 @@ Haptics::perform(...)`).
 - **`frust create --overwrite` is a non-issue here**, aside from the one
   manifest permission — Add Plugin's idempotent apply handles a repeat run
   the same way every other registry entry does.
+
+## Links and license
+
+Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## License
+
+Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`)
+or the MIT license (`LICENSE-MIT`) at your option (SPDX: `MIT OR Apache-2.0`).
+Both license files are included beside this README.

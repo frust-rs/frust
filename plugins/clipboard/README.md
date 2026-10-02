@@ -7,6 +7,8 @@ A platform-independent, **synchronous, plain-text** clipboard for frust apps
 clipboard, so this plugin has no named-store handle to open: `Clipboard::set_text`/`Clipboard::get_text`
 are plain associated functions.
 
+**Platform support:** Android, iOS, macOS, Linux and Windows. On any other target the calls report a typed unavailability error.
+
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
@@ -17,7 +19,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-clipboard = { path = "<frust>/plugins/clipboard" }  # crates.io later
+frust-clipboard = { path = "<frust>/plugins/clipboard" }  # or the crates.io release, e.g. version = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -162,3 +164,13 @@ FRUST_CLIPBOARD_TESTS=1 cargo test -p frust-clipboard
 
 This overwrites your clipboard and leaves a test string in it when it
 finishes.
+
+## Links and license
+
+Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## License
+
+Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`)
+or the MIT license (`LICENSE-MIT`) at your option (SPDX: `MIT OR Apache-2.0`).
+Both license files are included beside this README.

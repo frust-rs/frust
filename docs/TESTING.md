@@ -106,8 +106,10 @@ Known gaps are tracked by the comprehensive-testing feature plan:
   full lifecycle matrix. `scripts/testing/android-smoke.sh` (see § Android Emulator GPU Lab) covers
   automated launch, device-state normalization (wake/dismiss-keyguard), and a best-effort
   black-band visual probe against an attached device or emulator, but does not provision one.
-- No committed CI configuration or dedicated self-hosted GPU-runner workflow; a workflow file
-  (`.github/workflows/android-smoke.yml`) exists but is not executed by this repo's gates.
+- No GPU-runner or device CI. `.github/workflows/ci.yml` runs the CPU gates on pull requests and on
+  pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene;
+  aggregate `ci-ok` is the required check). `.github/workflows/android-smoke.yml` runs on a schedule
+  or manual dispatch and is not part of the required check.
 - Accessibility and several platform plugin paths remain manual physical-device
   gates.
 
@@ -126,8 +128,8 @@ cargo build --workspace --locked \
 ```
 
 Also run the Huddle and clean-signals-frust gates from their standalone
-workspace roots — unconditional, since `clean-signals` is git+rev-pinned to
-its public repo rather than a `../clean-signals-rs` sibling checkout (see
+workspace roots — unconditional, since `clean-signals` comes from
+crates.io rather than a `../clean-signals-rs` sibling checkout (see
 `docs/DEVELOPMENT.md`'s Version-Pin Policy):
 
 ```bash
@@ -625,8 +627,8 @@ manifest that still names the legacy theme, which must fail leg "template") is d
 script's header but not automated. `.github/workflows/android-smoke.yml` provisions an emulator
 (`workflow_dispatch` + nightly) and runs this script with `--target-platform android-x64
 --full-logcat`, but is a delivered template, not part of this repository's required gates; GitHub
-registers a workflow only from the default branch, so it cannot be dispatched or scheduled — and
-has never been executed — until `dev` is promoted to `main`.
+registers a workflow only from the default branch (`main`), so it can be dispatched or scheduled
+only once it is on `main`.
 
 ### Android Scenario Matrix
 

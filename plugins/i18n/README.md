@@ -723,3 +723,14 @@ The messages and full binaries were rebuilt in the same session to confirm the d
 drifted 3–4% vs. the prior rebuild, within expected variance from build-system cache effects and
 no cause for re-re-measuring. The prior table's evidence against the old figures (stdout checks,
 data-crate rlib presence, Mach-O section splits) all hold under the new baseline.
+
+---
+
+## Links
+
+- Documentation: <https://frust.dev>
+- Source: <https://github.com/frust-rs/frust>
+
+## License
+
+Licensed under either of Apache License, Version 2.0 or MIT license at your option. See the [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) files for details.

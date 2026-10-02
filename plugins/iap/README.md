@@ -13,7 +13,7 @@ not re-export it.
 
 > **Templates stay clean.** A generated frust project ships **no** IAP code,
 > permissions, or store wiring. The `frust` TUI's **Add Plugin** dialog
-> applies every §1 step below in one shot (`iap` card — Cargo dependency,
+> applies every §1 step below in one shot (Cargo dependency,
 > Android Gradle module, iOS Swift package); the manual steps are the same
 > edits, documented for hand-wiring and for auditing what the dialog did.
 > On Android the plugin's platform code ships as its own Gradle library
@@ -21,6 +21,10 @@ not re-export it.
 > in sync by hand once it's wired in; on iOS it ships as its own local Swift
 > package, added as a second package reference beside the embedding's
 > `FrustEmbedding`.
+
+**Platform support:** Android (Play Billing) and iOS (StoreKit). On macOS, Linux and Windows every operation returns `IapError::NotAvailable(Unavailability::UnsupportedPlatform)`; the same holds on any other target.
+
+More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ---
 
@@ -31,7 +35,12 @@ not re-export it.
 ```toml
 # app Cargo.toml — [dependencies]
 frust-iap = { path = "<frust>/plugins/iap" }  # crates.io later
+serde_json = "1"
 ```
+
+`serde_json` is needed because the purchase operations take and return
+`serde_json::Value` payloads (for example the optional connection config
+and purchase options).
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
 path = "…" }` line the scaffold already wrote.
@@ -528,3 +537,8 @@ edits by hand):
   purchase again (the listener on iOS, `get_available_purchases` on Android
   at minimum) and can finish it — the behavior §2's *iOS replay* and
   *3-day deadline* sections both depend on being handled, not ignored.
+
+## License
+
+Licensed under either of MIT or Apache-2.0 (SPDX: `MIT OR Apache-2.0`), at your
+option. See `LICENSE-MIT` and `LICENSE-APACHE` beside this README.

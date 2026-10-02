@@ -51,7 +51,7 @@
 //! today**: `create` has to name `jni::objects::JObject` on Android and
 //! `objc2-ui-kit`'s classes on iOS *in the implementing crate*, and this
 //! plugin re-exports neither FFI crate, so the practical audience today is
-//! plugin authors, not app authors (the only implementor here is this crate's
+//! plugin authors, not app authors (the only implementing type here is this crate's
 //! own non-default `demo-components` composite).
 //!
 //! A component hears its own views the way the built-in controls do: it

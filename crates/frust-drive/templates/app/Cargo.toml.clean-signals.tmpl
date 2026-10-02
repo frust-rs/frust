@@ -52,14 +52,12 @@ frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
 # dependency line in the default `Cargo.toml.tmpl`).
 clean-signals-frust = { path = "{{ frust_path }}/../../plugins/clean-signals-frust" }
 
-# `clean-signals` itself is not yet published to crates.io (see
-# `docs/DEVELOPMENT.md`'s Version-Pin Policy) — this app git+rev-pins to the
-# public repo at the exact same spec `clean-signals-frust`'s own
-# `clean-signals` dependency resolves, so Cargo unifies both into one crate
-# identity — the type-identity rule `examples/huddle/Cargo.toml` documents at
-# length. Unlike the old sibling-checkout path dep, this builds on any
+# `clean-signals` comes from crates.io with the exact same requirement
+# `clean-signals-frust`'s own `clean-signals` dependency declares, so Cargo
+# unifies both into one crate identity — the type-identity rule
+# `examples/huddle/Cargo.toml` documents at length. This builds on any
 # machine with no local `clean-signals-rs` checkout required.
-clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
+clean-signals = "0.1"
 
 # `log` facade dependency for the release-only `lean` feature below — mirrors
 # the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Design-token crate for Frust: the Theme aggregate, token tables, and the builder and extension seams a design system composes."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # Color role values (ColorScheme). Scene-layer-purity-adjacent: only

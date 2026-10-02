@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Windows desktop shell for Frust: native Win32 menu bar, window icons and app identity on top of frust-shell-desktop."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # The DesktopExtensions trait this crate implements, plus the winit core it
@@ -43,3 +49,9 @@ windows-sys = { workspace = true, features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+# docs.rs builds on x86_64 Linux by default, where a target-specific crate
+# documents as empty; build the docs for the crate's own target instead.
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]

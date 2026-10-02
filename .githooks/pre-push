@@ -1,0 +1,21 @@
+#!/bin/sh
+# Refuse a push that would publish a commit with assistant attribution or an
+# agent/hostname identity. stdin lines: <local ref> <local sha> <remote ref> <remote sha>.
+root="$(git rev-parse --show-toplevel)" || exit 1
+script="$root/scripts/ci/commit-hygiene.sh"
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ -n "$local_sha" ] || continue
+  # A deletion pushes no commits.
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    "$script" "$remote_sha..$local_sha" || status=1
+  else
+    "$script" "$local_sha" --not --remotes || status=1
+  fi
+done
+if [ "$status" -ne 0 ]; then
+  echo "pre-push: push refused (see violations above)" >&2
+fi
+exit "$status"

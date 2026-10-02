@@ -1,6 +1,6 @@
 //! The app's closed failure enum.
 //!
-//! One `Failure` implementor for the whole app (small enough for a single
+//! One `Failure` implementation for the whole app (small enough for a single
 //! app not to need per-feature error types). Every use case maps its errors
 //! into this generic retry/failure vocabulary at the domain boundary — see
 //! `docs/CODE_STANDARDS.md`'s "Generic-over-`F` failures" convention.

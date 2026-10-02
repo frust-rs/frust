@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Desktop shell for Frust: winit window and event loop, input, rendering and the extension seam used by the per-OS desktop shells."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 frust-core = { workspace = true }

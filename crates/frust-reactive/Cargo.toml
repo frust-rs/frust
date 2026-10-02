@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Reactive substrate for Frust: process-wide runtime, async executor, frame waker and shell event sources."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # reactive_graph has no default features, so no `features`/`default-features`
