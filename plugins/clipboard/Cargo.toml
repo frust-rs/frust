@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Synchronous plain-text clipboard for Frust apps: Android ClipboardManager, iOS UIPasteboard, and macOS, Linux and Windows through arboard."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # ClipboardError variants callers match on — thiserror per CODE_STANDARDS.
@@ -15,7 +21,7 @@ thiserror = { workspace = true }
 # Plugin Conventions). Unconditional like `frust-shared-preferences`'/
 # `frust-secure-storage`'s own copy: the crate is inert off Android, so
 # declaring it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 
 # Android: `ClipboardManager`/`ClipData` via plain JNI (no Kotlin/Gradle
 # module — see `src/android.rs`'s module doc for why one isn't needed).

@@ -10,6 +10,8 @@ paints itself — Flutter's `camera` plugin is the API model, but its
 external-texture preview mechanism has no equivalent on our stack (see
 `docs/ARCHITECTURE.md`'s Module Structure / Platform-view flow).
 
+**Platform support:** Android (CameraX) and Apple targets (AVFoundation; the Apple module is compiled for iOS and macOS, and the preview is documented for iOS). On any other target, including Linux, Windows and web, calls fail with `CameraError::PlatformNotInitialized`.
+
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
@@ -34,7 +36,7 @@ The **only** required Cargo step is the dependency line:
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-camera = { path = "<frust>/plugins/camera" }  # crates.io later
+frust-camera = { path = "<frust>/plugins/camera" }  # or the crates.io release, e.g. version = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -62,13 +64,12 @@ them, but you'll be looking at a black rectangle).
 ```rust
 let view_type = session.preview_view_type(); // target-gated — see the doc below
 frust::platform_view(view_type)
-    .params(session.params_json())
+    .params_json(session.params_json())
     // size it off `session.preview_aspect_ratio()` once non-zero
 ```
 
-`CameraSession::preview_view_type()` is **target-gated by design** (platform-
-views' W5 finding, restated on that method's own doc): Android returns the
-fully-qualified `"dev.frust.camera.CameraPreviewFactory"`, iOS the bare
+`CameraSession::preview_view_type()` is **target-gated by design** (restated on that method's own doc):
+Android returns the fully-qualified `"dev.frust.camera.CameraPreviewFactory"`, iOS the bare
 `"CameraPreviewFactory"` — never hardcode either string yourself, always call
 the method.
 
@@ -466,3 +467,13 @@ package reference, and the `NSCameraUsageDescription` plist key — is applied
 for you, idempotently, by the frust TUI's **Add Plugin** dialog (`frust tui` →
 Add Plugin → `camera`, no optional features in v1). This README is the manual
 contract that dialog encodes.
+
+## Links and license
+
+Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## License
+
+Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`)
+or the MIT license (`LICENSE-MIT`) at your option (SPDX: `MIT OR Apache-2.0`).
+Both license files are included beside this README.
