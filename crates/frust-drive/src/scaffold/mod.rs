@@ -1637,9 +1637,7 @@ mod tests {
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains(
-                "clean-signals = { git = \"https://github.com/f0x-it-llc/clean-signals-rs\", rev = \"910f626\" }"
-            ),
+            cargo_toml.contains("clean-signals = \"0.1\""),
             "{cargo_toml}"
         );
         // The notes-app demo's plugin dependency doesn't apply to this
