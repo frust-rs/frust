@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "In-app debug service for Frust apps: a loopback, token-authenticated NDJSON JSON-RPC server backed by a shell-supplied trait."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # The wire contract, and the ONLY frust-* dependency this crate may ever have.
@@ -15,7 +21,7 @@ license.workspace = true
 # re-declared dependency, so the `Value`s built here are the same crate version
 # the protocol's own public API speaks (docs/CODE_STANDARDS.md's whole-crate
 # valve rule).
-frust-devtools-protocol = { path = "../frust-devtools-protocol" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.0" }
 # The workspace `tokio` pin is `default-features = false`; enable exactly what
 # the loopback service needs and nothing more:
 #   rt      — the small internal current-thread runtime the service owns, so a
