@@ -10,6 +10,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+# SwiftPM's build output under `platform/ios/FrustIap`. Git ignores it, but
+# cargo follows the dependency checkouts inside it (each is its own git
+# repository) and would package their files.
+exclude = [".build/"]
 
 [dependencies]
 # IapError variants callers match on — thiserror per CODE_STANDARDS.
