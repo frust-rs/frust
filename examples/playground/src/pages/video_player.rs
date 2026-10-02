@@ -436,7 +436,7 @@ fn maybe_debug_fill(view: PlatformViewView) -> PlatformViewView {
 /// (invisible), rather than sitting on top of the picture as chrome. Square
 /// corners (`.radius(0.0)`, `ContainerView`'s own default) rather than the
 /// design system's usual rounded chip: an engine finding
-/// (act_000001a05c9fb5e4jvgzTl2W) recorded a rounded fill compositing
+/// recorded a rounded fill compositing
 /// incorrectly at a punched-hole edge, so this overlay avoids that shape
 /// here.
 #[cfg(any(target_os = "android", target_os = "ios"))]

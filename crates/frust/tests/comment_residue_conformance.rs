@@ -161,6 +161,12 @@
 //!   sends the reader to something that does not ship; state the technical
 //!   fact directly instead. `implementor` is banned in its trait sense too —
 //!   say "implementing type" — which keeps the pattern unambiguous.
+//! - **Private-tracker record ids**: one of `fplan`, `rsa`, `act`, `tsk`,
+//!   `rvr`, `wav`, `brd`, `pph`, `prj`, `wkt`, `tvd`, `vgt`, an underscore,
+//!   `0`, and at least eight more alphanumerics, word-bounded at the front.
+//!   A public reader cannot open the record, so state the fact in the
+//!   sentence instead. The length floor keeps identifiers such as
+//!   `act_on_input` and `tsk_len` clear.
 //! - **Plan requirement numbers**: `req N`, but ONLY when the same line also
 //!   contains the substring `phase` (case-insensitive). A bare `req N` is
 //!   collision-prone on its own (`req` is a common abbreviation with no
@@ -472,6 +478,8 @@ const REVIEW_ROUND_REASON: &str = "review-round reference (`review round N`)";
 const DEVICE_PARITY_REASON: &str = "device-parity-round reference";
 const PIPELINE_ARTIFACT_REASON: &str = "pointer to a private-pipeline artifact that does not ship \
      (`completion summary`/`task card`/`implementor`/`conductor`/`review round`)";
+const TRACKER_ID_REASON: &str = "private-tracker record id (a `<prefix>_0` plus alphanumerics id) that a public \
+     reader cannot open";
 const REQ_REASON: &str = "plan requirement number (`req N`) alongside a phase reference";
 
 /// Ownership phrases that say *whose* phase a bare `Phase N` mention is — the
@@ -898,6 +906,37 @@ fn pipeline_artifact_hits(comment: &str, out: &mut Vec<Hit>) {
     }
 }
 
+/// The record-id prefixes of the private tracker; an id is one of these, an
+/// underscore, `0`, and at least eight more alphanumerics.
+const TRACKER_ID_PREFIXES: &[&str] = &[
+    "fplan", "rsa", "act", "tsk", "rvr", "wav", "brd", "pph", "prj", "wkt", "tvd", "vgt",
+];
+
+/// Pushes every private-tracker record id. The shape is long enough
+/// (`0` plus 8 alphanumerics) that identifiers such as `act_on_input` or
+/// `tsk_len` never match, and the prefix must start a word.
+fn tracker_id_hits(comment: &str, out: &mut Vec<Hit>) {
+    for prefix in TRACKER_ID_PREFIXES {
+        let needle = format!("{prefix}_0");
+        for idx in find_all(comment, &needle) {
+            if !word_boundary_before(comment, idx) {
+                continue;
+            }
+            let tail_start = idx + needle.len();
+            let tail = comment[tail_start..]
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .count();
+            if tail >= 8 {
+                out.push(Hit {
+                    range: idx..tail_start + tail,
+                    reason: TRACKER_ID_REASON,
+                });
+            }
+        }
+    }
+}
+
 /// Pushes every `req N` match, but only when the same comment also contains
 /// `phase` (case-insensitive) — the narrowed `req` rule (see module doc).
 fn req_with_phase_hits(comment: &str, out: &mut Vec<Hit>) {
@@ -939,6 +978,7 @@ fn banned_hits(comment: &str) -> Vec<Hit> {
     );
     req_with_phase_hits(comment, &mut hits);
     pipeline_artifact_hits(comment, &mut hits);
+    tracker_id_hits(comment, &mut hits);
     hits.sort_by_key(|hit| (hit.range.start, hit.range.end));
     hits
 }
@@ -1462,6 +1502,10 @@ mod scan_behavior {
         assert!(banned_reason("nothing banned here").is_none());
     }
 
+    fn tracker_id_violation(comment: &str) -> bool {
+        fires(tracker_id_hits, comment)
+    }
+
     fn pipeline_artifact_violation(comment: &str) -> bool {
         fires(pipeline_artifact_hits, comment)
     }
@@ -1516,6 +1560,29 @@ mod scan_behavior {
         ));
         assert!(!pipeline_artifact_violation("// a nonconductor of heat"));
         assert!(!pipeline_artifact_violation("// the review of each round"));
+    }
+
+    /// Negative control: a comment carrying a tracker-shaped id is flagged.
+    /// The fixture id is assembled at run time so this file's own text holds
+    /// no literal id.
+    #[test]
+    fn tracker_id_is_flagged() {
+        let id = format!("{}_0{}", "act", "00001a070c818837NtGqevW");
+        assert!(tracker_id_violation(&format!("// regressed (action {id})")));
+        let plan = format!("{}_0{}", "fplan", "00001a02ee9100bPd4uUpRs");
+        assert!(
+            scan_comment(&format!("// owned by the plan `{plan}`"), &[]).is_some(),
+            "the id must fail the full per-comment scan, not only its detector"
+        );
+    }
+
+    /// Positive control: identifiers that merely start like an id pass.
+    #[test]
+    fn tracker_id_lookalike_identifiers_pass() {
+        assert!(!tracker_id_violation("// calls act_on_input then tsk_len"));
+        let embedded = format!("// the re{}_0123456789 value", "act");
+        assert!(!tracker_id_violation(&embedded), "prefix must start a word");
+        assert!(!tracker_id_violation("// act_0short is too brief"));
     }
 
     #[test]
