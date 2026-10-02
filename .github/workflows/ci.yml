@@ -1,0 +1,175 @@
+# Continuous integration for pull requests and main.
+#
+# The toolchain is whatever rust-toolchain.toml pins (1.98.1 + rustfmt + clippy);
+# rustup installs it on first use. `ci-ok` is the single aggregate check that
+# .github/rulesets/main.json requires, so a job added here only gates merges once
+# it is listed in `ci-ok`'s `needs`. No secrets are used and nothing runs on
+# `pull_request_target`.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install Linux build packages
+        run: |
+          pkgs=(
+            # C toolchain helper: build scripts locate system libraries through pkg-config
+            pkg-config
+            # Text: yeslogic-fontconfig-sys (system font discovery) needs a pkg-config sysroot (docs/DEVELOPMENT.md, Test section)
+            libfontconfig1-dev libfreetype-dev
+            # Wayland: wayland-sys (via winit and wgpu-hal) probes wayland-client through pkg-config
+            libwayland-dev libxkbcommon-dev
+            # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
+          )
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install Linux build packages
+        # One install step, a comment per package group. GPU-dependent tests are
+        # #[ignore] and stay ignored, so no GPU driver packages are installed.
+        run: |
+          pkgs=(
+            # C toolchain helper: build scripts locate system libraries through pkg-config
+            pkg-config
+            # Text: yeslogic-fontconfig-sys (system font discovery) needs a pkg-config sysroot (docs/DEVELOPMENT.md, Test section)
+            libfontconfig1-dev libfreetype-dev
+            # Wayland: wayland-sys (via winit and wgpu-hal) probes wayland-client through pkg-config
+            libwayland-dev libxkbcommon-dev
+            # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
+          )
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace
+
+  standalone:
+    name: standalone (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: examples/huddle
+            gate: cargo test && cargo clippy --all-targets -- -D warnings
+          - dir: examples/shadertoy
+            # No documented test gate; a full-target check proves the graph builds.
+            gate: cargo check --locked --all-targets
+          - dir: examples/glyph-catalog
+            gate: cargo build --locked && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+          - dir: examples/playground
+            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+          - dir: examples/design-system-sample
+            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+          - dir: examples/material3-demo
+            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+          - dir: examples/native-widgets-demo
+            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+          - dir: examples/web-gallery
+            wasm: true
+            gate: cargo check --locked --target wasm32-unknown-unknown
+          - dir: examples/web-spike
+            wasm: true
+            gate: cargo check --locked && cargo check --locked --target wasm32-unknown-unknown
+          - dir: plugins/clean-signals-frust
+            gate: cargo test && cargo clippy --all-targets -- -D warnings
+          - dir: benchmarks/frust_bench
+            # A benchmark app built for Android/iOS (cdylib + staticlib); on Linux
+            # only a compile check is meaningful, so it gets `cargo check`.
+            gate: cargo check --locked --all-targets
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Add the wasm32 target
+        if: ${{ matrix.wasm }}
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install Linux build packages
+        run: |
+          pkgs=(
+            # C toolchain helper: build scripts locate system libraries through pkg-config
+            pkg-config
+            # Text: yeslogic-fontconfig-sys (system font discovery) needs a pkg-config sysroot (docs/DEVELOPMENT.md, Test section)
+            libfontconfig1-dev libfreetype-dev
+            # Wayland: wayland-sys (via winit and wgpu-hal) probes wayland-client through pkg-config
+            libwayland-dev libxkbcommon-dev
+            # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
+          )
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ${{ matrix.dir }}
+      - name: Gate
+        working-directory: ${{ matrix.dir }}
+        run: ${{ matrix.gate }}
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Commit-hygiene guard self-test
+        run: scripts/ci/commit-hygiene.sh --self-test
+      - name: Check this pull request's commits
+        if: ${{ github.event_name == 'pull_request' }}
+        run: scripts/ci/commit-hygiene.sh origin/${{ github.base_ref }}..HEAD
+      - name: Licence texts are in sync
+        run: scripts/sync-licenses.sh --check
+
+  ci-ok:
+    # The one required status check (.github/rulesets/main.json).
+    if: always()
+    needs: [fmt, clippy, test, standalone, hygiene]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every needed job to have succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needed job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "a required job did not succeed" >&2
+              exit 1
+            fi
+          done

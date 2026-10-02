@@ -1,0 +1,5 @@
+#!/bin/sh
+# Reject a commit message that carries assistant attribution.
+# Enabled by scripts/install-hooks.sh (git config core.hooksPath .githooks).
+root="$(git rev-parse --show-toplevel)" || exit 1
+exec "$root/scripts/ci/commit-hygiene.sh" --message-file "$1"
