@@ -37,7 +37,7 @@
 //! answers. It also keeps those hooks unit-testable without a live event loop —
 //! a `winit::Window` cannot be constructed without one, which is why the two
 //! window-taking hooks have no spy coverage here (the command hook's *payload*
-//! is covered instead, in [`crate::platform_view`]'s own tests).
+//! is covered instead, in `crate::platform_view`'s own tests).
 
 use std::sync::Arc;
 
@@ -173,7 +173,7 @@ pub trait DesktopExtensions {
     /// Called on the UI thread right after a frame is submitted, with the
     /// platform-view differ's pending command batch in generation order — the
     /// per-OS half of the desktop platform-view host (this crate owns the
-    /// OS-neutral half; see [`crate::platform_view`]).
+    /// OS-neutral half; see `crate::platform_view`).
     ///
     /// A host creates, places, shows/hides, re-parameterizes and disposes its
     /// native sibling views from this batch, parented into `window`. Contract:
