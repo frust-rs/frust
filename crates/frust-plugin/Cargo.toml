@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Substrate for Frust plugins: Android platform handles and the desktop native-view factory registry."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # Errors callers match on (PlatformHandleError, desktop::RegisterError) —
