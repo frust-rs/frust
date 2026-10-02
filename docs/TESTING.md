@@ -126,8 +126,8 @@ cargo build --workspace --locked \
 ```
 
 Also run the Huddle and clean-signals-frust gates from their standalone
-workspace roots — unconditional, since `clean-signals` is git+rev-pinned to
-its public repo rather than a `../clean-signals-rs` sibling checkout (see
+workspace roots — unconditional, since `clean-signals` comes from
+crates.io rather than a `../clean-signals-rs` sibling checkout (see
 `docs/DEVELOPMENT.md`'s Version-Pin Policy):
 
 ```bash

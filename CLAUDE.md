@@ -49,10 +49,8 @@ it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frus
   gates from their own directories.
 - `workflow/` is a separate nested repo — never commit it.
 - Doc edits must respect the budgets recorded in [docs/DOC_POLICY.md](docs/DOC_POLICY.md).
-- `clean-signals` is git+rev-pinned (`910f626` on `master`) to its public repo —
-  `examples/huddle`, `plugins/clean-signals-frust`, and `crates/frust-drive/templates/app`'s clean-signals
-  scaffold variant must all resolve the identical git+rev spec (two resolution routes
-  would give Cargo two crate identities) — do not change one without the others.
+- `clean-signals` has one shared version requirement across three sites — see
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Version-Pin Policy before changing any of them.
 - `frust-engine` (on `frust-gpu`) is the only renderer `frust-render` contains — not a cargo
   feature, not an override. Do not reintroduce a render-tier choice (env var, CLI flag, or
   feature) without an explicit new plan.
