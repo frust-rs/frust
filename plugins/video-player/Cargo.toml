@@ -11,6 +11,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Video playback for Frust apps over Media3 ExoPlayer on Android and AVFoundation on iOS and macOS, hosted in a native platform view."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [features]
 default = ["frust-api"]
@@ -33,14 +39,14 @@ log = { workspace = true }
 # Unconditional per this crate's platform-plugin charter: **no other
 # `frust-*` dependency** (see `docs/ARCHITECTURE.md`'s Module Structure /
 # `docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions).
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 
 # The app-facing `frust-api` feature's only dependency — optional, gated
 # above. A literal `path` dependency, not `{ workspace = true }`: Cargo
 # forbids a workspace-inherited dependency from overriding `default-features`
 # unless the workspace-level entry already sets it explicitly, and the root
 # `frust` entry doesn't (`plugins/i18n/Cargo.toml` carries the same note).
-frust = { path = "../../crates/frust", default-features = false, optional = true }
+frust = { path = "../../crates/frust", version = "0.5.0", default-features = false, optional = true }
 
 # Android: this plugin's own JNI surface — the exports the Kotlin host calls
 # back through and the Rust→Kotlin player calls — needs `jni` directly,

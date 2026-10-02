@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "In-app purchases for Frust apps over Android Play Billing and iOS StoreKit, using the OpenIAP 3.0.1 wire protocol."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # IapError variants callers match on — thiserror per CODE_STANDARDS.
@@ -21,7 +27,7 @@ serde_json = { workspace = true }
 # Plugin Conventions). Unconditional like `frust-clipboard`'s/
 # `frust-haptics`'s own copy: the crate is inert off Android, so declaring
 # it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 # The Android nativeOn* export stubs and the Apple backend's own diagnostics
 # both log rather than print (platform plugins never own stdout/stderr the
 # way `frust-drive` does) — a leaf, framework-free dependency, matching

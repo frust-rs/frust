@@ -29,6 +29,10 @@ not re-export it.
 > into your app, so there is nothing to keep in sync by hand; on iOS there is
 > nothing to add at all beyond the dependency.
 
+**Platform support:** Android, iOS and macOS. Other targets (desktop preview, web) have no native-control backend.
+
+More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
+
 ---
 
 ## 1. What you get
@@ -444,8 +448,7 @@ Objective-C runtime from this crate's own code and resolved by
 `NSClassFromString` under the bare runtime name `FrustNativeControlFactory`
 (`docs/CODE_STANDARDS.md`'s Naming Conventions: iOS factories carry no
 package prefix — the opposite convention from Android's fully-qualified
-FQCN). This was proven out in Phase 0's spike 2 and has held for every
-control added since.
+FQCN). This has held for every control added since the first.
 
 ### macOS — the desktop Mode-A host registers the factory lazily
 
@@ -609,3 +612,8 @@ cause**:
 Both failures are silent by design (a misbehaving platform-view factory must
 never take down the frame loop), so `adb logcat -s frust` is the place to
 confirm which one you have.
+
+## License
+
+Licensed under either of MIT or Apache-2.0 (SPDX: `MIT OR Apache-2.0`), at your
+option. See `LICENSE-MIT` and `LICENSE-APACHE` beside this README.
