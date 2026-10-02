@@ -30,7 +30,7 @@ none — everything they need is here):
 - **Web** (only needed for browser output): `rustup target add wasm32-unknown-unknown` (no
   RUSTFLAGS/cfg needed on the `wgpu` 30.0.1 pin). Packaging needs host `wasm-bindgen-cli` 0.2.128
   (must equal the `wasm-bindgen` pin) and `wasm-opt` — see `examples/web-gallery/README.md` § Build.
-- **clean-signals-rs**: not required to build — `clean-signals` is git+rev-pinned to its public repo (*Version-Pin Policy*), so a sibling
+- **clean-signals-rs**: not required to build — `clean-signals` is a crates.io dependency (*Version-Pin Policy*), so a sibling
   checkout (`../clean-signals-rs`) only helps local `[patch]`-override iteration on `clean-signals` itself.
 - **`frust-database --features engine-turso`**: needs libclang on the host (pulls
   `bindgen`/`clang-sys`). The default (`engine-sqlite`) build does not — `rusqlite`'s `bundled`
@@ -265,8 +265,8 @@ Additionally run:
 All six gate from their own directory rather than `-p` from the repo root, being standalone
 workspaces excluded from the root one (*Version-Pin Policy*) — the same shape `examples/shadertoy`,
 `examples/glyph-catalog`, `examples/web-gallery` and `examples/web-spike` gate under, per their own
-READMEs (the latter two against the wasm32 target). `huddle` and `clean-signals-frust` git+rev-pin
-`clean-signals` to its public repo, so no local sibling checkout is needed. `design-system-sample`
+READMEs (the latter two against the wasm32 target). `huddle` and `clean-signals-frust` take
+`clean-signals` from crates.io, so no local sibling checkout is needed. `design-system-sample`
 additionally needs `cargo tree -e features -i frust -p sample-app` (from its own directory) to print
 **no** `frust feature "..."` line — the out-of-tree-realism check that this workspace resolves
 `frust` exactly as a real third-party design-system crate would, with nothing re-enabled by feature
@@ -455,11 +455,11 @@ The rules below bind every pin, wherever its row lives:
   --workspace --all-targets -- -D warnings` passes on the candidate — a stable auto-update once
   turned new lints on under untouched code and failed the gate everywhere.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a **standalone package** (own
-  `[workspace]` root/`Cargo.lock`, excluded from the root `[workspace]`), git+rev-pinning the
-  `clean-signals` core crate to its public repo (see
+  `[workspace]` root/`Cargo.lock`, excluded from the root `[workspace]`), depending on the
+  `clean-signals` core crate from crates.io (see
   [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)) rather than a path dep — every consumer, including
-  `crates/frust-drive/templates/app`'s clean-signals scaffold variant, must resolve the identical git+rev spec, or
-  Cargo builds two distinct crate identities. Neither manifest can use `{ workspace = true }`;
+  `crates/frust-drive/templates/app`'s clean-signals scaffold variant, must declare the identical version requirement,
+  or Cargo builds two distinct crate identities; change all three sites together. Neither manifest can use `{ workspace = true }`;
   gate each from its own directory (*Test*'s standalone chain above).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
   `cargo generate-lockfile`, then confirm `cargo build --workspace --locked` succeeds **before
