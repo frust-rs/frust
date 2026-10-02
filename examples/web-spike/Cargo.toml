@@ -163,7 +163,7 @@ frust-reactive = { path = "../../crates/frust-reactive" }
 # unifies onto one `reactive_graph` identity rather than forking a second.
 reactive_graph = "0.2"
 
-# --- w0-05 release profile (conductor's scope extension) ------------------
+# --- w0-05 release profile (added beyond the spike's original scope) ------------------
 #
 # This spike is a STANDALONE workspace (its own `[workspace]` root at the
 # top of this file), so the root `Cargo.toml`'s own `[profile.release]`

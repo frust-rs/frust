@@ -15,7 +15,7 @@
 //! module's own iOS test (`generate_produces_ios_tree_with_stripped_dir_suffix_and_substitutions`)
 //! uses. No Xcode toolchain is available on this host, so this test only
 //! proves the *rendered* shell script text — not a real Xcode build; the
-//! device/Mac gate remains the actual build proof (see the task card).
+//! device/Mac gate remains the actual build proof.
 
 use frust_drive::scaffold::{TemplateContext, generate};
 use std::fs;

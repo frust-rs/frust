@@ -226,7 +226,7 @@ with `python3 -m http.server`, whose `mimetypes` module has mapped `.wasm`
 to `application/wasm` since 3.9 — the same fact `examples/web-spike/serve.sh`
 documents). A `serve.sh` matching that spike's own script was **not** added
 — it is outside this task's `write_files` (`Cargo.toml`, `README.md`,
-`index.html`, `src/main.rs`); the conductor can add one from this recipe if
+`index.html`, `src/main.rs`); one can be added from this recipe if
 wanted.
 
 **Primary recipe's artifact** (`build/web/`, self-contained — `frust_web.js`
@@ -305,8 +305,7 @@ the existing per-design-system-case seeding (`set_default_theme`), which
 still runs unchanged when `?theme=` is absent. Host-follow with no query
 parameter needs no app code at all, exactly as before this task.
 
-**`?embed=1`** (`src/main.rs`'s `resolve_embed_from_query`, task p3-r1-01,
-review round 1) is a third piece, added after this section's other two: the
+**`?embed=1`** (`src/main.rs`'s `resolve_embed_from_query`) is a third piece, added after this section's other two: the
 website's `WidgetPreview` component builds its iframe `src` as
 `?case=<slug>&embed=1`, not bare `?case=<slug>`, so a reader inside the
 preview iframe sees exactly `component(CaseHost(case.build))` — no "‹ Index"
@@ -397,9 +396,8 @@ the fix.
 **Not run, and not claimable from this Mac:** Safari 26. There is no Safari
 automation available in this environment (Playwright's `webkit` channel is
 a bundled WebKit build, not shipping Safari, and was not substituted for
-it here since that would misrepresent the leg as covered). The conductor
-should bill a real Safari 26 pass to Ed or a macOS device gate, the same way
-the card's own acceptance names it.
+it here since that would misrepresent the leg as covered). A real
+Safari 26 pass belongs to a macOS device gate.
 
 ## Rig used for the milestone evidence below (prior task, w1-06)
 
@@ -672,7 +670,7 @@ them in every binary") is still the open item.
 
 ### Browser evidence: measured text, not a canvas that appeared
 
-The reason this defect survived a full phase and three review rounds is that
+The reason this defect went unnoticed is that
 the browser checks ran `Base` cases only, and the readiness probe asserts a
 canvas *appeared* — which it does whether or not a single glyph resolves.
 The measurement below therefore asserts on rendered text: real Chrome

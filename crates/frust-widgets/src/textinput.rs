@@ -4661,8 +4661,7 @@ mod tests {
         // type is stable across the flip and only its child's concrete type
         // changes — the `rebuild_child` swap. (Branching outside and handing
         // `Padding` a pre-erased `AnyView` would double-erase the child and
-        // hide the swap from the wrapper entirely; see the note in the
-        // completion summary.)
+        // hide the swap from the wrapper entirely.)
         let slot: AnyView<WrapState> = if state.row_editing {
             any(crate::Padding(
                 crate::EdgeInsets::all(0.0),

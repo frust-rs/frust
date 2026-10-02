@@ -1038,8 +1038,7 @@ mod tests {
         // the reader thread used to `raw.clear()` at the top of every loop
         // iteration, so a socket read timeout landing mid-line silently
         // threw away whatever had already been read for it. Verified to
-        // fail against the pre-fix code (see the task's completion summary
-        // for the revert check).
+        // fail against the pre-fix code.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let read_timeout = Duration::from_millis(100);

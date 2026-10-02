@@ -2010,8 +2010,8 @@ pub struct PaintOutcome {
 ///
 /// `Widget: Any` so the render root can downcast a boxed widget back to the
 /// concrete element type its originating view produced (needed during rebuild).
-/// Implementors get [`Widget::downcast_mut`] for free — no boilerplate method to
-/// write.
+/// Implementing types get [`Widget::downcast_mut`] for free — no boilerplate
+/// method to write.
 pub trait Widget: Any {
     /// Choose a size within `bc` and return it. The chosen size must satisfy
     /// `bc` (callers may additionally clamp via [`BoxConstraints::constrain`]).
@@ -4618,7 +4618,7 @@ mod tests {
     }
 
     /// A scene recorder that overrides the shadow/layer `PaintScene` additions, to
-    /// prove they reach an implementor that opts in.
+    /// prove they reach an implementing scene that opts in.
     #[derive(Default)]
     struct ShadowLayerRecordingScene {
         shadows: Vec<(Point, Size, f64, f64, Color)>,
@@ -4678,7 +4678,7 @@ mod tests {
     }
 
     /// A scene recorder overriding the path additions, proving they
-    /// reach an implementor that opts in.
+    /// reach an implementing scene that opts in.
     #[derive(Default)]
     struct PathRecordingScene {
         fills: Vec<(Point, BezPath)>,

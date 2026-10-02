@@ -905,8 +905,8 @@ publish_cell() {
 # it exists in this function), and they are copied best-effort, so their
 # presence is never required the way run-NN.log's is.
 # benchmarks/.gitignore's own pss content check ("scan *.pss_*.txt for any
-# package identifier other than it.f0x.*bench") is a separate, conductor-run
-# pre-commit check, not part of this function.
+# package identifier other than it.f0x.*bench") is a separate pre-commit
+# check run by hand, not part of this function.
 # Only ever called after a non-SKIPPED copy (see the run loop below) — a
 # SKIPPED cell is never staged, so this never runs against one.
 self_check_raw_dir() {

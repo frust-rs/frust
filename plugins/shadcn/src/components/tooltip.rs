@@ -1471,8 +1471,7 @@ mod tests {
     /// `OverlayInput::Interactive` makes this test fail (`outcome.handled` is
     /// `false` and `state.button_pressed` stays `false`, because the root's
     /// overlay pre-pass then routes the press to the tooltip's own pod
-    /// instead of letting it fall through) — see the completion summary for
-    /// the exact run.
+    /// instead of letting it fall through).
     #[test]
     fn a_press_on_a_button_beneath_an_open_tooltip_reaches_the_button() {
         let hover = TooltipHover::new();

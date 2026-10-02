@@ -5,8 +5,8 @@
 //! Every variant a later task needs is pre-planted here (the
 //! overlap-elimination shape this whole crate scaffold follows — see
 //! `src/lib.rs`'s crate doc): a later task may **use** this enum but must
-//! not **modify** it; if a variant it needs is missing, it notes the gap in
-//! its own completion summary rather than editing this file.
+//! not **modify** it; if a variant it needs is missing, it reports the gap
+//! rather than editing this file.
 
 /// The crate's public error type.
 #[derive(thiserror::Error, Debug)]

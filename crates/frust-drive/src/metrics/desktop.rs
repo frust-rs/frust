@@ -1,8 +1,8 @@
 //! Desktop Linux metrics: pure parsers over `/proc/<pid>/stat`,
 //! `/proc/<pid>/status`'s `VmRSS`, `/sys/class/thermal/thermal_zone*`, and
 //! `/proc/net/dev`, plus a thin `std::fs` reader layer feeding them. No new
-//! dependency (no `sysinfo`, no `libc`) — a deliberate conductor deviation
-//! from an earlier `sysinfo`-based plan, recorded here: these four sources
+//! dependency (no `sysinfo`, no `libc`) — a deliberate choice over a
+//! `sysinfo`-based design: these four sources
 //! are simple enough to parse directly and `frust-drive` already has a hard
 //! zero-new-dependency bar for this feature.
 //!

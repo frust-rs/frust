@@ -22,7 +22,7 @@
 //! today: `create` has to name `jni::objects::JObject` on Android and
 //! `objc2-ui-kit`'s classes on iOS *in the implementing crate*, and this
 //! plugin re-exports neither FFI crate, so the practical audience today is
-//! plugin authors, not app authors (the only implementor in this repo is this
+//! plugin authors, not app authors (the only implementing type in this repo is this
 //! crate's own non-default `demo-components` composite); `crate::component`'s
 //! module doc states that limit in full. What the mounted view reports back is
 //! the component's to decide: it attaches the platform's one listener to any

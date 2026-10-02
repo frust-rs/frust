@@ -109,9 +109,8 @@ pub fn parse_level(level: Option<&str>) -> LevelFilter {
 /// query string is already handed to this function as plain text, the
 /// grammar this needs (find a `key=value` pair among `&`-separated ones,
 /// ignore the rest, ignore a value-less or malformed pair) is a few lines,
-/// and this crate's `Cargo.toml` is a declared no-touch for this task (see
-/// the task card) — pulling in a new dependency for a single-key lookup is
-/// not worth it either way. Case-sensitive on the key (`log`, not `Log`), to
+/// and a new dependency in this crate's `Cargo.toml` for a single-key lookup
+/// is not worth it either way. Case-sensitive on the key (`log`, not `Log`), to
 /// keep the match trivial; the *value* still runs through `LevelFilter`'s
 /// case-insensitive parse.
 pub fn level_from_query(query: &str) -> LevelFilter {
