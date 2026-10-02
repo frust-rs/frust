@@ -8,7 +8,7 @@ constraint), so it is discoverable from the docs instead of only from a gate
 report or an old chat.
 
 **Entry bar**: evidence, not suspicion. Every entry below traces to a device
-gate, a review round, or a task's on-device measurement — cited at the end of
+gate, a review finding, or an on-device measurement — cited at the end of
 each entry. Each entry has a stable id (`` `id-like-this` ``) other docs and
 code comments can cite. When a limitation is fixed, delete its entry rather
 than marking it resolved-in-place — this file describes current-state gaps
@@ -78,8 +78,7 @@ proceeds normally.
 own delegate and reply channel, so a second call cannot collide with the
 first.
 
-**Why not fixed**: deferred by Ed's explicit ruling (review round 1, finding
-3), not by oversight. Two fixes are on the table but the choice between them
+**Why not fixed**: deferred by an explicit maintainer ruling, not by oversight. Two fixes are on the table but the choice between them
 is a contract decision, not a cleanup: (a) `take_picture` typed-refuses a
 call while one is already in flight on the same session, or (b) an app
 disables its capture control while a request is outstanding, leaving the
@@ -656,7 +655,7 @@ erases its own child (`pattern_switcher(key, pattern, child)` calls
 and every in-crate container's own child list — detects swaps correctly and is
 unaffected.
 
-**Why not fixed**: pre-existing (it predates the focus/IME fix rounds that
+**Why not fixed**: pre-existing (it predates the focus/IME fixes that
 found it) and not fixable at a call site — the information the reconciler needs
 has already been erased by the time it looks. Closing it needs **shared
 swap-detection machinery**: `ErasedView` would have to report the *element's*
@@ -701,7 +700,7 @@ focus-clear, and the gated orphan mark in one place) is the right end state but
 re-shapes two catalog widgets' reconcilers; replicating the
 `ctx.has_focus() && pod.is_focused()` gate inline is smaller but adds a third
 hand-rolled copy of a contract that already has one home. Deliberately
-deferred rather than fixed speculatively during a focus/IME review round.
+deferred rather than fixed speculatively during the focus/IME fixes.
 
 **Evidence**: source inspection of
 `crates/frust-widgets/src/material/navbar.rs` and
@@ -1102,7 +1101,7 @@ against this class drop the handle on any `transaction` error and reopen (README
 
 **Evidence**: `plugins/database/src/lib.rs` `RollbackGuard::drop` (best-effort
 `ROLLBACK`), the qualified poison-policy doc on `lock_conn`, README §4a's closing
-caveat; flagged by phase-review round 1 (`workflow/reviews/db-plugin/REVIEW.md`).
+caveat.
 
 ### `tui-shimmer-ansi16-degrade` — the §B10 phase-line shimmer degrades to flat+BOLD at Ansi16
 
@@ -1145,8 +1144,8 @@ Desktop and both simulators/emulators are unaffected.
 build/verify against, neither available on this build host. Deferred by plan decision
 rather than discovered as a gap; the natural v2 step once a Mac session is available.
 
-**Evidence**: `workflow/plans/features/frust-tui-devex/PLAN.md`'s Non-Goals and Risks
-sections (iOS physical-device forwarding via usbmuxd).
+**Evidence**: iOS physical-device forwarding via usbmuxd is an explicit non-goal of the
+frust-tui devex feature.
 
 ---
 
@@ -1211,8 +1210,7 @@ secret; the exposure window is debug/profile developer builds on the developer's
 `BCryptGenRandom`-based source (via `std::os::windows` FFI, no new crate) is the named follow-up
 when a Windows verification host is available.
 
-**Evidence**: `crates/frust-devtools/src/token.rs` (`os_random_bytes` cfg gate + module doc);
-review finding recorded in `workflow/reviews/frust-tui-devex-phase2/REVIEW-round1.md`.
+**Evidence**: `crates/frust-devtools/src/token.rs` (`os_random_bytes` cfg gate + module doc).
 
 ---
 
@@ -1236,8 +1234,7 @@ folded in here.
 
 **Evidence**: `crates/frust-tui/src/engine/devtools.rs`'s `MetricsIdentity` doc (desktop honesty
 note); `crates/frust-mcp/src/engine/metrics.rs`'s module doc ("Android only, and why");
-`workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s p3-06 completion note
-("desktop/iOS sampling unavailable — pid not exposed").
+desktop/iOS sampling is unavailable because the pid is not exposed.
 
 ---
 
@@ -1255,8 +1252,8 @@ plan's original option and was dropped to keep `frust-drive` free of the added d
 a native macOS source (e.g. `host_statistics`/IOKit) is deferred rather than pursued in this phase.
 
 **Evidence**: `crates/frust-drive/src/metrics/desktop.rs`'s module doc ("Linux-only... the macOS
-gap is tracked as a `docs/LIMITATIONS.md` entry"); `workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s
-conductor decision ("No sysinfo dep... macOS metrics deferred to LIMITATIONS").
+gap is tracked as a `docs/LIMITATIONS.md` entry"); the no-`sysinfo`-dependency decision defers
+macOS metrics to this entry.
 
 ---
 
@@ -2205,8 +2202,8 @@ a more complex `Engine::resolve` contract. Deferred from v1 scope.
 
 **Evidence**: `plugins/i18n/src/engine/resolve.rs`'s chain walk (lines 50-75, first owning
 bundle's `entry.bundle` is formatted); `plugins/i18n/src/fmt/fluent_fns.rs` (lines 77-88,
-`with_icu_functions` closure captures locale at bundle-build time); review R2-M4
-(workflow/reviews/i18n-plugin/REVIEW-r2.md).
+`with_icu_functions` closure captures locale at bundle-build time); review
+finding R2-M4.
 
 ---
 
@@ -2242,7 +2239,7 @@ does not become conditional).
 
 **Evidence**: `plugins/i18n/README.md` §10 (size measurement procedure and figures);
 `plugins/i18n/Cargo.toml`'s default feature list and the `formatting` feature's own
-dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md).
+dependencies.
 
 ---
 
@@ -2277,10 +2274,8 @@ objc2/objc2-app-kit 0.3.x) rather than guessed; only a Wayland session — a dis
 for the `app_id` identity path — has not yet run.
 
 **Evidence**: desktop-shells Phase A tasks 02/03/04/05/06 completion summaries (Risks/Limitations
-sections); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Build State (Wave 3
-integration-verify cross-target matrix); macOS runtime verification —
-`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` (gate table G4,
-G5, G9, G12, G15); Windows runtime verification — the 2026-08-19 gate, landed with the menu-quit
+sections); the cross-target build matrix; macOS runtime verification on a MacBook
+(window, menu, dock and quit behavior); Windows runtime verification — the 2026-08-19 gate, landed with the menu-quit
 and accelerator-registration fixes that narrowed this entry; Linux X11 verification — the
 2026-09-13 gate (KDE on Xorg, NVIDIA T400).
 
@@ -2334,11 +2329,9 @@ available substitute. Flagged by the implementor for reviewer confirmation, clos
 review, and the gap's exact shape was then confirmed live on real hardware.
 
 **Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #3,
-Risks/Limitations #3); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes
-(review-watch item #2). Runtime confirmation —
-`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` G13: a
+Risks/Limitations #3). Runtime confirmation on a MacBook: a
 Dock click on the already-active app with the window hidden did not re-show it (gap reproduced
-exactly); G12 confirms the inactive-path reopen works.
+exactly); the inactive-path reopen works.
 
 ---
 
@@ -2373,12 +2366,10 @@ routes were then observed live on real hardware. A later fix would route termina
 the graceful shutdown, then `terminateNow`) instead of the current predefined action.
 
 **Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #2);
-`workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes (review-watch item #1);
 `plugins/camera/src/apple.rs` (`AppleSession`'s `Drop`, module doc's macOS-shares-the-Apple-arm
-note). Runtime confirmation —
-`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` G9 and G14:
+note). Runtime confirmation on a MacBook:
 the `terminate:` route (menu Quit and ⌘Q, including while the window was hidden) exits without
-`run` returning; G10 confirms the close-window route returns from `run` cleanly (exit code 0).
+`run` returning; the close-window route returns from `run` cleanly (exit code 0).
 
 ---
 
@@ -2404,9 +2395,7 @@ About/Hide/Quit item labels follow the same name — `resolve_app_name` prefers 
 is set (gate r2 finding F-4). Only the unbundled bold title remains process-named, which is
 AppKit's own behavior.
 
-**Evidence**: `workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md`
-gate table (G4, G5) and Findings (F-2);
-`workflow/plans/features/desktop-shells/gates/macbook-gate-r2.md` (rows 1b, F-4);
+**Evidence**: MacBook runtime verification of the window title and application-menu name;
 `crates/frust-shell-macos/src/lib.rs` (`resolve_app_name`), `src/appkit_glue.rs`
 (`bundle_display_name`).
 
@@ -2496,11 +2485,7 @@ what's owed.
 (`07-cli-build-targets`) completion summaries (Testing Performed — real Linux smoke: genuine `.deb`
 verified via `file`, `.AppImage` failure tail); `crates/frust-drive/src/desktop_build/installer.rs`
 (`InstallerFormat::for_target`, `RpmNotSupported`, `PackagerMacosConfig`, `InstallerNote`,
-`generated_icns`); desktop-shells Phase B fix round 1
-(`workflow/plans/features/desktop-shells/phase-b/followups/phase-b-fix-1/TASKS.md`, G3/G4) for the
-codesign-flags policy and the `macos` config-block wiring, respectively; round 2 (same file, G6/G7)
-for the icon-name alignment and the non-Apple signing-identity suppression; round 3 (same file,
-G8/G9) for the credential-scrub-by-default + `notarize` opt-in contract —
+`generated_icns`); for the credential-scrub-by-default + `notarize` opt-in contract:
 `crates/frust-drive/src/desktop_build/installer.rs` (`APPLE_CREDENTIAL_ENV_VARS`,
 `InstallerNote::NotarizationSuppressed`/`NotarizationEnabled`), `crates/frust-drive/src/manifest.rs`
 (`MacosSection::notarize`/`notarize_enabled`), `crates/frust-drive/src/process.rs` (`ProcessRunner`'s
@@ -2521,9 +2506,8 @@ any per-OS shell.
 Phase A non-goal, not a defect — revisit only if a future winit brings first-class multi-window
 support worth exposing through `DesktopConfig`.
 
-**Evidence**: `workflow/plans/features/desktop-shells/PLAN.md` § Edge Cases & Risks (menus/deep
-links/lifecycle scope list: "multi-window stays out of scope (single window, like today —
-LIMITATIONS entry)").
+**Evidence**: the desktop-shells scope list for menus, deep links and lifecycle states that
+multi-window stays out of scope (single window, like today).
 
 ---
 
@@ -2550,7 +2534,7 @@ injectable existence probe plus the darwin cross-target gates cover the logic it
 **Evidence**: `crates/frust-paths/src/lib.rs` (`macos_dir_from`, `legacy_data_dir`/
 `legacy_cache_dir`); `plugins/database/src/lib.rs` (`resolve_db_path_from`);
 `crates/frust-shell-desktop/src/cache.rs` (`load_path`);
-`workflow/plans/features/desktop-shells/gates/macbook-gate-r2.md` (rows 4a-4c, 6a).
+MacBook runtime verification of the data and cache directory resolution.
 
 ---
 
@@ -3067,9 +3051,8 @@ frame after lift — i.e. the residual is transient, never a tint stranded on a 
 
 **Evidence**: `crates/frust-core/src/app.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
 `a_down_up_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
-`workflow/plans/features/shadcn-design-system/tasks/01-hover-pipeline.md` completion summary
-(2026-08-17, commit `68ac7e93`), "Known v1 gaps"; the touch residual and the `Up` rule traced to a
-review round of the same feature (2026-08-17).
+the hover pipeline (2026-08-17, commit `68ac7e93`) listed this among its known v1 gaps; the touch residual and
+the `Up` rule were traced in review the same day.
 
 ---
 
@@ -3090,8 +3073,7 @@ verification gap of the same shape already tracked for the rest of the desktop t
 
 **Evidence**: `crates/frust-shell-desktop/src/app_handler.rs`'s
 `every_framework_cursor_maps_to_its_winit_counterpart`/`the_cursor_is_pushed_to_winit_only_on_a_change`
-tests; `workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
-(2026-08-17, merged `49bc7657`).
+tests (cursor API merged 2026-08-17, `49bc7657`).
 
 ---
 
@@ -3112,8 +3094,7 @@ is cosmetic (a stale shape, never a stuck-captured pointer) and self-corrects on
 
 **Evidence**: `crates/frust-core/src/app.rs`'s `RenderRoot::cursor()` doc comment ("Residual:
 a widget that is torn down … leaves the last shape in place until the next `Move`");
-`workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
-(2026-08-17, merged `49bc7657`), "Limitations" list.
+the cursor API (merged 2026-08-17, `49bc7657`) listed this among its limitations.
 
 ---
 
@@ -3535,8 +3516,8 @@ is a composition gap tracked here pending a fix to the button/collapsible press 
 than a hand-rolled sub-menu special case.
 
 **Evidence**: `plugins/shadcn/src/components/sidebar.rs` module docs ("Not in this port" — mobile
-sheet, icon-mode tooltips, sub-menu disclosure); `workflow/plans/features/shadcn-round-2/tasks/11-demo-expansion.md` completion summary ("No composed
-disclosure for sidebar_menu_sub … sub-list permanently open in demo").
+sheet, icon-mode tooltips, sub-menu disclosure); the demo has no composed disclosure for `sidebar_menu_sub`, so the
+sub-list is permanently open there.
 
 ---
 
@@ -3621,8 +3602,8 @@ with no frust equivalent to port against; `calendar`'s gap is scope (a real date
 policy (no drive-by dependency addition), not a dependency wall, so it is the one candidate for a
 future round rather than a permanent exclusion.
 
-**Evidence**: `workflow/plans/research/shadcn-round-2/RESEARCH.md`'s component sweep ("DEFERRED:
-calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner … chart … direction").
+**Evidence**: the component sweep deferred `calendar` and marked menubar, navigation-menu, form,
+sonner, chart and direction as not portable as-is.
 
 ---
 
@@ -4488,10 +4469,7 @@ reference-palette contract instead. Consequence: an app switching
 half its roles plus a visibly different error red.
 
 **Evidence**: `plugins/material/src/tokens/hct.rs`'s
-`from_seed_diverges_from_the_baked_baseline_only_as_recorded` test; Material
-3 Expressive Phase 1 wave 2 record
-(`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`); review
-round 0 Major 4 (`workflow/reviews/features/material-3-expressive-phase-1/REVIEW.md`).
+`from_seed_diverges_from_the_baked_baseline_only_as_recorded` test.
 
 ---
 
@@ -4522,8 +4500,7 @@ discoverable rather than silently baked into the type scale.
 **Evidence**: `crates/frust-text/src/style.rs:246-264` (`TextStyle`, no
 variations/width field); `crates/frust-text/src/context.rs:129-137`
 (`push_style_defaults`, no `FontVariations`/`FontWidth` push); pinned
-parley 0.11.0 `style/mod.rs:77,85`; Material 3 Expressive Phase 1 wave 3
-record (`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`).
+parley 0.11.0 `style/mod.rs:77,85`.
 
 ---
 
@@ -4548,9 +4525,7 @@ speculatively. The dp table itself is exact; only the shadow decomposition is
 narrowed.
 
 **Evidence**: `plugins/material/src/tokens/metrics.rs` (module doc's two-layer
-model description and the single-`ShadowSpec` `elevation_level` constructor);
-Material 3 Expressive Phase 1 wave 3 record
-(`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`).
+model description and the single-`ShadowSpec` `elevation_level` constructor).
 
 ---
 
@@ -4577,8 +4552,7 @@ for `frust_shadcn::input`'s `dark:bg-input/30` wash, so it isn't
 material-specific.
 
 **Evidence**: `plugins/material/src/text_field.rs` module doc's "Container
-fill: a documented fidelity gap" section; Material 3 Expressive Phase 2 wave 1
-ledger (`workflow/plans/features/material-3-expressive/phase-2/TASKS.md`).
+fill: a documented fidelity gap" section.
 
 ---
 
@@ -4615,8 +4589,7 @@ port.
 
 **Evidence**: `plugins/material/src/text_field.rs` module doc's "Known
 limitations" section (the "A `Down` on an interactive slot blurs the field"
-bullet); Material 3 Expressive Phase 2 review round 0, confirmed Major 5
-(`workflow/reviews/features/material-3-expressive-phase-2/REVIEW.md`).
+bullet); confirmed in review as a major finding.
 
 ---
 
@@ -4795,8 +4768,7 @@ expose the relevant Size knob live (e.g.
 selectable `FabSize::Large`; `do_/split_button.rs:303`'s `.leading_icon(|| any(icon(icons::SAVE)))`
 with all five tiers offered). This is believed net-positive — the same glyph-vs-box contract
 violation the fix closes, corrected everywhere it recurs, not only at the FAB — but **unverified on
-device**: the widened re-verify scope is recorded against `G12` in the phase's device-gate ledger
-(`workflow/reviews/features/material-3-expressive-gate/GATE.md`). None of this touches the
+device**: the widened re-verify scope is recorded against the FAB device-gate row. None of this touches the
 `FabWidget` mechanism above: that mismatch is entirely `FabWidget`'s own `container` variable, which
 stays the nominal tier size regardless of `bc`, independent of whatever the icon inside it is doing.
 The Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride
@@ -4830,9 +4802,7 @@ core.rs:101-129` (`ButtonSize::metrics`, tight-constrain at `:838`);
 `plugins/material/src/toggle_button.rs:259-283` (`ToggleButtonSize::metrics`, tight-constrain at
 `:1466`); `plugins/material/src/icon_button.rs:226-233` (`icon_glyph_size`, tight-constrain at
 `:1060`); `examples/material3-demo/src/pages/playground/do_/fabs.rs:84` (default-24 icon under a
-selectable `FabSize::Large`); `workflow/reviews/features/material-3-expressive-gate/GATE.md` (`G12`
-re-verify scope); Phase-4 ledger,
-`workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
+selectable `FabSize::Large`); the FAB device-gate re-verify scope.
 
 ---
 
@@ -4893,8 +4863,7 @@ seed — out of scope for this arc.
 `with_scheme_override`/`MaterialTheme` anywhere in the crate); `examples/material3-demo/src/pages/
 theme_config_page.rs`'s `toggles` (the disabled "Dynamic color" row and its supporting text);
 `examples/material3-demo/src/theme/settings.rs` module doc ("Dynamic (device-sourced) coloring is
-not modelled at all"); PLAN.md Scope decision 2
-(`workflow/plans/features/material-3-expressive/PLAN.md:110-114`).
+not modelled at all"); the Material 3 Expressive scope decision to leave dynamic color out.
 
 ---
 
@@ -5852,7 +5821,7 @@ one of them compiles into any one linked test binary.
 
 **Watch item** (not reproduced on iOS 26.2): a developer-forum report that UIKit's corner layout guide does not reset to zero when a window returns to full screen — gate g4-01 observed the guide reset to zero on entering full screen and come back non-zero on return to a window; `.minimal` reports zero corners because the control takes a safe-area strip instead.
 
-**Evidence**: plan fplan_000001a0ed6d3e3a5vOFrNW1, research rsa_000001a0ed6cf8b2zqGLZEkL + rsa_000001a0ed7142ce7O3dRUAf, review round rvr_000001a0f44e80abuPyeN2C3, action items act_000001a0f44f6894QCZiX1iA + act_000001a0f44f6bd9CVDGKOj3, gate g4-01 PASSED 2026-10-01 on the iPad Pro 13-inch (M5) iOS 26.2 Simulator (Xcode 27.0; 12 legs — windowed readout TL 66x43 / TR 10x43, bar slot clear, full screen zeros, rotation, Stage Manager resize, automatic/unified/minimal styles, RTL, no-regression).
+**Evidence**: device gate PASSED 2026-10-01 on the iPad Pro 13-inch (M5) iOS 26.2 Simulator (Xcode 27.0; 12 legs — windowed readout TL 66x43 / TR 10x43, bar slot clear, full screen zeros, rotation, Stage Manager resize, automatic/unified/minimal styles, RTL, no-regression).
 
 ---
 
