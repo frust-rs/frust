@@ -11,12 +11,42 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of six section pages in a [`scroll_view`], with a bottom
-//! [`navigation_bar`](frust_material::navigation_bar) selecting between them, the whole
-//! column inside one [`safe_area`] and under a toast overlay), and the
-//! [`frust::app!`] entry binding all three platforms. The section pages
-//! themselves live in [`pages`] — each a `page(&PlaygroundState) ->
-//! AnyView<PlaygroundState>` (see `pages/mod.rs` for the page-fn contract).
+//! of eleven section pages in a [`scroll_view`], the whole column inside one
+//! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
+//! binding all three platforms. The section pages themselves live in
+//! [`pages`] — each a `page(&PlaygroundState) -> AnyView<PlaygroundState>`
+//! (see `pages/mod.rs` for the page-fn contract).
+//!
+//! # Responsive navigation
+//!
+//! [`pages::SECTION_LABELS`] carries eleven destinations now — too many for a
+//! single bottom nav bar to divide evenly without its labels wrapping (see
+//! that constant's own doc). [`home_page`] picks between two shapes, the same
+//! `use_context::<WindowMetrics>()` / named-breakpoint idiom
+//! `pages::responsive` establishes (a missing context — the headless test
+//! harness, or a shell that has not yet published one — falls back to the
+//! narrow shape, same as that page):
+//!
+//! - **Narrow** (< [`NAV_WIDE_BREAKPOINT_PX`]): [`bottom_nav_bar`] shows the
+//!   first [`pages::PRIMARY_NAV_COUNT`] sections plus a trailing "More"
+//!   destination; pressing it opens [`more_overlay`], a full-section list
+//!   overlay (dismissed by picking a section, or its own "Close" button).
+//! - **Wide** (\u{2265} [`NAV_WIDE_BREAKPOINT_PX`]): [`side_rail`] replaces the
+//!   bottom bar with an in-layout column listing every section, beside the
+//!   page body (the `frust_material::navigation_rail` mounting contract's
+//!   "Standard" shape) — nothing is ever behind an overflow menu at this
+//!   width.
+//!
+//! [`bottom_nav_bar`] still rides the existing
+//! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
+//! chrome (neither needs an icon, so growing to 11 labels costs nothing
+//! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
+//! [`button`]s instead of `frust_material::navigation_rail`/
+//! `navigation_drawer` — those destinations carry a *mandatory* icon per
+//! entry, and playground names no icon set for its eleven sections (the
+//! module docs' design-neutral charter: "Nothing in this app demonstrates a
+//! design language"). [`pages::SECTION_LABELS`] stays the single source of
+//! truth every shape reads from.
 //!
 //! Back-dismiss (a pushed overlay/page, then the root navigator) works with
 //! **zero** app code — `frust::navigator` (imported below) auto-wires
@@ -65,14 +95,22 @@ use frust::authoring::{
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    Align, Alignment, AnyView, Axis, Brightness, Color, Component, DeepLink, EdgeInsets, FlexView,
-    Get, GetUntracked, MotionScheme, NavigatorController, Padding, PageTransition, RwSignal, Set,
-    SizedBox, Stack, Theme, TransitionSpec, Update, View, any, button, deep_links, flexible, icon,
-    icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, text,
+    Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink,
+    EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController, Padding,
+    PageTransition, PanZoomController, PanZoomTransform, RwSignal, Set, SizedBox, Stack, Theme,
+    TransitionSpec, Update, View, WindowMetrics, any, button, container, deep_links, flexible,
+    icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
-use pages::SECTION_LABELS;
+use pages::{PRIMARY_NAV_COUNT, SECTION_LABELS};
+
+/// The width breakpoint past which [`home_page`] shows [`side_rail`] instead
+/// of [`bottom_nav_bar`] — the same M3 compact/medium window-size-class
+/// cutoff `pages::responsive`'s own `WIDE_BREAKPOINT_PX` uses (one constant
+/// per page/shell that needs it, not a shared breakpoint API — see that
+/// page's own doc comment).
+const NAV_WIDE_BREAKPOINT_PX: f64 = 600.0;
 
 // ---------------------------------------------------------------------------
 // Deep-link routing — pure parse/plan functions plus the small root-mounted
@@ -303,6 +341,29 @@ pub struct PlaygroundState {
     /// a value nothing needs to *track*, without paying for an unused
     /// signal subscription.
     pub auto_run_db_smoke: Rc<Cell<bool>>,
+    /// Whether the narrow-width bottom nav bar's "More" overlay
+    /// ([`more_overlay`]) is open; written by [`bottom_nav_bar`]'s "More"
+    /// press and by every destination/"Close" press inside the overlay
+    /// itself. Shell-level nav state, not a page's own — lives beside
+    /// [`PlaygroundState::section`] for the same reason.
+    pub more_open: RwSignal<bool>,
+    /// The "Graph" section's selected node index (`pages::graph_canvas`), or
+    /// `None` before any node has been tapped. One of the two minimal
+    /// additions that section's own state needed — see
+    /// [`PlaygroundState::graph_transform`]'s doc for the other.
+    pub graph_selected: RwSignal<Option<usize>>,
+    /// The "Graph" section's live pan/zoom transform, published by its
+    /// `PanZoomView::on_transform` callback and read back by the page's own
+    /// scale/offset readout — the second of the two minimal state additions
+    /// that section needed (see [`PlaygroundState::graph_selected`]).
+    pub graph_transform: RwSignal<PanZoomTransform>,
+    /// The "Graph" section's `PanZoomController` handle, so its "Fit" button
+    /// (built fresh every rebuild, like every other page) still drives the
+    /// *same* attached controller every time — the identical
+    /// clone-shares-one-`Rc` shape [`PlaygroundState::nav`] already uses for
+    /// `NavigatorController`, not a reactive signal (a controller command is
+    /// recorded, not tracked — see `frust::PanZoomController`'s own doc).
+    pub graph_controller: PanZoomController,
 }
 
 impl PlaygroundState {
@@ -319,6 +380,10 @@ impl PlaygroundState {
             animations_enabled: RwSignal::new(true),
             last_applied_sequence: Cell::new(None),
             auto_run_db_smoke: Rc::new(Cell::new(false)),
+            more_open: RwSignal::new(false),
+            graph_selected: RwSignal::new(None),
+            graph_transform: RwSignal::new(PanZoomTransform::IDENTITY),
+            graph_controller: PanZoomController::new(),
         }
     }
 }
@@ -454,60 +519,174 @@ fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
     ))
 }
 
+/// The narrow-width bottom nav bar: the first [`PRIMARY_NAV_COUNT`]
+/// [`SECTION_LABELS`] plus a trailing "More" destination that opens
+/// [`more_overlay`] instead of navigating directly. `section` is the live
+/// selected index (any value — an overflow section has no primary slot of
+/// its own, see below).
+fn bottom_nav_bar(section: usize) -> AnyView<PlaygroundState> {
+    let mut items: Vec<_> = SECTION_LABELS[..PRIMARY_NAV_COUNT]
+        .iter()
+        .map(|label| nav_item::<PlaygroundState>(*label))
+        .collect();
+    items.push(nav_item::<PlaygroundState>("More"));
+    // An overflow section (index >= PRIMARY_NAV_COUNT) highlights the
+    // trailing "More" slot instead of a primary one of its own — the usual
+    // "More" tab behavior in a primary/overflow nav bar.
+    let selected = if section < PRIMARY_NAV_COUNT {
+        section
+    } else {
+        PRIMARY_NAV_COUNT
+    };
+    any(navigation_bar(
+        items,
+        selected,
+        |state: &mut PlaygroundState, index| {
+            if index < PRIMARY_NAV_COUNT {
+                let current = state.section.get_untracked();
+                // A move to an earlier section reads as "back": the switcher
+                // plays its shared-axis slide in reverse.
+                state.reverse.set(index < current);
+                state.section.set(index);
+            } else {
+                state.more_open.set(true);
+            }
+        },
+    ))
+}
+
+/// [`side_rail`]'s fixed column width, in logical px.
+const SIDE_RAIL_WIDTH_PX: f64 = 180.0;
+
+/// The wide-width side rail: every [`SECTION_LABELS`] destination as a
+/// vertically stacked button inside a fixed-width, scrollable column, the
+/// live selection highlighted via [`ButtonStyle::Primary`]. See the module
+/// docs' "Responsive navigation" section for why this is hand-rolled rather
+/// than `frust_material::navigation_rail`.
+fn side_rail(section: usize) -> AnyView<PlaygroundState> {
+    let items = SECTION_LABELS
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let style = if index == section {
+                ButtonStyle::Primary
+            } else {
+                ButtonStyle::Secondary
+            };
+            inflexible(any(button(*label, move |state: &mut PlaygroundState| {
+                let current = state.section.get_untracked();
+                state.reverse.set(index < current);
+                state.section.set(index);
+            })
+            .style(style)
+            .small()))
+        })
+        .collect();
+    any(
+        SizedBox::<PlaygroundState>(Some(SIDE_RAIL_WIDTH_PX), None).child(scroll_view(Padding(
+            EdgeInsets::all(8.0),
+            FlexView::new(Axis::Vertical, items),
+        ))),
+    )
+}
+
+/// The narrow-width "More" destination's overlay (see the module docs'
+/// "Responsive navigation" section): a bottom-anchored, opaque list of every
+/// [`SECTION_LABELS`] destination plus a "Close" row. Tapping a destination
+/// navigates to it and dismisses the overlay; tapping "Close" dismisses it
+/// without navigating. Mounted as a top [`Stack`] layer by [`home_page`] only
+/// while [`PlaygroundState::more_open`] is set.
+fn more_overlay() -> AnyView<PlaygroundState> {
+    let background = frust::use_context::<Theme>()
+        .unwrap_or_else(frust_material::baseline)
+        .scheme()
+        .surface_container_high;
+    let mut rows: Vec<_> = SECTION_LABELS
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            inflexible(any(button(*label, move |state: &mut PlaygroundState| {
+                let current = state.section.get_untracked();
+                state.reverse.set(index < current);
+                state.section.set(index);
+                state.more_open.set(false);
+            })
+            .style(ButtonStyle::Secondary)
+            .small()))
+        })
+        .collect();
+    rows.push(inflexible(any(button(
+        "Close",
+        |state: &mut PlaygroundState| state.more_open.set(false),
+    )
+    .style(ButtonStyle::Primary)
+    .small())));
+    any(Align(
+        Alignment::new(0.0, 1.0),
+        container(Padding(
+            EdgeInsets::all(16.0),
+            FlexView::new(Axis::Vertical, rows),
+        ))
+        .fill(background),
+    ))
+}
+
 /// The navigator's home page: the root app bar over the pattern-switched
-/// section body in a scroll view, with the bottom section navigation bar
-/// under it, all inside one [`safe_area`] and over an [`AppBackground`] base
-/// layer (see the module docs' "Mode B background" section). Re-run on every
-/// rebuild (the navigator re-invokes its page builder), so the signal reads
-/// here subscribe the shell to section/brightness/toast changes.
+/// section body in a scroll view, with [`bottom_nav_bar`] or [`side_rail`]
+/// beside/under it depending on window width (see the module docs'
+/// "Responsive navigation" section), all inside one [`safe_area`] and over an
+/// [`AppBackground`] base layer (see the module docs' "Mode B background"
+/// section). Re-run on every rebuild (the navigator re-invokes its page
+/// builder), so the signal reads here subscribe the shell to
+/// section/brightness/toast/more-open changes.
 fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     let section = state.section.get();
     let reverse = state.reverse.get();
     let pending = state.toasts.get();
+    let more_open = state.more_open.get();
 
-    let items = SECTION_LABELS
-        .iter()
-        .map(|label| nav_item::<PlaygroundState>(*label))
-        .collect();
-    let section_bar = inflexible(navigation_bar(
-        items,
-        section,
-        |state: &mut PlaygroundState, index| {
-            let current = state.section.get_untracked();
-            // A move to an earlier section reads as "back": the switcher plays
-            // its shared-axis slide in reverse.
-            state.reverse.set(index < current);
-            state.section.set(index);
-        },
-    ));
+    let wide = use_context::<WindowMetrics>()
+        .map(|metrics| metrics.size.width >= NAV_WIDE_BREAKPOINT_PX)
+        .unwrap_or(false);
 
     // The pattern switcher swaps the section body whenever `section` (its key)
     // changes, playing an M3 shared-axis-X slide in the tap-derived direction.
-    // The body must be the column's FLEXIBLE child (flex: 1): an `inflexible`
-    // child would size the scroll_view to its content's intrinsic height, so
-    // the viewport would never be smaller than the content and scrolling would
-    // never engage.
     let handles = state.clone();
-    let body = flexible(
-        1,
-        pattern_switcher(
-            section,
-            SharedAxis::X,
-            scroll_view(pages::current(section, &handles)),
-        )
-        .reverse(reverse),
-    );
+    let body = pattern_switcher(
+        section,
+        SharedAxis::X,
+        scroll_view(pages::current(section, &handles)),
+    )
+    .reverse(reverse);
+
+    // The body must be the FLEXIBLE element either way: an `inflexible` body
+    // would size its container (the row at wide width, the column at narrow
+    // width) to the body's own intrinsic extent, so the viewport would never
+    // be smaller than the content and scrolling would never engage.
+    let content: AnyView<PlaygroundState> = if wide {
+        any(FlexView::new(
+            Axis::Horizontal,
+            vec![inflexible(side_rail(section)), flexible(1, body)],
+        ))
+    } else {
+        any(FlexView::new(
+            Axis::Vertical,
+            vec![flexible(1, body), inflexible(bottom_nav_bar(section))],
+        ))
+    };
 
     // One safe area around the whole column: unlike a design-system app bar
     // that consumes the top window inset itself, the M3 `app_bar` above is a
-    // plain 64dp row, so the shell owns every edge's inset here. The Material
-    // navigation bar consumes the bottom inset itself (self-sizing chrome rule),
-    // so the safe area leaves that edge to it.
+    // plain 64dp row, so the shell owns every edge's inset here. At narrow
+    // width the Material navigation bar consumes the bottom inset itself
+    // (self-sizing chrome rule), so the safe area leaves that edge to it; at
+    // wide width nothing else sits on that edge, so the safe area consumes it
+    // instead (`.bottom(wide)`).
     let column = safe_area(FlexView::new(
         Axis::Vertical,
-        vec![inflexible(playground_app_bar(state)), body, section_bar],
+        vec![inflexible(playground_app_bar(state)), flexible(1, content)],
     ))
-    .bottom(false);
+    .bottom(wide);
 
     // `AppBackground` is the BOTTOM-most layer (see the module docs' "Mode B
     // background" section above): under the ON `FRUST_TRANSLUCENT_SURFACE`/
@@ -525,6 +704,9 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     ];
     if !pending.is_empty() {
         layers.push(toast_overlay(&pending));
+    }
+    if !wide && more_open {
+        layers.push(more_overlay());
     }
     any(Stack(layers))
 }

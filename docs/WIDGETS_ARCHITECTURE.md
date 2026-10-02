@@ -19,6 +19,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
+| `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
+| `frust-widgets::pinch` | `PinchRecognizer` — a pure two-contact pinch state machine — and `pinch_detector`, the wrapper view feeding it from a gesture's contacts |
+| `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a drag-pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
 | `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics` trait, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) that `ScrollView`/`ListView` consult instead of hard-coding a feel — see *Scroll Physics* below |
@@ -214,6 +217,45 @@ build from.
   mechanism itself.
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
+- Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget
+  translates to its own origin and clips to its bounds before invoking the closure, so painting
+  happens entirely in local space. `.size(Size)`/`.expand()` (default) pick the sizing policy;
+  `.on_hit(Fn(Point, Size) -> bool)` narrows hit-testing and gates `.on_tap`/`.on_pointer`;
+  `.repaint_key(impl Hash)` requests a repaint when an external fingerprint changes, since the paint
+  closure itself is not comparable across a rebuild.
+- Pinch flow: `PinchRecognizer::handle(PointerId, &PointerEvent, time_ms) -> Option<ScaleEvent>`
+  reduces a gesture's tracked contacts (the first two, in `Down` order) to the same
+  `ScaleEvent`/`ScalePhase` stream a desktop source produces. `pinch_detector(child)` captures the
+  pointer and calls `EventCtx::capture_contacts()` on the first primary `Down`, forwards the first
+  contact to the child unchanged, and steals an in-progress child gesture with one synthesized
+  `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a desktop `InputEvent::Scale`
+  reaches `on_scale` only when the child ignores it first. Nesting two detectors is unsupported.
+  `pinch_detector` captures the ambient multi-contact veto cell (`scroll.rs`'s
+  `ambient_scroll_veto`) on its claiming `Down` and holds it raised while it tracks a second
+  contact, so a pinch beginning over a single-finger press inside a `ScrollView`/`ListView`
+  survives the claimant's own travel past slop; it still never joins the Down-time nested-scroll
+  claim itself (see below), unlike `pan_zoom`.
+- Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by
+  `Affine::translate(offset) * Affine::scale(scale)` (`PanZoomTransform`), so frust-core's
+  transformed-pod seam (see CORE_ARCHITECTURE.md) inverse-maps the child's hit-testing and events. A
+  primary `Down` is offered to the child first; an ignored press pans on the claimant's moves. An
+  `InputEvent::Scale` (desktop ctrl/⌘+wheel, trackpad pinch) is likewise offered to the child first
+  and applied here when ignored; a touch pinch is recognised in-widget by a `PinchRecognizer` fed
+  from every primary `Down`'s contacts, so a second finger routes here even when the child owns the
+  first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same ambient
+  cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing
+  scrollable defers to it; when the child owns the press instead, the view captures the ambient
+  multi-contact veto cell and holds it raised while a second contact is tracked, so a pinch
+  beginning over that child-owned press is not taken over by the enclosing scroll surface once the
+  claimant crosses slop — the veto clears, and the surface's ordinary takeover resumes, once back
+  down to one contact. A `Scroll` arriving between `Scale`
+  events clears the stale `last_focal` left by an open bracket (a macOS trackpad pinch whose
+  modifier released mid-gesture finishes as wheel events) so a later unrelated wheel notch does not
+  anchor on it. `.min_scale`/`.max_scale` (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by
+  default) glides a released pan on a per-axis `FrictionSimulation`; `.on_transform(Fn(&mut State,
+  PanZoomTransform))` notifies after every change; `.controller(PanZoomController)` attaches a
+  cloneable handle (`jump_to`/`fit_to_bounds`/`fit_rect`/`transform`/`viewport_size`/`content_size`)
+  whose commands apply at the next layout or paint. Panning is unbounded; only panning glides.
 
 ## Key Types
 
@@ -397,7 +439,11 @@ nothing to scroll, a deliberate UIKit-default deviation from Flutter's own `Boun
 which still claims a fits-viewport surface. The report is a `Down`-time snapshot
 and the outer's defer decision is sticky for the rest of the gesture — content that becomes (or
 stops being) scrollable mid-drag never registers, and a deferred gesture never hands back — the same
-class of accepted tradeoff the navigator's own Down-time claim already lives with.
+class of accepted tradeoff the navigator's own Down-time claim already lives with. Both `ScrollView`
+and `ListView` also run a live **multi-contact veto** alongside that Down-time claim: a per-gesture
+cell either surface replaces on every primary `Down` and consults on every `Move` takeover check, so
+a nested `pinch_detector`/`pan_zoom` that reports a second contact after the claim snapshot was taken
+still suppresses the takeover (see *Pinch flow*/*Pan-zoom flow* above).
 
 `ScrollInfo`'s shape, wheel handling, and its consumers — `frust-shadcn`'s `scroll_area`,
 `frust-glyph`'s `app_bar` scroll-collapse — are unaffected: the seam changes only what computes
@@ -438,9 +484,12 @@ accumulates and commits only once the fling settles, so it never fights the flin
 
 **Refresh/overscroll parity with ScrollView** (see *Scroll Physics*, above, for the shared seam
 itself). `on_refresh_release` and drag overscroll share `scroll.rs`'s `pub(crate)`
-resistance/trigger/settle constants *and* nested-scroll claim cells with `ScrollView`, not just the
-constants — `ScrollView` is no longer the framework's only pull-to-refresh-capable or nest-aware
-widget, and the default feel is the same platform-adaptive physics rather than flat rubber-band. The
+resistance/trigger/settle constants *and* nested-scroll claim/veto cells with `ScrollView`, not just
+the constants — `ScrollView` is no longer the framework's only pull-to-refresh-capable or nest-aware
+widget, and the default feel is the same platform-adaptive physics rather than flat rubber-band.
+`ListView` replaces and consults the same live multi-contact veto `ScrollView` does (see *Nested-scroll
+arbitration*, above), so a pinch or pan-zoom beginning over a single-finger press inside a list
+survives the claimant's travel past slop the same way it does inside a `ScrollView`. The
 clamped-windowing/paint-only-overscroll split (`list_view.rs`'s module doc, *Windowing offset vs.
 painted offset*) survives every installed physics unchanged: only what computes the past-edge
 displacement differs, never how this widget stores or paints it.

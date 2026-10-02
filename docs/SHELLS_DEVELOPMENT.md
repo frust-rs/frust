@@ -131,6 +131,37 @@ permission alert only while it is system-initiated).
 - **Both — obscured fields:** a field built `obscured(true)` offers no Copy/Cut anywhere (bar, menu,
   or assistive-technology action) and puts nothing on the host clipboard.
 
+## Pinch / pan-zoom manual test (Android + iOS + desktop)
+
+A device/emulator and desktop gate for the multi-contact pointer routing, touch ABI change, and
+desktop scale-gesture mapping (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s Touch
+contacts and resampling / Desktop scale gestures), using `examples/playground`'s Graph page (the
+"Graph" section — a `pan_zoom`-wrapped `canvas`) as the vehicle. **iOS: passed 2026-10-02**
+on an iPhone SE (iOS 26.7, human-run, all legs) and the iOS Simulator (iOS 26.2, single-contact
+legs only; pinch not run), against `8a263d79` built with Xcode 27.0 — per-leg results in
+`examples/playground/README.md`'s gate checklist. The iPhone SE re-ran the pinch legs at
+`f47a9828` (after the multi-contact scroll veto) and passed: a pinch that starts on a node keeps
+the gesture through vertical travel, and a one-finger drag still scrolls the page. **Android: passed
+2026-10-02** on a Pixel 5 (Android 14; human-run pinch legs, `adb`-driven single-contact legs;
+Xiaomi 12 not run) — same checklist. **Desktop: not run yet.**
+
+- **Android (Pixel 5, Xiaomi 12):** two-finger pinch zooms the graph about the gesture's midpoint
+  and drag-pans it with one finger; after lifting to one finger mid-gesture, panning continues with
+  no jump.
+- **Android — single-finger regression:** on an unrelated screen with an ordinary tap target and a
+  `ScrollView`, confirm tap and single-finger scroll are unaffected by the touch-ABI change
+  (`nativeOnTouch`'s added `pointerId` argument) — both devices.
+- **iOS (device or Simulator):** a two-finger pinch zooms the graph about the gesture's midpoint; a
+  single-finger drag pans it; a plain tap elsewhere is unaffected. Xcode 27 ships no Simulator
+  app, so Option-drag is unavailable; `idb` drives single contacts only, and on Xcode 27 it needs
+  `DEVELOPER_DIR` pointed at a copy whose `Library/PrivateFrameworks` links
+  `SharedFrameworks/SimulatorKit.framework`. Pinch therefore needs a physical device.
+- **Desktop (Linux, macOS, Windows):** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) zooms the
+  graph about the cursor; a plain unmodified wheel still scrolls where applicable; drag-pans with
+  the primary button. macOS additionally: a two-finger trackpad pinch zooms the graph (winit's
+  `PinchGesture`); Linux/Windows have no trackpad-pinch source yet (`desktop-pinch-linux-windows-unavailable`
+  in [LIMITATIONS.md](LIMITATIONS.md)) — ctrl/⌘+wheel is the only route there.
+
 ## Per-OS desktop shell gate (macOS + Windows + Linux)
 
 A hardware gate for the native integration the shared winit core cannot cover, run against an app

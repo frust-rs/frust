@@ -306,9 +306,9 @@ open class FrustViewController: UIViewController {
         // Bridge the view's raw touch callbacks into the native tree.
         // `location` is already logical points, so it is passed through without
         // any scale division (contrast Android's physical-pixel touch path).
-        forgeView.onTouch = { [weak self] phase, location in
+        forgeView.onTouch = { [weak self] phase, slot, location in
             guard let self, let handle = self.handle else { return }
-            frust_dispatch_touch(handle, phase, Float(location.x), Float(location.y))
+            frust_dispatch_touch(handle, phase, slot, Float(location.x), Float(location.y))
             // A touch may have focused/blurred an editable widget; reconcile the
             // keyboard/first-responder state with what the tree now reports.
             // `userInitiated: true` — this is a touch on the Frust surface

@@ -780,6 +780,22 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                         };
                         self.forward(ctx, &local, substitute);
                     }
+                    // A scale gesture is routed on the same terms as a scroll:
+                    // only its focal point needs lifting into surface space.
+                    OverlayEventKind::Scale {
+                        focal,
+                        phase,
+                        scale_delta,
+                        velocity,
+                    } => {
+                        let local = InputEvent::Scale(frust_core::event::ScaleEvent {
+                            phase: *phase,
+                            scale_delta: *scale_delta,
+                            focal: *focal - origin,
+                            velocity: *velocity,
+                        });
+                        self.forward(ctx, &local, substitute);
+                    }
                     // The press landed on nothing floated: the surface never saw
                     // it, so nothing is forwarded — the owner reads the
                     // notification and decides whether to close.

@@ -14,7 +14,9 @@
 //! enclosing container reads the flag ([`EventCtx::is_pointer_captured`]) and
 //! records which child was active so it can route later moves/releases directly.
 //! Capture auto-releases on [`PointerPhase::Up`]/[`PointerPhase::Cancel`] (never
-//! on window-leave).
+//! on window-leave) — the claimant's own, when more than one contact is down:
+//! [`InputEvent::PointerContact`] states the multi-contact contract, and
+//! [`EventCtx::pointer_id`]/[`EventCtx::capture_contacts`] are a widget's side of it.
 //!
 //! # Hover is a claim, not a phase
 //!
@@ -73,7 +75,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::thread::LocalKey;
 
-use kurbo::{Point, Rect, Size, Vec2};
+use kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use crate::overlay::OverlayKey;
 
@@ -121,6 +123,76 @@ pub struct PointerEvent {
     pub position: Point,
     /// Which button the event carries (`Primary` for touch/pen).
     pub button: PointerButton,
+}
+
+/// The kind of device a pointer contact comes from — one half of a
+/// [`PointerId`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PointerSource {
+    /// The mouse (or any single-cursor host pointer a shell reports as one).
+    Mouse,
+    /// A touch contact — one finger on a touchscreen.
+    Touch,
+}
+
+/// The identity of one pointer contact: which device it comes from and which
+/// slot on that device.
+///
+/// It rides **beside** a [`PointerEvent`], never inside it: a shell hands a
+/// touch contact to the root as [`InputEvent::PointerContact`], the root
+/// unwraps it, and the widget receiving the plain [`InputEvent::Pointer`] reads
+/// the identity from [`EventCtx::pointer_id`]. A bare `InputEvent::Pointer`
+/// from a shell means [`PointerId::MOUSE`].
+///
+/// A slot is the shell's own numbering of simultaneous contacts on one source:
+/// slot `0` is the gesture's first contact, and a slot is free again once its
+/// contact ended. The mouse only ever has slot `0`.
+///
+/// # Multi-contact contract
+///
+/// Applied at the root ([`crate::app::RenderRoot::event`]):
+///
+/// * **(a)** With no live pointer capture, a slot-`0` contact is hit-tested
+///   exactly like a plain [`InputEvent::Pointer`] — the same overlay, hover,
+///   focus and blur bookkeeping — and a capture taken on its `Down` latches
+///   *this* id as the gesture's **claimant**.
+/// * **(b)** With no live capture, a contact on slot `1` or above is **dropped**
+///   at the root. Additional contacts exist only inside a captured gesture.
+/// * **(c)** While a capture is live, the claimant's own events take the
+///   captured path as usual. An event with any other id reaches the captor —
+///   and only the captor: the containers above it on that path forward it
+///   without running their own handling — only if the captor opted in with
+///   [`EventCtx::capture_contacts`] on its capturing `Down`; otherwise the root
+///   drops it. Only the claimant's `Up`/`Cancel` ends the capture: another
+///   contact's `Up`/`Cancel` never releases it, whether it came from a touch
+///   while a mouse holds the capture or the other way round. A container that
+///   takes the gesture over from the captor ([`EventCtx::release_captured_child`])
+///   ends the opt-in, and the other contacts are dropped from then on.
+///
+/// See [`InputEvent::PointerContact`] for the full contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PointerId {
+    /// The device the contact comes from.
+    pub source: PointerSource,
+    /// The contact's slot on that device (`0` for the first contact).
+    pub slot: u32,
+}
+
+impl PointerId {
+    /// The mouse pointer: the identity a bare [`InputEvent::Pointer`] carries,
+    /// and what [`EventCtx::pointer_id`] reports when nothing else is known.
+    pub const MOUSE: PointerId = PointerId {
+        source: PointerSource::Mouse,
+        slot: 0,
+    };
+
+    /// The touch contact in `slot` (`0` for the gesture's first finger).
+    pub const fn touch(slot: u32) -> PointerId {
+        PointerId {
+            source: PointerSource::Touch,
+            slot,
+        }
+    }
 }
 
 /// The pointer cursor a widget asks the host to display.
@@ -177,6 +249,54 @@ pub enum ScrollDelta {
     Lines(f64, f64),
     /// A precision delta measured in logical pixels `(x, y)`.
     Pixels(f64, f64),
+}
+
+/// The lifecycle phase of a scale (pinch/zoom) gesture.
+///
+/// No `Cancel`: every shipped source — the desktop ctrl/⌘+wheel mapping and
+/// macOS's `PinchGesture` — reports a clean bracket (or, for an ordinary
+/// notch wheel, a lone [`Update`](ScalePhase::Update) with no bracket at
+/// all), so there is nothing yet for a cancelled variant to mean. Widened the
+/// day a source needs one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalePhase {
+    /// The gesture began.
+    Begin,
+    /// The gesture continued; the event's `scale_delta`/`focal`/`velocity`
+    /// describe this increment.
+    Update,
+    /// The gesture ended normally.
+    End,
+}
+
+/// A scale (pinch/zoom) gesture event — [`InputEvent::Scroll`]'s hit-tested
+/// sibling, carrying a *multiplicative* delta and a focal point rather than
+/// an additive one.
+///
+/// Any source that reports a scale-factor change rather than individual
+/// contact moves reduces to this one event — a desktop shell's ctrl/⌘+wheel
+/// mapping, macOS's `PinchGesture`, and eventually a touch two-finger pinch
+/// recognizer — so a widget reacts to pinch-to-zoom the same way regardless
+/// of input device.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScaleEvent {
+    /// The gesture phase.
+    pub phase: ScalePhase,
+    /// The multiplicative scale change this event represents — not a running
+    /// total. A consumer multiplies its own accumulated scale by this value
+    /// each time an event arrives: `1.0` is a no-op, `>1.0` zooms in, `<1.0`
+    /// zooms out.
+    pub scale_delta: f64,
+    /// Where the gesture is centered, in the receiving widget's local
+    /// logical space — the point that must stay visually fixed while scale
+    /// changes. Translated like [`InputEvent::Pointer`]'s position by the
+    /// container chain that routes it (see [`InputEvent::translated`]).
+    pub focal: Point,
+    /// The gesture's current rate of scale change, per second. `0.0` when the
+    /// source reports none — every shipped desktop source today, since
+    /// neither a wheel notch nor winit's `PinchGesture` carries a velocity —
+    /// reserved for a recognizer that tracks contact velocity directly.
+    pub velocity: f64,
 }
 
 /// A named (non-character) key: the control keys an editable widget reacts to.
@@ -449,6 +569,19 @@ pub enum OverlayEventKind {
         /// How much to scroll.
         delta: ScrollDelta,
     },
+    /// A scale gesture inside the surface's rect, focal point in window
+    /// space — the overlay mirror of [`InputEvent::Scale`], routed here on
+    /// exactly the same hit-test terms as [`Scroll`](OverlayEventKind::Scroll).
+    Scale {
+        /// Where the gesture is centered, in absolute window space.
+        focal: Point,
+        /// The gesture phase.
+        phase: ScalePhase,
+        /// The multiplicative scale change this event represents.
+        scale_delta: f64,
+        /// The gesture's current rate of scale change, per second.
+        velocity: f64,
+    },
     /// A primary press landed outside **every** registered surface — the
     /// light-dismiss notification, delivered only to entries registered
     /// [`OutsideTap::Notify`](crate::overlay::OutsideTap::Notify). It carries no
@@ -460,16 +593,96 @@ pub enum OverlayEventKind {
 
 /// An input event delivered to the widget tree.
 ///
-/// Pointer gestures and scroll are **hit-tested** (routed by position); keyboard,
-/// IME, and edit-command events are **focus-routed** — delivered straight down
-/// the recorded focus chain with no hit test and no meaningful position (see
-/// [`crate::widget::ChildPod`]'s focus bookkeeping and `frust-widgets`'
-/// `route_event`). [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`] are
-/// neither: they are **broadcasts** that reach every child unconditionally.
+/// Pointer gestures, scroll, and scale are **hit-tested** (routed by position);
+/// keyboard, IME, and edit-command events are **focus-routed** — delivered
+/// straight down the recorded focus chain with no hit test and no meaningful
+/// position (see [`crate::widget::ChildPod`]'s focus bookkeeping and
+/// `frust-widgets`' `route_event`). [`InputEvent::Housekeeping`] and
+/// [`InputEvent::Overlay`] are neither: they are **broadcasts** that reach
+/// every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A pointer (mouse/touch/pen) gesture event.
+    ///
+    /// From a shell it means the same as
+    /// [`PointerContact`](InputEvent::PointerContact) with [`PointerId::MOUSE`].
+    /// It is also the **only** pointer form a widget ever receives: the root
+    /// unwraps a `PointerContact` into this variant and reports the contact's
+    /// identity through [`EventCtx::pointer_id`].
     Pointer(PointerEvent),
+    /// One identified pointer contact — the shell-facing carrier for a touch
+    /// contact (or any pointer that is not [`PointerId::MOUSE`]).
+    ///
+    /// **Widgets never receive this variant.**
+    /// [`RenderRoot::event`](crate::app::RenderRoot::event) unwraps it and
+    /// dispatches [`InputEvent::Pointer`]`(event)` with
+    /// [`EventCtx::pointer_id`] reporting `pointer_id`, so every existing
+    /// `match` on `InputEvent::Pointer` keeps working unchanged and a widget
+    /// that does not care which contact it is seeing never has to ask.
+    ///
+    /// # Multi-contact contract
+    ///
+    /// The root decides what a contact does from its id and the capture latch
+    /// it holds (the latch records the **claimant**: the id whose `Down` took the
+    /// capture).
+    ///
+    /// * **(a) Slot 0 with no live capture is hit-tested exactly like
+    ///   [`InputEvent::Pointer`].** The overlay pre-pass, hover, focus and
+    ///   blur-on-outside-tap bookkeeping are the same code path, so a
+    ///   single-finger gesture behaves identically whichever carrier delivered
+    ///   it. A capture taken on its `Down` latches `pointer_id` as the claimant.
+    /// * **(b) Slot 1 and above with no live capture is dropped at the root.**
+    ///   Additional contacts exist only inside a captured gesture; one that
+    ///   arrives while nothing holds the pointer reaches no widget and moves no
+    ///   root state.
+    /// * **(c) While a capture is live, routing is keyed on the claimant.** The
+    ///   claimant's own events take the captured path exactly as before. An
+    ///   event from **any other id** is delivered down the same captured path
+    ///   to the captor — as `InputEvent::Pointer`, with
+    ///   [`EventCtx::pointer_id`] reporting that id — only if the captor called
+    ///   [`EventCtx::capture_contacts`] on the `Down` it captured with;
+    ///   otherwise it is dropped at the root. **Only the claimant's
+    ///   `Up`/`Cancel` releases the capture.** Another contact's `Up`/`Cancel`
+    ///   never does — at the root or in any container's recorded active path —
+    ///   so a finger lifting elsewhere cannot break a mouse drag, nor a mouse
+    ///   release a touch drag.
+    ///
+    ///   **The captor is the only widget that sees another contact.** The
+    ///   delivery walks the recorded active path *forward-only*: every
+    ///   container between the root and the captor hands it on without its own
+    ///   pointer handling running (see
+    ///   [`ChildPod::event_child`](crate::widget::ChildPod::event_child) for the
+    ///   mechanism), so a scroll view or gesture detector enclosing a pinch
+    ///   recognizer never sees the second finger as a `Down` of its own; the
+    ///   captor's own handler, and whatever it routes below itself, run as
+    ///   usual. If the walk cannot reach the captor through a container (an
+    ///   overlay owner whose captured pod is a floated surface), that container
+    ///   alone is handed the event the ordinary way.
+    ///
+    ///   **A takeover ends the opt-in.** A container that cancels the captor
+    ///   and keeps the gesture for itself releases it with
+    ///   [`EventCtx::release_captured_child`]; the root then stops routing the
+    ///   other contacts (they fall under rule (c)'s drop branch), while the
+    ///   claimant keeps the capture — now held by that container — until its own
+    ///   `Up`/`Cancel`.
+    ///
+    /// A delivered non-claimant contact is not a gesture of its own: it opens or
+    /// moves no capture, takes no hover pass, resolves no cursor, and blurs
+    /// nothing (an explicit [`EventCtx::request_focus`]/[`EventCtx::release_focus`]
+    /// from its handler is still honoured, as it is for a scroll). When the
+    /// claimant's `Up`/`Cancel` ends the capture, the captor must treat every
+    /// other contact it was tracking as ended too: their later events fall under
+    /// rule (b) and never reach it.
+    ///
+    /// A bare [`InputEvent::Pointer`] from a shell is this variant with
+    /// [`PointerId::MOUSE`], so a host that emits only `Pointer` (desktop, web)
+    /// sees exactly the single-pointer behaviour it always had.
+    PointerContact {
+        /// Which contact this is.
+        pointer_id: PointerId,
+        /// The contact's event, positioned like any [`InputEvent::Pointer`].
+        event: PointerEvent,
+    },
     /// A scroll event at `position` (local logical space) carrying `delta`.
     Scroll {
         /// Where the scroll occurred, in the receiving widget's local space.
@@ -477,6 +690,11 @@ pub enum InputEvent {
         /// How much to scroll.
         delta: ScrollDelta,
     },
+    /// A scale (pinch/zoom) gesture event — hit-tested exactly like
+    /// [`Scroll`](InputEvent::Scroll), by its [`ScaleEvent::focal`] point, and
+    /// bubbles up the tree until a widget reports [`EventResult::Handled`].
+    /// See [`ScaleEvent`] for the field contract.
+    Scale(ScaleEvent),
     /// A keyboard key event, routed down the focus path (no hit test).
     Key(KeyEvent),
     /// An IME event, routed down the focus path (no hit test).
@@ -564,7 +782,9 @@ pub enum InputEvent {
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
-    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
+    /// [`InputEvent::Scale`] reports its [`ScaleEvent::focal`] point here, the
+    /// same way [`InputEvent::Scroll`] reports `position`. Focus-routed events
+    /// ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the two broadcasts
     /// ([`Housekeeping`](InputEvent::Housekeeping) and
     /// [`Overlay`](InputEvent::Overlay)) have no spatial position — they are
@@ -576,8 +796,9 @@ impl InputEvent {
     /// [`OverlayEventKind`]).
     pub fn position(&self) -> Point {
         match self {
-            InputEvent::Pointer(p) => p.position,
+            InputEvent::Pointer(p) | InputEvent::PointerContact { event: p, .. } => p.position,
             InputEvent::Scroll { position, .. } => *position,
+            InputEvent::Scale(scale) => scale.focal,
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -590,7 +811,9 @@ impl InputEvent {
     ///
     /// Containers use this (with `offset = -child_origin`) to translate an event
     /// from their own coordinate space into a child's local space before
-    /// forwarding it — see [`crate::widget::ChildPod::event_child`]. Focus-routed
+    /// forwarding it — see [`crate::widget::ChildPod::event_child`].
+    /// [`InputEvent::Scale`] shifts its [`ScaleEvent::focal`] point the same way
+    /// [`InputEvent::Scroll`] shifts its `position`. Focus-routed
     /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the
     /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
@@ -606,10 +829,71 @@ impl InputEvent {
                 position: p.position + offset,
                 ..*p
             }),
+            InputEvent::PointerContact { pointer_id, event } => InputEvent::PointerContact {
+                pointer_id: *pointer_id,
+                event: PointerEvent {
+                    position: event.position + offset,
+                    ..*event
+                },
+            },
             InputEvent::Scroll { position, delta } => InputEvent::Scroll {
                 position: *position + offset,
                 delta: *delta,
             },
+            InputEvent::Scale(scale) => InputEvent::Scale(ScaleEvent {
+                focal: scale.focal + offset,
+                ..*scale
+            }),
+            InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_)
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => self.clone(),
+        }
+    }
+
+    /// Return a copy of this event with its position mapped through `affine` —
+    /// the general form of [`InputEvent::translated`], for a container that
+    /// places a child under an arbitrary transform
+    /// ([`crate::widget::ChildPod::set_transform`]).
+    ///
+    /// Maps exactly the positions `translated` shifts, and leaves alone exactly
+    /// what it leaves alone: [`InputEvent::Pointer`]'s position, the inner event
+    /// of an [`InputEvent::PointerContact`], [`InputEvent::Scroll`]'s `position`
+    /// and [`InputEvent::Scale`]'s [`ScaleEvent::focal`] are mapped; the
+    /// focus-routed events, the [`Housekeeping`](InputEvent::Housekeeping)
+    /// broadcast and the window-space [`Overlay`](InputEvent::Overlay) payload are
+    /// returned unchanged (cloned), for the reasons `translated` gives.
+    ///
+    /// Only *positions* are mapped. A scroll `delta`, a scale's multiplicative
+    /// `scale_delta` and its `velocity` are carried over as-is: they describe the
+    /// gesture's magnitude in the input device's terms, not a point in the
+    /// receiver's space.
+    ///
+    /// A container routing into a transformed child passes the **inverse** of the
+    /// child's local→container mapping here; the caller owns checking that the
+    /// inverse exists (see [`crate::hit::checked_inverse`]).
+    pub fn transformed(&self, affine: &Affine) -> InputEvent {
+        match self {
+            InputEvent::Pointer(p) => InputEvent::Pointer(PointerEvent {
+                position: *affine * p.position,
+                ..*p
+            }),
+            InputEvent::PointerContact { pointer_id, event } => InputEvent::PointerContact {
+                pointer_id: *pointer_id,
+                event: PointerEvent {
+                    position: *affine * event.position,
+                    ..*event
+                },
+            },
+            InputEvent::Scroll { position, delta } => InputEvent::Scroll {
+                position: *affine * *position,
+                delta: *delta,
+            },
+            InputEvent::Scale(scale) => InputEvent::Scale(ScaleEvent {
+                focal: *affine * scale.focal,
+                ..*scale
+            }),
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -1294,6 +1578,337 @@ pub(crate) fn take_cursor_request() -> Option<CursorIcon> {
     CURSOR_REQUEST.with(|slot| slot.take())
 }
 
+/// What the contact pass running on this thread knows about the pointer it is
+/// dispatching — the state [`ContactPass`] brackets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContactPassState {
+    /// Whether a root opened a contact pass at all. A
+    /// [`EventCtx::capture_contacts`] made outside one (a widget driven with no
+    /// root above it) records nothing here.
+    open: bool,
+    /// The contact being dispatched — what [`EventCtx::new`] seeds a fresh
+    /// context's [`EventCtx::pointer_id`] with.
+    pointer_id: PointerId,
+    /// Whether the dispatch is a **non-claimant** contact travelling down a live
+    /// capture's path (rule (c) of [`InputEvent::PointerContact`]'s contract).
+    /// While set, [`crate::widget::ChildPod::set_active`] refuses to drop a
+    /// recorded active link, so another contact's `Up`/`Cancel` cannot release
+    /// the claimant's capture inside any container.
+    secondary: bool,
+    /// Whether a widget called [`EventCtx::capture_contacts`] during this pass
+    /// — since the last [`EventCtx::release_captured_child`] that released the
+    /// opted-in widget, which resets it (so the flag ends the pass naming only
+    /// an opt-in that is still on the active path).
+    contacts_requested: bool,
+    /// Whether a container released the gesture's opted-in widget from the
+    /// active path during this pass ([`EventCtx::release_captured_child`]).
+    capture_released: bool,
+}
+
+impl ContactPassState {
+    /// Nothing open: the mouse, no secondary contact, nothing requested.
+    const IDLE: ContactPassState = ContactPassState {
+        open: false,
+        pointer_id: PointerId::MOUSE,
+        secondary: false,
+        contacts_requested: false,
+        capture_released: false,
+    };
+}
+
+thread_local! {
+    /// The contact pass currently running on this thread — opened by
+    /// [`crate::app::RenderRoot::event`] for each dispatch through a
+    /// [`ContactPass`] guard.
+    ///
+    /// **A slot as well as a per-context field**, for the component boundary's
+    /// sake: a [`crate::component`] element dispatches its subtree through a
+    /// *fresh* [`EventCtx`] over its own local state, so anything carried only
+    /// in the context would stop at it. Seeding [`EventCtx::new`] from here
+    /// keeps [`EventCtx::pointer_id`] right below a component, and recording
+    /// [`EventCtx::capture_contacts`] here lets the root see an opt-in made
+    /// anywhere in the tree — the same reason the cursor request rides a slot
+    /// (see [`CURSOR_REQUEST`]).
+    ///
+    /// Thread-local for its neighbours' UI-thread-affinity reason.
+    static CONTACT_PASS: Cell<ContactPassState> = const { Cell::new(ContactPassState::IDLE) };
+}
+
+/// The bracket around one root dispatch's contact identity: entering publishes
+/// which contact is being dispatched (and whether it is a non-claimant one),
+/// dropping restores whatever the enclosing pass had — so a dispatch that
+/// re-enters [`crate::app::RenderRoot::event`] (the overlay pre-pass does)
+/// scopes its own opt-in and hands the slot back on exit, unwind included.
+pub(crate) struct ContactPass {
+    saved: ContactPassState,
+}
+
+impl ContactPass {
+    /// Open a pass dispatching `pointer_id`; `secondary` marks a non-claimant
+    /// contact routed down a live capture's path.
+    pub(crate) fn enter(pointer_id: PointerId, secondary: bool) -> Self {
+        let saved = CONTACT_PASS.with(|slot| {
+            slot.replace(ContactPassState {
+                open: true,
+                pointer_id,
+                secondary,
+                contacts_requested: false,
+                capture_released: false,
+            })
+        });
+        Self { saved }
+    }
+
+    /// Whether a widget called [`EventCtx::capture_contacts`] during this pass
+    /// (and no later [`EventCtx::release_captured_child`] in it released that
+    /// widget from the active path).
+    pub(crate) fn contacts_requested(&self) -> bool {
+        CONTACT_PASS.with(|slot| slot.get().contacts_requested)
+    }
+
+    /// Whether a container released the gesture's opted-in widget from the
+    /// active path during this pass ([`EventCtx::release_captured_child`]).
+    pub(crate) fn capture_released(&self) -> bool {
+        CONTACT_PASS.with(|slot| slot.get().capture_released)
+    }
+}
+
+impl Drop for ContactPass {
+    fn drop(&mut self) {
+        CONTACT_PASS.with(|slot| slot.set(self.saved));
+    }
+}
+
+/// The contact the pass running on this thread is dispatching —
+/// [`PointerId::MOUSE`] outside any pass.
+pub(crate) fn current_pointer_id() -> PointerId {
+    CONTACT_PASS.with(|slot| slot.get().pointer_id)
+}
+
+/// Whether the pass running on this thread is delivering a non-claimant
+/// contact down a live capture's path (see [`ContactPassState::secondary`]).
+pub(crate) fn in_secondary_contact_pass() -> bool {
+    CONTACT_PASS.with(|slot| slot.get().secondary)
+}
+
+/// Record a [`EventCtx::capture_contacts`] call in the open pass, if any, and
+/// in the dispatch frame that made it.
+fn note_contacts_requested() {
+    CONTACT_PASS.with(|slot| {
+        let mut state = slot.get();
+        if state.open {
+            state.contacts_requested = true;
+            slot.set(state);
+        }
+    });
+    CONTACT_FRAME.with(|slot| {
+        let mut frame = slot.get();
+        frame.opted_in = true;
+        slot.set(frame);
+    });
+}
+
+/// Record an [`EventCtx::release_captured_child`] that took the opted-in
+/// widget off the active path: the pass's opt-in is void from here on, unless a
+/// later [`EventCtx::capture_contacts`] in the same pass (the container that
+/// took over opting in itself) records a fresh one.
+fn note_capture_released() {
+    CONTACT_PASS.with(|slot| {
+        let mut state = slot.get();
+        if state.open {
+            state.capture_released = true;
+            state.contacts_requested = false;
+            slot.set(state);
+        }
+    });
+}
+
+/// What one widget dispatch — a [`crate::widget::ChildPod::event_child`] call,
+/// or the root's own call into its root widget — learned about the gesture's
+/// contact opt-in. The state [`ContactFrame`] brackets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ContactFrameState {
+    /// The dispatched widget itself called [`EventCtx::capture_contacts`].
+    opted_in: bool,
+    /// A widget below it did (folded in when each nested frame closes).
+    opted_in_below: bool,
+    /// The dispatch runs inside the handler of the widget that holds the live
+    /// opt-in (that widget's own frame included): a release made here never
+    /// takes the opt-in off the active path, because its holder stays on it.
+    under_captor: bool,
+}
+
+thread_local! {
+    /// The innermost widget dispatch's [`ContactFrameState`]. A slot rather
+    /// than an [`EventCtx`] field for [`CONTACT_PASS`]'s reason: a component
+    /// boundary dispatches through a fresh context, and the opt-in must still be
+    /// attributed to the pod it was made under.
+    static CONTACT_FRAME: Cell<ContactFrameState> =
+        const { Cell::new(ContactFrameState { opted_in: false, opted_in_below: false, under_captor: false }) };
+}
+
+/// The bracket around one widget dispatch's contact opt-in bookkeeping: entering
+/// opens a clean frame, [`ContactFrame::close`] reports whether the dispatched
+/// widget opted in itself and whether anything at or below it did, and dropping
+/// restores the enclosing frame with this one's opt-in folded into its
+/// `opted_in_below` (unwind included).
+pub(crate) struct ContactFrame {
+    saved: ContactFrameState,
+}
+
+impl ContactFrame {
+    /// Open a frame for one widget dispatch; `captor` marks the dispatched
+    /// widget as the holder of the live opt-in.
+    pub(crate) fn enter(captor: bool) -> Self {
+        let saved = CONTACT_FRAME.with(|slot| {
+            let saved = slot.get();
+            slot.set(ContactFrameState {
+                opted_in: false,
+                opted_in_below: false,
+                under_captor: saved.under_captor || captor,
+            });
+            saved
+        });
+        Self { saved }
+    }
+
+    /// Close the frame: `(opted_in, opted_in_at_or_below)` for the dispatched
+    /// widget.
+    pub(crate) fn close(self) -> (bool, bool) {
+        let frame = CONTACT_FRAME.with(|slot| slot.get());
+        (frame.opted_in, frame.opted_in || frame.opted_in_below)
+    }
+}
+
+impl Drop for ContactFrame {
+    fn drop(&mut self) {
+        CONTACT_FRAME.with(|slot| {
+            let frame = slot.get();
+            let mut restored = self.saved;
+            restored.opted_in_below |= frame.opted_in || frame.opted_in_below;
+            slot.set(restored);
+        });
+    }
+}
+
+/// Whether the dispatch running on this thread is inside the handler of the
+/// widget that holds the live contact opt-in (see
+/// [`ContactFrameState::under_captor`]).
+fn under_contact_captor() -> bool {
+    CONTACT_FRAME.with(|slot| slot.get().under_captor)
+}
+
+/// One level of a **secondary-contact walk**: the real event, in the coordinate
+/// space of the container currently being handed the walk's carrier, and what
+/// the walk delivered below that container.
+struct SecondaryWalkFrame {
+    /// The non-claimant contact's event, in the space of the container whose
+    /// handler is running (i.e. what that container's own `ChildPod`s
+    /// receive in their parent's space).
+    event: InputEvent,
+    /// The result of the delivery the walk made below this container, `None`
+    /// until one happened.
+    delivered: Option<EventResult>,
+}
+
+thread_local! {
+    /// The secondary-contact walk running on this thread, if any — innermost
+    /// level only; each level saves and restores its enclosing one.
+    ///
+    /// A slot for the same component-boundary reason as [`CONTACT_PASS`], and
+    /// because the walk's real event has to cross a container's handler that is
+    /// only ever handed the inert [`secondary_walk_carrier`].
+    static SECONDARY_WALK: std::cell::RefCell<Option<SecondaryWalkFrame>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// The [`OverlayKey`] the walk's carrier is addressed to — allocated once
+    /// per thread from [`OverlayKey::next`], so it is distinct from every key an
+    /// overlay owner holds and the carrier is ignored by all of them.
+    static SECONDARY_WALK_KEY: OverlayKey = OverlayKey::next();
+}
+
+/// The event a container on the active chain is handed while a non-claimant
+/// contact walks past it: an [`InputEvent::Overlay`] broadcast addressed to a
+/// key no owner holds. Every container already forwards a broadcast to its
+/// children before running any gesture, capture, focus or hit-test logic of its
+/// own (the broadcast-first rule), and every widget ignores an overlay event
+/// addressed to someone else — so a container's handler runs, but none of its
+/// pointer machinery does.
+pub(crate) fn secondary_walk_carrier() -> InputEvent {
+    InputEvent::Overlay(OverlayEvent {
+        key: SECONDARY_WALK_KEY.with(|key| *key),
+        kind: OverlayEventKind::OutsideDown,
+    })
+}
+
+/// Whether `event` is [`secondary_walk_carrier`]'s carrier.
+fn is_secondary_walk_carrier(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::Overlay(overlay)
+        if overlay.key == SECONDARY_WALK_KEY.with(|key| *key))
+}
+
+/// The real event a secondary-contact walk is carrying past the container
+/// that just routed `event` — `Some` only when a walk is running **and** `event`
+/// is its carrier (a container that synthesizes an event of its own mid-walk
+/// dispatches it normally).
+pub(crate) fn secondary_walk_event(event: &InputEvent) -> Option<InputEvent> {
+    if !is_secondary_walk_carrier(event) {
+        return None;
+    }
+    SECONDARY_WALK.with(|slot| slot.borrow().as_ref().map(|frame| frame.event.clone()))
+}
+
+/// Restores the enclosing walk level on drop (unwind included).
+struct SecondaryWalkRestore(Option<SecondaryWalkFrame>);
+
+impl Drop for SecondaryWalkRestore {
+    fn drop(&mut self) {
+        let saved = self.0.take();
+        SECONDARY_WALK.with(|slot| *slot.borrow_mut() = saved);
+    }
+}
+
+/// Run `f` as one level of a secondary-contact walk carrying `event` (in the
+/// space of the container `f` hands the carrier to), returning `f`'s result and
+/// what the walk delivered below it — `None` when the carrier never reached a
+/// `ChildPod` on the active chain.
+pub(crate) fn run_secondary_walk<R>(
+    event: InputEvent,
+    f: impl FnOnce() -> R,
+) -> (R, Option<EventResult>) {
+    let saved = SECONDARY_WALK.with(|slot| {
+        slot.borrow_mut().replace(SecondaryWalkFrame {
+            event,
+            delivered: None,
+        })
+    });
+    let restore = SecondaryWalkRestore(saved);
+    let result = f();
+    let delivered =
+        SECONDARY_WALK.with(|slot| slot.borrow().as_ref().and_then(|frame| frame.delivered));
+    drop(restore);
+    (result, delivered)
+}
+
+/// Run `f` with no secondary-contact walk in force — how the walk hands the
+/// real event to the widget it ends at, whose own subtree then routes it the
+/// ordinary way.
+pub(crate) fn without_secondary_walk<R>(f: impl FnOnce() -> R) -> R {
+    let saved = SECONDARY_WALK.with(|slot| slot.borrow_mut().take());
+    let _restore = SecondaryWalkRestore(saved);
+    f()
+}
+
+/// Record that the walk level in force delivered the real event below its
+/// container, with `result`.
+pub(crate) fn note_secondary_delivered(result: EventResult) {
+    SECONDARY_WALK.with(|slot| {
+        if let Some(frame) = slot.borrow_mut().as_mut() {
+            frame.delivered = Some(result);
+        }
+    });
+}
+
 /// What kind of content a focused editable field holds — the hint a widget
 /// publishes so each shell can configure the platform input method.
 ///
@@ -1561,6 +2176,16 @@ pub struct EventCtx<'a> {
     state: &'a mut dyn Any,
     needs_redraw: bool,
     capture_requested: bool,
+    /// Set by [`EventCtx::capture_contacts`]; bubbles up beside
+    /// `capture_requested` so a container can see the opt-in.
+    contacts_requested: bool,
+    /// Set by [`EventCtx::release_captured_child`] when the release took the
+    /// gesture's contact opt-in off the active path; bubbles up beside
+    /// `capture_requested` ([`EventCtx::is_capture_released`]).
+    capture_released: bool,
+    /// Which contact this dispatch carries ([`EventCtx::pointer_id`]); threaded
+    /// unchanged from parent to child.
+    pointer_id: PointerId,
     /// Set by [`EventCtx::request_focus`]; read by the enclosing container to
     /// record which child holds the focus path (mirrors `capture_requested`).
     focus_requested: bool,
@@ -1614,6 +2239,12 @@ impl<'a> EventCtx<'a> {
             state,
             needs_redraw: false,
             capture_requested: false,
+            contacts_requested: false,
+            capture_released: false,
+            // The contact the running root pass is dispatching, so a context
+            // built mid-pass (a component's inner one) reports the same id its
+            // enclosing context does; the mouse outside any pass.
+            pointer_id: current_pointer_id(),
             focus_requested: false,
             focus_released: false,
             has_focus: false,
@@ -1650,15 +2281,19 @@ impl<'a> EventCtx<'a> {
     }
 
     /// Capture the pointer: subsequent moves/releases should route back to this
-    /// widget. The enclosing container reads [`EventCtx::is_pointer_captured`]
-    /// after the dispatch returns to record the active child.
+    /// widget. The [`ChildPod::event_child`](crate::widget::ChildPod::event_child)
+    /// call that delivered the event reads [`EventCtx::is_pointer_captured`]
+    /// after the dispatch returns and records the active path on its pod; the
+    /// container clears it on `Up`/`Cancel`.
     ///
-    /// **Capture is a `Down`-time concept here.** Only the `Down` arm of
-    /// [`RenderRoot::event`](crate::app::RenderRoot::event) folds a request into
-    /// the root's own capture mirror, so a capture opened from a `Move` records
-    /// the pod's active path (routing works) while the root still reads
-    /// uncaptured. For hover that means a `Move` that both captures and
-    /// [`claim_hover`](EventCtx::claim_hover)s records the claim — the pod's
+    /// **Capture is a `Down`-time concept here.** For a hit-tested pointer event,
+    /// only the `Down` arm of [`RenderRoot::event`](crate::app::RenderRoot::event)
+    /// folds a request into the root's own capture mirror, so a capture opened
+    /// from a `Move` records the pod's active path (routing works) while the root
+    /// still reads uncaptured. (A floated overlay surface's own input is the one
+    /// exception: the root mirrors a capture claimed through it on any phase —
+    /// see [`InputEvent::Overlay`].) For hover that means a `Move` that both
+    /// captures and [`claim_hover`](EventCtx::claim_hover)s records the claim — the pod's
     /// eligibility gate reads the active flag as it stood *before* this dispatch —
     /// and then lapses on the next `Move`, where the now-active pod is ineligible.
     /// A gesture that wants hover chrome for its whole drag keeps its own pressed
@@ -1672,12 +2307,133 @@ impl<'a> EventCtx<'a> {
         self.capture_requested
     }
 
+    /// Which pointer contact this event comes from.
+    ///
+    /// [`PointerId::MOUSE`] unless the dispatch says otherwise: a shell's bare
+    /// [`InputEvent::Pointer`] is the mouse, and a touch contact arrives as
+    /// [`InputEvent::PointerContact`], which the root unwraps into
+    /// `InputEvent::Pointer` while this reports its id. Meaningful for pointer
+    /// events only; any other event reports whatever contact the pass carries
+    /// (the mouse at the top level).
+    ///
+    /// A widget that tracks one gesture at a time never needs this — the root
+    /// only ever delivers it the claimant's contact unless it opted in with
+    /// [`EventCtx::capture_contacts`]. One that did opt in tells the contacts
+    /// apart with it.
+    pub fn pointer_id(&self) -> PointerId {
+        self.pointer_id
+    }
+
+    /// Opt into the **other** contacts of the gesture this widget is capturing:
+    /// call it on the same `Down` that calls [`EventCtx::capture_pointer`], and
+    /// while that capture lives every additional contact's
+    /// `Down`/`Move`/`Up`/`Cancel` is delivered here down the captured path, as
+    /// [`InputEvent::Pointer`] with [`EventCtx::pointer_id`] naming the contact.
+    /// A pinch or rotate recognizer is the intended caller.
+    ///
+    /// The opt-in is read with the capture it accompanies: on a `Down` that
+    /// captures nothing it does nothing, and it ends with the capture.
+    ///
+    /// # Multi-contact contract
+    ///
+    /// * **(a)** With no live capture, a slot-`0` contact is hit-tested exactly
+    ///   like a plain [`InputEvent::Pointer`]; the `Down` this widget captures
+    ///   on makes that contact the gesture's **claimant**.
+    /// * **(b)** With no live capture, a contact on slot `1` or above is dropped
+    ///   at the root — so an additional finger only ever reaches a widget
+    ///   through this opt-in.
+    /// * **(c)** While the capture lives, the claimant's events arrive as usual;
+    ///   every other contact's events arrive only because of this call (a
+    ///   captor that did not make it never sees them), and **only here**: the
+    ///   containers between the root and this widget on the recorded active
+    ///   path forward them without running their own pointer handling (see
+    ///   [`ChildPod::event_child`](crate::widget::ChildPod::event_child)), so an
+    ///   enclosing scroll view or gesture detector never mistakes a second
+    ///   finger for its own. Only the claimant's `Up`/`Cancel` ends the
+    ///   capture — another contact's `Up`/`Cancel` is delivered but releases
+    ///   nothing, so the handler must not treat it as the end of the gesture.
+    ///   When the claimant's `Up`/`Cancel` arrives, the captor must drop every
+    ///   other contact it was tracking: their later events no longer reach it.
+    ///   The opt-in also ends early if an enclosing container takes the gesture
+    ///   over and releases this widget from the active path
+    ///   ([`EventCtx::release_captured_child`]).
+    ///
+    /// See [`InputEvent::PointerContact`] for the full contract.
+    pub fn capture_contacts(&mut self) {
+        self.contacts_requested = true;
+        note_contacts_requested();
+    }
+
+    /// Whether a widget opted into the gesture's other contacts
+    /// ([`EventCtx::capture_contacts`]) during this (sub)dispatch — the
+    /// container-side read, bubbled by
+    /// [`ChildPod::event_child`](crate::widget::ChildPod::event_child) exactly
+    /// like [`EventCtx::is_pointer_captured`]. The root does not depend on the
+    /// bubble: it reads the opt-in from the pass it opened, so a component
+    /// boundary (whose fresh inner context this flag does not cross) cannot
+    /// hide it.
+    pub fn is_contact_capture_requested(&self) -> bool {
+        self.contacts_requested
+    }
+
+    /// Release a captured child: the container-side half of a **takeover**, for
+    /// a container that cancels the gesture its captured child was handling and
+    /// keeps the gesture for itself (a scroll view crossing its drag slop).
+    ///
+    /// Clears `child`'s recorded active path exactly like
+    /// [`ChildPod::set_active`](crate::widget::ChildPod::set_active)`(false)`
+    /// (call it after delivering the child its `Cancel`), and when the released
+    /// subtree held the widget that opted into the gesture's other contacts
+    /// ([`EventCtx::capture_contacts`]) it also tells the root, which then stops
+    /// routing those contacts — the widget that asked for them is no longer on
+    /// the active path, and nothing else asked. The signal bubbles like
+    /// [`EventCtx::is_pointer_captured`] ([`EventCtx::is_capture_released`]).
+    ///
+    /// The capture itself stays with the gesture's claimant: the container that
+    /// took over is still on the active path (it was the released child's
+    /// ancestor), so the claimant's later events keep reaching it and only the
+    /// claimant's `Up`/`Cancel` ends the gesture. A container that wants the
+    /// other contacts for itself calls [`EventCtx::capture_contacts`] after
+    /// this, in the same dispatch.
+    ///
+    /// Nothing is released or signalled while the child holds no active path,
+    /// while a non-claimant contact is being delivered (whose `Up`/`Cancel`
+    /// must never break the claimant's gesture — see
+    /// [`ChildPod::set_active`](crate::widget::ChildPod::set_active)), or when
+    /// the opted-in widget is this container or one of its ancestors (it stays
+    /// on the active path, so its opt-in stands).
+    pub fn release_captured_child(&mut self, child: &mut crate::widget::ChildPod) {
+        if !child.is_active() {
+            return;
+        }
+        let held_opt_in = child.holds_contact_opt_in();
+        child.set_active(false);
+        if child.is_active() || !held_opt_in || under_contact_captor() {
+            return;
+        }
+        self.capture_released = true;
+        note_capture_released();
+    }
+
+    /// Whether a container released the gesture's opted-in widget from the
+    /// active path during this (sub)dispatch
+    /// ([`EventCtx::release_captured_child`]) — bubbled by
+    /// [`ChildPod::event_child`](crate::widget::ChildPod::event_child) exactly
+    /// like [`EventCtx::is_pointer_captured`]. As with the opt-in, the root reads
+    /// the release from the pass it opened, so a component boundary cannot hide
+    /// it.
+    pub fn is_capture_released(&self) -> bool {
+        self.capture_released
+    }
+
     /// Request focus: subsequent keyboard/IME events should route to this widget.
     ///
-    /// The enclosing container reads the flag after the dispatch returns and
-    /// records this child as the focused path (the focus mirror of
-    /// [`EventCtx::capture_pointer`]). Focus is delivered down the recorded chain
-    /// with no hit test.
+    /// The [`ChildPod::event_child`](crate::widget::ChildPod::event_child) call
+    /// that delivered the event reads the flag after the dispatch returns and
+    /// records its pod as the focused path, stamped with the live focus session
+    /// (the focus mirror of [`EventCtx::capture_pointer`]); the request bubbles,
+    /// so every pod up to the root records it. Focus-routed events are delivered
+    /// down that recorded chain with no hit test.
     pub fn request_focus(&mut self) {
         self.focus_requested = true;
     }
@@ -2146,9 +2902,10 @@ impl<'a> EventCtx<'a> {
     /// hover-claim flags start clear; `has_focus` reflects the child pod's recorded
     /// focus flag, `hovered` its recorded hover link, and `hover_eligible` whether
     /// the child may claim hover at all (the caller narrows it — see
-    /// [`crate::widget::ChildPod::event_child`]). The live hover epoch and the
-    /// running root's identity are threaded down unchanged (a claim anywhere in
-    /// the subtree is stamped with both). The parent folds the results back in with
+    /// [`crate::widget::ChildPod::event_child`]). The live hover epoch, the
+    /// running root's identity and the dispatch's [`EventCtx::pointer_id`] are
+    /// threaded down unchanged (a claim anywhere in the subtree is stamped with
+    /// the first two). The parent folds the results back in with
     /// [`EventCtx::absorb_child`].
     pub(crate) fn child_ctx(
         &mut self,
@@ -2162,6 +2919,9 @@ impl<'a> EventCtx<'a> {
             state: &mut *self.state,
             needs_redraw: false,
             capture_requested: false,
+            contacts_requested: false,
+            capture_released: false,
+            pointer_id: self.pointer_id,
             focus_requested: false,
             focus_released: false,
             has_focus: focused,
@@ -2176,12 +2936,16 @@ impl<'a> EventCtx<'a> {
         }
     }
 
-    /// Fold a child dispatch's redraw/capture/hover-claim/focus flags (and any
-    /// published IME surface) back into this context.
+    /// Fold a child dispatch's redraw/capture/contact-opt-in/capture-release/
+    /// hover-claim/focus flags (and any published IME surface) back into this
+    /// context.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn absorb_child(
         &mut self,
         child_needs_redraw: bool,
         child_captured: bool,
+        child_contacts_requested: bool,
+        child_capture_released: bool,
         child_hover_claimed: bool,
         child_focus_requested: bool,
         child_focus_released: bool,
@@ -2189,6 +2953,8 @@ impl<'a> EventCtx<'a> {
     ) {
         self.needs_redraw |= child_needs_redraw;
         self.capture_requested |= child_captured;
+        self.contacts_requested |= child_contacts_requested;
+        self.capture_released |= child_capture_released;
         // A claim bubbles like a focus request: every pod between the claimant and
         // the root records it, so the whole path carries the same stamp.
         self.hover_claimed |= child_hover_claimed;
@@ -2242,6 +3008,77 @@ mod tests {
     }
 
     #[test]
+    fn transformed_maps_every_positioned_variant_like_translated() {
+        // A pure translation through `transformed` must agree with `translated`
+        // for every variant, positioned or not.
+        let offset = Vec2::new(-5.0, -7.0);
+        let affine = Affine::translate(offset);
+        let scale = ScaleEvent {
+            phase: ScalePhase::Update,
+            scale_delta: 1.5,
+            focal: Point::new(20.0, 30.0),
+            velocity: 0.25,
+        };
+        let events = [
+            down(20.0, 30.0),
+            InputEvent::PointerContact {
+                pointer_id: PointerId::touch(1),
+                event: PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: Point::new(20.0, 30.0),
+                    button: PointerButton::Primary,
+                },
+            },
+            InputEvent::Scroll {
+                position: Point::new(20.0, 30.0),
+                delta: ScrollDelta::Pixels(3.0, 4.0),
+            },
+            InputEvent::Scale(scale),
+            InputEvent::Housekeeping,
+        ];
+        for event in &events {
+            assert_eq!(event.transformed(&affine), event.translated(offset));
+        }
+    }
+
+    #[test]
+    fn transformed_maps_positions_through_scale_and_keeps_magnitudes() {
+        // Inverse of scale(2) then translate(10, 20): container (30, 60) is
+        // local (10, 20).
+        let inverse = (Affine::translate(Vec2::new(10.0, 20.0)) * Affine::scale(2.0)).inverse();
+        assert_eq!(
+            down(30.0, 60.0).transformed(&inverse).position(),
+            Point::new(10.0, 20.0)
+        );
+        let scroll = InputEvent::Scroll {
+            position: Point::new(30.0, 60.0),
+            delta: ScrollDelta::Pixels(3.0, 4.0),
+        };
+        assert_eq!(
+            scroll.transformed(&inverse),
+            InputEvent::Scroll {
+                position: Point::new(10.0, 20.0),
+                delta: ScrollDelta::Pixels(3.0, 4.0),
+            }
+        );
+        let scale = InputEvent::Scale(ScaleEvent {
+            phase: ScalePhase::Begin,
+            scale_delta: 1.25,
+            focal: Point::new(30.0, 60.0),
+            velocity: 2.0,
+        });
+        assert_eq!(
+            scale.transformed(&inverse),
+            InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Begin,
+                scale_delta: 1.25,
+                focal: Point::new(10.0, 20.0),
+                velocity: 2.0,
+            })
+        );
+    }
+
+    #[test]
     fn absorb_child_folds_flags_upward() {
         let mut count = 0u32;
         let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
@@ -2256,7 +3093,7 @@ mod tests {
             child.request_redraw();
             child.capture_pointer();
             let (redraw, cap) = (child.needs_redraw(), child.is_pointer_captured());
-            ctx.absorb_child(redraw, cap, false, false, false, None);
+            ctx.absorb_child(redraw, cap, false, false, false, false, false, None);
         }
         assert!(ctx.needs_redraw());
         assert!(ctx.is_pointer_captured());
@@ -2311,7 +3148,7 @@ mod tests {
                 child.is_focus_released(),
                 child.take_ime_state(),
             );
-            ctx.absorb_child(false, false, false, fr, frl, ime);
+            ctx.absorb_child(false, false, false, false, false, fr, frl, ime);
         }
         assert!(ctx.is_focus_requested());
         assert!(!ctx.is_focus_released());
@@ -2353,7 +3190,7 @@ mod tests {
             assert_eq!(child.hover_claim_epoch(), 8, "a claim takes the next epoch");
             child.claim_hover();
             let claimed = child.is_hover_claimed();
-            ctx.absorb_child(false, false, claimed, false, false, None);
+            ctx.absorb_child(false, false, false, false, claimed, false, false, None);
         }
         assert!(ctx.is_hover_claimed());
     }
@@ -2444,7 +3281,7 @@ mod tests {
             let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, true, false, false);
             child.publish_ime_state(published.clone());
             let ime = child.take_ime_state();
-            ctx.absorb_child(false, false, false, false, false, ime);
+            ctx.absorb_child(false, false, false, false, false, false, false, ime);
         }
         assert_eq!(ctx.take_ime_state(), Some(published));
     }
@@ -2952,5 +3789,104 @@ mod tests {
         // No length either — that leaks too.
         assert!(!rendered.contains('7'));
         assert_eq!(format!("{:?}", EditCommand::SelectAll), "SelectAll");
+    }
+
+    #[test]
+    fn a_pointer_contact_is_positioned_and_translated_like_a_pointer() {
+        let contact = InputEvent::PointerContact {
+            pointer_id: PointerId::touch(2),
+            event: PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(30.0, 40.0),
+                button: PointerButton::Primary,
+            },
+        };
+        assert_eq!(contact.position(), Point::new(30.0, 40.0));
+        assert_eq!(
+            contact.translated(Vec2::new(-10.0, -20.0)),
+            InputEvent::PointerContact {
+                pointer_id: PointerId::touch(2),
+                event: PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: Point::new(20.0, 20.0),
+                    button: PointerButton::Primary,
+                },
+            },
+            "the position shifts; the id and the rest of the event do not"
+        );
+        // Hit-tested, like the pointer it wraps: neither class of non-positional
+        // event.
+        assert!(!contact.is_focus_routed());
+        assert!(!contact.is_broadcast());
+    }
+
+    #[test]
+    fn pointer_ids_name_the_mouse_and_touch_slots() {
+        assert_eq!(
+            PointerId::MOUSE,
+            PointerId {
+                source: PointerSource::Mouse,
+                slot: 0
+            }
+        );
+        assert_eq!(
+            PointerId::touch(3),
+            PointerId {
+                source: PointerSource::Touch,
+                slot: 3
+            }
+        );
+        assert_ne!(PointerId::MOUSE, PointerId::touch(0));
+    }
+
+    #[test]
+    fn a_context_reports_the_mouse_outside_any_contact_pass() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        assert_eq!(ctx.pointer_id(), PointerId::MOUSE);
+        // An opt-in with no pass open is still visible to the container that
+        // reads it, but records nothing a later pass could inherit.
+        ctx.capture_contacts();
+        assert!(ctx.is_contact_capture_requested());
+        drop(ctx);
+        let pass = ContactPass::enter(PointerId::touch(0), false);
+        assert!(!pass.contacts_requested());
+    }
+
+    #[test]
+    fn a_contact_pass_seeds_every_context_and_collects_the_opt_in() {
+        let mut count = 0u32;
+        let outer = ContactPass::enter(PointerId::touch(1), true);
+        assert!(in_secondary_contact_pass());
+        {
+            // A fresh context (what a component builds over its own state)
+            // reports the pass's contact, and so does every child context.
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            assert_eq!(ctx.pointer_id(), PointerId::touch(1));
+            let (contacts, id) = {
+                let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false, false, false);
+                let id = child.pointer_id();
+                child.capture_contacts();
+                (child.is_contact_capture_requested(), id)
+            };
+            assert_eq!(id, PointerId::touch(1));
+            ctx.absorb_child(false, false, contacts, false, false, false, false, None);
+            assert!(ctx.is_contact_capture_requested(), "the opt-in bubbles");
+        }
+        assert!(outer.contacts_requested(), "and is recorded in the pass");
+
+        // A nested pass scopes its own contact and opt-in, then hands back.
+        {
+            let inner = ContactPass::enter(PointerId::MOUSE, false);
+            assert_eq!(current_pointer_id(), PointerId::MOUSE);
+            assert!(!in_secondary_contact_pass());
+            assert!(!inner.contacts_requested());
+        }
+        assert_eq!(current_pointer_id(), PointerId::touch(1));
+        assert!(in_secondary_contact_pass());
+        assert!(outer.contacts_requested());
+        drop(outer);
+        assert_eq!(current_pointer_id(), PointerId::MOUSE);
+        assert!(!in_secondary_contact_pass());
     }
 }

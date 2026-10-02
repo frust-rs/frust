@@ -58,6 +58,88 @@ pub(crate) fn touch_phase_from_action(action: i32) -> TouchPhase {
     }
 }
 
+/// The largest number of simultaneous touch contacts one gesture tracks.
+///
+/// Android's `MotionEvent` publishes no hard contact-count limit, but every
+/// shipped touchscreen driver reports at most this many simultaneous pointers
+/// in practice. **Community-approximate**: chosen generously (well above any
+/// observed device) rather than measured from a published spec, so
+/// [`TouchSlotMap::assign`] never has to refuse a contact on real hardware.
+const MAX_TOUCH_SLOTS: usize = 10;
+
+/// Maps Android's own `MotionEvent.getPointerId` values — stable for a
+/// contact's lifetime but platform-chosen and not small/contiguous — onto the
+/// small, gesture-local slot numbers [`frust_core::event::PointerId::touch`]
+/// takes (`0` for the gesture's first contact, `1` for the second, …).
+///
+/// A slot is assigned on a contact's `Down` and freed on its `Up`/`Cancel`;
+/// freeing one slot never renumbers another that is still live — a second
+/// finger holding slot `1` stays at `1` after the first (slot `0`) lifts, so
+/// the primary-sequence latch (`frust_core::event::PointerId`'s multi-contact
+/// contract: a slot-`0` contact is the one a capture can latch onto) never
+/// retargets mid-gesture. A new contact takes the **lowest currently-free**
+/// slot, so the map "resets" to handing out `0` again once every contact has
+/// lifted — there is no separate reset operation, it falls out of the search.
+///
+/// Kept in `frust-shell-android`'s host-testable `ffi_support` module (not
+/// `app::input`, which is `#[cfg(target_os = "android")]` via its `frust-core`
+/// dependency) so the slot-assignment rule itself is exercised by `cargo test
+/// -p frust-shell-android` on every host, mirroring [`touch_phase_from_action`]
+/// and [`appearance_from_dark`] above.
+#[derive(Debug)]
+pub(crate) struct TouchSlotMap {
+    /// Index = frust slot; value = the Android `pointerId` currently occupying
+    /// it, or `None` when the slot is free.
+    slots: [Option<i32>; MAX_TOUCH_SLOTS],
+}
+
+impl TouchSlotMap {
+    /// A fresh map with every slot free (no gesture in progress).
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: [None; MAX_TOUCH_SLOTS],
+        }
+    }
+
+    /// The slot `android_pointer_id` currently occupies, if its `Down` has
+    /// already been assigned one.
+    pub(crate) fn slot_for(&self, android_pointer_id: i32) -> Option<u32> {
+        self.slots
+            .iter()
+            .position(|slot| *slot == Some(android_pointer_id))
+            .map(|i| i as u32)
+    }
+
+    /// Assign `android_pointer_id` the lowest currently-free slot (its
+    /// `Down`). A duplicate assignment for an id already tracked returns its
+    /// existing slot rather than taking a second one. When every slot is
+    /// already occupied (see [`MAX_TOUCH_SLOTS`]) the last slot is reused
+    /// rather than refusing the contact — a saturating fallback, not a panic.
+    pub(crate) fn assign(&mut self, android_pointer_id: i32) -> u32 {
+        if let Some(slot) = self.slot_for(android_pointer_id) {
+            return slot;
+        }
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(android_pointer_id);
+                return i as u32;
+            }
+        }
+        let last = MAX_TOUCH_SLOTS - 1;
+        self.slots[last] = Some(android_pointer_id);
+        last as u32
+    }
+
+    /// Free the slot `android_pointer_id` occupies (its `Up`/`Cancel`), so a
+    /// later `Down` may reuse it. A release for an id this map never assigned
+    /// is a harmless no-op.
+    pub(crate) fn release(&mut self, android_pointer_id: i32) {
+        if let Some(slot) = self.slot_for(android_pointer_id) {
+            self.slots[slot as usize] = None;
+        }
+    }
+}
+
 /// Convert Kotlin's `Choreographer.FrameCallback` `frameTimeNanos` (a JNI
 /// `jlong`, signed 64-bit) into the unsigned nanosecond count
 /// [`frust_core::FrameTime::from_nanos`] takes.
@@ -696,6 +778,93 @@ mod tests {
         assert!(handle_is_live(1));
         assert!(handle_is_live(-1));
         assert!(handle_is_live(0x7fff_ffff_ffff_ffff));
+    }
+
+    #[test]
+    fn touch_slot_map_first_finger_gets_slot_zero() {
+        let mut map = TouchSlotMap::new();
+        assert_eq!(map.assign(/* android pointerId */ 7), 0);
+        assert_eq!(map.slot_for(7), Some(0));
+    }
+
+    #[test]
+    fn touch_slot_map_second_finger_gets_slot_one() {
+        let mut map = TouchSlotMap::new();
+        assert_eq!(map.assign(7), 0);
+        assert_eq!(
+            map.assign(3),
+            1,
+            "a second simultaneous contact takes slot 1"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_release_of_first_keeps_second_at_its_slot() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7); // slot 0
+        map.assign(3); // slot 1
+        map.release(7); // first finger lifts
+        assert_eq!(
+            map.slot_for(3),
+            Some(1),
+            "the surviving contact must not be renumbered down to slot 0"
+        );
+        assert_eq!(map.slot_for(7), None);
+    }
+
+    #[test]
+    fn touch_slot_map_all_up_resets_the_next_down_to_zero() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7);
+        map.assign(3);
+        map.release(7);
+        map.release(3);
+        assert_eq!(
+            map.assign(42),
+            0,
+            "once every contact has lifted, the next Down starts over at slot 0"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_a_freed_slot_is_reused_by_a_later_contact() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7); // slot 0
+        map.assign(3); // slot 1
+        map.release(7); // slot 0 now free, slot 1 still held
+        assert_eq!(
+            map.assign(9),
+            0,
+            "a new contact takes the lowest free slot, not the next unused number"
+        );
+        assert_eq!(
+            map.slot_for(3),
+            Some(1),
+            "the untouched contact is unaffected"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_duplicate_assign_returns_the_existing_slot() {
+        let mut map = TouchSlotMap::new();
+        assert_eq!(map.assign(7), 0);
+        assert_eq!(
+            map.assign(7),
+            0,
+            "re-assigning an already-tracked id must not take a second slot"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_release_of_an_unknown_id_is_a_no_op() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7);
+        map.release(999); // never assigned
+        assert_eq!(
+            map.slot_for(7),
+            Some(0),
+            "an untracked release must not disturb slot 0"
+        );
     }
 
     #[test]

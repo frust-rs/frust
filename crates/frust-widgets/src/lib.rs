@@ -30,6 +30,7 @@
 mod align;
 pub mod authoring;
 mod button;
+mod canvas;
 mod checkbox;
 mod container;
 mod divider;
@@ -44,7 +45,9 @@ pub mod motion;
 pub mod nav;
 mod overlay;
 mod padding;
+mod pan_zoom;
 pub mod physics;
+pub mod pinch;
 mod platform_view;
 mod radio;
 mod safe_area;
@@ -61,6 +64,7 @@ use std::hash::{Hash, Hasher};
 
 pub use align::{Align, AlignView, AlignWidget, Alignment};
 pub use button::{Button, ButtonStyle, ButtonView, ButtonWidget, button};
+pub use canvas::{CanvasView, CanvasWidget, canvas};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use container::{BorderStyle, ContainerView, ContainerWidget, colored_box, container};
 pub use divider::{DividerView, DividerWidget, divider};
@@ -92,6 +96,10 @@ pub use overlay::{
     OverlayPortalView, OverlayPortalWidget, OverlaySide, OverlaySlot, overlay_portal, place,
 };
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
+pub use pan_zoom::{
+    DEFAULT_MAX_SCALE, DEFAULT_MIN_SCALE, PanZoomController, PanZoomTransform, PanZoomView,
+    PanZoomWidget, pan_zoom,
+};
 pub use physics::effect::OverscrollEffect;
 pub use physics::parity::{
     AlwaysScrollable, Bouncing, Clamping, DecelerationRate, NeverScrollable,
@@ -100,6 +108,9 @@ pub use physics::rubber_band::RubberBand;
 pub use physics::{
     MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, ScrollMetrics, ScrollPhysics, Simulation,
     SpringDescription, Tolerance,
+};
+pub use pinch::{
+    PINCH_SLOP, PinchDetectorView, PinchDetectorWidget, PinchRecognizer, pinch_detector,
 };
 pub use platform_view::{
     PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,

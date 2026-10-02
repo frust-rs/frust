@@ -209,17 +209,21 @@ macro_rules! ios_app {
         /// `frust_dispatch_touch`: deliver one touch contact.
         ///
         /// `phase` is the fixed code (`0`=began, `1`=moved, `2`=ended,
-        /// `3`=cancelled — an ABI shared with the Swift `FrustView`); `x`/`y`
-        /// are logical points (passed through, no scale division).
+        /// `3`=cancelled — an ABI shared with the Swift `FrustView`);
+        /// `pointer_id` is the per-sequence contact slot (first contact of a
+        /// sequence is 0; later contacts 1..; see FrustView.swift's slot map and
+        /// the 'Multi-contact contract' rustdoc in crates/frust-core/src/event.rs);
+        /// `x`/`y` are logical points (passed through, no scale division).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_dispatch_touch(
             handle: *mut ::core::ffi::c_void,
             phase: u32,
+            pointer_id: u32,
             x: f32,
             y: f32,
         ) {
-            $crate::ffi_glue::dispatch_touch(handle, phase, x, y)
+            $crate::ffi_glue::dispatch_touch(handle, phase, pointer_id, x, y)
         }
 
         /// `frust_ime_apply`: push a whole editing state from the Swift

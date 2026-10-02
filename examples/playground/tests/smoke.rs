@@ -13,7 +13,8 @@
 
 use std::any::Any;
 
-use frust::{AnyView, Brightness, Theme, any, component, provide_context};
+use frust::authoring::WindowInsets;
+use frust::{AnyView, Brightness, Theme, WindowMetrics, any, component, provide_context};
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_reactive::ReactiveRuntime;
@@ -23,7 +24,7 @@ use kurbo::{BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;
 
-use playground::pages::{self, SECTION_LABELS};
+use playground::pages::{self, PRIMARY_NAV_COUNT, SECTION_LABELS};
 use playground::{PlaygroundApp, PlaygroundState};
 
 const W: f64 = 900.0;
@@ -55,6 +56,9 @@ struct RecScene {
     text_colors: Vec<peniko::Color>,
     rounded: usize,
     fills: usize,
+    /// Straight-line strokes — the "Graph" section's edges
+    /// (`pages::graph_canvas`'s `CanvasView` paints each with `stroke_line`).
+    lines: usize,
     /// The absolute (canvas-space) block origin — [`GlyphRun::transform`]'s
     /// translation — of every painted glyph run, in paint order. Every line
     /// of one [`frust_text::TextLayout`] shares the SAME transform (the
@@ -97,6 +101,9 @@ impl PaintScene for RecScene {
         self.fills += 1;
     }
     fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
+    fn stroke_line(&mut self, _p0: Point, _p1: Point, _width: f64, _color: Color) {
+        self.lines += 1;
+    }
 }
 
 /// Installs the reactive runtime and an ambient owner, mirroring the desktop
@@ -285,15 +292,18 @@ fn out_of_range_section_falls_back() {
     assert!(scene.text_runs > 0, "the fallback page paints");
 }
 
-/// The regression test for nav-label wrapping: at phone
-/// portrait width the bottom `navigation_bar` divides its width evenly across
-/// every [`SECTION_LABELS`] destination — 390px / `SECTION_LABELS.len()` per
-/// slot (≈48.75px at eight) — and
-/// a label whose shaped text wraps to two lines overflows the bar's declared
-/// 64dp height (`label_y` = 42 inside a 64px box leaves only 22px, but two
-/// `labelMediumEmphasized` lines need 32px). Mounts the WHOLE
+/// The regression test for nav-label wrapping: at phone portrait width (no
+/// `WindowMetrics` context published — the headless harness's own
+/// unpublished-context state, which `playground::home_page` treats as narrow,
+/// same as `pages::responsive`'s convention) the bottom `navigation_bar`
+/// divides its width evenly across its VISIBLE destinations — the first
+/// [`PRIMARY_NAV_COUNT`] of [`SECTION_LABELS`] plus a trailing "More" slot,
+/// never the full (now eleven-long) label list — 390px / `VISIBLE_LABELS.len()`
+/// per slot, and a label whose shaped text wraps to two lines overflows the
+/// bar's declared 64dp height (`label_y` = 42 inside a 64px box leaves only
+/// 22px, but two `labelMediumEmphasized` lines need 32px). Mounts the WHOLE
 /// [`PlaygroundApp`] shell (not a bare page, and not at the suite's other
-/// 900x700 desktop-ish size where a 150px slot never wrapped) and inspects
+/// 900x700 desktop-ish size where a wider slot never wrapped) and inspects
 /// the actual painted glyph runs: a single-line label's block lands at
 /// exactly `LABEL_TOP_OFFSET` below the bar's top edge (see that local
 /// constant's own comment, inside this test's body); a wrapped label's block
@@ -315,10 +325,20 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
     let _owner = setup();
     let mut tcx = TextContext::new();
 
+    // The narrow-width bottom nav bar's own visible set (`playground`'s
+    // `bottom_nav_bar`): the first `PRIMARY_NAV_COUNT` section labels plus a
+    // trailing "More" slot — never the full `SECTION_LABELS` list, which is
+    // exactly the overflow this nav restructure exists to avoid wrapping.
+    let visible_labels: Vec<&str> = SECTION_LABELS[..PRIMARY_NAV_COUNT]
+        .iter()
+        .copied()
+        .chain(std::iter::once("More"))
+        .collect();
+
     const PHONE_W: f64 = 390.0;
     const PHONE_H: f64 = 844.0;
     const NAV_HEIGHT: f64 = 80.0;
-    const SLOT_W: f64 = PHONE_W / SECTION_LABELS.len() as f64;
+    let slot_w: f64 = PHONE_W / visible_labels.len() as f64;
     // Mirrors `frust_material::navbar`'s current (post p4-03-navbar-rework,
     // merge `cacaaf21`) item layout — the label's top-edge offset from its
     // item's own origin. Before that rework `NavItemWidget::layout` placed
@@ -358,19 +378,19 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
         0,
     );
 
-    let mut runs_per_slot = vec![0usize; SECTION_LABELS.len()];
+    let mut runs_per_slot = vec![0usize; visible_labels.len()];
     for origin in &scene.text_run_origins {
         if (origin.y - expected_label_y).abs() > 0.5 {
             continue;
         }
-        let slot = ((origin.x / SLOT_W) as usize).min(SECTION_LABELS.len() - 1);
+        let slot = ((origin.x / slot_w) as usize).min(visible_labels.len() - 1);
         runs_per_slot[slot] += 1;
     }
 
-    for (slot, label) in SECTION_LABELS.iter().enumerate() {
+    for (slot, label) in visible_labels.iter().enumerate() {
         assert_eq!(
             runs_per_slot[slot], 1,
-            "nav label {slot} ({label:?}) painted {} glyph run(s) inside its {SLOT_W}px slot at \
+            "nav label {slot} ({label:?}) painted {} glyph run(s) inside its {slot_w}px slot at \
              {PHONE_W}px width — expected exactly 1 (a single line painted at the item's \
              single-line label Y); zero means the label wrapped (its shared block origin shifted \
              to a different Y, since the item column is centred by content height — see \
@@ -395,8 +415,9 @@ fn full_shell_mounts_with_app_bar_body_and_nav_bar() {
 
     let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
 
-    // The app-bar title + three toggle labels + the four nav-bar labels + the
-    // platform-views page's own text all shape text runs.
+    // The app-bar title + three toggle labels + the six nav-bar labels (the
+    // first `PRIMARY_NAV_COUNT` sections plus "More") + the platform-views
+    // page's own text all shape text runs.
     assert!(
         scene.text_runs > 0,
         "the shell paints its app-bar/nav-bar/body text (got {})",
@@ -412,4 +433,90 @@ fn full_shell_mounts_with_app_bar_body_and_nav_bar() {
     // A second frame keeps mounting cleanly (reconcile-in-place, no panic).
     let (scene2, _outcome2) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
     assert!(scene2.text_runs > 0);
+}
+
+/// The "Graph" section's own coverage gate: its `CanvasView` paints every
+/// edge (`stroke_line`, recorded as [`RecScene::lines`]) and every node (a
+/// `fill_rounded_rect` circle, recorded as [`RecScene::rounded`]), and its
+/// per-node labels plus its title/caption/readout all shape real text —
+/// proving the page builds, lays out, and paints headless (see the module
+/// docs), beyond the generic per-section sweep above.
+#[test]
+fn graph_page_paints_nodes_edges_and_labels() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let graph_index = pages::section_index_for("graph").expect("graph is a known section");
+
+    let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+    let mut state = PlaygroundState::new();
+    let mut logic = |s: &mut PlaygroundState| pages::current(graph_index, s);
+    let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+
+    assert!(
+        scene.lines >= 13,
+        "the graph's 13 edges must each paint a stroke_line (got {})",
+        scene.lines,
+    );
+    assert!(
+        scene.rounded >= 12,
+        "all 12 nodes must each paint a fill_rounded_rect circle (got {})",
+        scene.rounded,
+    );
+    assert!(
+        scene.text_runs > 12,
+        "the title/caption/readout plus every node's own label must shape text (got {})",
+        scene.text_runs,
+    );
+
+    // A second frame (reconcile-in-place) keeps painting cleanly, no panic.
+    let (scene2, _outcome2) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
+    assert!(scene2.lines >= 13);
+}
+
+/// At or past the shell's wide-nav breakpoint, `playground`'s home page shows
+/// its side rail's full eleven-destination column instead of the narrow
+/// bottom nav bar's six-item (five primary + "More") bar — a `WindowMetrics`
+/// context is how an app publishes window shape (`pages::responsive`'s own
+/// convention), so providing one at a wide size before mounting is what flips
+/// the home page onto that path. Asserted by nav-destination TEXT RUN COUNT:
+/// eleven side-rail labels paint strictly more nav-destination text than the
+/// narrow bar's six.
+#[test]
+fn wide_width_shows_every_section_in_the_side_rail() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+
+    let narrow_runs = {
+        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+        let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+        let mut state = ();
+        let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+        scene.text_runs
+    };
+
+    provide_context(WindowMetrics::new(
+        Size::new(1024.0, 768.0),
+        1.0,
+        WindowInsets::default(),
+    ));
+    let wide_runs = {
+        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+        let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+        let mut state = ();
+        let (scene, _outcome) = frame_at_size(
+            &mut root,
+            &mut logic,
+            &mut state,
+            &mut tcx,
+            Size::new(1024.0, 768.0),
+            0,
+        );
+        scene.text_runs
+    };
+
+    assert!(
+        wide_runs > narrow_runs,
+        "the wide-width side rail (11 destinations) must paint more text runs than the narrow \
+         bottom bar (6 destinations): narrow {narrow_runs}, wide {wide_runs}",
+    );
 }

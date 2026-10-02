@@ -37,6 +37,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::frame_gate` | Shared run/skip frame decision and pacing used by both continuous-loop mobile shells |
 | `frust-shell-common::render_split` | UI-thread/render-thread split vocabulary (scene handoff, lifecycle commands, completion barrier) every shell's default frame path uses |
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
+| `frust-shell-common::resample` | `PointerResampler` — one lane per `PointerId`, emitting a frame-boundary-interpolated `Move` per contact while passing `Down`/`Up`/`Cancel` through losslessly; shared by both mobile shells |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override and fonts on every shell, desktop included |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through the facade's `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both of its device-creation sites; the Android and iOS shells forward the feature but do not install a handle yet, so `with_context` answers `None` there |
@@ -51,7 +52,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-web::app_handler` | Winit-generic host-signal translation ported from `frust-shell-desktop` (input mapping, the reactive-owner event wrap, theme delivery, window-metrics publish) plus, gated to `wasm32`, the `browser_loop` submodule owning the canvas-bound event loop and frame turn (`spawn_app`/`run_app`) |
 | `frust-shell-web::pacing` | Pure paced-wake decision logic composing the browser's two wake mechanisms (`requestAnimationFrame` redraws, `ControlFlow::WaitUntil` deadlines) |
 | `frust-shell-web::render` | The single-thread inline frame executor (`WebFrameExecutor`) over the wgpu surface: swapchain reconciliation, encode/acquire/submit, and the cold-page adapter-retry bring-up |
-| `frust-shell-web::input` | Single-contact `TouchTracker`, matching the mobile shells' v1 touch contract — the one input mapping with no `frust-shell-desktop` twin |
+| `frust-shell-web::input` | `TouchTracker` — maps every winit touch `id` to a per-sequence slot and emits `InputEvent::PointerContact` for each contact, the mobile shells' multi-contact model; the one input mapping with no `frust-shell-desktop` twin |
 | `frust-shell-web::ime` | The hidden-`<input>` overlay bridging real browser composition into `ImeEvent::Compose`/`Commit`, and the canvas re-dispatch that keeps plain typing on winit's existing key path — see Cross-cutting host signals below |
 | `frust-shell-web::logging` | Routes the `log` facade to the browser console (`console_log`/`console_error_panic_hook`), idempotent against the facade's own install, plus a `?log=` query-param level knob |
 
@@ -336,6 +337,30 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   forwards the secondary mouse button as `PointerButton::Secondary` through a delivery-latched
   gate — an Up dispatches iff its Down did — guaranteeing every Down/Up pair reaches `AppTree`
   paired even under pointer capture.
+- **Touch contacts and resampling:** each mobile shell maps its platform's own per-finger id onto a
+  gesture-local `PointerId` slot (the first contact of a gesture always lands on slot `0`) and
+  delivers every contact as `InputEvent::PointerContact`, on both the direct path and the
+  `PointerResampler`-buffered one — a `RawPointerSample` carries the same `pointer_id`, one
+  resampler lane per contact. Slot numbering is the same **lowest-currently-free-slot** rule on
+  every shell: a slot is taken on `Down` and freed on `Up`/`Cancel`, freeing one never renumbers
+  another still-live slot, and a slot freed mid-gesture is handed to the next contact that arrives
+  — Android's `TouchSlotMap` (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots`,
+  and the web shell's `TouchTracker` `free_slots` all implement it independently. Android's JNI
+  entry point is `nativeOnTouch(handle, action, pointerId, x, y)` (`(JIIFF)V`); the Kotlin view
+  calls it once per pointer for `ACTION_DOWN`/`ACTION_POINTER_DOWN` and
+  `ACTION_UP`/`ACTION_POINTER_UP` (the changed `actionIndex`), once per currently-down pointer for
+  `ACTION_MOVE`, and once per pointer still down for `ACTION_CANCEL`. iOS's C-ABI entry point is
+  `frust_dispatch_touch(handle, phase, pointer_id, x, y)`; `FrustView` assigns each `UITouch` a
+  slot keyed by its `ObjectIdentifier` and sets `isMultipleTouchEnabled`. The web shell's
+  `TouchTracker` (see Module Structure) is the browser-side equivalent, with no resampler of its
+  own.
+- **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to
+  `InputEvent::Scale` at the cursor position, `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE ×
+  lines)` (a wheel-notch-equivalent line count; `WHEEL_SCALE_RATE_PER_LINE = 0.1`, ~10% per notch) —
+  a plain, unmodified wheel stays `Scroll`. Winit's `PinchGesture` (macOS only at this winit pin)
+  maps to the same `Scale` stream with `scale_delta = 1.0 + delta` and `ScalePhase`
+  Begin/Update/End taken from winit's gesture-bracket phase; see `desktop-pinch-linux-windows-unavailable`
+  in [LIMITATIONS.md](LIMITATIONS.md).
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape actually changes, guarded by the shared
   `WindowMetricsPublisher` against per-frame churn (see
@@ -407,67 +432,32 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
   those slots and the rule an asynchronous read inherits: the answer is a later focus-routed
   dispatch carrying no identity, so it is bound to the session (`focus_epoch`) recorded when the
-  paste request is drained and dropped when that session has gone. Which tier reads which way is
-  this tier's half: desktop and Android asynchronously, iOS synchronously.
-  **Desktop** drains both slots beside `sync_ime`/`sync_cursor`, because either can fill as a side
-  effect of any event, and hands each to a lazily spawned worker thread owning the process's single
-  `arboard::Clipboard` for the run's lifetime: on X11 and Wayland a copy is served *live* by the
-  process that claimed the selection, so an instance created per call takes the copy with it when it
-  drops, and a read blocks for as long as that owner takes to answer (24 s, measured, against a
-  stopped one) — which is why the read may not run on the event loop, and why both operations
-  serialise on one thread rather than sharing an instance behind a lock. A finished read comes back
-  through the event-loop proxy as a fresh top-level dispatch on a later turn, never nested in the
-  pass that asked. A request raised while a read is outstanding folds into that read rather than
-  queueing a second such wait, and re-points its answer at the most recent asker — the only asker an
-  answer can still reach. That gate re-opens as the worker *posts* an answer, not as the UI thread
-  consumes it, so a further read can start inside that window; the record is taken on arrival, so a
-  surplus answer finds nothing addressed to it and is dropped, the deliberate cost being that two
-  presses close enough to race it yield one paste rather than two. Shutdown waits, briefly, for the
-  worker to drop the instance so a clipboard manager can adopt the copy.
-  **Web** cannot go through winit here either, because a browser hands clipboard access to the
-  focused editable and nobody else: the hidden IME overlay below carries the `copy`/`cut`/`paste`
-  listeners (plus `beforecopy`/`beforecut`, which claim the verbs for a collapsed selection),
-  reading `clipboardData` directly on a paste and writing with `setData` on a copy or cut, inside
-  the callback, where neither a secure context nor a permission is needed. A paste keystroke is
-  withheld from the canvas re-dispatch, since the DOM event carries text no key event could; a copy
-  or cut keeps the key path — an engine may raise no event at all for this overlay, and a bridge
-  waiting for one would drop the gesture — and marks a handoff, so the widget's own answer is what
-  the callback writes and one gesture stays one write. A write no callback is coming for (an app- or
-  toolbar-driven copy) and a toolbar paste take `navigator.clipboard`, undefined outside a secure
-  context: an `http://` page loses those outright, warning once, while the keyboard's paste is
-  unaffected.
+  paste request is drained and dropped when that session has gone. Desktop and Android read
+  asynchronously; iOS reads synchronously.
+  **Desktop** serialises both operations on one lazily spawned worker thread owning the process's
+  single `arboard::Clipboard`, because on X11/Wayland a copy is served *live* by the process that
+  claimed the selection and a read can block for as long as that owner takes to answer — so the read
+  cannot run on the event loop. A finished read returns through the event-loop proxy as a fresh
+  top-level dispatch; an outstanding read absorbs a later request rather than queuing a second,
+  re-pointed at the most recent asker.
+  **Web** cannot go through winit here either, because a browser hands clipboard access only to the
+  focused editable: the hidden IME overlay below (see Web IME bridge) carries the `copy`/`cut`/
+  `paste` listeners, reading `clipboardData` on a paste and writing with `setData` on a copy or cut.
+  An app- or toolbar-driven access instead uses `navigator.clipboard`, undefined outside a secure
+  context (an `http://` page loses it, warning once; the keyboard path is unaffected).
   **Android** owns the clipboard on the JVM side (`ClipboardManager` has no Rust-reachable binding),
-  so the channel is a JNI trio: the Kotlin view drains `nativeTakeClipboardWrite` and
-  `nativeTakePasteRequest` once per frame, and pushes verbs back in through `nativeEditCommand` from
-  two host routes — the IME's own affordances through
-  `FrustInputConnection.performContextMenuAction` (a soft keyboard never sends chords) and hardware
-  `Ctrl+C`/`X`/`V`/`A` decoded in `onKeyDown`. Both are gated on a focused editable, since an edit
-  command is focus-routed and consuming the press for nobody would take it from the host activity
-  for nothing. A clip whose text must be coerced resolves off the view's thread under the same
-  session guard as desktop, bounded additionally by a 2 s deadline stamped at request time, since
-  nothing can interrupt a thread already parked inside another app's `ContentProvider`. One
-  resolution is outstanding at a time here too: a request raised while one runs folds into it,
-  re-pointed at the most recent asker with its deadline re-stamped from that press, rather than
-  starting a second. That record is held until the UI thread *takes* the answer rather than
-  released as it is posted, so no second resolution can start inside that window at all. Two system
-  behaviours are lived with rather than engineered around: `getPrimaryClip` yields nothing unless
-  the app holds input focus (Android 10+), indistinguishable here from an empty clipboard on
-  purpose; and reading another app's clip raises the system "pasted from" toast (Android 12+), which
-  is why the cheap `hasPrimaryClip` gate runs first and only a real, user-initiated paste ever
-  crosses that line.
-  **iOS** *locks* the `Native` toolbar policy at start-up — an app's later
-  `set_selection_toolbar_policy` is refused, not obeyed, because the exemption below depends on the
-  native route being the only one — so a field floats no pod and UIKit's own edit menu is the only
-  menu on screen, presented at the published anchor through `UIEditMenuInteraction` (iOS 16+,
-  `UIMenuController` on 15) and answered from the published verb set, with the framework's view as
-  the app's single responder for both the menu and a hardware `Cmd+C`/`X`/`V`/`A` arriving over
-  `UIResponderStandardEditActions`. A focused field publishes those verbs whether or not any menu is
-  up, because the responder chain is asked for them with nothing on screen. Native is the platform's
-  requirement rather than a preference: `UIPasteboard.general.string` is exempt from iOS's paste
-  notice and per-app permission alert only when the read is system-initiated, which `paste(_:)` is
-  and a framework-drawn Paste button — answerable only by reading the pasteboard off a display-link
-  tick — is not. That read runs synchronously on the main thread inside `paste(_:)`, so this tier
-  has no in-flight window to guard at all. Both mobile tiers' clipboard paths are device-unverified.
+  so the channel is a JNI trio: the Kotlin view drains the write/paste slots once per frame and
+  pushes verbs back through two host routes — the IME's context-menu action and hardware
+  `Ctrl+C`/`X`/`V`/`A` — both gated on a focused editable. A clip needing coercion resolves off the
+  view's thread under a time-bounded session guard, one resolution outstanding at a time. See
+  [LIMITATIONS.md](LIMITATIONS.md) for the `getPrimaryClip`/`hasPrimaryClip` focus and toast quirks
+  this route works around.
+  **iOS** locks the `Native` toolbar policy at start-up (a later `set_selection_toolbar_policy` is
+  refused) because `UIPasteboard.general.string`'s paste-notice exemption applies only to a
+  system-initiated read, which only UIKit's own edit menu (`UIEditMenuInteraction`/
+  `UIMenuController`) provides; the framework's view is the app's single responder for that menu and
+  for hardware `Cmd+C`/`X`/`V`/`A`, and its read runs synchronously inside `paste(_:)` with no
+  in-flight window to guard. Both mobile clipboard paths are device-unverified.
 - **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (its `web_sys` backend
   implements none of the IME setters — upstream issue 4424 is open with no timeline), so
   `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under

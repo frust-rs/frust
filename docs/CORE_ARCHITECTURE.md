@@ -107,6 +107,40 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   `.observe(view)`; `RouterDeepLinks::routes()` hands out the one wired to its own router.
 - `frust-paths`' dir/atomic-write helpers back GPU pipeline-cache persistence and preference
   storage in the shells and plugins that consume it.
+- **Multi-contact pointer routing.** A `PointerId` (`PointerSource::Mouse`/`Touch` plus a slot)
+  names a live contact; `PointerEvent` itself carries no identity. A shell reports a non-mouse
+  contact as `InputEvent::PointerContact { pointer_id, event }`; the root unwraps it and delivers
+  the plain `InputEvent::Pointer` a widget already handles, with `EventCtx::pointer_id()` reporting
+  which contact it was (`PointerId::MOUSE` for a bare `Pointer`). With no live capture, slot `0` is
+  hit-tested exactly like the mouse and a capture taken on its `Down` latches that id as the
+  claimant; slot ≥ 1 is dropped. While a capture is live, the claimant's events take the captured
+  path as usual; another contact reaches only the captor — the widget that called
+  `EventCtx::capture_contacts()` on its capturing `Down` — and nothing above it on the active path:
+  each intervening container is handed an inert `InputEvent::Overlay` broadcast instead of running
+  its own pointer handling, while the real event rides alongside, re-based into each pod's space
+  (`ChildPod::event_child`/`walk_secondary`/`dispatch_local`); where a container does not forward
+  broadcasts to its children (an overlay owner whose captured pod is a floated surface), the real
+  event falls back to ordinary delivery to that child alone. Only the claimant's `Up`/`Cancel`
+  releases the capture. A thread-local `ContactPass` guard brackets each root dispatch with the
+  contact identity and opt-in flag so both survive a `ComponentWidget` boundary's fresh `EventCtx`.
+  A container that takes a gesture over from a captured child releases it through
+  `EventCtx::release_captured_child`, not `ChildPod::set_active(false)` directly: the claimant
+  keeps the capture until its own `Up`/`Cancel`, but the captor's contact opt-in ends
+  (`capture_contacts` clears) when the released subtree held it.
+- **Scale gestures.** `InputEvent::Scale(ScaleEvent { phase, scale_delta, focal, velocity })`
+  (`ScalePhase::Begin`/`Update`/`End`) is hit-tested and bubbles exactly like `Scroll`;
+  `OverlayEventKind::Scale` is its floated-surface mirror, and `InputEvent::position`/`translated`/
+  `transformed` cover both new variants alongside the existing ones.
+- **Transformed pods.** `ChildPod::set_transform(Option<kurbo::Affine>)` places a child under an
+  arbitrary affine, opt-in and unset by default. While set, `ChildPod::contains`/`event_child` map a
+  point or a positioned event (`InputEvent::transformed`) through the inverse before hit-testing or
+  delivery, paint brackets the child in `PaintScene::push_transform`/`pop_transform`, and
+  `ChildPod::semantics_child` reports the subtree at the transformed rect's axis-aligned bounding
+  box (an approximation — see `transformed-subtree-semantics-aabb` in
+  [LIMITATIONS.md](LIMITATIONS.md)). `frust_core::hit::point_in_transformed_rect` is the public
+  helper a canvas hit closure or a pan/zoom container tests against directly (see
+  WIDGETS_ARCHITECTURE.md). A transform with no inverse (singular, non-finite) hits and paints
+  nothing; a pod with no transform takes the exact pre-existing path.
 - A compile-time `Send` assertion on `Scene` guards a future render-thread split.
 - **Introspection is read-only and zero cost when unused.** `WidgetTree::roots()`/`children()`
   return the arena's own insertion order (the arena stays authoritative); `WidgetTree::inspect()`
@@ -320,7 +354,10 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
 | `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner` |
-| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
+| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
+| `PointerId` / `PointerSource` | A pointer contact's identity (device plus slot), riding beside a `PointerEvent` and read via `EventCtx::pointer_id()` — see Data Flow's Multi-contact pointer routing |
+| `ScaleEvent` / `ScalePhase` | A pinch/zoom gesture event, hit-tested and bubbling like `Scroll` — see Data Flow's Scale gestures |
+| `frust_core::hit::point_in_transformed_rect` / `checked_inverse` | Hit-testing helpers for content drawn under an arbitrary `Affine` — what `ChildPod::set_transform` uses internally, exposed for a canvas hit closure or pan/zoom container |
 | `EditCommand` | The four clipboard/selection verbs a shell or a floated toolbar hands the focused editable: `Copy`/`Cut` carry nothing (the widget owns the selection and answers into the clipboard slot), `Paste(text)` carries text already read by the shell, `SelectAll` is pure selection. `Debug` redacts the paste payload |
 | `OverlayEntry` / `OverlayKey` / `OverlayBand` / `OverlayInput` / `OutsideTap` | One floated surface's registration and the four rules the root reads back from it — owner identity, z-band, whether it hit-tests at all, and what a press outside every surface delivers (see Overlay Portal) |
 | `OverlayEvent` / `OverlayEventKind` | What a routed overlay broadcast carries, always in absolute window space: `Pointer`, `Scroll`, or the positionless `OutsideDown` light-dismiss notification |

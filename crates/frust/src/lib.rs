@@ -277,6 +277,104 @@ pub use frust_core::{
 /// with the slot's placement.
 pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 
+/// Declarative custom painting over the [`PaintScene`] trait object — a chart,
+/// a node-and-edge graph, a game board — without hand-rolling a `View`/
+/// `Widget` pair. [`canvas`] takes a paint closure that runs in **local
+/// space** (the widget's own top-left is always `(0, 0)`, and painting past
+/// its own size is clipped, never a bug to chase) — flat-re-exported from
+/// `frust-widgets` so app code never names that crate directly. See
+/// [`CanvasView`]'s own doc for the full builder contract (`.size`/`.expand`
+/// sizing, `.on_hit`-gated `.on_tap`/`.on_pointer`, and `.repaint_key` for
+/// paint-only dirtying driven by data outside the ordinary `View` diff).
+///
+/// ```no_run
+/// use frust::authoring::{PaintCtx, PaintScene};
+/// use frust::{AnyView, Component, any, canvas};
+/// use kurbo::{Point, Size};
+/// use peniko::Color;
+///
+/// #[derive(Default)]
+/// struct Clock;
+///
+/// impl Component for Clock {
+///     type State = u32;
+///
+///     fn init(&self) -> Self::State {
+///         0
+///     }
+///
+///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///         let ticks = *state;
+///         any(canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x10, 0x10, 0x10));
+///         })
+///         .expand()
+///         .repaint_key(ticks))
+///     }
+/// }
+///
+/// frust::app!(Clock);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
+
+/// A pan/zoom viewport over one child — a node-and-edge graph, a map, a large
+/// image — without hand-rolling the gesture math. [`pan_zoom`] lays its child
+/// out at its natural size and places it under a scale-then-translate
+/// transform ([`PanZoomTransform`]) the user drives: primary drag pans (unless
+/// the child claims the press), a touch pinch or a desktop ctrl/⌘+wheel and
+/// trackpad pinch zooms about the gesture's focal point, clamped to
+/// `.min_scale`/`.max_scale`. A plain wheel still reaches the child, and the
+/// child sees its own unscaled local coordinates at any zoom. Flat-re-exported
+/// from `frust-widgets` so app code never names that crate directly; see
+/// [`PanZoomView`]'s own doc for the full contract (`.inertia` glide,
+/// `.on_transform` notification, and the [`PanZoomController`] handle's
+/// `jump_to`/`fit_to_bounds`/`fit_rect`).
+///
+/// ```no_run
+/// use frust::authoring::{PaintCtx, PaintScene};
+/// use frust::{AnyView, Component, PanZoomController, PanZoomTransform, any, canvas, pan_zoom};
+/// use kurbo::{Point, Size};
+/// use peniko::Color;
+///
+/// #[derive(Default)]
+/// struct Board;
+///
+/// struct BoardState {
+///     zoom: PanZoomController,
+///     transform: PanZoomTransform,
+/// }
+///
+/// impl Component for Board {
+///     type State = BoardState;
+///
+///     fn init(&self) -> Self::State {
+///         BoardState {
+///             zoom: PanZoomController::new(),
+///             transform: PanZoomTransform::IDENTITY,
+///         }
+///     }
+///
+///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///         let board = canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
+///         })
+///         .size(Size::new(2000.0, 1500.0));
+///         any(pan_zoom(board)
+///             .max_scale(4.0)
+///             .inertia(true)
+///             .controller(state.zoom.clone())
+///             .on_transform(|state: &mut BoardState, t| state.transform = t))
+///     }
+/// }
+///
+/// frust::app!(Board);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{
+    PanZoomController, PanZoomTransform, PanZoomView, PanZoomWidget, pan_zoom,
+};
+
 /// The vendored Material Symbols starter icon set,
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
 /// underlying `frust-widgets` crate. Each entry is an

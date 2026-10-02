@@ -9,6 +9,7 @@
 //! interactive descendants keep working. v1 recognises **tap + long-press**;
 //! double-tap is deferred, and lacking an input-kind flag on events the slop is
 //! [`TOUCH_SLOP`] uniformly.
+//! Two-finger pinch lives in [`crate::pinch`] ([`crate::pinch::pinch_detector`]).
 //!
 //! # Long-press firing semantics
 //!

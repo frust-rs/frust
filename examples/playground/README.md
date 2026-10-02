@@ -14,8 +14,19 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, with a bottom `navigation_bar`
-selecting between ten sections:
+`pattern_switcher`-hosted section body, selecting between eleven sections
+through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
+against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
+convention, applied to the shell itself):
+
+- **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
+  first five sections directly, plus a trailing "More" destination that opens
+  an overlay listing every section.
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all eleven
+  sections directly, in a column beside the page body — nothing is ever
+  behind an overflow menu at this width.
+
+The sections, in order:
 
 1. **Platform Views** — the real `frust::platform_view` embedding contract: a
    300×400 `dev.frust.DemoStreamFactory` Mode B slot with chrome overlapping
@@ -88,6 +99,16 @@ selecting between ten sections:
     logs the migration warning (see
     `docs/SHELLS_DEVELOPMENT.md`). Xiaomi 12 / Android 16 shows no regression
     (`t=39.3, b=0.0` — its gesture bar is hidden).
+11. **Graph** — a `CanvasView`/`PanZoomView` widget demo, not a plugin gate: a
+    toy node-and-edge graph (12 nodes, a spiral layout, 13 edges) painted by a
+    `frust::canvas` closure (edges via `stroke_line`, nodes as
+    `fill_rounded_rect` circles) hosted inside a `frust::pan_zoom` viewport.
+    Drag pans, ctrl/⌘+wheel or trackpad-pinch (desktop) or a touch pinch
+    zooms, both focal-point-correct; tapping a node selects it (highlighted on
+    the next repaint via `CanvasView::repaint_key`) through `on_hit`/
+    `on_pointer` rather than `on_tap`, since only the raw event carries the
+    tap's position; a readout below shows the live scale/offset, and "Fit"
+    drives the attached `PanZoomController` to frame the whole graph.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -135,3 +156,62 @@ liveness — it cannot prove any of the on-device behaviour these pages exist
 for (a real native view compositing, a real camera session delivering frames,
 real platform controls responding to touch). That remains a human-run device
 gate.
+
+## Gate checklist (human-run, hardware-owed)
+
+The headless suite above proves the Graph page builds/lays out/paints and
+that the node-hit/selection math is correct; it cannot drive a real pointer,
+trackpad, or touchscreen. Rows marked OWED have not been run:
+
+| Gate | Platform | Status |
+|------|----------|--------|
+| Desktop ctrl/⌘+wheel zoom + drag pan | Linux (local) | OWED |
+| Touch pinch zoom + drag pan | Pixel 5 (redfin), Android 14, 2026-10-02 | PASS (all legs below) |
+| Touch pinch zoom + drag pan, plus tap/scroll/focus regression | iPhone SE (iPhone12,8), iOS 26.7, 2026-10-02 | PASS (all legs below; human-run) |
+| Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
+
+iOS legs (Phase A touch-ABI gate, build at `8a263d79`). The Simulator legs were
+driven by `idb` with screenshots. Pinch could not run there: Xcode 27 ships no
+Simulator app for Option-drag, and `idb` injects one contact only.
+
+| Leg | iPhone SE | Simulator |
+|-----|-----------|-----------|
+| Platform: tap "Bump params" | PASS | PASS (count 0 to 1) |
+| Platform: one-finger page scroll | PASS | PASS |
+| Keys: tap the zone, keyboard focus | PASS (typing registered) | PASS (`active=1`; `idb` text did not register) |
+| Graph: tap a node selects and highlights it | PASS | PASS (`selected: N0`) |
+| Graph: one-finger drag on empty space pans | PASS | PASS (offset moved by the drag) |
+| Graph: vertical drag starting on a node | PASS (no anomaly reported) | No pan, by design: the canvas handles the press, so the child owns the gesture (same at `5c078079`, after the veto fix) |
+| Graph: two-finger pinch zooms about the fingers; lifting one keeps panning | PASS | NOT RUN |
+| Graph: Fit reframes the whole graph | PASS | PASS |
+
+Android legs, Pixel 5 (redfin), Android 14. The first legs below ran at build
+`8a263d79`; the node-first pinch leg, exercising the live
+multi-contact veto fix, ran at build `2e084ef5`.
+
+| Leg | Pixel 5 |
+|-----|---------|
+| Gradle/Kotlin build + install | PASS |
+| Deep link to Graph | PASS |
+| Fit reframes the graph | PASS |
+| Graph: tap a node selects and highlights it | PASS |
+| Graph: one-finger drag on empty space pans, page does not scroll | PASS |
+| Graph: vertical drag starting on a node: selects, no pan by design, page does not scroll | PASS |
+| Graph: two-finger pinch zooms about the fingers and a two-finger drag pans | PASS (human-run) |
+| Graph: pinch with the first finger on a node, after the veto fix (build `2e084ef5`) | PASS (human-run, no page scroll) |
+
+On a phone-width viewport the Graph page opens at 1.0x over an empty corner of
+the 1400x1000 content, so press Fit first.
+
+Multi-contact veto re-check (pinch survives the page scroll), iPhone SE, iOS 26.7,
+2026-10-02, build `f47a9828`, human-run. The Graph page overflows the SE screen,
+so the page body scrolls vertically. `pinch_detector` has no consumer in
+playground, so only `pan_zoom`'s half of the fix runs on a device here.
+
+| Leg | Result |
+|-----|--------|
+| A: pinch starting with one finger on a node, both fingers travelling vertically, zooms throughout and the page does not scroll | PASS |
+| B: the same pinch starting on empty canvas | PASS |
+| C: one finger on a node, vertical drag, scrolls the page | PASS |
+| D: right after a pinch ends, leg C scrolls the page again | PASS |
+| E: button tap, page scroll, Keys focus at this build | PASS |

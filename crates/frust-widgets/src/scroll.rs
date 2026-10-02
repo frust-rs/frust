@@ -101,6 +101,26 @@
 //! (`alwaysBounceVertical == false`): a scrollable with nothing to scroll
 //! does not intercept the gesture.
 //!
+//! ## Multi-contact veto: a live counterpart to the `Down`-time claim
+//!
+//! The ambient claim above is a snapshot taken once, synchronously, right
+//! after the `Down` is forwarded — too early for a multi-contact recognizer
+//! nested inside (`pinch_detector`, [`crate::pan_zoom`]'s child-owned-press
+//! branch) to report anything about a second contact that has not arrived
+//! yet. Those recognizers instead capture the ambient **multi-contact veto**
+//! cell ([`ambient_scroll_veto`]) on the claimant's `Down` and keep writing to
+//! it for the rest of the gesture: `true` while they are tracking more than
+//! the claimant's own contact, `false` once back down to one. The takeover
+//! site checks it live, on every `Move`, alongside `inner_at_down` — while it
+//! reads `true` this surface takes nothing over and keeps forwarding the
+//! claimant's events, exactly as it does for a deferred nested scrollable, so
+//! a two-finger pinch or pan-zoom beginning over a single-finger drag is never
+//! stolen out from under it. Clearing the veto does not retroactively replay
+//! the slop check that a live pinch suppressed — the very next claimant
+//! `Move` is measured against the gesture's original `down_start` as usual,
+//! so a drag that already travelled well past [`TOUCH_SLOP`] while the second
+//! finger was down takes over immediately once the veto lifts.
+//!
 //! # Fling driver (v1)
 //!
 //! On release with sufficient velocity a fling begins, integrated
@@ -382,6 +402,60 @@ pub(crate) fn with_scroll_claim<R>(claim: &Rc<Cell<InnerScrollState>>, f: impl F
 /// `Down`, or any non-`Down` event).
 pub(crate) fn ambient_scroll_claim() -> Option<Rc<Cell<InnerScrollState>>> {
     SCROLL_CLAIM.with(|stack| stack.borrow().last().cloned())
+}
+
+thread_local! {
+    /// The stack of per-surface **multi-contact veto** cells for the scroll
+    /// surfaces currently forwarding a pointer `Down` — [`SCROLL_CLAIM`]'s
+    /// live counterpart (the module docs' *Multi-contact veto*). A nested
+    /// recognizer that opts into the gesture's other contacts
+    /// (`pinch_detector`, [`crate::pan_zoom`]'s child-owned-press branch)
+    /// captures the ambient cell on the claimant's `Down`, while it is still
+    /// reachable, and keeps writing to it for the rest of the gesture — long
+    /// after the `Down` forward that exposed it has returned, which is
+    /// exactly what a `Down`-time snapshot like [`InnerScrollState`] cannot
+    /// do (it is read back once, synchronously, before a second contact can
+    /// possibly have arrived).
+    ///
+    /// A separate stack from [`SCROLL_CLAIM`] rather than a field folded into
+    /// it: `InnerScrollState` stays `Copy` (and byte-identical) for
+    /// [`crate::list_view::ListViewWidget`]'s existing consumption of it, and
+    /// a plain `Rc<Cell<bool>>` is exactly as `Copy`-free a value as this
+    /// seam needs.
+    static MULTI_CONTACT_VETO: RefCell<Vec<Rc<Cell<bool>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Pops [`MULTI_CONTACT_VETO`] on drop, so an unwinding child dispatch cannot
+/// leave a stale scope behind for the rest of the thread's life (mirrors
+/// [`ScrollClaimGuard`]).
+struct MultiContactVetoGuard;
+
+impl Drop for MultiContactVetoGuard {
+    fn drop(&mut self) {
+        MULTI_CONTACT_VETO.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// Run `f` (a `Down` forward into this surface's own children) with `veto`
+/// installed as the ambient multi-contact veto cell, so a recognizer reached
+/// underneath that opts into the gesture's other contacts can capture it and
+/// raise it later, once a second contact actually joins the gesture.
+///
+/// The [`MULTI_CONTACT_VETO`] borrow is released *before* `f` runs, mirroring
+/// [`with_scroll_claim`].
+pub(crate) fn with_scroll_veto<R>(veto: &Rc<Cell<bool>>, f: impl FnOnce() -> R) -> R {
+    MULTI_CONTACT_VETO.with(|stack| stack.borrow_mut().push(Rc::clone(veto)));
+    let _guard = MultiContactVetoGuard;
+    f()
+}
+
+/// The multi-contact veto cell of the scroll surface currently forwarding a
+/// `Down` — the *nearest enclosing* one — or `None` outside that forward (a
+/// top-level surface's own `Down`, or any non-`Down` event).
+pub(crate) fn ambient_scroll_veto() -> Option<Rc<Cell<bool>>> {
+    MULTI_CONTACT_VETO.with(|stack| stack.borrow().last().cloned())
 }
 
 /// What a surface sitting at `metrics` under `physics` claims it could do with
@@ -708,6 +782,17 @@ pub struct ScrollWidget {
     /// would mean cancelling a scroll in flight). Cleared with
     /// [`ScrollWidget::inner_at_down`].
     pub(crate) deferring: bool,
+    /// A live veto a nested multi-contact recognizer (`pinch_detector`,
+    /// [`crate::pan_zoom`]'s child-owned-press branch) can raise for the rest
+    /// of this gesture once it is tracking more than the claimant's own
+    /// contact — the live counterpart to `inner_at_down` for a case the
+    /// `Down`-time snapshot cannot see (the module docs' *Multi-contact
+    /// veto*). Checked on every `Move` at the takeover site, not read once:
+    /// the recognizer flips it live as a second contact joins and leaves.
+    /// Replaced with a fresh, unset cell on every `Down` (and cleared again
+    /// on `Up`/`Cancel`) so a stale recognizer handle from a previous gesture
+    /// can never veto this one.
+    live_veto: Rc<Cell<bool>>,
     down_start: Point,
     last_drag: Point,
     tracker: VelocityTracker,
@@ -745,6 +830,7 @@ impl ScrollWidget {
             down_active: false,
             inner_at_down: InnerScrollState::default(),
             deferring: false,
+            live_veto: Rc::new(Cell::new(false)),
             down_start: Point::ZERO,
             last_drag: Point::ZERO,
             tracker: VelocityTracker::new(),
@@ -1217,6 +1303,10 @@ impl ScrollWidget {
                     self.down_active = true;
                     self.inner_at_down = InnerScrollState::default();
                     self.deferring = false;
+                    // A fresh, unset cell for this gesture — never the
+                    // previous one, which a since-torn-down recognizer may
+                    // still hold a clone of.
+                    self.live_veto = Rc::new(Cell::new(false));
                     // Remember what this press interrupted before killing it —
                     // the next fling asks the physics how much of it to carry
                     // forward (`0.0` under `RubberBand`, i.e. start cold).
@@ -1247,8 +1337,11 @@ impl ScrollWidget {
                         host.set(inner_claim_state(self.physics.as_ref(), &self.metrics()));
                     }
                     let claim = Rc::new(Cell::new(InnerScrollState::default()));
+                    let veto = Rc::clone(&self.live_veto);
                     let child = &mut self.child;
-                    with_scroll_claim(&claim, || child.event_child(ctx, event));
+                    with_scroll_claim(&claim, || {
+                        with_scroll_veto(&veto, || child.event_child(ctx, event))
+                    });
                     self.inner_at_down = claim.get();
                     EventResult::Handled
                 }
@@ -1272,6 +1365,7 @@ impl ScrollWidget {
                         self.notify_scroll(ctx);
                         ctx.request_redraw();
                     } else if !self.deferring
+                        && !self.live_veto.get()
                         && (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
                         && self.physics.should_accept_user_offset(&self.metrics())
                     {
@@ -1301,7 +1395,11 @@ impl ScrollWidget {
                             // regrab continues from what is on screen.
                             self.drag_position = self.offset;
                             self.send_child_cancel(ctx, p.position);
-                            self.child.set_active(false);
+                            // A takeover, not the gesture's end: releasing the
+                            // child through the context also ends a contact
+                            // opt-in held below it, so the root stops routing
+                            // other fingers to a captor that was just cancelled.
+                            ctx.release_captured_child(&mut self.child);
                             ctx.request_redraw();
                         }
                     } else {
@@ -1358,6 +1456,7 @@ impl ScrollWidget {
                     self.down_active = false;
                     self.inner_at_down = InnerScrollState::default();
                     self.deferring = false;
+                    self.live_veto = Rc::new(Cell::new(false));
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -1368,6 +1467,7 @@ impl ScrollWidget {
                     self.down_active = false;
                     self.inner_at_down = InnerScrollState::default();
                     self.deferring = false;
+                    self.live_veto = Rc::new(Cell::new(false));
                     // Cancel never mutates state and never fires a callback: drop
                     // any pending notification and snap an overscrolled surface back
                     // into range (no settle animation, no on_scroll/on_refresh) —
@@ -1382,6 +1482,21 @@ impl ScrollWidget {
                     EventResult::Handled
                 }
             },
+            // Any other variant — a hit-tested `Scale` today — belongs to the
+            // child, and so does its result: a child that handled it consumed
+            // it, so an enclosing recognizer (a `pinch_detector` offered the
+            // same gesture next) must not act on it a second time. Only a
+            // broadcast is never consumed, whatever the child returned; the arm
+            // above catches both today, and the check keeps that true for a
+            // broadcast variant added later.
+            _ => {
+                let result = self.child.event_child(ctx, event);
+                if event.is_broadcast() {
+                    EventResult::Ignored
+                } else {
+                    result
+                }
+            }
         }
     }
 }
@@ -3912,5 +4027,452 @@ mod tests {
             "the copy was answered by the child, through this router"
         );
         assert_eq!(state.value, "hello", "a copy edits nothing");
+    }
+}
+
+/// A scroll view enclosing a multi-contact recognizer, driven through a real
+/// `RenderRoot`: the second finger reaches only the widget that opted into it,
+/// a takeover ends that opt-in, and a hit-tested `Scale` keeps its result.
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+    use crate::{PanZoomTransform, pan_zoom, pinch_detector};
+    use frust_core::RenderRoot;
+    use frust_core::event::{PointerId, ScaleEvent, ScalePhase};
+    use std::any::Any;
+
+    #[derive(Default)]
+    struct App {
+        transforms: Vec<PanZoomTransform>,
+        scales: Vec<ScaleEvent>,
+    }
+
+    type Seen = Rc<RefCell<Vec<(PointerId, PointerPhase)>>>;
+
+    /// A 1000-px-tall content leaf. Logs every pointer event it receives (into
+    /// a shared log, never app state, so its `Cancel` arm stays state-free).
+    /// With `grabs` it captures every primary `Down` and handles it — opting
+    /// into the gesture's other contacts too with `opt_in` — and otherwise
+    /// ignores pointers. With `consumes` it reports `Handled` for a `Scale`
+    /// and for a broadcast; otherwise it ignores both.
+    #[derive(Clone)]
+    struct Tall {
+        seen: Seen,
+        grabs: bool,
+        opt_in: bool,
+        consumes: bool,
+    }
+    struct TallWidget(Tall);
+    impl View<App> for Tall {
+        type Element = TallWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TallWidget {
+            TallWidget(self.clone())
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut TallWidget, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for TallWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(400.0, 1000.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) => {
+                    self.0.seen.borrow_mut().push((ctx.pointer_id(), p.phase));
+                    if !self.0.grabs {
+                        return EventResult::Ignored;
+                    }
+                    if p.phase == PointerPhase::Down {
+                        ctx.capture_pointer();
+                        if self.0.opt_in {
+                            ctx.capture_contacts();
+                        }
+                    }
+                    EventResult::Handled
+                }
+                InputEvent::Scale(_) | InputEvent::Housekeeping if self.0.consumes => {
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    fn tall(grabs: bool, opt_in: bool, consumes: bool) -> (Tall, Seen) {
+        let seen = Seen::default();
+        let view = Tall {
+            seen: seen.clone(),
+            grabs,
+            opt_in,
+            consumes,
+        };
+        (view, seen)
+    }
+
+    struct NullScene;
+    impl PaintScene for NullScene {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: peniko::Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    fn touch(slot: u32, phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: PointerId::touch(slot),
+            event: PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            },
+        }
+    }
+
+    /// A root over `logic`, laid out in a 400 × 300 window.
+    fn root_over<V: View<App>>(logic: impl Fn() -> V + 'static) -> (RenderRoot<App, V>, App) {
+        let mut root: RenderRoot<App, V> = RenderRoot::new();
+        let mut state = App::default();
+        root.rebuild(&mut move |_: &mut App| logic(), &mut state);
+        root.layout(Size::new(400.0, 300.0));
+        (root, state)
+    }
+
+    fn viewport(root: &RenderRoot<App, ScrollView<App>>) -> &ScrollWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<ScrollWidget>()
+            .expect("root is a ScrollWidget")
+    }
+
+    #[test]
+    fn a_second_finger_never_rearms_the_viewport_around_a_pan_zoom() {
+        use PointerPhase::{Down, Move};
+        let (content, seen) = tall(false, false, false);
+        let (mut root, mut state) = root_over(move || {
+            scroll_view(
+                pan_zoom(content.clone()).on_transform(|s: &mut App, t| s.transforms.push(t)),
+            )
+        });
+        let t0 = PointerId::touch(0);
+        // Two fingers stacked vertically, then the first one pans sideways —
+        // no vertical travel at all for the claimant. A viewport that took the
+        // second finger's `Down` as its own would measure this move against
+        // *that* finger's position, cross its slop, and steal the gesture.
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts(), "pan_zoom opted in");
+        root.event(&mut state, &touch(1, Down, 100.0, 250.0));
+        root.event(&mut state, &touch(0, Move, 110.0, 100.0));
+        root.event(&mut state, &touch(0, Move, 120.0, 100.0));
+
+        let scroll = viewport(&root);
+        assert_eq!(scroll.offset(), 0.0, "the viewport never scrolled");
+        assert!(!scroll.scrolling, "and never took the gesture over");
+        assert_eq!(
+            scroll.down_start,
+            Point::new(100.0, 100.0),
+            "its drag is still anchored on the claimant"
+        );
+        assert_eq!(
+            state.transforms.last().map(|t| t.offset),
+            Some(kurbo::Vec2::new(20.0, 0.0)),
+            "pan_zoom kept receiving the claimant's moves — it was never cancelled"
+        );
+        assert!(
+            !seen
+                .borrow()
+                .iter()
+                .any(|(_, phase)| *phase == PointerPhase::Cancel)
+        );
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(
+            root.pointer_capture_contacts(),
+            "still routing the second finger to pan_zoom"
+        );
+    }
+
+    #[test]
+    fn a_pinch_inside_a_viewport_reports_its_scale_and_leaves_the_viewport_alone() {
+        use PointerPhase::{Down, Move, Up};
+        let (content, _) = tall(true, false, false);
+        let (mut root, mut state) = root_over(move || {
+            scroll_view(pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)))
+        });
+        let mut sink = NullScene;
+        let ms = |ms: u64| FrameTime::from_nanos(ms * 1_000_000);
+        root.paint(&mut sink, ms(0));
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut state, &touch(1, Down, 120.0, 100.0));
+        root.paint(&mut sink, ms(16));
+        // The second finger spreads straight down: vertical travel a viewport
+        // that saw it would read as a scroll drag.
+        root.event(&mut state, &touch(1, Move, 120.0, 160.0));
+        root.paint(&mut sink, ms(32));
+        root.event(&mut state, &touch(1, Move, 120.0, 250.0));
+        root.event(&mut state, &touch(1, Up, 120.0, 250.0));
+
+        let phases: Vec<ScalePhase> = state.scales.iter().map(|e| e.phase).collect();
+        assert_eq!(
+            phases,
+            [ScalePhase::Begin, ScalePhase::Update, ScalePhase::End],
+            "the pinch recognizer saw the whole spread"
+        );
+        let scroll = viewport(&root);
+        assert_eq!(scroll.offset(), 0.0);
+        assert!(!scroll.scrolling);
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+        root.event(&mut state, &touch(0, Up, 100.0, 100.0));
+        assert!(!root.is_pointer_captured());
+    }
+
+    #[test]
+    fn a_vertical_drag_over_a_non_panning_child_still_scrolls_and_ends_its_opt_in() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        let (content, seen) = tall(true, true, false);
+        let (mut root, mut state) = root_over(move || scroll_view(content.clone()));
+        let t0 = PointerId::touch(0);
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        assert!(root.pointer_capture_contacts(), "the child opted in");
+
+        // Past the slop: the viewport takes over, cancels the child and
+        // releases it — and the root hears about it.
+        root.event(&mut state, &touch(0, Move, 100.0, 60.0));
+        assert!(viewport(&root).scrolling);
+        assert_eq!(*seen.borrow(), [(t0, Down), (t0, Cancel)]);
+        assert_eq!(
+            root.pointer_capture_claimant(),
+            Some(t0),
+            "the drag is still the first finger's"
+        );
+        assert!(
+            !root.pointer_capture_contacts(),
+            "but the cancelled child no longer gets other fingers"
+        );
+
+        // A second finger now reaches nothing.
+        let outcome = root.event(&mut state, &touch(1, Down, 100.0, 200.0));
+        assert!(!outcome.handled);
+        assert_eq!(seen.borrow().len(), 2);
+
+        // The claimant keeps scrolling, and its release ends the gesture.
+        root.event(&mut state, &touch(0, Move, 100.0, 30.0));
+        assert_eq!(viewport(&root).offset(), 30.0);
+        root.event(&mut state, &touch(0, Up, 100.0, 30.0));
+        assert!(!root.is_pointer_captured());
+        assert_eq!(
+            seen.borrow().len(),
+            2,
+            "the child heard nothing after its Cancel"
+        );
+    }
+
+    /// Build a bare scroll widget over `child` in a 400 × 300 viewport.
+    fn bare(child: Tall) -> ScrollWidget {
+        let view: ScrollView<App> = scroll_view(child);
+        let mut counter = 0u64;
+        let mut w = View::<App>::build(&view, &mut BuildCtx::new(&mut counter));
+        w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(400.0, 300.0)),
+        );
+        w
+    }
+
+    /// Dispatch into a bare scroll widget: its result and whether a capture
+    /// release bubbled out of it.
+    fn run(w: &mut ScrollWidget, event: &InputEvent, t_ms: f64) -> (EventResult, bool) {
+        let mut state = App::default();
+        let sa: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(400.0, 300.0));
+        let result = w.event_at(&mut ctx, event, t_ms);
+        (result, ctx.is_capture_released())
+    }
+
+    fn mouse(phase: PointerPhase, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(100.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    #[test]
+    fn a_takeover_raises_the_release_only_for_an_opted_in_child() {
+        for opt_in in [true, false] {
+            let (content, _) = tall(true, opt_in, false);
+            let mut w = bare(content);
+            assert!(!run(&mut w, &mouse(PointerPhase::Down, 100.0), 0.0).1);
+            let (_, released) = run(&mut w, &mouse(PointerPhase::Move, 60.0), 16.0);
+            assert!(w.scrolling, "took over");
+            assert!(!w.child.is_active(), "and released the child");
+            assert_eq!(released, opt_in, "signalled only when the child opted in");
+        }
+    }
+
+    #[test]
+    fn a_scale_keeps_the_childs_result_and_a_broadcast_is_never_consumed() {
+        let scale = InputEvent::Scale(ScaleEvent {
+            phase: ScalePhase::Update,
+            scale_delta: 1.1,
+            focal: Point::new(100.0, 100.0),
+            velocity: 0.0,
+        });
+        let (consumer, _) = tall(false, false, true);
+        let mut w = bare(consumer);
+        assert_eq!(run(&mut w, &scale, 0.0).0, EventResult::Handled);
+        assert_eq!(
+            run(&mut w, &InputEvent::Housekeeping, 0.0).0,
+            EventResult::Ignored,
+            "a broadcast is never consumed, whatever the child returned"
+        );
+        let (bystander, _) = tall(false, false, false);
+        let mut w = bare(bystander);
+        assert_eq!(run(&mut w, &scale, 0.0).0, EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_wheel_zoom_handled_inside_the_viewport_is_not_applied_twice() {
+        let (content, _) = tall(false, false, false);
+        let (mut root, mut state) = root_over(move || {
+            pinch_detector(scroll_view(
+                pan_zoom(content.clone()).on_transform(|s: &mut App, t| s.transforms.push(t)),
+            ))
+            .on_scale(|s: &mut App, e| s.scales.push(e))
+        });
+        let outcome = root.event(
+            &mut state,
+            &InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Update,
+                scale_delta: 1.5,
+                focal: Point::new(100.0, 100.0),
+                velocity: 0.0,
+            }),
+        );
+        assert!(outcome.handled);
+        assert_eq!(state.transforms.len(), 1, "pan_zoom zoomed once");
+        assert!(
+            state.scales.is_empty(),
+            "and the enclosing recognizer did not zoom again"
+        );
+    }
+
+    // --- The multi-contact veto: surviving the claimant's own travel -------
+
+    #[test]
+    fn a_pinch_survives_the_claimants_own_travel_past_slop() {
+        use PointerPhase::{Down, Move};
+        let (content, _seen) = tall(false, false, false);
+        let (mut root, mut state) = root_over(move || {
+            scroll_view(pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)))
+        });
+        let mut sink = NullScene;
+        let ms = |ms: u64| FrameTime::from_nanos(ms * 1_000_000);
+        root.paint(&mut sink, ms(0));
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut state, &touch(1, Down, 120.0, 100.0));
+        root.paint(&mut sink, ms(16));
+        // The CLAIMANT's own finger spreads the pair vertically, past the
+        // viewport's `TOUCH_SLOP` — a viewport reading only the `Down`-time
+        // claim snapshot (always unregistered here; `pinch_detector` is not a
+        // nested scrollable) would steal this as an ordinary scroll drag
+        // (the counterexample this card fixes).
+        root.event(&mut state, &touch(0, Move, 100.0, 40.0));
+        root.paint(&mut sink, ms(32));
+        root.event(&mut state, &touch(0, Move, 100.0, 10.0));
+
+        let phases: Vec<ScalePhase> = state.scales.iter().map(|e| e.phase).collect();
+        assert_eq!(
+            phases,
+            [ScalePhase::Begin, ScalePhase::Update],
+            "the pinch recognizer saw the whole spread"
+        );
+        let scroll = viewport(&root);
+        assert_eq!(scroll.offset(), 0.0, "the viewport never scrolled");
+        assert!(!scroll.scrolling, "and never took the gesture over");
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+        assert!(
+            root.pointer_capture_contacts(),
+            "the viewport never cancelled/released the detector's opt-in"
+        );
+    }
+
+    #[test]
+    fn a_pinch_over_a_child_owned_press_survives_the_claimants_own_travel() {
+        use PointerPhase::{Down, Move};
+        // `grabs = true`: the content captures the primary `Down` itself, so
+        // `PanZoomWidget::begin_gesture` takes the child-owned branch, which
+        // publishes nothing into the nested-scroll claim.
+        let (content, _seen) = tall(true, false, false);
+        let (mut root, mut state) = root_over(move || {
+            scroll_view(
+                pan_zoom(content.clone()).on_transform(|s: &mut App, t| s.transforms.push(t)),
+            )
+        });
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut state, &touch(1, Down, 120.0, 100.0));
+        // The claimant's finger travels well past TOUCH_SLOP vertically while
+        // a second contact is tracked — exactly the counterexample this card
+        // fixes for `PanZoomView`'s child-owned-press branch.
+        root.event(&mut state, &touch(0, Move, 100.0, 40.0));
+        root.event(&mut state, &touch(1, Move, 180.0, 40.0));
+
+        let scroll = viewport(&root);
+        assert_eq!(scroll.offset(), 0.0, "the viewport never scrolled");
+        assert!(!scroll.scrolling, "and never took the gesture over");
+        assert!(
+            !state.transforms.is_empty(),
+            "pan_zoom's own pinch zoomed the view instead"
+        );
+    }
+
+    #[test]
+    fn a_single_finger_drag_still_scrolls_through_a_pinch_detector_with_no_second_finger() {
+        use PointerPhase::{Down, Move};
+        let (content, _seen) = tall(false, false, false);
+        let (mut root, mut state) = root_over(move || {
+            scroll_view(pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)))
+        });
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut state, &touch(0, Move, 100.0, 40.0));
+        assert!(
+            viewport(&root).scrolling,
+            "no second finger ever arrived to veto the takeover"
+        );
+        root.event(&mut state, &touch(0, Move, 100.0, 10.0));
+        assert_eq!(viewport(&root).offset(), 30.0);
+        assert!(state.scales.is_empty(), "never a pinch with one finger");
+    }
+
+    #[test]
+    fn releasing_the_second_finger_clears_the_veto_and_scrolling_resumes() {
+        use PointerPhase::{Down, Move, Up};
+        let (content, _seen) = tall(true, false, false);
+        let (mut root, mut state) = root_over(move || {
+            scroll_view(pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)))
+        });
+        let mut sink = NullScene;
+        let ms = |ms: u64| FrameTime::from_nanos(ms * 1_000_000);
+        root.paint(&mut sink, ms(0));
+        root.event(&mut state, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut state, &touch(1, Down, 120.0, 100.0));
+        root.paint(&mut sink, ms(16));
+        root.event(&mut state, &touch(0, Move, 100.0, 40.0)); // past slop while paired: no takeover
+        assert!(
+            !viewport(&root).scrolling,
+            "the pinch still owns the gesture"
+        );
+
+        root.event(&mut state, &touch(1, Up, 120.0, 40.0)); // the second finger lifts: pinch ends
+
+        // The claimant's very next `Move` is measured against its original
+        // `down_start` as usual (the veto does not replay the suppressed slop
+        // check) — already well past `TOUCH_SLOP`, so the viewport takes the
+        // drag over immediately once the veto clears, per the existing
+        // single-finger scroll contract.
+        root.event(&mut state, &touch(0, Move, 100.0, 10.0));
+        assert!(
+            viewport(&root).scrolling,
+            "the viewport resumed scrolling once the pinch ended"
+        );
     }
 }

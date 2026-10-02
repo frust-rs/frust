@@ -66,14 +66,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use frust_core::event::PointerEvent;
 use frust_core::insets::WindowInsets;
 use frust_reactive::{TrackedScope, provide_context};
 use frust_render::SurfaceAlphaRequest;
 use frust_scene::Scene;
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::platform_view::FramePairing;
-use frust_shell_common::resample::PointerResampler;
+use frust_shell_common::resample::{PointerResampler, ResampledPointer};
 use frust_shell_common::{
     AppTree, FrameGate, PlatformViewState, ThemeOverrideWatcher, WindowMetricsPublisher,
     sanitize_scale,
@@ -306,7 +305,7 @@ pub struct IosAppHandle {
     resample_clock: Instant,
     /// Scratch buffer the resampler drains into each frame, reused (cleared, not
     /// reallocated) so a drag's per-frame resample allocates nothing.
-    pointer_scratch: Vec<PointerEvent>,
+    pointer_scratch: Vec<ResampledPointer>,
     /// The previous `CADisplayLink` tick timestamp (ns), for the deadline-aware
     /// pacing estimate: the tick-to-tick delta is this
     /// frame's deadline budget (see `resample::frame_interval_nanos`). `None`
