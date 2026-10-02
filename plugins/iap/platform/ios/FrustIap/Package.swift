@@ -23,9 +23,9 @@ import PackageDescription
 //    `github.com/hyodotdev/openiap` over the network, so a consuming app's
 //    first SwiftPM resolution needs GitHub reachable. Pinned by commit
 //    `revision:`, not the mutable `3.0.1` tag it currently names — a
-//    payments-path dependency gets the same commit-pin rigor as
-//    `clean-signals`' git+rev (`docs/DEVELOPMENT.md`'s Version-Pin Policy):
-//    the tag alone can be force-moved upstream, the revision cannot. Bump
+//    payments-path dependency is pinned to an immutable commit
+//    (`docs/DEVELOPMENT.md`'s Version-Pin Policy): the tag alone can be
+//    force-moved upstream, the revision cannot. Bump
 //    the revision and this comment's tag name together, in LOCKSTEP with
 //    Android's `openiap-google` pin (same Version-Pin Policy row).
 //

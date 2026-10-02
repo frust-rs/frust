@@ -2,8 +2,8 @@
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
-//! `clean-signals-frust` (dependency; `clean-signals` itself is git+rev-pinned
-//! to its public repo, so no sibling checkout is required), `camera`
+//! `clean-signals-frust` (dependency; `clean-signals` itself is a crates.io
+//! dependency, so no sibling checkout is required), `camera`
 //! (dependency, an app-side plist key, the plugin's
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
@@ -1111,8 +1111,8 @@ mod tests {
 
     #[test]
     fn clean_signals_frust_declares_no_sibling_requirement() {
-        // clean-signals is git+rev-pinned to its public repo; the
-        // plugin no longer needs a `../clean-signals-rs` sibling checkout.
+        // clean-signals is a crates.io dependency; the plugin needs no
+        // `../clean-signals-rs` sibling checkout.
         let spec = find_plugin("clean-signals-frust").unwrap();
         assert_eq!(spec.requires_sibling, None);
     }

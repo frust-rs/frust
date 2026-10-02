@@ -639,10 +639,9 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         Some(Effect::ProbeCleanSignals) => {
             // Neither the create wizard's arch cards nor the Add Plugin
-            // dialog's registry cards are sibling-gated any longer —
-            // clean-signals moved to a git+rev pin (`docs/DEVELOPMENT.md`'s
-            // Version-Pin Policy), so there is no `../clean-signals-rs`
-            // checkout left to probe for. Reply immediately rather than
+            // dialog's registry cards are sibling-gated —
+            // clean-signals is a crates.io dependency, so there is no
+            // `../clean-signals-rs` checkout to probe for. Reply immediately rather than
             // touching disk for a check nothing acts on.
             let _ = tx.send(Message::CleanSignalsProbed(true));
         }

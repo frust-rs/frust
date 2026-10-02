@@ -8,9 +8,8 @@
 //! `crate::ui` renders it; the runner enacts the
 //! [`Effect`](super::update::Effect)s the pure transition requests.
 //!
-//! No arch card is sibling-gated today — `clean-signals` is git+rev-pinned to
-//! its public repo (`docs/DEVELOPMENT.md`'s Version-Pin Policy), so no
-//! `../clean-signals-rs` sibling checkout is required — but
+//! No arch card is sibling-gated today — `clean-signals` is a crates.io
+//! dependency, so no `../clean-signals-rs` sibling checkout is required — but
 //! [`ArchCard::sibling_gated`]/[`CreateWizard::set_clean_signals_available`]
 //! stay in place as the generic mechanism a future sibling-dependent arch
 //! would reuse.
@@ -381,8 +380,8 @@ mod tests {
             .find(|c| c.tag.as_deref() == Some("clean-signals"))
             .expect("clean-signals card enumerated from KNOWN_ARCHES");
         assert_eq!(clean.label, "Clean Signals");
-        // clean-signals is git+rev-pinned to its public repo, so
-        // this card needs no sibling checkout and starts enabled like every
+        // clean-signals is a crates.io dependency, so this card needs no
+        // sibling checkout and starts enabled like every
         // other card.
         assert!(!clean.sibling_gated);
         assert!(clean.enabled);

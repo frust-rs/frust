@@ -65,8 +65,8 @@ pub struct PluginSpec {
     /// own deps path into it), declared relative to the frust repo root.
     /// [`add_plugin`] errors [`PluginAddError::SiblingCheckoutMissing`] when
     /// it isn't on disk. No current registry entry sets this —
-    /// `clean-signals-frust` was the sole user until `clean-signals` moved to
-    /// a git+rev pin (see `registry.rs`'s `CLEAN_SIGNALS_FRUST`) — but the
+    /// `clean-signals-frust` needs none because `clean-signals` is a crates.io
+    /// dependency (see `registry.rs`'s `CLEAN_SIGNALS_FRUST`) — but the
     /// mechanism stays in place for a future facade-tier plugin that does.
     pub requires_sibling: Option<&'static str>,
 }

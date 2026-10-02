@@ -81,9 +81,9 @@ pub enum Command {
         /// `Cargo.toml` path-deps into this Frust checkout for `frust` and
         /// the in-repo `clean-signals-frust` plugin — the project won't
         /// build without this checkout present. `clean-signals` itself is
-        /// git+rev-pinned to its public repo (see `docs/DEVELOPMENT.md`'s
-        /// Version-Pin Policy), so no sibling `clean-signals-rs` checkout
-        /// is required.
+        /// a crates.io dependency (the same registry requirement at every
+        /// consumer), so no sibling checkout and no git access is
+        /// required.
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
 
