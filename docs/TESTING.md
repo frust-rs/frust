@@ -106,8 +106,10 @@ Known gaps are tracked by the comprehensive-testing feature plan:
   full lifecycle matrix. `scripts/testing/android-smoke.sh` (see § Android Emulator GPU Lab) covers
   automated launch, device-state normalization (wake/dismiss-keyguard), and a best-effort
   black-band visual probe against an attached device or emulator, but does not provision one.
-- No committed CI configuration or dedicated self-hosted GPU-runner workflow; a workflow file
-  (`.github/workflows/android-smoke.yml`) exists but is not executed by this repo's gates.
+- No GPU-runner or device CI. `.github/workflows/ci.yml` runs the CPU gates on pull requests and on
+  pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene;
+  aggregate `ci-ok` is the required check). `.github/workflows/android-smoke.yml` runs on a schedule
+  or manual dispatch and is not part of the required check.
 - Accessibility and several platform plugin paths remain manual physical-device
   gates.
 

@@ -6575,7 +6575,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `auth-session-android-ephemeral-browser-dependent` — `ephemeral` on Android is advisory to the Custom Tabs provider
 
-**Observed**: `FrustAuthSessionHost` calls `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled(true)` (present in the pinned `androidx.browser:browser 1.10.0`), but the flag is a request the provider may ignore: on the gate device (Xiaomi 12, LineageOS 23.2) the provider selected was Fennec F-Droid 129.0.0 and two consecutive ephemeral sessions both saw the `frustauth=1` cookie set by an earlier session (`plugins/auth-session/README.md` § 6). In the round-1 re-check the allow-listed provider was Chrome 153, which honoured the flag (an ephemeral session did not see the normal jar's cookie; a later non-ephemeral session did) — the behaviour is per provider, not per platform. Dropping the awaited future releases the session Busy slot immediately.
+**Observed**: `FrustAuthSessionHost` calls `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled(true)` (present in the pinned `androidx.browser:browser 1.10.0`), but the flag is a request the provider may ignore: on the test device (Xiaomi 12, LineageOS 23.2) the provider selected was Fennec F-Droid 129.0.0 and two consecutive ephemeral sessions both saw the `frustauth=1` cookie set by an earlier session. In a later check the allow-listed provider was Chrome 153, which honoured the flag (an ephemeral session did not see the normal jar's cookie; a later non-ephemeral session did) — the behaviour is per provider, not per platform. Dropping the awaited future releases the session Busy slot immediately.
 
 **Applies to**: Android only; apps relying on `ephemeral: true` for cookie isolation must not assume it holds on every browser.
 
@@ -6583,7 +6583,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Trigger for removal**: the host probes ephemeral support before launching (or prefers a provider that reports it) and the gate records `no cookie (set now)` on a second ephemeral visit.
 
-**Evidence**: `plugins/auth-session/README.md` § 6 (Android transcript, step 4); `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`launch`).
+**Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`launch`); the two-session cookie check on the test device described under Observed.
 
 ---
 
@@ -6597,7 +6597,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Trigger for removal**: a follow-on card tracks session lifecycle granularly, distinguishing user dismissal (Cancelled) from Activity-level interruption (a new `Interrupted` outcome or a more specific error variant).
 
-**Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`onActivityResumed`); `plugins/auth-session/README.md` §3 (*Session generations are tracked …*).
+**Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`onActivityResumed`); `plugins/auth-session/README.md` §3 (the *Attribution is by timing, not evidence* bullet).
 
 ---
 
