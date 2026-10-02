@@ -136,10 +136,10 @@ permission alert only while it is system-initiated).
 A device/emulator and desktop gate for the multi-contact pointer routing, touch ABI change, and
 desktop scale-gesture mapping (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s Touch
 contacts and resampling / Desktop scale gestures), using `examples/playground`'s Graph page (the
-"Graph" section — a `pan_zoom`-wrapped `canvas`) as the vehicle. **Not run yet on any
-platform** — no pinch/pan-zoom behaviour has been observed on a physical device, the iOS
-Simulator, or a desktop session, so nothing below is known to pass; record the outcome here once a
-run happens.
+"Graph" section — a `pan_zoom`-wrapped `canvas`) as the vehicle. **iOS: passed 2026-10-02**
+on an iPhone SE (iOS 26.7, human-run, all legs) and the iOS Simulator (iOS 26.2, single-contact
+legs only; pinch not run), against `8a263d79` built with Xcode 27.0 — per-leg results in
+`examples/playground/README.md`'s gate checklist. **Android and desktop: not run yet.**
 
 - **Android (Pixel 5, Xiaomi 12):** two-finger pinch zooms the graph about the gesture's midpoint
   and drag-pans it with one finger; after lifting to one finger mid-gesture, panning continues with
@@ -147,8 +147,11 @@ run happens.
 - **Android — single-finger regression:** on an unrelated screen with an ordinary tap target and a
   `ScrollView`, confirm tap and single-finger scroll are unaffected by the touch-ABI change
   (`nativeOnTouch`'s added `pointerId` argument) — both devices.
-- **iOS Simulator:** Option-drag (the Simulator's two-finger-pinch stand-in) zooms the graph about
-  the drag's midpoint; a single-finger drag pans it; a plain tap elsewhere is unaffected.
+- **iOS (device or Simulator):** a two-finger pinch zooms the graph about the gesture's midpoint; a
+  single-finger drag pans it; a plain tap elsewhere is unaffected. Xcode 27 ships no Simulator
+  app, so Option-drag is unavailable; `idb` drives single contacts only, and on Xcode 27 it needs
+  `DEVELOPER_DIR` pointed at a copy whose `Library/PrivateFrameworks` links
+  `SharedFrameworks/SimulatorKit.framework`. Pinch therefore needs a physical device.
 - **Desktop (Linux, macOS, Windows):** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) zooms the
   graph about the cursor; a plain unmodified wheel still scrolls where applicable; drag-pans with
   the primary button. macOS additionally: a two-finger trackpad pinch zooms the graph (winit's
