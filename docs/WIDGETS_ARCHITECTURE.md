@@ -230,6 +230,8 @@ build from.
   contact to the child unchanged, and steals an in-progress child gesture with one synthesized
   `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a desktop `InputEvent::Scale`
   reaches `on_scale` only when the child ignores it first. Nesting two detectors is unsupported.
+  `pinch_detector` never joins the nested-scroll claim (see below), unlike `pan_zoom` — see
+  `pinch-under-scroll-view-claimant-takeover` in [LIMITATIONS.md](LIMITATIONS.md).
 - Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by
   `Affine::translate(offset) * Affine::scale(scale)` (`PanZoomTransform`), so frust-core's
   transformed-pod seam (see CORE_ARCHITECTURE.md) inverse-maps the child's hit-testing and events. A
@@ -237,7 +239,13 @@ build from.
   `InputEvent::Scale` (desktop ctrl/⌘+wheel, trackpad pinch) is likewise offered to the child first
   and applied here when ignored; a touch pinch is recognised in-widget by a `PinchRecognizer` fed
   from every primary `Down`'s contacts, so a second finger routes here even when the child owns the
-  first. `.min_scale`/`.max_scale` (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by
+  first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same ambient
+  cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing
+  scrollable defers to it; when the child owns the press, nothing is published, leaving the
+  scrollable's own default (unregistered) report in place. A `Scroll` arriving between `Scale`
+  events clears the stale `last_focal` left by an open bracket (a macOS trackpad pinch whose
+  modifier released mid-gesture finishes as wheel events) so a later unrelated wheel notch does not
+  anchor on it. `.min_scale`/`.max_scale` (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by
   default) glides a released pan on a per-axis `FrictionSimulation`; `.on_transform(Fn(&mut State,
   PanZoomTransform))` notifies after every change; `.controller(PanZoomController)` attaches a
   cloneable handle (`jump_to`/`fit_to_bounds`/`fit_rect`/`transform`/`viewport_size`/`content_size`)

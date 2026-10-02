@@ -341,14 +341,19 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   gesture-local `PointerId` slot (the first contact of a gesture always lands on slot `0`) and
   delivers every contact as `InputEvent::PointerContact`, on both the direct path and the
   `PointerResampler`-buffered one — a `RawPointerSample` carries the same `pointer_id`, one
-  resampler lane per contact. Android's JNI entry point is `nativeOnTouch(handle, action,
-  pointerId, x, y)` (`(JIIFF)V`); the Kotlin view calls it once per pointer for
-  `ACTION_DOWN`/`ACTION_POINTER_DOWN` and `ACTION_UP`/`ACTION_POINTER_UP` (the changed
-  `actionIndex`), once per currently-down pointer for `ACTION_MOVE`, and once per pointer still down
-  for `ACTION_CANCEL`. iOS's C-ABI entry point is `frust_dispatch_touch(handle, phase, pointer_id,
-  x, y)`; `FrustView` assigns each `UITouch` a stable per-sequence slot keyed by its
-  `ObjectIdentifier` and sets `isMultipleTouchEnabled`. The web shell's `TouchTracker` (see Module
-  Structure) is the browser-side equivalent, with no resampler of its own.
+  resampler lane per contact. Slot numbering is the same **lowest-currently-free-slot** rule on
+  every shell: a slot is taken on `Down` and freed on `Up`/`Cancel`, freeing one never renumbers
+  another still-live slot, and a slot freed mid-gesture is handed to the next contact that arrives
+  — Android's `TouchSlotMap` (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots`,
+  and the web shell's `TouchTracker` `free_slots` all implement it independently. Android's JNI
+  entry point is `nativeOnTouch(handle, action, pointerId, x, y)` (`(JIIFF)V`); the Kotlin view
+  calls it once per pointer for `ACTION_DOWN`/`ACTION_POINTER_DOWN` and
+  `ACTION_UP`/`ACTION_POINTER_UP` (the changed `actionIndex`), once per currently-down pointer for
+  `ACTION_MOVE`, and once per pointer still down for `ACTION_CANCEL`. iOS's C-ABI entry point is
+  `frust_dispatch_touch(handle, phase, pointer_id, x, y)`; `FrustView` assigns each `UITouch` a
+  slot keyed by its `ObjectIdentifier` and sets `isMultipleTouchEnabled`. The web shell's
+  `TouchTracker` (see Module Structure) is the browser-side equivalent, with no resampler of its
+  own.
 - **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to
   `InputEvent::Scale` at the cursor position, `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE ×
   lines)` (a wheel-notch-equivalent line count; `WHEEL_SCALE_RATE_PER_LINE = 0.1`, ~10% per notch) —
