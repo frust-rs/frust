@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "GPU backend for Frust: renders a frust-scene display list into a window surface through the frust-engine strip pipeline on wgpu."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # Backend-free by design: the workspace row carries only wgpu's base

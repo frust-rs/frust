@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Baseline widget set for Frust: text, buttons, images, flex, stack and scroll containers, and the authoring helpers for custom widgets."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 frust-core = { workspace = true }
