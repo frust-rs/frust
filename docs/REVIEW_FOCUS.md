@@ -80,7 +80,7 @@
   signal; a median-only perf claim is not a finding.
 - The `clean-signals`/`clean-signals-frust` strings and the sibling-checkout path dependencies
   around them — load-bearing compatibility surface, not typos to "fix".
-- `workflow/` — a separate nested repo, not part of this build; out of scope entirely.
+- Any nested working-notes repository checked out beside the sources — not part of this build; out of scope entirely.
 - Generated Android/iOS project trees under `examples/*` — scaffold output. Review the templates
   in `frust-drive` instead of the generated artifacts.
 - Anything already entered in `docs/LIMITATIONS.md` — accepted, measured degrades. Do not re-flag
