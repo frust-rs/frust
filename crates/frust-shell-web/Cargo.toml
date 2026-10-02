@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Browser shell for Frust: runs a Frust app on a canvas in the browser via winit and WebAssembly."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 # The browser shell tier. Unlike the three per-OS desktop crates, this one does
 # NOT depend on `frust-shell-desktop`: that crate's winit core is entangled with
@@ -160,3 +166,9 @@ web-sys = { workspace = true, features = [
 # own `logging` module owns the sink's shape and level). Workspace rows.
 console_log = { workspace = true }
 console_error_panic_hook = { workspace = true }
+
+# docs.rs builds on x86_64 Linux by default, where a target-specific crate
+# documents as empty; build the docs for the crate's own target instead.
+[package.metadata.docs.rs]
+default-target = "wasm32-unknown-unknown"
+targets = ["wasm32-unknown-unknown"]
