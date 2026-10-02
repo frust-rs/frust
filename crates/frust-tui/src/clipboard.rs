@@ -328,9 +328,15 @@ const OSC52_WRITE_CHUNK_BYTES: usize = 4096;
 /// weakening that ordering guarantee, since every chunk still lands before
 /// this function returns.
 fn write_osc52(text: &str, screen: bool) -> Result<CopyOutcome, String> {
+    write_osc52_to(&mut std::io::stdout(), text, screen)
+}
+
+/// [`write_osc52`] against any writer. The sequence sets the clipboard of
+/// whatever terminal receives it, so tests write into a buffer rather than
+/// into the process's stdout.
+fn write_osc52_to(out: &mut impl Write, text: &str, screen: bool) -> Result<CopyOutcome, String> {
     let (payload, outcome) = truncate_to_osc52_cap(text);
     let seq = osc52_sequence(payload, screen);
-    let mut out = std::io::stdout();
     for chunk in seq.chunks(OSC52_WRITE_CHUNK_BYTES) {
         out.write_all(chunk)
             .map_err(|e| format!("OSC 52 clipboard write failed: {e}"))?;
@@ -740,19 +746,23 @@ mod tests {
     #[test]
     fn write_osc52_reports_truncated_outcome_for_oversized_text() {
         let text = "a".repeat(OSC52_MAX_BYTES + 1000);
-        let outcome = write_osc52(&text, false).unwrap();
+        let mut out = Vec::new();
+        let outcome = write_osc52_to(&mut out, &text, false).unwrap();
         assert_eq!(
             outcome,
             CopyOutcome::Truncated {
                 kept_bytes: OSC52_MAX_BYTES
             }
         );
+        assert_eq!(out, osc52_sequence(&text[..OSC52_MAX_BYTES], false));
     }
 
     #[test]
     fn write_osc52_reports_complete_for_text_within_the_cap() {
-        let outcome = write_osc52("hello", false).unwrap();
+        let mut out = Vec::new();
+        let outcome = write_osc52_to(&mut out, "hello", false).unwrap();
         assert_eq!(outcome, CopyOutcome::Complete);
+        assert_eq!(out, b"\x1b]52;c;aGVsbG8=\x07");
     }
 
     // ─── write_system cancellation protocol ─────────────────────────────
