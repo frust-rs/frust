@@ -181,7 +181,7 @@ Simulator app for Option-drag, and `idb` injects one contact only.
 | Keys: tap the zone, keyboard focus | PASS (typing registered) | PASS (`active=1`; `idb` text did not register) |
 | Graph: tap a node selects and highlights it | PASS | PASS (`selected: N0`) |
 | Graph: one-finger drag on empty space pans | PASS | PASS (offset moved by the drag) |
-| Graph: vertical drag starting on a node | PASS (no anomaly reported) | No pan, by design: the canvas handles the press, so the child owns the gesture (same at `5c078079`, after f3-01) |
+| Graph: vertical drag starting on a node | PASS (no anomaly reported) | No pan, by design: the canvas handles the press, so the child owns the gesture (same at `5c078079`, after the veto fix) |
 | Graph: two-finger pinch zooms about the fingers; lifting one keeps panning | PASS | NOT RUN |
 | Graph: Fit reframes the whole graph | PASS | PASS |
 
