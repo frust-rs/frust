@@ -6073,21 +6073,6 @@ confirmed or a Firefox leg showing the engine does raise a usable `cut` for
 the overlay after all — which needs a Firefox install this machine does not
 have.
 
-### `web-touch-single-contact` — the web shell tracks only one touch contact at a time
-
-**Observed** (evidence: `crates/frust-shell-web/src/input.rs`'s
-`TouchTracker`): `frust_core::event::PointerEvent` carries no per-finger id,
-so a second simultaneous browser touch contact is not tracked — matching
-the mobile shells' own v1 single-contact contract rather than inventing a
-multi-touch protocol unilaterally on the web tier.
-
-**Accepted because**: this matches the existing Android/iOS single-contact
-v1 contract rather than diverging from it; a multi-touch protocol is a
-`frust_core` vocabulary change affecting every shell, not a web-only fix.
-
-**Trigger for removal**: `frust_core::event::PointerEvent` gains a
-per-contact id, adopted by every shell together.
-
 ### `web-generic-family-partial-fallback` — `Monospace`, `Serif` and `Emoji` still resolve no glyph on `wasm32`; `SystemUi`/`SansSerif` are covered by a bundled fallback face
 
 **Observed** (evidence: `crates/frust-shell-web/src/fonts.rs`;
@@ -6728,3 +6713,45 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: raising the crate's deployment floor to iOS 17.4, or adding a floor-gated second path that uses the newer initializer when available.
 
 **Evidence**: `plugins/auth-session/src/apple.rs`'s module doc (*The iOS 15 floor and the deprecated initializer*) and its `make_session` function.
+
+---
+
+### `desktop-pinch-linux-windows-unavailable` — trackpad pinch has no desktop `Scale` source on Linux or Windows
+
+**Observed**: winit 0.30.13 emits `WindowEvent::PinchGesture` only on macOS (and iOS, which has no desktop shell); it never emits that variant on Linux or Windows at this pin, so a two-finger trackpad pinch there produces no `InputEvent::Scale`. The ctrl/⌘+wheel mapping (`frust-shell-desktop`'s `map_wheel_scale_delta`) is the only desktop zoom-gesture source on those platforms.
+
+**Applies to**: `frust-shell-linux` and `frust-shell-windows`; macOS is unaffected.
+
+**Why accepted**: the gesture is winit's to emit, not this crate's; widening it would mean reading raw trackpad/touchpad events per platform (XInput2/libinput on Linux, a raw-input precision-touchpad API on Windows) outside winit's abstraction, which this unit does not do today.
+
+**Trigger for removal**: winit gains `PinchGesture` support on Linux and/or Windows, or this unit adds a platform-specific trackpad-gesture source feeding the same `InputEvent::Scale`.
+
+**Evidence**: `crates/frust-shell-desktop/src/app_handler.rs`'s `WindowEvent::PinchGesture` arm comment.
+
+---
+
+### `transformed-subtree-semantics-aabb` — a transformed pod's semantics subtree is reported as its axis-aligned bounding box, not its exact shape
+
+**Observed**: `ChildPod::semantics_child` reports a pod under a `set_transform` at the axis-aligned bounding box of the transformed child rect; descendants are offset from that box's corner unscaled and unrotated, so a rotated or non-uniformly-scaled subtree's accessibility bounds are an approximation rather than its true painted shape.
+
+**Applies to**: any widget placed under `ChildPod::set_transform` with a rotation or non-uniform scale — in-tree, `pan_zoom`'s child pod (uniform scale only, so this is exact there in practice) and any future rotating container.
+
+**Why accepted**: v1 scope for the transformed-pod seam — hit-testing and paint already map exactly through the inverse transform; only the semantics tree, which accesskit's own node model expects axis-aligned, takes the approximation.
+
+**Trigger for removal**: an accesskit node shape richer than an axis-aligned rect, or a documented need for exact rotated-bounds accessibility reporting.
+
+**Evidence**: `crates/frust-core/src/widget.rs`'s `ChildPod::semantics_child` doc comment.
+
+---
+
+### `canvas-view-no-semantics-node` — `CanvasWidget` publishes no accessibility node
+
+**Observed**: `canvas()` builds a `CanvasWidget` that implements no `Widget::semantics` override, so arbitrary painted content (a chart, a node-and-edge graph, a game board) is invisible to `RenderRoot::inspect()` and to an assistive-technology client.
+
+**Applies to**: every `CanvasView`/`CanvasWidget` instance, including `pan_zoom`'s typical child.
+
+**Why accepted**: there is no generic accessible role for arbitrary painted content — a `canvas` caller who needs one composes it from ordinary semantics-carrying widgets instead, or layers its own `Widget::semantics` implementation outside this helper.
+
+**Trigger for removal**: `CanvasView` grows an opt-in semantics builder (a label/role/bounds callback) a caller can attach.
+
+**Evidence**: `crates/frust-widgets/src/canvas.rs` — no `semantics` method on `CanvasWidget`.
