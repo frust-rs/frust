@@ -161,10 +161,29 @@ gate.
 
 The headless suite above proves the Graph page builds/lays out/paints and
 that the node-hit/selection math is correct; it cannot drive a real pointer,
-trackpad, or touchscreen. The following are **owed** — not yet run:
+trackpad, or touchscreen. Rows marked OWED have not been run:
 
 | Gate | Platform | Status |
 |------|----------|--------|
 | Desktop ctrl/⌘+wheel zoom + drag pan | Linux (local) | OWED |
 | Touch pinch zoom + drag pan | Pixel 5 / Xiaomi 12 (Android) | OWED |
-| Touch pinch zoom + drag pan | iOS Simulator | OWED |
+| Touch pinch zoom + drag pan, plus tap/scroll/focus regression | iPhone SE (iPhone12,8), iOS 26.7, 2026-10-02 | PASS (all legs below; human-run) |
+| Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
+
+iOS legs (Phase A touch-ABI gate, build at `8a263d79`). The Simulator legs were
+driven by `idb` with screenshots. Pinch could not run there: Xcode 27 ships no
+Simulator app for Option-drag, and `idb` injects one contact only.
+
+| Leg | iPhone SE | Simulator |
+|-----|-----------|-----------|
+| Platform: tap "Bump params" | PASS | PASS (count 0 to 1) |
+| Platform: one-finger page scroll | PASS | PASS |
+| Keys: tap the zone, keyboard focus | PASS (typing registered) | PASS (`active=1`; `idb` text did not register) |
+| Graph: tap a node selects and highlights it | PASS | PASS (`selected: N0`) |
+| Graph: one-finger drag on empty space pans | PASS | PASS (offset moved by the drag) |
+| Graph: vertical drag starting on a node | PASS (no anomaly reported) | No pan: the drag is taken (the f3-01 case) |
+| Graph: two-finger pinch zooms about the fingers; lifting one keeps panning | PASS | NOT RUN |
+| Graph: Fit reframes the whole graph | PASS | PASS |
+
+On a phone-width viewport the Graph page opens at 1.0x over an empty corner of
+the 1400x1000 content, so press Fit first.
