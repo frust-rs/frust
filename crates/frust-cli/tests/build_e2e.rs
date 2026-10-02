@@ -4,8 +4,8 @@
 //!
 //! **Every case asserts on the ARTIFACT** (`apksigner verify --print-certs`),
 //! never on the gate's verdict alone. A green gate riding on a debug-signed
-//! APK is the exact failure mode these tests exist to catch, and a release
-//! gate shipped one precisely because the assertions stopped at the verdict.
+//! APK is the exact failure mode these tests exist to catch, and one shipped
+//! precisely because the assertions stopped at the verdict.
 //!
 //! `[signing]` has three independent axes — properties **path**, key
 //! **prefix**, env-var **names** — and each is a way for the CLI's resolution
