@@ -66,17 +66,17 @@ appear in the index before publishing its dependents. Members with `publish = fa
 
 ### Rate limits
 
-crates.io limits publishing (verified against crates.io's own documentation on 2026-10-02; re-check
-before each release, since the limits can change):
+crates.io limits publishing (read from crates.io's published source on 2026-10-02; re-check before
+each release, since the limits can change):
 
 - New crates: a burst of 5, then one per 10 minutes.
 - New versions of existing crates: a burst of 30, then one per minute.
 - The limits can be raised by writing to help@crates.io.
 
 A first release of the whole workspace creates every crate and therefore hits the new-crate limit.
-If publishing stops on a rate-limit error, wait the stated time and run the same
-`cargo publish --workspace --locked` again; crates already uploaded are reported as such and the
-run continues from where it stopped. Do not change the version to get around a stop.
+A version that is on crates.io cannot be uploaded again, so after a stop wait the stated time and
+publish only what is still missing: re-run with `--exclude <crate>` for each crate already
+published. Do not change the version to get around a stop.
 
 ### First release and Trusted Publishing
 
