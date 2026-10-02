@@ -203,7 +203,7 @@ multi-contact veto fix, ran at build `2e084ef5`.
 On a phone-width viewport the Graph page opens at 1.0x over an empty corner of
 the 1400x1000 content, so press Fit first.
 
-f3-01 re-check (pinch survives the page scroll), iPhone SE, iOS 26.7,
+Multi-contact veto re-check (pinch survives the page scroll), iPhone SE, iOS 26.7,
 2026-10-02, build `f47a9828`, human-run. The Graph page overflows the SE screen,
 so the page body scrolls vertically. `pinch_detector` has no consumer in
 playground, so only `pan_zoom`'s half of the fix runs on a device here.
