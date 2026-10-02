@@ -77,8 +77,8 @@ pub enum Effect {
     /// sibling checkout was present, posting the result back as
     /// [`Message::CleanSignalsProbed`] to gate the create wizard's
     /// clean-signals arch card / the Add Plugin dialog's facade-tier cards.
-    /// `clean-signals` is now git+rev-pinned to its public repo, so no card
-    /// is sibling-gated any more and the runner replies immediately with
+    /// `clean-signals` is a crates.io dependency, so no card is
+    /// sibling-gated and the runner replies immediately with
     /// `true` rather than touching disk — kept as the priming effect fired
     /// on opening either the wizard or the dialog, and as the generic
     /// mechanism a future sibling-dependent registry entry would reuse.
@@ -5123,8 +5123,8 @@ mod tests {
 
     #[test]
     fn probe_result_is_a_harmless_no_op_for_the_clean_signals_card() {
-        // clean-signals is git+rev-pinned to its public repo, so
-        // the card starts enabled and stays enabled regardless of the probe
+        // clean-signals is a crates.io dependency, so the card starts
+        // enabled and stays enabled regardless of the probe
         // result — the probe still fires (`Effect::ProbeCleanSignals`) but
         // no card depends on its outcome today.
         let mut st = welcome();
@@ -5276,9 +5276,8 @@ mod tests {
 
     #[test]
     fn add_plugin_probe_is_a_harmless_no_op_with_no_sibling_gated_entries() {
-        // clean-signals-frust was the sole `requires_sibling` registry user
-        // before clean-signals moved to a git+rev pin; no entry is
-        // sibling-gated today, so every card starts (and stays) enabled
+        // clean-signals-frust needs no `requires_sibling` (clean-signals is
+        // a crates.io dependency); no entry is sibling-gated, so every card starts (and stays) enabled
         // regardless of the probe result.
         let mut st = workbench_with_project();
         update(&mut st, Message::OpenAddPlugin);

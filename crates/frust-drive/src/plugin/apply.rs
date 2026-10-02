@@ -2533,9 +2533,9 @@ mod tests {
     fn clean_signals_frust_add_succeeds_without_sibling_checkout() {
         // test_context's frust_path is nonexistent, so a `../clean-signals-rs`
         // sibling derived from it is absent too — clean-signals-frust's
-        // registry entry no longer requires one (clean-signals is
-        // git+rev-pinned to its public repo; see `registry.rs`'s
-        // `CLEAN_SIGNALS_FRUST`), so this must still succeed.
+        // registry entry requires none (clean-signals is a crates.io
+        // dependency; see `registry.rs`'s `CLEAN_SIGNALS_FRUST`), so this
+        // must still succeed.
         let root = scaffold_project("clean-signals-no-sibling");
         let report = add_plugin(&root, "clean-signals-frust", &[]).unwrap();
         assert_eq!(report.items.len(), 1);

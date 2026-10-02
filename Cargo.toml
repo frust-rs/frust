@@ -29,9 +29,9 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
 # [workspace] root, own Cargo.lock) because its
-# `clean-signals` dependency is git+rev-pinned to a repo outside this one,
-# which must never enter the root workspace
-# graph (see docs/DEVELOPMENT.md's Version-Pin Policy).
+# `clean-signals` dependency is a crates.io registry requirement that the
+# root workspace graph must never resolve (see docs/DEVELOPMENT.md's
+# Version-Pin Policy).
 # examples/shadertoy (the shader showcase) is standalone because it is a full
 # `frust create` scaffold whose generated Cargo.toml carries its own
 # `[profile.*]` blocks, which only take effect in a workspace root.
