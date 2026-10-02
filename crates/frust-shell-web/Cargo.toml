@@ -3,7 +3,9 @@ name = "frust-shell-web"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# Not the workspace expression: `src/fonts.rs` embeds `fonts/InterVariable.ttf`,
+# which is under the SIL Open Font License 1.1 (`fonts/OFL.txt`).
+license = "(MIT OR Apache-2.0) AND OFL-1.1"
 description = "Browser shell for Frust: runs a Frust app on a canvas in the browser via winit and WebAssembly."
 repository.workspace = true
 homepage.workspace = true

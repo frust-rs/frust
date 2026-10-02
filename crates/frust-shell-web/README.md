@@ -17,6 +17,12 @@ See <https://frust.dev> for the framework documentation and
 
 ## License
 
-Licensed under either of the MIT license or the Apache License, Version 2.0
-(SPDX expression `MIT OR Apache-2.0`), at your option. The full texts are in
-`LICENSE-MIT` and `LICENSE-APACHE` beside this file.
+The crate's SPDX expression is `(MIT OR Apache-2.0) AND OFL-1.1`. The Frust
+sources are licensed under either of the MIT license or the Apache License,
+Version 2.0, at your option; the full texts are in `LICENSE-MIT` and
+`LICENSE-APACHE` beside this file.
+
+The crate also bundles the Inter typeface as its default face
+(`fonts/InterVariable.ttf`), which is under the SIL Open Font License 1.1,
+Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter).
+The licence text is in `fonts/OFL.txt`.
