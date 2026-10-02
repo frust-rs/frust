@@ -53,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -78,7 +78,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
 
   standalone:
     name: standalone (${{ matrix.dir }})
@@ -88,20 +88,20 @@ jobs:
       matrix:
         include:
           - dir: examples/huddle
-            gate: cargo test && cargo clippy --all-targets -- -D warnings
+            gate: cargo test --locked && cargo clippy --all-targets --locked -- -D warnings
           - dir: examples/shadertoy
             # No documented test gate; a full-target check proves the graph builds.
             gate: cargo check --locked --all-targets
           - dir: examples/glyph-catalog
-            gate: cargo build --locked && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+            gate: cargo build --locked && cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check
           - dir: examples/playground
-            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+            gate: cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check
           - dir: examples/design-system-sample
-            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+            gate: cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check
           - dir: examples/material3-demo
-            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+            gate: cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check
           - dir: examples/native-widgets-demo
-            gate: cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+            gate: cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check
           - dir: examples/web-gallery
             wasm: true
             gate: cargo check --locked --target wasm32-unknown-unknown
@@ -109,7 +109,7 @@ jobs:
             wasm: true
             gate: cargo check --locked && cargo check --locked --target wasm32-unknown-unknown
           - dir: plugins/clean-signals-frust
-            gate: cargo test && cargo clippy --all-targets -- -D warnings
+            gate: cargo test --locked && cargo clippy --all-targets --locked -- -D warnings
           - dir: benchmarks/frust_bench
             # A benchmark app built for Android/iOS (cdylib + staticlib); on Linux
             # only a compile check is meaningful, so it gets `cargo check`.
