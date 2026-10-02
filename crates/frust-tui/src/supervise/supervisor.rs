@@ -126,6 +126,60 @@
 //! termination at install time instead of losing it. A session whose target is
 //! never known (a physical iOS device, which has no `devicectl` termination
 //! call here) simply skips this step — the package/bundle id is never guessed.
+//!
+//! # Detecting the app dying (Android liveness prober)
+//!
+//! The mirror-image problem: the *user* stops the app on the phone (force-stop
+//! from the app switcher, a crash, an OOM kill) while the workbench keeps
+//! showing the session `Running`. An Android device session streams
+//! `adb -s <serial> logcat --pid <pid>`, and **`logcat` does not exit when that
+//! pid dies** — it is the host's `adb` client filtering a device-wide log
+//! buffer, not a child of the app — so the drain never sees EOF and no
+//! terminal state is ever emitted. There is nothing to wait on; the only way
+//! to learn is to ask.
+//!
+//! So an Android session gets a **liveness prober**: a tracked std thread,
+//! spawned right after [`DeviceControl::install_logcat`] (streaming has begun)
+//! and only when the installed [`TerminationTarget`] is
+//! [`Android`](TerminationTarget::Android), which every
+//! [`LIVENESS_PROBE_INTERVAL`] asks `android_run::adb::process_alive` whether
+//! the package still reports a pid. [`LIVENESS_STRIKES`] **consecutive**
+//! not-alive answers declare the app gone — one is not enough, since a single
+//! `adb` hiccup (a momentarily busy daemon, a USB blip) would otherwise close
+//! a live session. A probe that *errors* counts as not-alive too: an `adb` we
+//! can no longer run tells us nothing about the app, and the workbench's view
+//! of it is dead either way.
+//!
+//! On the strike that declares it, the prober sets `app_gone` and kills the
+//! logcat [`StreamHandle`] — **under the same `logcat` mutex `stop` uses, and
+//! never while holding the `termination` mutex**, so it takes no lock in an
+//! order `stop` does not and cannot deadlock against a concurrent stop.
+//! Killing the stream is what unblocks the drain: from there the session
+//! terminates through exactly the path a `stop` takes.
+//! [`run_device_session`] then maps the outcome — `cancel` set still reports
+//! [`Killed`](SessionState::Killed) (a user stop that raced the prober is
+//! still a stop), while `app_gone` without `cancel` emits [`APP_GONE_NOTE`]
+//! **before** the terminal [`Exited(false)`](SessionState::Exited), so the
+//! transcript says why a session the user never stopped just ended. A plain
+//! EOF (the `adb` client itself dying) is unchanged. The prober also stops on
+//! its own when the drain ends for any *other* reason: the drain path sets
+//! `stream_done` before the terminal send, and the thread observes it at its
+//! next tick. Its handle is registered in the same vector the termination
+//! threads use, so [`Supervisor::stop_all`]/`Drop` bounded-join it
+//! ([`TERMINATION_JOIN_DEADLINE`]) rather than leaking a probing thread.
+//!
+//! The engine — and with it the MCP/DAP feeds — learns nothing new here: the
+//! session reaches a terminal state through the ordinary
+//! [`SessionEventKind::State`] replay every other ending uses, so no consumer
+//! needs a code path of its own for this.
+//!
+//! **iOS gets no prober, on purpose.** A simulator session's
+//! `simctl launch --console-pty` bridge *does* exit when the app exits — the
+//! console pipe is bound to the app process, so the drain already sees EOF and
+//! a second mechanism could only add a way to be wrong. A physical iOS device
+//! streams through `devicectl`, whose behavior on app death is unverified here
+//! (it has no termination call either, see [`TerminationTarget`]), so nothing
+//! is claimed about it until it can be measured on real hardware.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +240,41 @@ const TERMINAL_SEND_RETRY: Duration = Duration::from_millis(2);
 /// (tens to a few hundred ms) always completes first — the same tradeoff, and
 /// the same 5s figure, `frust-mcp`'s own teardown join makes.
 const TERMINATION_JOIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long an Android session's liveness prober waits between `pidof`
+/// probes (module docs' "Detecting the app dying").
+///
+/// Two seconds is the whole tradeoff: short enough that a force-stop on the
+/// phone shows up in the workbench while the user still associates the two,
+/// long enough that a half-hour session costs the device a negligible number
+/// of `adb shell` round-trips. Overridable per [`DeviceControl`] for tests,
+/// which run the loop at a few milliseconds so the suite never waits on a real
+/// clock.
+const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How many **consecutive** not-alive probes declare the app gone.
+///
+/// Two, not one: a single `adb` round-trip can fail or come back empty for
+/// reasons that have nothing to do with the app (a busy `adb` daemon, a USB
+/// blip, a device briefly reasserting itself), and closing a live session over
+/// one bad answer is worse than noticing a real death one interval later.
+const LIVENESS_STRIKES: u32 = 2;
+
+/// The longest a prober sleeps in one go while waiting out
+/// [`LIVENESS_PROBE_INTERVAL`].
+///
+/// The wait is sliced rather than slept in one call purely so the thread
+/// notices a `cancel`/`stream_done` promptly: an unsliced sleep would hold
+/// [`Supervisor::stop_all`]'s bounded join for up to a whole probe interval on
+/// every quit, and the slice costs nothing but a few flag reads.
+const PROBE_POLL_SLICE: Duration = Duration::from_millis(50);
+
+/// The line a device session emits when its app died on the device rather than
+/// being stopped from the workbench (module docs' "Detecting the app dying").
+///
+/// Sent as ordinary session output immediately before the terminal state, so
+/// the transcript explains an ending the user did not ask for.
+const APP_GONE_NOTE: &str = "app process ended on the device (pid gone) — session closed";
 
 /// One live (or terminated) session's supervisor-side bookkeeping.
 struct SessionEntry {
@@ -256,9 +345,15 @@ struct TerminationSlot {
     fired: bool,
 }
 
-/// Every device session's termination threads, shared between the
-/// [`Supervisor`] that bounded-joins them and each [`DeviceControl`] that
-/// spawns them.
+/// Every device session's detached helper threads — the OS-level
+/// app-terminations a stop spawns and the Android liveness probers a stream
+/// spawns — shared between the [`Supervisor`] that bounded-joins them and each
+/// [`DeviceControl`] that spawns them.
+///
+/// One registry for both because they want the identical discipline: spawned
+/// off the event-loop thread, tracked rather than detached, and bounded-joined
+/// from [`Supervisor::stop_all`]/`Drop` so process exit strands neither an
+/// un-issued force-stop nor a still-probing thread.
 type TerminationThreads = Arc<Mutex<Vec<JoinHandle<()>>>>;
 
 /// The cancel primitive for a supervised device session. `stop` sets `cancel`
@@ -279,9 +374,23 @@ struct DeviceControl {
     /// The runner the termination invocation goes through — the supervisor's
     /// own, so a test's `FakeProcessRunner` records it like any other spawn.
     runner: Arc<dyn ProcessRunner + Send + Sync>,
-    /// Where a spawned termination thread registers itself for the
-    /// supervisor's bounded join.
+    /// Where a spawned termination or liveness-prober thread registers itself
+    /// for the supervisor's bounded join.
     terminations: TerminationThreads,
+    /// Set by the liveness prober once [`LIVENESS_STRIKES`] consecutive probes
+    /// found no process on the device: the app died on the phone rather than
+    /// being stopped from here (module docs' "Detecting the app dying"). Read
+    /// by [`run_device_session`] to map the ending, and by the prober's own
+    /// loop as its exit condition.
+    app_gone: AtomicBool,
+    /// Set by the drain path the moment its stream ends, for any reason, so
+    /// the prober exits at its next tick instead of probing a session that is
+    /// already terminating.
+    stream_done: AtomicBool,
+    /// How long the prober waits between probes. [`LIVENESS_PROBE_INTERVAL`]
+    /// in production; tests build a control with a few milliseconds so the
+    /// suite never waits on a real clock.
+    probe_interval: Duration,
 }
 
 impl DeviceControl {
@@ -292,6 +401,9 @@ impl DeviceControl {
             termination: Mutex::new(TerminationSlot::default()),
             runner,
             terminations,
+            app_gone: AtomicBool::new(false),
+            stream_done: AtomicBool::new(false),
+            probe_interval: LIVENESS_PROBE_INTERVAL,
         }
     }
 
@@ -381,6 +493,96 @@ impl DeviceControl {
             installed.kill();
         }
         lines
+    }
+
+    /// Has the prober any reason left to keep probing? A stop (`cancel`), a
+    /// drain that has already ended (`stream_done`), or its own verdict
+    /// (`app_gone`) each mean the session's ending is settled and another
+    /// `adb` round-trip can only be noise.
+    fn probing_done(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+            || self.stream_done.load(Ordering::SeqCst)
+            || self.app_gone.load(Ordering::SeqCst)
+    }
+}
+
+/// Start an Android session's liveness prober, if the session is one: a
+/// tracked thread that watches for the app dying on the device (module docs'
+/// "Detecting the app dying"). Called once, right after
+/// [`DeviceControl::install_logcat`], so the thread only ever exists while
+/// there is a stream for it to kill.
+///
+/// Dispatch is on the **installed termination target**, the same
+/// pipeline-reported identity a force-stop uses — never a guessed package —
+/// so a session with no target (a physical iOS device) and an iOS simulator
+/// session both get no prober at all, and no `pidof` is ever run for them.
+/// A thread that cannot be spawned is simply skipped: a session without a
+/// prober behaves exactly as every device session did before it existed.
+fn spawn_liveness_prober(control: &Arc<DeviceControl>) {
+    let target = lock_termination(&control.termination).target.clone();
+    let Some(TerminationTarget::Android { serial, package }) = target else {
+        return;
+    };
+    let threads = Arc::clone(&control.terminations);
+    let control = Arc::clone(control);
+    let spawned = thread::Builder::new()
+        .name("frust-tui-liveness".to_string())
+        .spawn(move || probe_liveness(&control, &serial, &package));
+    if let Ok(handle) = spawned {
+        lock_terminations(&threads).push(handle);
+    }
+}
+
+/// The prober loop: every [`DeviceControl::probe_interval`], ask the device
+/// whether `package` still has a process, and on [`LIVENESS_STRIKES`]
+/// consecutive no's declare the app gone and kill the stream so the drain
+/// unblocks.
+///
+/// An `Err` from the probe counts as a no (module docs): an `adb` that can no
+/// longer be run says nothing about the app, and the session's view of it is
+/// dead either way. A single no never counts — the strike counter resets on
+/// the first alive answer, so only a genuinely sustained absence ends a
+/// session.
+fn probe_liveness(control: &DeviceControl, serial: &str, package: &str) {
+    let mut strikes = 0u32;
+    while sleep_until_next_probe(control) {
+        let alive = android_run::adb::process_alive(control.runner.as_ref(), serial, package)
+            .unwrap_or(false);
+        if alive {
+            strikes = 0;
+            continue;
+        }
+        strikes += 1;
+        if strikes < LIVENESS_STRIKES {
+            continue;
+        }
+        control.app_gone.store(true, Ordering::SeqCst);
+        // Under the same `logcat` mutex `stop`'s kill takes — and with no
+        // other lock held — so this can neither race a stop into a
+        // double-kill nor nest the two device locks in a new order.
+        if let Some(handle) = lock_logcat(&control.logcat).as_mut() {
+            handle.kill();
+        }
+        return;
+    }
+}
+
+/// Wait out one probe interval in [`PROBE_POLL_SLICE`] slices, returning
+/// `true` when it is time to probe again and `false` the moment the session's
+/// ending is settled ([`DeviceControl::probing_done`]) — which is how
+/// [`Supervisor::stop_all`]'s join stays prompt instead of waiting out a full
+/// interval.
+fn sleep_until_next_probe(control: &DeviceControl) -> bool {
+    let deadline = Instant::now() + control.probe_interval;
+    loop {
+        if control.probing_done() {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        thread::sleep((deadline - now).min(PROBE_POLL_SLICE));
     }
 }
 
@@ -960,33 +1162,11 @@ fn run_device_session(
 
     let terminal = match pipeline {
         Ok(Some(launched)) => {
-            // What the pipeline actually launched, so a stop can ask the OS to
-            // terminate it — installed before the stream, so the window in
-            // which a session is stoppable but not terminable is empty (see
-            // `install_termination`). `None` for a target with no termination
-            // call; never guessed.
-            if let Some(target) = launched.target {
-                control.install_termination(target);
-            }
-            // Install the stream under one continuous lock hold, closing the
-            // stop race: a `stop` observed just before or after this
-            // point kills the stream exactly once, so the drain always sees
-            // EOF rather than blocking forever (see `install_logcat`).
-            let lines = control.install_logcat(launched.stream);
-
-            if drain_receiver(&mut sender, &mut state, &lines).is_err() {
-                return;
-            }
-
-            // Reap the logcat child (idempotent with `stop`'s kill).
-            let success = lock_logcat(&control.logcat)
-                .as_mut()
-                .map(StreamHandle::wait)
-                .unwrap_or(false);
-            if control.cancel.load(Ordering::SeqCst) {
-                SessionState::Killed
-            } else {
-                SessionState::Exited(success)
+            match stream_device_session(&mut sender, &mut state, &control, launched) {
+                Some(terminal) => terminal,
+                // The engine dropped the receiver mid-drain; nothing left to
+                // report a terminal state to.
+                None => return,
             }
         }
         // Cancelled before the streaming phase began.
@@ -997,6 +1177,67 @@ fn run_device_session(
         }
     };
     sender.send_terminal_state(terminal);
+}
+
+/// Supervise a device session's streaming phase: install what the pipeline
+/// launched, start the Android liveness prober, drain the logcat/console
+/// stream to EOF, and decide the terminal state. `None` means the engine
+/// dropped the receiver mid-drain (the caller bails without a terminal state);
+/// otherwise the terminal state to send, with any explanatory line already
+/// sent ahead of it.
+///
+/// Split out of [`run_device_session`] so the streaming half — the part the
+/// prober, the stop race and the ending mapping all live in — is drivable from
+/// a test with a scripted stream, without standing up a whole fake Gradle
+/// build first.
+fn stream_device_session(
+    sender: &mut SessionSender,
+    state: &mut SessionState,
+    control: &Arc<DeviceControl>,
+    launched: LaunchedDevice,
+) -> Option<SessionState> {
+    // What the pipeline actually launched, so a stop can ask the OS to
+    // terminate it — installed before the stream, so the window in which a
+    // session is stoppable but not terminable is empty (see
+    // `install_termination`). `None` for a target with no termination call;
+    // never guessed.
+    if let Some(target) = launched.target {
+        control.install_termination(target);
+    }
+    // Install the stream under one continuous lock hold, closing the stop
+    // race: a `stop` observed just before or after this point kills the stream
+    // exactly once, so the drain always sees EOF rather than blocking forever
+    // (see `install_logcat`).
+    let lines = control.install_logcat(launched.stream);
+    // Only now — with a stream to kill and the target installed — is the
+    // prober meaningful; it no-ops for anything but an Android session.
+    spawn_liveness_prober(control);
+
+    let drained = drain_receiver(sender, state, &lines);
+    // The stream is over however it ended: retire the prober before anything
+    // else, so it can never probe (or kill) past the session's own life.
+    control.stream_done.store(true, Ordering::SeqCst);
+    drained.ok()?;
+
+    // Reap the logcat child (idempotent with `stop`'s kill).
+    let success = lock_logcat(&control.logcat)
+        .as_mut()
+        .map(StreamHandle::wait)
+        .unwrap_or(false);
+
+    // A stop wins over the prober: a user who asked for this ending gets
+    // `Killed`, even if the prober's kill is what actually closed the stream.
+    if control.cancel.load(Ordering::SeqCst) {
+        return Some(SessionState::Killed);
+    }
+    if control.app_gone.load(Ordering::SeqCst) {
+        // Say why, in the transcript, before the state the UI acts on — the
+        // session ended without the user asking, and `logcat`'s own exit
+        // status explains nothing about the app.
+        let _ = sender.send_lines(vec![APP_GONE_NOTE.to_string()]);
+        return Some(SessionState::Exited(false));
+    }
+    Some(SessionState::Exited(success))
 }
 
 /// What a device pipeline hands back once it is streaming: the logcat/console
@@ -1617,8 +1858,14 @@ mod tests {
 
     impl RecordingRunner {
         fn new() -> Self {
+            Self::over(FakeProcessRunner::new())
+        }
+
+        /// Record on top of an already-scripted fake — how the liveness tests
+        /// below both script `pidof` and count the probes it answered.
+        fn over(inner: FakeProcessRunner) -> Self {
             Self {
-                inner: FakeProcessRunner::new(),
+                inner,
                 runs: Mutex::new(Vec::new()),
             }
         }
@@ -1814,6 +2061,368 @@ mod tests {
             lock_terminations(&sup.terminations).is_empty(),
             "stop_all drains the registry it joined"
         );
+    }
+
+    // ── Android liveness probing ────────────────────────────────────────────
+
+    /// A successful `pidof` answer: `pid` for a live app, `""` for a gone one.
+    fn pidof(pid: &str) -> frust_drive::process::Output {
+        frust_drive::process::Output {
+            success: true,
+            stdout: pid.to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    const PIDOF_PROBE: &str = "adb -s emulator-5554 shell pidof com.example.app";
+
+    /// A [`DeviceControl`] over `runner` whose prober ticks in milliseconds
+    /// rather than [`LIVENESS_PROBE_INTERVAL`]'s seconds, so these tests
+    /// exercise the real loop without waiting on a real clock.
+    fn probing_control(
+        runner: Arc<dyn ProcessRunner + Send + Sync>,
+        interval: Duration,
+    ) -> (Arc<DeviceControl>, TerminationThreads) {
+        let threads: TerminationThreads = Arc::new(Mutex::new(Vec::new()));
+        let mut control = DeviceControl::new(runner, Arc::clone(&threads));
+        control.probe_interval = interval;
+        (Arc::new(control), threads)
+    }
+
+    /// Spawn a fake stream that ends on its own (an iOS console bridge, which
+    /// *does* exit with its app) and hand back its [`StreamHandle`].
+    fn exiting_handle(key_cmd: &str, key_args: &[&str]) -> StreamHandle {
+        let runner = FakeProcessRunner::new().with_stream(
+            invocation(key_cmd, key_args),
+            ["streaming…"],
+            true,
+        );
+        runner
+            .spawn_streaming(key_cmd, key_args, None, &[])
+            .expect("fake stream spawns")
+    }
+
+    /// Every line a paused channel is holding.
+    fn collected_lines(rx: &mut Receiver<SessionEvent>) -> Vec<String> {
+        let mut lines = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let SessionEventKind::Lines(mut ls) = ev.kind {
+                lines.append(&mut ls);
+            }
+        }
+        lines
+    }
+
+    /// (a) The defect this whole path exists for: the app is force-stopped on
+    /// the phone, `logcat` keeps running (a hanging stream — it never sees its
+    /// pid die), and the workbench would otherwise show `Running` forever. Two
+    /// empty `pidof` probes must end the session with the explanatory note and
+    /// `Exited(false)`.
+    #[test]
+    fn an_app_that_dies_on_the_device_ends_the_session_with_a_note() {
+        let runner = Arc::new(RecordingRunner::over(
+            FakeProcessRunner::new().with(PIDOF_PROBE, pidof("")),
+        ));
+        let (control, threads) =
+            probing_control(Arc::clone(&runner) as _, Duration::from_millis(5));
+
+        let (tx, mut rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(0));
+        let mut state = SessionState::Running;
+        let launched = LaunchedDevice {
+            stream: hanging_handle("adb", &["logcat"]),
+            target: Some(android_target()),
+        };
+
+        let started = Instant::now();
+        let terminal = stream_device_session(&mut sender, &mut state, &control, launched)
+            .expect("the receiver stays connected");
+        assert_eq!(terminal, SessionState::Exited(false));
+        assert!(
+            started.elapsed() < PROMPT_STOP,
+            "the prober must unblock a hanging logcat drain promptly, took {:?}",
+            started.elapsed()
+        );
+
+        drop(sender);
+        assert!(
+            collected_lines(&mut rx).contains(&APP_GONE_NOTE.to_string()),
+            "the note must reach the transcript before the terminal state"
+        );
+        join_all_terminations(&threads);
+
+        let runs = runner.runs();
+        assert!(
+            runs.len() >= LIVENESS_STRIKES as usize,
+            "it takes {LIVENESS_STRIKES} consecutive probes to declare the app gone, got {runs:?}"
+        );
+        assert!(
+            runs.iter().all(|r| r == PIDOF_PROBE),
+            "a prober only ever probes — no force-stop, no guessing, got {runs:?}"
+        );
+    }
+
+    /// A runner whose `pidof` answers come from a script: entry *n* answers
+    /// probe *n*, the last entry repeating forever. Anything that isn't a
+    /// `pidof` (a stop's own force-stop) succeeds silently.
+    struct ScriptedPidofRunner {
+        answers: Vec<&'static str>,
+        probes: Mutex<usize>,
+    }
+
+    impl ScriptedPidofRunner {
+        fn new(answers: Vec<&'static str>) -> Self {
+            Self {
+                answers,
+                probes: Mutex::new(0),
+            }
+        }
+
+        fn probes(&self) -> usize {
+            *self.probes.lock().unwrap_or_else(|p| p.into_inner())
+        }
+    }
+
+    impl ProcessRunner for ScriptedPidofRunner {
+        fn run(&self, _cmd: &str, args: &[&str]) -> Result<frust_drive::process::Output> {
+            if !args.contains(&"pidof") {
+                return Ok(pidof(""));
+            }
+            let mut probes = self.probes.lock().unwrap_or_else(|p| p.into_inner());
+            let answer = self.answers[(*probes).min(self.answers.len() - 1)];
+            *probes += 1;
+            Ok(pidof(answer))
+        }
+
+        fn run_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+            _on_line: &mut dyn FnMut(&str),
+        ) -> Result<frust_drive::process::Output> {
+            unreachable!("the prober never streams")
+        }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            unreachable!("the prober never streams")
+        }
+    }
+
+    /// Poll `ready` until it holds, failing (rather than hanging the suite) at
+    /// [`PROMPT_STOP`] — lets a test wait on a prober's own progress instead
+    /// of a fixed sleep.
+    fn wait_until(what: &str, ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + PROMPT_STOP;
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// (b) One empty probe is a hiccup, not a death: with the very next probe
+    /// reporting a pid again, the strike counter resets and the session is
+    /// never declared gone — the reason [`LIVENESS_STRIKES`] is 2.
+    #[test]
+    fn a_single_empty_probe_does_not_end_the_session() {
+        let runner = Arc::new(ScriptedPidofRunner::new(vec!["", "4242"]));
+        let (control, threads) =
+            probing_control(Arc::clone(&runner) as _, Duration::from_millis(2));
+
+        control.install_termination(android_target());
+        let _lines = control.install_logcat(hanging_handle("adb", &["logcat"]));
+        spawn_liveness_prober(&control);
+
+        // Well past the strike window: the first answer was empty, every
+        // later one is a live pid.
+        wait_until("the prober to answer several probes", || {
+            runner.probes() >= 4
+        });
+        assert!(
+            !control.app_gone.load(Ordering::SeqCst),
+            "a lone empty probe must never declare the app gone"
+        );
+
+        control.stop();
+        join_all_terminations(&threads);
+        assert!(!control.app_gone.load(Ordering::SeqCst));
+    }
+
+    /// A runner whose `pidof` parks until the test releases it — the way to
+    /// land a `stop` *while* a probe is in flight, with no sleep-based guess
+    /// at the timing. Non-`pidof` calls (the stop's own force-stop) pass
+    /// straight through.
+    struct GatedPidofRunner {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ProcessRunner for GatedPidofRunner {
+        fn run(&self, _cmd: &str, args: &[&str]) -> Result<frust_drive::process::Output> {
+            if !args.contains(&"pidof") {
+                return Ok(pidof(""));
+            }
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .recv();
+            Ok(pidof(""))
+        }
+
+        fn run_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+            _on_line: &mut dyn FnMut(&str),
+        ) -> Result<frust_drive::process::Output> {
+            unreachable!("the prober never streams")
+        }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            unreachable!("the prober never streams")
+        }
+    }
+
+    /// (c) A user stop landing while a probe is in flight: both paths race for
+    /// the same [`StreamHandle`] and the same ending, and the session must
+    /// still produce exactly one terminal state — `Killed`, because the user
+    /// asked — with no double-kill panic and no "the app died" note.
+    #[test]
+    fn a_stop_racing_the_prober_yields_one_killed_terminal() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let runner = Arc::new(GatedPidofRunner {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        // A zero interval: the prober probes at once, so it is parked inside
+        // `pidof` when the stop lands.
+        let (control, threads) = probing_control(Arc::clone(&runner) as _, Duration::ZERO);
+
+        let (tx, mut rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(3));
+        let launched = LaunchedDevice {
+            stream: hanging_handle("adb", &["logcat"]),
+            target: Some(android_target()),
+        };
+
+        let worker = {
+            let control = Arc::clone(&control);
+            thread::spawn(move || {
+                let mut state = SessionState::Running;
+                let terminal = stream_device_session(&mut sender, &mut state, &control, launched);
+                // Dropped here so the test can drain the channel afterwards.
+                drop(sender);
+                terminal
+            })
+        };
+
+        entered_rx
+            .recv_timeout(PROMPT_STOP)
+            .expect("the prober reaches its first probe");
+        control.stop(); // kills the stream out from under the parked prober
+        let _ = release_tx.send(()); // … which now finds no process either
+
+        let terminal = worker.join().expect("no panic in the streaming half");
+        assert_eq!(terminal, Some(SessionState::Killed));
+        assert!(
+            !collected_lines(&mut rx).contains(&APP_GONE_NOTE.to_string()),
+            "a stopped session was not abandoned by its app"
+        );
+        join_all_terminations(&threads);
+    }
+
+    /// (d) The prober is tracked, not detached: [`Supervisor::stop_all`] (and
+    /// therefore `Drop`) joins it, so quitting the workbench can't leave a
+    /// thread probing a device.
+    #[test]
+    fn stop_all_joins_the_liveness_prober() {
+        let runner = Arc::new(RecordingRunner::over(
+            FakeProcessRunner::new().with(PIDOF_PROBE, pidof("4242\n")),
+        ));
+        let (mut sup, _rx) = Supervisor::new(Arc::clone(&runner) as _);
+        // Built exactly as `start_device` builds it — over the supervisor's own
+        // runner and thread registry — but ticking in milliseconds.
+        let mut control =
+            DeviceControl::new(Arc::clone(&sup.runner), Arc::clone(&sup.terminations));
+        control.probe_interval = Duration::from_millis(5);
+        let control = Arc::new(control);
+        control.install_termination(android_target());
+        let _lines = control.install_logcat(hanging_handle("adb", &["logcat"]));
+        spawn_liveness_prober(&control);
+        assert_eq!(
+            lock_terminations(&sup.terminations).len(),
+            1,
+            "the prober registers itself for the supervisor's join"
+        );
+
+        control.stop(); // cancel: the prober exits at its next tick
+        let started = Instant::now();
+        sup.stop_all();
+
+        assert!(
+            lock_terminations(&sup.terminations).is_empty(),
+            "stop_all drains the registry it joined"
+        );
+        assert!(
+            started.elapsed() < TERMINATION_JOIN_DEADLINE,
+            "the prober was joined, not detached at the deadline (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    /// (e) Only Android gets a prober. An iOS simulator session's console
+    /// bridge exits with its app (so its drain already sees EOF) and a
+    /// physical iOS device has no verified probe at all — neither may run a
+    /// single `pidof`, and neither spawns a thread.
+    #[test]
+    fn a_non_android_session_never_probes() {
+        for target in [Some(ios_target()), None] {
+            let runner = Arc::new(RecordingRunner::new());
+            let (control, threads) =
+                probing_control(Arc::clone(&runner) as _, Duration::from_millis(1));
+
+            let (tx, mut rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+            let mut sender = SessionSender::new(tx, SessionId(4));
+            let mut state = SessionState::Running;
+            let launched = LaunchedDevice {
+                stream: exiting_handle("xcrun", &["simctl", "launch"]),
+                target: target.clone(),
+            };
+
+            let terminal = stream_device_session(&mut sender, &mut state, &control, launched)
+                .expect("the receiver stays connected");
+            assert_eq!(terminal, SessionState::Exited(true), "target {target:?}");
+
+            drop(sender);
+            assert!(!collected_lines(&mut rx).contains(&APP_GONE_NOTE.to_string()));
+            assert!(
+                runner.runs().is_empty(),
+                "no `pidof` for a non-Android session, got {:?}",
+                runner.runs()
+            );
+            assert!(
+                lock_terminations(&threads).is_empty(),
+                "no prober thread is spawned for a non-Android session"
+            );
+        }
     }
 
     // ── Batch coalescing + bounded-channel overflow ──────────────────────────

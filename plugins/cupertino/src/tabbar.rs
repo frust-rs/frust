@@ -80,7 +80,7 @@ use frust::authoring::text::LineHeight;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
-    SemanticsCtx, ThemeTextColor, View, Widget,
+    SemanticsCtx, ThemeTextColor, ThemeTextType, View, Widget,
 };
 use frust::input::WHEEL_LINE_PX;
 use frust::{
@@ -105,7 +105,12 @@ const LABEL_GAP: f64 = 2.0;
 ///
 /// **Community-approximate**: iOS tab-bar labels render at roughly SF Caption2
 /// (~10pt); this is the community-converged size, not an Apple-published tab-bar
-/// metric.
+/// metric. [`label_view`] opts the FAMILY into `ThemeTextType::LabelSmall` —
+/// the type scale's smallest slot (Caption 2, 11pt) and the nearest role to
+/// this size; both it and every other sub-headline slot share the same "SF
+/// Pro Text" family stack (`crate::tokens::type_scale`'s doc comment), so the
+/// family this label paints in is unchanged from before, only now it
+/// actually asks the theme for it.
 const LABEL_SIZE: f32 = 10.0;
 const LABEL_LINE_HEIGHT: f32 = 12.0;
 
@@ -248,11 +253,14 @@ fn stroke_specular_outline(
 
 /// Build a tab label's type-erased child view. Selected → explicit
 /// [`SYSTEM_BLUE`]; unselected → the live `OnSurfaceVariant` (secondaryLabel)
-/// role. See the [module docs](self)'s Label color note.
+/// role. See the [module docs](self)'s Label color note. FAMILY opts into
+/// `ThemeTextType::LabelSmall` either way — the explicit selected color
+/// doesn't block it, the two resolve independently.
 fn label_view<State: 'static>(label: String, selected: bool) -> AnyView<State> {
     let base = text(label)
         .size(LABEL_SIZE)
-        .line_height(LineHeight::Absolute(LABEL_LINE_HEIGHT));
+        .line_height(LineHeight::Absolute(LABEL_LINE_HEIGHT))
+        .themed_family(ThemeTextType::LabelSmall);
     let styled = if selected {
         base.color(SYSTEM_BLUE)
     } else {
@@ -1210,5 +1218,62 @@ mod tests {
             .find(|(_, n)| n.label() == Some("Search"))
             .expect("the Search tab is present");
         assert_eq!(selected.1.is_selected(), Some(true));
+    }
+
+    // --- Render-time typeface identity: item labels follow the theme -------
+
+    /// One selected item (explicit accent color) and one unselected item
+    /// (themed `OnSurfaceVariant`) — both branches of [`label_view`] must
+    /// still ask for `labelSmall`'s family; the explicit color on the
+    /// selected item must not block it.
+    fn two_items() -> Vec<TabItem<()>> {
+        vec![tab_item("Home"), tab_item("Search")]
+    }
+
+    #[test]
+    fn item_labels_paint_in_the_themes_label_small_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme =
+            baseline_with_family(|scale, family| scale.label_small.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the tab bar item labels",
+            |_: &mut ()| cupertino_tab_bar(two_items(), 0, |_: &mut (), _i| {}),
+            theme,
+            &[TUFFY],
+            Size::new(300.0, HEIGHT),
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn item_labels_follow_a_live_theme_family_change() {
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.label_small.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the tab bar item labels",
+            |_: &mut ()| cupertino_tab_bar(two_items(), 0, |_: &mut (), _i| {}),
+            tuffy_theme,
+            &faces,
+            Size::new(300.0, HEIGHT),
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.label_small.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the tab bar item labels",
+            |_: &mut ()| cupertino_tab_bar(two_items(), 0, |_: &mut (), _i| {}),
+            helvetica_theme,
+            &faces,
+            Size::new(300.0, HEIGHT),
+            TUFFY_AS_HELVETICA,
+        );
     }
 }

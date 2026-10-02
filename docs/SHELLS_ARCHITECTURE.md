@@ -5,15 +5,23 @@
 SHELLS is the seam between the platform-agnostic core+scene+render+text+theme+reactive stack and
 each concrete host. `frust-shell-common` is the platform-free plumbing every shell shares: a
 type-erased app driver, the frame-gate pacing decision, the render-thread split vocabulary, the
-platform-view differ, and a handful of signal-poll seams. Above it sit two tiers:
+platform-view differ, and a handful of signal-poll seams. Above it sit four host tiers:
 
 - **Desktop** — `frust-shell-desktop` is the shared winit core (event loop, frame pipeline,
   input/IME/theme translation, accessibility) for *every* desktop host, plus the
   `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary. Three thin per-OS
   crates — `frust-shell-macos`, `frust-shell-windows`, `frust-shell-linux` — implement that seam
   with native integration the core neither knows nor should know about.
-- **Mobile** — `frust-shell-android` and `frust-shell-ios` are FFI/frame-callback integration
-  points that own their host's lifecycle end to end.
+- **Android** and **iOS** — `frust-shell-android` and `frust-shell-ios` are FFI/frame-callback
+  integration points that own their host's lifecycle end to end.
+- **Web** — `frust-shell-web` (`crates/frust-shell-web`) is a winit host like Desktop, but not a
+  *desktop* host, so it sits directly on `frust-shell-common` — the way the two mobile shells do —
+  rather than depending on `frust-shell-desktop`, whose core is entangled with `accesskit_winit`,
+  `pollster::block_on` surface bring-up, a render thread and `frust-paths` cache I/O, none of which
+  exist on `wasm32-unknown-unknown`. It carries its own copy of that core's winit-*generic* halves
+  — input mapping, the reactive-owner event wrap (`event_under_owner`), the change-guarded
+  `WindowMetrics` publish, and brightness-follow — under a documented must-not-diverge contract
+  (`crates/frust-shell-web/src/app_handler.rs`'s header).
 
 Every concrete shell drives rebuild → layout → paint → encode → present and translates
 platform-native input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals into the
@@ -29,15 +37,24 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::frame_gate` | Shared run/skip frame decision and pacing used by both continuous-loop mobile shells |
 | `frust-shell-common::render_split` | UI-thread/render-thread split vocabulary (scene handoff, lifecycle commands, completion barrier) every shell's default frame path uses |
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
+| `frust-shell-common::resample` | `PointerResampler` — one lane per `PointerId`, emitting a frame-boundary-interpolated `Move` per contact while passing `Down`/`Up`/`Cancel` through losslessly; shared by both mobile shells |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override and fonts on every shell, desktop included |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through the facade's `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both of its device-creation sites; the Android and iOS shells forward the feature but do not install a handle yet, so `with_context` answers `None` there |
 | `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
-| `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, and the reopen observer in its `appkit_glue` unsafe zone |
+| `frust-shell-desktop::platform_view` | The OS-neutral desktop platform-view host: owns the shared differ, ingesting each paint's frames right after `RenderRoot::paint` and draining the batch to the per-OS hook right after the frame is submitted, then acknowledging it; plus the two lifecycle resets (replay on surface re-create, drop-everything on suspend) |
+| `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, the reopen observer in its `appkit_glue` unsafe zone, and the platform-view host below |
+| `frust-shell-macos::platform_view` | The AppKit (Mode A) native-view host: resolves a slot's `view_type` to a plugin factory, parents the returned `NSView` above winit's content view, and places/shows/disposes it from every later command. Its slot bookkeeping, geometry mapping and retain accounting sit behind a `NativeViewOps` seam and compile on every host; only the AppKit implementation is `cfg(target_os = "macos")` |
 | `frust-shell-windows` | Win32 integration: taskbar identity, window/taskbar icons, an `HMENU` menu bar with keyboard accelerators, and titlebar brightness — every `unsafe` and every `windows-sys` call confined to `win32_glue` |
 | `frust-shell-linux` | Wayland `app_id`/X11 `WM_CLASS` plus the X11 window icon, through winit's own cross-platform API. Deliberately thin: no GTK/X11 binding, no native menu (the menu is widget-drawn), no `unsafe`, one hook implemented |
 | `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; carries the theme precedence ladder and the conformance-pinned resolved-surface-mode publish site |
 | `frust-shell-ios` | Sanctioned-unsafe C-ABI FFI boundary, app-binding macro, and CADisplayLink-driven frame pipeline, with optional present-sync gating against platform-view geometry |
+| `frust-shell-web::app_handler` | Winit-generic host-signal translation ported from `frust-shell-desktop` (input mapping, the reactive-owner event wrap, theme delivery, window-metrics publish) plus, gated to `wasm32`, the `browser_loop` submodule owning the canvas-bound event loop and frame turn (`spawn_app`/`run_app`) |
+| `frust-shell-web::pacing` | Pure paced-wake decision logic composing the browser's two wake mechanisms (`requestAnimationFrame` redraws, `ControlFlow::WaitUntil` deadlines) |
+| `frust-shell-web::render` | The single-thread inline frame executor (`WebFrameExecutor`) over the wgpu surface: swapchain reconciliation, encode/acquire/submit, and the cold-page adapter-retry bring-up |
+| `frust-shell-web::input` | `TouchTracker` — maps every winit touch `id` to a per-sequence slot and emits `InputEvent::PointerContact` for each contact, the mobile shells' multi-contact model; the one input mapping with no `frust-shell-desktop` twin |
+| `frust-shell-web::ime` | The hidden-`<input>` overlay bridging real browser composition into `ImeEvent::Compose`/`Commit`, and the canvas re-dispatch that keeps plain typing on winit's existing key path — see Cross-cutting host signals below |
+| `frust-shell-web::logging` | Routes the `log` facade to the browser console (`console_log`/`console_error_panic_hook`), idempotent against the facade's own install, plus a `?log=` query-param level knob |
 
 ## Layer Dependencies
 
@@ -47,25 +64,46 @@ semantics), `frust-scene` (renderer-agnostic `Scene`/`SceneBuilder`), `frust-tex
 state), `frust-render` (`SurfaceRenderer`, encode/present, pipeline cache) and `frust-reactive`
 (`ReactiveRuntime`, `deep_link`, `back`, `menu`, `task`). Desktop and Android also depend on
 `frust-paths` for cache-dir persistence, and Android on `frust-plugin` to install the
-JavaVM/Context handle plugins read.
+JavaVM/Context handle plugins read — the same `nativeInitPlatform` call installs the app's
+files/cache directories into `frust-paths` (`install_android_dirs`) first, which is what makes
+`data_dir()`/`cache_dir()` resolve there.
 
 `frust-shell-common` is a hard platform-free leaf: no `jni`/`ndk`/`winit` dependency, no unsafe
 code, and no reactive dependency in its shipped surface, so every concrete shell can share it
 unconditionally. Platform FFI lives only in the concrete shells — `winit` + `accesskit_winit` in
 `frust-shell-desktop`, `jni`/`ndk`/`accesskit_android` in `frust-shell-android`,
-`objc2`/`accesskit_ios` in `frust-shell-ios`, and the per-OS desktop bindings below.
+`objc2`/`accesskit_ios` in `frust-shell-ios`, `winit` alone (no AccessKit — there is no web
+adapter) in `frust-shell-web`, and the per-OS desktop bindings below.
 
 **The three per-OS desktop crates depend only on `frust-shell-desktop`** plus `winit`, whatever
-narrow seam they push into (`frust-reactive` for menu activations, `frust-theme` for the Windows
-brightness hook) and their own native bindings — never on each other, never on
-`frust-shell-common`, and nothing in the shared core depends on them. The core is compiled for
-every desktop host; the native half is chosen above it.
+narrow seam they push into or are handed (`frust-reactive` for menu activations, `frust-theme` for
+the Windows brightness hook, and on macOS `frust-shell-common` for the `ViewCommand` vocabulary its
+platform-view hook receives) and their own native bindings — never on each other, and nothing in
+the shared core depends on them. The core is compiled for every desktop host; the native half is
+chosen above it.
+
+`frust-shell-macos` additionally depends on `frust-plugin`, to resolve a slot's `view_type` through
+the desktop view-factory registry: the **second shell → substrate edge** after `frust-shell-android`'s,
+in the same direction and for the same reason — a shell reads the leaf substrate so it can host a
+plugin's native view without depending on any plugin, and the edge only ever points that way (see
+[PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)). Both that edge and the `frust-shell-common`
+one are unconditional rather than macOS-gated, so the host's OS-neutral core stays compiled and
+unit-tested on every build host.
+
+**`frust-shell-web` depends only on `frust-shell-common`**, never on `frust-shell-desktop`, for the
+Overview's reasons. Its `winit` edge rides the identical workspace pin the desktop tier uses — a
+second `winit` identity between the two shell tiers would be a resolution hazard, not a
+convenience.
 
 ### Target gating
 
-The `frust` facade is the only place that names a per-OS shell crate. It gates each dependency and
-the matching extension-selection arm under the identical `cfg(target_os = …)`, so a build resolves
-only its own host's native bindings:
+The `frust` facade is the only place that names a per-OS or per-tier shell crate. It gates each
+dependency and the matching extension-selection/entry-point arm under the identical
+`cfg(target_os = …)` — or `cfg(target_arch = "wasm32")` for the browser tier — so a build resolves
+only its own host's native bindings: `crates/frust/Cargo.toml`'s `[target.'cfg(not(any(target_os =
+"android", target_os = "ios", target_arch = "wasm32")))'.dependencies]` table carries
+`frust-shell-desktop` (excluding it from `wasm32`), and a separate `[target.'cfg(target_arch =
+"wasm32")'.dependencies]` table carries `frust-shell-web` instead.
 
 | Target | Shell composition |
 |--------|-------------------|
@@ -73,6 +111,7 @@ only its own host's native bindings:
 | other desktop hosts (BSDs) | shared desktop core + the whole-set no-op extensions — window, input, theme and accessibility all work; only native identity/menu integration is absent |
 | Android | `frust-shell-android` only; the desktop core is excluded (winit's `android-activity` edge does not build there and the app is JNI-driven) |
 | iOS | `frust-shell-ios` only; the desktop core is excluded, keeping winit and `accesskit_winit` out of an iOS build entirely. The `app!` macro still emits a `__frust_main` **stub** on iOS, because the generated `main.rs` binary target Xcode builds calls it — it logs and exits non-zero rather than looking like an app that started and vanished |
+| Web (`wasm32-unknown-unknown`) | `frust-shell-web` only; the desktop core is excluded (see the Overview, and `crates/frust-shell-web/Cargo.toml`'s own header). `frust::web_app!` mirrors `android_app!`/`ios_app!`: an unconditional, self-gating invocation whose generated `#[wasm_bindgen(start)]` shim expands to nothing off `wasm32`, and `app!` emits it under the identical gate |
 
 ### Sanctioned-unsafe zones
 
@@ -89,7 +128,7 @@ seam race-free without a lock.
 
 ## The Desktop Extension Seam
 
-`DesktopExtensions` is a six-hook trait, every method defaulted to a no-op, invoked at the six
+`DesktopExtensions` is an eight-hook trait, every method defaulted to a no-op, invoked at the
 points in the loop where a native integration has something to say. `NoExtensions` implements none
 of them and is what the zero-config preview installs, so that path pays nothing for a seam it does
 not use.
@@ -101,14 +140,17 @@ not use.
 | `on_window_created(&Arc<Window>)` | once, after creation, before the window is shown | attaching a native menu to the live handle; retaining the window |
 | `pump` | once per frame, at the top of the redraw pass | draining the extension's own queue so what it delivers is visible to *this* frame's rebuild |
 | `on_theme_brightness_changed` | whenever the resolved brightness actually moves | Windows titlebar theming |
+| `on_platform_view_commands(&Arc<Window>, scale, &[ViewCommand])` | once per frame, right after the frame is submitted | placing plugin-provided native views — macOS's AppKit host |
+| `on_platform_views_suspended` | the window or its surface is going away | removing every hosted native view before it is orphaned |
 | `on_close_requested() -> CloseAction` | on a close request | macOS hide-instead-of-quit |
 
 Two contracts shape it. **Static dispatch, not `dyn`:** the builder hook hands out a
 `DesktopEventLoopBuilder` that a platform crate extends through winit's own `EventLoopBuilderExt*`
-traits (object safety would bite), and there is exactly one extension per binary anyway. **The
-window reaches an extension exactly once:** only `on_window_created` receives it, as an `&Arc` the
-extension clones and retains if a later hook needs it — which also keeps five of the six hooks
-unit-testable with no live event loop.
+traits (object safety would bite), and there is exactly one extension per binary anyway. **Only
+two hooks receive the window:** `on_window_created`, as an `&Arc` the extension clones and retains
+if a later hook needs it, and `on_platform_view_commands`, which fires from inside the frame path
+and must parent a hosted view into that exact window. That keeps the other six unit-testable with
+no live event loop.
 
 `CloseAction::Exit` (the default) exits the loop, which is what runs the real shutdown path:
 `run_app` returns, the frame executor drops, the render thread joins after a final present and its
@@ -203,11 +245,11 @@ The desktop shell persists a pipeline cache through `frust-paths`, so second-and
 skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 that is any
 Vulkan adapter (Linux, and Windows when the selected backend is Vulkan; verified in wgpu-hal
 30.0.1's unconditional Vulkan feature set), never Metal or DX12 — so macOS never writes a cache.
-Loading is unconditional file I/O at startup on every desktop OS, and reads through to a legacy
-macOS cache base when the current-location file is absent, migrating nothing — that read-through is inert by construction (the legacy base is `Some`
-only on macOS, where a save never fires, so no legacy blob can exist); it survives purely as
-compatibility for the `frust-paths` macOS-arm change. The whole path is best-effort — startup never
-fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
+Loading is unconditional file I/O at startup on every desktop OS and reads through to a legacy
+macOS cache base when the current-location file is absent, migrating nothing — inert by
+construction, since the legacy base is `Some` only on macOS, where a save never fires. The whole
+path is best-effort: startup never fails on cache I/O. See
+[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
 
 ### Mobile frame path
 
@@ -245,12 +287,11 @@ GPU work and the font wait, the two longest serial stretches of iOS cold start, 
 instead of back to back. The two threads share one startup-span recorder (`SharedStartupSpans`)
 behind a `StartupRecorder` that is `Owned` for the inline (`FRUST_NO_RENDER_THREAD`) executor and
 `Shared` for the split one; every `Shared` method locks only for the body of its own record/take
-call, never across `render_scene`'s blocking GPU tail (drawable acquire plus submit) — a `render_loop`
-that once held the lock across that whole call was a latent UIKit-watchdog hazard. Once the startup
-line is taken and emitted on the first present, the render thread drops to a lock-free `Owned`
-handle for every later frame. Because the two threads race to record onto the same shared line, the
-spans they contribute do not print in a fixed left-to-right causal order — a reader determines actual
-ordering from each span's own recorded delta, not from its position in the line.
+call, never across the blocking GPU tail (drawable acquire plus submit), which would be a UIKit
+watchdog hazard. Once the startup line is taken and emitted on the first present, the render thread
+drops to a lock-free `Owned` handle for every later frame. Because the two threads race to record
+onto one shared line, the spans do not print in causal order — read each span's own delta, not its
+position.
 
 Frame pacing itself is unchanged: the surface's desired maximum frame latency stays at its constant
 (two frames in flight, `crates/frust-gpu/src/surface.rs`), and pre-acquiring a drawable ahead of the
@@ -260,10 +301,31 @@ dial: `ios-pace`, one `frust-perf ios-pace` line per rendered frame decomposing 
 submit/loop time plus `p2p_us` — submit-to-submit cadence between frames whose GPU work was actually
 submitted for presentation. A frame that presented nothing reports `p2p_us=NA` and leaves the
 cadence base untouched; under armed present-sync the UI thread commits the drawable later than the
-render thread's own submit, so the render thread never observes that later commit. This diagnostic
-is also what showed an earlier "frames over 20 ms are missing a vsync" reading to be a measurement
-artefact: `FramePasses::total` sums the UI thread's and the render thread's concurrently-running
-spans, so it is a cost, not an interval, and present-to-present on the iPhone SE is a locked 60 Hz.
+render thread's own submit, so the render thread never observes that later commit. `FramePasses::total`
+is not an interval to read a dropped vsync out of: it sums the UI and render threads'
+concurrently-running spans, so it is a cost.
+
+### Web frame path
+
+The single-thread inline executor (`WebFrameExecutor`, `crates/frust-shell-web/src/render.rs`) —
+mirroring the desktop core's `FrameExecutor::Inline` encode→acquire→submit tail — is this tier's
+**first-class** path, not a fallback: `wasm32-unknown-unknown` has no OS threads and wgpu's handle
+types are not `Send`/`Sync` there, so there is no split executor to fall back from. Redraws ride
+`requestAnimationFrame`; a paced wake instead rides winit's `ControlFlow::WaitUntil`, serviced by
+the browser's Prioritized Task Scheduling API (falling back to `setTimeout`) rather than the
+heavily-clamped bare-`setTimeout` chain a naive implementation would hit — every deadline computed
+on `web_time::Instant` (`crates/frust-shell-web/src/pacing.rs`), the identical type winit itself
+declares `ControlFlow::WaitUntil` over on this target. The swapchain is reconciled against the
+canvas's real size every frame, because winit reports `inner_size` as 0x0 until its
+`ResizeObserver` has fired at least once. Surface bring-up is `async` all the way out to the
+caller — no `pollster::block_on`, which would block the page's one JS thread — and retries a cold
+page's `requestAdapter()`, which can spuriously answer `null` once on a machine with a perfectly
+good adapter (a GPU-process warm-up race). There is no pipeline-cache I/O: `frust-paths` writes
+files and a page has no filesystem, so the renderer runs on its empty initial cache every launch.
+
+The tier's gate vehicle is the standalone [examples/web-gallery](../examples/web-gallery)
+workspace — an ordinary `frust::web_app!` app exercising input, theme-follow, resize/DPR and a
+signal-driven repaint in the browser; see its own README for the milestone evidence.
 
 ### Cross-cutting host signals
 
@@ -275,11 +337,57 @@ spans, so it is a cost, not an interval, and present-to-present on the iPhone SE
   forwards the secondary mouse button as `PointerButton::Secondary` through a delivery-latched
   gate — an Up dispatches iff its Down did — guaranteeing every Down/Up pair reaches `AppTree`
   paired even under pointer capture.
+- **Touch contacts and resampling:** each mobile shell maps its platform's own per-finger id onto a
+  gesture-local `PointerId` slot (the first contact of a gesture always lands on slot `0`) and
+  delivers every contact as `InputEvent::PointerContact`, on both the direct path and the
+  `PointerResampler`-buffered one — a `RawPointerSample` carries the same `pointer_id`, one
+  resampler lane per contact. Slot numbering is the same **lowest-currently-free-slot** rule on
+  every shell: a slot is taken on `Down` and freed on `Up`/`Cancel`, freeing one never renumbers
+  another still-live slot, and a slot freed mid-gesture is handed to the next contact that arrives
+  — Android's `TouchSlotMap` (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots`,
+  and the web shell's `TouchTracker` `free_slots` all implement it independently. Android's JNI
+  entry point is `nativeOnTouch(handle, action, pointerId, x, y)` (`(JIIFF)V`); the Kotlin view
+  calls it once per pointer for `ACTION_DOWN`/`ACTION_POINTER_DOWN` and
+  `ACTION_UP`/`ACTION_POINTER_UP` (the changed `actionIndex`), once per currently-down pointer for
+  `ACTION_MOVE`, and once per pointer still down for `ACTION_CANCEL`. iOS's C-ABI entry point is
+  `frust_dispatch_touch(handle, phase, pointer_id, x, y)`; `FrustView` assigns each `UITouch` a
+  slot keyed by its `ObjectIdentifier` and sets `isMultipleTouchEnabled`. The web shell's
+  `TouchTracker` (see Module Structure) is the browser-side equivalent, with no resampler of its
+  own.
+- **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to
+  `InputEvent::Scale` at the cursor position, `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE ×
+  lines)` (a wheel-notch-equivalent line count; `WHEEL_SCALE_RATE_PER_LINE = 0.1`, ~10% per notch) —
+  a plain, unmodified wheel stays `Scroll`. Winit's `PinchGesture` (macOS only at this winit pin)
+  maps to the same `Scale` stream with `scale_delta = 1.0 + delta` and `ScalePhase`
+  Begin/Update/End taken from winit's gesture-bracket phase; see `desktop-pinch-linux-windows-unavailable`
+  in [LIMITATIONS.md](LIMITATIONS.md).
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape actually changes, guarded by the shared
   `WindowMetricsPublisher` against per-frame churn (see
   [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Desktop seeds insets as the default, since winit
-  0.30 offers no cross-platform safe-area accessor.
+  0.30 offers no cross-platform safe-area accessor. On iOS 26+, `FrustViewController` also reads
+  the corner-adapted safe-area regions (`UIView.edgeInsets(for: .safeArea(cornerAdaptation:))`,
+  horizontal and vertical), subtracts `safeAreaInsets` per edge, and pushes four **physical**
+  window-control corner sizes through `frust_set_corner_insets` (beside `frust_set_insets`) from
+  both `pushInsets` and `viewDidLayoutSubviews`; the Rust handle merges the two calls into one
+  `WindowInsets` (corners are never consumed; zero on Android, desktop, web and below iOS 26). An
+  app's `FrustSceneDelegate` subclass owns `preferredWindowingControlStyle(for:)` and
+  `windowScene.sizeRestrictions` itself — no shell support, documented on the Swift class.
+- **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
+  calls androidx `enableEdgeToEdge` with transparent status/navigation-bar `SystemBarStyle`s, then
+  on API < 35 adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the status/nav-bar
+  contrast scrim, so transparent bars and real window insets arrive regardless of the manifest
+  theme; API 35+ enforces edge-to-edge platform-side regardless of any of this. The scaffold
+  template names `@android:style/Theme.Material.NoActionBar`; a still-legacy theme (missing
+  `windowDrawsSystemBarBackgrounds`) keeps working — the added flag covers it — but logs one
+  `frust`-tagged warning naming the migration recipe (see
+  [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)). Every real inset change logs `frust-insets
+  view_padding l=… t=… r=… b=… view_insets l=… t=… r=… b=… scale=…`
+  (`crates/frust-shell-android/src/app/surface.rs`) — debug builds only (`cfg!(debug_assertions)`),
+  since the Android logger is capped at Info in every build so an unconditional `log::debug!` would
+  never surface. The iOS counterpart is `frust-corner-insets tl=… tr=… bl=… br=…`
+  (`crates/frust-shell-ios/src/app/surface.rs`), also debug builds only (the iOS stderr logger
+  installs Info by default; `FRUST_LOG` overrides).
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
   re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
   on the resolved brightness actually moving so an override swapping one dark theme for another
@@ -315,11 +423,89 @@ spans, so it is a cost, not an interval, and present-to-present on the iPhone SE
   `sync_ime` (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only
   when it differs from the shape last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one
   platform touch point mapping the framework's `CursorIcon` onto winit's own vocabulary; a mobile
-  shell never reads the resolved value. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
+  shell never reads the resolved value. Web carries the identical request/resolve contract and a
+  real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its
+  semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
   and Cursor section for the request/resolve contract.
+- **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
+  `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
+  `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
+  those slots and the rule an asynchronous read inherits: the answer is a later focus-routed
+  dispatch carrying no identity, so it is bound to the session (`focus_epoch`) recorded when the
+  paste request is drained and dropped when that session has gone. Desktop and Android read
+  asynchronously; iOS reads synchronously.
+  **Desktop** serialises both operations on one lazily spawned worker thread owning the process's
+  single `arboard::Clipboard`, because on X11/Wayland a copy is served *live* by the process that
+  claimed the selection and a read can block for as long as that owner takes to answer — so the read
+  cannot run on the event loop. A finished read returns through the event-loop proxy as a fresh
+  top-level dispatch; an outstanding read absorbs a later request rather than queuing a second,
+  re-pointed at the most recent asker.
+  **Web** cannot go through winit here either, because a browser hands clipboard access only to the
+  focused editable: the hidden IME overlay below (see Web IME bridge) carries the `copy`/`cut`/
+  `paste` listeners, reading `clipboardData` on a paste and writing with `setData` on a copy or cut.
+  An app- or toolbar-driven access instead uses `navigator.clipboard`, undefined outside a secure
+  context (an `http://` page loses it, warning once; the keyboard path is unaffected).
+  **Android** owns the clipboard on the JVM side (`ClipboardManager` has no Rust-reachable binding),
+  so the channel is a JNI trio: the Kotlin view drains the write/paste slots once per frame and
+  pushes verbs back through two host routes — the IME's context-menu action and hardware
+  `Ctrl+C`/`X`/`V`/`A` — both gated on a focused editable. A clip needing coercion resolves off the
+  view's thread under a time-bounded session guard, one resolution outstanding at a time. See
+  [LIMITATIONS.md](LIMITATIONS.md) for the `getPrimaryClip`/`hasPrimaryClip` focus and toast quirks
+  this route works around.
+  **iOS** locks the `Native` toolbar policy at start-up (a later `set_selection_toolbar_policy` is
+  refused) because `UIPasteboard.general.string`'s paste-notice exemption applies only to a
+  system-initiated read, which only UIKit's own edit menu (`UIEditMenuInteraction`/
+  `UIMenuController`) provides; the framework's view is the app's single responder for that menu and
+  for hardware `Cmd+C`/`X`/`V`/`A`, and its read runs synchronously inside `paste(_:)` with no
+  in-flight window to guard. Both mobile clipboard paths are device-unverified.
+- **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (its `web_sys` backend
+  implements none of the IME setters — upstream issue 4424 is open with no timeline), so
+  `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under
+  `document.body` (`opacity: 0`, `pointer-events: none`), opened when the focused widget publishes
+  an active `ImeState` (`focus_ime_generation`) and removed when it stops. Its attributes come from
+  the focused field's `ImeContentType`: a secret field gets `type="password"` plus
+  `autocomplete="new-password"`, a suggestion-refusing field adds `inputmode="text"`, and a hint
+  that moves tears the element down and rebuilds it rather than mutating it, since a browser only
+  reads `type` when it classifies an element it has not seen before — checked from a dispatched
+  event and from the frame loop alike, so a focus move a signal drove (no input event behind it) is
+  answered on the next frame: the replacement inherits the DOM focus the old element held, an
+  element that had lost focus is closed instead (a frame never takes focus for the user), and the
+  element's value is cleared on every pass no composition owns. Composition tracking is an explicit
+  three-state session, because an *empty* `compositionend` is not reliably a cancel: several
+  browsers end a composition that way and deliver its text on the `input` behind it, so the preedit
+  is held one signal longer and resolved as that commit when one arrives, as a clear otherwise.
+  winit's own `keydown`/`keyup` listeners stay on the canvas rather than `document`, so the overlay
+  re-dispatches each plain keystroke onto the canvas as a copy — except a `keydown` the browser
+  reports as `Unidentified` (what a mobile soft keyboard sends for most of its keys), whose edit is
+  taken from the `input` signal behind it and delivered once as a key event instead. A soft
+  keyboard's Backspace is the known gap: the element is emptied every frame, so the deletion has
+  nothing to consume and raises no `input`. Removing the element mid-composition ends the session
+  and retracts the preedit, the same as a blur. The same element is the page's clipboard surface —
+  its verb listeners and the exclusion keeping a clipboard keystroke from reaching a widget twice
+  are the Clipboard bullet above. Not yet wired: the mobile visual-viewport jump when a soft
+  keyboard opens, and multiple simultaneous editables. The bridge is compile- and
+  unit-tested but device-unverified — this build host has no browser rig — see
+  [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
+- **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
+  adapter — a canvas app needs its semantics mirrored into real DOM/ARIA elements) and the in-app
+  devtools UI-thread hop (a `wasm32` build has no sockets for its loopback listener, so
+  `frust-shell-web` forwards no `devtools` cargo feature at all) are each a documented no-op rather
+  than a silent gap (`crates/frust-shell-web/src/app_handler.rs`'s `push_semantics`/`pump_devtools`).
+  See [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
 - **Platform-view embedding:** paint-time view frames feed the `platform_view` differ, which
-  exposes a command backlog each shell's FFI layer polls and applies to the native view hierarchy,
-  frame-paired to keep geometry in sync.
+  exposes an idempotent create/update/dispose backlog. The two mobile shells **poll** it across
+  their FFI boundary and apply it frame-paired against present, converting each rect to physical px
+  on the way. Desktop has neither boundary nor poller: the differ is driven straight from the winit
+  loop — ingest after paint, then **push** the batch to
+  `DesktopExtensions::on_platform_view_commands` after the frame is submitted, acknowledged as the
+  hook returns, rects left in **logical points** (the hook also gets the window's scale factor, for
+  a host that does need physical px; AppKit does not). macOS is the one host implementing it,
+  parenting the plugin-provided `NSView` above winit's content view — Mode A, so nothing is
+  forwarded into it and the frust slot behind it is simply covered. Pushing before present means a
+  hosted view can lead its surroundings by **at most one frame**
+  (`desktop-platform-view-frame-lead` in [LIMITATIONS.md](LIMITATIONS.md)); pairing would need a
+  presented-frame id the desktop executor does not publish. A suspend removes every hosted view
+  rather than hiding it, and every surface bring-up replays `Create` + `Update` per live slot.
 - **Surface-mode resolution:** each mobile shell resolves the host's declared translucency mode
   against actual surface capabilities at configure time and republishes the resolved verdict every
   frame.
@@ -338,16 +524,16 @@ spans, so it is a cost, not an interval, and present-to-present on the iPhone SE
 
 | Type | Purpose |
 |------|---------|
-| `AppTree` / `new_boxed_app` / `new_boxed_app_with` | Type-erased app driver each shell's FFI/event-loop layer owns and calls into for every lifecycle callback |
+| `AppTree` / `new_boxed_app` / `new_boxed_app_with` | Type-erased app driver each shell's FFI/event-loop layer owns and calls into for every lifecycle callback. Beside the lifecycle passes it carries the host-signal drains a shell polls: `take_clipboard_write()`/`take_paste_request()` (destructive, one-shot) and `selection_toolbar()`/`selection_toolbar_generation()` (a level plus a counter to diff), each delegating to the matching `RenderRoot` accessor |
 | `FrameGate` / `FrameInputs` / `FrameDecision` | Shared run/skip decision the continuous-loop mobile shells consult every tick |
 | `RenderCommand` / `Ack` / `AckWaiter` / `SceneFrame` | UI-thread↔render-thread lifecycle and scene-handoff vocabulary underlying each shell's default split frame path |
-| `PlatformViewState` / `ViewCommand` | Generation-stamped native-sibling create/update/dispose backlog each mobile shell exposes to its embedding module |
+| `PlatformViewState` / `ViewCommand` | Generation-stamped native-sibling create/update/dispose backlog — polled by a mobile shell's embedding module, pushed by the desktop shell to its per-OS host |
 | `SurfaceMode` / `ResolvedSurfaceMode` / `SurfaceModeWatcher` | Host translucency declaration latch plus per-frame resolved-mode publication |
 | `WindowMetricsPublisher` | Shared, change-guarded path every shell drives to provide window-shape context without per-frame re-provides (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)) |
-| `DesktopExtensions` / `NoExtensions` / `CloseAction` / `DesktopEventLoopBuilder` | The per-OS desktop seam: its six hooks, the whole-set no-op, the close verdict, and the builder type a platform crate extends |
+| `DesktopExtensions` / `NoExtensions` / `CloseAction` / `DesktopEventLoopBuilder` | The per-OS desktop seam: its eight hooks — including `on_platform_view_commands` (the per-frame native-view batch) and `on_platform_views_suspended` (remove every hosted view) — the whole-set no-op, the close verdict, and the builder type a platform crate extends |
 | `DesktopConfig` / `MenuSpec` / `MenuItemSpec` / `MenuRole` / `IconData` | Platform-independent desktop identity and native-menu vocabulary, re-exported by the facade (`IconData` as `DesktopIconData`) |
 | `MacosExtensions` / `WindowsExtensions` / `LinuxExtensions` | The three per-OS implementations, each built from a borrowed `DesktopConfig` and installed by the facade under its own target `cfg` |
-| `android_app!` / `ios_app!` / `app!` | Facade macros binding a generated app's state/logic to the fixed JNI / C-ABI export set, and to the desktop entry point |
+| `android_app!` / `ios_app!` / `web_app!` / `app!` | Facade macros binding a generated app's state/logic to the fixed JNI / C-ABI export set, the wasm-bindgen start shim, and the desktop entry point |
 
 ## Verification State
 
@@ -355,12 +541,11 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 
 - **macOS** — runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu
   and accelerator, Hide/Show All, and close-then-Dock-click reopen.
-- **Windows** — runtime-verified on hardware (2026-08-19, Windows 11): titlebar/taskbar icon,
-  AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and
-  quit. The pass caught two real defects, both fixed: muda's predefined quit dead-ends under
-  winit's pump (the quit role is now an owned item the handler maps to `WM_CLOSE`), and an
-  accelerator only enters the `HACCEL` if its submenu is attached before the item is appended
-  (build order is load-bearing) — both documented at their `menu.rs` sites.
+- **Windows** — runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity,
+  titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules the
+  pass established are load-bearing and documented at their `menu.rs` sites: muda's predefined quit
+  dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is
+  attached before the item is appended.
 - **Linux** — proven by cross-target compilation only, plus every native call site read against
   its vendored source. Owed: a non-headless `app_id`/icon pass. See
   [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and

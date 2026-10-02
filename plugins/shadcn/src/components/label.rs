@@ -21,11 +21,11 @@ use frust::Theme;
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Role,
-    SemanticsCtx, Size, View, Widget,
+    SemanticsCtx, Size, ThemeTextType, View, Widget,
 };
 
 use crate::style::{TEXT_SM, disabled_tint};
-use crate::text::Label;
+use crate::text::{Label, themed_family};
 
 /// Unthemed fallback ink (a theme resolves this from `colors.on_surface`,
 /// shadcn's `--foreground`).
@@ -97,20 +97,24 @@ fn resolve_ink(theme: Option<&Theme>) -> Color {
     theme.map_or(FALLBACK_INK, |t| t.scheme().on_surface)
 }
 
-/// The label's style: `text-sm font-medium`, at the resolved (possibly
-/// disabled-dimmed) ink.
-fn label_style(ink: Color) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(TEXT_SM as f32, ink)
-    }
+/// The label's style: `text-sm font-medium` in the live theme's `LabelLarge`
+/// family, at the resolved (possibly disabled-dimmed) ink.
+fn label_style(theme: Option<&Theme>, ink: Color) -> TextStyle {
+    themed_family(
+        TextStyle {
+            weight: FontWeight::MEDIUM,
+            ..TextStyle::new(TEXT_SM as f32, ink)
+        },
+        theme,
+        ThemeTextType::LabelLarge,
+    )
 }
 
 impl Widget for LabelWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let ink = disabled_tint(resolve_ink(theme), self.disabled);
-        let style = label_style(ink);
+        let style = label_style(theme, ink);
         let size = self.label.layout(ctx, &style);
         bc.constrain(size)
     }
@@ -218,5 +222,25 @@ mod tests {
             View::<()>::rebuild(&next, &prev, &mut element, &mut BuildCtx::new(&mut counter));
         assert!(flags.contains(ChangeFlags::LAYOUT));
         assert_eq!(element.text, "Password");
+    }
+
+    // ---- Typeface: the text follows the live theme -----------------------
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_text_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a label's text",
+            |_: &mut ()| label("Email"),
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_text_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a label's text",
+            |_: &mut ()| label("Email"),
+        );
     }
 }

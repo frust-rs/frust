@@ -11,7 +11,7 @@ pointer.
 
 OPEN #1 (engine plan, decided 2026-08-29): **(b)** — this plan adds no wgpu
 feature. The target-gated `wasm32` `gles`/`webgpu` section is owned by the
-Web Shell plan (`fplan_000001a02ee9100bPd4uUpRs`), not this one. Everything
+Web Shell plan, not this one. Everything
 below documents why a measurement is currently blocked and what the nearest
 desktop stand-in is; it does not open that gate.
 
@@ -94,5 +94,5 @@ estimate so it is never read back as a benchmark result.
   at this file.
 - `docs/DEVELOPMENT.md` § Version-Pin Policy — why enabling `gles`/`webgpu`
   is not a local decision.
-- Web Shell plan `fplan_000001a02ee9100bPd4uUpRs` — owns the target-gated
+- The Web Shell plan — owns the target-gated
   `wasm32` `gles`/`webgpu` section this card explicitly does not open.

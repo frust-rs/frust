@@ -594,16 +594,34 @@ const BADGE_TEXT_SIZE: f32 = 11.0;
 /// shaping), scoped down to what a short badge label needs: no wrapping, no
 /// overflow, no natural-vs-fitted distinction. `button::core::LabelRun` is
 /// `pub(super)` to `button` and out of scope to import (see the module
-/// docs), so this is a parallel, badge-scoped copy of the same idiom.
+/// docs), so this is a parallel, badge-scoped copy of the same idiom. The
+/// cache is keyed on the content *and* the resolved style, so a theme swap
+/// that changes the family reshapes instead of serving the old face.
 struct BadgeRun {
     content: String,
+    /// The style the cached layout was shaped with.
+    style: TextStyle,
     layout: Option<TextLayout>,
+}
+
+/// The badge label's resolved style: [`BADGE_TEXT_SIZE`] stays literal, and
+/// the family is borrowed from the live theme's `labelSmall` — the role whose
+/// 11px that size matches — at layout (unthemed: the platform system UI
+/// family), so a theme swap or a font picker restyles the label along with
+/// the rest of the catalog.
+fn badge_style(theme: Option<&Theme>) -> TextStyle {
+    let mut style = TextStyle::new(BADGE_TEXT_SIZE, Color::BLACK);
+    if let Some(theme) = theme {
+        style.family = theme.type_scale.label_small.family.clone();
+    }
+    style
 }
 
 impl BadgeRun {
     fn new() -> Self {
         Self {
             content: String::new(),
+            style: badge_style(None),
             layout: None,
         }
     }
@@ -615,14 +633,17 @@ impl BadgeRun {
         }
     }
 
-    /// Shape (or reuse) the run, returning its measured size.
-    fn shape(&mut self, ctx: &mut LayoutCtx) -> Size {
+    /// Shape (or reuse) the run in `style`, returning its measured size.
+    fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        if self.style != *style {
+            self.style = style.clone();
+            self.layout = None;
+        }
         if let Some(layout) = &self.layout {
             return layout.size();
         }
-        let style = TextStyle::new(BADGE_TEXT_SIZE, Color::BLACK);
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, &style, None);
+        let laid = text_ctx.layout(&self.content, &self.style, None);
         let size = laid.size();
         self.layout = Some(laid);
         size
@@ -1068,7 +1089,8 @@ impl Widget for IconButtonWidget {
             ResolvedBadge::Dot => Size::new(DOT_DIAMETER, DOT_DIAMETER),
             ResolvedBadge::Label(text) => {
                 self.badge_run.set_content(text);
-                let text_size = self.badge_run.shape(ctx);
+                let style = badge_style(Theme::from_layout_ctx(ctx));
+                let text_size = self.badge_run.shape(ctx, &style);
                 let width = (text_size.width + BADGE_H_PAD * 2.0).max(BADGE_HEIGHT);
                 Size::new(width, BADGE_HEIGHT)
             }
@@ -1242,6 +1264,7 @@ mod tests {
     use super::*;
     use frust::FrameTime;
     use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::FontFamily;
     use frust::authoring::{BuildCtx, PointerButton, PointerEvent, View};
     use frust_widgets::test_support::leaf_any;
     use std::any::Any;
@@ -1791,6 +1814,77 @@ mod tests {
                 .iter()
                 .any(|(_, ink, glyphs)| *ink == ON_PRIMARY && *glyphs == 1),
             "the badge label's one-digit glyph run is painted at on_primary"
+        );
+    }
+
+    // ---- Badge typeface: the label's family follows the live theme ----------
+
+    /// A baseline theme whose `labelSmall` role names `family`.
+    fn theme_with_label_small(family: FontFamily) -> Theme {
+        let mut theme = crate::baseline();
+        theme.type_scale.label_small.family = family;
+        theme
+    }
+
+    /// Lay `widget` out against `tcx`, threading `theme` the way the render
+    /// root does.
+    fn layout_themed(widget: &mut IconButtonWidget, tcx: &mut TextContext, theme: Option<&Theme>) {
+        let mut ctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        widget.layout(&mut ctx, &BoxConstraints::loose(Size::new(200.0, 200.0)));
+    }
+
+    #[test]
+    fn a_badge_label_takes_its_family_from_label_small() {
+        let view = icon_button::<(), _>(leaf_any(24.0, 24.0), |_| {}).badge(BadgeValue::Count(7));
+        let mut widget = build(&view);
+        let mut tcx = TextContext::new();
+        let probe = FontFamily::named("Icon Badge Role Probe");
+        layout_themed(
+            &mut widget,
+            &mut tcx,
+            Some(&theme_with_label_small(probe.clone())),
+        );
+        assert_eq!(widget.badge_run.style.family, probe);
+        // Only the family is themed: the badge's own 11px stays.
+        assert_eq!(widget.badge_run.style.size, BADGE_TEXT_SIZE);
+    }
+
+    #[test]
+    fn without_a_theme_the_badge_label_keeps_the_unthemed_style() {
+        let unthemed = TextStyle::new(BADGE_TEXT_SIZE, Color::BLACK);
+        assert_eq!(badge_style(None), unthemed);
+        assert_eq!(unthemed.family, FontFamily::SystemUi);
+
+        let view = icon_button::<(), _>(leaf_any(24.0, 24.0), |_| {}).badge(BadgeValue::Count(7));
+        let mut widget = build(&view);
+        let mut tcx = TextContext::new();
+        layout_themed(&mut widget, &mut tcx, None);
+        assert_eq!(widget.badge_run.style, unthemed);
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_the_cached_badge_label() {
+        let view = icon_button::<(), _>(leaf_any(24.0, 24.0), |_| {}).badge(BadgeValue::Count(7));
+        let mut widget = build(&view);
+        let mut tcx = TextContext::new();
+        let first = theme_with_label_small(FontFamily::named("Icon Badge Swap Probe A"));
+        layout_themed(&mut widget, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses the cached run outright.
+        let settled = tcx.shape_cache_stats();
+        layout_themed(&mut widget, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        let second = theme_with_label_small(FontFamily::named("Icon Badge Swap Probe B"));
+        layout_themed(&mut widget, &mut tcx, Some(&second));
+        assert!(
+            tcx.shape_cache_stats().shapes > settled.shapes,
+            "a family swap must reshape the badge label, not serve the old face"
         );
     }
 

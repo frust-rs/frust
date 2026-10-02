@@ -88,7 +88,7 @@ use super::switch;
 use crate::motion::Ramp;
 use crate::press::{Lane, inside_inclusive as inside, keyframes_at, lerp_color};
 use crate::style;
-use crate::text::Label as ShapedText;
+use crate::text::{Label as ShapedText, ThemeTextType};
 use crate::tokens::{BeuiTokens, sans_family};
 
 /// Field width used when the incoming constraints are horizontally unbounded —
@@ -402,7 +402,14 @@ impl<State: 'static> InputView<State> {
     }
 }
 
-/// The label's text style: `text-sm font-medium text-foreground`.
+/// The type-scale role the label's family resolves from at layout.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the message's family resolves from at layout.
+const MESSAGE_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The label's text style: `text-sm font-medium text-foreground`. The family
+/// here is the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s family.
 fn label_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -413,7 +420,8 @@ fn label_style(color: Color) -> TextStyle {
     }
 }
 
-/// The message's text style: `text-xs text-destructive`.
+/// The message's text style: `text-xs text-destructive`. The family here is
+/// the unthemed base; `layout` shapes in [`MESSAGE_ROLE`]'s family.
 fn message_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -620,11 +628,11 @@ impl Widget for InputWidget {
         let tint = |color: Color| style::disabled_tint(color, self.disabled, DISABLED_OPACITY);
 
         let label_size = match &mut self.label {
-            Some(label) => label.layout(ctx, &label_style(tint(ink))),
+            Some(label) => label.layout_themed(ctx, &label_style(tint(ink)), LABEL_ROLE),
             None => Size::ZERO,
         };
         if let Some(message) = &mut self.message {
-            message.layout(ctx, &message_style(destructive));
+            message.layout_themed(ctx, &message_style(destructive), MESSAGE_ROLE);
         }
 
         let width = if bc.max().width.is_finite() {
@@ -752,8 +760,13 @@ impl Widget for InputWidget {
             let row_y = origin.y + self.field.max_y() + ROW_GAP;
             let rise = MESSAGE_RISE * (1.0 - presence);
             let size = message.size();
+            // The layer's origin matches the message's own paint origin
+            // (`+ LABEL_PADDING_X`, same as the label row) so its right edge
+            // lands at the text's right edge instead of `LABEL_PADDING_X`
+            // short of it — the old mismatch clipped the last few px of
+            // every message (e.g. a trailing period).
             scene.push_layer(
-                Point::new(origin.x, row_y - MESSAGE_RISE),
+                Point::new(origin.x + LABEL_PADDING_X, row_y - MESSAGE_RISE),
                 Size::new(size.width.max(1.0), size.height + MESSAGE_RISE),
                 presence as f32,
             );
@@ -817,6 +830,9 @@ mod tests {
         strokes: Vec<(Rect, f64, Color)>,
         glyphs: Vec<Point>,
         layers: Vec<f32>,
+        /// `(origin, size)` of each pushed layer, in paint order — matches
+        /// `layers` index-for-index.
+        layer_rects: Vec<(Point, Size)>,
         transforms: Vec<Affine>,
     }
 
@@ -838,8 +854,9 @@ mod tests {
             let t = run.transform.translation();
             self.glyphs.push(Point::new(t.x, t.y));
         }
-        fn push_layer(&mut self, _o: Point, _s: Size, alpha: f32) {
+        fn push_layer(&mut self, o: Point, s: Size, alpha: f32) {
             self.layers.push(alpha);
+            self.layer_rects.push((o, s));
         }
         fn push_transform(&mut self, transform: Affine) {
             self.transforms.push(transform);
@@ -1260,6 +1277,32 @@ mod tests {
     }
 
     #[test]
+    fn the_message_layer_reaches_the_message_runs_right_edge() {
+        // Regression for the clip where the layer stopped `LABEL_PADDING_X`
+        // short of the text it was compositing, chopping the last few px off
+        // every error/success message (e.g. a trailing period).
+        let view: InputView<String> =
+            input("", |_s: &mut String, _t| {}).error("That handle is taken.");
+        let mut w = build(&view);
+        let size = layout(&mut w, 200.0);
+        let message_width = w.message.as_ref().expect("an error message").size().width;
+        assert!(message_width > 0.0, "the message shaped to something");
+
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, size, FrameTime::ZERO);
+        w.paint(&mut ctx, &mut rec);
+
+        let (layer_origin, layer_size) = *rec.layer_rects.first().expect("the message layer");
+        let text_origin = *rec.glyphs.last().expect("the message glyph run");
+        let text_right_edge = text_origin.x + message_width;
+        let layer_right_edge = layer_origin.x + layer_size.width;
+        assert!(
+            layer_right_edge >= text_right_edge - 1e-6,
+            "layer right edge {layer_right_edge} clips the message's right edge {text_right_edge}"
+        );
+    }
+
+    #[test]
     fn reduce_motion_lands_every_treatment_at_once() {
         let mut h = Harness::new(Props::default());
         h.reduce_motion();
@@ -1376,4 +1419,35 @@ mod tests {
     }
     // `ShapedText` (aliasing `crate::text::Label`) carries its own leaf test
     // in `crate::text`'s test module now.
+
+    // ---- Typeface: label and message follow the live theme -----------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(320.0, 200.0);
+
+    /// A labelled field with an error message. The value and placeholder are
+    /// empty: the wrapped baseline field has no themed-family opt-in, so its
+    /// own text would paint the system face and is not what these tests pin.
+    fn probe_view(_: &mut ()) -> InputView<()> {
+        input::<(), _>("", |_: &mut (), _| {})
+            .label("Email")
+            .error("Enter a valid address")
+    }
+
+    #[test]
+    fn label_and_message_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the input's label and message", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn label_and_message_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap(
+            "the input's label and message",
+            probe_view,
+            PROBE_WINDOW,
+        );
+    }
 }

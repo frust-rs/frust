@@ -13,6 +13,7 @@ use frust_core::accesskit;
 use frust_core::anim::FrameTime;
 use frust_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use frust_core::insets::WindowInsets;
+use frust_core::selection_toolbar::SelectionToolbarRequest;
 use frust_core::view::{ChangeFlags, View};
 use frust_core::widget::PlatformViewFrame;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
@@ -88,7 +89,43 @@ pub trait AppTree {
     /// other additive methods below: any constant default (`0` included) would
     /// report "nothing ever changed" and silently strand a focus transition,
     /// against the frame gate's default-to-run rule.
+    ///
+    /// **This is not the session's identity**, and the distinction is the whole
+    /// reason [`AppTree::focus_epoch`] sits beside it — read that one's doc
+    /// before using this counter to decide whether focus is still where it was.
     fn focus_ime_generation(&self) -> u64;
+
+    /// The live focus session's **identity**, advanced once per honoured focus
+    /// claim and once per session release (delegates to
+    /// [`RenderRoot::focus_epoch`]).
+    ///
+    /// Two adjacent generation counters invite exactly one mistake, so: the
+    /// neighbour above counts *changes to the published surface*, this one
+    /// counts *sessions*, and neither substitutes for the other.
+    ///
+    /// * **Focus moving from one field to another moves this one and can leave
+    ///   the neighbour completely still.** Claiming focus while some field is
+    ///   already focused writes `true` over `true`, and `ImeState` is
+    ///   `{active, editing, caret, content_type}` — it names no widget, so two
+    ///   fields can publish equal surfaces, and a field that takes focus and
+    ///   publishes nothing leaves the *previous* field's surface standing.
+    /// * **An edit, a caret move, or the field being repositioned under the
+    ///   user moves the neighbour and leaves this one still.** The session is
+    ///   the same session throughout.
+    ///
+    /// So a shell that must run a frame or re-sync the platform IME reads the
+    /// neighbour; a shell binding an answer it will receive *later* to the
+    /// session that asked for it — an off-thread clipboard read, say — reads
+    /// this one and compares it again on arrival.
+    ///
+    /// **Never `0`**, whatever a shell's own FFI layer may use `0` to mean: the
+    /// counter is built at `1` and steps past `0` on wrap.
+    ///
+    /// Not defaulted, for a sharper reason than its neighbour's: a constant
+    /// default would report "still the same session" *forever*, so every stale
+    /// answer would compare equal and be accepted. A wrong default here delivers
+    /// text into the wrong field rather than costing a frame.
+    fn focus_epoch(&self) -> u64;
 
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased.
@@ -129,6 +166,85 @@ pub trait AppTree {
     /// platform input method. Delegates to [`RenderRoot::ime_state`]; `None` when
     /// nothing is focused or no IME surface was published.
     fn ime_state(&self) -> Option<ImeState>;
+
+    /// Take (and clear) the text a widget asked to put on the host clipboard
+    /// (delegates to [`RenderRoot::take_clipboard_write`]).
+    ///
+    /// The shell half of the clipboard channel: a focused editable answers a
+    /// copy/cut by writing its selection into the pass's clipboard slot
+    /// ([`frust_core::EventCtx::write_clipboard`]), and the shell — the only side
+    /// with a host clipboard to talk to — drains it here **immediately after
+    /// every [`AppTree::event`]/[`AppTree::ime_apply`]**, beside
+    /// [`AppTree::ime_state`]. `None` means no widget copied, and a shell with no
+    /// clipboard wired yet may simply not call this.
+    ///
+    /// **Destructive**, unlike the level reads around it: a clipboard write is an
+    /// edge, so a caller that drains and drops the result loses that write.
+    fn take_clipboard_write(&mut self) -> Option<String>;
+
+    /// Take (and clear) whether a widget asked the shell to read the host
+    /// clipboard back to it (delegates to [`RenderRoot::take_paste_request`]).
+    ///
+    /// The inverse direction, drained in the same place: on `true` the shell reads
+    /// its host clipboard and dispatches
+    /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`](frust_core::EditCommand::Paste)`(text))`
+    /// back through [`AppTree::event`] — a *new* dispatch, since the read may be
+    /// asynchronous. That answer is focus-routed and therefore self-cancelling: if
+    /// focus moved or was released while the read was in flight it reaches no
+    /// widget and is dropped, so the shell never has to track who asked.
+    ///
+    /// **Destructive**, for [`AppTree::take_clipboard_write`]'s reason.
+    fn take_paste_request(&mut self) -> bool;
+
+    /// The selection-toolbar request the focused field published during the most
+    /// recent [`AppTree::paint`] (delegates to
+    /// [`RenderRoot::selection_toolbar`]); `None` when no field has a selection
+    /// worth a toolbar.
+    ///
+    /// The shell half of the **platform edit-menu** route: on a host with a
+    /// system edit menu (iOS `UIEditMenuInteraction`), a shell reads this beside
+    /// [`AppTree::ime_state`] and presents the host menu at the request's anchor
+    /// rect, converting the logical rect to the platform's own units itself. A
+    /// **level**, not an edge — pair it with
+    /// [`AppTree::selection_toolbar_generation`] to notice changes cheaply.
+    ///
+    /// A field drawing its *own* toolbar publishes this too (one code path for
+    /// both routes), so a shell must gate on
+    /// `frust_core::selection_toolbar::selection_toolbar_policy()`, not on the
+    /// presence of a request.
+    ///
+    /// **`Some` means a field is FOCUSED, not that it has a selection.** The verbs
+    /// are a level a platform responder chain reads at any moment, so they are
+    /// published on every paint of a focused field; `None` means no field is
+    /// focused. Whether a menu should be *presented* is the request's own flag,
+    /// not the presence of the request.
+    ///
+    /// **Defaulted to `None`** like the getters below, so an [`AppTree`] impl
+    /// that predates this channel still compiles and reads an empty one.
+    fn selection_toolbar(&self) -> Option<SelectionToolbarRequest> {
+        None
+    }
+
+    /// A monotonically-increasing generation bumped when the **menu-significant**
+    /// part of [`AppTree::selection_toolbar`] actually changes — the present flag
+    /// and the verb set, its clearing included — and NOT when the anchor alone
+    /// moves (delegates to [`RenderRoot::selection_toolbar_generation`]).
+    ///
+    /// The anchor exclusion is deliberate: the anchor is recomputed every painted
+    /// frame and follows a dragging selection, so moving the generation with it
+    /// would ask the host to re-present its menu on every touch sample. Re-read
+    /// the anchor as a level for the menu's target rect; do not treat it as a
+    /// reason to present.
+    ///
+    /// The [`AppTree::focus_ime_generation`] contract one channel over: a shell
+    /// caches the last value it acted on and re-presents the host menu only when
+    /// it moves, which is what keeps a standing selection — republished every
+    /// frame it stands — from re-presenting the menu on every vsync.
+    ///
+    /// **Defaulted to `0`**, the same additive shape as its neighbour above.
+    fn selection_toolbar_generation(&self) -> u64 {
+        0
+    }
 
     /// Store the app's active theme, threaded into every subsequent
     /// layout/paint pass (delegates to [`RenderRoot::set_theme`]).
@@ -327,6 +443,10 @@ where
         self.root.focus_ime_generation()
     }
 
+    fn focus_epoch(&self) -> u64 {
+        self.root.focus_epoch()
+    }
+
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {
         self.root.layout_with_text(logical, text_ctx);
     }
@@ -348,6 +468,22 @@ where
 
     fn ime_state(&self) -> Option<ImeState> {
         self.root.ime_state()
+    }
+
+    fn take_clipboard_write(&mut self) -> Option<String> {
+        self.root.take_clipboard_write()
+    }
+
+    fn take_paste_request(&mut self) -> bool {
+        self.root.take_paste_request()
+    }
+
+    fn selection_toolbar(&self) -> Option<SelectionToolbarRequest> {
+        self.root.selection_toolbar()
+    }
+
+    fn selection_toolbar_generation(&self) -> u64 {
+        self.root.selection_toolbar_generation()
     }
 
     fn set_theme(&mut self, theme: Box<dyn Any>) {
@@ -507,6 +643,9 @@ mod tests {
         fn focus_ime_generation(&self) -> u64 {
             unimplemented!()
         }
+        fn focus_epoch(&self) -> u64 {
+            unimplemented!()
+        }
         fn layout(&mut self, _logical: Size, _text_ctx: &mut dyn Any) {
             unimplemented!()
         }
@@ -521,6 +660,17 @@ mod tests {
         }
         fn ime_state(&self) -> Option<ImeState> {
             unimplemented!()
+        }
+        // The clipboard drains answer honestly instead of panicking like their
+        // neighbours: "no widget asked" is a real answer a tree can give (it is
+        // what a shell reads on every pass in which nothing copied), so a
+        // hypothetical driver calling them on this double should see the empty
+        // channel rather than a panic.
+        fn take_clipboard_write(&mut self) -> Option<String> {
+            None
+        }
+        fn take_paste_request(&mut self) -> bool {
+            false
         }
         fn set_theme(&mut self, _theme: Box<dyn Any>) {
             unimplemented!()
@@ -542,6 +692,16 @@ mod tests {
             unimplemented!()
         }
         // set_insets deliberately NOT overridden — exercises the default no-op.
+    }
+
+    #[test]
+    fn app_tree_selection_toolbar_defaults_to_absent() {
+        // Compiles (both defaults exist, so a pre-toolbar `AppTree` impl outside
+        // this crate is unaffected) and reads the empty channel: no request, and
+        // a generation a shell can diff from frame zero.
+        let tree = MinimalTree;
+        assert!(tree.selection_toolbar().is_none());
+        assert_eq!(tree.selection_toolbar_generation(), 0);
     }
 
     #[test]
@@ -572,6 +732,85 @@ mod tests {
             EdgeInsets::new(0.0, 24.0, 0.0, 34.0),
             EdgeInsets::ZERO,
         ));
+    }
+
+    /// A leaf that answers a clipboard verb the way a real editable does: it
+    /// writes its "selection" on a copy and asks for the host clipboard on a
+    /// paste command it cannot satisfy itself.
+    struct ClipboardWidget;
+    impl Widget for ClipboardWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, _bc: &BoxConstraints) -> Size {
+            Size::ZERO
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(
+            &mut self,
+            ctx: &mut frust_core::EventCtx,
+            event: &InputEvent,
+        ) -> frust_core::EventResult {
+            match event {
+                InputEvent::EditCommand(frust_core::EditCommand::Copy) => {
+                    ctx.write_clipboard("selection".to_string());
+                    frust_core::EventResult::Handled
+                }
+                InputEvent::EditCommand(frust_core::EditCommand::SelectAll) => {
+                    ctx.request_paste();
+                    frust_core::EventResult::Handled
+                }
+                _ => frust_core::EventResult::Ignored,
+            }
+        }
+    }
+
+    struct ClipboardView;
+    impl View<NonDefaultState> for ClipboardView {
+        type Element = ClipboardWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClipboardWidget {
+            ClipboardWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ClipboardWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn erased_app_delegates_the_clipboard_drains_to_the_root() {
+        // The shell-facing half of the clipboard channel: a shell drains these
+        // through `AppTree` and never touches `RenderRoot` directly.
+        let mut app = new_boxed_app_with(
+            || NonDefaultState { label: "clip" },
+            |_state: &mut NonDefaultState| ClipboardView,
+        );
+        app.rebuild();
+        app.layout(Size::new(10.0, 10.0), &mut () as &mut dyn Any);
+
+        assert!(app.take_clipboard_write().is_none(), "nothing copied yet");
+        assert!(!app.take_paste_request());
+
+        app.event(&InputEvent::EditCommand(frust_core::EditCommand::Copy));
+        assert_eq!(app.take_clipboard_write().as_deref(), Some("selection"));
+        assert!(
+            app.take_clipboard_write().is_none(),
+            "the drain is one-shot through the erasure too"
+        );
+
+        app.event(&InputEvent::EditCommand(frust_core::EditCommand::SelectAll));
+        assert!(app.take_paste_request());
+        assert!(!app.take_paste_request());
+    }
+
+    #[test]
+    fn app_tree_clipboard_drains_report_an_empty_channel_on_the_minimal_tree() {
+        // Unlike its `unimplemented!()` neighbours these answer, because "no
+        // widget asked" is a real answer a tree with no clipboard can give.
+        let mut tree = MinimalTree;
+        assert!(tree.take_clipboard_write().is_none());
+        assert!(!tree.take_paste_request());
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub struct AppBarView<State: 'static> {
     leading: Option<AnyView<State>>,
     actions: Vec<AnyView<State>>,
     center_title: bool,
+    corner_shift: bool,
     density: AppBarDensity,
     shape_family: AppBarShapeFamily,
     toolbar_height: Option<f64>,
@@ -62,6 +63,7 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         leading: None,
         actions: Vec::new(),
         center_title: false,
+        corner_shift: true,
         density: AppBarDensity::Regular,
         shape_family: AppBarShapeFamily::Square,
         toolbar_height: None,
@@ -142,6 +144,17 @@ impl<State: 'static> AppBarView<State> {
     /// actions (`centerTitle`, default `false`).
     pub fn center_title(mut self, center: bool) -> Self {
         self.center_title = center;
+        self
+    }
+
+    /// Shift the row out from under a protruding window-control corner (default
+    /// `true`). Pass `false` for a bar that does not span the window's top edge
+    /// (detail pane, sheet, dialog, below other content): layout cannot see the
+    /// bar's window-space position and the corner value is never consumed, so
+    /// such a bar would otherwise over-shift.
+    #[must_use]
+    pub fn corner_shift(mut self, enabled: bool) -> Self {
+        self.corner_shift = enabled;
         self
     }
 
@@ -228,6 +241,7 @@ pub struct AppBarWidget {
     /// Whether `slots[0]` is the leading slot (vs. the title).
     has_leading: bool,
     center_title: bool,
+    corner_shift: bool,
     band: f64,
     shape_family: AppBarShapeFamily,
     background: Option<Color>,
@@ -256,6 +270,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             slots,
             has_leading: self.leading.is_some(),
             center_title: self.center_title,
+            corner_shift: self.corner_shift,
             band: self.band(),
             shape_family: self.shape_family,
             background: self.background,
@@ -301,6 +316,10 @@ impl<State: 'static> View<State> for AppBarView<State> {
             element.center_title = self.center_title;
             flags |= ChangeFlags::LAYOUT;
         }
+        if element.corner_shift != self.corner_shift {
+            element.corner_shift = self.corner_shift;
+            flags |= ChangeFlags::LAYOUT;
+        }
         let band = self.band();
         if element.band != band {
             element.band = band;
@@ -337,7 +356,27 @@ impl Widget for AppBarWidget {
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, band));
         let title_index = self.title_index();
 
-        let mut left = PAD_X;
+        // Shift the row out from under a protruding window-control corner (the
+        // iPadOS 26+ traffic lights); see the module docs of `appbar`.
+        let (shift_l, shift_r) = if self.corner_shift {
+            let corners = ctx.window_insets().corner_insets;
+            (
+                if corners.top_left.height > 0.0 {
+                    corners.top_left.width
+                } else {
+                    0.0
+                },
+                if corners.top_right.height > 0.0 {
+                    corners.top_right.width
+                } else {
+                    0.0
+                },
+            )
+        } else {
+            (0.0, 0.0)
+        };
+
+        let mut left = PAD_X + shift_l;
         if self.has_leading {
             let size = self.slots[0].layout_child(ctx, &slot_bc);
             self.slots[0].set_origin(Point::new(left, (band - size.height) / 2.0));
@@ -346,7 +385,7 @@ impl Widget for AppBarWidget {
 
         // Lay out actions in reverse so the *last* action lands flush against
         // the trailing edge, preserving left-to-right reading order.
-        let mut right = width - PAD_X;
+        let mut right = width - PAD_X - shift_r;
         for pod in self.slots[title_index + 1..].iter_mut().rev() {
             let size = pod.layout_child(ctx, &slot_bc);
             right -= size.width;
@@ -395,6 +434,7 @@ impl Widget for AppBarWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
+    use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
     use frust_widgets::test_support::{RecordingScene, leaf_any};
     use std::any::Any;
 
@@ -424,6 +464,28 @@ mod tests {
         let mut lctx =
             LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(theme as &dyn Any));
         w.layout(&mut lctx, bc)
+    }
+
+    /// Lay out under a window carrying the given window-control corners.
+    fn layout_with_corners(
+        w: &mut AppBarWidget,
+        bc: &BoxConstraints,
+        corners: CornerInsets,
+    ) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(WindowInsets::default().with_corner_insets(corners), |ctx| {
+            w.layout(ctx, bc)
+        })
+    }
+
+    fn top_corners() -> CornerInsets {
+        CornerInsets::new(
+            CornerInset::new(44.0, 30.0),
+            CornerInset::new(52.0, 30.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        )
     }
 
     /// Records both container shapes — `fill_rect` (square family) and
@@ -495,6 +557,128 @@ mod tests {
             "the title is centered in the remaining space \
              (left_gap={left_gap}, right_gap={right_gap})"
         );
+    }
+
+    #[test]
+    fn corner_shift_moves_leading_and_actions() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        let size = layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        assert_eq!(size.height, BAND);
+        assert_eq!(w.slots[0].origin().x, PAD_X + 44.0);
+        assert_eq!(
+            w.slots[3].origin().x + w.slots[3].size().width,
+            400.0 - PAD_X - 52.0
+        );
+    }
+
+    #[test]
+    fn corner_shift_opt_out_is_byte_identical_with_nonzero_corners() {
+        let bc = BoxConstraints::loose(Size::new(400.0, 200.0));
+        let mk = |shift: Option<bool>| {
+            let mut view: AppBarView<()> = app_bar("Home")
+                .leading(leaf_any(40.0, 40.0))
+                .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+            if let Some(b) = shift {
+                view = view.corner_shift(b);
+            }
+            build(&view)
+        };
+        let mut plain = mk(None);
+        let plain_size = layout(&mut plain, &bc);
+        let mut opted = mk(Some(false));
+        let opted_size = layout_with_corners(&mut opted, &bc, top_corners());
+        assert_eq!(plain_size, opted_size);
+        assert_eq!(plain.slots.len(), opted.slots.len());
+        for (a, b) in plain.slots.iter().zip(opted.slots.iter()) {
+            assert_eq!(a.origin(), b.origin());
+            assert_eq!(a.size(), b.size());
+        }
+    }
+
+    #[test]
+    fn corner_shift_defaults_on() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        assert_eq!(w.slots[0].origin().x, PAD_X + 44.0);
+    }
+
+    #[test]
+    fn corner_with_zero_height_shifts_nothing() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        let corners = CornerInsets::new(
+            CornerInset::new(44.0, 0.0),
+            CornerInset::new(52.0, 0.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        );
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            corners,
+        );
+        assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            400.0 - PAD_X
+        );
+    }
+
+    #[test]
+    fn center_title_still_centers_in_the_remaining_space_with_shifted_slots() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .center_title(true);
+        let mut w = build(&view);
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        let leading_end = w.slots[0].origin().x + w.slots[0].size().width;
+        let action_start = w.slots[2].origin().x;
+        let title_start = w.slots[1].origin().x;
+        let title_end = title_start + w.slots[1].size().width;
+        let left_gap = title_start - leading_end;
+        let right_gap = action_start - title_end;
+        assert!(
+            (left_gap - right_gap).abs() < 0.01,
+            "left_gap={left_gap}, right_gap={right_gap}"
+        );
+    }
+
+    #[test]
+    fn zero_corners_are_byte_identical() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)]);
+        let bc = BoxConstraints::loose(Size::new(400.0, 200.0));
+        let mut plain = build(&view);
+        layout(&mut plain, &bc);
+        let mut zeroed = build(&view);
+        layout_with_corners(&mut zeroed, &bc, CornerInsets::ZERO);
+        assert_eq!(plain.slots.len(), zeroed.slots.len());
+        for (a, b) in plain.slots.iter().zip(zeroed.slots.iter()) {
+            assert_eq!(a.origin(), b.origin());
+            assert_eq!(a.size(), b.size());
+        }
     }
 
     #[test]
@@ -682,5 +866,223 @@ mod tests {
             .find(|(_, n)| n.role() == Role::TitleBar)
             .expect("a TitleBar node is contributed");
         assert_eq!(node.label(), Some("Mail, inbox folder"));
+    }
+
+    // --- Render-time typeface identity ---
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_paints_in_roboto_flex_under_the_material_theme() {
+        use super::typeface_probe::{Face, assert_paints_only_in};
+        let flex = crate::tokens::font_data()[0];
+        assert_paints_only_in(
+            "the app bar title",
+            |_: &mut ()| app_bar::<()>("Hello"),
+            crate::baseline(),
+            &[flex],
+            Size::new(300.0, BAND),
+            Face {
+                bytes: flex,
+                name: "Roboto Flex",
+            },
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_follows_a_live_theme_family_change() {
+        // The demo gallery's font picker rewrites every type-scale role's
+        // family and pushes the theme; the title must follow it like the
+        // buttons do, not stay pinned to the catalog's own Roboto Flex.
+        use super::typeface_probe::{Face, assert_paints_only_in};
+        use frust::authoring::text::{FontFamily, GenericSlot};
+        let (flex, mono) = (crate::tokens::font_data()[0], crate::tokens::font_data()[1]);
+        let mono_family = FontFamily::stack_with_generic(
+            [crate::tokens::ROBOTO_MONO_FAMILY],
+            GenericSlot::Monospace,
+        );
+        let mut theme = crate::baseline();
+        macro_rules! every_role {
+            ($($role:ident),+ $(,)?) => {
+                $( theme.type_scale.$role.family = mono_family.clone(); )+
+            };
+        }
+        every_role!(
+            display_large,
+            display_medium,
+            display_small,
+            headline_large,
+            headline_medium,
+            headline_small,
+            title_large,
+            title_medium,
+            title_small,
+            body_large,
+            body_medium,
+            body_small,
+            label_large,
+            label_medium,
+            label_small,
+            display_large_emphasized,
+            display_medium_emphasized,
+            display_small_emphasized,
+            headline_large_emphasized,
+            headline_medium_emphasized,
+            headline_small_emphasized,
+            title_large_emphasized,
+            title_medium_emphasized,
+            title_small_emphasized,
+            body_large_emphasized,
+            body_medium_emphasized,
+            body_small_emphasized,
+            label_large_emphasized,
+            label_medium_emphasized,
+            label_small_emphasized,
+        );
+        // Both faces registered, as `install()` does: the title must pick the
+        // theme's Roboto Mono even with Roboto Flex available to it.
+        assert_paints_only_in(
+            "the app bar title",
+            |_: &mut ()| app_bar::<()>("Hello"),
+            theme,
+            &[flex, mono],
+            Size::new(300.0, BAND),
+            Face {
+                bytes: mono,
+                name: "Roboto Mono",
+            },
+        );
+    }
+}
+
+/// A render-time typeface probe for the Material components that build their
+/// text from plain `text(..)`: lays a view out and paints it through a real
+/// `RenderRoot` under a given theme, with only the given faces registered, and
+/// checks each painted glyph run's font bytes against one exact face.
+///
+/// Registering a face proves nothing about what paints — a text run that never
+/// asks for the theme's family paints the platform's system font right beside a
+/// successfully registered Roboto Flex — so these tests assert on the runs.
+///
+/// Every identity assertion is paired with a control, because "every run is
+/// the expected face" only means something where a run that does NOT opt in
+/// would come out differently. The control paints a plain `text(..)` — the
+/// `SystemUi` request an un-opted Material text makes — through the same
+/// theme and faces, and requires that none of its runs is the expected face.
+/// If a host ever resolved `SystemUi` to that face, the control fails, so an
+/// identity test can never pass there without the behaviour it guards.
+///
+/// The control deliberately uses no process-wide fallback decoy
+/// (`frust_text::register_generic_fallback`): that registry is append-only and
+/// shared by every `TextContext` this test binary builds, so a decoy would
+/// change other tests' `SystemUi` resolution depending on scheduling, and on a
+/// host with system fonts it is appended after them and never reached anyway.
+/// A host whose `SystemUi` has no face at all shapes zero runs for the control
+/// (allowed) and for an un-opted component (which then fails the identity
+/// assertion's at-least-one-run check).
+#[cfg(all(test, feature = "bundled-fonts"))]
+pub(crate) mod typeface_probe {
+    use frust::Theme;
+    use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{PaintScene, View};
+    use frust_core::{FrameTime, RenderRoot};
+    use kurbo::{Point, Size};
+    use peniko::Color;
+    use std::any::Any;
+
+    /// Records, per painted glyph run, whether its font bytes are `expected`.
+    struct FaceRecorder {
+        expected: &'static [u8],
+        matches: Vec<bool>,
+    }
+
+    impl PaintScene for FaceRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.matches
+                .push(run.font.font().data.as_ref() == self.expected);
+        }
+    }
+
+    /// Rebuilds `logic`'s view under `theme`, lays it out in `window` with a
+    /// text context holding `faces`, paints it, and returns one entry per
+    /// glyph run: `true` when that run shaped against `expected`'s bytes.
+    fn painted_run_faces<V: View<()>>(
+        mut logic: impl FnMut(&mut ()) -> V,
+        theme: Theme,
+        faces: &[&'static [u8]],
+        window: Size,
+        expected: &'static [u8],
+    ) -> Vec<bool> {
+        let mut tcx = TextContext::new();
+        for face in faces {
+            tcx.register_fonts(face.to_vec())
+                .expect("a bundled Material face registers");
+        }
+        let mut root: RenderRoot<(), V> = RenderRoot::new();
+        root.set_theme(Box::new(theme));
+        root.rebuild(&mut logic, &mut ());
+        root.layout_with_text(window, &mut tcx as &mut dyn Any);
+        let mut recorder = FaceRecorder {
+            expected,
+            matches: Vec::new(),
+        };
+        root.paint(&mut recorder, FrameTime::ZERO);
+        recorder.matches
+    }
+
+    /// The face every run must shape against: its exact bytes and a name for
+    /// failure messages.
+    pub(crate) struct Face {
+        pub(crate) bytes: &'static [u8],
+        pub(crate) name: &'static str,
+    }
+
+    /// Paints `logic`'s component under `theme` with `faces` registered and
+    /// asserts it painted at least one glyph run, every one in `expected` —
+    /// after first asserting the control (see the [module docs](self)): a plain
+    /// `text(..)` painted the same way has no run in `expected`. Returns the
+    /// component's run count, for a caller's own fixture checks.
+    #[track_caller]
+    pub(crate) fn assert_paints_only_in<V: View<()>>(
+        what: &str,
+        logic: impl FnMut(&mut ()) -> V,
+        theme: Theme,
+        faces: &[&'static [u8]],
+        window: Size,
+        expected: Face,
+    ) -> usize {
+        let control = painted_run_faces(
+            |_: &mut ()| frust::text("Hello"),
+            theme.clone(),
+            faces,
+            window,
+            expected.bytes,
+        );
+        let leaked = control.iter().filter(|matched| **matched).count();
+        assert_eq!(
+            leaked,
+            0,
+            "control: {leaked} of {} run(s) of a plain text() that never opts in shaped \
+             in {} — on this host an un-opted run is indistinguishable from the \
+             expected face, so the identity assertion for {what} would prove nothing",
+            control.len(),
+            expected.name
+        );
+
+        let runs = painted_run_faces(logic, theme, faces, window, expected.bytes);
+        assert!(!runs.is_empty(), "{what} painted no glyph run at all");
+        let foreign = runs.iter().filter(|matched| !**matched).count();
+        assert_eq!(
+            foreign,
+            0,
+            "{foreign} of {} glyph run(s) in {what} shaped against a face other than \
+             {} — the text is not asking for the theme's type-scale family",
+            runs.len(),
+            expected.name
+        );
+        runs.len()
     }
 }

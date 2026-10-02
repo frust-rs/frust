@@ -22,11 +22,19 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    CursorIcon, CursorPass, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
-    PointerButton, PointerEvent, PointerPhase,
+    ContactFrame, ContactPass, CursorIcon, EventCtx, EventOutcome, EventResult, ImeState,
+    InputEvent, OverlayEvent, OverlayEventKind, PointerButton, PointerEvent, PointerId,
+    PointerPhase, RequestPass,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
+use crate::overlay::{
+    OutsideTap, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPaintPass,
+    sort_into_paint_order,
+};
+use crate::selection_toolbar::{
+    SelectionToolbarActions, SelectionToolbarPass, SelectionToolbarRequest,
+};
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
@@ -159,11 +167,10 @@ const MAX_PENDING_RESULT_FLUSH_PASSES: usize = 3;
 /// bumps `generation` **only** when the value actually moves ([`ImeState`] is
 /// `PartialEq`).
 ///
-/// A free function over the two fields rather than a `&mut self` method because
-/// [`RenderRoot::paint`] writes it while holding disjoint borrows of the tree
-/// and the theme, where no whole-`self` call is possible;
-/// [`RenderRoot::store_ime_state`] is the method form the event pass uses, so
-/// both paths share this one implementation.
+/// A free function over the two fields rather than a `&mut self` method, so the
+/// change guard has exactly one implementation whatever borrows its caller
+/// happens to hold; [`RenderRoot::store_ime_state`] is the `&mut self` form, and
+/// is what every current caller goes through.
 ///
 /// The change guard is load-bearing, not an optimisation: the paint pass
 /// re-publishes the focused widget's IME surface every frame, so an
@@ -200,20 +207,35 @@ fn store_ime_state_in(slot: &mut Option<ImeState>, generation: &mut u64, next: O
 /// tests pin. The change guard itself is unchanged: an already-released root
 /// writes the same values back and moves nothing.
 ///
-/// A free function over the three fields (not a `&mut self` method) for the same
-/// reason [`store_ime_state_in`] is: [`RenderRoot::paint`] releases while holding
-/// disjoint borrows of the tree and the theme, where no whole-`self` call is
-/// possible. [`RenderRoot::release_focus_session`] is the method form.
+/// **A release ends the session's identity too.** On an actual move it advances
+/// `focus_epoch` and republishes it, which strands every recorded focus link at
+/// once — the chain the session ran through, and a floated surface's link that
+/// no container's blur sweep can reach. That is why the release has to own the
+/// epoch rather than leave it to the caller: a session cleared without moving
+/// its identity leaves links behind that still name it.
+///
+/// A free function over the fields (not a `&mut self` method) for the same
+/// reason [`store_ime_state_in`] is — one implementation of the contract,
+/// whatever borrows the caller holds. [`RenderRoot::release_focus_session`] is
+/// the method form, and is what every current caller goes through.
 fn release_focus_session_in(
     focus_active: &mut bool,
     ime_slot: &mut Option<ImeState>,
     generation: &mut u64,
+    focus_epoch: &mut u64,
+    root_identity: u64,
 ) {
     let moved = *focus_active || ime_slot.is_some();
     *focus_active = false;
     *ime_slot = None;
     if moved {
         *generation = generation.wrapping_add(1);
+        // A session that ends strands every link recorded against it, wherever
+        // in (or off) the tree it sits — the one clearing sweep no container can
+        // be asked to run. Only on an actual release: a `Down` on already-blurred
+        // chrome is the commonest event there is and must move nothing.
+        *focus_epoch = advance_focus_epoch(*focus_epoch);
+        crate::widget::set_live_focus_session(root_identity, *focus_epoch, *focus_epoch);
     }
 }
 
@@ -231,6 +253,38 @@ fn release_focus_session_in(
 /// is only ever compared for equality, never used to order anything.
 static NEXT_ROOT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
+/// The next focus epoch after `epoch`, skipping `0`.
+///
+/// `0` is reserved twice over — it is a never-claimed
+/// [`ChildPod`](crate::widget::ChildPod)'s stamp, and it is the epoch half of
+/// the `(0, 0)` pair a dispatch driven with no root at all compares against — so
+/// a root that wrapped onto it would hand every unclaimed pod in the tree a live
+/// link at once.
+fn advance_focus_epoch(epoch: u64) -> u64 {
+    match epoch.wrapping_add(1) {
+        0 => 1,
+        next => next,
+    }
+}
+
+/// What [`RenderRoot`]'s overlay pre-pass decided about one incoming event.
+///
+/// The pre-pass runs before anything else [`RenderRoot::event`] does, and has
+/// exactly two answers: the event belonged to a floated surface (or was swallowed
+/// by a modal light-dismiss) and the main tree must not see it, or it did not and
+/// today's dispatch continues. Both arms carry an [`EventOutcome`], because even
+/// the "continue" answer may already have produced one — an
+/// [`OutsideTap::Notify`]`{ consume: false }` surface is told about the press
+/// *and* lets it through, and the redraw that notification asked for must not be
+/// dropped on the floor when the main dispatch's own outcome replaces it.
+enum OverlayRoute {
+    /// The overlay layer consumed the event; return this outcome unchanged.
+    Consumed(EventOutcome),
+    /// The event continues into today's dispatch; merge this outcome into
+    /// whatever that produces.
+    Continue(EventOutcome),
+}
+
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
 ///
@@ -244,17 +298,88 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// Monotonic widget-id counter, borrowed by each `BuildCtx`.
     next_id: u64,
     window_size: Size,
-    /// Whether a pointer is currently down-and-captured somewhere in the tree.
-    /// Set on a `Down` whose dispatch requested capture, cleared on `Up`/`Cancel`.
-    /// Root-level mirror of the per-container `active` path bookkeeping.
-    pointer_captured: bool,
+    /// The **claimant** of the pointer capture in flight, if any: the contact
+    /// whose `Down` requested capture. Set on that `Down`, cleared only by the
+    /// claimant's own `Up`/`Cancel` — another contact's release never touches
+    /// it (rule (c) of [`InputEvent::PointerContact`]'s multi-contact contract).
+    /// Root-level mirror of the per-container `active` path bookkeeping, which
+    /// is keyed on the same claimant (see [`crate::widget::ChildPod::set_active`]).
+    capture_claimant: Option<PointerId>,
+    /// Whether the live capture's captor opted into the gesture's other
+    /// contacts ([`EventCtx::capture_contacts`]) on the `Down` it captured
+    /// with. Meaningless — and kept `false` — while nothing is captured.
+    /// Cleared early when a container takes the gesture over from that captor
+    /// ([`EventCtx::release_captured_child`]).
+    capture_contacts: bool,
+    /// Whether the live opt-in was made by the root widget itself rather than
+    /// by a pod below it — in which case a non-claimant contact is handed to the
+    /// root widget directly instead of walking the active path (see
+    /// [`crate::widget::ChildPod::event_child`]). Same lifetime as
+    /// `capture_contacts`.
+    contacts_captor_is_root: bool,
     /// Whether some widget in the tree currently holds focus. Root-level mirror of
     /// the per-container `focused` path bookkeeping (the focus analog of
-    /// `pointer_captured`): set when a dispatch requested focus, cleared by a
+    /// `capture_claimant`): set when a dispatch requested focus, cleared by a
     /// session release — a blur-on-outside-tap `Down`, an explicit focus release,
     /// a widget publishing an inactive IME surface, or the generic-unmount orphan
     /// drain in [`RenderRoot::rebuild`] (see [`release_focus_session_in`]).
     focus_active: bool,
+    /// Which branch the live focus/IME session belongs to: `None` for the main
+    /// tree, `Some(key)` for the floated surface whose pod holds the recorded
+    /// focus path. The identity `focus_active` deliberately does not carry — one
+    /// bool cannot say *whose* session it is, and a surface's chain and the main
+    /// tree's are not siblings any container's blur sweep can reach across.
+    ///
+    /// **Resolved from links that can be shown to be live.** The only
+    /// authoritative view of a pod's recorded link the root ever gets is the pod
+    /// itself, which it holds for exactly the length of
+    /// [`RenderRoot::paint_overlays`] — so that pass writes this, from
+    /// [`crate::widget::ChildPod::holds_live_focus`], and the event pass only ever
+    /// *clears* it (a hit-tested claim is the main tree's by construction, and a
+    /// release ends the session outright). An overlay-pass focus request cannot
+    /// be attributed at the root: the bubble is a bare flag, and a field in the
+    /// main tree re-claiming its own session through a floated toolbar raises
+    /// exactly the same one as an editable inside the surface claiming it for the
+    /// first time.
+    ///
+    /// The liveness half is what makes the record worth keeping. A pod's raw
+    /// `focused` flag survives the session moving away from it — nothing visits
+    /// an abandoned branch to clear one — so a record resolved from the flag
+    /// alone latched on the first surface that ever took focus and never let go.
+    /// Resolved from the stamp instead, it answers a question the code can
+    /// falsify, and it names nobody the moment the session leaves every surface.
+    ///
+    /// **It no longer gates the tree's paint seed**, which is the other half of
+    /// the same correction: seeding is per-link, against `focus_epoch`, so a
+    /// branch proves its own claim rather than the root vouching for it from one
+    /// frame behind. What is left here is *provenance* — whether an overlay
+    /// dispatch's IME publish is the session owner's — plus the cross-surface
+    /// retirement in [`RenderRoot::event`], both of which genuinely need a name
+    /// rather than a per-link answer.
+    focus_surface: Option<OverlayKey>,
+    /// The identity of the live focus session — what a
+    /// [`ChildPod`](crate::widget::ChildPod) stamps beside its recorded focus
+    /// link, and the only thing that tells a link on the session the root has
+    /// now from one a moved session left behind.
+    ///
+    /// The focus analog of `hover_epoch`, with one difference that follows from
+    /// focus having no per-pass rhythm: this advances **around a dispatch**
+    /// rather than at the end of one. [`RenderRoot::event`] moves it forward
+    /// before it dispatches and puts it back afterwards unless the dispatch
+    /// actually recorded a claim — so a claim is stamped with a value nothing
+    /// older carries, and a pass that moved no focus leaves every standing link
+    /// exactly as it found it. Published to the pods through
+    /// [`crate::widget::set_live_focus_session`], which is where a container
+    /// deciding routing, and a pod's own destructor, read it.
+    ///
+    /// Starts at `1`, not `0`: a freshly built pod's stamp is `0`, and `(0, 0)`
+    /// is what a dispatch driven with no root at all sees, so a real root must
+    /// never publish that pair.
+    ///
+    /// Wrapping is deliberate and harmless — the value is only ever compared for
+    /// equality, never ordered — but it skips `0` on the way round (see
+    /// [`advance_focus_epoch`]).
+    focus_epoch: u64,
     /// Whether the last completed hover pass left some widget in the tree holding
     /// the hover link. Root-level mirror of the per-pod hover stamp (the hover
     /// analog of `focus_active`), seeded into every event/paint pass so nothing
@@ -301,6 +426,31 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// beside it: the shell compares the value it last applied (see
     /// [`RenderRoot::cursor`]).
     cursor: CursorIcon,
+    /// The text the tree last asked the shell to put on the host clipboard, or
+    /// `None` once drained — the cursor's write-only sibling, resolved from the
+    /// same kind of per-pass slot ([`EventCtx::write_clipboard`]) by the same
+    /// [`RequestPass`] bracket.
+    ///
+    /// **One-shot, unlike [`cursor`](RenderRoot::cursor).** A cursor is a *level*
+    /// (a standing shape a shell re-applies when it differs); a clipboard write
+    /// is an *edge* (a thing to do once), so the accessor
+    /// [`RenderRoot::take_clipboard_write`] drains it and a shell that forgets to
+    /// call it merely delays the write rather than repeating it.
+    ///
+    /// A pass that writes replaces whatever stood here undrained — the newest
+    /// copy is the one the user meant, and the shell is expected to drain after
+    /// every dispatch — while a pass that writes nothing leaves it alone rather
+    /// than silently discarding a write nobody has taken yet.
+    pending_clipboard_write: Option<String>,
+    /// Whether the tree has asked the shell to read the host clipboard back to it
+    /// ([`EventCtx::request_paste`]), until drained by
+    /// [`RenderRoot::take_paste_request`].
+    ///
+    /// The data-free twin of [`pending_clipboard_write`](RenderRoot::pending_clipboard_write),
+    /// and one-shot for the same reason. Raised by any pass in which a widget
+    /// asked and lowered only by the drain, so a shell that skips a drain answers
+    /// late rather than losing the paste.
+    pending_paste_request: bool,
     /// The IME surface the focused widget last published (via
     /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
@@ -417,6 +567,46 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// wait for whatever input happens to arrive next, which is the exact
     /// failure this whole mechanism exists to remove.
     deferred_frame: bool,
+    /// The routing half of the overlay entries the **last** [`RenderRoot::paint`]
+    /// registered, in paint order (`Floating` band then `Tooltip`, registration
+    /// order within each) — what [`RenderRoot::event`]'s overlay pre-pass
+    /// hit-tests before the main tree ever sees a pointer.
+    ///
+    /// Replaced wholesale every paint, exactly like `platform_view_frames`: an
+    /// owner keeps a surface routable by registering it again each frame, so a
+    /// surface whose owner stopped registering (or was unmounted) stops taking
+    /// input after the next paint with nothing to unregister.
+    ///
+    /// Carries **no pod handle** by construction (see
+    /// [`OverlayHit`](crate::overlay::OverlayHit)): the owner owns the pod, and a
+    /// root holding a clone of it between passes would both outlive the owner and
+    /// invite a borrow held across a pass boundary.
+    ///
+    /// One frame of lag is inherent and intended: input is routed against where
+    /// the surfaces were painted, which is the only place the user could have
+    /// seen them.
+    overlay_hits: Vec<OverlayHit>,
+    /// The selection-toolbar request the focused field published during the most
+    /// recent [`RenderRoot::paint`], surfaced to the shell through
+    /// [`RenderRoot::selection_toolbar`] for the platform edit-menu route.
+    ///
+    /// Resolved per paint pass: a pass in which nothing published clears it, which
+    /// is what puts the menu away when a selection collapses. A session release
+    /// clears it too (see [`RenderRoot::release_focus_session`]), so the menu can
+    /// never outlive the focus the selection belonged to — the event pass's blur
+    /// lands a whole frame before the paint that would otherwise notice.
+    selection_toolbar: Option<SelectionToolbarRequest>,
+    /// A monotonically-increasing generation bumped on every **actual** change of
+    /// `selection_toolbar` — the same change-guarded edge signal
+    /// `focus_ime_gen` is, and for the same reason: the publishing field
+    /// re-publishes an unchanged request every single frame its selection stands,
+    /// so bumping on write rather than on change would ask the shell to re-present
+    /// the platform menu on every vsync.
+    ///
+    /// Kept beside the value rather than inside it so the counter survives a
+    /// clear: a shell diffs the generation to notice the menu went *away* just as
+    /// much as to notice it appeared.
+    selection_toolbar_gen: u64,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -429,13 +619,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             prev_view: None,
             next_id: 0,
             window_size: Size::ZERO,
-            pointer_captured: false,
+            capture_claimant: None,
+            capture_contacts: false,
+            contacts_captor_is_root: false,
             focus_active: false,
+            focus_surface: None,
+            // Past a fresh pod's `0` stamp, and past the `(0, 0)` a rootless
+            // dispatch sees — see the field doc.
+            focus_epoch: 1,
             hover_active: false,
             // Past a fresh pod's `0` stamp — see the field doc.
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             cursor: CursorIcon::Default,
+            pending_clipboard_write: None,
+            pending_paste_request: false,
             ime_state: None,
             focus_ime_gen: 0,
             platform_view_frames: Vec::new(),
@@ -450,6 +648,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             root_semantics_id: Cell::new(None),
             semantics_gen: 0,
             deferred_frame: false,
+            overlay_hits: Vec::new(),
+            selection_toolbar: None,
+            selection_toolbar_gen: 0,
             _state: core::marker::PhantomData,
         }
     }
@@ -575,7 +776,22 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// Whether a captured pointer gesture is currently in flight.
     pub fn is_pointer_captured(&self) -> bool {
-        self.pointer_captured
+        self.capture_claimant.is_some()
+    }
+
+    /// The contact that claimed the pointer capture in flight — the only one
+    /// whose `Up`/`Cancel` can end it — or `None` while nothing is captured.
+    pub fn pointer_capture_claimant(&self) -> Option<PointerId> {
+        self.capture_claimant
+    }
+
+    /// Whether the capture in flight routes the gesture's **other** contacts to
+    /// its captor — the captor opted in with [`EventCtx::capture_contacts`] on
+    /// the `Down` it captured with, and no container has since taken the
+    /// gesture over from it ([`EventCtx::release_captured_child`]). `false`
+    /// while nothing is captured.
+    pub fn pointer_capture_contacts(&self) -> bool {
+        self.capture_contacts
     }
 
     /// Whether some widget in the tree currently holds keyboard/IME focus.
@@ -629,6 +845,59 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.cursor
     }
 
+    /// Take (and clear) the text the tree asked the shell to put on the host
+    /// clipboard — the drain a shell performs immediately after every
+    /// [`RenderRoot::event`], beside [`cursor()`](RenderRoot::cursor) and
+    /// [`ime_state()`](RenderRoot::ime_state).
+    ///
+    /// `Some` exactly when some widget called
+    /// [`EventCtx::write_clipboard`](crate::event::EventCtx::write_clipboard)
+    /// during a pass since the last drain (answering a
+    /// [`EditCommand::Copy`](crate::event::EditCommand::Copy)/[`Cut`](crate::event::EditCommand::Cut),
+    /// or a chord the widget decoded itself). The shell hands the text to its host
+    /// clipboard — winit's `arboard` on desktop, `ClipboardManager` on Android,
+    /// `UIPasteboard` on iOS — and does nothing at all on `None`.
+    ///
+    /// **Destructive**, unlike [`cursor()`](RenderRoot::cursor): a clipboard write
+    /// is an edge, not a standing level, so a caller that drains and drops the
+    /// result loses that write. Draining twice after one pass yields `None` the
+    /// second time.
+    ///
+    /// A widget that never copies leaves this `None` forever, so a shell with no
+    /// clipboard (the mobile shells before their own clipboard work lands) may
+    /// call it and discard the result, or not call it at all.
+    pub fn take_clipboard_write(&mut self) -> Option<String> {
+        self.pending_clipboard_write.take()
+    }
+
+    /// Take (and clear) whether the tree asked the shell to read the host
+    /// clipboard back to it — drained beside
+    /// [`take_clipboard_write`](RenderRoot::take_clipboard_write) after every
+    /// [`RenderRoot::event`].
+    ///
+    /// `true` exactly when some widget called
+    /// [`EventCtx::request_paste`](crate::event::EventCtx::request_paste) during a
+    /// pass since the last drain. The shell answers by reading its host clipboard
+    /// and dispatching
+    /// [`InputEvent::EditCommand`]`(`[`EditCommand::Paste`](crate::event::EditCommand::Paste)`(text))`
+    /// — a *new* dispatch, because the read may be asynchronous and the pass that
+    /// asked is over. That answer carries no identity of its own and is
+    /// focus-routed to whoever holds focus when it lands: a release in between
+    /// drops it harmlessly, but a focus *move* in between lands it in the new
+    /// field rather than the one that asked. A synchronous read has no such
+    /// window; an asynchronous one snapshots
+    /// [`focus_epoch`](RenderRoot::focus_epoch) at this drain and discards an
+    /// answer whose epoch no longer matches — not
+    /// [`focus_ime_generation`](RenderRoot::focus_ime_generation), which also
+    /// moves within a single session.
+    ///
+    /// **Destructive**, for [`take_clipboard_write`](RenderRoot::take_clipboard_write)'s
+    /// reason. A pass may both write and request (a cut that immediately re-reads,
+    /// or a widget answering two chords) — the two drains are independent.
+    pub fn take_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_paste_request)
+    }
+
     /// The IME surface the focused widget published, for the shell to drive the
     /// platform input method (winit `set_ime_cursor_area`, Android
     /// `updateSelection`, iOS `inputDelegate`). `None` when nothing is focused or
@@ -677,8 +946,51 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// surface (which the paint pass does on every frame a field stays focused)
     /// or re-blurring an already-blurred root is not an edge. Wrapping is
     /// deliberate and harmless — a comparison, never an ordering.
+    ///
+    /// # Not the session's identity
+    ///
+    /// This counts *changes to the published surface*, not *sessions*, and the
+    /// two come apart in both directions — see
+    /// [`focus_epoch`](RenderRoot::focus_epoch), which is what to reach for when
+    /// the question is "is this still the same focus session?". Answering that
+    /// one from this counter is wrong whenever focus moves between two fields
+    /// without the published value changing.
     pub fn focus_ime_generation(&self) -> u64 {
         self.focus_ime_gen
+    }
+
+    /// The live focus session's **identity** — advanced once per honoured focus
+    /// claim and once per session release, and by nothing else.
+    ///
+    /// The neighbour of [`focus_ime_generation`](RenderRoot::focus_ime_generation)
+    /// and easy to mistake for it, so: that one counts *changes to the published
+    /// surface* (the focus flag, or the [`ImeState`] value), this one counts
+    /// *sessions*. They come apart in both directions, which is why both exist:
+    ///
+    /// * Focus moving from one field to another moves this one and can leave
+    ///   that one completely still. Claiming focus while some field already
+    ///   holds it writes `true` over `true`, and the surface the new field
+    ///   publishes may compare equal to the old field's ([`ImeState`] is
+    ///   `{active, editing, caret, content_type}` and names no widget) — or may
+    ///   not be published at all, since a widget is free to take focus and
+    ///   publish nothing, which leaves the previous field's surface standing.
+    /// * An edit landing, a caret moving, or the field being repositioned under
+    ///   the user moves that one and leaves this one still: the session is the
+    ///   same session throughout.
+    ///
+    /// So a caller binding an asynchronous answer to the session that asked for
+    /// it wants this one; a caller asking "must I run a frame, or re-sync the
+    /// platform IME?" wants that one.
+    ///
+    /// **Never `0`.** The counter is built at `1` and steps *past* `0` on wrap,
+    /// because `0` is a never-claimed [`ChildPod`](crate::widget::ChildPod)'s
+    /// stamp and a root publishing it would hand every unclaimed pod in the tree
+    /// a live link. A caller is therefore free to use `0` as its own "no root /
+    /// no answer" sentinel with no risk of colliding with a live value. Wrapping
+    /// is otherwise deliberate and harmless: the value is compared for equality,
+    /// never ordered.
+    pub fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
     }
 
     /// Set the root's focus flag, bumping [`RenderRoot::focus_ime_generation`]
@@ -720,6 +1032,42 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             &mut self.focus_active,
             &mut self.ime_state,
             &mut self.focus_ime_gen,
+            &mut self.focus_epoch,
+            self.root_identity,
+        );
+        // No session, no owner. A paint pass that releases re-resolves the owner
+        // from the pods before it ends anyway (see
+        // `RenderRoot::resolve_session_surface`), so this write is the event and
+        // rebuild passes' own.
+        self.focus_surface = None;
+        // A selection toolbar describes the *focused* field's selection, so the
+        // session ending is the toolbar ending — and it must end on the event
+        // pass that blurred, not a frame later when the next paint happens to
+        // publish nothing. Change-guarded like every other edge here: releasing
+        // an already-toolbarless root moves no generation.
+        if self.selection_toolbar.take().is_some() {
+            self.selection_toolbar_gen = self.selection_toolbar_gen.wrapping_add(1);
+        }
+    }
+
+    /// Publish this root's live focus session so the pods can compare their own
+    /// stamps against it — the focus counterpart of the `(root, epoch)` pair
+    /// `crate::event::set_live_hover_link` publishes for hover.
+    ///
+    /// Called at the head of every pass, not only when the session moves: the
+    /// channel mirrors one root, so a second root driving passes on the same
+    /// thread would otherwise leave this one's pods comparing against a session
+    /// that is none of their business. Re-publishing an unchanged triple costs a
+    /// `Cell` write and notifies nothing.
+    ///
+    /// Publishes the session "at rest" — the live epoch and the epoch a claim
+    /// would take are the same value. [`RenderRoot::event`] publishes the two
+    /// apart for the length of its dispatch; see that method.
+    fn publish_focus_session(&self) {
+        crate::widget::set_live_focus_session(
+            self.root_identity,
+            self.focus_epoch,
+            self.focus_epoch,
         );
     }
 
@@ -876,6 +1224,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         app_logic: &mut impl FnMut(&mut State) -> V,
         state: &mut State,
     ) -> ChangeFlags {
+        // Republish this root's focus session before the diff runs: a pod
+        // severed by it compares its own stamp against the channel from its
+        // destructor, and the channel mirrors one root at a time.
+        self.publish_focus_session();
         let view = app_logic(state);
         let mut flags = self.rebuild_view(view);
 
@@ -1102,6 +1454,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Thread the window insets down; one layout context reaches the whole
         // tree, so the global insets are set once here (see `crate::insets`).
         ctx.set_window_insets(insets);
+        // Thread the window's own size down the same way — global and
+        // origin-independent like the insets. A widget floating an overlay pod
+        // lays it out against this rather than against its own constraints (see
+        // `LayoutCtx::window_size`).
+        ctx.set_window_size(window_size);
         let size = pod.widget_mut().layout(&mut ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
@@ -1131,9 +1488,129 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// is seeded onto the root [`PaintCtx`] and threaded unchanged to every child
     /// ([`crate::widget::ChildPod::paint_child`]), so an animating widget advances
     /// against one consistent timestamp — see [`PaintCtx::frame_time`].
+    ///
+    /// # The overlay post-pass
+    ///
+    /// Painting the main tree is only the first half. Widgets registering a
+    /// floated surface during that walk ([`PaintCtx::register_overlay`]) are
+    /// drained here and painted **after** it, in band order — which is the only
+    /// way a popover, menu or tooltip escapes its owner's paint order and every
+    /// ancestor's clip. Their routing rects are retained (see
+    /// `RenderRoot::overlay_hits`) for the next event pass to hit-test first, and
+    /// their paint outcomes merge into this pass's own, so an animating overlay
+    /// keeps the frames coming exactly like an animating widget in the tree.
     pub fn paint(&mut self, scene: &mut dyn PaintScene, frame_time: FrameTime) -> PaintOutcome {
+        // Open the two paint-pass channels for the whole pass. Entering CLEARS
+        // each slot, which is what makes "the registry is empty at the start of
+        // every paint" true by construction rather than by everyone remembering
+        // to unregister; `Drop` hands an enclosing pass its own back.
+        let overlay_pass = OverlayPaintPass::enter();
+        let toolbar_pass = SelectionToolbarPass::enter();
+        // Republish this root's focus session before anything reads it: the
+        // channel mirrors one root, and the pods about to be visited must
+        // compare their stamps against *this* root's session.
+        self.publish_focus_session();
+
+        let (mut outcome, main_tree_ime) = self.paint_main_tree(scene, frame_time);
+
+        // Drain what the main tree registered and paint it above everything.
+        // Sorting is stable, so the band decides and registration order breaks
+        // ties within a band (see `crate::overlay::sort_into_paint_order`).
+        let mut entries = overlay_pass.take();
+        sort_into_paint_order(&mut entries);
+        // Retain the routing half — never the pods — for the next event pass.
+        self.overlay_hits = entries.iter().map(OverlayHit::of).collect();
+        let (holder, holder_ime) = self.paint_overlays(&entries, scene, frame_time, &mut outcome);
+        // Release the owners' pod clones before the pass ends: the root holds no
+        // overlay pod at rest, so a pod's lifetime stays exactly its owner's.
+        drop(entries);
+
+        // Both halves have now spoken, so the one question neither of them can
+        // answer alone — whose surface the shell is configured with — is settled
+        // in one place, with both answers in hand.
+        self.resolve_session_surface(main_tree_ime, holder, holder_ime);
+
+        // Resolve the selection-toolbar publish last, so a field that published
+        // while painting *inside* a floated pod (a text input hosted in a
+        // popover) is resolved by the same rule as one in the main tree.
+        self.resolve_selection_toolbar(toolbar_pass.take());
+
+        outcome
+    }
+
+    /// Settle which branch's IME surface the shell is configured with, from the
+    /// two halves of the paint pass: what the main tree published, and what the
+    /// floated surface holding the live focus link published (`holder`/
+    /// `holder_ime`, both resolved from the pods' own stamps — see
+    /// [`RenderRoot::paint_overlays`]).
+    ///
+    /// # Why it is decided here and not where the publish happens
+    ///
+    /// A publish is a claim about *the* session, and the session has exactly one
+    /// owner. The main tree paints first, so at the moment it publishes, nothing
+    /// yet knows whether a floated surface is about to prove that the session is
+    /// no longer the tree's. Storing it there and correcting later is what
+    /// produced a frame of lag with a secure field's surface standing in it —
+    /// and the record the correction had to be driven from was one nothing could
+    /// falsify. Deferring the decision by the width of one pass removes both.
+    ///
+    /// # The rules
+    ///
+    /// * the owner's own publish wins, whether that owner is a surface or the
+    ///   tree; a publish from anywhere else was already dropped by the half that
+    ///   collected it;
+    /// * an **inactive** publish from the owner is the session ending, not a
+    ///   value — the same reading every other release site gives it;
+    /// * an owner that published **nothing** leaves a standing surface standing,
+    ///   *unless* ownership moved this pass: then what stands belongs to the
+    ///   branch that just lost the session, and goes with it rather than
+    ///   remaining as the shell's idea of a live one. This is the rule that stops
+    ///   a popover taking focus from leaving the platform keyboard configured for
+    ///   the secure field underneath it — in both directions, since the session
+    ///   coming back to the tree moves ownership just as much as it leaving.
+    fn resolve_session_surface(
+        &mut self,
+        main_tree_ime: Option<ImeState>,
+        holder: Option<OverlayKey>,
+        holder_ime: Option<ImeState>,
+    ) {
+        let published = if holder.is_some() {
+            holder_ime
+        } else {
+            main_tree_ime
+        };
+        let ownership_moved = holder != self.focus_surface;
+        match published {
+            Some(ime) if ime.active => self.store_ime_state(Some(ime)),
+            Some(_) => self.release_focus_session(),
+            None if ownership_moved => self.store_ime_state(None),
+            None => {}
+        }
+        // Resolved from the links themselves, never from the focus request that
+        // opened the session — see the field's doc.
+        self.focus_surface = if self.focus_active { holder } else { None };
+    }
+
+    /// Paint the main widget tree — everything [`RenderRoot::paint`] does before
+    /// the floated overlay pods get their turn.
+    ///
+    /// Split out from [`RenderRoot::paint`] purely for borrow scoping: this body
+    /// holds `&mut self.tree` (beside disjoint borrows of the theme) for its whole
+    /// length, while painting an overlay pod needs the root's fields again to
+    /// merge outcomes and extend the per-pass channels. Nothing about the pass
+    /// itself changed when it moved here.
+    ///
+    /// Reports, beside the outcome, the IME surface the tree published this pass
+    /// (if any) — handed back rather than stored, because whether the tree still
+    /// owns the session is not knowable until the floated pods have been visited
+    /// (see [`RenderRoot::resolve_session_surface`]).
+    fn paint_main_tree(
+        &mut self,
+        scene: &mut dyn PaintScene,
+        frame_time: FrameTime,
+    ) -> (PaintOutcome, Option<ImeState>) {
         let Some(root_id) = self.root_id else {
-            return PaintOutcome::default();
+            return (PaintOutcome::default(), None);
         };
         // Disjoint field borrows: the theme (immut) vs the tree (mut).
         let theme = self.theme.as_deref();
@@ -1160,10 +1637,28 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // platform-view hole-punch gates its rect-clear on it — see
             // `PaintCtx::is_translucent`).
             ctx.set_translucent(surface_translucent);
-            // Seed the root widget's paint-time focus from the cached focus path
-            // so a leaf-root editable observes its own focus; deeper focus is
-            // threaded per-pod by `ChildPod::paint_child`.
+            // Seed the root widget's paint-time focus from the session mirror so
+            // a leaf-root editable observes its own focus, and thread the live
+            // session's identity down beside it: deeper focus is resolved
+            // per-pod by `ChildPod::paint_child`, which counts a recorded link
+            // only while its stamp names this session.
+            //
+            // The mirror alone, deliberately. Narrowing the seed by *which
+            // branch* the root believes owns the session was the previous shape,
+            // and it de-seeded the whole tree off a record no pass could
+            // falsify: a link a floated pod recorded is reached by no container's
+            // blur sweep, so once one existed the tree never got seeded again.
+            // The epoch answers the same question where it can actually be
+            // answered — at each link, against the session that link was
+            // recorded for.
+            //
+            // The arena root has no recorded link of its own (it is a
+            // `WidgetPod`, not a `ChildPod`, and carries no stamp), so a
+            // *leaf-root* editable is still seeded from the bare mirror. Every
+            // real tree puts a container there, and the first `ChildPod` below it
+            // composes the stamp back in.
             ctx.set_has_focus(self.focus_active);
+            ctx.set_focus_epoch(self.focus_epoch);
             // Thread the hover mirror + live epoch the same way: the root widget's
             // own hover comes from the mirror (a leaf root can claim hover itself),
             // and deeper links are resolved per-pod by `ChildPod::paint_child`
@@ -1176,18 +1671,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // runs after every rebuild), so a controlled change applied by the
             // rebuild — e.g. a submit clearing the field — refreshes the
             // shell-facing `ime_state` that the event pass alone would leave
-            // stale. Defense-in-depth: only accept a bubbled publish while
-            // focus is actually active. A widget whose pod focus was just
-            // cleared by a container-routed blur (but whose internal flag lags
-            // one frame) can then never resurrect the `ime_state` the blur
-            // cleared — even before it observes the blur via `PaintCtx::has_focus`.
+            // stale.
             //
-            // Routed through `store_ime_state_in` (the field form — this pass
-            // holds disjoint borrows of the tree and the theme, so no
-            // whole-`self` call is possible here) so an *unchanged* republish —
-            // the overwhelmingly common case, a focused field re-publishing the
-            // same surface frame after frame — moves no generation and
-            // therefore fires no `focus_or_ime_changed` edge at the shell.
+            // Collected, not stored: what the tree published is only the
+            // session's if the session is still the tree's, and the pods that
+            // could say otherwise have not been visited yet.
+            // `resolve_session_surface` decides once both halves have spoken,
+            // and routes the store through the change guard so an *unchanged*
+            // republish — the overwhelmingly common case, a focused field
+            // re-publishing the same surface frame after frame — moves no
+            // generation and therefore fires no `focus_or_ime_changed` edge at
+            // the shell.
             //
             // An **inactive** publish is not a surface refresh at all: it is the
             // publishing widget saying "this session is over" — the navigator's
@@ -1197,30 +1691,25 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // de-focus. Storing it as `Some(inactive)` and leaving `focus_active`
             // standing is what leaked the session after a pop: the shells' gate
             // saw `ime_state().is_some()`, `is_focus_active()` kept lying, and the
-            // next real focus interaction started from a corrupt baseline. So it
-            // takes the *full* release instead — the same one a blur-on-outside-tap
-            // `Down` performs — through the shared primitive, which fires exactly
-            // one edge.
+            // next real focus interaction started from a corrupt baseline. So the
+            // resolver takes the *full* release instead — the same one a
+            // blur-on-outside-tap `Down` performs, firing exactly one edge.
             //
-            // The `self.focus_active` guard stays, and covers both arms: an
-            // inactive publish arriving when focus is already false is a no-op
-            // (nothing to release — `release_focus_session_in` would move
-            // nothing anyway, but the guard means we never even take it), and an
-            // active publish from a widget whose pod focus was just cleared
-            // still cannot resurrect the surface that blur dropped.
-            if self.focus_active
-                && let Some(ime) = ctx.take_ime_state()
-            {
-                if ime.active {
-                    store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, Some(ime));
-                } else {
-                    release_focus_session_in(
-                        &mut self.focus_active,
-                        &mut self.ime_state,
-                        &mut self.focus_ime_gen,
-                    );
-                }
-            }
+            // The `self.focus_active` guard stays and is applied here, at the
+            // point of collection: a publish arriving when no session is live
+            // describes nothing, so a widget whose pod focus was just cleared by
+            // a container-routed blur (but whose internal flag lags one frame)
+            // can never resurrect the `ime_state` that blur dropped — even
+            // before it observes the blur via `PaintCtx::has_focus`.
+            //
+            // Provenance below that guard is the chain's own job now: a link
+            // reads focused only while its stamp names the live session, so a
+            // branch the session has left publishes nothing to collect.
+            let main_tree_ime = if self.focus_active {
+                ctx.take_ime_state()
+            } else {
+                None
+            };
             // Replace (never merge) the whole platform-view collection with
             // whatever this pass published — unlike `ime_state` above there is
             // no single "the" published instance to guard behind a focus
@@ -1246,7 +1735,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // it here (and clear it) so a dirty-driven shell schedules the frame
             // that finishes the flush — see the `deferred_frame` field doc.
             let deferred_frame = std::mem::take(&mut self.deferred_frame);
-            PaintOutcome {
+            let outcome = PaintOutcome {
                 needs_frame: ctx.needs_frame() || deferred_frame,
                 needs_layout,
                 // Aggregate tick class: paced-only iff a frame was requested and
@@ -1261,10 +1750,261 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // resolves it against the live theme's cap — see
                 // `PaintCtx::request_frame_paced_at`.
                 paced_interval: ctx.paced_interval(),
-            }
+            };
+            (outcome, main_tree_ime)
         } else {
-            PaintOutcome::default()
+            (PaintOutcome::default(), None)
         }
+    }
+
+    /// Paint the pods registered during this pass, above the main tree, and fold
+    /// each one's paint outcome back into `outcome`.
+    ///
+    /// `entries` arrives in paint order (`Floating` band first, then `Tooltip`,
+    /// registration order within each). Each pod is painted through a
+    /// [`PaintCtx`] whose absolute origin is its own registered
+    /// [`window_rect`](crate::overlay::OverlayEntry::window_rect) — not its
+    /// owner's origin, which is the whole point of floating — carrying the same
+    /// clock, theme, insets, presented count, translucency and focus/hover
+    /// seeding the root pod's context carries, so a widget inside a pod cannot
+    /// tell it is not in the tree.
+    ///
+    /// The pod borrow is taken per entry and released before the next: the root
+    /// must never hold one across a pass boundary, nor across another entry's
+    /// paint (two entries may belong to the same owner).
+    ///
+    /// It is also the one pass that can act on a floated pod's focus link at
+    /// all, because it is the one pass holding the pods. Two things follow, and
+    /// both happen here:
+    ///
+    /// * it **retires** a link the live session has already stranded
+    ///   ([`ChildPod::retire_stale_focus_link`](crate::widget::ChildPod::retire_stale_focus_link)),
+    ///   so the raw flag consumers that cannot consult an epoch — an owner's own
+    ///   `is_focused()` read, a hand-written container's routing — stop seeing a
+    ///   record of a session that has moved on;
+    /// * it **resolves** which surface, if any, holds a link on the live session,
+    ///   and collects that one surface's IME publish. Every other pod's publish
+    ///   is dropped where it is taken: paint descends into every pod
+    ///   unconditionally and the bubble up `paint_child` carries a published
+    ///   surface whatever the publisher's link says, so without this the last pod
+    ///   painted would decide what the shell is configured with — a surface
+    ///   belonging to a field it has nothing to do with, secure-text
+    ///   configuration and all.
+    ///
+    /// Returns `(holder, holder's publish)` for
+    /// [`RenderRoot::resolve_session_surface`] to settle against the main tree's.
+    /// **Two holders resolve to none:** a second live link is a contradiction the
+    /// mechanism is supposed to make impossible (one claim, one chain, one
+    /// stamp), and answering it by picking the topmost would let a surface speak
+    /// for a session on evidence that has already failed. Reporting no holder
+    /// instead means neither surface's publish is carried out of this pass —
+    /// the resolver then reads the pass exactly as it reads one where nothing is
+    /// floated at all.
+    fn paint_overlays(
+        &mut self,
+        entries: &[OverlayEntry],
+        scene: &mut dyn PaintScene,
+        frame_time: FrameTime,
+        outcome: &mut PaintOutcome,
+    ) -> (Option<OverlayKey>, Option<ImeState>) {
+        if entries.is_empty() {
+            // Nothing is floated, so nothing floated owns the session.
+            return (None, None);
+        }
+        // The same disjoint field borrows the main pass takes, for the same
+        // reason: the theme is lent immutably into each context while other
+        // fields of `self` are written.
+        let theme = self.theme.as_deref();
+        let presented_frames = self.presented_frames;
+        let surface_translucent = self.surface_translucent;
+        let hover_active = self.hover_active;
+        let hover_epoch = self.hover_epoch;
+        let focus_active = self.focus_active;
+        let focus_epoch = self.focus_epoch;
+
+        // The surface whose pod holds a link on the LIVE session, resolved as the
+        // pods go past, together with the surface that pod published — one pair,
+        // so the publish can never be attributed to an entry that did not make
+        // it. A second live holder sets `contested` and the pair is discarded.
+        let mut holder: Option<(OverlayKey, Option<ImeState>)> = None;
+        let mut contested = false;
+
+        for entry in entries {
+            let mut ctx = PaintCtx::new(entry.window_rect.origin(), entry.window_rect.size());
+            ctx.set_frame_time(frame_time);
+            ctx.set_theme(theme);
+            ctx.set_window_insets(entry.insets);
+            ctx.set_presented_frames(presented_frames);
+            ctx.set_translucent(surface_translucent);
+            // Seeded from the root's own mirrors exactly as the root pod's
+            // context is, so a focused editable inside a floated pod observes its
+            // focus (and a hovered one its hover) through the ordinary
+            // `ChildPod::paint_child` composition.
+            //
+            // The mirror alone, deliberately: the pod's own link is ANDed onto it
+            // inside `paint_child`, which is the same composition that decides
+            // the main tree's, so a pod that holds no link reads unfocused
+            // whatever the mirror says.
+            ctx.set_has_focus(focus_active);
+            ctx.set_focus_epoch(focus_epoch);
+            ctx.set_hovered(hover_active);
+            ctx.set_hover_epoch(hover_epoch);
+            // Retired and read before the paint, in the same borrow: nothing in a
+            // paint pass moves the focus path, and the answer is what decides
+            // whether this pod may describe the session below.
+            let pod_holds_focus = {
+                let mut pod = entry.pod.borrow_mut();
+                pod.retire_stale_focus_link();
+                let holds = pod.holds_live_focus();
+                pod.paint_child(&mut ctx, scene);
+                holds
+            };
+
+            // Fold this pod's continuation-frame request into the frame's outcome
+            // on the two lattices the tree's own aggregation uses: `needs_frame`
+            // ORs, the class is a max-lattice (any unpaced request makes the whole
+            // frame unpaced), and the paced interval is a MIN-lattice. The
+            // standing aggregate's class is recovered from the outcome itself —
+            // `needs_frame && !needs_frame_paced_only` is precisely "something
+            // unpaced asked" — which also preserves the deferred-flush frame the
+            // main pass may have folded in.
+            let stood_unpaced = outcome.needs_frame && !outcome.needs_frame_paced_only;
+            let entry_unpaced = ctx.needs_frame() && !ctx.needs_frame_paced_only();
+            outcome.needs_frame |= ctx.needs_frame();
+            outcome.needs_frame_paced_only =
+                outcome.needs_frame && !(stood_unpaced || entry_unpaced);
+            outcome.paced_interval = match (outcome.paced_interval, ctx.paced_interval()) {
+                (Some(standing), Some(asked)) => Some(standing.min(asked)),
+                (standing, asked) => standing.or(asked),
+            };
+            // A layout-animating widget inside a pod relayouts the next frame the
+            // same way one in the tree does.
+            if ctx.needs_layout() {
+                outcome.needs_layout = true;
+                self.pending |= ChangeFlags::LAYOUT;
+            }
+            // A focused editable inside a pod republishes its IME surface on every
+            // paint, exactly like one in the tree, so the same rules apply
+            // verbatim: collect a publish only while a session is actually active
+            // (never resurrect a surface a blur cleared), and only from the pod
+            // that holds a link on THAT session — the provenance a child of the
+            // tree gets for free from its chain. A publish taken from any other
+            // pod is dropped here, which is why the take is unconditional: the
+            // per-entry context is about to be discarded either way, and leaving
+            // a surface in it would only invite a later reader to trust it.
+            //
+            // An *inactive* publish is refused on exactly the same terms rather
+            // than treated as a release: ending a session is a claim about it
+            // too, and a pod that does not hold it makes neither.
+            let published = ctx.take_ime_state();
+            if focus_active && pod_holds_focus {
+                if holder.is_some() {
+                    // Two pods claiming one session. See the method doc: the
+                    // contradiction is answered by attributing the session to
+                    // nobody, not by ranking the claimants.
+                    contested = true;
+                } else {
+                    holder = Some((entry.key, published));
+                }
+            }
+            // EXTEND the two replace-per-pass channels rather than replacing them:
+            // `paint_main_tree` already put this pass's tree-published frames and
+            // shields there, and a platform-view slot or z-shield that happens to
+            // paint inside a floated pod must survive beside them (see
+            // `PaintCtx::publish_platform_view`).
+            self.platform_view_frames.extend(ctx.take_platform_views());
+            self.input_shields.extend(ctx.take_input_shields());
+        }
+
+        match holder {
+            Some((key, published)) if !contested => (Some(key), published),
+            _ => (None, None),
+        }
+    }
+
+    /// Resolve this paint pass's selection-toolbar publish into the shell-facing
+    /// slot, moving [`RenderRoot::selection_toolbar_generation`] only on a
+    /// **menu edge**.
+    ///
+    /// The request carries two shapes of fact, and they are resolved differently
+    /// (see [`SelectionToolbarRequest`]):
+    ///
+    /// * The whole request is stored as a **level**, newest wins. A shell reads
+    ///   [`SelectionToolbarRequest::anchor`] on every tick it has a menu on
+    ///   screen, so the stored anchor has to be the current one, not the one the
+    ///   generation last moved for.
+    /// * The generation moves on the **menu-significant** part alone:
+    ///   [`SelectionToolbarRequest::present_menu`] and
+    ///   [`SelectionToolbarRequest::actions`], with an absent request reading as
+    ///   "no menu, no verbs" so appearing and disappearing are edges on the same
+    ///   comparison. An anchor that merely moved is deliberately **not** an edge:
+    ///   a focused field recomputes its anchor every painted frame, and a
+    ///   selection dragged wider moves it on every touch sample — bumping there
+    ///   would ask the platform to re-present its menu per sample.
+    ///
+    /// The publish is refused outright while no focus session is active, mirroring
+    /// `paint`'s refusal to let a paint-time publish resurrect a cleared IME
+    /// surface: the request describes the focused field, so one arriving after the
+    /// blur describes a field that no longer holds anything.
+    fn resolve_selection_toolbar(&mut self, published: Option<SelectionToolbarRequest>) {
+        let next = if self.focus_active { published } else { None };
+        // "Nothing published" is the same statement as "no menu wanted, no verbs
+        // enabled" — which is what lets one comparison cover a change between two
+        // requests, a first appearance, and a clearing alike.
+        let menu_edge = |request: &Option<SelectionToolbarRequest>| {
+            request.map_or((false, SelectionToolbarActions::default()), |request| {
+                (request.present_menu, request.actions)
+            })
+        };
+        if menu_edge(&self.selection_toolbar) != menu_edge(&next) {
+            self.selection_toolbar_gen = self.selection_toolbar_gen.wrapping_add(1);
+        }
+        self.selection_toolbar = next;
+    }
+
+    /// The selection-toolbar request the focused field published during the most
+    /// recent [`RenderRoot::paint`], or `None` when no field is focused at all.
+    ///
+    /// The shell half of the platform edit-menu route
+    /// ([`SelectionToolbarPolicy::Native`](crate::selection_toolbar::SelectionToolbarPolicy::Native)):
+    /// a shell reads it beside [`RenderRoot::ime_state`], answers "may I offer
+    /// this verb?" from [`SelectionToolbarRequest::actions`] whenever the platform
+    /// asks, and presents the host's own menu at
+    /// [`SelectionToolbarRequest::anchor`] when
+    /// [`SelectionToolbarRequest::present_menu`] says so. A **level**, not an edge
+    /// — re-read it as often as you like; pair it with
+    /// [`RenderRoot::selection_toolbar_generation`] to notice the changes worth
+    /// presenting or dismissing for.
+    ///
+    /// Present for a focused field with no selection at all, which is not a
+    /// wasted answer: paste applies to a bare caret, and a platform asking
+    /// whether it may offer one needs a reply before any bar exists.
+    ///
+    /// A field under the framework policy publishes this too (it floats its own
+    /// toolbar through [`crate::overlay`] as well), so a shell that drives the
+    /// platform menu must decide on the policy, not on the presence of a request.
+    pub fn selection_toolbar(&self) -> Option<SelectionToolbarRequest> {
+        self.selection_toolbar
+    }
+
+    /// A monotonically-increasing generation bumped on every change to the
+    /// **menu-significant** part of [`RenderRoot::selection_toolbar`] — its
+    /// [`present_menu`](SelectionToolbarRequest::present_menu) flag and its
+    /// [`actions`](SelectionToolbarRequest::actions) — including the clearing that
+    /// a blur produces, so a shell sees the menu going away as an edge too.
+    ///
+    /// A moved [`anchor`](SelectionToolbarRequest::anchor) is **not** an edge: it
+    /// is republished (and recomputed) every painted frame, so a shell re-reads it
+    /// from [`RenderRoot::selection_toolbar`] rather than waiting for this to move
+    /// — bumping on it would re-present a menu on every touch sample of a drag
+    /// that widens a selection.
+    ///
+    /// The `focus_ime_generation` contract one channel over: a shell caches the
+    /// last value it acted on and acts only when it moves, which is what keeps a
+    /// standing selection — republished every single frame — from asking the
+    /// platform to re-present its menu on every vsync.
+    pub fn selection_toolbar_generation(&self) -> u64 {
+        self.selection_toolbar_gen
     }
 
     /// Collect the accessibility tree for the current frame,
@@ -1358,8 +2098,19 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// requested a redraw; the shell turns that into a `window.request_redraw()`.
     ///
     /// Root capture bookkeeping mirrors the per-container `active`-child model: a
-    /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
-    /// and `Cancel` release it (never a window-leave).
+    /// `Down` whose dispatch requested capture marks a gesture in flight and
+    /// latches the contact that sent it as the gesture's claimant; the
+    /// claimant's `Up` and `Cancel` release it (never a window-leave, and never
+    /// another contact's release).
+    ///
+    /// Pointer contacts are gated **first**, before anything else runs: an
+    /// [`InputEvent::PointerContact`] is unwrapped into the plain
+    /// [`InputEvent::Pointer`] every widget matches on, with
+    /// [`EventCtx::pointer_id`](crate::event::EventCtx::pointer_id) reporting its
+    /// id, and a contact the multi-contact contract does not route — an
+    /// additional contact with nothing captured, or one the captor did not opt
+    /// into — is dropped here with an empty outcome (see that variant's
+    /// *Multi-contact contract*). A bare `InputEvent::Pointer` is the mouse.
     ///
     /// Root hover bookkeeping is the third recorded path, and the one this pass
     /// *derives* rather than merely mirrors: an **uncaptured** `Move` opens a hover
@@ -1385,6 +2136,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// call a desktop shell makes straight after this pass returns, with no frame
     /// involved, and folding it in would repaint the tree on every hover move.
     ///
+    /// The **clipboard channel** rides the same bracket and is the fifth thing
+    /// this pass resolves: whatever the dispatch asked for through
+    /// [`EventCtx::write_clipboard`](crate::event::EventCtx::write_clipboard) and
+    /// [`EventCtx::request_paste`](crate::event::EventCtx::request_paste) lands in
+    /// [`RenderRoot::take_clipboard_write`] / [`RenderRoot::take_paste_request`],
+    /// which a shell drains immediately after this returns, beside
+    /// [`RenderRoot::cursor`] and [`RenderRoot::ime_state`]. Unlike the cursor,
+    /// both commit on **every** pass rather than on a pointer `Move` alone — a
+    /// copy can be answered from a key chord, a context-menu tap, or an
+    /// [`InputEvent::EditCommand`] — and both are one-shot drains rather than
+    /// standing levels. Like the cursor, neither folds into `needs_redraw`:
+    /// talking to the host clipboard paints nothing (a `Cut` that mutates the
+    /// document asks for its own redraw, for the mutation).
+    ///
     /// # Reentrancy
     ///
     /// This pass **never rebuilds or repaints**. Event handlers mutate `state`
@@ -1402,8 +2167,89 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
         };
+
+        // The multi-contact gate (`InputEvent::PointerContact`'s contract). A
+        // contact is unwrapped into the plain `Pointer` every widget matches on,
+        // so everything below sees one pointer shape; a bare `Pointer` is the
+        // mouse. Any other event dispatches under the contact the enclosing pass
+        // carries (the overlay pre-pass re-enters this method with a broadcast
+        // that must keep its gesture's id), or the mouse at the top level.
+        let unwrapped;
+        let (event, pointer_id) = match event {
+            InputEvent::PointerContact {
+                pointer_id,
+                event: pointer,
+            } => {
+                unwrapped = InputEvent::Pointer(*pointer);
+                (&unwrapped, *pointer_id)
+            }
+            InputEvent::Pointer(_) => (event, PointerId::MOUSE),
+            _ => (event, crate::event::current_pointer_id()),
+        };
+        let secondary = if matches!(event, InputEvent::Pointer(_)) {
+            match self.contact_route(pointer_id) {
+                Some(secondary) => secondary,
+                // Rule (b), or rule (c) for a captor that did not opt in: the
+                // contact reaches nothing and moves no root state.
+                None => return EventOutcome::default(),
+            }
+        } else {
+            false
+        };
+        // Published for the whole dispatch: `EventCtx::new` seeds
+        // `pointer_id()` from it (so the id survives a component boundary),
+        // `capture_contacts` records its opt-in into it, and `ChildPod::set_active`
+        // reads its `secondary` mark to keep every container's active link on
+        // the claimant. Restored on drop, so a nested pass scopes its own.
+        let contact_pass = ContactPass::enter(pointer_id, secondary);
+
+        // The overlay pre-pass runs before every other thing this method does —
+        // before the hover derivation, before the cursor bracket, before the
+        // dispatch — because a pointer over a floated surface must reach none of
+        // them: not the main tree's hit test, not its hover pass, and above all
+        // not its blur rule. See `route_overlay`.
+        let carried = match self.route_overlay(state, event) {
+            OverlayRoute::Consumed(outcome) => return outcome,
+            OverlayRoute::Continue(outcome) => outcome,
+        };
+
+        // Open a candidate focus session for this dispatch, BEFORE anything is
+        // routed. A claim recorded below is stamped with this new epoch, which
+        // nothing older carries — so the branch the session is leaving is
+        // stranded by arithmetic rather than by a clearing sweep that would have
+        // to visit it, and a floated pod no container owns is retired on exactly
+        // the same terms as a field in the tree.
+        //
+        // Candidate, not committed: `self.focus_epoch` is left alone and the
+        // pass settles it below, because whether this dispatch recorded anything
+        // is only known once it has run. A `Move` over a focused field, a
+        // housekeeping broadcast, a press inside a surface that claims nothing —
+        // none of those may disturb a standing link.
+        //
+        // Both epochs are published because a claim recorded on the way back up
+        // has to be observable to the container still unwinding around it (a
+        // blur sweep asking which child kept focus, a portal noticing its surface
+        // took the session) while a link recorded *before* this dispatch still
+        // has to read live. See `crate::widget::set_live_focus_session`.
+        //
+        // After `route_overlay`, deliberately: an event that belongs to a floated
+        // surface is re-dispatched through the front door and opens its own
+        // candidate session there, and this call returns that outcome untouched.
+        let live_focus_epoch = self.focus_epoch;
+        let candidate_focus_epoch = advance_focus_epoch(live_focus_epoch);
+        crate::widget::set_live_focus_session(
+            self.root_identity,
+            live_focus_epoch,
+            candidate_focus_epoch,
+        );
+        let focus_active_before = self.focus_active;
+
         let Some(pod) = self.tree.pod_mut(root_id) else {
-            return EventOutcome::default();
+            // Nothing to dispatch into, but an outside-tap notification may
+            // already have produced an outcome; returning it rather than the
+            // default keeps that redraw.
+            self.publish_focus_session();
+            return carried;
         };
 
         // Hover is derived per **uncaptured** pointer `Move`: that pass, and only
@@ -1420,16 +2266,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // cannot outlive the finger (`docs/LIMITATIONS.md`'s
         // `hover-window-leave-standing`). A scroll, key, IME, or the housekeeping
         // broadcast leaves a live hover exactly as it was.
+        //
+        // A non-claimant contact delivered down a live capture (`secondary`) is
+        // neither: it is not a gesture of its own, so it leaves hover exactly as
+        // the claimant's gesture had it.
         let hover_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move)
-            && !self.pointer_captured;
-        let hover_ends = matches!(
-            event,
-            InputEvent::Pointer(p)
-                if matches!(
-                    p.phase,
-                    PointerPhase::Down | PointerPhase::Up | PointerPhase::Cancel
-                )
-        );
+            && self.capture_claimant.is_none();
+        let hover_ends = !secondary
+            && matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(
+                        p.phase,
+                        PointerPhase::Down | PointerPhase::Up | PointerPhase::Cancel
+                    )
+            );
         let hover_epoch = self.hover_epoch;
         let hover_was_active = self.hover_active;
         let root_identity = self.root_identity;
@@ -1448,8 +2299,23 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // are one bracket (`CursorPass`) rather than two bare calls, so a dispatch
         // that re-entered this method could not silently eat the enclosing pass's
         // request — see that guard.
-        let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
-        let cursor_slot = CursorPass::enter();
+        //
+        // The claimant's moves only: a second finger moving under a captured
+        // drag says nothing about the drag's own cursor.
+        let cursor_pass =
+            !secondary && matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
+        // The same bracket carries the clipboard channel (a write and a paste
+        // request), which differs only in when it commits: every pass, not the
+        // pointer-move subset, since a copy can be answered from a key chord or an
+        // `EditCommand` that never moved a pointer. See `RequestPass`.
+        let request_slot = RequestPass::enter();
+
+        // Whether the root widget itself holds the live opt-in (rather than a
+        // pod below it), and whether it opted in during this dispatch.
+        let contacts_captor_is_root = self.capture_claimant.is_some()
+            && self.capture_contacts
+            && self.contacts_captor_is_root;
+        let root_opted_in;
 
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
@@ -1467,7 +2333,32 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // destructor can tell this root's link from another root's
             // identically-numbered epoch (see `root_identity`).
             ctx.set_hover_root(root_identity);
-            let result = pod.widget_mut().event(&mut ctx, event);
+            // The root widget's own contact frame: attributes a
+            // `capture_contacts` made by the root widget itself (not by a pod
+            // below it) to the root, and marks the dispatch as running under the
+            // live opt-in's holder when the root widget is that holder.
+            let frame = ContactFrame::enter(contacts_captor_is_root);
+            let result = if secondary && !contacts_captor_is_root {
+                // A non-claimant contact walks the recorded active path
+                // forward-only (see `ChildPod::event_child`): the root widget is
+                // handed the inert carrier and the real event rides beside it,
+                // so only the captor that opted in runs its pointer handling. A
+                // walk that never reached a pod on the path (the root widget
+                // does not forward broadcasts to its captured child) falls back
+                // to the ordinary delivery.
+                let widget = pod.widget_mut();
+                let carrier = crate::event::secondary_walk_carrier();
+                let (_, delivered) = crate::event::run_secondary_walk(event.clone(), || {
+                    widget.event(&mut ctx, &carrier)
+                });
+                match delivered {
+                    Some(result) => result,
+                    None => crate::event::without_secondary_walk(|| widget.event(&mut ctx, event)),
+                }
+            } else {
+                pod.widget_mut().event(&mut ctx, event)
+            };
+            root_opted_in = frame.close().0;
             let handled = matches!(result, EventResult::Handled);
             (
                 handled,
@@ -1498,7 +2389,33 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Ordering: this runs before the focus match below, so a dispatch that
         // both published an inactive surface and requested focus still ends up
         // focused — the later, more specific claim wins.
+        //
+        // The provenance rule `paint_overlays` applies to a paint-time publish,
+        // mirrored onto this pass — the two must not disagree about who is
+        // allowed to speak for the session, so a change to either belongs in
+        // both.
+        //
+        // What the root can attribute here is bounded by how the event was
+        // routed. A hit-tested or focus-routed dispatch reaches a publisher
+        // through the tree, and the tree's own chain is what gated it (a
+        // well-behaved editable publishes only while `has_focus`, which is now
+        // stamp-gated) — so the rule for those is the liveness half alone: a
+        // session must exist, or be opening in this very dispatch, for a publish
+        // to describe anything. An `InputEvent::Overlay` is broadcast to the
+        // whole tree and reaches every floated pod whether or not it holds
+        // anything, so there the addressed surface must be the recorded owner of
+        // the session, or be claiming it now — the same "the publisher holds the
+        // link" question `paint_overlays` answers from the pods themselves.
+        //
+        // The *inactive* publish is refused on the same terms and for the same
+        // reason it is at paint: ending a session is a claim about it too, and a
+        // branch that owns none makes neither.
+        let publish_attributable = match event {
+            InputEvent::Overlay(overlay) => focus_req || self.focus_surface == Some(overlay.key),
+            _ => self.focus_active || focus_req,
+        };
         match ime {
+            Some(_) if !publish_attributable => {}
             Some(ime) if !ime.active => {
                 self.release_focus_session();
             }
@@ -1520,14 +2437,55 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // focus/IME edge generation: a `Down` on already-blurred chrome (the
         // commonest event of all) writes the same values back and must therefore
         // NOT fire an edge.
+        //
+        // Whether an arm below actually *honoured* a focus claim — the one thing
+        // that makes the candidate epoch opened above the real one. Deliberately
+        // not `focus_req` itself: the housekeeping arm ignores a claim by
+        // contract, and a claim it ignored must leave the standing session (and
+        // therefore the standing epoch) exactly where it was.
+        let mut focus_claim_honoured = false;
         match event {
+            // A non-claimant contact delivered down a live capture (rule (c) of
+            // `InputEvent::PointerContact`'s contract): not a gesture of its own,
+            // so it opens, moves and releases no capture and never blurs — its
+            // `Up` must not end the claimant's gesture, and its `Down` is not a
+            // tap outside anything. An explicit focus request or release from
+            // its handler is honoured exactly as the scroll arm below honours
+            // one.
+            InputEvent::Pointer(_) if secondary => {
+                if focus_req {
+                    focus_claim_honoured = true;
+                    self.set_focus_active(true);
+                }
+                if focus_rel {
+                    self.release_focus_session();
+                }
+            }
+            // Never reached: the gate at the top unwrapped every contact into a
+            // plain `Pointer`, and routed it by the arms around this one.
+            InputEvent::PointerContact { .. } => {}
             InputEvent::Pointer(pointer) => match pointer.phase {
                 PointerPhase::Down => {
                     if captured {
-                        self.pointer_captured = true;
+                        // Rule (a): the contact whose `Down` captured is the
+                        // claimant, and only its release ends the gesture. The
+                        // opt-in is read from the pass rather than the root
+                        // context's bubble so a captor below a component
+                        // boundary (which mirrors capture but not the opt-in)
+                        // is still heard.
+                        self.capture_claimant = Some(pointer_id);
+                        self.capture_contacts = contact_pass.contacts_requested();
+                        self.contacts_captor_is_root = root_opted_in;
                     }
                     if focus_req {
+                        focus_claim_honoured = true;
                         self.set_focus_active(true);
+                        // A hit-tested press reached the claimant through the
+                        // containers, so the session is the main tree's — the one
+                        // attribution the event pass can make without help, and
+                        // what makes the next paint seed the tree's links again
+                        // the moment focus comes back to it (see `focus_surface`).
+                        self.focus_surface = None;
                     } else {
                         // Blur: no widget on the tapped path took focus. The
                         // canonical release — flag and surface drop together, as
@@ -1535,11 +2493,31 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                         self.release_focus_session();
                     }
                 }
-                PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
+                // Only ever the claimant's (or an uncaptured contact's) release:
+                // any other contact's was routed to the `secondary` arm above or
+                // dropped at the gate.
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    self.capture_claimant = None;
+                    self.capture_contacts = false;
+                    self.contacts_captor_is_root = false;
+                }
                 PointerPhase::Move => {}
             },
-            InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_) => {
+            InputEvent::Scroll { .. }
+            | InputEvent::Scale(_)
+            | InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_) => {
                 if focus_req {
+                    // The candidate epoch opened above becomes this claim's, so
+                    // a focus move driven from the keyboard retires the branch it
+                    // supersedes on exactly the terms a press does — including a
+                    // floated surface's link, which this arm could otherwise
+                    // never reach. `focus_surface` is deliberately left alone:
+                    // which branch a focus-routed claim came from is not
+                    // something the root can attribute, so the next paint
+                    // re-resolves it from the pods' own live links.
+                    focus_claim_honoured = true;
                     self.set_focus_active(true);
                 }
                 if focus_rel {
@@ -1560,7 +2538,163 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // ignores a broadcast outright, and both cleared-surface publishers
             // are paint-time — so this is a contract note, not live behavior.
             InputEvent::Housekeeping => {}
+            // A floated surface's own input: a broadcast at the root, but a real
+            // user gesture underneath, so it moves *some* of what a hit-tested
+            // event moves and deliberately none of the rest.
+            InputEvent::Overlay(overlay) => {
+                // Honoured: a text field inside a popover may claim focus, and the
+                // session it opens is an ordinary one.
+                //
+                // What it must not do is stack on top of the session it
+                // supersedes. A hit-tested press has the containers' blur sweep
+                // under it, which clears every focused child but the one the
+                // press kept; a press inside a floated surface reaches no
+                // container's hit test, so nothing retires the chain the claim
+                // replaces and two branches go on believing they are focused —
+                // one of them still describing its own IME surface to the shell.
+                // The root retires it in the two places it has standing to: here,
+                // when its record already names a *different* surface as the
+                // owner, and in `paint_overlays`, which resolves that record from
+                // the pods themselves and stops seeding the main tree's links the
+                // pass after the session leaves it.
+                //
+                // The other repair — running the blur sweep for this event, with
+                // the claiming surface's owner kept — was not taken: that sweep
+                // belongs to the containers, which run it over the children they
+                // hold when a pointer `Down` passes through them. The root has no
+                // mutable route to a `focused` link below its own pod, so from
+                // here it is not a sweep at all but a change to how every
+                // container routes a broadcast.
+                //
+                // The record is deliberately not *written* here: an overlay-pass
+                // focus request cannot be attributed at the root (see
+                // `focus_surface`) — a field in the tree re-claiming its own
+                // session through a floated toolbar raises exactly the flag an
+                // editable inside the surface raises to take it away.
+                if focus_req {
+                    if self.focus_surface.is_some_and(|owner| owner != overlay.key) {
+                        // A session another surface owns, which *is* attributable:
+                        // retire it whole rather than let the new claim inherit
+                        // the surface the old one published.
+                        self.release_focus_session();
+                    }
+                    focus_claim_honoured = true;
+                    self.set_focus_active(true);
+                }
+                // Honoured: an **explicit** `EventCtx::release_focus` from inside
+                // the surface ends the session it asked to end — the same rule the
+                // `Scroll`/`Key`/`Ime` arm applies.
+                if focus_rel {
+                    self.release_focus_session();
+                }
+                // NEVER the blur branch. A `Down` that claims no focus blurs the
+                // tree only when it was hit-tested *in* the tree; a press inside a
+                // floated surface is the one press that must not, or tapping a
+                // selection toolbar would drop the very selection the toolbar acts
+                // on — which is the whole reason these two are routed apart.
+                //
+                // Nor does it advance the hover epoch: `hover_pass`/`hover_ends`
+                // above match `InputEvent::Pointer` only, so a live hover in the
+                // main tree survives an overlay pass by construction rather than by
+                // a check here.
+                //
+                // A capture requested from inside the surface IS honoured, exactly
+                // as a hit-tested `Down`'s is: the gesture then owns every
+                // follow-up, and because a live capture short-circuits the overlay
+                // pre-pass those follow-ups arrive as ordinary `Pointer` events
+                // routed by the capture path — which is what lets a drag begun
+                // inside a surface continue outside it, and what closes it on the
+                // `Up` through the arm above.
+                //
+                // Whatever phase claimed it, not `Down` alone. The pods record
+                // their own `active` path on any phase, so a capture claimed on a
+                // `Move` left the surface latched and the root's mirror clear:
+                // the pre-pass kept hit-testing, the follow-ups kept missing the
+                // latched surface, and the `Up` that would have released it never
+                // arrived — leaving the surface free to divert every later
+                // pointer event its owner is reached by. Mirroring the claim on
+                // any phase is what routes those follow-ups, and that `Up`, back
+                // down the capture path to the surface that opened it.
+                //
+                // The claimant is the contact this overlay event was routed for —
+                // the pre-pass re-enters this method under the gesture's own
+                // contact pass, so `pointer_id` is that gesture's id.
+                if captured {
+                    self.capture_claimant = Some(pointer_id);
+                    self.capture_contacts = contact_pass.contacts_requested();
+                    self.contacts_captor_is_root = root_opted_in;
+                }
+                // ...and released on the phase that ends the gesture, in the
+                // same door it was claimed through. The claim is mirrored on any
+                // phase (see above), so the release has to be too: an `Up` or
+                // `Cancel` that arrives *as an overlay event* — which is what
+                // happens when the surface was not holding the capture when the
+                // gesture began, so the pre-pass kept hit-testing it — would
+                // otherwise leave the root's latch standing on a gesture that is
+                // over, and a standing latch short-circuits the pre-pass for
+                // every floated surface until some unrelated pointer release
+                // happens along.
+                //
+                // A gesture whose claim *did* short-circuit the pre-pass ends on
+                // the ordinary pointer arm above instead, because that is the
+                // door its follow-ups come in by; the pod's own `active` link is
+                // released by whichever of the two the release arrived through
+                // (see `frust-widgets`' `OverlaySlot::forward`).
+                if let OverlayEventKind::Pointer(pointer) = &overlay.kind
+                    && matches!(pointer.phase, PointerPhase::Up | PointerPhase::Cancel)
+                    && self
+                        .capture_claimant
+                        .is_none_or(|claimant| claimant == pointer_id)
+                {
+                    self.capture_claimant = None;
+                    self.capture_contacts = false;
+                    self.contacts_captor_is_root = false;
+                }
+            }
         }
+
+        // A takeover during the claimant's own dispatch: a container cancelled
+        // the widget that opted into the gesture's other contacts and released
+        // it from the active path (`EventCtx::release_captured_child`). The
+        // opt-in goes with it — unless the container that took over opted in
+        // itself afterwards, which the pass records — so the other contacts are
+        // dropped from here on rather than routed to a captor that is gone. The
+        // claimant latch is deliberately kept: the gesture is still the
+        // claimant's, now held by the container that took it over (still on the
+        // active path, as the released child's ancestor), and only the
+        // claimant's own `Up`/`Cancel` ends it. Never on a non-claimant
+        // contact's dispatch, in which no container can clear a recorded link
+        // (`ChildPod::set_active`), so nothing could have left the path.
+        if !secondary && self.capture_claimant.is_some() && contact_pass.capture_released() {
+            self.capture_contacts = contact_pass.contacts_requested();
+        }
+
+        // Settle the session's identity — the one write that decides which
+        // recorded links survive this dispatch, in one place, from what the
+        // dispatch actually did.
+        //
+        // * A **live session that ended** strands everything: the chain it ran
+        //   through, a floated surface's link, and anything this very pass
+        //   stamped (a claim the same dispatch then released). Past the candidate,
+        //   therefore, not merely onto it — this is the clearing sweep no
+        //   container can be asked to run.
+        // * A **claim the root honoured** commits the candidate, so the chain it
+        //   stamped is the only one that reads live and every older link is
+        //   stranded by arithmetic.
+        // * Anything else leaves the session exactly where it was, which is what
+        //   makes a `Move`, a housekeeping broadcast, or a press inside a surface
+        //   that claimed nothing incapable of disturbing a standing link — and
+        //   what strands a claim an arm declined to honour, since the candidate
+        //   it was stamped with is then never published again.
+        let session_ended = focus_active_before && !self.focus_active;
+        self.focus_epoch = if session_ended {
+            advance_focus_epoch(candidate_focus_epoch)
+        } else if focus_claim_honoured {
+            candidate_focus_epoch
+        } else {
+            live_focus_epoch
+        };
+        self.publish_focus_session();
 
         // Close the hover pass: advance the epoch (which strands every stamp this
         // pass did not renew, wherever in the tree it sits) and refresh the mirror.
@@ -1593,10 +2727,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // pointer moving off every requesting widget resolves to. Drained
         // unconditionally so a request made on a non-cursor pass cannot survive
         // into the next one; only a cursor pass commits it.
-        let requested = cursor_slot.take();
+        let requested = request_slot.take();
         if cursor_pass {
-            self.cursor = requested.unwrap_or_default();
+            self.cursor = requested.cursor.unwrap_or_default();
         }
+        // The clipboard half of the same drain, committed on **every** pass: a copy
+        // is answered from whatever event decoded it, and there is no
+        // "clipboard pass" the way there is a cursor pass. Both fields are
+        // one-shot (see their docs) — a write from this pass supersedes one still
+        // standing undrained, and a request is raised but never lowered here, so a
+        // shell that skipped a drain answers late rather than losing the paste.
+        if let Some(text) = requested.clipboard_write {
+            self.pending_clipboard_write = Some(text);
+        }
+        self.pending_paste_request |= requested.paste_request;
         // A hover that ended with *nothing* taking it needs one repaint no widget
         // can ask for: the pointer moved onto empty chrome (or a press/lift/cancel
         // cleared the link), so the old claimant's `event()` was never called and
@@ -1611,8 +2755,176 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let needs_redraw = needs_redraw || (hover_was_active && !self.hover_active);
 
         EventOutcome {
-            handled,
-            needs_redraw,
+            // Merge whatever the overlay pre-pass already produced: a
+            // pass-through outside-tap notification ran before this dispatch and
+            // its redraw is owed just as much as the dispatch's own.
+            handled: handled || carried.handled,
+            needs_redraw: needs_redraw || carried.needs_redraw,
+        }
+    }
+
+    /// Decide what one pointer contact does — the root half of
+    /// [`InputEvent::PointerContact`]'s multi-contact contract.
+    ///
+    /// `Some(false)` routes it as the gesture's own pointer (rule (a): slot `0`
+    /// with nothing captured, hit-tested; or the claimant of a live capture,
+    /// down the captured path). `Some(true)` routes it as a **non-claimant**
+    /// contact down a live capture's path, which happens only while the captor's
+    /// opt-in stands (rule (c)): the dispatch then walks the recorded active
+    /// path forward-only, so only the captor's own handler sees it (see
+    /// [`crate::widget::ChildPod::event_child`]). `None` drops it: an additional
+    /// contact with nothing captured (rule (b)), or one the captor did not opt
+    /// into — or whose opt-in ended when a container took the gesture over from
+    /// the captor ([`EventCtx::release_captured_child`]) — (rule (c)).
+    fn contact_route(&self, pointer_id: PointerId) -> Option<bool> {
+        match self.capture_claimant {
+            None if pointer_id.slot == 0 => Some(false),
+            None => None,
+            Some(claimant) if claimant == pointer_id => Some(false),
+            Some(_) if self.capture_contacts => Some(true),
+            Some(_) => None,
+        }
+    }
+
+    /// Hit-test the surfaces the last paint floated, **before** the main tree
+    /// sees an uncaptured pointer, scroll, or scale — the routing half of the
+    /// overlay portal (see [`crate::overlay`]).
+    ///
+    /// # What it does
+    ///
+    /// Walks [`RenderRoot::overlay_hits`] topmost-first (the `Tooltip` band before
+    /// `Floating`, later registration before earlier), skipping
+    /// [`OverlayInput::Transparent`] entries, and on the first rect containing the
+    /// event's position re-dispatches it as
+    /// [`InputEvent::Overlay`] — a broadcast carrying the owner's key and a
+    /// **window-space** payload — then returns
+    /// [`OverlayRoute::Consumed`]. The main tree never sees the original event.
+    ///
+    /// If nothing was hit and the event is a primary `Down`, every `Interactive`
+    /// entry registered [`OutsideTap::Notify`] is told, topmost-first, with
+    /// [`OverlayEventKind::OutsideDown`]; the press is then consumed iff any of
+    /// them asked to consume it, and otherwise continues into today's dispatch.
+    ///
+    /// # What it deliberately does not do
+    ///
+    /// A **live capture short-circuits it entirely**: a gesture that has captured
+    /// the pointer owns every follow-up until it ends, and re-hit-testing a drag
+    /// that wandered over a floated surface would hand it to the wrong widget
+    /// mid-gesture. That is also what lets a drag *begun* inside a surface
+    /// continue outside it — the capture the overlay `Down` opened routes the
+    /// follow-ups by the ordinary captured path.
+    ///
+    /// Housekeeping, `Key`, `Ime`, `EditCommand` and an overlay event already
+    /// being routed pass straight through: a broadcast and a focus-routed event
+    /// each reach their target with no hit test, so there is nothing here to
+    /// redirect.
+    fn route_overlay(&mut self, state: &mut State, event: &InputEvent) -> OverlayRoute {
+        if self.capture_claimant.is_some() || self.overlay_hits.is_empty() {
+            return OverlayRoute::Continue(EventOutcome::default());
+        }
+        let (position, kind) = match event {
+            // A contact is routed for its position and phase exactly like a
+            // plain pointer (the root's gate has already unwrapped one, so the
+            // second pattern is for totality); the re-entered dispatch below
+            // keeps its id through the contact pass it runs under.
+            InputEvent::Pointer(pointer) | InputEvent::PointerContact { event: pointer, .. } => {
+                (pointer.position, OverlayEventKind::Pointer(*pointer))
+            }
+            InputEvent::Scroll { position, delta } => (
+                *position,
+                OverlayEventKind::Scroll {
+                    position: *position,
+                    delta: *delta,
+                },
+            ),
+            InputEvent::Scale(scale) => (
+                scale.focal,
+                OverlayEventKind::Scale {
+                    focal: scale.focal,
+                    phase: scale.phase,
+                    scale_delta: scale.scale_delta,
+                    velocity: scale.velocity,
+                },
+            ),
+            InputEvent::Key(_)
+            | InputEvent::Ime(_)
+            | InputEvent::EditCommand(_)
+            | InputEvent::Housekeeping
+            | InputEvent::Overlay(_) => {
+                return OverlayRoute::Continue(EventOutcome::default());
+            }
+        };
+
+        // `overlay_hits` is in paint order, so walking it in reverse walks from
+        // the surface painted last — the one the user sees on top — downward.
+        // Cloned because each dispatch below needs `&mut self`; the list is one
+        // small `Copy` struct per floated surface, and the clone never happens on
+        // the overwhelmingly common no-overlays path (guarded above).
+        let hits = self.overlay_hits.clone();
+        for hit in hits.iter().rev() {
+            // An `egui`-style transparent surface is painted above the app and
+            // hit-tested by nothing: the pointer passes straight through to
+            // whatever the main tree has underneath.
+            if hit.input == OverlayInput::Transparent {
+                continue;
+            }
+            if hit.contains(position) {
+                let routed = InputEvent::Overlay(OverlayEvent {
+                    key: hit.key,
+                    kind: kind.clone(),
+                });
+                // Re-entering this method is deliberate and shallow: the routed
+                // event is a broadcast, so it takes the branch above out
+                // immediately and can never recurse further. Going back through
+                // the front door is what gives the overlay dispatch the same
+                // request bracket, focus bookkeeping and outcome folding every
+                // other event gets, with one arm's worth of difference rather
+                // than a second copy of the pass.
+                return OverlayRoute::Consumed(self.event(state, &routed));
+            }
+        }
+
+        // Nothing floated was hit. Only a **primary** press is a light-dismiss
+        // signal: a secondary press is a context gesture (see
+        // `docs/CODE_STANDARDS.md`'s Interaction Semantics), and a `Move`, `Up` or
+        // scroll outside a surface says nothing about dismissing it.
+        let dismissing = matches!(
+            event,
+            InputEvent::Pointer(pointer) | InputEvent::PointerContact { event: pointer, .. }
+                if pointer.phase == PointerPhase::Down
+                    && pointer.button == PointerButton::Primary
+        );
+        if !dismissing {
+            return OverlayRoute::Continue(EventOutcome::default());
+        }
+
+        let mut carried = EventOutcome::default();
+        let mut consumed = false;
+        for hit in hits.iter().rev() {
+            // A transparent surface takes no input at all, outside-taps included:
+            // it is chrome the pointer does not know about.
+            if hit.input == OverlayInput::Transparent {
+                continue;
+            }
+            let OutsideTap::Notify { consume } = hit.outside_tap else {
+                continue;
+            };
+            let routed = InputEvent::Overlay(OverlayEvent {
+                key: hit.key,
+                kind: OverlayEventKind::OutsideDown,
+            });
+            let outcome = self.event(state, &routed);
+            carried.handled |= outcome.handled;
+            carried.needs_redraw |= outcome.needs_redraw;
+            // Every notified surface is told before any of them consumes:
+            // dismissing one menu must not hide the press from a second surface
+            // that also wanted to close.
+            consumed |= consume;
+        }
+        if consumed {
+            OverlayRoute::Consumed(carried)
+        } else {
+            OverlayRoute::Continue(carried)
         }
     }
 
@@ -1682,7 +2994,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // synthetic `Cancel` then releases the capture that `Down` also
                 // opened (mirroring a real gesture steal), leaving the recorded
                 // focus path intact — `Cancel` clears both `active` and
-                // `pointer_captured` while never touching `focused`/`focus_active`.
+                // `capture_claimant` while never touching `focused`/`focus_active`.
                 // Without the `Cancel`, the `Down` alone would leave the widget
                 // permanently capturing every subsequent pointer event.
                 let down = self.event(state, &synth(PointerPhase::Down));
@@ -1707,6 +3019,8 @@ impl<State: 'static, V: View<State>> Default for RenderRoot<State, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{ImeContentType, ScrollDelta};
+    use crate::overlay::OverlayKey;
 
     /// Application state for the tests.
     #[derive(Default)]
@@ -2826,6 +4140,38 @@ mod tests {
         assert!(!root.take_change_flags().is_empty());
     }
 
+    #[test]
+    fn set_insets_round_trips_corner_insets() {
+        use crate::insets::{CornerInset, CornerInsets};
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let corners = CornerInsets::new(
+            CornerInset::ZERO,
+            CornerInset::new(72.0, 24.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        );
+        let insets = WindowInsets::default().with_corner_insets(corners);
+        root.set_insets(insets);
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
+        assert_eq!(root.insets().corner_insets, corners);
+        // Identical re-push marks nothing.
+        root.set_insets(insets);
+        assert!(root.take_change_flags().is_empty());
+        // A push differing only in corners dirties again.
+        let moved = insets.with_corner_insets(CornerInsets::new(
+            CornerInset::new(72.0, 24.0),
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+            CornerInset::ZERO,
+        ));
+        root.set_insets(moved);
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
+    }
+
     // --- Presented-frame count: pushed value reaches the paint context, unset
     //     yields `None`, and — unlike theme/insets — the setter dirties nothing. ---
 
@@ -2952,6 +4298,7 @@ mod tests {
                         },
                         caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
                         content_type: Default::default(),
+                        suppress_soft_keyboard: false,
                     });
                     return EventResult::Handled;
                 }
@@ -3048,6 +4395,7 @@ mod tests {
             },
             caret: None,
             content_type: Default::default(),
+            suppress_soft_keyboard: false,
         }
     }
 
@@ -3265,6 +4613,7 @@ mod tests {
                 },
                 caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
                 content_type: Default::default(),
+                suppress_soft_keyboard: false,
             }
         }
     }
@@ -3466,6 +4815,305 @@ mod tests {
             root.focus_ime_generation(),
             released,
             "releasing an already-released focus must not move the generation"
+        );
+    }
+
+    // --- The focus session's IDENTITY, beside the edge generation ------------
+    //
+    // `focus_epoch` answers a question `focus_ime_generation` cannot: "is this
+    // still the session that asked?". A caller that binds a slow, asynchronous
+    // answer to the field that asked for it needs an identity, and a counter
+    // over the published surface's *value* is not one — two fields publish
+    // equal surfaces, and a field is free to take focus and publish nothing at
+    // all.
+    //
+    // Each test below asserts what BOTH counters did at the same moment. The
+    // `focus_ime_generation` assertions are the point rather than decoration:
+    // they are what states, in a form the compiler checks, that the edge
+    // generation stands still exactly where the identity moves.
+
+    /// The text both fields publish from a press, so neither can be told from
+    /// the other by the published value alone.
+    const SHARED_FIELD_TEXT: &str = "shared";
+
+    /// One field of the two-field fixture.
+    ///
+    /// Takes the focus session on any press inside itself; publishes an IME
+    /// surface on that press only when built to; and treats an `Ime` event as an
+    /// edit — the text changes and the surface is republished, but nothing
+    /// re-claims a session the field already holds.
+    ///
+    /// `publishes: false` is not a contrivance: the baseline text input claims
+    /// focus and republishes nothing for a press that lands inside text it
+    /// already had selected (such a press moves no caret and collapses no
+    /// selection), and any app-authored focusable that publishes no IME surface
+    /// of its own behaves the same way.
+    ///
+    /// A press publishes the *shared* surface, so the two fields are
+    /// indistinguishable to anything reading the published value — that is the
+    /// case under test. An edit publishes the field's own `name` instead, which
+    /// is how a test proves which field a focus-routed event actually reached.
+    struct SessionField {
+        name: &'static str,
+        publishes: bool,
+    }
+
+    impl SessionField {
+        /// The surface a field publishes. Deliberately carries nothing that
+        /// tells one field from another: `ImeState` is
+        /// `{active, editing, caret, content_type}` and names no widget, so two
+        /// fields holding the same text and caret publish equal values — which
+        /// is the ordinary shape of two empty fields, or two overlapping ones
+        /// mid-transition.
+        fn surface(text: &str) -> ImeState {
+            ImeState {
+                active: true,
+                editing: EditingState {
+                    text: text.to_string(),
+                    selection_base: 0,
+                    selection_extent: 0,
+                    composing_base: -1,
+                    composing_extent: -1,
+                },
+                caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                content_type: Default::default(),
+                suppress_soft_keyboard: false,
+            }
+        }
+    }
+
+    impl crate::widget::Widget for SessionField {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    if self.publishes {
+                        ctx.publish_ime_state(Self::surface(SHARED_FIELD_TEXT));
+                    }
+                    EventResult::Handled
+                }
+                InputEvent::Ime(_) => {
+                    ctx.publish_ime_state(Self::surface(self.name));
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// The fixture's root: two stacked fields, with a pointer event hit-tested
+    /// to the one under it and a focus-routed event forwarded down the recorded
+    /// focus path without a hit test — the routing every real container does.
+    struct TwoFields {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for TwoFields {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::new(0.0, 0.0));
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 50.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.top.paint_child(ctx, scene);
+            self.bottom.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if matches!(event, InputEvent::Pointer(_)) {
+                let pos = event.position();
+                if self.top.contains(pos) {
+                    return self.top.event_child(ctx, event);
+                }
+                if self.bottom.contains(pos) {
+                    return self.bottom.event_child(ctx, event);
+                }
+                return EventResult::Ignored;
+            }
+            if self.top.holds_live_focus() {
+                return self.top.event_child(ctx, event);
+            }
+            if self.bottom.holds_live_focus() {
+                return self.bottom.event_child(ctx, event);
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            self.top.semantics_child(ctx);
+            self.bottom.semantics_child(ctx);
+        }
+    }
+
+    struct TwoFieldsView {
+        bottom_publishes: bool,
+    }
+
+    impl View<ClickState> for TwoFieldsView {
+        type Element = TwoFields;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TwoFields {
+            TwoFields {
+                top: crate::widget::ChildPod::new(Box::new(SessionField {
+                    name: "top",
+                    publishes: true,
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(SessionField {
+                    name: "bottom",
+                    publishes: self.bottom_publishes,
+                })),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut TwoFields,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// An edit pushed down the focus path by the platform IME: it claims no
+    /// focus, so only the field already holding the session sees it — which is
+    /// what makes the surface it republishes name that field.
+    fn edit_event() -> InputEvent {
+        InputEvent::Ime(crate::event::ImeEvent::ApplyEditingState(
+            SessionField::surface(SHARED_FIELD_TEXT).editing,
+        ))
+    }
+
+    /// Mount the two-field fixture and press the top field, returning the root
+    /// with a live session on it.
+    fn two_fields_focused(
+        bottom_publishes: bool,
+    ) -> (RenderRoot<ClickState, TwoFieldsView>, ClickState) {
+        let mut root: RenderRoot<ClickState, TwoFieldsView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut |_| TwoFieldsView { bottom_publishes }, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active(), "the top field opened a session");
+        (root, state)
+    }
+
+    #[test]
+    fn focus_epoch_moves_when_focus_crosses_two_fields_publishing_alike() {
+        let (mut root, mut state) = two_fields_focused(true);
+        let first_session = root.focus_epoch();
+        let steady_edge = root.focus_ime_generation();
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface(SHARED_FIELD_TEXT))
+        );
+
+        // Press the bottom field. Focus really does move — and nothing
+        // observable about the published surface moves with it: claiming while
+        // some field is already focused writes `true` over `true`, and the
+        // surface the second field publishes compares equal to the first's.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.focus_ime_generation(),
+            steady_edge,
+            "the edge generation is blind to this move, which is why a caller \
+             asking 'is this the same session?' must not be built on it"
+        );
+        assert_ne!(
+            root.focus_epoch(),
+            first_session,
+            "the session identity must move when focus crosses to another field"
+        );
+
+        // Not merely "some counter moved": the focus PATH is the bottom
+        // field's now, which a focus-routed event proves by reaching it.
+        root.event(&mut state, &edit_event());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface("bottom")),
+            "the second field is the one holding the session"
+        );
+    }
+
+    #[test]
+    fn focus_epoch_moves_when_the_field_taking_focus_publishes_nothing() {
+        let (mut root, mut state) = two_fields_focused(false);
+        let first_session = root.focus_epoch();
+        let steady_edge = root.focus_ime_generation();
+
+        // Press the bottom field, which takes the session and publishes no
+        // surface of its own. A publish-nothing dispatch leaves the standing
+        // surface standing, so what the shell still sees describes the field
+        // the user just left — for as long as this session lasts, not merely
+        // until the next frame.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface(SHARED_FIELD_TEXT)),
+            "the field that lost focus is still the one the surface describes"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            steady_edge,
+            "no published value moved, so the edge generation cannot have"
+        );
+        assert_ne!(
+            root.focus_epoch(),
+            first_session,
+            "an honoured claim moves the session identity whether or not the \
+             claimant publishes anything"
+        );
+
+        // And again, the move is a real one: the focus path now ends at the
+        // field that published nothing.
+        root.event(&mut state, &edit_event());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface("bottom")),
+            "the second field is the one holding the session"
+        );
+    }
+
+    #[test]
+    fn focus_epoch_ignores_an_edit_inside_one_session() {
+        // The converse direction, and the reason the two counters are kept
+        // apart rather than merged: a caller holding an identity can let a
+        // harmless edit ride, where a caller comparing the published value has
+        // to treat every keystroke as a reason to give up.
+        let (mut root, mut state) = two_fields_focused(true);
+        let session = root.focus_epoch();
+        let before_edit = root.focus_ime_generation();
+
+        root.event(&mut state, &edit_event());
+        assert_eq!(
+            root.ime_state(),
+            Some(SessionField::surface("top")),
+            "the focused field applied the edit and republished"
+        );
+        assert_ne!(
+            root.focus_ime_generation(),
+            before_edit,
+            "a changed surface IS an edge"
+        );
+        assert_eq!(
+            root.focus_epoch(),
+            session,
+            "an edit does not end or restart the session it lands in"
+        );
+
+        // A release ends the identity too, so a stale one can never come back
+        // round to matching by standing still.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 90.0));
+        assert!(!root.is_focus_active());
+        assert_ne!(
+            root.focus_epoch(),
+            session,
+            "a release retires the session's identity"
         );
     }
 
@@ -5539,5 +7187,2718 @@ mod tests {
         h.dispatch(PointerPhase::Up, 50.0, 45.0);
         h.move_over(Leaf::Bottom);
         assert_eq!(h.cursor(), CursorIcon::Text);
+    }
+
+    use crate::event::{EditCommand, Key, KeyEvent, Modifiers, NamedKey};
+
+    // --- Clipboard: the per-pass write / paste-request channels ---------------
+    //
+    // The cursor's two siblings, resolved by the same bracket but committed on
+    // every pass rather than on a pointer `Move` alone, and drained one-shot
+    // rather than read as a standing level. The fixture is the cursor pair's
+    // shape with focus in place of hit testing, because a clipboard verb is
+    // focus-routed: two stacked leaves, a container that can speak before or
+    // after routing (the last-writer case) or ask for a paste of its own (the
+    // two-channels-in-one-pass case).
+
+    /// How the clipboard fixture's container speaks relative to its children.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ContainerClipboard {
+        /// Says nothing at all — the ordinary container.
+        Silent,
+        /// Writes *before* routing, so whatever the child writes comes later.
+        WritesBeforeRouting(&'static str),
+        /// Writes *after* routing, deliberately overriding its child.
+        WritesAfterRouting(&'static str),
+        /// Asks for a paste before routing — a toolbar refreshing whether its
+        /// paste button should be enabled, which is how a write and a request
+        /// legitimately ride one pass.
+        AsksForPaste,
+    }
+
+    /// A focusable editable stand-in: claims focus on a `Down`, answers a
+    /// copy/cut by writing its "selection", and asks for the clipboard when it
+    /// sees the hardware [`NamedKey::Paste`] key it decoded itself.
+    struct ClipboardLeaf {
+        /// What this leaf would copy.
+        text: &'static str,
+        /// Every [`EditCommand`] this leaf was handed, in order — the proof of
+        /// who the focus routing actually reached.
+        seen: Rc<RefCell<Vec<EditCommand>>>,
+    }
+
+    impl crate::widget::Widget for ClipboardLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::EditCommand(cmd) => {
+                    self.seen.borrow_mut().push(cmd.clone());
+                    match cmd {
+                        // The widget owns the selection, so it is the only thing
+                        // that can say what "copy" means.
+                        EditCommand::Copy | EditCommand::Cut => {
+                            ctx.write_clipboard(self.text.to_string());
+                        }
+                        // A paste arrives with its text already read by the shell,
+                        // and select-all touches no clipboard at all.
+                        EditCommand::Paste(_) | EditCommand::SelectAll => {}
+                    }
+                    EventResult::Handled
+                }
+                // The hardware clipboard key, decoded by the widget rather than by
+                // the shell: it carries no text, so the widget asks for some.
+                InputEvent::Key(k) if k.key == Key::Named(NamedKey::Paste) => {
+                    ctx.request_paste();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// Two stacked clipboard leaves, routed by focus for a focus-routed event and
+    /// by hit test for a pointer one, plus the container's own optional request.
+    struct ClipboardPair {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+        own: ContainerClipboard,
+    }
+
+    impl crate::widget::Widget for ClipboardPair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match self.own {
+                ContainerClipboard::WritesBeforeRouting(text) => {
+                    ctx.write_clipboard(text.to_string())
+                }
+                ContainerClipboard::AsksForPaste => ctx.request_paste(),
+                _ => {}
+            }
+            let result = self.route(ctx, event);
+            if let ContainerClipboard::WritesAfterRouting(text) = self.own {
+                ctx.write_clipboard(text.to_string());
+            }
+            result
+        }
+    }
+
+    impl ClipboardPair {
+        /// Focus routing for a focus-routed event, hit testing for the rest —
+        /// the two branches every real container has.
+        fn route(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_focus_routed() {
+                for pod in [&mut self.top, &mut self.bottom] {
+                    if pod.is_focused() {
+                        return pod.event_child(ctx, event);
+                    }
+                }
+                return EventResult::Ignored;
+            }
+            let pos = event.position();
+            let blurs = matches!(
+                event,
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down
+            );
+            let mut result = EventResult::Ignored;
+            let mut hit = false;
+            for pod in [&mut self.top, &mut self.bottom] {
+                if !hit && pod.contains(pos) {
+                    hit = true;
+                    result = pod.event_child(ctx, event);
+                } else if blurs {
+                    // A `Down` that lands elsewhere blurs the chain, exactly as
+                    // `frust-widgets`' routers do.
+                    pod.set_focused(false);
+                }
+            }
+            result
+        }
+    }
+
+    /// The fixture's view. It carries the two `seen` logs rather than letting the
+    /// harness reach into the built tree for them: `Widget` has no downcast, and
+    /// a shared handle is the same way the hover fixture's probe is watched.
+    #[derive(Clone)]
+    struct ClipboardPairView {
+        own: ContainerClipboard,
+        top_seen: Rc<RefCell<Vec<EditCommand>>>,
+        bottom_seen: Rc<RefCell<Vec<EditCommand>>>,
+    }
+
+    impl View<()> for ClipboardPairView {
+        type Element = ClipboardPair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClipboardPair {
+            ClipboardPair {
+                top: crate::widget::ChildPod::new(Box::new(ClipboardLeaf {
+                    text: "top selection",
+                    seen: self.top_seen.clone(),
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(ClipboardLeaf {
+                    text: "bottom selection",
+                    seen: self.bottom_seen.clone(),
+                })),
+                own: self.own,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut ClipboardPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// A `RenderRoot` over the clipboard fixture, plus the two leaves' `seen`
+    /// logs (cloned out of the built widgets, which the root owns).
+    struct ClipboardHarness {
+        root: RenderRoot<(), ClipboardPairView>,
+        state: (),
+        top_seen: Rc<RefCell<Vec<EditCommand>>>,
+        bottom_seen: Rc<RefCell<Vec<EditCommand>>>,
+    }
+
+    impl ClipboardHarness {
+        fn new(own: ContainerClipboard) -> Self {
+            let mut root: RenderRoot<(), ClipboardPairView> = RenderRoot::new();
+            let mut state = ();
+            let view = ClipboardPairView {
+                own,
+                top_seen: Rc::new(RefCell::new(Vec::new())),
+                bottom_seen: Rc::new(RefCell::new(Vec::new())),
+            };
+            let (top_seen, bottom_seen) = (view.top_seen.clone(), view.bottom_seen.clone());
+            root.rebuild(&mut move |_: &mut ()| view.clone(), &mut state);
+            root.layout(Size::new(100.0, 60.0));
+            ClipboardHarness {
+                root,
+                state,
+                top_seen,
+                bottom_seen,
+            }
+        }
+
+        /// Focus a leaf the way a user does: a `Down` inside its bounds.
+        fn focus(&mut self, leaf: Leaf) {
+            let y = match leaf {
+                Leaf::Top => 15.0,
+                Leaf::Bottom => 45.0,
+            };
+            self.root
+                .event(&mut self.state, &pointer(PointerPhase::Down, 50.0, y));
+        }
+
+        fn dispatch(&mut self, event: &InputEvent) -> EventOutcome {
+            self.root.event(&mut self.state, event)
+        }
+    }
+
+    #[test]
+    fn a_copy_reaches_the_focused_leaf_alone_and_its_text_drains_once() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        assert!(
+            h.root.take_clipboard_write().is_none(),
+            "a focusing tap writes nothing"
+        );
+
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(
+            h.top_seen.borrow().as_slice(),
+            &[EditCommand::Copy],
+            "the focused leaf received the command"
+        );
+        assert!(
+            h.bottom_seen.borrow().is_empty(),
+            "and the unfocused sibling never saw it — focus routing, not hit testing"
+        );
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("top selection")
+        );
+        assert_eq!(
+            h.root.take_clipboard_write(),
+            None,
+            "the drain is one-shot: a clipboard write is an edge, not a level"
+        );
+    }
+
+    #[test]
+    fn a_copy_follows_the_focus_when_it_moves() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        h.focus(Leaf::Bottom);
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Cut));
+        assert!(
+            h.top_seen.borrow().is_empty(),
+            "the blurred leaf is out of the routed path"
+        );
+        assert_eq!(h.bottom_seen.borrow().as_slice(), &[EditCommand::Cut]);
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("bottom selection")
+        );
+    }
+
+    #[test]
+    fn a_paste_request_drains_once_and_its_answer_is_an_ordinary_dispatch() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        assert!(
+            !h.root.take_paste_request(),
+            "a focusing tap asks for nothing"
+        );
+
+        // The widget decoded the hardware Paste key itself and asked the shell.
+        h.dispatch(&InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Paste),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        }));
+        assert!(h.root.take_paste_request());
+        assert!(
+            !h.root.take_paste_request(),
+            "the flag is one-shot, so a shell answers a request once"
+        );
+
+        // The shell's answer is a new, focus-routed dispatch carrying the text.
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Paste(
+            "from the host".to_string(),
+        )));
+        assert_eq!(
+            h.top_seen.borrow().as_slice(),
+            &[EditCommand::Paste("from the host".to_string())]
+        );
+        assert!(
+            !h.root.take_paste_request(),
+            "answering a request does not raise a new one"
+        );
+        assert!(
+            h.root.take_clipboard_write().is_none(),
+            "and a paste writes nothing back to the host clipboard"
+        );
+    }
+
+    #[test]
+    fn a_paste_answered_after_a_blur_reaches_nobody() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        h.dispatch(&InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Paste),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        }));
+        assert!(h.root.take_paste_request());
+
+        // Focus is released while the shell's clipboard read is in flight: a
+        // `Down` on empty chrome past both leaves blurs the chain.
+        h.dispatch(&pointer(PointerPhase::Down, 50.0, 100.0));
+        assert!(!h.root.is_focus_active(), "the tap blurred the field");
+
+        // The shell answers anyway — it never has to track who asked, because the
+        // answer is focus-routed and simply reaches no widget.
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Paste(
+            "from the host".to_string(),
+        )));
+        assert!(h.top_seen.borrow().is_empty());
+        assert!(h.bottom_seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_last_clipboard_write_of_a_pass_wins_at_the_root() {
+        // A container that writes BEFORE routing yields to its child, exactly as
+        // `set_cursor` does: the innermost widget the route reaches speaks last.
+        let mut h = ClipboardHarness::new(ContainerClipboard::WritesBeforeRouting("container"));
+        h.focus(Leaf::Top);
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("top selection")
+        );
+
+        // A container that writes AFTER routing deliberately overrides it.
+        let mut h = ClipboardHarness::new(ContainerClipboard::WritesAfterRouting("container"));
+        h.focus(Leaf::Top);
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(h.root.take_clipboard_write().as_deref(), Some("container"));
+    }
+
+    #[test]
+    fn a_write_and_a_paste_request_ride_one_pass_independently() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::AsksForPaste);
+        h.focus(Leaf::Top);
+        // The focusing tap already carried the container's ask; drain it so the
+        // assertion below is about the copy pass alone.
+        assert!(h.root.take_paste_request());
+
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert_eq!(
+            h.root.take_clipboard_write().as_deref(),
+            Some("top selection"),
+            "the leaf's write landed"
+        );
+        assert!(
+            h.root.take_paste_request(),
+            "and the container's request landed in the same pass"
+        );
+    }
+
+    #[test]
+    fn a_pass_that_asks_for_neither_leaves_both_empty() {
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        // A select-all is a real clipboard verb that touches no clipboard, and a
+        // pointer move touches nothing at all.
+        h.dispatch(&InputEvent::EditCommand(EditCommand::SelectAll));
+        h.dispatch(&pointer(PointerPhase::Move, 50.0, 15.0));
+        assert_eq!(h.top_seen.borrow().as_slice(), &[EditCommand::SelectAll]);
+        assert_eq!(h.root.take_clipboard_write(), None);
+        assert!(!h.root.take_paste_request());
+    }
+
+    #[test]
+    fn an_edit_command_moves_focus_only_when_the_dispatch_asks() {
+        // The bookkeeping arm `EditCommand` shares with `Key`/`Ime`: unlike a
+        // `Down`, it neither claims nor blurs by itself.
+        let mut h = ClipboardHarness::new(ContainerClipboard::Silent);
+        h.focus(Leaf::Top);
+        assert!(h.root.is_focus_active());
+        let gen_before = h.root.focus_ime_generation();
+        h.dispatch(&InputEvent::EditCommand(EditCommand::Copy));
+        assert!(
+            h.root.is_focus_active(),
+            "a clipboard verb leaves the focus session exactly as it found it"
+        );
+        assert_eq!(h.root.focus_ime_generation(), gen_before);
+    }
+
+    // ---------------------------------------------------------------------
+    // Overlay portal: an owner that floats a pod, a sibling painted after it,
+    // and a root that routes like any hand-written container.
+    // ---------------------------------------------------------------------
+
+    /// What the owner does when a `Down` arrives inside one of its surfaces.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum OwnerReaction {
+        /// Nothing — the commonest shape (a menu item acts on `Up`).
+        Nothing,
+        /// Capture the pointer, the drag-from-inside-a-surface shape.
+        Capture,
+        /// Claim focus, the text-field-inside-a-popover shape.
+        Focus,
+    }
+
+    /// One floated surface the fixture's owner registers.
+    #[derive(Clone, Debug, PartialEq)]
+    struct SurfaceSpec {
+        key: OverlayKey,
+        label: &'static str,
+        rect: Rect,
+        band: crate::overlay::OverlayBand,
+        input: OverlayInput,
+        outside_tap: OutsideTap,
+        /// Whether the owner registers it at all this frame — the fixture for
+        /// "stop registering and the surface stops existing".
+        register: bool,
+        on_down: OwnerReaction,
+        /// The same, for a `Move` inside the surface — a drag threshold latching
+        /// a capture mid-gesture, the shape that claims one on no `Down` at all.
+        on_move: OwnerReaction,
+        /// The same again, for an `Up` — the phase on which a capture claim has
+        /// nothing left to own, and the one that reaches the surface as an
+        /// overlay event precisely because no capture was standing to divert it.
+        on_up: OwnerReaction,
+        /// Whether the leaf INSIDE the pod claims focus on a `Down` of its own —
+        /// the editable-in-a-popover shape, distinct from `on_down`'s claim,
+        /// which the owner makes on the surface's behalf.
+        pod_claims_focus: bool,
+        /// Whether that leaf republishes an active IME surface on every paint.
+        /// Stated unconditionally, so the fixture can publish from a pod holding
+        /// no focus link at all — the provenance case.
+        pod_publishes_ime: bool,
+        /// The same publish, from the leaf's `event` handler instead of its
+        /// paint — the event-route half of the provenance case, and equally
+        /// ungated.
+        pod_publishes_ime_on_event: bool,
+    }
+
+    impl SurfaceSpec {
+        fn floating(label: &'static str, rect: Rect) -> Self {
+            Self {
+                key: OverlayKey::next(),
+                label,
+                rect,
+                band: crate::overlay::OverlayBand::Floating,
+                input: OverlayInput::Interactive,
+                outside_tap: OutsideTap::Ignore,
+                register: true,
+                on_down: OwnerReaction::Nothing,
+                on_move: OwnerReaction::Nothing,
+                on_up: OwnerReaction::Nothing,
+                pod_claims_focus: false,
+                pod_publishes_ime: false,
+                pod_publishes_ime_on_event: false,
+            }
+        }
+    }
+
+    /// Everything the overlay fixture recorded, shared between the widgets and
+    /// the test.
+    #[derive(Default)]
+    struct OverlayLog {
+        /// Events the owner received, in the order they arrived.
+        owner: Vec<InputEvent>,
+        /// `(surface label, event)` for everything a floated pod's content saw —
+        /// positions here are the pod's own local space.
+        pod: Vec<(&'static str, InputEvent)>,
+        /// Events the main-tree sibling received.
+        sibling: Vec<InputEvent>,
+        /// What the sibling read from `EventCtx::has_focus` on each event.
+        sibling_focus: Vec<bool>,
+        /// What the pod's leaf read from `PaintCtx::has_focus` on each paint.
+        pod_paint_focus: Vec<bool>,
+        /// The same read for the main-tree sibling. The two together answer
+        /// "which branches believe they are focused".
+        sibling_paint_focus: Vec<bool>,
+        /// The window size the owner observed in its own (child) layout.
+        child_window_size: Option<Size>,
+    }
+
+    type Log = std::rc::Rc<std::cell::RefCell<OverlayLog>>;
+
+    /// The leaf inside a floated pod: paints its label at the pod's absolute
+    /// origin and records what reaches it.
+    ///
+    /// Optionally an editable — it claims focus on a `Down` of its own and
+    /// republishes an IME surface on every paint. The publish is deliberately
+    /// ungated: a pod describing a session it holds no focus link for is
+    /// precisely what the root has to answer for.
+    struct OverlayContentWidget {
+        label: &'static str,
+        log: Log,
+        claims_focus: bool,
+        publishes_ime: bool,
+        publishes_ime_on_event: bool,
+    }
+
+    impl OverlayContentWidget {
+        /// What such a pod publishes: an ordinary field's surface, carrying no
+        /// secure-text configuration of its own.
+        fn surface() -> ImeState {
+            ImeState {
+                active: true,
+                content_type: ImeContentType::Normal,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl crate::widget::Widget for OverlayContentWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(80.0, 30.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.draw_text(ctx.origin(), self.label);
+            self.log.borrow_mut().pod_paint_focus.push(ctx.has_focus());
+            if self.publishes_ime {
+                ctx.publish_ime_state(Self::surface());
+            }
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.log.borrow_mut().pod.push((self.label, event.clone()));
+            if self.publishes_ime_on_event {
+                ctx.publish_ime_state(Self::surface());
+            }
+            if self.claims_focus
+                && let InputEvent::Pointer(pointer) = event
+                && pointer.phase == PointerPhase::Down
+            {
+                ctx.request_focus();
+            }
+            EventResult::Handled
+        }
+    }
+
+    /// One live surface: its spec plus the pod the owner keeps.
+    struct OwnedSurface {
+        spec: SurfaceSpec,
+        pod: crate::overlay::OverlayPod,
+    }
+
+    /// The overlay owner: hosts the pods, registers them from `paint`, and
+    /// forwards the broadcasts the root routes back to it into the right pod.
+    struct OverlayOwnerWidget {
+        surfaces: Vec<OwnedSurface>,
+        log: Log,
+    }
+
+    impl OverlayOwnerWidget {
+        fn new(specs: &[SurfaceSpec], log: Log) -> Self {
+            let mut owner = Self {
+                surfaces: Vec::new(),
+                log,
+            };
+            owner.sync(specs);
+            owner
+        }
+
+        /// Reconcile the live surfaces against `specs`, keeping each pod alive
+        /// across a rebuild (a real owner keeps its popover's widget state).
+        fn sync(&mut self, specs: &[SurfaceSpec]) {
+            self.surfaces
+                .retain(|s| specs.iter().any(|n| n.key == s.spec.key));
+            for spec in specs {
+                match self.surfaces.iter_mut().find(|s| s.spec.key == spec.key) {
+                    Some(live) => live.spec = spec.clone(),
+                    None => {
+                        let log = std::rc::Rc::clone(&self.log);
+                        self.surfaces.push(OwnedSurface {
+                            spec: spec.clone(),
+                            pod: std::rc::Rc::new(std::cell::RefCell::new(
+                                crate::widget::ChildPod::new(Box::new(OverlayContentWidget {
+                                    label: spec.label,
+                                    log,
+                                    claims_focus: spec.pod_claims_focus,
+                                    publishes_ime: spec.pod_publishes_ime,
+                                    publishes_ime_on_event: spec.pod_publishes_ime_on_event,
+                                })),
+                            )),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    impl crate::widget::Widget for OverlayOwnerWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            // The window size reaches a CHILD's layout unchanged — this widget is
+            // a `ChildPod` of the fixture's root.
+            self.log.borrow_mut().child_window_size = Some(ctx.window_size());
+            // A floated pod is laid out against the WINDOW, never against the
+            // owner's own constraints: it escapes the owner's box entirely.
+            let window = BoxConstraints::loose(ctx.window_size());
+            for surface in &mut self.surfaces {
+                surface.pod.borrow_mut().layout_child(ctx, &window);
+            }
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.draw_text(ctx.origin(), "owner");
+            for surface in &self.surfaces {
+                if !surface.spec.register {
+                    continue;
+                }
+                // Registered, never painted here: the root paints it last.
+                ctx.register_overlay(OverlayEntry {
+                    key: surface.spec.key,
+                    band: surface.spec.band,
+                    input: surface.spec.input,
+                    outside_tap: surface.spec.outside_tap,
+                    window_rect: surface.spec.rect,
+                    pod: std::rc::Rc::clone(&surface.pod),
+                    insets: ctx.window_insets(),
+                });
+            }
+        }
+
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Overlay(overlay) = event else {
+                self.log.borrow_mut().owner.push(event.clone());
+                return EventResult::Ignored;
+            };
+            let Some(surface) = self.surfaces.iter_mut().find(|s| s.spec.key == overlay.key) else {
+                // Another owner's surface: the broadcast reached us, and we
+                // ignore it. This fall-through is the whole addressing rule.
+                return EventResult::Ignored;
+            };
+            self.log.borrow_mut().owner.push(event.clone());
+            match &overlay.kind {
+                OverlayEventKind::Pointer(pointer) => {
+                    let reaction = match pointer.phase {
+                        PointerPhase::Down => Some(surface.spec.on_down),
+                        PointerPhase::Move => Some(surface.spec.on_move),
+                        PointerPhase::Up => Some(surface.spec.on_up),
+                        _ => None,
+                    };
+                    match reaction {
+                        Some(OwnerReaction::Capture) => ctx.capture_pointer(),
+                        Some(OwnerReaction::Focus) => ctx.request_focus(),
+                        Some(OwnerReaction::Nothing) | None => {}
+                    }
+                    // Window space → the pod's own space is one subtraction: the
+                    // registered rect's origin.
+                    let local = InputEvent::Pointer(PointerEvent {
+                        position: pointer.position - surface.spec.rect.origin().to_vec2(),
+                        ..*pointer
+                    });
+                    surface.pod.borrow_mut().event_child(ctx, &local);
+                }
+                OverlayEventKind::Scroll { position, delta } => {
+                    let local = InputEvent::Scroll {
+                        position: *position - surface.spec.rect.origin().to_vec2(),
+                        delta: *delta,
+                    };
+                    surface.pod.borrow_mut().event_child(ctx, &local);
+                }
+                OverlayEventKind::Scale {
+                    focal,
+                    phase,
+                    scale_delta,
+                    velocity,
+                } => {
+                    let local = InputEvent::Scale(crate::event::ScaleEvent {
+                        phase: *phase,
+                        scale_delta: *scale_delta,
+                        focal: *focal - surface.spec.rect.origin().to_vec2(),
+                        velocity: *velocity,
+                    });
+                    surface.pod.borrow_mut().event_child(ctx, &local);
+                }
+                OverlayEventKind::OutsideDown => {}
+            }
+            // A broadcast is never consumed, whatever the pod returned.
+            EventResult::Ignored
+        }
+    }
+
+    /// The main-tree sibling: painted AFTER the owner, claims focus on a `Down`
+    /// inside it, and records what it sees.
+    ///
+    /// It stands in for a secure text field: the surface it publishes carries
+    /// [`ImeContentType::Password`], and it republishes that surface on every
+    /// paint for as long as the pass seeds it focused — the shipped field's
+    /// republish-and-self-correct shape, in miniature.
+    struct SiblingLeafWidget {
+        log: Log,
+        /// The selection-toolbar request to publish each paint, if any.
+        publish: Option<crate::selection_toolbar::SelectionToolbarRequest>,
+    }
+
+    impl SiblingLeafWidget {
+        /// The secure surface this field describes its session with.
+        fn surface() -> ImeState {
+            ImeState {
+                active: true,
+                content_type: ImeContentType::Password,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl crate::widget::Widget for SiblingLeafWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(60.0, 40.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.draw_text(ctx.origin(), "sibling");
+            self.log
+                .borrow_mut()
+                .sibling_paint_focus
+                .push(ctx.has_focus());
+            if ctx.has_focus() {
+                ctx.publish_ime_state(Self::surface());
+            }
+            if let Some(request) = self.publish {
+                ctx.publish_selection_toolbar(request);
+            }
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            {
+                let mut log = self.log.borrow_mut();
+                log.sibling.push(event.clone());
+                log.sibling_focus.push(ctx.has_focus());
+            }
+            match event {
+                InputEvent::Pointer(pointer) if pointer.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    ctx.publish_ime_state(Self::surface());
+                    EventResult::Handled
+                }
+                // A scroll is hit-tested like a press but travels the root's
+                // keyboard-class focus arm (`Scroll | Key | Ime | EditCommand`),
+                // so claiming focus here is how the fixture expresses a focus
+                // move that is not a pointer `Down`.
+                InputEvent::Scroll { .. } => {
+                    ctx.request_focus();
+                    ctx.publish_ime_state(Self::surface());
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// The fixture's root: a hand-written two-child container routing exactly
+    /// like `frust-widgets`' helpers — broadcast first, then capture, then focus,
+    /// then a topmost-first hit test.
+    struct OverlayRootWidget {
+        owner: crate::widget::ChildPod,
+        sibling: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for OverlayRootWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.owner.layout_child(ctx, bc);
+            self.owner.set_origin(Point::new(0.0, 0.0));
+            self.sibling.layout_child(ctx, bc);
+            self.sibling.set_origin(Point::new(0.0, 100.0));
+            bc.constrain(Size::new(200.0, 200.0))
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            // The owner paints FIRST, the sibling after it — so an overlay pod
+            // landing after both proves the root's post-pass really is last.
+            self.owner.paint_child(ctx, scene);
+            self.sibling.paint_child(ctx, scene);
+        }
+
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                self.owner.event_child(ctx, event);
+                self.sibling.event_child(ctx, event);
+                return EventResult::Ignored;
+            }
+            let ends = matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for (pod, _) in [(&mut self.owner, 0), (&mut self.sibling, 1)] {
+                if pod.is_active() {
+                    let result = pod.event_child(ctx, event);
+                    if ends {
+                        pod.set_active(false);
+                    }
+                    return result;
+                }
+            }
+            if event.is_focus_routed() {
+                // `holds_live_focus`, not `is_focused` — the same read
+                // `frust-widgets`' `route_event` makes, and the reason this
+                // fixture can stand in for it: both children can carry a
+                // recorded link at once, and only one of them can carry the live
+                // session's.
+                if self.sibling.holds_live_focus() {
+                    return self.sibling.event_child(ctx, event);
+                }
+                if self.owner.holds_live_focus() {
+                    return self.owner.event_child(ctx, event);
+                }
+                return EventResult::Ignored;
+            }
+            // Topmost-first: the sibling paints last, so it hit-tests first.
+            let position = event.position();
+            if self.sibling.contains(position) {
+                return self.sibling.event_child(ctx, event);
+            }
+            if self.owner.contains(position) {
+                return self.owner.event_child(ctx, event);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// The view producing the fixture, reconciling the surface specs in place.
+    struct OverlayRootView {
+        specs: Vec<SurfaceSpec>,
+        publish: Option<crate::selection_toolbar::SelectionToolbarRequest>,
+        log: Log,
+    }
+
+    impl View<OverlayState> for OverlayRootView {
+        type Element = OverlayRootWidget;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Self::Element {
+            OverlayRootWidget {
+                owner: crate::widget::ChildPod::new(Box::new(OverlayOwnerWidget::new(
+                    &self.specs,
+                    std::rc::Rc::clone(&self.log),
+                ))),
+                sibling: crate::widget::ChildPod::new(Box::new(SiblingLeafWidget {
+                    log: std::rc::Rc::clone(&self.log),
+                    publish: self.publish,
+                })),
+            }
+        }
+
+        fn rebuild(
+            &self,
+            prev: &Self,
+            element: &mut Self::Element,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element
+                .owner
+                .widget_mut()
+                .downcast_mut::<OverlayOwnerWidget>()
+                .expect("the owner keeps its type")
+                .sync(&self.specs);
+            element
+                .sibling
+                .widget_mut()
+                .downcast_mut::<SiblingLeafWidget>()
+                .expect("the sibling keeps its type")
+                .publish = self.publish;
+            if prev.specs != self.specs || prev.publish != self.publish {
+                ChangeFlags::PAINT
+            } else {
+                ChangeFlags::NONE
+            }
+        }
+    }
+
+    /// App state for the overlay fixture: the surface specs the next rebuild
+    /// applies, plus the shared log.
+    struct OverlayState {
+        specs: Vec<SurfaceSpec>,
+        publish: Option<crate::selection_toolbar::SelectionToolbarRequest>,
+        log: Log,
+    }
+
+    fn overlay_logic(state: &mut OverlayState) -> OverlayRootView {
+        OverlayRootView {
+            specs: state.specs.clone(),
+            publish: state.publish,
+            log: std::rc::Rc::clone(&state.log),
+        }
+    }
+
+    /// Drives the overlay fixture the way a shell does: rebuild, layout, paint,
+    /// then dispatch.
+    struct OverlayHarness {
+        root: RenderRoot<OverlayState, OverlayRootView>,
+        state: OverlayState,
+        log: Log,
+    }
+
+    impl OverlayHarness {
+        fn new(specs: Vec<SurfaceSpec>) -> Self {
+            let log: Log = std::rc::Rc::new(std::cell::RefCell::new(OverlayLog::default()));
+            let mut harness = Self {
+                root: RenderRoot::new(),
+                state: OverlayState {
+                    specs,
+                    publish: None,
+                    log: std::rc::Rc::clone(&log),
+                },
+                log,
+            };
+            harness.frame();
+            harness
+        }
+
+        /// One full frame: rebuild, layout at a 200x200 window, paint.
+        fn frame(&mut self) -> RecordingScene {
+            self.root.rebuild(&mut overlay_logic, &mut self.state);
+            self.root.layout(Size::new(200.0, 200.0));
+            let mut scene = RecordingScene::default();
+            self.root.paint(&mut scene, FrameTime::ZERO);
+            scene
+        }
+
+        fn dispatch(&mut self, event: &InputEvent) -> EventOutcome {
+            self.root.event(&mut self.state, event)
+        }
+
+        fn down(&mut self, x: f64, y: f64) -> EventOutcome {
+            self.dispatch(&pointer(PointerPhase::Down, x, y))
+        }
+
+        fn clear_log(&mut self) {
+            let mut log = self.log.borrow_mut();
+            log.owner.clear();
+            log.pod.clear();
+            log.sibling.clear();
+            log.sibling_focus.clear();
+            log.pod_paint_focus.clear();
+            log.sibling_paint_focus.clear();
+        }
+
+        /// What the pod's leaf and the main-tree sibling each read from
+        /// `PaintCtx::has_focus` on the most recent frame — "which branches
+        /// believe they are focused", read from the branches themselves.
+        fn branch_focus(&self) -> (bool, bool) {
+            let log = self.log.borrow();
+            (
+                *log.pod_paint_focus
+                    .last()
+                    .expect("the pod painted at least once"),
+                *log.sibling_paint_focus
+                    .last()
+                    .expect("the sibling painted at least once"),
+            )
+        }
+
+        /// The overlay events the owner received, as `(key, kind)`.
+        fn owner_overlays(&self) -> Vec<(OverlayKey, OverlayEventKind)> {
+            self.log
+                .borrow()
+                .owner
+                .iter()
+                .filter_map(|event| match event {
+                    InputEvent::Overlay(o) => Some((o.key, o.kind.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Pointer events the sibling saw — the "did the main tree get it?" read.
+        fn sibling_pointers(&self) -> Vec<PointerEvent> {
+            self.log
+                .borrow()
+                .sibling
+                .iter()
+                .filter_map(|event| match event {
+                    InputEvent::Pointer(p) => Some(*p),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// A rect well clear of the sibling (which sits at y >= 100).
+    fn floating_rect() -> Rect {
+        Rect::new(120.0, 10.0, 200.0, 60.0)
+    }
+
+    #[test]
+    fn a_registered_pod_paints_after_a_later_sibling_at_its_window_rect() {
+        let spec = SurfaceSpec::floating("popover", floating_rect());
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+        let scene = h.frame();
+
+        assert_eq!(
+            scene
+                .texts
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner", "sibling", "popover"],
+            "the floated pod paints after the owner AND after the sibling painted \
+             later than the owner — escaping paint order is the whole point"
+        );
+        assert_eq!(
+            scene.texts[2].0,
+            floating_rect().origin(),
+            "and it paints at its registered window rect, not at its owner's origin"
+        );
+        assert_eq!(h.root.overlay_hits.len(), 1);
+        assert_eq!(h.root.overlay_hits[0].key, spec.key);
+        assert_eq!(h.root.overlay_hits[0].window_rect, floating_rect());
+    }
+
+    #[test]
+    fn two_bands_paint_floating_then_tooltip_whatever_the_registration_order() {
+        // Registered tooltip-first, so registration order and band order
+        // disagree: the band must win.
+        let mut tooltip = SurfaceSpec::floating("tooltip", Rect::new(0.0, 0.0, 40.0, 20.0));
+        tooltip.band = crate::overlay::OverlayBand::Tooltip;
+        tooltip.input = OverlayInput::Transparent;
+        let floating = SurfaceSpec::floating("floating", floating_rect());
+        let mut h = OverlayHarness::new(vec![tooltip, floating]);
+        let scene = h.frame();
+
+        assert_eq!(
+            scene
+                .texts
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner", "sibling", "floating", "tooltip"],
+            "Floating paints below Tooltip regardless of who registered first"
+        );
+    }
+
+    #[test]
+    fn the_registry_is_empty_at_the_start_of_every_paint() {
+        let spec = SurfaceSpec::floating("popover", floating_rect());
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+        h.frame();
+        assert_eq!(h.root.overlay_hits.len(), 1);
+
+        // Paint again with nothing changed: the entry is re-registered, not
+        // accumulated — an owner registering every frame must not grow the table.
+        let scene = h.frame();
+        assert_eq!(h.root.overlay_hits.len(), 1);
+        assert_eq!(scene.texts.len(), 3);
+
+        // The owner stops registering (its popover closed). There is nothing to
+        // unregister: the next paint simply does not see it.
+        h.state.specs[0].register = false;
+        let scene = h.frame();
+        assert!(
+            h.root.overlay_hits.is_empty(),
+            "a surface nobody registers stops existing after the next paint"
+        );
+        assert_eq!(
+            scene
+                .texts
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner", "sibling"],
+            "and stops painting"
+        );
+
+        // A `Down` inside where it used to be now reaches the main tree.
+        h.clear_log();
+        h.down(150.0, 30.0);
+        assert!(h.owner_overlays().is_empty());
+    }
+
+    #[test]
+    fn the_window_size_reaches_a_childs_layout() {
+        let h = OverlayHarness::new(vec![SurfaceSpec::floating("popover", floating_rect())]);
+        assert_eq!(
+            h.log.borrow().child_window_size,
+            Some(Size::new(200.0, 200.0)),
+            "a child lays out knowing the window, which is what an overlay pod is \
+             sized against"
+        );
+    }
+
+    #[test]
+    fn a_down_inside_a_floating_surface_reaches_only_its_owner_and_never_blurs() {
+        let spec = SurfaceSpec::floating("popover", floating_rect());
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+
+        // A field elsewhere in the main tree takes focus first.
+        h.down(30.0, 120.0);
+        assert!(
+            h.root.is_focus_active(),
+            "the sibling holds a focus session"
+        );
+        let ime_before = h.root.ime_state();
+        assert!(ime_before.is_some());
+        let focus_gen_before = h.root.focus_ime_generation();
+        h.clear_log();
+
+        // Now press inside the floated surface.
+        h.down(150.0, 30.0);
+
+        assert_eq!(
+            h.owner_overlays(),
+            vec![(
+                spec.key,
+                OverlayEventKind::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    position: Point::new(150.0, 30.0),
+                    button: PointerButton::Primary,
+                })
+            )],
+            "the owner is reached by key, with a WINDOW-space payload"
+        );
+        assert_eq!(
+            h.log.borrow().pod,
+            vec![(
+                "popover",
+                InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    // 150-120, 30-10: the owner's one subtraction, the rect origin.
+                    position: Point::new(30.0, 20.0),
+                    button: PointerButton::Primary,
+                })
+            )],
+            "and the owner forwards it into the pod in the pod's own space"
+        );
+        assert!(
+            h.sibling_pointers().is_empty(),
+            "the main tree never saw the press"
+        );
+        assert!(
+            h.root.is_focus_active(),
+            "and the press did NOT blur the field the surface belongs to"
+        );
+        assert_eq!(
+            h.root.ime_state(),
+            ime_before,
+            "nor disturb its IME surface"
+        );
+        assert_eq!(
+            h.root.focus_ime_generation(),
+            focus_gen_before,
+            "so no focus/IME edge fires at the shell either"
+        );
+        assert_eq!(
+            h.log.borrow().sibling_focus.last(),
+            Some(&true),
+            "the focused leaf still reads as focused when the broadcast reaches it"
+        );
+    }
+
+    #[test]
+    fn a_down_inside_a_transparent_surface_reaches_the_main_tree_normally() {
+        // The transparent surface covers the sibling exactly.
+        let mut spec = SurfaceSpec::floating("tooltip", Rect::new(0.0, 100.0, 60.0, 140.0));
+        spec.input = OverlayInput::Transparent;
+        spec.outside_tap = OutsideTap::Notify { consume: true };
+        let mut h = OverlayHarness::new(vec![spec]);
+        h.frame();
+        h.clear_log();
+
+        h.down(30.0, 120.0);
+
+        assert!(
+            h.owner_overlays().is_empty(),
+            "a transparent surface is never hit-tested — not even for OutsideDown"
+        );
+        assert_eq!(
+            h.sibling_pointers().len(),
+            1,
+            "the pointer passed straight through to the widget underneath"
+        );
+        assert!(h.root.is_focus_active(), "which claimed focus as usual");
+    }
+
+    #[test]
+    fn a_scroll_inside_a_surface_routes_to_its_owner_in_window_space() {
+        let spec = SurfaceSpec::floating("popover", floating_rect());
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+        h.clear_log();
+
+        h.dispatch(&InputEvent::Scroll {
+            position: Point::new(150.0, 30.0),
+            delta: ScrollDelta::Lines(0.0, 3.0),
+        });
+
+        assert_eq!(
+            h.owner_overlays(),
+            vec![(
+                spec.key,
+                OverlayEventKind::Scroll {
+                    position: Point::new(150.0, 30.0),
+                    delta: ScrollDelta::Lines(0.0, 3.0),
+                }
+            )]
+        );
+        assert_eq!(
+            h.log.borrow().pod,
+            vec![(
+                "popover",
+                InputEvent::Scroll {
+                    position: Point::new(30.0, 20.0),
+                    delta: ScrollDelta::Lines(0.0, 3.0),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_capture_from_inside_a_surface_routes_the_next_move_by_the_capture_path() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.on_down = OwnerReaction::Capture;
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+        h.clear_log();
+
+        h.down(150.0, 30.0);
+        assert!(
+            h.root.is_pointer_captured(),
+            "a capture bubbled from an overlay Down opens a gesture exactly like a \
+             hit-tested one"
+        );
+        h.clear_log();
+
+        // Still INSIDE the surface's own rect — which is the case that
+        // discriminates: the pre-pass would happily hit-test this one and route it
+        // as another broadcast, and it must not, because the gesture is captured.
+        h.dispatch(&pointer(PointerPhase::Move, 160.0, 45.0));
+        assert!(
+            h.owner_overlays().is_empty(),
+            "a live capture short-circuits the overlay pre-pass even inside the \
+             surface's own rect"
+        );
+        assert_eq!(
+            h.log.borrow().owner,
+            vec![InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(160.0, 45.0),
+                button: PointerButton::Primary,
+            })],
+            "the move reaches the owner by the ordinary captured path instead"
+        );
+        h.clear_log();
+
+        // And the drag may wander far outside the surface — over the sibling, in
+        // fact — without the sibling ever hearing about it.
+        h.dispatch(&pointer(PointerPhase::Move, 30.0, 120.0));
+
+        assert!(h.owner_overlays().is_empty());
+        assert_eq!(
+            h.log.borrow().owner,
+            vec![InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(30.0, 120.0),
+                button: PointerButton::Primary,
+            })],
+            "which is what lets a drag begun inside a floated surface continue \
+             outside it"
+        );
+        assert!(
+            h.sibling_pointers().is_empty(),
+            "and never reaches the widget it passed over"
+        );
+
+        // The `Up` closes the gesture through the ordinary pointer arm.
+        h.dispatch(&pointer(PointerPhase::Up, 30.0, 120.0));
+        assert!(!h.root.is_pointer_captured());
+    }
+
+    /// A capture claimed on a phase other than `Down` is a capture all the
+    /// same. The pods record their own active path on any phase, so a root that
+    /// mirrored the `Down` alone left the surface latched with no `Up` able to
+    /// reach it — and a latched surface diverts every later pointer event its
+    /// owner is reached by.
+    #[test]
+    fn a_capture_claimed_on_a_move_inside_a_surface_reaches_the_root() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.on_move = OwnerReaction::Capture;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.dispatch(&pointer(PointerPhase::Move, 150.0, 30.0));
+        assert!(
+            h.root.is_pointer_captured(),
+            "the root mirrors a claim the surface made mid-gesture"
+        );
+
+        // Which is what ends it: the mirrored capture short-circuits the overlay
+        // pre-pass, so the `Up` routes down the capture path — outside the
+        // surface's own rect, where a hit test would never have delivered it.
+        h.dispatch(&pointer(PointerPhase::Up, 30.0, 120.0));
+        assert!(
+            !h.root.is_pointer_captured(),
+            "and the gesture closes on the ordinary pointer arm"
+        );
+    }
+
+    /// The release side of the root's overlay capture mirror. The claim is
+    /// mirrored on any phase, so the release has to be bounded on any phase too:
+    /// an `Up` reaches a surface as an overlay event exactly when no capture was
+    /// standing to divert it, and a claim made there has no gesture left to own.
+    /// A latch left standing short-circuits the overlay pre-pass, which stops
+    /// every floated surface taking input until some unrelated pointer release
+    /// happens along.
+    #[test]
+    fn a_capture_claimed_on_an_overlay_up_does_not_outlive_the_gesture() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.on_up = OwnerReaction::Capture;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(150.0, 30.0);
+        h.dispatch(&pointer(PointerPhase::Up, 150.0, 30.0));
+
+        assert!(
+            !h.root.is_pointer_captured(),
+            "the phase that ends a gesture releases the mirror it just set"
+        );
+
+        // Which is what keeps the surfaces routable: a press inside one still
+        // reaches its owner rather than being diverted down a capture path.
+        h.clear_log();
+        h.down(150.0, 30.0);
+        assert_eq!(
+            h.owner_overlays().len(),
+            1,
+            "the overlay pre-pass is still hit-testing"
+        );
+    }
+
+    #[test]
+    fn a_focus_request_from_inside_a_surface_opens_a_session() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.on_down = OwnerReaction::Focus;
+        let mut h = OverlayHarness::new(vec![spec]);
+        assert!(!h.root.is_focus_active());
+
+        h.down(150.0, 30.0);
+
+        assert!(
+            h.root.is_focus_active(),
+            "a text field inside a popover may claim focus — the overlay arm \
+             honours the request even though it refuses the blur"
+        );
+    }
+
+    /// The case the test above cannot express: the claim arrives while ANOTHER
+    /// branch already holds the session. Honouring it without retiring what it
+    /// supersedes leaves two branches believing they are focused — and leaves
+    /// the root describing, to the shell, a field that no longer owns anything.
+    #[test]
+    fn a_pod_focus_claim_retires_the_branch_it_supersedes() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        // A secure field in the main tree takes the session first.
+        h.down(30.0, 120.0);
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (false, true),
+            "only the field's own branch reads focused while it holds the session"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "and the surface the shell configures its keyboard from is the \
+             secure one that field published"
+        );
+
+        // Now the editable inside the floated surface claims focus.
+        h.down(150.0, 30.0);
+        assert!(h.root.is_focus_active(), "the claim is honoured");
+
+        // The claim stamped its own chain with a session identity nothing older
+        // carries, so the field's link stops counting on the very next pass —
+        // no convergence frame, and nothing had to visit the branch the session
+        // left in order to clear it.
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (true, false),
+            "exactly one branch believes it is focused: the one that claimed it"
+        );
+        assert_eq!(
+            h.root.ime_state(),
+            None,
+            "and the surface that field published for the session it just lost \
+             does NOT stand: the branch that took the session described none of \
+             its own, so the shell is left configuring nothing rather than a \
+             secure field nobody is in"
+        );
+
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (true, false),
+            "which is a settled state, not a frame of transition"
+        );
+        assert!(
+            h.root.is_focus_active(),
+            "and the session the pod opened is still the live one"
+        );
+    }
+
+    /// The return direction, which the test above never exercises: the session
+    /// goes to a floated surface and the user then presses the field in the main
+    /// tree again.
+    ///
+    /// A press outside every floated rect is hit-tested through the containers
+    /// like any other, so the claim it produces is the main tree's by
+    /// construction — and the surface's own recorded link has to stop counting
+    /// the moment that claim lands, or the tree is de-seeded for the rest of the
+    /// pod's life and the secure surface the field publishes is thrown away
+    /// every frame.
+    #[test]
+    fn a_hit_tested_claim_takes_the_session_back_from_a_floated_surface() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        // The field takes the session, then the editable inside the surface
+        // takes it away.
+        h.down(30.0, 120.0);
+        h.frame();
+        h.down(150.0, 30.0);
+        h.frame();
+        assert_eq!(
+            h.branch_focus(),
+            (true, false),
+            "the surface holds the session and the field's link no longer counts"
+        );
+
+        // The user presses the field again, outside `floating_rect()`, so the
+        // press routes through the containers exactly as the first one did.
+        h.down(30.0, 120.0);
+        h.frame();
+
+        assert_eq!(
+            h.branch_focus(),
+            (false, true),
+            "the session is the field's again and the surface's link is retired"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "and the secure surface that field publishes reaches the shell"
+        );
+    }
+
+    /// The same move, driven from the root's keyboard-class arm
+    /// (`Scroll | Key | Ime | EditCommand`) rather than a pointer `Down`. That
+    /// arm honours the claim and nothing else, so a mechanism that only retires
+    /// a surface's link on a press leaves the session split here.
+    #[test]
+    fn a_keyboard_class_claim_in_the_tree_retires_a_surfaces_link() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(150.0, 30.0);
+        h.frame();
+        assert!(h.branch_focus().0, "the surface holds the session");
+
+        // A scroll over the field, outside every floated rect: hit-tested into
+        // the main tree, but routed through the root's non-pointer focus arm.
+        h.dispatch(&InputEvent::Scroll {
+            position: Point::new(30.0, 120.0),
+            delta: ScrollDelta::Lines(0.0, 3.0),
+        });
+        h.frame();
+
+        assert_eq!(
+            h.branch_focus(),
+            (false, true),
+            "a claim that arrives without a pointer `Down` retires the surface's \
+             link just the same"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+        );
+    }
+
+    /// A pod dropped while it holds the link takes the session with it. Nothing
+    /// else can end that session: the widget that owned it no longer exists, so
+    /// no later pass can reach it to release it, and the root would otherwise go
+    /// on reporting a live focus session to the shell for a surface nobody can
+    /// see.
+    #[test]
+    fn a_pod_dropped_while_it_holds_the_link_ends_the_session_it_owned() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(150.0, 30.0);
+        h.frame();
+        assert!(h.root.is_focus_active(), "the surface holds the session");
+
+        // The owner stops owning the surface: the spec goes, the pod is dropped
+        // by the next rebuild.
+        h.state.specs.clear();
+        h.frame();
+
+        assert!(
+            !h.root.is_focus_active(),
+            "the session dies with the widget that held it"
+        );
+        assert_eq!(h.root.ime_state(), None);
+
+        // And the tree is not left de-seeded: the next press focuses normally.
+        h.down(30.0, 120.0);
+        h.frame();
+        assert!(
+            h.branch_focus().1,
+            "a field in the tree takes the session as if no surface had existed"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+        );
+    }
+
+    /// The event-route half of the provenance rule. `paint_overlays` refuses a
+    /// paint-time publish from a pod holding no link; the dispatch that carries
+    /// an overlay broadcast has to refuse the same publish, or a surface the
+    /// user merely touched reconfigures the platform keyboard for a secure field
+    /// it has nothing to do with.
+    #[test]
+    fn a_pod_publish_from_an_event_cannot_overwrite_a_field_it_does_not_own() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        // Publishes from its `event`, and never claims focus.
+        spec.pod_publishes_ime_on_event = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(30.0, 120.0);
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "the focused field's own surface"
+        );
+
+        // A press inside the surface. The pod publishes, holds no focus link,
+        // and claims none.
+        h.down(150.0, 30.0);
+
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "a publish from a branch that owns no session describes nobody's"
+        );
+        assert!(
+            h.root.is_focus_active(),
+            "and the field it did not own still holds the session"
+        );
+    }
+
+    /// A pod publishing an IME surface it holds no focus link for describes
+    /// nobody's session. Accepting it would let a surface overwrite a focused
+    /// field's — including the content type that configures the platform
+    /// keyboard as a secure one.
+    #[test]
+    fn a_pod_publish_cannot_overwrite_the_surface_of_a_field_it_does_not_own() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        // Publishes on every paint, and never claims focus.
+        spec.pod_publishes_ime = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(30.0, 120.0);
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "the focused field's own surface"
+        );
+
+        h.frame();
+
+        assert!(
+            h.root.is_focus_active(),
+            "the field still holds the session"
+        );
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Password),
+            "and it still describes it: the publishing pod holds no focus link, \
+             so its surface is not the session's"
+        );
+    }
+
+    /// The provenance rule is a check, not a refusal: a pod that DOES hold the
+    /// recorded focus path publishes exactly like a field in the tree.
+    #[test]
+    fn a_pod_that_holds_the_focus_path_publishes_its_own_surface() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.pod_claims_focus = true;
+        spec.pod_publishes_ime = true;
+        let mut h = OverlayHarness::new(vec![spec]);
+
+        h.down(30.0, 120.0);
+        h.down(150.0, 30.0);
+        h.frame();
+
+        assert!(h.root.is_focus_active());
+        assert_eq!(
+            h.root.ime_state().map(|ime| ime.content_type),
+            Some(ImeContentType::Normal),
+            "the surface published by the branch that owns the session"
+        );
+    }
+
+    #[test]
+    fn an_outside_press_notifies_a_consuming_surface_and_stops_there() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.outside_tap = OutsideTap::Notify { consume: true };
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+        h.clear_log();
+
+        // Inside the sibling, outside every floated rect.
+        h.down(30.0, 120.0);
+
+        assert_eq!(
+            h.owner_overlays(),
+            vec![(spec.key, OverlayEventKind::OutsideDown)],
+            "the light-dismiss notification carries no position"
+        );
+        assert!(
+            h.sibling_pointers().is_empty(),
+            "and the press that dismissed the menu did not also activate what was \
+             underneath it"
+        );
+        assert!(
+            !h.root.is_focus_active(),
+            "the main tree saw no Down at all, so nothing claimed focus"
+        );
+    }
+
+    #[test]
+    fn a_pass_through_outside_press_notifies_and_still_reaches_the_main_tree() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.outside_tap = OutsideTap::Notify { consume: false };
+        let mut h = OverlayHarness::new(vec![spec.clone()]);
+        h.clear_log();
+
+        let outcome = h.down(30.0, 120.0);
+
+        assert_eq!(
+            h.owner_overlays(),
+            vec![(spec.key, OverlayEventKind::OutsideDown)]
+        );
+        assert_eq!(
+            h.sibling_pointers().len(),
+            1,
+            "consume: false means both — the owner hears, and the press continues"
+        );
+        assert!(h.root.is_focus_active(), "so the tapped field took focus");
+        assert!(
+            outcome.handled,
+            "and the main dispatch's own outcome survives"
+        );
+    }
+
+    #[test]
+    fn an_ignoring_surface_hears_nothing_about_an_outside_press() {
+        // `Ignore` is the default; state it explicitly.
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.outside_tap = OutsideTap::Ignore;
+        let mut h = OverlayHarness::new(vec![spec]);
+        h.clear_log();
+
+        h.down(30.0, 120.0);
+
+        assert!(
+            h.owner_overlays().is_empty(),
+            "a surface that dismisses some other way is never told"
+        );
+        assert_eq!(h.sibling_pointers().len(), 1);
+    }
+
+    #[test]
+    fn only_a_primary_press_dismisses() {
+        let mut spec = SurfaceSpec::floating("popover", floating_rect());
+        spec.outside_tap = OutsideTap::Notify { consume: true };
+        let mut h = OverlayHarness::new(vec![spec]);
+        h.clear_log();
+
+        // A secondary press is a context gesture, not a dismissal.
+        h.dispatch(&InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(30.0, 120.0),
+            button: PointerButton::Secondary,
+        }));
+        assert!(h.owner_overlays().is_empty());
+        assert_eq!(h.sibling_pointers().len(), 1, "and it reaches the tree");
+
+        // Nor does a move or a lift outside the surface.
+        h.clear_log();
+        h.dispatch(&pointer(PointerPhase::Move, 30.0, 120.0));
+        h.dispatch(&pointer(PointerPhase::Up, 30.0, 120.0));
+        assert!(h.owner_overlays().is_empty());
+    }
+
+    #[test]
+    fn an_overlay_press_leaves_the_main_trees_hover_standing() {
+        let spec = SurfaceSpec::floating("popover", floating_rect());
+        let mut h = OverlayHarness::new(vec![spec]);
+        let epoch_before = h.root.hover_epoch;
+
+        h.down(150.0, 30.0);
+
+        assert_eq!(
+            h.root.hover_epoch, epoch_before,
+            "an overlay pass advances no hover epoch, so a live hover in the main \
+             tree is not stranded by a press on a floated surface"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Selection toolbar: publish, generation, clear.
+    // ---------------------------------------------------------------------
+
+    /// A request with the menu up, anchored at `x` — the shape a field
+    /// publishes while its bar stands.
+    fn toolbar_request(x: f64) -> crate::selection_toolbar::SelectionToolbarRequest {
+        crate::selection_toolbar::SelectionToolbarRequest {
+            anchor: Rect::new(x, 100.0, x + 50.0, 120.0),
+            actions: crate::selection_toolbar::SelectionToolbarActions {
+                copy: true,
+                cut: true,
+                paste: false,
+                select_all: true,
+            },
+            present_menu: true,
+        }
+    }
+
+    /// The same request with no menu wanted — what a focused field publishes
+    /// with nothing on screen, so the platform can still answer "may I offer
+    /// Copy?" for a hardware shortcut.
+    fn toolbar_level(x: f64) -> crate::selection_toolbar::SelectionToolbarRequest {
+        crate::selection_toolbar::SelectionToolbarRequest {
+            present_menu: false,
+            ..toolbar_request(x)
+        }
+    }
+
+    #[test]
+    fn a_selection_toolbar_publish_resolves_and_only_a_menu_edge_moves_the_generation() {
+        let mut h = OverlayHarness::new(vec![]);
+        // A toolbar describes the FOCUSED field's selection, so open a session
+        // first — a publish with nothing focused describes nothing.
+        h.down(30.0, 120.0);
+        assert!(h.root.is_focus_active());
+
+        h.state.publish = Some(toolbar_request(10.0));
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(10.0)));
+        let first_gen = h.root.selection_toolbar_generation();
+        assert!(first_gen > 0, "appearing is an edge");
+
+        // The field republishes the same request every frame its selection
+        // stands: that must not ask the shell to re-present the menu per vsync.
+        h.frame();
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(10.0)));
+        assert_eq!(h.root.selection_toolbar_generation(), first_gen);
+
+        // A moved anchor is stored — a shell re-reads it to place a menu it
+        // already has on screen — but it is NOT a menu edge. This assertion used
+        // to read `first_gen + 1`: the anchor is recomputed every painted frame
+        // and a drag that widens a selection moves it on every touch sample, so
+        // bumping here asked the platform to re-present its menu per sample.
+        h.state.publish = Some(toolbar_request(60.0));
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(60.0)));
+        assert_eq!(
+            h.root.selection_toolbar_generation(),
+            first_gen,
+            "an anchor following the selection is not a reason to re-present"
+        );
+
+        // A verb changing IS: the menu's own contents just changed.
+        let mut fewer_verbs = toolbar_request(60.0);
+        fewer_verbs.actions.select_all = false;
+        h.state.publish = Some(fewer_verbs);
+        h.frame();
+        assert_eq!(h.root.selection_toolbar_generation(), first_gen + 1);
+
+        // The field blurs: it stops publishing, and the menu goes away with
+        // nothing retracted.
+        h.state.publish = None;
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), None);
+        assert_eq!(
+            h.root.selection_toolbar_generation(),
+            first_gen + 2,
+            "going away is an edge too, or a shell never learns to dismiss"
+        );
+
+        // ...and staying away is not.
+        h.frame();
+        assert_eq!(h.root.selection_toolbar_generation(), first_gen + 2);
+    }
+
+    #[test]
+    fn only_the_menu_flag_going_up_asks_a_shell_to_present() {
+        let mut h = OverlayHarness::new(vec![]);
+        h.down(30.0, 120.0);
+        assert!(h.root.is_focus_active());
+
+        // A focused field with no bar up publishes all the same: the verbs are
+        // the answer a platform responder chain needs for a hardware shortcut
+        // that arrives with nothing on screen.
+        h.state.publish = Some(toolbar_level(10.0));
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), Some(toolbar_level(10.0)));
+        let level_gen = h.root.selection_toolbar_generation();
+
+        // Republishing the same level is not an edge, however many frames it
+        // stands for.
+        h.frame();
+        h.frame();
+        assert_eq!(h.root.selection_toolbar_generation(), level_gen);
+
+        // The gesture fires and the field asks for a menu: THAT is the edge.
+        h.state.publish = Some(toolbar_request(10.0));
+        h.frame();
+        assert_eq!(
+            h.root.selection_toolbar_generation(),
+            level_gen + 1,
+            "the flag going false to true is what presents the menu"
+        );
+
+        // And dropping it again is the dismiss edge, with the field still
+        // focused and still publishing its verbs.
+        h.state.publish = Some(toolbar_level(10.0));
+        h.frame();
+        assert!(h.root.selection_toolbar().is_some());
+        assert_eq!(h.root.selection_toolbar_generation(), level_gen + 2);
+    }
+
+    #[test]
+    fn a_pass_that_publishes_nothing_still_moves_the_generation() {
+        // `RenderRoot::paint` resolves a pass nobody published in to `None`,
+        // which reads as "no menu, no verbs" and must differ from whatever
+        // stood — otherwise a shell holding a presented menu never learns to
+        // put it away.
+        let mut h = OverlayHarness::new(vec![]);
+        h.down(30.0, 120.0);
+        h.state.publish = Some(toolbar_request(10.0));
+        h.frame();
+        let standing = h.root.selection_toolbar_generation();
+
+        h.state.publish = None;
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), None);
+        assert_eq!(h.root.selection_toolbar_generation(), standing + 1);
+    }
+
+    #[test]
+    fn a_blur_clears_the_selection_toolbar_on_the_event_pass() {
+        let mut h = OverlayHarness::new(vec![]);
+        h.down(30.0, 120.0);
+        h.state.publish = Some(toolbar_request(10.0));
+        h.frame();
+        assert!(h.root.selection_toolbar().is_some());
+        let gen_before = h.root.selection_toolbar_generation();
+
+        // A press on chrome that claims no focus ends the session — and the menu
+        // must go with it immediately, not a frame later.
+        h.down(150.0, 30.0);
+        assert!(!h.root.is_focus_active());
+        assert_eq!(
+            h.root.selection_toolbar(),
+            None,
+            "a toolbar cannot outlive the focus session its selection belonged to"
+        );
+        assert_eq!(h.root.selection_toolbar_generation(), gen_before + 1);
+
+        // And a field still publishing into the blurred session cannot resurrect
+        // it — the same refusal the IME republish makes.
+        h.frame();
+        assert_eq!(h.root.selection_toolbar(), None);
+    }
+}
+
+/// The root half of the multi-contact contract (`InputEvent::PointerContact`):
+/// how a contact's id, the claimant latch and the `capture_contacts` opt-in
+/// decide where an event goes.
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+
+    /// What every probe saw: which probe, which contact, which phase.
+    #[derive(Default)]
+    struct Log {
+        seen: Vec<(char, PointerId, PointerPhase)>,
+    }
+
+    /// A leaf that logs every pointer event it receives with the contact id its
+    /// context reports, and on a `Down` captures (optionally opting into the
+    /// gesture's other contacts) and claims focus.
+    struct Probe {
+        tag: char,
+        opt_in: bool,
+    }
+    impl crate::widget::Widget for Probe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            let id = ctx.pointer_id();
+            ctx.state_mut::<Log>().seen.push((self.tag, id, p.phase));
+            if p.phase == PointerPhase::Down {
+                ctx.capture_pointer();
+                if self.opt_in {
+                    ctx.capture_contacts();
+                }
+                ctx.request_focus();
+            }
+            EventResult::Handled
+        }
+    }
+
+    /// Two probes stacked vertically (A at y 0..20, B at y 30..50) behind the
+    /// standard recorded-path routing: a captured gesture goes straight to the
+    /// active child and releases it on `Up`/`Cancel`; anything else is
+    /// hit-tested, and a `Down` that hits nothing blurs both.
+    struct Pair {
+        a: crate::widget::ChildPod,
+        b: crate::widget::ChildPod,
+    }
+    impl crate::widget::Widget for Pair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.a.layout_child(ctx, bc);
+            self.a.set_origin(Point::new(0.0, 0.0));
+            self.b.layout_child(ctx, bc);
+            self.b.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.a.paint_child(ctx, scene);
+            self.b.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let releases = matches!(
+                event,
+                InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for pod in [&mut self.a, &mut self.b] {
+                if pod.is_active() {
+                    let result = pod.event_child(ctx, event);
+                    if releases {
+                        pod.set_active(false);
+                    }
+                    return result;
+                }
+            }
+            let pos = event.position();
+            let down = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down);
+            for pod in [&mut self.a, &mut self.b] {
+                if pod.contains(pos) {
+                    return pod.event_child(ctx, event);
+                }
+            }
+            if down {
+                self.a.set_focused(false);
+                self.b.set_focused(false);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct PairView {
+        opt_in: bool,
+    }
+    impl View<Log> for PairView {
+        type Element = Pair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Pair {
+            Pair {
+                a: crate::widget::ChildPod::new(Box::new(Probe {
+                    tag: 'A',
+                    opt_in: self.opt_in,
+                })),
+                b: crate::widget::ChildPod::new(Box::new(Probe {
+                    tag: 'B',
+                    opt_in: self.opt_in,
+                })),
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut Pair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn root_with(opt_in: bool) -> (RenderRoot<Log, PairView>, Log) {
+        let mut root: RenderRoot<Log, PairView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(&mut |_| PairView { opt_in }, &mut log);
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    fn ev(phase: PointerPhase, x: f64, y: f64) -> PointerEvent {
+        PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        }
+    }
+
+    fn mouse(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(ev(phase, x, y))
+    }
+
+    fn touch(slot: u32, phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: PointerId::touch(slot),
+            event: ev(phase, x, y),
+        }
+    }
+
+    /// Positions: over A, over B, and over neither.
+    const A: (f64, f64) = (10.0, 10.0);
+    const B: (f64, f64) = (10.0, 40.0);
+    const NOWHERE: (f64, f64) = (150.0, 150.0);
+
+    #[test]
+    fn slot_zero_touch_takes_the_same_path_as_a_plain_pointer() {
+        use PointerPhase::{Down, Move, Up};
+        let script = [
+            (Down, A),
+            (Move, NOWHERE),
+            (Up, NOWHERE),
+            (Down, NOWHERE),
+            (Move, B),
+            (Down, B),
+            (Up, B),
+        ];
+        let (mut via_pointer, mut pointer_log) = root_with(false);
+        let (mut via_contact, mut contact_log) = root_with(false);
+        for (phase, (x, y)) in script {
+            let a = via_pointer.event(&mut pointer_log, &mouse(phase, x, y));
+            let b = via_contact.event(&mut contact_log, &touch(0, phase, x, y));
+            assert_eq!(a, b, "{phase:?} at ({x}, {y}): same outcome");
+            assert_eq!(
+                via_pointer.is_pointer_captured(),
+                via_contact.is_pointer_captured()
+            );
+            assert_eq!(via_pointer.is_focus_active(), via_contact.is_focus_active());
+            assert_eq!(via_pointer.is_hover_active(), via_contact.is_hover_active());
+            assert_eq!(
+                via_pointer.focus_ime_generation(),
+                via_contact.focus_ime_generation()
+            );
+        }
+        // Same widgets, same phases; only the reported id differs.
+        let strip = |log: &Log| -> Vec<(char, PointerPhase)> {
+            log.seen.iter().map(|(t, _, p)| (*t, *p)).collect()
+        };
+        assert_eq!(strip(&pointer_log), strip(&contact_log));
+        assert!(
+            pointer_log
+                .seen
+                .iter()
+                .all(|(_, id, _)| *id == PointerId::MOUSE)
+        );
+        assert!(
+            contact_log
+                .seen
+                .iter()
+                .all(|(_, id, _)| *id == PointerId::touch(0))
+        );
+        // The capture the contact's Down took named it as the claimant.
+        via_contact.event(&mut contact_log, &touch(0, Down, A.0, A.1));
+        assert_eq!(
+            via_contact.pointer_capture_claimant(),
+            Some(PointerId::touch(0))
+        );
+    }
+
+    #[test]
+    fn an_additional_contact_with_nothing_captured_is_dropped() {
+        let (mut root, mut log) = root_with(true);
+        let outcome = root.event(&mut log, &touch(1, PointerPhase::Down, A.0, A.1));
+        assert_eq!(outcome, EventOutcome::default());
+        assert!(log.seen.is_empty(), "no widget saw the slot-1 contact");
+        assert!(!root.is_pointer_captured());
+        assert!(!root.is_focus_active(), "a dropped contact claims nothing");
+    }
+
+    #[test]
+    fn an_opted_in_captor_receives_the_other_contacts_on_the_captured_path() {
+        use PointerPhase::{Down, Move, Up};
+        let (mut root, mut log) = root_with(true);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+
+        // The second finger lands over B, yet travels the captured path to A.
+        let t1 = PointerId::touch(1);
+        assert!(root.event(&mut log, &touch(1, Down, B.0, B.1)).handled);
+        root.event(&mut log, &touch(1, Move, NOWHERE.0, NOWHERE.1));
+        root.event(&mut log, &touch(1, Up, NOWHERE.0, NOWHERE.1));
+        assert_eq!(
+            log.seen[1..],
+            [('A', t1, Down), ('A', t1, Move), ('A', t1, Up)],
+            "A saw touch(1)'s whole contact, B saw nothing"
+        );
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+    }
+
+    #[test]
+    fn a_captor_that_did_not_opt_in_never_sees_the_other_contacts() {
+        use PointerPhase::{Down, Move, Up};
+        let (mut root, mut log) = root_with(false);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        for phase in [Down, Move, Up] {
+            let outcome = root.event(&mut log, &touch(1, phase, B.0, B.1));
+            assert_eq!(
+                outcome,
+                EventOutcome::default(),
+                "touch(1) {phase:?} dropped"
+            );
+        }
+        assert_eq!(log.seen, [('A', PointerId::touch(0), Down)]);
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+    }
+
+    #[test]
+    fn a_touch_release_never_ends_a_mouse_capture_and_vice_versa() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        // A mouse drag holds A; a finger tapping elsewhere must not break it.
+        let (mut root, mut log) = root_with(false);
+        root.event(&mut log, &mouse(Down, A.0, A.1));
+        root.event(&mut log, &touch(0, Down, B.0, B.1));
+        root.event(&mut log, &touch(0, Up, B.0, B.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::MOUSE));
+        root.event(&mut log, &mouse(Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(
+            log.seen.last(),
+            Some(&('A', PointerId::MOUSE, Move)),
+            "the drag still reaches its captor"
+        );
+        assert!(log.seen.iter().all(|(tag, _, _)| *tag == 'A'));
+        root.event(&mut log, &mouse(Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+
+        // The mirror image: a touch drag holds B; the mouse cannot end it.
+        let (mut root, mut log) = root_with(false);
+        root.event(&mut log, &touch(0, Down, B.0, B.1));
+        root.event(&mut log, &mouse(Up, A.0, A.1));
+        root.event(&mut log, &mouse(Cancel, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+        root.event(&mut log, &touch(0, Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(log.seen.last(), Some(&('B', PointerId::touch(0), Move)));
+        root.event(&mut log, &touch(0, Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+    }
+
+    #[test]
+    fn only_the_claimants_release_clears_the_latch() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        let (mut root, mut log) = root_with(true);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        // Another contact ends twice over — delivered, yet nothing releases:
+        // not the root latch, and not the container's active link either.
+        root.event(&mut log, &touch(1, Down, A.0, A.1));
+        root.event(&mut log, &touch(1, Up, A.0, A.1));
+        root.event(&mut log, &touch(2, Down, A.0, A.1));
+        root.event(&mut log, &touch(2, Cancel, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(PointerId::touch(0)));
+        // Still on the captured path: a claimant move far outside A reaches A.
+        root.event(&mut log, &touch(0, Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(log.seen.last(), Some(&('A', PointerId::touch(0), Move)));
+
+        // The claimant's own release ends it; later contacts fall to rule (b).
+        root.event(&mut log, &touch(0, Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+        let before = log.seen.len();
+        root.event(&mut log, &touch(1, Move, A.0, A.1));
+        assert_eq!(
+            log.seen.len(),
+            before,
+            "touch(1) dropped once the gesture ended"
+        );
+        // And the container's link went with it: a fresh contact is hit-tested.
+        root.event(&mut log, &touch(0, Down, B.0, B.1));
+        assert_eq!(log.seen.last(), Some(&('B', PointerId::touch(0), Down)));
+    }
+
+    #[test]
+    fn a_non_claimant_contact_never_blurs_or_moves_hover() {
+        use PointerPhase::{Down, Up};
+        let (mut root, mut log) = root_with(true);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert!(root.is_focus_active());
+        let generation = root.focus_ime_generation();
+        root.event(&mut log, &touch(1, Down, NOWHERE.0, NOWHERE.1));
+        root.event(&mut log, &touch(1, Up, NOWHERE.0, NOWHERE.1));
+        assert!(
+            root.is_focus_active(),
+            "a second finger is not a tap outside"
+        );
+        assert_eq!(root.focus_ime_generation(), generation);
+    }
+
+    /// A container in front of [`Pair`] with pointer handling of its own that
+    /// another contact must never reach: it logs every pointer event it routes
+    /// (tag `'G'`) and treats a `Down` outside its child as a tap outside — an
+    /// explicit focus release. With `forwards_broadcasts` unset it drops every
+    /// broadcast instead of forwarding it (a container the forward-only walk
+    /// cannot pass).
+    struct Guard {
+        inner: crate::widget::ChildPod,
+        forwards_broadcasts: bool,
+    }
+    impl crate::widget::Widget for Guard {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner
+                .layout_child(ctx, &BoxConstraints::tight(Size::new(100.0, 60.0)));
+            self.inner.set_origin(Point::ZERO);
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                if self.forwards_broadcasts {
+                    self.inner.event_child(ctx, event);
+                }
+                return EventResult::Ignored;
+            }
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            let id = ctx.pointer_id();
+            ctx.state_mut::<Log>().seen.push(('G', id, p.phase));
+            let inside = self.inner.contains(p.position);
+            let result = if self.inner.is_active() || inside {
+                self.inner.event_child(ctx, event)
+            } else {
+                EventResult::Ignored
+            };
+            if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel) {
+                self.inner.set_active(false);
+            }
+            if p.phase == PointerPhase::Down && !inside {
+                ctx.release_focus();
+            }
+            result
+        }
+    }
+
+    struct GuardView {
+        forwards_broadcasts: bool,
+    }
+    impl View<Log> for GuardView {
+        type Element = Guard;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Guard {
+            Guard {
+                inner: crate::widget::ChildPod::new(Box::new(Pair {
+                    a: crate::widget::ChildPod::new(Box::new(Probe {
+                        tag: 'A',
+                        opt_in: true,
+                    })),
+                    b: crate::widget::ChildPod::new(Box::new(Probe {
+                        tag: 'B',
+                        opt_in: true,
+                    })),
+                })),
+                forwards_broadcasts: self.forwards_broadcasts,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut Guard, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn guarded_root(forwards_broadcasts: bool) -> (RenderRoot<Log, GuardView>, Log) {
+        let mut root: RenderRoot<Log, GuardView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(
+            &mut |_| GuardView {
+                forwards_broadcasts,
+            },
+            &mut log,
+        );
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    #[test]
+    fn another_contact_reaches_only_the_captor_and_moves_no_hover_or_focus() {
+        use PointerPhase::{Down, Move, Up};
+        let (mut root, mut log) = guarded_root(true);
+        let (t0, t1) = (PointerId::touch(0), PointerId::touch(1));
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert!(root.is_focus_active());
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts());
+        let (focus_generation, hover) = (root.focus_ime_generation(), root.is_hover_active());
+
+        // A second finger landing outside the guard's child: delivered to A down
+        // the captured path, while the guard — whose own `Down` handling would
+        // release focus on a tap outside — never runs on it.
+        assert!(
+            root.event(&mut log, &touch(1, Down, NOWHERE.0, NOWHERE.1))
+                .handled
+        );
+        root.event(&mut log, &touch(1, Move, B.0, B.1));
+        root.event(&mut log, &touch(1, Up, B.0, B.1));
+        assert_eq!(
+            log.seen,
+            [
+                ('G', t0, Down),
+                ('A', t0, Down),
+                ('A', t1, Down),
+                ('A', t1, Move),
+                ('A', t1, Up),
+            ],
+            "only the captor saw touch(1)"
+        );
+        assert!(root.is_focus_active(), "no tap outside was seen");
+        assert_eq!(root.focus_ime_generation(), focus_generation);
+        assert_eq!(root.is_hover_active(), hover);
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts());
+
+        // The claimant itself still takes the ordinary path through the guard.
+        root.event(&mut log, &touch(0, Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(
+            log.seen[5..],
+            [('G', t0, Move), ('A', t0, Move)],
+            "the claimant's own move runs every handler on the path"
+        );
+        root.event(&mut log, &touch(0, Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+        assert!(!root.pointer_capture_contacts());
+    }
+
+    #[test]
+    fn a_walk_a_container_cannot_pass_falls_back_to_the_ordinary_delivery() {
+        use PointerPhase::Down;
+        let (mut root, mut log) = guarded_root(false);
+        let (t0, t1) = (PointerId::touch(0), PointerId::touch(1));
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        // The guard drops the carrier, so it is handed the real event instead —
+        // and the captor still receives it, down the captured path.
+        assert!(root.event(&mut log, &touch(1, Down, B.0, B.1)).handled);
+        assert_eq!(
+            log.seen,
+            [
+                ('G', t0, Down),
+                ('A', t0, Down),
+                ('G', t1, Down),
+                ('A', t1, Down),
+            ]
+        );
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+    }
+
+    /// A root container that takes a gesture over from its child once the
+    /// claimant moves more than 10 px: it cancels the child and releases it
+    /// through [`EventCtx::release_captured_child`]. Logs every pointer event it
+    /// sees (tag `'T'`); with `opt_in` it also opts into the gesture's other
+    /// contacts itself, ahead of its child, on the `Down`.
+    struct TakeOver {
+        inner: crate::widget::ChildPod,
+        opt_in: bool,
+        down_at: Option<Point>,
+        released_seen: bool,
+    }
+    impl crate::widget::Widget for TakeOver {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner.layout_child(ctx, bc);
+            self.inner.set_origin(Point::ZERO);
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                self.inner.event_child(ctx, event);
+                return EventResult::Ignored;
+            }
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            let id = ctx.pointer_id();
+            ctx.state_mut::<Log>().seen.push(('T', id, p.phase));
+            match p.phase {
+                PointerPhase::Down if self.down_at.is_none() => {
+                    self.down_at = Some(p.position);
+                    ctx.capture_pointer();
+                    if self.opt_in {
+                        ctx.capture_contacts();
+                    }
+                    if self.inner.contains(p.position) {
+                        self.inner.event_child(ctx, event);
+                    }
+                }
+                PointerPhase::Move => {
+                    let moved = self.down_at.map(|at| (p.position - at).hypot());
+                    if self.inner.is_active() && moved.is_some_and(|d| d > 10.0) {
+                        let cancel = InputEvent::Pointer(PointerEvent {
+                            phase: PointerPhase::Cancel,
+                            ..*p
+                        });
+                        self.inner.event_child(ctx, &cancel);
+                        ctx.release_captured_child(&mut self.inner);
+                        self.released_seen = ctx.is_capture_released();
+                    } else if self.inner.is_active() {
+                        self.inner.event_child(ctx, event);
+                    }
+                }
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    if self.inner.is_active() {
+                        self.inner.event_child(ctx, event);
+                        self.inner.set_active(false);
+                    }
+                    self.down_at = None;
+                }
+                PointerPhase::Down => {}
+            }
+            EventResult::Handled
+        }
+    }
+
+    struct TakeOverView {
+        opt_in: bool,
+    }
+    impl View<Log> for TakeOverView {
+        type Element = TakeOver;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TakeOver {
+            TakeOver {
+                inner: crate::widget::ChildPod::new(Box::new(Probe {
+                    tag: 'A',
+                    opt_in: true,
+                })),
+                opt_in: self.opt_in,
+                down_at: None,
+                released_seen: false,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut TakeOver, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn take_over_root(opt_in: bool) -> (RenderRoot<Log, TakeOverView>, Log) {
+        let mut root: RenderRoot<Log, TakeOverView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(&mut |_| TakeOverView { opt_in }, &mut log);
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    fn take_over_widget(root: &mut RenderRoot<Log, TakeOverView>) -> &mut TakeOver {
+        let id = root.root_id().expect("root built");
+        root.tree
+            .pod_mut(id)
+            .expect("root pod")
+            .widget_mut()
+            .downcast_mut::<TakeOver>()
+            .expect("root is a TakeOver")
+    }
+
+    #[test]
+    fn a_takeover_ends_the_contact_opt_in_but_keeps_the_claimant() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        let (mut root, mut log) = take_over_root(false);
+        let t0 = PointerId::touch(0);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts(), "A opted in");
+
+        // The claimant moves past the container's threshold: it cancels A and
+        // releases it, and the release reaches the root.
+        root.event(&mut log, &touch(0, Move, A.0, A.1 + 30.0));
+        assert!(take_over_widget(&mut root).released_seen);
+        assert_eq!(log.seen[3], ('A', t0, Cancel));
+        assert_eq!(
+            root.pointer_capture_claimant(),
+            Some(t0),
+            "the gesture is still the claimant's, now held by the container"
+        );
+        assert!(
+            !root.pointer_capture_contacts(),
+            "the widget that asked for the other contacts is gone"
+        );
+
+        // Another finger is dropped from here on — neither the container nor
+        // the cancelled captor hears it.
+        let before = log.seen.len();
+        let outcome = root.event(&mut log, &touch(1, Down, A.0, A.1));
+        assert_eq!(outcome, EventOutcome::default());
+        assert_eq!(log.seen.len(), before);
+
+        // The claimant keeps driving the container, and its release ends it.
+        root.event(&mut log, &touch(0, Move, A.0, A.1 + 60.0));
+        assert_eq!(log.seen.last(), Some(&('T', t0, Move)));
+        root.event(&mut log, &touch(0, Up, A.0, A.1 + 60.0));
+        assert!(!root.is_pointer_captured());
+    }
+
+    #[test]
+    fn a_takeover_by_the_widget_holding_the_opt_in_keeps_it() {
+        use PointerPhase::{Down, Move};
+        let (mut root, mut log) = take_over_root(true);
+        let (t0, t1) = (PointerId::touch(0), PointerId::touch(1));
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        root.event(&mut log, &touch(0, Move, A.0, A.1 + 30.0));
+        assert!(
+            !take_over_widget(&mut root).released_seen,
+            "the container itself holds the opt-in, so releasing its child ends nothing"
+        );
+        assert!(root.pointer_capture_contacts());
+        // The container is the captor: another finger reaches it directly.
+        assert!(root.event(&mut log, &touch(1, Down, A.0, A.1)).handled);
+        assert_eq!(log.seen.last(), Some(&('T', t1, Down)));
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+    }
+}
+
+/// [`InputEvent::Scale`]: hit-tested by [`ScaleEvent::focal`] exactly like
+/// [`InputEvent::Scroll`], translated down the tree the same way, and bubbles
+/// topmost-first until a widget reports [`EventResult::Handled`].
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+    use crate::event::{ScaleEvent, ScalePhase};
+
+    /// What every leaf saw: which leaf, which event.
+    #[derive(Default)]
+    struct Log {
+        seen: Vec<(char, ScaleEvent)>,
+    }
+
+    /// Logs every [`InputEvent::Scale`] it receives, in its own local space,
+    /// and reports `Handled` only when `handles` is set — everything else
+    /// (including a non-`Scale` event) is ignored.
+    struct ScaleLeaf {
+        tag: char,
+        handles: bool,
+    }
+    impl crate::widget::Widget for ScaleLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 40.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Scale(scale) = event else {
+                return EventResult::Ignored;
+            };
+            ctx.state_mut::<Log>().seen.push((self.tag, *scale));
+            if self.handles {
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
+    }
+
+    /// Two leaves at identical bounds `(0, 0)..(40, 40)` — `top` painted (and
+    /// hit-tested) before `bottom`, mirroring `frust-widgets::route_event`'s
+    /// topmost-first, fall-through-on-`Ignored` hit test: a `Scale` landing in
+    /// the shared rect reaches `top` first, and only reaches `bottom` if `top`
+    /// ignores it.
+    struct Overlapping {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+    }
+    impl crate::widget::Widget for Overlapping {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::ZERO);
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.bottom.paint_child(ctx, scene);
+            self.top.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let pos = event.position();
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.contains(pos) && pod.event_child(ctx, event) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// Wraps [`Overlapping`] one container deeper, offset by `(10, 20)` — so
+    /// the fixture also proves [`InputEvent::translated`] shifts a `Scale`
+    /// event's focal point correctly across a container boundary.
+    struct Offset {
+        inner: crate::widget::ChildPod,
+    }
+    impl crate::widget::Widget for Offset {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner.layout_child(ctx, bc);
+            self.inner.set_origin(Point::new(10.0, 20.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let pos = event.position();
+            if self.inner.contains(pos) {
+                return self.inner.event_child(ctx, event);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct OffsetView {
+        top_handles: bool,
+    }
+    impl View<Log> for OffsetView {
+        type Element = Offset;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Offset {
+            Offset {
+                inner: crate::widget::ChildPod::new(Box::new(Overlapping {
+                    top: crate::widget::ChildPod::new(Box::new(ScaleLeaf {
+                        tag: 'T',
+                        handles: self.top_handles,
+                    })),
+                    bottom: crate::widget::ChildPod::new(Box::new(ScaleLeaf {
+                        tag: 'B',
+                        handles: true,
+                    })),
+                })),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut Offset,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn root_with(top_handles: bool) -> (RenderRoot<Log, OffsetView>, Log) {
+        let mut root: RenderRoot<Log, OffsetView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(&mut |_| OffsetView { top_handles }, &mut log);
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    fn scale(phase: ScalePhase, scale_delta: f64, x: f64, y: f64) -> InputEvent {
+        InputEvent::Scale(ScaleEvent {
+            phase,
+            scale_delta,
+            focal: Point::new(x, y),
+            velocity: 0.0,
+        })
+    }
+
+    #[test]
+    fn scale_hit_tests_by_focal_point_and_translates_through_a_container() {
+        let (mut root, mut log) = root_with(true);
+
+        // Window (5, 5): outside the offset container entirely (it starts at
+        // (10, 20)) — nothing is hit, nothing logged.
+        let outside = root.event(&mut log, &scale(ScalePhase::Begin, 1.1, 5.0, 5.0));
+        assert!(
+            log.seen.is_empty(),
+            "a focal point outside every pod hits nothing"
+        );
+        assert!(!outside.handled);
+
+        // Window (30, 40): inside the container, local (20, 20) once the
+        // Offset container's (10, 20) origin is subtracted by
+        // `InputEvent::translated` — squarely inside both overlapping 40x40
+        // leaves, so the topmost one (`top`) is the one that sees it.
+        let inside = root.event(&mut log, &scale(ScalePhase::Update, 1.2, 30.0, 40.0));
+        assert!(inside.handled);
+        assert_eq!(log.seen.len(), 1, "the topmost leaf alone handled it");
+        let (tag, seen) = log.seen[0];
+        assert_eq!(tag, 'T');
+        assert_eq!(
+            seen.focal,
+            Point::new(20.0, 20.0),
+            "translated() shifted the focal point into the container's local space"
+        );
+        assert_eq!(seen.scale_delta, 1.2);
+        assert_eq!(seen.phase, ScalePhase::Update);
+    }
+
+    #[test]
+    fn an_ignored_scale_bubbles_to_the_next_hit_widget() {
+        // `top` ignores every `Scale` it sees; `bottom`, at the identical
+        // bounds, still handles it — proving the hit test falls through to
+        // the next topmost-first candidate instead of stopping (and
+        // swallowing the event) at the first hit.
+        let (mut root, mut log) = root_with(false);
+        let outcome = root.event(&mut log, &scale(ScalePhase::Begin, 0.9, 30.0, 40.0));
+        assert!(outcome.handled, "the bottom leaf still handled it");
+        assert_eq!(
+            log.seen.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            vec!['T', 'B'],
+            "the ignoring top leaf saw it first, and bottom is what it bubbled to"
+        );
     }
 }

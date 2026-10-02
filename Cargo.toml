@@ -8,7 +8,13 @@ resolver = "2"
 # of plugins/i18n, the `locales!` compile-time Fluent-bundle loader) — listed
 # explicitly like every other `plugins/*` member above; no glob in this list
 # reaches two directory levels deep.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
+# plugins/video-player is a platform plugin like the ones before it (one Rust
+# video API over a per-OS player backend), listed explicitly for the same
+# reason.
+# plugins/oauth-native is a pure-Rust protocol crate (RFC 8252 PKCE, state,
+# authorization URL, callback and token-grant helpers) with no platform code
+# and no frust-* dependency, listed explicitly beside plugins/auth-session.
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
 # plugins/{beui,cupertino,glyph,material,shadcn} are the design-system plugin
 # tier (listed alphabetically): the three catalogs that used to live in-tree
 # behind `frust-widgets` cargo features, plus two external-origin catalogs,
@@ -22,27 +28,19 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # examples/huddle (renamed from its prior directory name) is the
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
-# [workspace] root, own Cargo.lock) for two independent reasons: (1) its
-# `clean-signals` dependency is git+rev-pinned to a repo outside this one,
-# which must never enter the root workspace
-# graph (see docs/DEVELOPMENT.md's Version-Pin Policy); (2) its generated
-# Android AND iOS projects (`frust run`/`build` install targets) need a
-# project-local `target/` dir — the generated iOS Xcode
-# build phase resolves `target/<triple>/<profile>/libhuddle.a` relative to
-# the project directory, which a root-workspace member's shared `target/`
-# would break (the same rationale the now-deleted `catalog` example carried).
-# examples/shadertoy (the shader showcase) is standalone for huddle's reason
-# (2) alone: it is a full `frust create` scaffold whose generated Android/iOS
-# projects need a project-local `target/` dir, and its generated Cargo.toml
-# carries its own `[profile.*]` blocks, which only take effect in a
-# workspace root.
+# [workspace] root, own Cargo.lock) because its
+# `clean-signals` dependency is a crates.io registry requirement that the
+# root workspace graph must never resolve (see docs/DEVELOPMENT.md's
+# Version-Pin Policy).
+# examples/shadertoy (the shader showcase) is standalone because it is a full
+# `frust create` scaffold whose generated Cargo.toml carries its own
+# `[profile.*]` blocks, which only take effect in a workspace root.
 # examples/glyph-catalog (the Glyph design-system catalog) is standalone for
 # the same reason as shadertoy: a full `frust create` scaffold with its own
-# project-local `target/` dir and hand-synced `[profile.*]` blocks (its
-# generated Android/iOS projects need a project-local `target/`).
+# hand-synced `[profile.*]` blocks, which only take effect in a workspace
+# root.
 # examples/playground (the plugin/native-capability testing ground) is
-# standalone for glyph-catalog's reason: a full `frust create` scaffold whose
-# generated Android/iOS projects need a project-local `target/` dir, plus
+# standalone for glyph-catalog's reason: a full `frust create` scaffold with
 # hand-synced `[profile.*]` blocks that only take effect in a workspace root.
 # examples/design-system-sample (the out-of-tree design-system proof) is
 # standalone for a historical reason plus a live one. Historically it had to
@@ -58,21 +56,31 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # standalone for glyph-catalog's reason, arrived at later: it started as a
 # root-workspace member while it was desktop-only, and became a full `frust
 # create` scaffold once it had to run on Android and iOS devices — its
-# generated projects need a project-local `target/` dir (the iOS Xcode build
-# phase resolves `target/<triple>/<profile>/libmaterial3demo.a` relative to
-# the project directory), and its `[profile.*]` blocks only take effect in a
-# workspace root. Gate it from its own directory (see its README).
+# `[profile.*]` blocks only take effect in a workspace root. Gate it from its
+# own directory (see its README).
+# examples/native-widgets-demo (the native-widgets showcase and device-gate
+# vehicle) is standalone for glyph-catalog's reason: a full `frust create`
+# scaffold (Android/iOS/macOS) whose hand-synced `[profile.*]` blocks only take
+# effect in a workspace root, and whose generated Android/iOS projects resolve
+# a project-local build dir. Gate it from its own directory (see its README).
 # plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
+# examples/web-spike (web-shell plan Phase 0) is a throwaway standalone
+# workspace that compiles the engine graph for wasm32 with its own target
+# and RUSTFLAGS; it must never be absorbed by the `examples/*` glob.
+exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "examples/native-widgets-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/frust-rs/frust"
+homepage = "https://frust.dev"
+keywords = ["gui", "ui", "mobile", "declarative", "wgpu"]
+categories = ["gui"]
 
 [workspace.dependencies]
 # rendering stack — pins are LAW (do not bump independently)
@@ -89,22 +97,48 @@ license = "MIT OR Apache-2.0"
 # Deliberately dropped everywhere: `gles` (no shipping shell surfaces a
 # GLES-only device; the engine tier's own downlevel design covers the
 # WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL` tested against a desktop
-# adapter, per `docs/RENDER_DEVELOPMENT.md`; the web arm is cancelled,
-# `engine-webgl2-unhosted`) and `webgpu` (wasm target only, Frust ships no
-# wasm shell). Confirmed via `cargo tree -e features`: these two (and their
-# naga frontends/backends) are absent from every target's dependency graph.
+# adapter, per `docs/RENDER_DEVELOPMENT.md`) and `webgpu`/`webgl` (wasm target
+# only; the web-shell plan owns the wasm arm via `crates/frust-gpu/Cargo.toml`'s
+# target-gated section). Confirmed via `cargo tree -e features`: these features
+# (and their naga frontends/backends) are absent from the native target graph.
 #
 # The pin itself (30.0.1) is LAW — docs/DEVELOPMENT.md's Version-Pin Policy,
 # row owned by docs/RENDER_DEVELOPMENT.md. Moving features between this row
-# and the per-target tables is not a bump and leaves `Cargo.lock` untouched
-# (the lock is the union over all targets and records no features).
+# and the per-target tables is not a bump; however, `crates/frust-gpu/Cargo.toml`'s
+# wasm target rows introduce wasm-only transitive crates in Cargo.lock:
+# gl_generator, glow, glutin_wgl_sys, khronos-egl, khronos_api, wgpu-core-deps-wasm, xml-rs.
+# Narrowing the wasm predicate (e.g. to exclude emscripten) does not change this set.
 wgpu = { version = "30.0.1", default-features = false, features = [
     "std",
     "parking_lot",
     "wgsl",
 ] }
 winit = "0.30.13"
-parley = "0.11.0"
+
+# --- Browser shell (wasm32-unknown-unknown) rows -------------------------------
+# Consumed only by `crates/frust-shell-web` and the facade's wasm32 arm; a row
+# no member references never enters Cargo.lock, so these are inert for every
+# native graph. Facts behind each pin were established by the Phase-0 spike
+# (examples/web-spike/RESULTS.md): wgpu 30.0.1 needs no RUSTFLAGS/cfg on wasm32.
+#
+# The wasm-bindgen CRATE must equal the host `wasm-bindgen-cli` (0.2.128,
+# installed 2026-09-07) — the CLI refuses a mismatched schema — hence the exact
+# pin; wasm-bindgen-futures/js-sys/web-sys each require their own exact
+# wasm-bindgen, so the pin forces them in lockstep (Cargo.lock resolves
+# 0.4.78 / 0.3.105 / 0.3.105 — the caret rows below are what allowed that
+# forced move without a second edit here).
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4.77"
+js-sys = "0.3.104"
+web-sys = "0.3.104"
+# `std::time::Instant` panics on wasm32; `web-time` is the drop-in winit 0.30
+# itself uses (already 1.1.0 in Cargo.lock through winit).
+web-time = "1.1.0"
+# stderr is a silent no-op in a browser: `console_log` routes the `log` facade
+# to `console.*`, `console_error_panic_hook` routes panics to `console.error`.
+console_log = "1.0.0"
+console_error_panic_hook = "0.1.7"
+parley = "0.11.1"
 peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
@@ -175,7 +209,11 @@ log = "0.4"
 jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
-android_logger = "0.15"
+# Dropped default feature: `regex` (pulls in `env_filter`'s `regex`
+# sub-feature) — unused because frust-shell-android configures the logger
+# with `Config::default().with_max_level(...)` and never parses a filter
+# spec.
+android_logger = { version = "0.15", default-features = false }
 # Platform priority self-boost for the render-thread split:
 # `frust-shell-android` calls `setpriority(THREAD_PRIORITY_DISPLAY)` and
 # `frust-shell-ios` calls `pthread_set_qos_class_self_np(USER_INTERACTIVE)` at
@@ -308,6 +346,19 @@ vello_cpu_oracle = { package = "vello_cpu", version = "=0.2.0", default-features
 # 0.3.2, objc2-local-authentication 0.3.2, both actively maintained).
 objc2-security = "0.3"
 objc2-local-authentication = "0.3"
+# frust-auth-session's Apple backend — `ASWebAuthenticationSession`
+# (`ASFoundation`/`objc2-authentication-services`), the RFC 8252 in-app
+# browser tab both iOS and macOS route an OAuth/OIDC flow through. Same plain
+# version-string shape as `objc2-security`/`objc2-local-authentication`
+# above, for the same `default-features = false`-without-a-member-override
+# reason. Pinned to minor per the Version-Pin Policy: 0.3.2 resolves and
+# requires `objc2 >=0.6.2` (satisfied by this file's own `objc2 = "0.6"` row
+# above); it pulls in `objc2-app-kit` only on macOS (the
+# `ASWebAuthenticationPresentationContextProviding` anchor is `NSWindow`
+# there, `UIWindow` on iOS — see `plugins/auth-session/Cargo.toml`'s own
+# per-target rows). The tripwire is `cargo check --target
+# aarch64-apple-ios-sim -p frust-auth-session`.
+objc2-authentication-services = "0.3"
 # frust-secure-storage's desktop (Linux/Windows) secret-store backend —
 # `keyring` 4.x's re-architecture fronts `keyring-core`
 # + separate opt-in per-platform store crates.
@@ -398,6 +449,23 @@ objc2-ui-kit = "0.3"
 # 1.88 floor. `wl-clipboard-rs`'s native-Wayland `wayland-data-control`
 # feature is deliberately NOT enabled (see `plugins/clipboard/src/desktop.rs`'s
 # module doc) — the tripwire is `cargo check -p frust-clipboard`.
+#
+# Also consumed by `frust-shell-desktop`, which holds ONE `arboard::Clipboard`
+# for the process lifetime — owned by its `frust-clipboard` WORKER THREAD, not
+# by `ShellHandler` — rather than constructing one per call the way
+# `plugins/clipboard/src/desktop.rs` does. On X11/Wayland the clipboard's
+# content is served live by whichever process last claimed the selection, so a
+# per-call instance would drop that ownership (and so the content just copied)
+# the moment `set_text` returned, on a desktop with no clipboard manager
+# running; see `crates/frust-shell-desktop/src/app_handler.rs`'s
+# `ClipboardWorker` doc. NOTE the coexistence constraint the two consumers now
+# carry between them: one long-lived instance on a background thread plus
+# per-call instances on the UI thread can be live concurrently, which
+# `plugins/clipboard` records as observed to crash arboard's macOS backend —
+# documented at both consumers, not yet closed.
+# Same `default-features = false` / no-`wayland-data-control` shape, no
+# version change from either consumer; the tripwire for this arm is `cargo
+# check -p frust-shell-desktop`.
 arboard = { version = "=3.6.1", default-features = false }
 # frust-database's default (`engine-sqlite`) backend — rusqlite's `bundled`
 # feature compiles SQLite 3.53.2 from source via `cc` rather than linking a
@@ -560,6 +628,19 @@ axum = "0.8"
 base64 = "0.22"
 # frust-mcp: the `CancellationToken` graceful-shutdown seam wired to ctrl-c.
 tokio-util = "0.7"
+# frust-oauth-native's PKCE verifier and `state` randomness — the OS CSPRNG
+# via `getrandom::fill`. Pinned to minor per the Version-Pin Policy (pre-1.0);
+# 0.3.4 is already in Cargo.lock through other crates.
+getrandom = "0.3"
+# frust-oauth-native's PKCE S256 challenge (SHA-256 of the verifier). Pinned
+# to minor per the Version-Pin Policy (pre-1.0); 0.10.9 is already locked.
+sha2 = "0.10"
+# frust-oauth-native's constant-time `state` comparison on the callback path.
+# Stable 2.x API; 2.6.1 is already locked.
+subtle = "2"
+# frust-oauth-native's RFC 3986 component and form-urlencoded encoders.
+# Stable 2.x API; 2.3.2 is already locked.
+percent-encoding = "2"
 # frust-engine's diagnostic microbenches (harness = false) — pinned to the
 # current release (0.8.2); never a compile or test gate.
 criterion = "0.8.2"
@@ -579,36 +660,37 @@ proptest = { version = "1.11.0", default-features = false, features = [
     "bit-set",
 ] }
 # intra-workspace
-frust-core = { path = "crates/frust-core" }
-frust-scene = { path = "crates/frust-scene" }
-frust-render = { path = "crates/frust-render" }
-frust-text = { path = "crates/frust-text" }
+frust-core = { path = "crates/frust-core", version = "0.5.0" }
+frust-scene = { path = "crates/frust-scene", version = "0.5.0" }
+frust-render = { path = "crates/frust-render", version = "0.5.0" }
+frust-text = { path = "crates/frust-text", version = "0.5.0" }
 # The engine plan's foundation crate above wgpu, and the engine crate built on
 # it. `crates/frust-engine` does not exist yet at this SHA (a later task adds
 # it) — declaring the row ahead of the crate is harmless: Cargo only resolves
 # a `[workspace.dependencies]` path when some member's manifest references it
 # via `{ workspace = true }`, and none does yet.
-frust-gpu = { path = "crates/frust-gpu" }
-frust-engine = { path = "crates/frust-engine" }
+frust-gpu = { path = "crates/frust-gpu", version = "0.5.0" }
+frust-engine = { path = "crates/frust-engine", version = "0.5.0" }
 # Neither edge carries `default-features = false` any more: both crates now
 # declare no default features at all. `frust-theme` is pure token
 # infrastructure (no design-language module, no bundled fonts) and
 # `frust-widgets` is the baseline widget set plus the `authoring` toolkit —
 # a design system, in-tree plugin or third-party, composes over both from its
 # own crate.
-frust-theme = { path = "crates/frust-theme" }
-frust-widgets = { path = "crates/frust-widgets" }
-frust-reactive = { path = "crates/frust-reactive" }
-frust-plugin = { path = "crates/frust-plugin" }
-frust-paths = { path = "crates/frust-paths" }
-frust-shell-desktop = { path = "crates/frust-shell-desktop" }
-frust-shell-common = { path = "crates/frust-shell-common" }
-frust-shell-android = { path = "crates/frust-shell-android" }
-frust-shell-ios = { path = "crates/frust-shell-ios" }
-frust-shell-macos = { path = "crates/frust-shell-macos" }
-frust-shell-windows = { path = "crates/frust-shell-windows" }
-frust-shell-linux = { path = "crates/frust-shell-linux" }
-frust = { path = "crates/frust" }
+frust-theme = { path = "crates/frust-theme", version = "0.5.0" }
+frust-widgets = { path = "crates/frust-widgets", version = "0.5.0" }
+frust-reactive = { path = "crates/frust-reactive", version = "0.5.0" }
+frust-plugin = { path = "crates/frust-plugin", version = "0.5.0" }
+frust-paths = { path = "crates/frust-paths", version = "0.5.0" }
+frust-shell-desktop = { path = "crates/frust-shell-desktop", version = "0.5.0" }
+frust-shell-common = { path = "crates/frust-shell-common", version = "0.5.0" }
+frust-shell-android = { path = "crates/frust-shell-android", version = "0.5.0" }
+frust-shell-ios = { path = "crates/frust-shell-ios", version = "0.5.0" }
+frust-shell-macos = { path = "crates/frust-shell-macos", version = "0.5.0" }
+frust-shell-windows = { path = "crates/frust-shell-windows", version = "0.5.0" }
+frust-shell-linux = { path = "crates/frust-shell-linux", version = "0.5.0" }
+frust-shell-web = { path = "crates/frust-shell-web", version = "0.5.0" }
+frust = { path = "crates/frust", version = "0.5.0" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
 # wgpu/naga's shader-pipeline
@@ -625,7 +707,7 @@ frust = { path = "crates/frust" }
 # 3`'s further gain over 2 is marginal for straight-line shader-translation
 # code and not worth its added compile-time cost). This is frust's own
 # workspace dev workflow (building/testing the crates in this workspace
-# directly); the same override lands in `templates/app/Cargo.toml.tmpl`
+# directly); the same override lands in `crates/frust-drive/templates/app/Cargo.toml.tmpl`
 # (every generated app) and `examples/huddle/Cargo.toml`.
 [profile.dev.package.wgpu]
 opt-level = 2
@@ -656,7 +738,7 @@ opt-level = 2
 # (opt-level 2) still win over this wildcard since a named package override
 # takes precedence over `"*"`. Targets emulator/debug first-frame cost —
 # parley/swash/image/kurbo compiled at `opt-level = 0` are part of that cost.
-# Hand-synced across `templates/app/Cargo.toml.tmpl` and `examples/huddle/
+# Hand-synced across `crates/frust-drive/templates/app/Cargo.toml.tmpl` and `examples/huddle/
 # Cargo.toml` (examples-convergence dropped the other two
 # manifests this used to be hand-synced against — the now-deleted `catalog`
 # and `inbox` examples' own `Cargo.toml`s — along with the examples
@@ -680,9 +762,13 @@ opt-level = 1
 # carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"
 # measured 7.28MB (-3.2%): neither clears the >5% meaningfully-wins
 # bar once the carve-out that protects render-path perf is in place, so
-# `opt-level` stays at its default (3) and no carve-out is needed. This
+# `opt-level` stays at its default (3) and no carve-out is needed. That
+# finding still stands for the GLOBAL opt-level and is why there is no
+# `opt-level` key in this block; what the cold-set block below adds is its
+# inverse — per-package `"z"` for named crates that do no per-frame work,
+# which is a different (and measured-larger) win. This
 # block and the wildcard dev override above are hand-synced across
-# `templates/app/Cargo.toml.tmpl` and `examples/huddle/Cargo.toml`
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl` and `examples/huddle/Cargo.toml`
 # (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
 # examples-convergence dropped the other two manifests this used to be
 # hand-synced against — the now-deleted `catalog` and `inbox` examples' own
@@ -692,3 +778,99 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
+# Release cold-set `opt-level = "z"`: the *global* release `opt-level` stays at
+# its default 3 for the reason recorded above (a whole-binary "s"/"z" didn't
+# clear the 5% size bar once the render stack was carved back out). This block
+# is the inverse of that rejected shape and is what actually pays: instead of
+# shrinking everything and exempting the hot crates, it shrinks only crates
+# that are COLD on the per-frame path and leaves everything else at 3.
+#
+# "Cold" here means the crate does no measurable work inside the steady-state
+# frame loop, so its code size is pure footprint:
+#   * shader translation / GPU object setup — `naga`,
+#     `codespan-reporting` (naga's diagnostics), `ash`,
+#     `gpu-allocator`: these run at pipeline-creation and
+#     resource-allocation time, not per frame (the per-frame GPU cost is
+#     queue submission and the driver's own work). `wgpu-core` and
+#     `wgpu-types` have since left the set: `wgpu-core` carries the
+#     per-frame upload/submit path and its `z` build cost about 0.2 ms of
+#     S5's `submit` p50 (see benchmarks/RESULTS.md's dated S5 attribution
+#     note), and `z` made `wgpu-types` larger, not smaller.
+#   * one-shot parsing / asset decode / async plumbing — `serde_json`,
+#     `roxmltree`, `fontique` (font enumeration at startup), `mio`,
+#     `image`, `png`.
+#
+# Deliberately KEPT at `opt-level = 3` — every crate that runs per frame, per
+# glyph or per pixel, where a smaller-code tradeoff would cost frame time:
+# `frust-engine`, `frust-gpu`, `frust-render`, `frust-text`, `harfrust`,
+# `skrifa`, `read-fonts`, `zune-jpeg`, `parley`.
+#
+# Also kept at 3, for a different reason than the render-stack crates above:
+# `tokio` and the three `accesskit`/`accesskit_consumer`/`accesskit_android`
+# crates do per-frame work that falls outside the spans the render-stack CPU
+# bar measures — `tokio`'s reactive-pump runtime entry
+# (`ReactiveRuntime::pump_local` -> `Handle::enter`, at least four times a
+# frame) and accesskit's semantics publish on every frame whose semantics
+# generation changed — so the bar cannot see their per-frame cost the way it
+# sees the render stack's. Both were measured directly instead (see
+# benchmarks/RESULTS.md's tokio/accesskit microbench note): at `z`,
+# accesskit's publish cost more per changed frame on a little core than the
+# cold set's CPU rule allows (at a 2,000-node tree), and `z` saved `tokio` no
+# size, so neither earns a place in the set.
+#
+# # `wgpu-hal` is deliberately NOT in the cold set, and that is a measured
+# exclusion rather than an oversight: it sits on the per-frame submit path,
+# so it was built and benchmarked as its OWN variant on top of this set. That
+# variant bought a further 37 KB (0.55% of the stripped lean `.so`) while
+# costing a small but consistent amount of per-frame CPU work in every
+# scenario measured. The cost sits inside the measurement noise, so the
+# trade was refused rather than forced: a crate on the submit path needs a
+# better reason than 0.55%. Re-measure it on its own if that changes.
+#
+# The set is measured, not assumed — it is gated on the render-stack CPU
+# carve-out bar docs/DEVELOPMENT.md records (a smaller opt-level must not cost
+# more than 5% on the measured CPU path) and was re-measured on device before
+# landing. `[profile.profile]` inherits these overrides along with the rest of
+# `[profile.release]`, which is what makes the benchmark build measure the
+# shipping configuration.
+#
+# Hand-synced, byte-for-byte, across the EIGHT manifests that build an Android
+# artifact: this root manifest, `crates/frust-drive/templates/app/Cargo.toml.tmpl`,
+# `examples/huddle`, `examples/glyph-catalog`, `examples/material3-demo`,
+# `examples/playground`, `examples/shadertoy` and
+# `benchmarks/frust_bench`. `crates/frust-cli/tests/profile_sync.rs` is the
+# tripwire. `examples/web-gallery` is wasm-only and deliberately carries NO
+# package overrides (wasm perf is unmeasured) — see its own manifest.
+
+[profile.release.package.naga]
+opt-level = "z"
+
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+[profile.release.package.ash]
+opt-level = "z"
+
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
+[profile.release.package.roxmltree]
+opt-level = "z"
+
+[profile.release.package.fontique]
+opt-level = "z"
+
+[profile.release.package.mio]
+opt-level = "z"
+
+[profile.release.package.image]
+opt-level = "z"
+
+[profile.release.package.png]
+opt-level = "z"
+# END release cold-set opt-level overrides

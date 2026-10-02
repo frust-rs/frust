@@ -35,12 +35,26 @@
 # `frust-iap` are the instances today.
 /plugins/*/platform/ios/.build/
 
+# Root /build/ directory holds diagnostics from the Android smoke-test script
+# (scripts/testing/android-smoke.sh writes to build/android-smoke/, uploaded
+# by the CI workflow). App-project build directories live inside example/app,
+# not at the repository root.
+/build/
+
 # A direct/SourceKit package resolution also drops a `Package.resolved`
 # beside the manifest (frust-iap's external OpenIAP dependency makes this
 # routine — camera's all-local deps never produced one). A consuming app
 # records its own resolution in its project; the package-local file is
 # tooling exhaust, never committed.
 /plugins/*/platform/ios/Package.resolved
+/plugins/*/platform/ios/*/Package.resolved
 /platform/ios/FrustEmbedding/Package.resolved
 
+# Xcode writes per-user SwiftPM state (scheme order, workspace settings) into a
+# `.swiftpm/` directory beside every local package it opens, including when a
+# consuming app references the package. None of it is shared configuration.
+.swiftpm/
+
 .zabinenv
+
+.build

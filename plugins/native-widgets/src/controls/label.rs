@@ -332,6 +332,135 @@ pub(crate) mod platform {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSTextField` and apply the same planned
+    //! setters the Android and iOS halves do.
+    //!
+    //! # One construction-time normalization: a wrapping label
+    //!
+    //! `NSTextField::labelWithString:` produces a **non-wrapping** field
+    //! (Apple's own header doc: "Creates a non-wrapping, non-editable,
+    //! non-selectable text field..."), where a fresh Android `TextView`
+    //! wraps to as many lines as its box allows and the iOS arm normalizes
+    //! `UILabel` to the same shape (`numberOfLines = 0`, this file's iOS
+    //! module doc). Wrapping is not a post-construction flag this arm can
+    //! flip afterward without rebuilding the field — AppKit exposes it only
+    //! as a *different* convenience constructor,
+    //! `NSTextField::wrappingLabelWithString:`, documented to return a field
+    //! that "wrap[s]" (Apple's header doc: "Creates a wrapping,
+    //! non-editable, selectable text field..."). `create` calls that
+    //! constructor instead, bringing the fresh view into the wrapping
+    //! behaviour `LabelProps` already describes (no line-count field on any
+    //! platform, the same reason the iOS fix targets `UILabel`'s own default
+    //! rather than a modelled property) — the same normalize-then-diff shape
+    //! [`super`]'s per-arm guidance and the iOS module doc above describe.
+    //!
+    //! That header doc also names the one side effect the swap introduces:
+    //! `wrappingLabelWithString:` is documented **selectable**, where
+    //! `labelWithString:` is documented non-selectable — confirmed against a
+    //! live `NSTextField` on this arm's own `objc2-app-kit` version
+    //! (`isEditable`/`isBezeled`/`drawsBackground` read `false` on both
+    //! constructors; only `isSelectable` differs, `false` then `true`).
+    //! `LabelProps::platform_default` has no field for text selectability
+    //! either, so `create` calls `setSelectable(false)` on the fresh view
+    //! right after construction, the same "normalize what the constructor
+    //! got wrong, then run the diffed plan" shape — leaving nothing else for
+    //! `create` to force before the plan runs. `create` still passes an
+    //! empty string to the constructor rather than `props.text` directly, so
+    //! a non-empty caption plans through [`Setter::Text`] like every other
+    //! field, the same "one code path for create and update" shape [`super`]
+    //! documents.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSTextField;
+    use objc2_foundation::NSString;
+
+    use super::{KIND, Label, LabelProps};
+    use crate::NativeWidgetError;
+    use crate::appkit::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live label's retained state — the same shape as `ButtonState`
+    /// (`button.rs`'s macOS arm): the typed view beside the runtime's own
+    /// `AppKitHandle` reference, needed here because `update` calls
+    /// `NSTextField`'s own `setStringValue:`/`setFont:`, which an untyped
+    /// `NSView` handle could not reach. No target — this control emits no
+    /// events (module doc, top of file).
+    pub(crate) struct LabelState {
+        view: Retained<NSTextField>,
+    }
+
+    impl NativeWidget for Label {
+        type Props = LabelProps;
+        type State = LabelState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            LabelProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+            // Module doc: `wrappingLabelWithString:` is documented (and
+            // confirmed live) selectable, unlike `labelWithString:` and
+            // unlike `LabelProps::platform_default` — undo that one side
+            // effect before the diffed plan runs.
+            view.setSelectable(false);
+            let plan = LabelProps::plan(&LabelProps::platform_default(props.slot), props);
+            apply_all(&view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((handle, LabelState { view }))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(&state.view, &LabelProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            _state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Display-only: nothing attached, and dropping the state releases
+            // its retain.
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — the same order contract the
+    /// other two arms keep.
+    fn apply_all(view: &NSTextField, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSTextField, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Text(text) => view.setStringValue(&NSString::from_str(text)),
+            Setter::Enabled(enabled) => platform::set_enabled(view, enabled),
+            Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
+            Setter::TextColor(argb) => platform::set_text_color(view, argb),
+            Setter::TextSizeSp(sp) => platform::set_text_size(view, sp),
+            Setter::Typeface(face) => platform::set_typeface(view, face),
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

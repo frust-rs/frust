@@ -7,13 +7,13 @@
 //! dependency and the next build simply stops applying them — no project file
 //! is left carrying a contribution its plugin no longer owns.
 //!
-//! **Everything written here lands under `dist/`.** The merge targets are the
-//! assembled bundle's own `Contents/Info.plist` and `<identifier>.desktop` —
-//! copies, whichever way they were produced — plus, for entitlements (which
-//! `codesign` reads from a file rather than from the bundle), a generated
-//! `dist/macos/<binary>.entitlements` beside the `.app`. The project's own
-//! `macos/Info.plist`, `macos/app.entitlements` and `linux/app.desktop` are
-//! user-owned and are only ever *read*.
+//! **Everything written here lands under `build/desktop/`.** The merge targets
+//! are the assembled bundle's own `Contents/Info.plist` and
+//! `<identifier>.desktop` — copies, whichever way they were produced — plus,
+//! for entitlements (which `codesign` reads from a file rather than from the
+//! bundle), a generated `build/desktop/macos/<binary>.entitlements` beside the
+//! `.app`. The project's own `macos/Info.plist`, `macos/app.entitlements` and
+//! `linux/app.desktop` are user-owned and are only ever *read*.
 //!
 //! **An existing key always wins.** A key already present in the file is left
 //! exactly as it is and reported as a [`BundleNote::PluginEntryPresent`] — a
@@ -115,6 +115,7 @@ fn applies_to(contribution: &Contribution, target: DesktopBundleTarget) -> bool 
         | Contribution::PlistEntry { .. }
         | Contribution::GradleModule { .. }
         | Contribution::SwiftPackageRef { .. }
+        | Contribution::IosFramework { .. }
         | Contribution::AppCrateMacro { .. }
         | Contribution::CargoFeature { .. }
         | Contribution::ScaffoldFile { .. } => false,
@@ -169,7 +170,7 @@ pub(super) fn apply(
 }
 
 /// Merges every [`Contribution::MacosPlistEntry`] in `rows` into the assembled
-/// bundle's `Info.plist` — the dist copy, so a generated and a copied plist
+/// bundle's `Info.plist` — the build copy, so a generated and a copied plist
 /// are handled identically and the project's own file is never touched.
 fn merge_info_plist(
     plist: &Path,
@@ -226,7 +227,7 @@ fn merge_info_plist(
 ///   [`BundleNote::EntitlementsSkippedUnsigned`]: an entitlement without a
 ///   signature is not a degraded bundle, it is a no-op;
 /// - contributions on a signing build → a **generated** file at
-///   `dist/macos/<binary>.entitlements`, either the project's own file with
+///   `build/desktop/macos/<binary>.entitlements`, either the project's own file with
 ///   the absent keys merged in or a minimal plist of just the contributed
 ///   keys.
 ///
@@ -290,7 +291,7 @@ fn resolve_entitlements(
 }
 
 /// Merges every [`Contribution::LinuxDesktopEntry`] in `rows` into the
-/// assembled bundle's `<identifier>.desktop` — again the dist copy, generated
+/// assembled bundle's `<identifier>.desktop` — again the build copy, generated
 /// or copied alike.
 ///
 /// A key already in the `[Desktop Entry]` group wins; a new one is appended at
@@ -364,7 +365,7 @@ fn merge_desktop_entry(
 /// resolved no entitlements at all (an entitlement without a signature is a
 /// no-op) but `cargo-packager`'s own codesign pass over the `.app` it
 /// synthesizes still needs one. Probing is second-best precisely because it
-/// trusts whatever file sits at the predictable dist path.
+/// trusts whatever file sits at the predictable output path.
 pub(super) fn entitlements_for_packaging(
     project_dir: &Path,
     config: &DesktopConfig,
@@ -377,11 +378,11 @@ pub(super) fn entitlements_for_packaging(
     project_file.is_file().then_some(project_file)
 }
 
-/// `dist/macos/<binary>.entitlements` — a generated artifact beside the
-/// `.app`, never a file in the project.
+/// `build/desktop/macos/<binary>.entitlements` — a generated artifact beside
+/// the `.app`, never a file in the project.
 fn generated_entitlements_path(project_dir: &Path, config: &DesktopConfig) -> PathBuf {
     DesktopBundleTarget::Macos
-        .dist_dir(project_dir)
+        .output_dir(project_dir)
         .join(format!("{}.entitlements", config.binary_name))
 }
 
@@ -1031,7 +1032,7 @@ mod tests {
     /// **generated** file beside the `.app` — the project file itself is
     /// byte-for-byte untouched.
     #[test]
-    fn entitlements_merge_generates_a_dist_file_and_never_edits_the_project_one() {
+    fn entitlements_merge_generates_a_build_file_and_never_edits_the_project_one() {
         let dir = temp_dir("entitlements-merge");
         let project_file = dir.join(PROJECT_ENTITLEMENTS_REL);
         fs::create_dir_all(project_file.parent().unwrap()).unwrap();
@@ -1053,7 +1054,10 @@ mod tests {
         .unwrap()
         .expect("a generated entitlements path");
 
-        assert_eq!(resolved, dir.join("dist/macos/my_app.entitlements"));
+        assert_eq!(
+            resolved,
+            dir.join("build/desktop/macos/my_app.entitlements")
+        );
         // A file this run wrote, reported like every other written file.
         assert_eq!(artifacts, vec![resolved.clone()]);
         assert_eq!(fs::read_to_string(&project_file).unwrap(), original);
@@ -1130,7 +1134,7 @@ mod tests {
 
         assert_eq!(resolved, None);
         assert!(artifacts.is_empty(), "{artifacts:?}");
-        assert!(!dir.join("dist/macos/my_app.entitlements").exists());
+        assert!(!dir.join("build/desktop/macos/my_app.entitlements").exists());
         assert_eq!(
             notes,
             vec![BundleNote::EntitlementsSkippedUnsigned { count: 2 }]
@@ -1145,7 +1149,7 @@ mod tests {
     fn without_contributions_the_projects_own_entitlements_are_used_and_stale_ones_removed() {
         let dir = temp_dir("entitlements-none");
         let config = signing_config();
-        let stale = dir.join("dist/macos/my_app.entitlements");
+        let stale = dir.join("build/desktop/macos/my_app.entitlements");
         fs::create_dir_all(stale.parent().unwrap()).unwrap();
         fs::write(&stale, "<plist/>").unwrap();
 
@@ -1186,7 +1190,7 @@ mod tests {
             Some(project_file)
         );
 
-        let generated = dir.join("dist/macos/my_app.entitlements");
+        let generated = dir.join("build/desktop/macos/my_app.entitlements");
         fs::create_dir_all(generated.parent().unwrap()).unwrap();
         fs::write(&generated, "<plist/>").unwrap();
         assert_eq!(entitlements_for_packaging(&dir, &config), Some(generated));

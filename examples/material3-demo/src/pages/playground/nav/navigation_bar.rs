@@ -157,7 +157,8 @@ fn preview(theme: &Theme, state: &NavBarState) -> AnyView<NavBarState> {
         )
         .size(state.size)
         .label_behavior(state.label_behavior)
-        .indicator_style(state.indicator),
+        .indicator_style(state.indicator)
+        .safe_area(false),
     )
 }
 
@@ -227,7 +228,7 @@ fn snippet_code(state: &NavBarState) -> String {
         "destinations: vec![\n        nav_item(\"Home\").icon(any(icon(icons::HOME))),\n        nav_item(\"Search\").icon(any(icon(icons::SEARCH))),\n        nav_item(\"Agenda\").icon(any(icon(icons::CALENDAR_TODAY))),\n        nav_item(\"Drafts\").icon(any(icon(icons::EDIT))),\n    ],"
     };
     format!(
-        "navigation_bar(\n    {rows}\n    selected,\n    on_select,\n)\n    .size(NavBarSize::{size:?})\n    .label_behavior(NavBarLabelBehavior::{behavior:?})\n    .indicator_style(NavBarIndicatorStyle::{indicator:?});",
+        "navigation_bar(\n    {rows}\n    selected,\n    on_select,\n)\n    .size(NavBarSize::{size:?})\n    .label_behavior(NavBarLabelBehavior::{behavior:?})\n    .indicator_style(NavBarIndicatorStyle::{indicator:?})\n    .safe_area(false);\n// preview is embedded mid-screen; a bar docked at the screen bottom omits .safe_area(false)",
         rows = rows,
         size = state.size,
         behavior = state.label_behavior,

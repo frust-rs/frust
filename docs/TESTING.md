@@ -71,19 +71,45 @@ The repository already contains substantial non-pixel coverage:
   triptych/JSON failure artifacts under `target/frust-testing/`, and the
   committed `testing/goldens/cpu/` class (unit, adversarial, widget, page, and
   text cases, incl. `examples/material3-demo`'s standalone page goldens).
+- `examples/gallery` (package `frust-gallery`): a hand-authored widget/page case registry, a
+  dev-only root workspace member shared by the website's static snapshot generator and the
+  browser gallery below. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
+  CPU oracle to a light/dark PNG plus `manifest.json` per case — a documentation-asset
+  generator, not a golden class (no committed baseline, no promotion); its `--check` mode
+  re-renders and byte-compares, proving same-host determinism only. Run via
+  `scripts/widget-snapshots.sh`.
+- `examples/web-gallery`: the frust.dev website's live-preview app, rendering the same
+  `examples/gallery` case registry in-browser via `frust build web --release`. It carries
+  no automated coverage and is gated manually in a browser — see its README's "Browser
+  verification" section for the procedure, and its "Binary size" section for the artifact
+  measurement (deliberately not restated here, since it moves with every build).
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.
 - Plugin conformance tests using file/fake backends, with platform secret-store
   and biometric behavior kept as explicit hardware gates.
+- `plugins/native-widgets`: the shared runtime/component/`api::mount`/demo-lifecycle dispatch,
+  diff, and lifecycle contract is host-tested through a per-platform stand-in context/view pair,
+  but that stand-in — and the roughly 50 tests built against it (runtime 26, component 21, mount
+  3, demo 3) — is `#[cfg]`-compiled only on a host with **no** platform arm at all
+  (`not(any(target_os = "android", target_os = "ios", target_os = "macos"))`); each platform arm
+  swaps in its own real context/view types instead. So `cargo test --workspace` on a macOS runner
+  exercises none of that layer — Linux/Windows/web hosts are the only ones that do — while every
+  platform's `Cargo.toml`-target compile gate (`docs/DEVELOPMENT.md` § Test) still type-checks the
+  real arm. See [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md).
 - `benchmarks/`: deterministic scenario logic, harness parser tests, and the
   S1-S8 cross-framework device protocol.
 
 Known gaps are tracked by the comprehensive-testing feature plan:
 
-- No automated Android emulator provisioning, launch, state normalization,
-  screenshot comparison, or lifecycle matrix.
-- No committed CI configuration or dedicated self-hosted GPU-runner workflow.
+- No emulator-provisioning script in this repository, no screenshot-baseline comparison, and no
+  full lifecycle matrix. `scripts/testing/android-smoke.sh` (see § Android Emulator GPU Lab) covers
+  automated launch, device-state normalization (wake/dismiss-keyguard), and a best-effort
+  black-band visual probe against an attached device or emulator, but does not provision one.
+- No GPU-runner or device CI. `.github/workflows/ci.yml` runs the CPU gates on pull requests and on
+  pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene;
+  aggregate `ci-ok` is the required check). `.github/workflows/android-smoke.yml` runs on a schedule
+  or manual dispatch and is not part of the required check.
 - Accessibility and several platform plugin paths remain manual physical-device
   gates.
 
@@ -102,8 +128,8 @@ cargo build --workspace --locked \
 ```
 
 Also run the Huddle and clean-signals-frust gates from their standalone
-workspace roots — unconditional, since `clean-signals` is git+rev-pinned to
-its public repo rather than a `../clean-signals-rs` sibling checkout (see
+workspace roots — unconditional, since `clean-signals` comes from
+crates.io rather than a `../clean-signals-rs` sibling checkout (see
 `docs/DEVELOPMENT.md`'s Version-Pin Policy):
 
 ```bash
@@ -283,9 +309,14 @@ Store independent baselines for:
 - `engine-metal-macos/`: the Mac M4 rig's engine class — baselines promoted
   across the unit/widget/page/text corpus and, since the p6-d1 verification
   round, the filter family too.
-- No browser/WebGL2 golden class exists — that arm was cancelled before
-  landing, not merely unimplemented (`docs/LIMITATIONS.md`'s
-  `engine-webgl2-unhosted`); do not document one as shipping.
+- No independent `engine-webgl2-*` golden class exists, but the arm is covered: `crates/frust-testing`'s
+  non-default `webgl` feature (`tests/wasm_goldens.rs`, `tests/wasm_binary_invariants.rs`) runs the unit
+  corpus through `frust-engine` on a real `wgpu::Backend::Gl` adapter via `wasm-bindgen-test` in headless
+  Chrome (chromedriver) — run recipe in [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s
+  `FRUST_ENGINE_DOWNLEVEL` row. It compares against the existing `cpu/` class above rather than owning
+  one of its own: each baseline is `include_bytes!`'d straight from `testing/goldens/cpu/` (no filesystem
+  in a browser), held to the same P1 bar `engine-vulkan-nvidia-t400/`/`engine-metal-macos/` are. See
+  [LIMITATIONS.md](LIMITATIONS.md)'s `engine-webgl2-atlas-target` for the one residual upstream constraint.
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the
@@ -361,12 +392,25 @@ subset commands, and checksums in `testing/fonts/LICENSES.md`),
 `frust_testing::fonts::register_test_fonts` registers only those,
 `frame::pin_type_scale` rewrites the theme's type scale onto the bundled
 family, and `frame::foreign_font_runs` rejects any captured glyph run whose
-font bytes are not a bundled face. Residual gap: widget-internal text built
-via `text(label)` (`frust-widgets` button/checkbox/radio, the Material
-app-bar and Cupertino nav-bar titles, shadcn's `card_title`, Glyph's `tag`)
-hardcodes `TextStyle::default()` (`FontFamily::SystemUi`) with no theme seam,
-so widget/page golden cases pass those string slots empty and supply real
-text through view slots (tracked as an open action item).
+font bytes are not a bundled face. Widget-internal text is therefore
+pinnable when its family comes from the theme's type scale — a widget that
+resolves its family from `Theme::type_scale`, or a `Text` opted in with
+`.themed_family(..)` — and not when the family is fixed in code rather than
+taken from the theme (`TextStyle::default()`'s `FontFamily::SystemUi`, or a
+hardcoded stack). Golden cases empty or avoid the string slots of the second
+kind and supply real text through view slots or as plain page content
+instead; the corpus modules' docs (`crates/frust-testing/src/corpus/page.rs`,
+`widget.rs`) record which slots, and why. Every catalog's own chrome and
+controls opt in this way too — Material's app bar, navigation-bar labels and
+dialog title/body; Cupertino's nav bar title, tab items and button; shadcn's
+buttons and card title; and Glyph's tag label — and are still passed empty
+(or the widget avoided) only because their committed baselines were
+captured that way, not because the family can't be pinned (tracked as an
+open action item). Separately, font registration lands in a process-global
+list (`frust_text`'s `TextContext::register_fonts`/`APP_FONTS`), so two
+`TextContext`s built at different points in the same test process can drift
+once another test has registered fonts in between — lay both sides of a
+layout comparison out through the same context.
 
 ### Comparison
 
@@ -530,7 +574,7 @@ wait for a deterministic ready signal:
 ```bash
 cd examples/huddle
 frust build apk --debug --target-platform android-x64
-adb -s emulator-5554 install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5554 install -r build/android/app/outputs/apk/debug/app-debug.apk
 adb -s emulator-5554 shell am force-stop it.f0x.huddle
 adb -s emulator-5554 shell am start -W -n it.f0x.huddle/.MainActivity
 adb -s emulator-5554 exec-out screencap -p > actual-android.png
@@ -558,6 +602,33 @@ Retain the emulator's startup log. It identifies the chosen graphics mode and
 is required evidence when a supposedly hardware-backed result is promoted.
 Use `-gpu swiftshader` as a diagnostic/reference mode, not as proof that the
 T400 path works.
+
+### Automated Entry Point
+
+`scripts/testing/android-smoke.sh --serial <serial>` is the automated entry point against an
+attached device or a running emulator (`--serial` defaults to `$ANDROID_SERIAL`, else the sole
+`adb devices` target). Device reachability (`adb get-state`) is checked before any build, failing
+fast (exit 1) on a wrong `--serial` rather than after a multi-minute build. Both legs build a
+**debug** APK — required, since the `frust-insets` log line and the playground DB auto-run are
+both debug-only (`cfg!(debug_assertions)`). It runs two legs (`--leg template|playground|all`):
+
+- **template** — scaffolds a fresh app, builds and installs it, and asserts `frust-insets` reports
+  non-zero top/bottom `view_padding` and that the legacy-theme warning is absent; its scratch
+  scaffold is removed at the end of the leg unless `--keep`.
+- **playground** — builds/installs `examples/playground`, launches it via the
+  `frustplay://section/db` deep link, and asserts `frust-database smoke: ok` appears in logcat
+  alongside the same non-zero-insets check.
+
+The artifacts directory is emptied of the script's own `logcat-*.log`/`*.png` files at the start of
+each run. Each leg's dumped logcat is filtered to `frust:V AndroidRuntime:E DEBUG:I
+ActivityManager:I libc:F` by default; `--full-logcat` (or `ANDROID_SMOKE_FULL_LOGCAT=1`) keeps the
+unfiltered device-wide dump. A negative control (pointing the script at an APK built from a
+manifest that still names the legacy theme, which must fail leg "template") is documented in the
+script's header but not automated. `.github/workflows/android-smoke.yml` provisions an emulator
+(`workflow_dispatch` + nightly) and runs this script with `--target-platform android-x64
+--full-logcat`, but is a delivered template, not part of this repository's required gates; GitHub
+registers a workflow only from the default branch (`main`), so it can be dispatched or scheduled
+only once it is on `main`.
 
 ### Android Scenario Matrix
 

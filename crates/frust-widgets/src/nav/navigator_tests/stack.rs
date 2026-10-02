@@ -851,6 +851,7 @@ impl Widget for EditableLeafWidget {
                 },
                 caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
                 content_type: Default::default(),
+                suppress_soft_keyboard: false,
             });
             return EventResult::Handled;
         }
@@ -984,6 +985,7 @@ fn field_surface() -> ImeState {
         },
         caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
         content_type: Default::default(),
+        suppress_soft_keyboard: false,
     }
 }
 

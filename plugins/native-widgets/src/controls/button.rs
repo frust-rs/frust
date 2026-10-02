@@ -8,8 +8,9 @@
 //!
 //! Clicks are platform-owned: `create` attaches the shared
 //! `dev.frust.nativewidgets.FrustNativeListener` as an `OnClickListener` on
-//! Android, and a `FrustNativeControlTarget` as the `TouchUpInside` action on iOS
-//! (`crate::apple::events`); both arms'
+//! Android, a `FrustNativeControlTarget` as the `TouchUpInside` action on iOS
+//! (`crate::apple::events`), and the macOS `FrustNativeControlTarget` as the
+//! `NSButton`'s target/action (`crate::appkit::events`); all three arms'
 //! [`on_event`](crate::runtime::NativeWidget::on_event) decode the firing via
 //! the SAME [`crate::events::decode_click`] into the runtime's event
 //! dispatch. Nothing about that goes through `RenderRoot::event` (the crate
@@ -446,6 +447,141 @@ pub(crate) mod platform {
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(view, label, mtm);
             }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSButton` and apply the same planned setters
+    //! the Android and iOS halves do.
+    //!
+    //! # A momentary push button with the push bezel
+    //!
+    //! `ButtonProps::platform_default` describes *"the state a freshly
+    //! constructed button is already in"*, and the create plan diffs against
+    //! it, so construction must land exactly there. `NSButton::new` (i.e.
+    //! `initWithFrame:` with a zero frame) yields a momentary push-in button
+    //! titled `"Button"`; this arm pins its type and bezel explicitly —
+    //! `NSButtonType::MomentaryPushIn` and `NSBezelStyle::Push` (the modern
+    //! name of the deprecated `NSBezelStyle::Rounded` alias in objc2-app-kit
+    //! 0.3.2: the standard rounded push button, which picks up the system
+    //! accent/appearance like `UIButtonType::System` does on iOS) — and clears
+    //! the placeholder title, so an empty caption in `Props` really is an empty
+    //! button rather than one reading "Button".
+    //!
+    //! # Clicks are platform-owned, exactly like the other two arms
+    //!
+    //! `create` attaches a [`FrustNativeControlTarget`] as the button's
+    //! target/action with [`EVENT_KIND_CLICK`], and `on_event` decodes its
+    //! firing via [`crate::events::decode_click`] — the same decoder Android's
+    //! and iOS's `on_event` call. The click reaches the button directly
+    //! through AppKit's responder chain (the desktop host parents it above
+    //! frust's surface and adds no input shield), never through
+    //! `RenderRoot::event`; a click is never caused by `update`'s own setters,
+    //! so no echo guard.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSBezelStyle, NSButton, NSButtonType};
+    use objc2_foundation::NSString;
+
+    use super::{Button, ButtonProps, KIND};
+    use crate::NativeWidgetError;
+    use crate::appkit::{FrustNativeControlTarget, NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::events::{EVENT_KIND_CLICK, EventPayload, decode_click};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
+
+    /// A live button's retained state — the iOS arm's shape: the typed
+    /// button beside the runtime's own `NSView` reference, and the
+    /// target-action object nothing else retains (`NSControl.target` is weak —
+    /// `crate::appkit::events`' *Target retention*).
+    pub(crate) struct ButtonState {
+        /// The button, kept typed: `update` needs `NSButton`'s own
+        /// `setTitle:`, which an `NSView` handle could not reach.
+        view: Retained<NSButton>,
+        /// The target `create` attached; released with the rest of `State`
+        /// when `Instance::dispose` tears the slot down.
+        target: Retained<FrustNativeControlTarget>,
+    }
+
+    impl NativeWidget for Button {
+        type Props = ButtonProps;
+        type State = ButtonState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            ButtonProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSButton::new(mtm);
+            view.setButtonType(NSButtonType::MomentaryPushIn);
+            view.setBezelStyle(NSBezelStyle::Push);
+            // Module doc: land exactly on `platform_default`'s empty caption.
+            view.setTitle(&NSString::from_str(""));
+            let plan = ButtonProps::plan(&ButtonProps::platform_default(props.slot), props);
+            apply_all(&view, &plan);
+            // Attached after the initial plan, matching the other two arms'
+            // create order.
+            let target = FrustNativeControlTarget::attach(mtm, &view, props.slot, EVENT_KIND_CLICK);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((handle, ButtonState { view, target }))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(&state.view, &ButtonProps::plan(old, new));
+            Ok(())
+        }
+
+        fn on_event(_state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_click(event)
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Detach so a stray in-flight click can't reach a torn-down slot,
+            // mirroring the other two arms; dropping `state` afterwards
+            // releases the target's only retain.
+            state.target.detach(&state.view);
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — the same order contract the
+    /// other two arms keep.
+    fn apply_all(view: &NSButton, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(view: &NSButton, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Text(text) => view.setTitle(&NSString::from_str(text)),
+            Setter::Enabled(enabled) => platform::set_enabled(view, enabled),
+            Setter::TextColor(argb) => platform::set_text_color(view, argb),
+            Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
+            Setter::TextSizeSp(sp) => platform::set_text_size(view, sp),
+            Setter::ThemedBackground { fill, radius_dp } => {
+                platform::set_background_color(view, fill);
+                platform::set_corner_radius(view, radius_dp);
+            }
+            Setter::Typeface(face) => platform::set_typeface(view, face),
+            Setter::ContentDescription(label) => platform::set_accessibility_label(view, label),
             ref other => platform::warn_unexpected_setter(KIND, other),
         }
     }

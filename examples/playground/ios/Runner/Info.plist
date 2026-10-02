@@ -55,6 +55,19 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>it.f0x.playground</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>frustplay</string>
+			</array>
+		</dict>
+	</array>
 	<!-- Enable 120Hz on ProMotion iPhone hardware. This key is REQUIRED for
 	     >60fps refresh rates on iPhone Pro models (Apple Foundation reference:
 	     CADisplayLink preferredFrameRateRange, accessed 2026-07-18). Without it,

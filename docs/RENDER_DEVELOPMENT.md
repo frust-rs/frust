@@ -12,10 +12,11 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 
 | Pin | Why | Tripwire |
 |---|---|---|
-| `wgpu` caret `30.0.1` — frust-owned, no `vello` constraint above it (`vello` is fully deleted; nothing in this workspace depends on it) | The engine's substrate (`frust-gpu`); vertex/fragment-only, no compute — bump deliberately, after the full engine gate suite (device smokes across backends), never casually | `cargo build --workspace --locked` plus a device smoke on each shipping backend — the retired "wgpu 30.0.1 device smoke" section of RESULTS.md (git history, `git show f64be636:benchmarks/RESULTS.md`) records the p8-07 arms (Pixel 5 Vulkan matrix; iPhone SE + Simulator Metal gates; macOS window smoke; Windows DX12 smoke on the Dell rig) — all four shipping-backend arms recorded |
+| `wgpu` caret `30.0.1` — frust-owned, no `vello` constraint above it (`vello` is fully deleted; nothing in this workspace depends on it) | The engine's substrate (`frust-gpu`); vertex/fragment-only, no compute — bump deliberately, after the full engine gate suite (device smokes across backends), never casually | `cargo build --workspace --locked` plus a device smoke on each shipping backend — the retired "wgpu 30.0.1 device smoke" section of RESULTS.md (git history, `git show f64be636:benchmarks/RESULTS.md`) records the p8-07 arms (Pixel 5 Vulkan matrix; iPhone SE + Simulator Metal gates; macOS window smoke; Windows DX12 smoke on the Dell rig) — all four shipping-backend arms recorded; the browser gate below (`frust-testing`'s `webgl` feature, headless Chrome) is the fifth shipping-backend arm and must re-run too |
 | `image =0.25.10` exact (`Image` widget's PNG/JPEG decoder, `png`/`jpeg` only) | Only 0.25.x release whose MSRV equals the workspace `rust-version` (1.88) | fresh MSRV check before bumping, not just `cargo update` |
 | `vello_common =0.2.0` / `glifo =0.3.0` exact | `frust-engine`'s vendored sparse-strips rasterizer core — the engine is a plain dependency of `frust-render`, not a cargo feature; see Engine below | `cargo build -p frust-render --locked` and `cargo test -p frust-engine`, plus `cargo tree -d` |
 | `vello_cpu_oracle (=0.2.0, package vello_cpu, features std+text+u8_pipeline)` — dev-only | `frust-testing`'s CPU oracle arm rasterizes with the engine's own core (`vello_common`/`glifo` 0.2.0/0.3.0), the P1 reference against `EngineOracle`; the published crate hits a `compile_error!` on `std`+`text` alone, so `u8_pipeline` is required, not decorative | `cargo test -p frust-testing --test dup_identities` (guard G6: exactly ONE `vello_common` identity (`0.2.0`), ONE `glifo` identity (`0.3.0`), `vello_cpu` resolving to `{0.2.0}`) |
+| `parley` caret `0.11.1` — `frust-text`'s shaping/layout engine, the text tier's only engine pin. `harfrust`, `fontique`, `skrifa`, `read-fonts` are deliberately NOT pinned: `frust-text` uses `parley.workspace = true` and reaches `fontique` only through `parley::fontique`, so parley's own manifest is the single choke point deciding all four | 0.11.1 is a manifest-only release (source identical to 0.11.0) that moves harfrust 0.10.0 → 0.12.0, fontique 0.11.0 → 0.11.1, and skrifa 0.43.2 → 0.44.0 (pulling read-fonts 0.41.0), aligning the text tier onto the skrifa 0.44 / read-fonts 0.41 copies `glifo =0.3.0` already required — so each now resolves to exactly one version on the lean Android graph. Never add a `harfrust` or `fontique` row beneath parley — two resolution routes would reopen the split | `cargo test -p frust-text`; `cargo test -p frust-testing` and `scripts/widget-snapshots.sh --check` (the shaping goldens — harfrust is a real shaping-engine change even when parley is source-identical); `cargo tree -d --target aarch64-linux-android --no-default-features --features lean` in `benchmarks/frust_bench` showing a single `skrifa` and a single `read-fonts`; `cargo build --locked` in the root and all ten standalone workspaces |
 
 `effective_limits` (`frust-gpu::context`) still forces the iOS Simulator's device request back up to
 a 256-byte uniform alignment (the Simulator misreports its own) — kept until upstream
@@ -63,8 +64,28 @@ above):**
 | `FRUST_ENGINE_NO_DEPTH` | Disables the engine's depth attachment/test (`config::depth_disabled`); the two draw passes collapse into one blended painter-order pass. | Wired |
 | `FRUST_ENGINE_NO_ATLAS` | Routes every glyph/image atlas resolution to a logged skip instead. | Wired |
 | `FRUST_ENGINE_ATLAS_SIZE=<W>x<H>` | Overrides the capability-chosen per-layer atlas extent (e.g. `2048x2048`); runtime wins over compile-time. | Wired |
-| `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below); no browser/wasm measurement exists — the arm was cancelled, not merely unimplemented (`engine-webgl2-unhosted` in LIMITATIONS.md). | Wired |
+| `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below). A real browser measurement now exists too (`examples/web-spike/RESULTS.md` §§ 16-17): Chrome WebGL2 (`Backend::Gl`/ANGLE) renders shapes, shaped text, images, gradients, blur and layers pixel-correct against the same Chrome WebGPU arm, after the atlas-array workaround (`engine-webgl2-atlas-target` in LIMITATIONS.md) landed. | Wired |
 | `FRUST_ENGINE_NO_LAYERS` / `FRUST_ENGINE_NO_POOL` / `FRUST_ENGINE_MAX_TEX=<n>` | Parsed and cached (`crates/frust-engine/src/config.rs`) but consulted by nothing yet — reserved for the layer-cache/resource-pool/texture-ceiling subsystems that will read them. | Reserved (no effect) |
+
+**Browser gate** (`crates/frust-testing`'s non-default `webgl` feature; headless Chrome via
+`wasm-bindgen-test-runner`/chromedriver): `tests/wasm_goldens.rs` renders every unit-corpus case
+through `frust-engine` on a real `wgpu::Backend::Gl` adapter and holds each to the same
+`vello_cpu` 0.2.0 bar the host engine gate uses, plus a pixel-exact check of the browser's own
+`vello_cpu` arm against the committed `testing/goldens/cpu/` baseline; `tests/wasm_binary_invariants.rs`
+covers the shipped module's own byte size. Both PASSED on the Linux rig.
+
+```bash
+CHROMEDRIVER_REMOTE=http://localhost:9517 \
+  CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+  cargo test -p frust-testing --target wasm32-unknown-unknown \
+    --features webgl --release --test wasm_goldens --test wasm_binary_invariants
+```
+
+Measured (`examples/web-spike/RESULTS.md` § 17.5, `?log=info` to exclude the probe's own
+console-logging cost): a WebGL2 first frame of ~0.44-0.76s against ~0.11-0.27s on WebGPU on the
+same rig, roughly 3-6x, spent in naga's WGSL→GLSL-ES translation and ANGLE shader compilation —
+both of which a WebGPU build skips entirely; steady-state per-frame strip/submit cost is
+0.6-1.4ms on both backends, within ~1ms of each other.
 
 Each follows `FRUST_TRACE`'s compile-time-`option_env!`-or-runtime-`std::env::var` shape, runtime
 winning.
@@ -118,6 +139,7 @@ split as `frust-gpu`, mandatory on a multi-adapter host:
 ```bash
 # Host-only arm, no GPU/environment needed:
 cargo test -p frust-engine
+# includes tests/proptest_strips.rs — see the memory caveat below on a constrained host
 
 # Host-only arm with perf-trace instrumentation tests:
 cargo test -p frust-engine --features perf-trace
@@ -133,6 +155,12 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
 # Diagnostic only — never a gate:
 cargo bench -p frust-engine -- --quick
 ```
+
+The host-only arm's `tests/proptest_strips.rs` has twice exhausted host memory on random inputs
+(2026-09-08 OOM at ~35 GB RSS; 2026-09-26 a 187 GB allocation abort) and is tracked as an open
+engine finding; on a host without tens of GB to spare, or when iterating, run it scoped instead —
+`cargo test -p frust-engine --test <file>` or `cargo test -p frust-engine --lib <path>` — which is
+how the `docs/learning` labs invoke it.
 
 Engine-owned instrumentation — the `frust-perf img`/`frust-perf atlas`/`frust-perf enc` counter lines
 and the `EncodeTrace` type — compiles only under the `perf-trace` feature (an island, absent entirely

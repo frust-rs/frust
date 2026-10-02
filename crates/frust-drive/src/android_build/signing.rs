@@ -257,8 +257,10 @@ fn verify(
     };
 
     Ok(Some(ResolvedSigning {
-        // Absolute, so Gradle's `rootProject.file(...)` base can't disagree
-        // with the three bases the gate searched.
+        // Absolute, so whichever base the project's Gradle resolves against
+        // (`rootProject.file(...)` in the shipped template, a module-relative
+        // `file(...)` in a Flutter-style rig) can't disagree with whichever
+        // of the four bases the gate searched actually landed.
         store_file: absolute(found),
         store_password: resolved[&Field::StorePassword].clone(),
         key_alias: resolved[&Field::KeyAlias].clone(),
@@ -561,13 +563,17 @@ fn absolute(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Every base a relative `storeFile` plausibly resolves against: the
-/// properties file's own directory (the relocated-rig convention), the
-/// Gradle root project (`android/`, what the shipped template uses), and the
-/// Frust project root. The gate accepts the first that lands on a real file
-/// rather than guessing which base the project's Gradle picked — and since the
-/// resolved path is then handed to Gradle *absolute*, that guess is no longer
-/// something the two sides can disagree about.
+/// Every base a relative `storeFile` plausibly resolves against, in the order
+/// tried: the properties file's own directory (the relocated-rig convention,
+/// `storeFile=prod.jks` beside `key.properties`), the Gradle root project
+/// (`android/`, what the shipped template's `rootProject.file(…)` uses), the
+/// Gradle app module (`android/app/`, what a bare `file(…)` inside
+/// `app/build.gradle.kts` resolves against — the Flutter convention, kept
+/// verbatim by a rig ported from a Flutter app), and the Frust project root.
+/// The gate accepts the first that lands on a real file rather than guessing
+/// which base the project's Gradle picked — and since the resolved path is
+/// then handed to Gradle *absolute*, that guess is no longer something the
+/// two sides can disagree about.
 fn store_file_candidates(
     project_root: &Path,
     android_dir: &Path,
@@ -583,6 +589,9 @@ fn store_file_candidates(
         bases.push(parent.to_path_buf());
     }
     bases.push(android_dir.to_path_buf());
+    // The source module `frust create` lays out — not
+    // `BuildLayout::android_app()`, which is the build *output* tree.
+    bases.push(android_dir.join("app"));
     bases.push(project_root.to_path_buf());
 
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -867,8 +876,28 @@ mod tests {
         let err = check(&dir, BuildMode::Release).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("no file exists there"), "{message}");
+        // Component-wise `Path::join`s, not a single `/`-embedded string:
+        // the production candidates are built base-then-filename via two
+        // separate `.join()` calls (see `store_file_candidates`), which on
+        // Windows renders pure-`\` — `dir.join("android/upload.jks")` would
+        // instead carry a literal `/` inside the pushed component, never
+        // matching that `Display` output there.
         assert!(
-            message.contains(&dir.join("android/upload.jks").display().to_string()),
+            message.contains(&dir.join("android").join("upload.jks").display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                &dir.join("android")
+                    .join("app")
+                    .join("upload.jks")
+                    .display()
+                    .to_string()
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(&dir.join("upload.jks").display().to_string()),
             "{message}"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -916,7 +945,7 @@ mod tests {
         );
         let store_file = store_file_line(&contents);
         assert!(
-            Path::new(store_file).is_absolute() && Path::new(store_file).is_file(),
+            Path::new(&store_file).is_absolute() && Path::new(&store_file).is_file(),
             "storeFile must be an absolute path to a real keystore: {store_file}"
         );
 
@@ -947,7 +976,7 @@ mod tests {
         assert!(contents.contains("keyAlias=upload"), "{contents}");
         let store_file = store_file_line(&contents);
         assert!(
-            Path::new(store_file).is_file(),
+            Path::new(&store_file).is_file(),
             "storeFile must resolve to the real keystore: {store_file}"
         );
 
@@ -1033,7 +1062,41 @@ mod tests {
         let (contents, guard) = generate(&dir, FakeEnv::new());
         assert!(contents.contains("keyAlias=upload"), "{contents}");
         assert!(
-            Path::new(store_file_line(&contents)).is_file(),
+            Path::new(&store_file_line(&contents)).is_file(),
+            "{contents}"
+        );
+        drop(guard);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The Flutter convention, verbatim: `key.properties` lives in
+    /// `android/app/keystores/`, its `storeFile` is `keystores/production.jks`,
+    /// and the app's `build.gradle.kts` resolves it with a bare `file(…)` —
+    /// relative to the *module*, `android/app/`. Before the module base
+    /// existed the gate refused this rig over a keystore sitting exactly where
+    /// Gradle would look, listing a doubled `keystores/keystores/` path among
+    /// the bases it had tried.
+    #[test]
+    fn a_module_relative_store_file_resolves_against_android_app() {
+        let dir = unique_temp_dir("module-relative");
+        touch_keystore(&dir, "android/app/keystores/production.jks");
+        write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [signing]\nkey-properties = \"app/keystores/key.properties\"\nprefix = \"prod\"\n",
+        );
+        write(
+            dir.join("android/app/keystores/key.properties"),
+            "prod.storeFile=keystores/production.jks\nprod.storePassword=pw\n\
+             prod.keyAlias=upload\nprod.keyPassword=pw\n",
+        );
+        assert!(!dir.join("android/app/keystores/keystores").exists());
+        let (contents, guard) = generate(&dir, FakeEnv::new());
+        let generated = PathBuf::from(store_file_line(&contents));
+        assert!(generated.is_file(), "{contents}");
+        assert_eq!(
+            fs::canonicalize(&generated).unwrap(),
+            fs::canonicalize(dir.join("android/app/keystores/production.jks")).unwrap(),
             "{contents}"
         );
         drop(guard);
@@ -1250,11 +1313,35 @@ mod tests {
     }
 
     /// The `storeFile=` value out of a generated file, unescaping the only
-    /// escape a filesystem path can realistically carry here.
-    fn store_file_line(contents: &str) -> &str {
-        contents
+    /// escape a filesystem path can realistically carry here: the backslash
+    /// doubling `escape_property_value` applies to every `\` (Windows path
+    /// separators, and the `\\?\` verbatim-path prefix `fs::canonicalize`
+    /// returns there). Never surfaced on Unix, where a real path has no `\`
+    /// to double in the first place — a bare "strip the prefix" used to be
+    /// enough there, but reading a raw `\\`-doubled path back on Windows
+    /// makes `Path::is_absolute`/`is_file` fail against a string that no
+    /// longer names the real file.
+    fn store_file_line(contents: &str) -> String {
+        let raw = contents
             .lines()
             .find_map(|line| line.strip_prefix("storeFile="))
-            .unwrap_or_else(|| panic!("no storeFile line in:\n{contents}"))
+            .unwrap_or_else(|| panic!("no storeFile line in:\n{contents}"));
+        unescape_backslashes(raw)
+    }
+
+    /// Reverses `escape_property_value`'s `\` → `\\` doubling. Deliberately
+    /// narrow (backslash only) — this test helper only ever reads back a
+    /// filesystem path, never the `\n`/`\r`/`\t`/`\uXXXX` escapes that
+    /// function also emits for arbitrary values.
+    fn unescape_backslashes(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' && chars.as_str().starts_with('\\') {
+                chars.next();
+            }
+            out.push(ch);
+        }
+        out
     }
 }

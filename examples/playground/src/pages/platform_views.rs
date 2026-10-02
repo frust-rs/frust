@@ -84,8 +84,8 @@ const SECOND_SLOT_H: f64 = 160.0;
 
 /// Defines a `fn $name() -> RwSignal<$ty>` returning a screen-local signal
 /// cached in a `thread_local!`, self-healing across a disposed owner — the
-/// established per-module precedent (`native_widgets.rs` carries the same
-/// macro), not shared across files.
+/// established per-module precedent (the demo app's `composite.rs` page
+/// carries the same macro), not shared across files.
 macro_rules! local_sig {
     ($name:ident, $ty:ty, $init:expr) => {
         fn $name() -> RwSignal<$ty> {

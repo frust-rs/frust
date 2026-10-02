@@ -56,6 +56,11 @@
 //! [`frust::TextView`]'s four fixed `ThemeTextColor` roles, so
 //! `TabsWidget` shapes and paints its own label glyph runs directly via
 //! `frust_text`, mirroring `crate::text::TextWidget`'s shape.
+//!
+//! Each label reads its family at layout from the live theme's `titleSmall`
+//! type-scale role (IBM Plex Mono under Glyph's own scale), falling back to
+//! Glyph's IBM Plex Mono stack unthemed, so a theme swap reshapes the labels
+//! (see [`crate::badge`]'s Typeface section).
 
 use std::rc::Rc;
 
@@ -219,11 +224,16 @@ struct TabEntry {
     label_size: Size,
 }
 
-/// The label's fixed style (family/weight/size are Glyph-authored constants;
-/// only `color` varies).
-fn tab_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the labels' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// A label's style: weight/size are Glyph-authored constants, the family is
+/// the theme's `titleSmall` role; `color` varies per tab.
+fn tab_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(TAB_FONT_SIZE, color)
     }
@@ -430,15 +440,22 @@ impl TabsWidget {
 
 impl Widget for TabsWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve both styles up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (accent, inactive, _) = resolve_tab_colors(theme);
+        let active_style = tab_style(theme, accent);
+        let inactive_style = tab_style(theme, inactive);
 
         let mut x = 0.0;
         let mut content_height = 0.0_f64;
         for (i, entry) in self.tabs.iter_mut().enumerate() {
-            let color = if i == self.selected { accent } else { inactive };
-            let style = tab_style(color);
-            let label_size = entry.label.layout(ctx, &style, None);
+            let style = if i == self.selected {
+                &active_style
+            } else {
+                &inactive_style
+            };
+            let label_size = entry.label.layout(ctx, style, None);
             entry.label_size = label_size;
             entry.x = x;
             entry.width = label_size.width + TAB_PAD_X * 2.0;
@@ -1034,5 +1051,29 @@ mod tests {
         // A wheel event is ignored and never moves a non-overflowing strip.
         dispatch(&mut w, &[scroll_x_ev(50.0)]);
         assert_eq!(w.scroll_x, 0.0);
+    }
+
+    // ---- Typeface: labels follow their type-scale role --------------------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn two_tabs(_: &mut ()) -> TabsView<()> {
+        tabs(vec!["shell".into(), "logs".into()], 0, |_s: &mut (), _i| {})
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn labels_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(two_tabs, crate::baseline(), Size::new(400.0, 60.0));
+        assert_eq!(faces, [Face::PlexMono; 2]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn labels_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(two_tabs, Size::new(400.0, 60.0));
+        assert_eq!(before, [Face::PlexMono; 2]);
+        assert_eq!(after, [Face::SpaceMono; 2]);
     }
 }

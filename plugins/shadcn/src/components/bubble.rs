@@ -32,12 +32,12 @@ use frust::Theme;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
     BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, View, Widget,
+    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
 };
 use peniko::Color;
 
 use crate::style::{self, PATH_TOLERANCE};
-use crate::text::Label;
+use crate::text::{Label, themed_family};
 
 /// `bubbleVariants`' `variant` axis. `Default` = shadcn's `default`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -234,9 +234,12 @@ impl Widget for BubbleWidget {
         } else {
             f64::INFINITY
         };
-        self.label_size = self
-            .label
-            .layout(ctx, &TextStyle::new(style::TEXT_SM as f32, ink));
+        let text_style = themed_family(
+            TextStyle::new(style::TEXT_SM as f32, ink),
+            theme,
+            ThemeTextType::BodyMedium,
+        );
+        self.label_size = self.label.layout(ctx, &text_style);
         // Wrapping to the 80% cap is left to the caller's own text width (no
         // wrap engine is driven here); the cap instead bounds the pill so an
         // overlong single-line label is at least never wider than the row.
@@ -494,5 +497,34 @@ mod tests {
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 400.0)));
         assert_eq!(w.children[0].origin(), Point::ZERO);
         assert!(w.children[1].origin().y > w.children[0].origin().y);
+    }
+
+    // ---- Typeface: the message text follows the live theme ----------------
+
+    /// Two bubbles, one per alignment, each a run shaped here.
+    #[cfg(feature = "bundled-fonts")]
+    fn thread(_: &mut ()) -> BubbleGroupView<()> {
+        bubble_group(vec![
+            frust::authoring::any(bubble("Hello there")),
+            frust::authoring::any(bubble("Hi!").align(BubbleAlign::End)),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_message_text_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a bubble's message text",
+            thread,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_message_text_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a bubble's message text",
+            thread,
+        );
     }
 }

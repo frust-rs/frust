@@ -4,8 +4,11 @@
 //! panic/backtrace fold rows, and a copy-while-scrolling selection highlight.
 //!
 //! Layering: every function here renders `&AppState` and only *registers*
-//! interaction (tab clicks, the log scroll region, fold-row/filter-chip
-//! clicks) through the [`MouseCtx`] — it never mutates the engine. The
+//! interaction (tab clicks, the log scroll region, per-row/fold-row/
+//! filter-chip clicks) through the [`MouseCtx`] — it never mutates the
+//! engine. In particular the per-row click regions carry only the absolute
+//! line they draw: what a click *means* (anchor, range end, or nothing at
+//! all) is line-selection-mode state `crate::engine::update` owns. The
 //! wrap/window math is factored into pure helpers (`hard_wrap`,
 //! `display_window`) unit-tested below without a TTY; which lines are visible
 //! at all, and where the anchor sits among them, is engine state logic
@@ -198,6 +201,12 @@ fn status_style(s: &SessionState, animation_frame: u64, theme: &Theme) -> (Strin
     }
 }
 
+/// The tab-label suffix marking a watched session (`SessionView::watch`).
+const WATCH_GLYPH_SUFFIX: &str = " \u{27f3}"; // ⟳
+
+/// The log status line's segment for a watched session.
+const WATCH_STATUS: &str = "\u{27f3} watch"; // ⟳ watch
+
 /// Render the tab bar: sessions grouped by project (a muted `name:` label per
 /// group), each tab numbered `1`–`9` where jumpable, the active tab accented.
 fn render_tab_bar(
@@ -243,7 +252,15 @@ fn render_tab_bar(
             } else {
                 String::new()
             };
-            let label = format!(" {number}{glyph} {} ", session.target_label);
+            // A watched session ("Watch: restart on save") carries a small
+            // `⟳` after its label — hardcoded Unicode like the status glyphs
+            // above (no Nerd Font variant in `Icons` for it).
+            let watch_mark = if session.watch {
+                WATCH_GLYPH_SUFFIX
+            } else {
+                ""
+            };
+            let label = format!(" {number}{glyph} {}{watch_mark} ", session.target_label);
 
             let tab_x = area.x + col;
             let tab_style = if active {
@@ -271,7 +288,7 @@ fn render_tab_bar(
                 push(
                     &mut spans,
                     &mut col,
-                    format!(" {} ", session.target_label),
+                    format!(" {}{watch_mark} ", session.target_label),
                     tab_style,
                 );
             }
@@ -313,8 +330,11 @@ fn render_log(
     // Wheel over the log scrolls it (not a global focus) — one line per notch.
     mouse.scroll(area, Message::LogScrollUp(1), Message::LogScrollDown(1));
     mouse.hover(area, RegionId::LogView);
-    // Right-click over the log pane opens its context menu (copy/follow/search).
-    mouse.context(area, ContextTarget::LogView);
+    // Right-click over the log pane opens its context menu (copy/follow/
+    // search). This pane-wide region is the empty space *below* the last
+    // drawn row — it carries no row, and the per-row regions registered
+    // further down (later push, so they win the overlap) carry theirs.
+    mouse.context(area, ContextTarget::LogView { row: None });
 
     if session.log.is_empty() {
         // Pre-first-line placeholder (workbook §B10): a transient session
@@ -377,18 +397,33 @@ fn render_log(
     }
 
     let rows = display_window(session, &vis, state.wrap, area.width, area.height, theme);
-    let lines: Vec<Line<'static>> = rows.iter().map(|(l, _)| l.clone()).collect();
+    let lines: Vec<Line<'static>> = rows.iter().map(|r| r.line.clone()).collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
+
+    // Every drawn row is a click + right-click target carrying the absolute
+    // line it draws — re-registered each frame, so a scrolled (or filtered,
+    // or folded) viewport always maps a row to the line actually under it.
+    // Registered before the fold affordance below, which shares the same
+    // cells on a fold row and must win the tie (last pushed wins).
+    for (i, row) in rows.iter().enumerate() {
+        let rect = Rect::new(area.x, area.y + i as u16, area.width, 1);
+        mouse.click(
+            rect,
+            RegionId::LogRow(row.abs),
+            Message::LogRowClicked(row.abs),
+        );
+        mouse.context(rect, ContextTarget::LogView { row: Some(row.abs) });
+    }
 
     // A collapsed panic block's synthetic `▶ n frames…` row is its own click
     // target (mouse parity for `z` — see `Message::ToggleFold`).
-    for (i, (_, fold_id)) in rows.iter().enumerate() {
-        if let Some(block_start) = fold_id {
+    for (i, row) in rows.iter().enumerate() {
+        if let Some(block_start) = row.fold {
             let rect = Rect::new(area.x, area.y + i as u16, area.width, 1);
             mouse.click(
                 rect,
-                RegionId::LogFoldToggle(*block_start),
-                Message::ToggleFold(*block_start),
+                RegionId::LogFoldToggle(block_start),
+                Message::ToggleFold(block_start),
             );
         }
     }
@@ -485,6 +520,13 @@ fn render_log_status(
     if session.selection.is_some() {
         left.push(Span::styled("  ·  ", Style::default().fg(theme.border())));
         left.push(Span::styled("y copy", Style::default().fg(theme.accent())));
+    }
+    if session.watch {
+        left.push(Span::styled("  ·  ", Style::default().fg(theme.border())));
+        left.push(Span::styled(
+            WATCH_STATUS.to_string(),
+            Style::default().fg(theme.accent()),
+        ));
     }
 
     let filter = session.level_filter;
@@ -991,6 +1033,20 @@ pub fn sidebar_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
 
 // ── Pure log-window helpers (unit-tested below) ─────────────────────────────
 
+/// One drawn row of the log pane: the styled line, the absolute log-line
+/// index it belongs to (a wrapped line's continuation rows repeat it, and a
+/// collapsed panic block's fold row carries the block's oldest visible body
+/// line), and the fold-block id when the row *is* that block's `▶ n frames…`
+/// affordance.
+struct DisplayRow {
+    /// The styled row as it will be painted.
+    line: Line<'static>,
+    /// The fold block this row stands in for, if it is a fold affordance row.
+    fold: Option<u64>,
+    /// The absolute log-line index this row draws.
+    abs: u64,
+}
+
 /// Build the ≤`height` display rows ending at the bottom-anchored entry: walk
 /// the visible sequence upward from [`SessionView::bottom_pos`], ANSI-parse +
 /// (hard-)wrap each, and keep the last `height` display rows so the bottom
@@ -1000,9 +1056,10 @@ pub fn sidebar_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
 ///
 /// `vis` is a [`SessionView::visible_indices`] sequence, which already folds a
 /// collapsed panic block's whole body into one entry; this draws that entry as
-/// the synthetic `▶ n frames…` row. The second element of each returned pair
-/// is `Some(block_start)` for that row (the click target; [`render_log`]
-/// registers it), `None` for an ordinary line.
+/// the synthetic `▶ n frames…` row. Each returned [`DisplayRow`] carries the
+/// absolute line index it draws (the per-row click target [`render_log`]
+/// registers, shared by every wrapped continuation row of the same line) plus
+/// that row's fold id, if it is a fold affordance.
 fn display_window(
     session: &SessionView,
     vis: &[u64],
@@ -1010,13 +1067,13 @@ fn display_window(
     width: u16,
     height: u16,
     theme: &Theme,
-) -> Vec<(Line<'static>, Option<u64>)> {
+) -> Vec<DisplayRow> {
     if vis.is_empty() || width == 0 || height == 0 {
         return Vec::new();
     }
     let h = height as usize;
     let w = width as usize;
-    let mut rows: VecDeque<(Line<'static>, Option<u64>)> = VecDeque::new();
+    let mut rows: VecDeque<DisplayRow> = VecDeque::new();
     let mut pos = session.bottom_pos(vis) as isize;
     while pos >= 0 && rows.len() < h {
         let abs = vis[pos as usize];
@@ -1030,8 +1087,12 @@ fn display_window(
             } else {
                 vec![row]
             };
-            for l in wrapped.into_iter().rev() {
-                rows.push_front((l, Some(block_start)));
+            for line in wrapped.into_iter().rev() {
+                rows.push_front(DisplayRow {
+                    line,
+                    fold: Some(block_start),
+                    abs,
+                });
             }
             pos -= 1;
             continue;
@@ -1042,8 +1103,12 @@ fn display_window(
         } else {
             vec![styled]
         };
-        for l in wrapped.into_iter().rev() {
-            rows.push_front((l, None));
+        for line in wrapped.into_iter().rev() {
+            rows.push_front(DisplayRow {
+                line,
+                fold: None,
+                abs,
+            });
         }
         pos -= 1;
     }
@@ -1284,6 +1349,55 @@ mod tests {
         row_text(l).chars().skip(PREFIX_WIDTH).collect()
     }
 
+    /// Render the session workspace for `state` into a plain string.
+    fn render_main_to_string(state: &AppState) -> String {
+        use crate::ui::mouse::MouseRegions;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Position;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("test terminal");
+        let mut regions = MouseRegions::new();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                let area = frame.area();
+                render_main(frame, area, state, &theme(), &mut ctx);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in buf.area.top()..buf.area.bottom() {
+            for x in buf.area.left()..buf.area.right() {
+                if let Some(cell) = buf.cell(Position::new(x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn a_watched_session_shows_the_watch_mark_on_its_tab_and_status_line() {
+        let mut state = AppState::default();
+        state.sessions.push(session(3));
+        state.active_session = Some(0);
+        let unwatched = render_main_to_string(&state);
+        assert!(!unwatched.contains('\u{27f3}'), "{unwatched}");
+
+        state.sessions[0].watch = true;
+        let watched = render_main_to_string(&state);
+        assert!(
+            watched.contains(&format!("desktop{WATCH_GLYPH_SUFFIX}")),
+            "the tab carries the mark:\n{watched}"
+        );
+        assert!(
+            watched.contains(WATCH_STATUS),
+            "the status line says so:\n{watched}"
+        );
+    }
+
     #[test]
     fn hard_wrap_splits_at_width_and_preserves_text() {
         let line = Line::from("abcdefghij".to_string());
@@ -1317,7 +1431,7 @@ mod tests {
         let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 5, &theme());
         assert_eq!(rows.len(), 5);
-        let texts: Vec<String> = rows.iter().map(|(l, _)| msg_only(l)).collect();
+        let texts: Vec<String> = rows.iter().map(|r| msg_only(&r.line)).collect();
         assert_eq!(
             texts,
             vec!["line 15", "line 16", "line 17", "line 18", "line 19"]
@@ -1330,7 +1444,7 @@ mod tests {
         s.scroll = Scroll::Anchored(9); // line 9 at the bottom
         let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 3, &theme());
-        let texts: Vec<String> = rows.iter().map(|(l, _)| msg_only(l)).collect();
+        let texts: Vec<String> = rows.iter().map(|r| msg_only(&r.line)).collect();
         assert_eq!(texts, vec!["line 7", "line 8", "line 9"]);
     }
 
@@ -1366,10 +1480,10 @@ mod tests {
         let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 5, &theme());
         // rows: line0..line4; lines 1 and 2 carry the overlay bg.
-        assert!(rows[0].0.style.bg.is_none());
-        assert!(rows[1].0.style.bg.is_some());
-        assert!(rows[2].0.style.bg.is_some());
-        assert!(rows[3].0.style.bg.is_none());
+        assert!(rows[0].line.style.bg.is_none());
+        assert!(rows[1].line.style.bg.is_some());
+        assert!(rows[2].line.style.bg.is_some());
+        assert!(rows[3].line.style.bg.is_none());
     }
 
     // ── Log styling: levels/sources render, panic-block folding ────────────
@@ -1383,12 +1497,12 @@ mod tests {
         let t = theme();
         let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 3, &t);
-        assert_eq!(rows[0].0.style.fg, Some(t.error()));
-        assert!(row_text(&rows[0].0).starts_with(" E "));
-        assert_eq!(rows[1].0.style.fg, Some(t.warn()));
-        assert!(row_text(&rows[1].0).starts_with(" W "));
-        assert_eq!(rows[2].0.style.fg, None); // info: plain, no tint
-        assert!(row_text(&rows[2].0).starts_with("   ")); // blank badge column
+        assert_eq!(rows[0].line.style.fg, Some(t.error()));
+        assert!(row_text(&rows[0].line).starts_with(" E "));
+        assert_eq!(rows[1].line.style.fg, Some(t.warn()));
+        assert!(row_text(&rows[1].line).starts_with(" W "));
+        assert_eq!(rows[2].line.style.fg, None); // info: plain, no tint
+        assert!(row_text(&rows[2].line).starts_with("   ")); // blank badge column
     }
 
     #[test]
@@ -1397,7 +1511,7 @@ mod tests {
         s.push_line_at("[gradle] BUILD SUCCESSFUL".into(), "00:00:00");
         let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 1, &theme());
-        let text = row_text(&rows[0].0);
+        let text = row_text(&rows[0].line);
         assert!(text.trim_end().ends_with("BUILD SUCCESSFUL"));
         // The tag renders exactly once — the drive pipeline's raw `"[gradle]
         // "` marker was stripped before ANSI-parsing the message, so it
@@ -1427,11 +1541,11 @@ mod tests {
         // header + message + one fold row + the trailing "app: recovering"
         // line — the backtrace header/frame/location lines are absorbed.
         assert_eq!(rows.len(), 4);
-        assert!(row_text(&rows[0].0).contains("panicked at"));
-        assert!(row_text(&rows[1].0).contains("Option::unwrap"));
-        assert_eq!(rows[2].1, Some(0)); // the fold row's click target
-        assert!(row_text(&rows[2].0).contains("1 frames"));
-        assert!(row_text(&rows[3].0).contains("app: recovering"));
+        assert!(row_text(&rows[0].line).contains("panicked at"));
+        assert!(row_text(&rows[1].line).contains("Option::unwrap"));
+        assert_eq!(rows[2].fold, Some(0)); // the fold row's click target
+        assert!(row_text(&rows[2].line).contains("1 frames"));
+        assert!(row_text(&rows[3].line).contains("app: recovering"));
     }
 
     #[test]
@@ -1445,10 +1559,10 @@ mod tests {
         let rows = display_window(&s, &vis, false, 60, 10, &theme());
         // header + message + backtrace-header + frame + location + trailer.
         assert_eq!(rows.len(), 6);
-        assert!(row_text(&rows[2].0).contains("stack backtrace:"));
-        assert!(row_text(&rows[3].0).contains("my_app::state::reduce"));
-        assert!(row_text(&rows[4].0).contains("at src/state.rs"));
-        assert!(rows.iter().all(|(_, fold)| fold.is_none()));
+        assert!(row_text(&rows[2].line).contains("stack backtrace:"));
+        assert!(row_text(&rows[3].line).contains("my_app::state::reduce"));
+        assert!(row_text(&rows[4].line).contains("at src/state.rs"));
+        assert!(rows.iter().all(|r| r.fold.is_none()));
     }
 
     // ── Base keyhint degrade: pure fit math ─────────────────────────────────

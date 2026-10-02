@@ -1,0 +1,231 @@
+[package]
+name = "{{ project_name }}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+{%- if platform_windows %}
+# Windows-only resource embedding (taskbar/exe icon, FileVersion/
+# ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
+# isn't itself platform-conditional (Cargo has no such thing) and stays a
+# no-op off Windows. Rendered only when the windows platform is selected
+# (`--platforms`, `ScaffoldPlatform::Windows`): Cargo compiles a `build`
+# script's source for the HOST on every target it builds, so this key must
+# not survive a selection that never emits `windows/build.rs` at all.
+build = "windows/build.rs"
+{%- endif %}
+
+# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
+# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# NOTE: temporary path dependency pointing at the Frust repo checkout
+# that generated this project ("frust_path" is explicitly a temporary
+# mechanism). Once Frust crates are published, `frust
+# create` will emit a version dependency here instead.
+#
+# `frust` itself carries no design-system catalog and its own `[features]`
+# default is `default = []` (see `crates/frust/Cargo.toml`) — there is
+# nothing left to opt out of with `default-features = false`, so this edge
+# names no features at all.
+frust = { path = "{{ frust_path }}" }
+
+# Design system (gs1): Glyph is this app's design system, brought in as a
+# sibling plugin crate (`frust-glyph`, below) rather than a `frust` Cargo
+# feature — the three built-in design systems (Glyph/Material 3/Cupertino)
+# ship as their own plugin crates (`frust-glyph`/`frust-material`/
+# `frust-cupertino`), each depended on beside `frust` and installed with its
+# own `install()` call. Depending on the crate alone only compiles its
+# tokens/widgets/fonts in, though — `src/lib.rs`'s `frust::app!(...,
+# setup = { frust_glyph::install(); })` is the runtime call that actually
+# makes it the *active* theme at startup (every shell otherwise falls back
+# to a design-language-free `Theme::neutral()`; see that file's comment). To
+# swap to Material 3 or Cupertino instead: replace the `frust-glyph`
+# dependency below with `frust-material`/`frust-cupertino` and swap the
+# setup call for `frust_material::install()` / `frust_cupertino::install()`.
+# To drop every built-in design system entirely: remove the `frust-glyph`
+# dependency and its `install()` call in `src/lib.rs` — the app still
+# builds, now neutral-themed.
+frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
+
+# `frust-shared-preferences` demo: a platform plugin
+# the notes app below uses to persist its notes list + draft, the same way
+# a real app would add any other Frust plugin (the `frust_path`
+# temporary-path mechanism applies here too — `frust_path` resolves to
+# `crates/frust`, so `../../plugins/shared-preferences` walks back up to
+# the repo root and down into the plugin's own directory).
+frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-preferences" }
+
+# `log` facade dependency, present only so the release-only `lean` feature
+# below can raise the compiled-in log ceiling (release-lean build mode).
+# `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
+# release-only opt-in and never an always-on `features = [...]` line:
+# `release_max_level_*` keys off `debug_assertions`, which the
+# `[profile.profile]` inherits-release profile has OFF, so an unconditional
+# ceiling would also silence PROFILE-mode perf output — exactly the mode that
+# must keep it. The `frust` CLI enables `--features lean` for `--release`
+# builds only (riding the same features plumbing that turns on
+# `frust/perf-trace` for debug/profile), so release strips stray info/debug
+# log lines while keeping warn/error crash diagnostics, and profile keeps its
+# `frust-perf` output.
+log = "0.4"
+{%- if platform_windows %}
+
+# `windows/build.rs`'s resource embedder. `winres` (the older, commonly
+# referenced crate for this) was last published 2021-09-28 — stale — so this
+# uses the actively maintained `winresource` fork instead. A
+# `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
+# never touches a macOS/Linux build. Rendered only alongside the `build =
+# "windows/build.rs"` key above, for the same reason: this build-dependency
+# is meaningless without the script that reads it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+{%- endif %}
+
+# Browser (`wasm32-unknown-unknown`) row. `src/lib.rs`'s `frust::app!` binds
+# a fourth platform beside Android/iOS/desktop: on this target it expands to
+# `frust::web_app!`, whose generated entry point is annotated
+# `#[wasm_bindgen(start)]` — wasm-bindgen's own module-init hook, which the
+# browser calls once it has instantiated the compiled `.wasm`. The facade
+# routes the ATTRIBUTE itself through a hidden re-export
+# (`frust::__wasm_bindgen`), but the attribute macro then expands, inside
+# THIS crate, to glue that names `wasm_bindgen::` paths absolutely — so the
+# app crate needs its own dependency edge on the crate regardless. Nothing
+# else here is browser-only: every other dependency above compiles for
+# `wasm32` unchanged (`frust-shared-preferences` included — its file backend
+# simply finds no user data directory in a browser and
+# `SharedPreferences::standard()` returns an `Err` that `src/lib.rs` already
+# degrades to "notes won't persist this run").
+#
+# Version-Pin Policy (`docs/DEVELOPMENT.md`): this pin is EXACT and must
+# equal the `wasm-bindgen-cli` version that post-processes the build, a
+# schema-version contract stricter than semver — a mismatch fails the
+# `wasm-bindgen` step outright rather than degrading. `=0.2.128` is the
+# version Frust's own web crates and `examples/web-gallery` pin; upgrade the
+# CLI and every one of those rows together, never this row alone.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+
+[features]
+# Release-lean log ceiling — see the `log` dependency above for why this is a
+# release-only opt-in rather than an unconditional manifest feature. The CLI
+# passes `--features lean` for `--release` builds; debug/profile builds omit
+# it (and enable `frust/perf-trace` instead).
+lean = ["log/release_max_level_warn"]
+
+# `--release` mode: fully optimized, stripped, single-panic-path binary for
+# store distribution. `lto = "fat"` + `codegen-units = 1`
+# (measured 2026-07-18 against the now-deleted `catalog`
+# example's release arm64-v8a `.so` via `scripts/size-report.sh` in the
+# Frust repo): fat LTO + cgu=1 alone (opt-level 3, the default —
+# no override needed) shrank the prior baseline (lto="thin", no cgu
+# override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
+# unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
+# shader/render-stack (wgpu*/naga) carve-out back to `opt-level = 3` —
+# the config that would actually ship, since sacrificing encode-path CPU
+# perf isn't acceptable — and under that carve-out "s" measured 7.36MB
+# (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
+# neither clears a >5%-meaningfully-wins bar once the carve-out
+# that protects render-path perf is in place, so `opt-level` stays at its
+# default (3) and no carve-out is needed. This block and its
+# `[profile.profile]` counterpart are hand-synced with Frust's own root
+# `Cargo.toml` and `examples/huddle/Cargo.toml`.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
+# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
+# per-frame path (shader translation, one-shot parsing/decode) while every
+# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
+# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
+# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+
+[profile.release.package.naga]
+opt-level = "z"
+
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+[profile.release.package.ash]
+opt-level = "z"
+
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
+[profile.release.package.roxmltree]
+opt-level = "z"
+
+[profile.release.package.fontique]
+opt-level = "z"
+
+[profile.release.package.mio]
+opt-level = "z"
+
+[profile.release.package.image]
+opt-level = "z"
+
+[profile.release.package.png]
+opt-level = "z"
+# END release cold-set opt-level overrides
+
+# `--profile` mode: release performance with symbols + tracing kept for
+# on-device performance measurement. Artifacts land in
+# `target/<triple>/profile/` (custom-profile name, verified legal).
+[profile.profile]
+inherits = "release"
+debug = true
+strip = "none"
+
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
+# wgpu/naga's shader-pipeline
+# translation runs at `opt-level = 0` by default, which is slow enough on a
+# physical iOS device that the OS SIGKILLs a debug `frust run` before the
+# synchronous, main-thread launch-time shader compile finishes. This app's
+# own code stays at the default dev opt-level (fast incremental rebuilds) —
+# only these dependencies are bumped. Deps otherwise default to
+# `opt-level = 1` (see the wildcard override below); `opt-level = 2` is used
+# here for the shader-compile-heavy crates specifically (see frust's own root
+# `Cargo.toml` for the full rationale — the same override, kept in sync).
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 2
+
+[profile.dev.package.vello_common]
+opt-level = 2
+
+[profile.dev.package.glifo]
+opt-level = 2
+
+[profile.dev.package.fearless_simd]
+opt-level = 2
+
+# Debug dep opt widening: non-workspace-member dependencies
+# build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
+# workspace members and the profile's own package — verified against Cargo's
+# profile-override docs); this app's own code stays at the fast default dev
+# opt-level, and the named shader-stack overrides above (opt-level 2) still
+# win over this wildcard since a named package override takes precedence
+# over `"*"`. Targets emulator/debug first-frame cost — parley/swash/image/
+# kurbo compiled at `opt-level = 0` are part of that cost. Hand-synced with
+# Frust's own root `Cargo.toml` and `examples/huddle/Cargo.toml` (phase
+# 8's examples-convergence deleted the `catalog` and `inbox` examples this
+# used to be hand-synced against, along with the examples themselves).
+[profile.dev.package."*"]
+opt-level = 1

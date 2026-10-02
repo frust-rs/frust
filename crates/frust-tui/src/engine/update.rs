@@ -7,7 +7,9 @@
 //! clipboard). It performs no I/O and reads no clock, so every transition is
 //! unit-testable without a terminal (see the tests below).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use frust_dap::ide_config::{ParentIde, WriteMode};
 
 use super::add_plugin::{AddPluginAdvance, AddPluginDialog};
 use super::bootstrap::BootstrapWizard;
@@ -18,10 +20,15 @@ use super::dap_settings::{DapFocus, DapIdeReport, DapSetting, IdeConfigRequest};
 use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab, PerfFrame};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::SessionView;
+use super::session_view::{SessionTarget, SessionView, truncate_with_ellipsis};
 use super::state::{AppState, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
+
+/// How much of a copied log line the "Copied: …" notice previews before
+/// eliding the rest — counted in Unicode scalar values, not bytes (see
+/// [`truncate_with_ellipsis`]).
+const COPY_LINE_PREVIEW_CHARS: usize = 60;
 
 /// A side effect the (terminal/supervisor-owning) runner performs after a
 /// transition — the pure core requests it, the runner enacts it.
@@ -29,6 +36,26 @@ use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, 
 pub enum Effect {
     /// Stop a session: route to `Supervisor::stop` (the group-kill).
     StopSession(SessionId),
+    /// Stop `id` and relaunch its retained spec as a new session — the
+    /// keyboard restart's enactment (`Message::RestartSession`), mirroring
+    /// `crate::supervise::mcp_backend::restart_app`'s own stop-then-relaunch
+    /// contract (see that fn's doc for the shared guard/cap discipline the
+    /// two callers keep aligned). The runner looks the spec up by `id` in its
+    /// own launch records; `update()` has already applied every guard this
+    /// effect needs before requesting it.
+    RestartSession(SessionId),
+    /// Start (`on`) or stop session `id`'s source watcher — the enactment of
+    /// a "Watch: restart on save" flip ([`Message::ToggleWatch`],
+    /// [`Message::EnableWatch`]). The runner keys its
+    /// `crate::supervise::SourceWatchers` by `id`, watching the launch
+    /// record's project root; every settled change burst comes back as
+    /// [`Message::WatchTriggered`].
+    WatchSet {
+        /// The session whose watcher starts/stops.
+        id: SessionId,
+        /// Start (`true`) or stop (`false`).
+        on: bool,
+    },
     /// Copy text to the system clipboard (the runner emits an OSC 52 sequence).
     Copy(String),
     /// Discover devices off-thread (`frust-drive`'s `DeviceDiscovery` set),
@@ -37,6 +64,11 @@ pub enum Effect {
     /// Launch one supervised session per spec (the run-config modal's checked
     /// targets), registering each returned id back into the model.
     LaunchSessions(Vec<SessionSpec>),
+    /// [`Self::LaunchSessions`] for desktop specs launched with the
+    /// run-config modal's watch checkbox ticked: the runner launches them
+    /// exactly the same way, then posts [`Message::EnableWatch`] for each
+    /// session that started, after its registration.
+    LaunchWatchedSessions(Vec<SessionSpec>),
     /// Persist `path` as the most-recently-opened project (`toml_edit`
     /// format-preserving save to `~/.config/frust/tui.toml`) — the runner
     /// performs the actual file I/O; the pure engine only requests it.
@@ -45,8 +77,8 @@ pub enum Effect {
     /// sibling checkout was present, posting the result back as
     /// [`Message::CleanSignalsProbed`] to gate the create wizard's
     /// clean-signals arch card / the Add Plugin dialog's facade-tier cards.
-    /// `clean-signals` is now git+rev-pinned to its public repo, so no card
-    /// is sibling-gated any more and the runner replies immediately with
+    /// `clean-signals` is a crates.io dependency, so no card is
+    /// sibling-gated and the runner replies immediately with
     /// `true` rather than touching disk — kept as the priming effect fired
     /// on opening either the wizard or the dialog, and as the generic
     /// mechanism a future sibling-dependent registry entry would reuse.
@@ -357,6 +389,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             project_root,
             target_label,
             devtools,
+            target,
         } => {
             if state.session_index(id).is_some() {
                 return Outcome::idle();
@@ -366,10 +399,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // an existing absolute line index, and a freshly registered
             // session has no lines yet — so `Follow` is the only valid
             // starting state.
-            let view = SessionView::with_devtools(id, project_root, target_label, devtools);
+            // A keyboard restart's relaunch takes focus (the replaced tab is
+            // on its way out); the pending focus is consumed by this
+            // registration either way — see `AppState::focus_next_registered`.
+            let restart_relaunch = state.take_restart_focus(&project_root, target.as_ref());
+            let view = SessionView::with_devtools(id, project_root, target_label, devtools, target);
             state.sessions.push(view);
             // Auto-select the first session that appears.
-            if state.active_session.is_none() {
+            if state.active_session.is_none() || restart_relaunch {
                 state.active_session = Some(state.sessions.len() - 1);
             }
             Outcome::redraw()
@@ -384,8 +421,35 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 Outcome::idle()
             }
         }
-        Message::StopSession => match state.active_session().map(|s| s.id) {
-            Some(id) => Outcome::effect(Effect::StopSession(id)),
+        Message::StopSession => match state.active_session_mut() {
+            Some(session) => {
+                // An explicit stop ends the watch loop too (the runner's
+                // `StopSession` enactment stops the watcher): otherwise the
+                // next save would relaunch what the user just stopped.
+                session.watch = false;
+                Outcome::effect(Effect::StopSession(session.id))
+            }
+            None => Outcome::idle(),
+        },
+        Message::RestartSession => match state.active_session {
+            Some(idx) => restart_session_at(state, idx),
+            None => Outcome::idle(),
+        },
+        Message::ToggleWatch => toggle_watch(state),
+        Message::WatchTriggered { session } => watch_triggered(state, session),
+        Message::EnableWatch { session } => enable_watch(state, session),
+        Message::WatchFailed { session, reason } => {
+            if let Some(idx) = state.session_index(session) {
+                state.sessions[idx].watch = false;
+            }
+            state
+                .toasts
+                .push(ToastKind::Warn, format!("Watch unavailable: {reason}"));
+            Outcome::redraw()
+        }
+        Message::CloseTab(idx) => close_tab(state, idx),
+        Message::CloseActiveTab => match state.active_session {
+            Some(idx) => close_tab(state, idx),
             None => Outcome::idle(),
         },
         Message::ToggleFollow => {
@@ -448,10 +512,38 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        Message::SelectionBegin => with_active(state, |s| s.begin_selection()),
-        Message::SelectionExtendUp(n) => with_active(state, |s| s.extend_selection_up(n)),
-        Message::SelectionExtendDown(n) => with_active(state, |s| s.extend_selection_down(n)),
-        Message::SelectionClear => with_active(state, |s| s.clear_selection()),
+        // Refused (idle, no toast) while the active session's tab is showing
+        // DevTools: that pane owns the whole key namespace (`translate_key`'s
+        // early return on `devtools.open`), so a `v` press can never reach
+        // here — but the palette's "Select lines…" row re-dispatches this
+        // same `Message` regardless of which pane is in front, and the
+        // palette is the one surface that stays reachable over DevTools
+        // (see `palette::commands`'s "Select lines…" entry). Gating here
+        // rather than disabling the palette row keeps the choke point single
+        // and covers every future caller of this message alike.
+        Message::SelectEnter => with_active_changed(state, |s, f| {
+            if s.devtools.open {
+                return false;
+            }
+            s.enter_select_mode(f)
+        }),
+        Message::SelectExit => with_active_changed(state, |s, f| s.exit_select_mode(f)),
+        Message::SelectMove(n) => with_active_changed(state, |s, f| s.move_cursor(n, f)),
+        Message::SelectPage(dir) => with_active_changed(state, |s, f| s.move_cursor_page(dir, f)),
+        Message::SelectHome => with_active_changed(state, |s, f| s.cursor_home(f)),
+        Message::SelectEnd => with_active_changed(state, |s, f| s.cursor_end(f)),
+        // The runner translates a row click without knowing the mode; the
+        // mode semantics live here: the first click of a mode session
+        // re-anchors, every later one drags the range end to the clicked row.
+        Message::LogRowClicked(abs) => with_active_changed(state, |s, _| {
+            if !s.select_mode {
+                false
+            } else if s.clicked_since_enter() {
+                s.cursor_to(abs)
+            } else {
+                s.anchor_at(abs)
+            }
+        }),
         Message::ToggleFold(block_start) => with_active(state, |s| {
             s.toggle_fold(block_start);
         }),
@@ -460,17 +552,48 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         }),
         Message::CycleLevelFilter(delta) => with_active(state, |s| s.cycle_level_filter(delta)),
         Message::SetLevelFilter(filter) => with_active(state, |s| s.set_level_filter(filter)),
-        Message::CopySelection => match state.active_session().and_then(|s| s.selected_text()) {
+        // `y` is the whole copy gesture: it copies the range *and* leaves the
+        // mode (follow-tail restored under `exit_select_mode`'s rule), so the
+        // highlight never lingers over a log the user has finished with.
+        Message::CopySelection => {
+            let filter = state.search.filter.clone();
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            let Some(text) = session.selected_text(filter.as_deref()) else {
+                return Outcome::idle();
+            };
+            let lines = session.selected_visible_count(filter.as_deref());
+            session.exit_select_mode(filter.as_deref());
+            let word = if lines == 1 { "line" } else { "lines" };
+            state
+                .toasts
+                .push(ToastKind::Info, format!("Copied: {lines} {word}"));
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::Copy(text)),
+            }
+        }
+        // The log view's right-click "Copy line". The text comes from the
+        // same redacted ring the view renders (never a raw line), and an
+        // already-evicted index says so instead of copying nothing.
+        Message::CopyLine(abs) => match state.active_session().and_then(|s| s.line_text(abs)) {
             Some(text) => {
+                let preview = truncate_with_ellipsis(&text, COPY_LINE_PREVIEW_CHARS);
                 state
                     .toasts
-                    .push(ToastKind::Success, "Copied selection to clipboard");
+                    .push(ToastKind::Info, format!("Copied: {preview}"));
                 Outcome {
                     redraw: true,
                     effect: Some(Effect::Copy(text)),
                 }
             }
-            None => Outcome::idle(),
+            None => {
+                state
+                    .toasts
+                    .push(ToastKind::Warn, "Line no longer available");
+                Outcome::redraw()
+            }
         },
 
         // ── Devices panel + run-config modal ────────────────────────────────
@@ -499,6 +622,15 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 .collect();
             state.devices_refreshing = false;
             state.clamp_device_cursor();
+            // The device list is replaced wholesale. Any open context menu
+            // targeting a DeviceRow becomes stale since the entry's SelectDeviceAt
+            // is positional; close it. A menu on a SessionTab is untouched.
+            if matches!(
+                &state.context_menu,
+                Some(m) if matches!(m.target, ContextTarget::DeviceRow(_))
+            ) {
+                state.context_menu = None;
+            }
             Outcome::redraw()
         }
         Message::DeviceCursorUp => move_device_cursor(state, -1),
@@ -539,6 +671,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigFocusPrev => with_modal(state, RunConfig::focus_prev),
         Message::RunConfigToggleTarget => with_modal(state, RunConfig::toggle_focused_target),
         Message::RunConfigToggleTargetAt(i) => with_modal(state, |m| m.toggle_target(i)),
+        Message::RunConfigToggleWatch => with_modal(state, RunConfig::toggle_watch),
         Message::RunConfigCycleMode(delta) => with_modal(state, |m| {
             m.cycle_mode(delta);
             m.focus = super::run_config::RunFocus::Mode;
@@ -549,10 +682,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigLaunch => match &state.run_config {
             Some(modal) if modal.any_selected() => {
                 let specs = modal.launch_specs();
+                let watch = modal.watch;
                 state.run_config = None;
+                // The modal closes either way: a refusal is explained by its
+                // own toast, not by leaving the dialog up.
+                let specs = drop_already_running(state, specs);
                 Outcome {
                     redraw: true,
-                    effect: Some(Effect::LaunchSessions(specs)),
+                    effect: launch_effect(state, specs, watch),
                 }
             }
             // Modal open but nothing checked, or no modal: nothing to launch.
@@ -727,7 +864,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             if has_fail && quiet {
                 state
                     .toasts
-                    .push(ToastKind::Error, "Doctor found problems · press d");
+                    .push(ToastKind::Error, "Doctor found problems · press i");
             }
             Outcome::redraw()
         }
@@ -746,6 +883,13 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             } else {
                 Outcome::idle()
             }
+        }
+        Message::OpenToolchainFromDoctor => {
+            // Toolchain setup via the Doctor panel: close it, then run
+            // the same transition `OpenBootstrapWizard` does — always a
+            // redraw, since closing the panel alone already is one.
+            state.doctor_panel_open = false;
+            open_bootstrap_wizard(state)
         }
 
         // ── Bootstrap wizard + titlebar toolchain chip ──────────────────────
@@ -911,6 +1055,31 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             },
             None => Outcome::idle(),
         },
+
+        // ── Quit confirm dialog ──────────────────────────────────────────────
+        Message::RequestQuit => {
+            if state.live_session_count() == 0 {
+                state.should_quit = true;
+                Outcome::idle()
+            } else {
+                state.quit_confirm = true;
+                Outcome::redraw()
+            }
+        }
+        Message::ConfirmQuit => {
+            state.quit_confirm = false;
+            state.should_quit = true;
+            // No point drawing a frame we're about to tear down.
+            Outcome::idle()
+        }
+        Message::CloseQuitConfirm => {
+            if state.quit_confirm {
+                state.quit_confirm = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
 
         // ── Build artifact copy-path ────────────────────────────────────────
         Message::CopyBuiltArtifacts => {
@@ -1326,11 +1495,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         // naming the server *currently installed* — the identical race, and
         // the identical consequence of losing it, as the MCP pair above.
         //
-        // A fresh listener is additionally where auto-configuration happens:
-        // the editor's launch config must name the port that was *actually*
-        // bound (a server started on `0` learns its port here and nowhere
-        // else), so the generation request rides this report rather than the
-        // start that preceded it.
+        // A fresh listener is also one of the two auto-configuration triggers
+        // (the other is an app launch — see `launch_effect`), but only when a
+        // session is active: the config goes into *that* session's project,
+        // named with the port actually bound (a server started on `0` learns
+        // its port here and nowhere else). With no session, a bind writes
+        // nothing — the workbench's active project at startup is just the
+        // first `frust.toml` the walk found, not a project anyone asked to
+        // debug.
         Message::DapListening(generation, port) => {
             let names_installed = state
                 .dap
@@ -1347,14 +1519,17 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // Gated on `changed`, so auto-configuration runs once per bind:
             // a repeat report for a port already recorded is the same server
             // saying the same thing, not a second listener to reconfigure for.
-            if changed && state.dap_settings.auto_configure_ide {
-                let out = request_ide_config(state, port);
-                Outcome {
-                    redraw: changed || out.redraw,
-                    effect: out.effect,
-                }
+            let effect = if changed {
+                state
+                    .active_session()
+                    .map(|session| session.project_root.clone())
+                    .and_then(|root| auto_ide_config(state, &root))
             } else {
-                Outcome::dirty(changed)
+                None
+            };
+            Outcome {
+                redraw: changed,
+                effect,
             }
         }
         Message::DapStopped(generation, error) => {
@@ -1527,18 +1702,44 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 crate::supervise::DapStatus::Listening { port, .. } => port,
                 _ => state.dap_settings.port,
             };
-            request_ide_config(state, port)
+            let project_root = state.project_root.clone();
+            request_ide_config(state, port, project_root, WriteMode::Refresh)
         }
         Message::DapIdeConfig(report) => {
-            let kind = if report.is_failure() {
-                ToastKind::Error
-            } else {
-                ToastKind::Info
+            // An automatic write's report arrives tagged with its project and
+            // IDE: a repeating outcome (stale port, failure) toasts once per
+            // pair per run. The explicit path's report arrives bare and
+            // always toasts. Either way the dialog keeps the latest outcome.
+            let (report, toast) = match report {
+                DapIdeReport::Auto {
+                    project_root,
+                    ide,
+                    report,
+                } => {
+                    let toast = state
+                        .dap_settings
+                        .admit_auto_toast(&project_root, ide, &report);
+                    (*report, toast)
+                }
+                report => (report, true),
             };
-            state
-                .toasts
-                .push(kind, format!("DAP · {}", report.summary()));
+            if toast {
+                let kind = if report.is_failure() {
+                    ToastKind::Error
+                } else if report.is_stale_port() {
+                    ToastKind::Warn
+                } else {
+                    ToastKind::Info
+                };
+                state
+                    .toasts
+                    .push(kind, format!("DAP · {}", report.summary()));
+            }
             state.dap_settings.last_ide_config = Some(report);
+            Outcome::redraw()
+        }
+        Message::Notify { level, text } => {
+            state.toasts.push(level, text);
             Outcome::redraw()
         }
     }
@@ -1578,27 +1779,45 @@ fn commit_dap_port(state: &mut AppState) -> Option<Effect> {
     }
 }
 
-/// Request an IDE DAP-config generation for `port`, or record why there is
-/// nothing to generate.
+/// The IDE a config would be generated for, or the refusal explaining why
+/// there is none: no IDE detected or chosen, or an IDE with no DAP config
+/// format at all.
+fn config_ide(state: &AppState) -> Result<ParentIde, DapIdeReport> {
+    let Some(ide) = state.dap_settings.effective_ide() else {
+        return Err(DapIdeReport::NoIde);
+    };
+    if !ide.supports_dap_config() {
+        return Err(DapIdeReport::Unsupported(ide));
+    }
+    Ok(ide)
+}
+
+/// Request an IDE DAP-config generation for `port` into `project_root` with
+/// `mode`, or record why there is nothing to generate — the dialog's explicit
+/// "generate now" path.
 ///
 /// The generation itself reads and writes real files, so it can only be an
 /// [`Effect`] — but every *refusal* is decided here, in the pure core, and
 /// stored where the dialog shows it: an absent IDE, an IDE with no DAP config
 /// format at all, and a workbench with no project open are each reported
-/// rather than silently doing nothing.
-fn request_ide_config(state: &mut AppState, port: u16) -> Outcome {
+/// rather than silently doing nothing. (The automatic path,
+/// [`auto_ide_config`], refuses silently instead.)
+fn request_ide_config(
+    state: &mut AppState,
+    port: u16,
+    project_root: Option<PathBuf>,
+    mode: WriteMode,
+) -> Outcome {
     fn report(state: &mut AppState, report: DapIdeReport) -> Outcome {
         state.dap_settings.last_ide_config = Some(report);
         Outcome::redraw()
     }
 
-    let Some(ide) = state.dap_settings.effective_ide() else {
-        return report(state, DapIdeReport::NoIde);
+    let ide = match config_ide(state) {
+        Ok(ide) => ide,
+        Err(refusal) => return report(state, refusal),
     };
-    if !ide.supports_dap_config() {
-        return report(state, DapIdeReport::Unsupported(ide));
-    }
-    let Some(project_root) = state.project_root.clone() else {
+    let Some(project_root) = project_root else {
         return report(
             state,
             DapIdeReport::Failed(
@@ -1610,7 +1829,80 @@ fn request_ide_config(state: &mut AppState, port: u16) -> Outcome {
         ide,
         port,
         project_root,
+        mode,
     }))
+}
+
+/// The automatic IDE-config write for `project_root`, if one is due: only
+/// with `auto_configure_ide` on and the DAP server currently listening (its
+/// bound port is what the config names), and always
+/// [`WriteMode::IfAbsent`] — an existing frust entry is never rewritten.
+///
+/// Refusals (no IDE, an IDE with no DAP config format) are silent here: the
+/// automatic path runs on every launch, and neither stores a
+/// [`DapIdeReport`] nor toasts — only the dialog's explicit
+/// [`request_ide_config`] reports them.
+fn auto_ide_config(state: &AppState, project_root: &Path) -> Option<Effect> {
+    if !state.dap_settings.auto_configure_ide {
+        return None;
+    }
+    let crate::supervise::DapStatus::Listening { port, .. } = state.dap_status() else {
+        return None;
+    };
+    let ide = config_ide(state).ok()?;
+    Some(Effect::GenerateIdeConfig(IdeConfigRequest {
+        ide,
+        port,
+        project_root: project_root.to_path_buf(),
+        mode: WriteMode::IfAbsent,
+    }))
+}
+
+/// The effect for launching `specs` — every workbench launch path
+/// (the run-config modal, run-on-all-devices) goes through here, so an app
+/// launch is where the editor's DAP client config gets written: one
+/// [`Effect::LaunchSessions`], followed (via [`Effect::Batch`]) by one
+/// [`auto_ide_config`] write per *distinct* project root among the specs,
+/// when one is due. `None` for no specs. With `watch` set (the run-config
+/// modal's checkbox), the desktop specs go out as
+/// [`Effect::LaunchWatchedSessions`] instead and the device specs stay in a
+/// plain [`Effect::LaunchSessions`] — watch is desktop-only.
+///
+/// Sessions launched through the MCP/DAP backend
+/// (`crate::supervise::mcp_backend`) never pass through here, by design: the
+/// DAP client that launched them already had a config to connect with.
+fn launch_effect(state: &AppState, specs: Vec<SessionSpec>, watch: bool) -> Option<Effect> {
+    if specs.is_empty() {
+        return None;
+    }
+    let mut roots: Vec<&Path> = Vec::new();
+    for spec in &specs {
+        let root = spec.project_root.as_path();
+        // `Path` equality is already component-wise.
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let configs: Vec<Effect> = roots
+        .into_iter()
+        .filter_map(|root| auto_ide_config(state, root))
+        .collect();
+    let mut effects = Vec::with_capacity(2 + configs.len());
+    if watch {
+        let (desktop, devices): (Vec<SessionSpec>, Vec<SessionSpec>) = specs
+            .into_iter()
+            .partition(|spec| matches!(spec.target, DeviceTarget::Desktop));
+        if !desktop.is_empty() {
+            effects.push(Effect::LaunchWatchedSessions(desktop));
+        }
+        if !devices.is_empty() {
+            effects.push(Effect::LaunchSessions(devices));
+        }
+    } else {
+        effects.push(Effect::LaunchSessions(specs));
+    }
+    effects.extend(configs);
+    batch(effects)
 }
 
 /// The scrollbar-track fraction (`0.0`..=`1.0`, top→bottom) for a pointer at
@@ -1695,13 +1987,15 @@ fn open_create_wizard(state: &mut AppState) -> Outcome {
 }
 
 /// Open `root` as the active project in place (a freshly scaffolded project, or
-/// a switch): register it in `projects` (front, recent-first), make it active,
-/// show the workbench, focus its first session (if any), and request the
-/// runner persist it as most-recently-opened.
+/// a switch): register it in `projects` keeping the local/previous boundary
+/// invariant (see `AppState::insert_project`), make it active, show the
+/// workbench, focus its first session (if any), and request the runner persist
+/// it as most-recently-opened. `root` is run through `host_path::simplify`
+/// first — the wizard/open-result entry point paths enter state through, so a
+/// Windows verbatim scaffold path never reaches `projects`/`project_root`.
 fn open_project(state: &mut AppState, root: PathBuf) -> Outcome {
-    if !state.projects.contains(&root) {
-        state.projects.insert(0, root.clone());
-    }
+    let root = frust_drive::host_path::simplify(&root);
+    state.insert_project(root.clone());
     state.project_root = Some(root.clone());
     state.screen = Screen::Workbench;
     state.active_session = state.sessions.iter().position(|s| s.project_root == root);
@@ -1957,10 +2251,50 @@ fn run_on_all_devices(state: &mut AppState) -> Outcome {
     if specs.is_empty() {
         return Outcome::idle();
     }
+    let specs = drop_already_running(state, specs);
+    if specs.is_empty() {
+        // Every device already runs this project; the toasts say so.
+        return Outcome::redraw();
+    }
     Outcome {
         redraw: true,
-        effect: Some(Effect::LaunchSessions(specs)),
+        effect: launch_effect(state, specs, false),
     }
+}
+
+/// Keep only the specs whose (project, target) has no live session yet,
+/// pushing one `Warn` toast per refused spec — the one-live-session-per-
+/// (project, device) guard on the workbench's own launch paths (its MCP/DAP
+/// counterpart is `crate::supervise::mcp_backend`'s typed refusal).
+///
+/// Refusing here rather than in the runner keeps the decision in the pure
+/// core, where it is testable and where the toast explaining it is written:
+/// a spec that survives is one nothing is running yet, so the effect the
+/// runner enacts never needs a second opinion. Launching the same app onto
+/// the same device twice is never what the user meant — the second install
+/// replaces the first app's process behind its own still-streaming session
+/// tab, leaving a tab that logs nothing and a stop that stops the wrong
+/// thing.
+fn drop_already_running(state: &mut AppState, specs: Vec<SessionSpec>) -> Vec<SessionSpec> {
+    let mut launchable = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let target = SessionTarget::of(&spec.target);
+        if state
+            .live_session_for(&spec.project_root, &target)
+            .is_some()
+        {
+            state.toasts.push(
+                ToastKind::Warn,
+                format!(
+                    "{}: already running here — stop it first (x)",
+                    target.label()
+                ),
+            );
+        } else {
+            launchable.push(spec);
+        }
+    }
+    launchable
 }
 
 /// A project's short display name (its final path component), for a toast.
@@ -2050,6 +2384,7 @@ fn fix_copy_text(fix: &frust_drive::doctor::FixCommand) -> String {
 /// an unknown id is dropped (the session must be registered first — see
 /// [`Message::RegisterSession`]).
 fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
+    use crate::supervise::SessionState;
     let Some(idx) = state.session_index(ev.id) else {
         return Outcome::idle();
     };
@@ -2085,6 +2420,31 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
             }
             SessionEventKind::State(s) => {
                 session.state = s;
+                // `Killed` is the terminal transition of *every* external
+                // stop: the keyboard `x` (`Message::StopSession`, which
+                // already clears `watch` itself), `close_tab`/`CloseActiveTab`
+                // (X, palette, context menu), an MCP `stop_app` or
+                // `restart_app`, and a DAP terminate/disconnect
+                // (`SessionBackend::stop_app` — `frust-dap`'s adapter routes
+                // through the same call) — all of them end here because none
+                // of `mcp_backend.rs`'s handlers can reach into `AppState` to
+                // clear the flag themselves (`McpServeCtx::state` is `&AppState`,
+                // read-only). So this is the one place that must do it for
+                // every path other than the keyboard stop, which is why the
+                // check lives on the *state*, not the message that produced
+                // it: without it, a session an agent (or the user, from a
+                // route other than `x`/close) stopped would keep `watch` set
+                // and the next save would relaunch what was just stopped, or
+                // (after `restart_app`) leave a doomed watcher armed on the
+                // now-replaced tab while the new one runs unwatched.
+                //
+                // `Exited(_)` is left untouched on purpose: a crash or a
+                // compile-error exit is not a stop request, so a watched
+                // session keeps watching and the next save relaunches it —
+                // that is the whole point of "restart on save".
+                if session.state == SessionState::Killed {
+                    session.watch = false;
+                }
                 if session.state.is_terminal() {
                     session_ended = session.devtools.on_session_end();
                     metrics_ended = session.devtools.metrics.on_session_end();
@@ -2143,10 +2503,222 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
         effects.extend(metrics_start(state, idx));
     }
     let effect = batch(effects);
-    Outcome {
+    let mut outcome = Outcome {
         redraw: outcome.redraw || effect.is_some(),
         effect: outcome.effect.or(effect),
+    };
+    // A tab `close_tab` marked `close_on_exit` while it was still live
+    // removes itself the instant its terminal state lands — after the
+    // bookkeeping/effects above, so its devtools/metrics bridges still get
+    // their disconnect first.
+    if state.sessions[idx].state.is_terminal() && state.sessions[idx].close_on_exit {
+        remove_session(state, idx);
+        outcome.redraw = true;
     }
+    outcome
+}
+
+/// Close the tab at `idx`. A session already in a terminal state is removed
+/// immediately; a live one is marked `close_on_exit` and stopped exactly like
+/// [`Message::StopSession`] — the removal itself happens once its terminal
+/// [`SessionEvent`] lands in [`on_session_event`].
+fn close_tab(state: &mut AppState, idx: usize) -> Outcome {
+    let Some(session) = state.sessions.get(idx) else {
+        return Outcome::idle();
+    };
+    if session.state.is_terminal() {
+        remove_session(state, idx);
+        Outcome::redraw()
+    } else {
+        let id = session.id;
+        state.sessions[idx].close_on_exit = true;
+        // Clear watch immediately, exactly like `Message::StopSession`
+        // (rather than waiting for the terminal `Killed` event this same
+        // `StopSession` effect will eventually produce): otherwise the ⟳
+        // glyph would linger on a tab already told to stop for as long as
+        // the process takes to actually die.
+        state.sessions[idx].watch = false;
+        Outcome::effect(Effect::StopSession(id))
+    }
+}
+
+/// Restart the session at `idx` — the one restart path shared by the active
+/// tab (`R` with an app session active, and the palette's "Restart session"
+/// row) and a watched session's settled save-burst
+/// ([`Message::WatchTriggered`], via [`watch_triggered`]). The keyboard twin
+/// of `crate::supervise::mcp_backend::restart_app`/DAP `frustRestart`; see
+/// that fn's doc for the shared contract this mirrors (same duplicate guard,
+/// excluding the session being restarted; stop; relaunch the retained spec)
+/// so the two stay aligned. MCP additionally applies its record cap; this
+/// path has none — a restart is a net-zero swap, and the keyboard's own `r`
+/// launches are uncapped too.
+///
+/// An out-of-range `idx` idles. An ad-hoc session (no `SessionTarget`)
+/// refuses with a toast — only an app launch has a spec worth relaunching.
+/// Otherwise the one-live-session guard runs excluding the session being
+/// restarted (`AppState::live_session_for_excluding`, exactly as
+/// `restart_app` excludes it from its own duplicate check) and refuses with
+/// the same toast wording [`drop_already_running`] uses on a hit. Once it
+/// clears, the tab is marked for removal-once-terminal exactly as
+/// [`close_tab`] does for a live session, except an already-terminal tab is
+/// removed immediately *and* the effect still fires — a crashed session must
+/// still relaunch, unlike closing a tab, which has nothing left to do once
+/// the tab is gone. When the restarted tab was the active one, the
+/// relaunch's tab is focused when it registers
+/// (`AppState::focus_next_registered`); a watched background tab's relaunch
+/// does not steal focus.
+///
+/// The replaced tab's `watch` flag is cleared: the runner stops its watcher
+/// in the same enactment and re-enables watch on the *relaunch* instead
+/// ([`Message::EnableWatch`]), so the dying tab never shows the indicator.
+fn restart_session_at(state: &mut AppState, idx: usize) -> Outcome {
+    let Some(session) = state.sessions.get(idx) else {
+        return Outcome::idle();
+    };
+    let id = session.id;
+    let Some(target) = session.target.clone() else {
+        state.toasts.push(
+            ToastKind::Warn,
+            "only an app session can be restarted".to_string(),
+        );
+        return Outcome::idle();
+    };
+    let project_root = session.project_root.clone();
+
+    // Re-entry guard: a restart already requested for this tab (its
+    // `close_on_exit` is set and it is waiting for the kill to land) must not
+    // be requested again. The duplicate guard below deliberately excludes the
+    // tab itself, so without this check a held `R` (terminal key-repeat) or a
+    // second palette activation would pass every guard and the runner would
+    // relaunch the same spec twice — two live sessions on one target.
+    if session.close_on_exit {
+        return Outcome::idle();
+    }
+
+    if state
+        .live_session_for_excluding(&project_root, &target, Some(id))
+        .is_some()
+    {
+        state.toasts.push(
+            ToastKind::Warn,
+            format!(
+                "{}: already running here — stop it first (x)",
+                target.label()
+            ),
+        );
+        return Outcome::idle();
+    }
+
+    let refocus = state.active_session == Some(idx);
+    state.sessions[idx].watch = false;
+    if state.sessions[idx].state.is_terminal() {
+        remove_session(state, idx);
+    } else {
+        state.sessions[idx].close_on_exit = true;
+    }
+    if refocus {
+        state.focus_next_registered = Some((project_root, target));
+    }
+    Outcome::effect(Effect::RestartSession(id))
+}
+
+/// The refusal toast for "Watch: restart on save" on anything but a desktop
+/// app session — `frust run --watch`'s own reason (`frust-cli`'s `run` docs).
+const WATCH_DESKTOP_ONLY: &str = "Watch is desktop-only: the watch loop has no device-side \
+     kill/rebuild/relaunch story yet";
+
+/// Flip "Watch: restart on save" on the active session
+/// ([`Message::ToggleWatch`]). No active session idles; a session whose
+/// target is not the desktop preview (a device, or an ad-hoc session with no
+/// target) refuses with [`WATCH_DESKTOP_ONLY`] and no effect. Otherwise the
+/// flag flips and the runner is told to start/stop the watcher.
+fn toggle_watch(state: &mut AppState) -> Outcome {
+    let Some(session) = state.active_session_mut() else {
+        return Outcome::idle();
+    };
+    if session.target != Some(SessionTarget::Desktop) {
+        state
+            .toasts
+            .push(ToastKind::Warn, WATCH_DESKTOP_ONLY.to_string());
+        return Outcome::redraw();
+    }
+    session.watch = !session.watch;
+    let (id, on) = (session.id, session.watch);
+    let text = if on {
+        "Watching src/ + Cargo.toml — a save restarts this session"
+    } else {
+        "Watch off"
+    };
+    state.toasts.push(ToastKind::Info, text.to_string());
+    Outcome::effect(Effect::WatchSet { id, on })
+}
+
+/// A watched session's sources settled after a change
+/// ([`Message::WatchTriggered`]): restart it through [`restart_session_at`]
+/// — unless it is gone, has watch off, or already has a restart pending
+/// (`close_on_exit` set by an earlier restart or close that has not landed
+/// yet). That last guard is what keeps one save-burst to one relaunch: a
+/// trigger already in flight when the first restart was requested finds the
+/// replaced tab marked and does nothing.
+fn watch_triggered(state: &mut AppState, session: SessionId) -> Outcome {
+    let Some(idx) = state.session_index(session) else {
+        return Outcome::idle();
+    };
+    let view = &state.sessions[idx];
+    if !view.watch || view.close_on_exit {
+        return Outcome::idle();
+    }
+    restart_session_at(state, idx)
+}
+
+/// Turn watch on for a freshly launched session the runner says should carry
+/// it ([`Message::EnableWatch`] — a watched session's relaunch, or a
+/// watch-checked desktop launch). Only a desktop app session takes it;
+/// anything else, an unknown id, or a session already watching idles.
+fn enable_watch(state: &mut AppState, session: SessionId) -> Outcome {
+    let Some(idx) = state.session_index(session) else {
+        return Outcome::idle();
+    };
+    let view = &mut state.sessions[idx];
+    if view.watch || view.target != Some(SessionTarget::Desktop) {
+        return Outcome::idle();
+    }
+    view.watch = true;
+    Outcome::effect(Effect::WatchSet {
+        id: session,
+        on: true,
+    })
+}
+
+/// Remove `sessions[idx]`, repairing `active_session` and closing a context
+/// menu that targeted the removed tab.
+///
+/// Index-repair rule: if the removed tab was active, the tab that slides into
+/// its slot becomes active (the "next tab" — same index, now the following
+/// session) when one exists, else the previous tab, else no tab at all. If
+/// the removed tab was *before* the active one, the active index shifts down
+/// by one to keep pointing at the same session; if it was after, the active
+/// index is untouched.
+fn remove_session(state: &mut AppState, idx: usize) {
+    state.sessions.remove(idx);
+    state.active_session = match state.active_session {
+        Some(active) if active == idx => {
+            if idx < state.sessions.len() {
+                Some(idx)
+            } else if idx > 0 {
+                Some(idx - 1)
+            } else {
+                None
+            }
+        }
+        Some(active) if active > idx => Some(active - 1),
+        other => other,
+    };
+    // Any open context menu is invalidated by a session removal: a positional
+    // tab index shifts or becomes stale, and a LogView menu was built against
+    // the then-active session, which may have changed. Closing is the safe
+    // repair — the user reopens on the context they meant.
+    state.context_menu = None;
 }
 
 /// A fresh devtools discovery line landed for the session at `idx`. While
@@ -2391,6 +2963,20 @@ fn with_active_filtered(
     }
 }
 
+/// [`with_active_filtered`] for the transitions that report whether they
+/// actually changed anything (the line-selection-mode moves, each of which is
+/// a no-op at a clamp or outside the mode) — a no-op costs no redraw.
+fn with_active_changed(
+    state: &mut AppState,
+    f: impl FnOnce(&mut SessionView, Option<&str>) -> bool,
+) -> Outcome {
+    let filter = state.search.filter.clone();
+    match state.active_session_mut() {
+        Some(s) => Outcome::dirty(f(s, filter.as_deref())),
+        None => Outcome::idle(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2506,17 +3092,45 @@ mod tests {
     // ── Session wiring ──────────────────────────────────────────────────────
 
     fn register(state: &mut AppState, id: u64, project: &str, label: &str) -> SessionId {
-        register_with(state, id, project, label, DevtoolsLaunch::unavailable())
+        register_with(
+            state,
+            id,
+            project,
+            label,
+            DevtoolsLaunch::unavailable(),
+            None,
+        )
+    }
+
+    /// [`register`] for a session that occupies a run target — what the
+    /// one-live-session guard reads.
+    fn register_on(
+        state: &mut AppState,
+        id: u64,
+        project: &str,
+        target: SessionTarget,
+    ) -> SessionId {
+        let label = target.label();
+        register_with(
+            state,
+            id,
+            project,
+            &label,
+            DevtoolsLaunch::unavailable(),
+            Some(target),
+        )
     }
 
     /// [`register`] for a real app session — `launch` decides whether it
-    /// could host a devtools service (workbook §B12).
+    /// could host a devtools service (workbook §B12), and `target` is where
+    /// it runs (`None` for an ad-hoc build/clean session).
     fn register_with(
         state: &mut AppState,
         id: u64,
         project: &str,
         label: &str,
         launch: DevtoolsLaunch,
+        target: Option<SessionTarget>,
     ) -> SessionId {
         let id = SessionId(id);
         update(
@@ -2526,6 +3140,7 @@ mod tests {
                 project_root: PathBuf::from(project),
                 target_label: label.to_string(),
                 devtools: launch,
+                target,
             },
         );
         id
@@ -2552,6 +3167,7 @@ mod tests {
                 project_root: PathBuf::from("/tmp/huddle"),
                 target_label: "desktop".into(),
                 devtools: DevtoolsLaunch::unavailable(),
+                target: None,
             },
         );
         assert!(!out.redraw);
@@ -2741,6 +3357,921 @@ mod tests {
         // With no session, stop is a no-op.
         let mut empty = welcome();
         assert_eq!(update(&mut empty, Message::StopSession).effect, None);
+    }
+
+    #[test]
+    fn close_tab_on_a_terminal_session_removes_it_and_repairs_the_active_index() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Closing the active tab (first) activates the tab that slides into
+        // its slot — the next tab.
+        st.active_session = Some(0);
+        let out = update(&mut st, Message::CloseTab(0));
+        assert!(out.redraw);
+        assert_eq!(st.sessions.len(), 2);
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.active_session, Some(0), "b slides into slot 0");
+
+        // Closing the active (now last) tab with no next tab falls back to
+        // the previous one.
+        st.active_session = Some(1);
+        update(&mut st, Message::CloseTab(1));
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.active_session, Some(0));
+
+        // Closing the only remaining tab leaves no active tab, and the
+        // workbench falls back to its no-session path.
+        update(&mut st, Message::CloseTab(0));
+        assert!(st.sessions.is_empty());
+        assert_eq!(st.active_session, None);
+    }
+
+    #[test]
+    fn close_tab_on_a_non_active_terminal_session_only_shifts_a_left_neighbor() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+        st.active_session = Some(1); // b is active
+
+        // Closing a tab to the *right* of the active one leaves the active
+        // index untouched.
+        update(&mut st, Message::CloseTab(2));
+        assert_eq!(st.active_session, Some(1));
+        assert_eq!(st.sessions[st.active_session.unwrap()].id, b);
+
+        // Closing a tab to the *left* of the active one shifts the active
+        // index down by one, still pointing at the same session.
+        update(&mut st, Message::CloseTab(0));
+        assert_eq!(st.active_session, Some(0));
+        assert_eq!(st.sessions[st.active_session.unwrap()].id, b);
+    }
+
+    #[test]
+    fn close_tab_on_a_live_session_stops_it_and_removes_it_once_terminal() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::CloseTab(0));
+        assert_eq!(out.effect, Some(Effect::StopSession(a)));
+        assert!(
+            !out.redraw,
+            "the removal happens once the terminal event lands, not here"
+        );
+        assert_eq!(st.sessions.len(), 1, "a live session is not removed yet");
+        assert!(st.sessions[0].close_on_exit);
+
+        // The terminal event now removes it exactly once.
+        let out = update(&mut st, state_event(a, SessionState::Killed));
+        assert!(out.redraw);
+        assert!(st.sessions.is_empty());
+        assert_eq!(st.active_session, None);
+
+        // A terminal event for the id it just removed is ignored — no panic,
+        // no second removal.
+        let out = update(&mut st, state_event(a, SessionState::Killed));
+        assert!(!out.redraw);
+        assert!(st.sessions.is_empty());
+    }
+
+    #[test]
+    fn restart_routes_the_active_session_id_and_marks_the_tab_for_removal_once_terminal() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert_eq!(st.sessions.len(), 1, "the old tab is not removed yet");
+        assert!(st.sessions[0].close_on_exit);
+
+        // The terminal event now removes the old tab exactly once — the
+        // restart's relaunch is a brand new session, registered separately.
+        let out = update(&mut st, state_event(a, SessionState::Killed));
+        assert!(out.redraw);
+        assert!(st.sessions.is_empty());
+
+        // With no active session, restart is a no-op.
+        let mut empty = welcome();
+        assert_eq!(update(&mut empty, Message::RestartSession).effect, None);
+    }
+
+    #[test]
+    fn a_second_restart_of_a_tab_already_being_replaced_is_ignored() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        // First press: the tab is marked for replacement and the effect fires.
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions[0].close_on_exit);
+
+        // Key-repeat / a second palette activation before the kill lands:
+        // the duplicate guard excludes the tab itself, so only the re-entry
+        // guard stands between this press and a second relaunch of the same
+        // spec. It must idle — no effect, no toast, nothing else changed.
+        let toasts_before = st.toasts.items.len();
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(
+            out.effect, None,
+            "a pending restart is never requested twice"
+        );
+        assert_eq!(
+            st.toasts.items.len(),
+            toasts_before,
+            "silent: key-repeat must not spam toasts"
+        );
+        assert_eq!(st.sessions.len(), 1);
+
+        // Once the kill lands the tab goes, exactly as after a single press.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert!(st.sessions.is_empty());
+    }
+
+    #[test]
+    fn restart_of_an_already_terminal_tab_removes_it_immediately_and_still_emits_the_effect() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, state_event(a, SessionState::Exited(false)));
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(
+            out.effect,
+            Some(Effect::RestartSession(a)),
+            "a crashed session must still relaunch"
+        );
+        assert!(
+            st.sessions.is_empty(),
+            "an already-terminal tab is removed on the spot, like close_tab"
+        );
+    }
+
+    #[test]
+    fn restart_with_another_live_session_on_the_same_target_is_refused_with_a_toast() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        // A second session on the *other* device does not block the first —
+        // only an exact (project, target) hit does. Simulate the collision by
+        // registering a second desktop session for the same project directly
+        // (bypassing the launch guard, exactly like `register_on` does for
+        // every other guard test in this module).
+        register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        st.active_session = Some(st.session_index(a).unwrap());
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["desktop: already running here — stop it first (x)"]
+        );
+    }
+
+    #[test]
+    fn restart_of_a_targetless_session_is_refused() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["only an app session can be restarted"]
+        );
+    }
+
+    #[test]
+    fn a_restart_relaunch_becomes_the_active_tab_and_stays_active_once_the_old_tab_goes() {
+        let mut st = workbench_with_project();
+        let a = register(&mut st, 0, "/tmp/huddle", "build apk");
+        let old = register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        let b = register(&mut st, 2, "/tmp/huddle", "clean");
+        st.sessions[1].state = SessionState::Running;
+        st.active_session = Some(st.session_index(old).unwrap());
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(old)));
+
+        let new = register_on(&mut st, 3, "/tmp/huddle", SessionTarget::Desktop);
+        assert_eq!(
+            st.active_session().map(|s| s.id),
+            Some(new),
+            "the relaunch's tab takes focus when it registers"
+        );
+        assert_eq!(
+            st.focus_next_registered, None,
+            "the pending focus is consumed"
+        );
+
+        // The replaced tab's terminal event removes it; `new` stays active.
+        update(&mut st, state_event(old, SessionState::Killed));
+        assert_eq!(
+            st.sessions.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![a, b, new]
+        );
+        assert_eq!(st.active_session().map(|s| s.id), Some(new));
+    }
+
+    #[test]
+    fn a_pending_restart_focus_only_applies_to_the_very_next_matching_registration() {
+        let mut st = workbench_with_project();
+        let old = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::RestartSession);
+
+        // The relaunch never registered (e.g. its launch failed); an
+        // unrelated registration arrives next. It is not focused, and it
+        // consumes the pending focus.
+        let unrelated = register(&mut st, 7, "/tmp/huddle", "build apk");
+        assert_eq!(st.active_session().map(|s| s.id), Some(old));
+        assert_ne!(st.active_session().map(|s| s.id), Some(unrelated));
+        assert_eq!(st.focus_next_registered, None);
+
+        // A later desktop launch is not focused by the stale restart.
+        update(&mut st, state_event(old, SessionState::Killed));
+        let first = register(&mut st, 8, "/tmp/huddle", "clean");
+        st.active_session = Some(st.session_index(first).unwrap());
+        register_on(&mut st, 9, "/tmp/huddle", SessionTarget::Desktop);
+        assert_eq!(st.active_session().map(|s| s.id), Some(first));
+    }
+
+    // ── Watch: restart on save ──────────────────────────────────────────────
+
+    /// Every effect `out` carries, flattening one level of `Effect::Batch`.
+    fn effects_of(out: &Outcome) -> Vec<Effect> {
+        match &out.effect {
+            Some(Effect::Batch(effects)) => effects.clone(),
+            Some(effect) => vec![effect.clone()],
+            None => vec![],
+        }
+    }
+
+    #[test]
+    fn toggle_watch_on_a_device_session_refuses_with_the_cli_wording() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, None);
+        assert!(!st.sessions[0].watch);
+        assert_eq!(warn_texts(&st), vec![WATCH_DESKTOP_ONLY]);
+        assert!(
+            WATCH_DESKTOP_ONLY
+                .contains("the watch loop has no device-side kill/rebuild/relaunch story yet"),
+            "reuses `frust run --watch`'s wording"
+        );
+
+        // An ad-hoc (targetless) session refuses the same way.
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+        assert_eq!(update(&mut st, Message::ToggleWatch).effect, None);
+        assert!(!st.sessions[0].watch);
+
+        // No session at all: nothing to do, nothing said.
+        let mut empty = welcome();
+        let out = update(&mut empty, Message::ToggleWatch);
+        assert_eq!(out.effect, None);
+        assert!(warn_texts(&empty).is_empty());
+    }
+
+    #[test]
+    fn toggle_watch_on_a_desktop_session_flips_the_flag_and_emits_watch_set() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: a, on: true }));
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: a, on: false }));
+        assert!(!st.sessions[0].watch);
+    }
+
+    #[test]
+    fn watch_triggered_for_a_session_with_watch_off_is_a_no_op() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, None);
+        assert!(!st.sessions[0].close_on_exit);
+
+        // An unknown session id is ignored too.
+        let out = update(
+            &mut st,
+            Message::WatchTriggered {
+                session: SessionId(99),
+            },
+        );
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn watch_triggered_restarts_that_session_once_per_burst() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(
+            st.sessions[0].close_on_exit,
+            "the replaced tab is removed once terminal"
+        );
+        assert!(
+            !st.sessions[0].watch,
+            "the dying tab hands the flag to its relaunch"
+        );
+
+        // A second trigger already in flight for the same burst finds the
+        // restart pending and does nothing — one relaunch, never two.
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, None);
+
+        // The terminal event removes the replaced tab exactly once.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert!(st.sessions.is_empty());
+    }
+
+    #[test]
+    fn a_pending_close_blocks_a_watch_restart_even_with_the_flag_still_on() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        st.sessions[0].watch = true;
+        st.sessions[0].close_on_exit = true;
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn a_crashed_watched_session_is_relaunched_by_the_next_save() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+        // A compile error: the session exits non-zero; watch stays on.
+        update(&mut st, state_event(a, SessionState::Exited(false)));
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions.is_empty(), "the terminal tab goes at once");
+    }
+
+    /// An external stop (MCP `stop_app`, DAP terminate/disconnect, or an MCP
+    /// `restart_app`'s own kill of the session it replaces) delivers `Killed`
+    /// with no prior [`Message::StopSession`] ever applied — that terminal
+    /// event is what must turn watch off, or the next save relaunches
+    /// something the agent (or user, via a route other than `x`) just
+    /// stopped.
+    #[test]
+    fn an_externally_killed_watched_session_turns_watch_off_and_the_next_save_does_nothing() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert!(
+            !st.sessions[0].watch,
+            "an externally delivered Killed turns watch off"
+        );
+
+        let out = update(&mut st, Message::WatchTriggered { session: a });
+        assert_eq!(
+            out.effect, None,
+            "watch is off, so a leftover trigger does nothing"
+        );
+    }
+
+    /// An MCP `restart_app` never goes through [`restart_session_at`] — it
+    /// stops the old session and starts the new one directly
+    /// (`crate::supervise::mcp_backend::restart_app`'s own doc), so the new
+    /// session's `RegisterSession` can land *before* the old one's
+    /// asynchronous `Killed` event does. Once `Killed` lands the old
+    /// session's watch is off (no refusal toast — this is an ordinary stop,
+    /// not a failure) and the new session, having bypassed the one place that
+    /// carries the flag over, stays unwatched.
+    #[test]
+    fn an_mcp_restart_of_a_watched_session_leaves_no_armed_watcher() {
+        let mut st = workbench_with_project();
+        let s1 = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        let s2 = register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, state_event(s1, SessionState::Killed));
+        assert!(!st.sessions[st.session_index(s1).unwrap()].watch);
+
+        let out = update(&mut st, Message::WatchTriggered { session: s1 });
+        assert_eq!(
+            out.effect, None,
+            "the stopped session's own leftover trigger is a no-op"
+        );
+        // `Killed` always raises its own routine "stopped" toast
+        // (`terminal_toast`) — the refusal this asserts against is the
+        // watch-specific one ([`Message::WatchFailed`]'s "Watch unavailable:
+        // …"), which never fires here since `watch_triggered` finds the flag
+        // already off and idles before reaching anything that could refuse.
+        assert!(
+            !warn_texts(&st)
+                .iter()
+                .any(|t| t.contains("Watch unavailable")),
+            "an ordinary stop-then-relaunch is not a watch refusal: {:?}",
+            warn_texts(&st)
+        );
+        assert!(
+            !st.sessions[st.session_index(s2).unwrap()].watch,
+            "restart_app's relaunch bypasses restart_session_at and stays unwatched"
+        );
+    }
+
+    #[test]
+    fn a_watch_restart_of_a_background_tab_does_not_steal_focus() {
+        let mut st = workbench_with_project();
+        let watched = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        let other = register(&mut st, 1, "/tmp/huddle", "build apk");
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        st.active_session = Some(st.session_index(other).unwrap());
+
+        let out = update(&mut st, Message::WatchTriggered { session: watched });
+        assert_eq!(out.effect, Some(Effect::RestartSession(watched)));
+        assert_eq!(st.focus_next_registered, None);
+    }
+
+    #[test]
+    fn the_relaunch_of_a_watched_session_carries_watch_on() {
+        let mut st = workbench_with_project();
+        let old = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        update(&mut st, Message::WatchTriggered { session: old });
+
+        // The runner relaunches the spec (a synthetic registration here) and,
+        // because `old` had a watcher, posts `EnableWatch` for the new id
+        // right after it.
+        let new = register_on(&mut st, 1, "/tmp/huddle", SessionTarget::Desktop);
+        assert!(
+            !st.sessions[1].watch,
+            "a registration alone starts unwatched"
+        );
+        let out = update(&mut st, Message::EnableWatch { session: new });
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: new, on: true }));
+        let view = &st.sessions[st.session_index(new).unwrap()];
+        assert!(view.watch);
+        assert_eq!(st.active_session().map(|s| s.id), Some(new));
+
+        // Idempotent: a repeated enable starts nothing twice.
+        assert_eq!(
+            update(&mut st, Message::EnableWatch { session: new }).effect,
+            None
+        );
+    }
+
+    #[test]
+    fn enable_watch_is_refused_for_a_device_session() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        assert_eq!(
+            update(&mut st, Message::EnableWatch { session: a }).effect,
+            None
+        );
+        assert!(!st.sessions[0].watch);
+    }
+
+    #[test]
+    fn stopping_a_watched_session_turns_watch_off() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+
+        let out = update(&mut st, Message::StopSession);
+        assert_eq!(out.effect, Some(Effect::StopSession(a)));
+        assert!(!st.sessions[0].watch);
+    }
+
+    /// `close_tab` (the `x`/palette/context-menu "Close tab" and "Stop &
+    /// close" routes, and `CloseActiveTab`'s `X`) clears `watch` immediately,
+    /// mirroring [`Message::StopSession`] — the ⟳ glyph must not linger on a
+    /// tab already told to stop.
+    #[test]
+    fn closing_a_watched_tab_turns_watch_off() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::CloseTab(0));
+        assert_eq!(out.effect, Some(Effect::StopSession(a)));
+        assert!(st.sessions[0].close_on_exit);
+        assert!(!st.sessions[0].watch, "CloseTab turns watch off at once");
+
+        // `CloseActiveTab` (the `X` key) shares the same path.
+        let mut st = workbench_with_project();
+        let b = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        st.active_session = Some(0);
+        update(&mut st, Message::ToggleWatch);
+        assert!(st.sessions[0].watch);
+
+        let out = update(&mut st, Message::CloseActiveTab);
+        assert_eq!(out.effect, Some(Effect::StopSession(b)));
+        assert!(!st.sessions[0].watch, "CloseActiveTab turns watch off too");
+    }
+
+    #[test]
+    fn a_failed_watcher_clears_the_flag_and_says_why() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::ToggleWatch);
+
+        update(
+            &mut st,
+            Message::WatchFailed {
+                session: a,
+                reason: "no inotify".to_string(),
+            },
+        );
+        assert!(!st.sessions[0].watch);
+        assert_eq!(warn_texts(&st), vec!["Watch unavailable: no inotify"]);
+    }
+
+    #[test]
+    fn a_watch_checked_launch_routes_only_the_desktop_spec_through_the_watched_launch() {
+        let mut st = workbench_with_project();
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+        update(&mut st, Message::RunConfigToggleTargetAt(0)); // desktop on
+        update(&mut st, Message::RunConfigToggleWatch);
+        assert!(st.run_config.as_ref().unwrap().watch);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+        let effects = effects_of(&out);
+        let watched: Vec<&SessionSpec> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LaunchWatchedSessions(specs) => Some(specs),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let plain: Vec<&SessionSpec> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LaunchSessions(specs) => Some(specs),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(watched.len(), 1);
+        assert_eq!(watched[0].target, DeviceTarget::Desktop);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(SessionTarget::of(&plain[0].target), pixel_7_target());
+
+        // Unchecked (the default), the same launch stays one plain effect.
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            effects_of(&out)
+                .iter()
+                .all(|e| !matches!(e, Effect::LaunchWatchedSessions(_)))
+        );
+    }
+
+    #[test]
+    fn close_active_tab_resolves_to_the_active_index() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        update(&mut st, state_event(a, SessionState::Exited(true)));
+
+        let out = update(&mut st, Message::CloseActiveTab);
+        assert!(out.redraw);
+        assert!(st.sessions.is_empty());
+
+        // With no active session, closing the active tab is a no-op.
+        let mut empty = welcome();
+        let out = update(&mut empty, Message::CloseActiveTab);
+        assert!(!out.redraw);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn digit_select_after_removal_targets_the_shifted_tab() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Remove `a` (index 0); `b` and `c` shift down to 0 and 1.
+        update(&mut st, Message::CloseTab(0));
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.sessions[1].id, c);
+
+        // `SelectTab(1)` (what pressing `2` resolves to) now targets `c`, not
+        // the stale pre-removal tab that index used to name.
+        update(&mut st, Message::SelectTab(1));
+        assert_eq!(st.active_session, Some(1));
+        assert_eq!(st.sessions[st.active_session.unwrap()].id, c);
+    }
+
+    #[test]
+    fn closing_a_tab_clears_a_context_menu_that_targeted_it() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        update(&mut st, state_event(a, SessionState::Exited(true)));
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+
+        update(&mut st, Message::CloseTab(0));
+        assert!(
+            st.context_menu.is_none(),
+            "the menu targeted the tab that just closed"
+        );
+    }
+
+    #[test]
+    fn closing_a_live_session_invalidates_a_higher_indexed_context_menu() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        st.sessions[0].state = SessionState::Running;
+
+        // Close tab 0 (live); removal is deferred until its terminal event lands.
+        let out = update(&mut st, Message::CloseTab(0));
+        assert!(out.effect.is_some());
+        assert_eq!(st.sessions.len(), 3);
+        assert!(st.sessions[0].close_on_exit);
+
+        // Open a context menu on tab 2 (which will become index 1 after the
+        // deferred removal).
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(2),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(2)
+        ));
+
+        // Tab 0's terminal event lands and removes it.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert_eq!(st.sessions.len(), 2);
+        assert_eq!(st.sessions[0].id, b);
+        assert_eq!(st.sessions[1].id, c);
+        // The menu targeting the old tab 2 should have been cleared because its
+        // index >= the removed index.
+        assert!(
+            st.context_menu.is_none(),
+            "menu targeting old tab 2 should clear when tab 0 is removed"
+        );
+
+        // A fresh menu on the tab that was at index 2 (now 1) should yield the
+        // correct CloseTab(1) message. The label may be "Stop & close" or "Close tab"
+        // depending on session state.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(1),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        let entries = &st.context_menu.as_ref().unwrap().entries;
+        let close_tab_entry = entries
+            .iter()
+            .find(|e| e.label == "Close tab" || e.label == "Stop & close")
+            .expect("Close tab / Stop & close entry should exist");
+        // Verify the entry has the correct message for the shifted index.
+        assert!(
+            matches!(&close_tab_entry.message, Message::CloseTab(1)),
+            "close_tab_entry message should target index 1, not the old index 2"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_lower_index_closes_when_any_tab_removed() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        let c = register(&mut st, 2, "/tmp/c", "desktop");
+        for id in [a, b, c] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Open a context menu on tab 0.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(0)
+        ));
+
+        // Remove tab 2 via CloseTab.
+        update(&mut st, Message::CloseTab(2));
+        assert_eq!(st.sessions.len(), 2);
+        assert_eq!(st.sessions[0].id, a);
+        assert_eq!(st.sessions[1].id, b);
+
+        // Menu targeting tab 0 closes even though the removed tab is after it.
+        // Any session removal invalidates any open context menu.
+        assert!(
+            st.context_menu.is_none(),
+            "menu on tab 0 should close when tab 2 is removed"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_log_view_closes_on_tab_removal() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        for id in [a, b] {
+            update(&mut st, state_event(id, SessionState::Exited(true)));
+        }
+
+        // Open a context menu on a LogView target.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::LogView { row: Some(42) },
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::LogView { .. }
+        ));
+
+        // Remove tab 0.
+        update(&mut st, Message::CloseTab(0));
+        assert_eq!(st.sessions.len(), 1);
+
+        // Menu targeting LogView closes: the menu was built against the
+        // then-active session, which may have changed or may not match
+        // what the menu entries expect to operate on.
+        assert!(
+            st.context_menu.is_none(),
+            "menu on LogView should close on tab removal"
+        );
+    }
+
+    #[test]
+    fn deferred_menu_on_active_session_closes_when_session_removed() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        st.sessions[0].state = SessionState::Running;
+        st.active_session = Some(0);
+
+        // Close tab 0 (live); removal is deferred until its terminal event lands.
+        let out = update(&mut st, Message::CloseTab(0));
+        assert!(out.effect.is_some());
+        assert_eq!(st.sessions.len(), 2);
+        assert!(st.sessions[0].close_on_exit);
+
+        // Open a context menu on the active session's log view. The menu is built
+        // against session 0, which is about to be removed.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::LogView { row: Some(10) },
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::LogView { .. }
+        ));
+
+        // Tab 0's terminal event lands and removes it.
+        update(&mut st, state_event(a, SessionState::Killed));
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].id, b);
+
+        // The menu closes: even though it targets a LogView (not a SessionTab),
+        // it was built against the active session, which is gone. A later
+        // 'CopyLine' action cannot read from the wrong session.
+        assert!(
+            st.context_menu.is_none(),
+            "menu on removed active session should close"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_device_row_closes_when_devices_reload() {
+        let mut st = workbench_with_project();
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                dev("a", "A", Platform::Android, Kind::Emulator),
+                dev("b", "B", Platform::Android, Kind::Emulator),
+            ]),
+        );
+
+        // Open a context menu on device row 1.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::DeviceRow(1),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::DeviceRow(1)
+        ));
+
+        // Devices reload with a reordered/shorter list: row 1's entry is stale.
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![dev("b", "B", Platform::Android, Kind::Emulator)]),
+        );
+
+        assert!(
+            st.context_menu.is_none(),
+            "menu on a DeviceRow should close when the device list reloads"
+        );
+    }
+
+    #[test]
+    fn context_menu_on_session_tab_survives_devices_reload() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+
+        // Open a context menu on a session tab.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+
+        // A device list reload is unrelated to a SessionTab menu; it stays open
+        // and still targets the same tab.
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![dev("a", "A", Platform::Android, Kind::Emulator)]),
+        );
+
+        assert!(
+            st.context_menu.is_some(),
+            "menu on a SessionTab should survive a device list reload"
+        );
+        assert!(matches!(
+            st.context_menu.as_ref().unwrap().target,
+            ContextTarget::SessionTab(0)
+        ));
     }
 
     #[test]
@@ -3008,6 +4539,7 @@ mod tests {
                     project_root: spec.project_root.clone(),
                     target_label: label,
                     devtools: DevtoolsLaunch::unavailable(),
+                    target: Some(SessionTarget::of(&spec.target)),
                 },
             );
         }
@@ -3031,19 +4563,454 @@ mod tests {
         );
     }
 
+    // ── One live session per (project, target) ──────────────────────────────
+
+    /// A `Pixel 7` emulator, as both the discovery panel and the guard see it.
+    fn pixel_7() -> Device {
+        dev(
+            "emulator-5554",
+            "Pixel 7",
+            Platform::Android,
+            Kind::Emulator,
+        )
+    }
+
+    /// The identity of [`pixel_7`].
+    fn pixel_7_target() -> SessionTarget {
+        SessionTarget::of(&DeviceTarget::Device(pixel_7()))
+    }
+
+    /// Load `devices`, select them all in the panel, and open the run-config
+    /// modal — which checks exactly the selected devices (row 0, desktop, is
+    /// left unchecked once any device is selected).
+    fn run_config_on_devices(st: &mut AppState, devices: Vec<Device>) {
+        let count = devices.len();
+        update(st, Message::DevicesLoaded(devices));
+        for _ in 0..count {
+            update(st, Message::ToggleDeviceSelect);
+            update(st, Message::DeviceCursorDown);
+        }
+        update(st, Message::OpenRunConfig);
+    }
+
+    fn warn_texts(st: &AppState) -> Vec<&str> {
+        st.toasts
+            .items
+            .iter()
+            .filter(|t| t.kind == ToastKind::Warn)
+            .map(|t| t.text.as_str())
+            .collect()
+    }
+
     #[test]
-    fn copy_selection_emits_effect_with_the_selected_text() {
+    fn launching_a_target_that_is_already_running_is_refused_with_a_toast() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::OpenRunConfig); // desktop checked by default
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        assert_eq!(
+            out.effect, None,
+            "a refused launch must not reach the supervisor at all"
+        );
+        assert!(
+            st.run_config.is_none(),
+            "the modal still closes — the toast is what explains the refusal"
+        );
+        assert_eq!(
+            warn_texts(&st),
+            vec!["desktop: already running here — stop it first (x)"]
+        );
+    }
+
+    #[test]
+    fn a_mixed_launch_starts_only_the_targets_that_are_free() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+        // Check desktop too, so the batch is {desktop (free), Pixel 7 (busy)}.
+        update(&mut st, Message::RunConfigToggleTargetAt(0));
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!("the free target must still launch, got {:?}", out.effect);
+        };
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].target, DeviceTarget::Desktop);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["Pixel 7: already running here — stop it first (x)"],
+            "one toast, naming the device that was refused"
+        );
+    }
+
+    #[test]
+    fn a_terminal_session_does_not_block_relaunching_its_target() {
+        let mut st = workbench_with_project();
+        let id = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id,
+                kind: SessionEventKind::State(crate::supervise::SessionState::Exited(true)),
+            }),
+        );
+        update(&mut st, Message::OpenRunConfig);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            "an exited session occupies nothing, got {:?}",
+            out.effect
+        );
+        assert!(warn_texts(&st).is_empty());
+    }
+
+    #[test]
+    fn a_different_project_on_the_same_device_is_allowed() {
+        let mut st = workbench_with_project();
+        // Another project is already on the Pixel 7 — the pair is what is
+        // exclusive, not the device.
+        register_on(&mut st, 0, "/tmp/other-app", pixel_7_target());
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!(
+                "a different project must still launch, got {:?}",
+                out.effect
+            );
+        };
+        assert_eq!(specs.len(), 1);
+        assert!(warn_texts(&st).is_empty());
+    }
+
+    #[test]
+    fn an_ad_hoc_session_never_blocks_a_launch() {
+        let mut st = workbench_with_project();
+        // A build of the same project: live, same root, but no target.
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+        update(&mut st, Message::OpenRunConfig);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            "building a project must not stop it being run, got {:?}",
+            out.effect
+        );
+        assert!(warn_texts(&st).is_empty());
+    }
+
+    #[test]
+    fn run_on_all_devices_skips_the_devices_already_running_this_project() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                pixel_7(),
+                dev(
+                    "emulator-5556",
+                    "Pixel 8",
+                    Platform::Android,
+                    Kind::Emulator,
+                ),
+            ]),
+        );
+
+        let out = update(&mut st, Message::RunOnAllDevices);
+
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!("the free device must still launch, got {:?}", out.effect);
+        };
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0].target, DeviceTarget::Device(d) if d.name == "Pixel 8"),
+            "only the device with no live session launches"
+        );
+        assert_eq!(
+            warn_texts(&st),
+            vec!["Pixel 7: already running here — stop it first (x)"]
+        );
+    }
+
+    #[test]
+    fn run_on_all_devices_emits_no_effect_when_every_device_is_busy() {
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        update(&mut st, Message::DevicesLoaded(vec![pixel_7()]));
+
+        let out = update(&mut st, Message::RunOnAllDevices);
+
+        assert_eq!(out.effect, None);
+        assert!(out.redraw, "the toast explaining it is itself a paint");
+        assert_eq!(
+            warn_texts(&st),
+            vec!["Pixel 7: already running here — stop it first (x)"]
+        );
+    }
+
+    // ── Line-selection mode (`v` … `y`) ─────────────────────────────────────
+
+    /// A workbench with one session holding `n` seeded lines, following its
+    /// tail — the starting point every mode flow below drives with messages.
+    fn selection_state(n: usize) -> AppState {
         let mut st = welcome();
         let a = register(&mut st, 0, "/tmp/a", "desktop");
-        for i in 0..5 {
+        for i in 0..n {
             update(&mut st, line(a, &format!("line {i}")));
         }
-        update(&mut st, Message::SelectionBegin); // anchors newest (line 4)
-        update(&mut st, Message::SelectionExtendUp(2)); // -> lines 2..=4
+        st
+    }
+
+    fn selected(st: &AppState) -> Option<(u64, u64)> {
+        st.active_session()
+            .and_then(|s| s.selection)
+            .map(|sel| (sel.lo(), sel.hi()))
+    }
+
+    fn toast_texts(st: &AppState, kind: ToastKind) -> Vec<&str> {
+        st.toasts
+            .items
+            .iter()
+            .filter(|t| t.kind == kind)
+            .map(|t| t.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn select_enter_anchors_one_line_at_the_tail_and_pauses_follow() {
+        let mut st = selection_state(5);
+        assert!(st.active_session().unwrap().is_following());
+
+        let out = update(&mut st, Message::SelectEnter);
+
+        assert!(out.redraw);
+        assert_eq!(out.effect, None);
+        let session = st.active_session().unwrap();
+        assert!(session.select_mode);
+        assert_eq!(selected(&st), Some((4, 4)), "`v` selects the newest line");
+        assert!(!session.is_following(), "the mode pauses follow-tail");
+        assert_eq!(session.follow_before_select, Some(true));
+    }
+
+    /// DevTools owns the whole key namespace while it is open (workbook
+    /// §B12); the palette's "Select lines…" row re-dispatches the same
+    /// `Message::SelectEnter` a `v` press would, so the refusal has to live
+    /// in `update` itself rather than in `translate_key`'s early return.
+    #[test]
+    fn select_enter_is_refused_while_devtools_owns_the_pane() {
+        let mut st = selection_state(5);
+        st.active_session_mut().unwrap().devtools.open = true;
+
+        let out = update(&mut st, Message::SelectEnter);
+
+        assert!(!out.redraw, "no toast, no highlight — a silent refusal");
+        assert!(!st.active_session().unwrap().select_mode);
+        assert_eq!(st.active_session().unwrap().selection, None);
+    }
+
+    #[test]
+    fn select_move_down_extends_the_range_a_row_at_a_time() {
+        let mut st = selection_state(8);
+        update(&mut st, Message::SelectEnter);
+        // From the tail the cursor can only walk back up the log.
+        for _ in 0..3 {
+            update(&mut st, Message::SelectMove(-1));
+        }
+        assert_eq!(selected(&st), Some((4, 7)), "four lines selected");
+        // …and back down again, shrinking the range.
+        update(&mut st, Message::SelectMove(1));
+        assert_eq!(selected(&st), Some((5, 7)));
+    }
+
+    #[test]
+    fn select_move_clamps_at_both_ends_and_home_end_jump_to_them() {
+        let mut st = selection_state(6);
+        update(&mut st, Message::SelectEnter);
+        for _ in 0..20 {
+            update(&mut st, Message::SelectMove(-1));
+        }
+        assert_eq!(selected(&st), Some((0, 5)), "clamped at the oldest line");
+        let out = update(&mut st, Message::SelectMove(-1));
+        assert!(!out.redraw, "a clamped move is not a repaint");
+
+        update(&mut st, Message::SelectEnd);
+        assert_eq!(selected(&st), Some((5, 5)), "cursor back at the tail");
+        update(&mut st, Message::SelectHome);
+        assert_eq!(selected(&st), Some((0, 5)));
+        update(&mut st, Message::SelectPage(1));
+        assert_eq!(selected(&st), Some((5, 5)), "a page covers this short log");
+    }
+
+    #[test]
+    fn a_row_click_anchors_once_then_drags_the_range_end() {
+        let mut st = selection_state(10);
+        update(&mut st, Message::SelectEnter);
+
+        // First click re-anchors at the clicked row…
+        update(&mut st, Message::LogRowClicked(2));
+        assert_eq!(selected(&st), Some((2, 2)));
+        // …every later one only moves the range end.
+        update(&mut st, Message::LogRowClicked(6));
+        assert_eq!(selected(&st), Some((2, 6)));
+        update(&mut st, Message::LogRowClicked(4));
+        assert_eq!(selected(&st), Some((2, 4)), "the anchor stays put");
+    }
+
+    #[test]
+    fn a_row_click_outside_the_mode_is_idle() {
+        let mut st = selection_state(4);
+        let out = update(&mut st, Message::LogRowClicked(1));
+        assert!(!out.redraw);
+        assert_eq!(out.effect, None);
+        assert_eq!(selected(&st), None);
+    }
+
+    #[test]
+    fn copy_selection_emits_the_joined_lines_toasts_and_leaves_the_mode() {
+        let mut st = selection_state(5);
+        update(&mut st, Message::SelectEnter); // anchors newest (line 4)
+        update(&mut st, Message::SelectMove(-2)); // -> lines 2..=4
+
         let out = update(&mut st, Message::CopySelection);
+
         assert_eq!(
             out.effect,
             Some(Effect::Copy("line 2\nline 3\nline 4".to_string()))
+        );
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 3 lines"]);
+        let session = st.active_session().unwrap();
+        assert!(!session.select_mode, "`y` is the whole gesture");
+        assert_eq!(session.selection, None);
+        assert!(
+            !session.is_following(),
+            "the cursor was walked off the tail, so the view stays where it was"
+        );
+    }
+
+    /// The WarnPlus counterexample: a Warn/Info/Warn triple with the level
+    /// filter hiding the middle line. The cursor keys skip the hidden line
+    /// (already covered in `session_view`), and `y` copies and counts only
+    /// the two visible rows, even though the absolute range spans all three.
+    #[test]
+    fn copy_selection_counts_only_the_visible_sequence_across_a_level_filter() {
+        use crate::engine::logstyle::LevelFilter;
+
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        update(&mut st, line(a, "warn a"));
+        update(&mut st, line(a, "info b"));
+        update(&mut st, line(a, "warn c"));
+        st.active_session_mut()
+            .unwrap()
+            .set_level_filter(LevelFilter::WarnPlus);
+
+        update(&mut st, Message::SelectEnter); // anchors the newest visible: warn c
+        update(&mut st, Message::SelectMove(-1)); // -> warn a, the hidden info skipped
+
+        let out = update(&mut st, Message::CopySelection);
+
+        assert_eq!(out.effect, Some(Effect::Copy("warn a\nwarn c".to_string())));
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 2 lines"]);
+    }
+
+    #[test]
+    fn copying_at_the_tail_restores_the_follow_it_paused() {
+        let mut st = selection_state(5);
+        update(&mut st, Message::SelectEnter);
+        let out = update(&mut st, Message::CopySelection);
+        assert_eq!(out.effect, Some(Effect::Copy("line 4".to_string())));
+        assert_eq!(toast_texts(&st, ToastKind::Info), vec!["Copied: 1 line"]);
+        assert!(st.active_session().unwrap().is_following());
+    }
+
+    #[test]
+    fn select_exit_leaves_the_mode_without_copying() {
+        let mut st = selection_state(5);
+        update(&mut st, Message::SelectEnter);
+        update(&mut st, Message::SelectMove(-1));
+
+        let out = update(&mut st, Message::SelectExit);
+
+        assert_eq!(out.effect, None, "`Esc` copies nothing");
+        assert!(out.redraw);
+        let session = st.active_session().unwrap();
+        assert!(!session.select_mode);
+        assert_eq!(session.selection, None);
+        assert!(st.toasts.items.is_empty());
+        assert!(
+            !update(&mut st, Message::SelectExit).redraw,
+            "leaving a mode that is already left is idle"
+        );
+    }
+
+    #[test]
+    fn the_mode_is_per_session_and_survives_a_tab_switch() {
+        let mut st = selection_state(4);
+        let b = register(&mut st, 1, "/tmp/a", "Pixel 7");
+        update(&mut st, line(b, "other"));
+
+        update(&mut st, Message::SelectTab(0));
+        update(&mut st, Message::SelectEnter);
+        update(&mut st, Message::SelectTab(1));
+        assert!(
+            !st.active_session().unwrap().select_mode,
+            "the other tab is not in the mode"
+        );
+        update(&mut st, Message::SelectTab(0));
+        assert!(
+            st.active_session().unwrap().select_mode,
+            "the tab that entered the mode is still in it"
+        );
+    }
+
+    #[test]
+    fn a_terminal_session_event_does_not_leave_the_mode() {
+        let mut st = selection_state(3);
+        let a = SessionId(0);
+        update(&mut st, Message::SelectEnter);
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Exited(true)),
+            }),
+        );
+        assert!(
+            st.active_session().unwrap().select_mode,
+            "the log is still there to select from"
+        );
+    }
+
+    #[test]
+    fn copy_line_copies_one_line_with_a_previewed_toast() {
+        let mut st = selection_state(3);
+        let long = "x".repeat(80);
+        update(&mut st, line(SessionId(0), &long));
+
+        let out = update(&mut st, Message::CopyLine(3));
+
+        assert_eq!(out.effect, Some(Effect::Copy(long.clone())));
+        let preview = toast_texts(&st, ToastKind::Info);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0], format!("Copied: {}\u{2026}", "x".repeat(60)));
+    }
+
+    #[test]
+    fn copy_line_on_an_evicted_line_warns_instead_of_copying() {
+        let mut st = selection_state(3);
+        let out = update(&mut st, Message::CopyLine(99));
+        assert_eq!(out.effect, None);
+        assert!(out.redraw);
+        assert_eq!(
+            toast_texts(&st, ToastKind::Warn),
+            vec!["Line no longer available"]
         );
     }
 
@@ -3156,8 +5123,8 @@ mod tests {
 
     #[test]
     fn probe_result_is_a_harmless_no_op_for_the_clean_signals_card() {
-        // clean-signals is git+rev-pinned to its public repo, so
-        // the card starts enabled and stays enabled regardless of the probe
+        // clean-signals is a crates.io dependency, so the card starts
+        // enabled and stays enabled regardless of the probe
         // result — the probe still fires (`Effect::ProbeCleanSignals`) but
         // no card depends on its outcome today.
         let mut st = welcome();
@@ -3244,7 +5211,7 @@ mod tests {
 
         // The runner posts the absolute root back; the wizard closes and the
         // project opens in the workbench.
-        let root = dest.canonicalize().unwrap();
+        let root = frust_drive::host_path::canonicalize_simplified(&dest).unwrap();
         let out = update(
             &mut st,
             Message::ScaffoldSucceeded {
@@ -3309,9 +5276,8 @@ mod tests {
 
     #[test]
     fn add_plugin_probe_is_a_harmless_no_op_with_no_sibling_gated_entries() {
-        // clean-signals-frust was the sole `requires_sibling` registry user
-        // before clean-signals moved to a git+rev pin; no entry is
-        // sibling-gated today, so every card starts (and stays) enabled
+        // clean-signals-frust needs no `requires_sibling` (clean-signals is
+        // a crates.io dependency); no entry is sibling-gated, so every card starts (and stays) enabled
         // regardless of the probe result.
         let mut st = workbench_with_project();
         update(&mut st, Message::OpenAddPlugin);
@@ -3484,6 +5450,23 @@ mod tests {
     }
 
     #[test]
+    fn doctor_failure_toast_shows_correct_key() {
+        let mut st = welcome();
+        update(&mut st, Message::RunDoctor);
+        let results = vec![DoctorCheck {
+            name: "Rust toolchain".to_string(),
+            status: Status::Fail,
+            messages: vec!["Something is wrong".to_string()],
+        }];
+        update(&mut st, Message::DoctorResults(results));
+        assert_eq!(st.toasts.items.len(), 1);
+        let toast = &st.toasts.items[0];
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(toast.text.contains("press i"), "{}", toast.text);
+        assert!(!toast.text.contains("press d"), "{}", toast.text);
+    }
+
+    #[test]
     fn open_and_close_doctor_panel_toggles_and_dedupes() {
         let mut st = welcome();
         assert!(update(&mut st, Message::OpenDoctorPanel).redraw);
@@ -3498,6 +5481,20 @@ mod tests {
             !update(&mut st, Message::CloseDoctorPanel).redraw,
             "already closed"
         );
+    }
+
+    /// Toolchain setup via the Doctor panel's `t` key: close the panel and
+    /// open the bootstrap wizard in the same transition `OpenBootstrapWizard`
+    /// performs.
+    #[test]
+    fn open_toolchain_from_doctor_closes_the_panel_and_opens_the_wizard() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenDoctorPanel);
+        assert!(st.doctor_panel_open);
+        let out = update(&mut st, Message::OpenToolchainFromDoctor);
+        assert!(out.redraw);
+        assert!(!st.doctor_panel_open);
+        assert!(st.bootstrap_wizard.is_some());
     }
 
     // ── Build launcher ──────────────────────────────────────────────────────
@@ -3585,6 +5582,69 @@ mod tests {
         assert!(out.redraw);
         assert!(st.clean_confirm.is_none());
         assert_eq!(update(&mut st, Message::ConfirmClean).effect, None);
+    }
+
+    // ── Quit confirm dialog ──────────────────────────────────────────────────
+
+    #[test]
+    fn request_quit_with_no_live_session_quits_immediately() {
+        let mut st = workbench_with_project();
+        assert_eq!(st.live_session_count(), 0);
+        let out = update(&mut st, Message::RequestQuit);
+        assert!(
+            st.should_quit,
+            "no live session — behaves exactly like Quit"
+        );
+        assert!(!st.quit_confirm);
+        assert!(!out.redraw, "about to tear down, no point drawing a frame");
+    }
+
+    #[test]
+    fn request_quit_with_a_live_session_opens_the_dialog_instead_of_quitting() {
+        let mut st = workbench_with_project();
+        register(&mut st, 1, "/tmp/huddle", "desktop");
+        assert_eq!(st.live_session_count(), 1);
+        let out = update(&mut st, Message::RequestQuit);
+        assert!(!st.should_quit, "asks first rather than quitting outright");
+        assert!(st.quit_confirm);
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn a_terminal_session_does_not_count_toward_request_quit() {
+        let mut st = workbench_with_project();
+        let id = register(&mut st, 1, "/tmp/huddle", "desktop");
+        let idx = st.session_index(id).unwrap();
+        st.sessions[idx].state = SessionState::Exited(true);
+        assert_eq!(st.live_session_count(), 0);
+        update(&mut st, Message::RequestQuit);
+        assert!(
+            st.should_quit,
+            "an exited session never blocks a quit request"
+        );
+    }
+
+    #[test]
+    fn confirm_quit_quits_and_clears_the_dialog() {
+        let mut st = workbench_with_project();
+        register(&mut st, 1, "/tmp/huddle", "desktop");
+        update(&mut st, Message::RequestQuit);
+        assert!(st.quit_confirm);
+        let out = update(&mut st, Message::ConfirmQuit);
+        assert!(st.should_quit);
+        assert!(!st.quit_confirm);
+        assert!(!out.redraw);
+    }
+
+    #[test]
+    fn close_quit_confirm_clears_the_flag_without_quitting() {
+        let mut st = workbench_with_project();
+        register(&mut st, 1, "/tmp/huddle", "desktop");
+        update(&mut st, Message::RequestQuit);
+        let out = update(&mut st, Message::CloseQuitConfirm);
+        assert!(out.redraw);
+        assert!(!st.quit_confirm);
+        assert!(!st.should_quit);
     }
 
     // ── Build artifact copy-path ────────────────────────────────────────────
@@ -3823,17 +5883,21 @@ mod tests {
     fn context_menu_nav_activate_redispatches_and_closes() {
         let mut st = welcome();
         register(&mut st, 0, "/tmp/a", "desktop");
-        // Log-view menu: Copy selection (disabled, no selection) / Follow / Search.
+        // Log-view menu, clicked below the last row (no row under the
+        // cursor): Copy line (disabled) / Copy selection (disabled, nothing
+        // selected) / Select lines… / Toggle follow-tail / Search.
         update(
             &mut st,
             Message::OpenContextMenu {
                 x: 10,
                 y: 10,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
             },
         );
-        // Move to "Toggle follow-tail" (index 1) and activate it.
-        update(&mut st, Message::ContextMenuCursorDown);
+        // Move to "Toggle follow-tail" (index 3) and activate it.
+        for _ in 0..3 {
+            update(&mut st, Message::ContextMenuCursorDown);
+        }
         let following_before = st.active_session().unwrap().is_following();
         let out = update(&mut st, Message::ContextMenuActivate);
         assert!(out.redraw);
@@ -3854,10 +5918,10 @@ mod tests {
             Message::OpenContextMenu {
                 x: 10,
                 y: 10,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
             },
         );
-        // Index 0 is "Copy selection", disabled with no selection.
+        // Index 0 is "Copy line", disabled with no row under the cursor.
         let out = update(&mut st, Message::ContextMenuActivateAt(0));
         assert!(!out.redraw);
         assert!(st.context_menu.is_some(), "a disabled entry doesn't close");
@@ -4048,7 +6112,14 @@ mod tests {
     /// A workbench with one running, devtools-capable desktop session.
     fn devtools_workbench() -> (AppState, SessionId) {
         let mut st = workbench_with_project();
-        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", debug_launch());
+        let id = register_with(
+            &mut st,
+            0,
+            "/tmp/huddle",
+            "desktop",
+            debug_launch(),
+            Some(SessionTarget::Desktop),
+        );
         update(&mut st, state_event(id, SessionState::Running));
         (st, id)
     }
@@ -4131,7 +6202,18 @@ mod tests {
             frust_drive::build_info::BuildMode::Profile,
             Some("emulator-5554".to_string()),
         );
-        let id = register_with(&mut st, 0, "/tmp/huddle", "Pixel 8", launch);
+        let id = register_with(
+            &mut st,
+            0,
+            "/tmp/huddle",
+            "Pixel 8",
+            launch,
+            Some(SessionTarget::Device {
+                id: "serial-8".to_string(),
+                name: "Pixel 8".to_string(),
+                platform: frust_drive::devices::Platform::Android,
+            }),
+        );
         update(&mut st, line(id, DISCOVERY));
         let out = update(&mut st, Message::DevtoolsToggle);
         assert_eq!(
@@ -4144,7 +6226,14 @@ mod tests {
     fn a_release_session_never_connects_and_shows_the_unavailable_screen() {
         let mut st = workbench_with_project();
         let launch = DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Release, None);
-        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", launch);
+        let id = register_with(
+            &mut st,
+            0,
+            "/tmp/huddle",
+            "desktop",
+            launch,
+            Some(SessionTarget::Desktop),
+        );
         update(&mut st, line(id, DISCOVERY));
         let out = update(&mut st, Message::DevtoolsToggle);
         assert_eq!(out.effect, None);
@@ -5205,6 +7294,7 @@ mod tests {
                 ide: crate::engine::IDE_OVERRIDES[0],
                 port: crate::engine::DEFAULT_DAP_PORT,
                 project_root: PathBuf::from("/tmp/huddle"),
+                mode: WriteMode::Refresh,
             }))
         );
     }
@@ -5353,12 +7443,30 @@ mod tests {
         assert!(st.dap_settings_open);
     }
 
-    /// The auto-configure path end to end at the message level: the bound
-    /// port (not the configured one) is what the editor is pointed at, and
-    /// the outcome the runner reports back is retained for the dialog.
+    /// A bind with no session writes nothing: the workbench's active project
+    /// at startup is merely the first `frust.toml` found, not a project
+    /// anyone launched.
     #[test]
-    fn a_fresh_listener_requests_ide_config_and_stores_the_reported_outcome() {
+    fn a_fresh_listener_without_a_session_writes_no_ide_config() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        assert!(st.dap_settings.auto_configure_ide);
+        st.dap = Some(dap_handle(0));
+        let out = update(&mut st, Message::DapListening(0, 41_234));
+        assert!(out.redraw, "the port still promotes the handle");
+        assert_eq!(out.effect, None);
+        assert_eq!(st.dap_settings.last_ide_config, None);
+    }
+
+    /// The auto-configure-on-bind path end to end at the message level: with
+    /// a session active, its project (not the workbench's) is configured,
+    /// the bound port (not the configured one) is what the editor is pointed
+    /// at, an existing entry is never rewritten, and the outcome the runner
+    /// reports back is retained for the dialog.
+    #[test]
+    fn a_fresh_listener_configures_the_active_sessions_project_and_stores_the_outcome() {
         let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        register_on(&mut st, 0, "/tmp/other-app", SessionTarget::Desktop);
+        assert!(st.active_session().is_some());
         st.dap = Some(dap_handle(0));
         // Started on `0`: the OS-assigned port is only known here.
         let out = update(&mut st, Message::DapListening(0, 41_234));
@@ -5367,9 +7475,15 @@ mod tests {
             Some(Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
                 ide: frust_dap::ide_config::ParentIde::VSCode,
                 port: 41_234,
-                project_root: PathBuf::from("/tmp/huddle"),
+                project_root: PathBuf::from("/tmp/other-app"),
+                mode: WriteMode::IfAbsent,
             })),
-            "the config must name the port actually bound"
+            "the config must name the port actually bound, in the session's project"
+        );
+        assert_eq!(
+            update(&mut st, Message::DapListening(0, 41_234)).effect,
+            None,
+            "a repeat report for the same port is not a second bind"
         );
 
         let result = frust_dap::ide_config::IdeConfigResult {
@@ -5396,15 +7510,344 @@ mod tests {
         assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
     }
 
+    /// An automatic report, as the runner posts it: tagged with its project
+    /// and IDE.
+    fn auto_report(
+        root: &str,
+        ide: frust_dap::ide_config::ParentIde,
+        report: crate::engine::DapIdeReport,
+    ) -> crate::engine::DapIdeReport {
+        crate::engine::DapIdeReport::Auto {
+            project_root: PathBuf::from(root),
+            ide,
+            report: Box::new(report),
+        }
+    }
+
+    fn stale_report(root: &str) -> crate::engine::DapIdeReport {
+        crate::engine::DapIdeReport::Written {
+            ide: frust_dap::ide_config::ParentIde::VSCode,
+            result: frust_dap::ide_config::IdeConfigResult {
+                path: PathBuf::from(root).join(".vscode/launch.json"),
+                action: frust_dap::ide_config::ConfigAction::StalePort {
+                    existing: 1111,
+                    bound: 41_234,
+                },
+            },
+        }
+    }
+
+    /// A kept entry naming a stale port warns once per (root, IDE) per run,
+    /// naming the file, both ports and the fix — and never again on a repeat,
+    /// while the dialog still shows the latest outcome.
+    #[test]
+    fn an_automatic_stale_port_toasts_once_per_root_and_ide() {
+        use frust_dap::ide_config::ParentIde;
+        let mut st = dap_workbench(Some(ParentIde::VSCode));
+        let stale = stale_report("/tmp/a");
+
+        let out = update(
+            &mut st,
+            Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::VSCode, stale.clone())),
+        );
+        assert!(out.redraw);
+        assert_eq!(st.toasts.items.len(), 1);
+        let toast = &st.toasts.items[0];
+        assert_eq!(toast.kind, ToastKind::Warn);
+        // Extract the path from the stale report to get the exact rendering
+        let config_path_str =
+            if let crate::engine::DapIdeReport::Written { ide: _, result } = &stale {
+                result.path.display().to_string()
+            } else {
+                panic!("stale report is not Written variant")
+            };
+        assert!(
+            toast.text.contains(&config_path_str),
+            "Config path '{}' not found in toast text: {}",
+            config_path_str,
+            toast.text
+        );
+        assert!(toast.text.contains("1111"), "{}", toast.text);
+        assert!(toast.text.contains("41234"), "{}", toast.text);
+        assert!(
+            toast.text.contains("press g in DAP settings to refresh"),
+            "{}",
+            toast.text
+        );
+        assert_eq!(
+            st.dap_settings.last_ide_config,
+            Some(stale.clone()),
+            "the dialog stores the unwrapped report"
+        );
+
+        // The next launch / bind: same pair, no second toast.
+        for _ in 0..3 {
+            update(
+                &mut st,
+                Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::VSCode, stale.clone())),
+            );
+        }
+        assert_eq!(st.toasts.items.len(), 1, "a repeat never toasts again");
+        assert_eq!(st.dap_settings.last_ide_config, Some(stale));
+
+        // Another project is its own pair.
+        update(
+            &mut st,
+            Message::DapIdeConfig(auto_report(
+                "/tmp/b",
+                ParentIde::VSCode,
+                stale_report("/tmp/b"),
+            )),
+        );
+        assert_eq!(st.toasts.items.len(), 2);
+    }
+
+    /// An automatic failure (e.g. an unparseable existing config) errors once
+    /// per (root, IDE) per run instead of on every launch.
+    #[test]
+    fn an_automatic_failure_toasts_once_per_root_and_ide() {
+        use frust_dap::ide_config::ParentIde;
+        let mut st = dap_workbench(Some(ParentIde::Zed));
+        let failed = crate::engine::DapIdeReport::Failed("invalid JSON in debug.json".to_string());
+        for _ in 0..3 {
+            update(
+                &mut st,
+                Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::Zed, failed.clone())),
+            );
+        }
+        assert_eq!(st.toasts.items.len(), 1);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+        assert_eq!(st.dap_settings.last_ide_config, Some(failed.clone()));
+
+        update(
+            &mut st,
+            Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::Emacs, failed)),
+        );
+        assert_eq!(st.toasts.items.len(), 2, "another IDE is its own pair");
+    }
+
+    /// The explicit `g` path's reports arrive untagged and always toast —
+    /// even an outcome the automatic path has already spent its toast on.
+    #[test]
+    fn the_explicit_path_reports_every_outcome_every_time() {
+        use frust_dap::ide_config::ParentIde;
+        let mut st = dap_workbench(Some(ParentIde::VSCode));
+        let failed = crate::engine::DapIdeReport::Failed("permission denied".to_string());
+        update(
+            &mut st,
+            Message::DapIdeConfig(auto_report("/tmp/a", ParentIde::VSCode, failed.clone())),
+        );
+        assert_eq!(st.toasts.items.len(), 1);
+        st.toasts.items.clear(); // (the toast queue holds at most three)
+        for _ in 0..2 {
+            update(&mut st, Message::DapIdeConfig(failed.clone()));
+        }
+        let skipped = crate::engine::DapIdeReport::Written {
+            ide: ParentIde::VSCode,
+            result: frust_dap::ide_config::IdeConfigResult {
+                path: PathBuf::from("/tmp/a/.vscode/launch.json"),
+                action: frust_dap::ide_config::ConfigAction::Skipped(
+                    "content unchanged".to_string(),
+                ),
+            },
+        };
+        update(&mut st, Message::DapIdeConfig(skipped.clone()));
+        assert_eq!(st.toasts.items.len(), 3);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+        assert_eq!(st.toasts.items[1].kind, ToastKind::Error);
+        assert!(
+            st.toasts.items[2]
+                .text
+                .contains("skipped (content unchanged)")
+        );
+        assert_eq!(st.dap_settings.last_ide_config, Some(skipped));
+    }
+
+    #[test]
+    fn notify_pushes_the_given_toast_kind_and_text() {
+        let mut st = welcome();
+        let out = update(
+            &mut st,
+            Message::Notify {
+                level: ToastKind::Warn,
+                text: "Copy failed: system clipboard unavailable".to_string(),
+            },
+        );
+        assert!(out.redraw);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Warn);
+        assert_eq!(
+            st.toasts.items[0].text,
+            "Copy failed: system clipboard unavailable"
+        );
+    }
+
     #[test]
     fn auto_configure_off_leaves_a_fresh_listener_alone() {
         let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
         st.dap_settings.auto_configure_ide = false;
         st.dap = Some(dap_handle(0));
         let out = update(&mut st, Message::DapListening(0, 4849));
         assert!(out.redraw, "the port still promotes the handle");
         assert_eq!(out.effect, None);
         assert_eq!(st.dap_settings.last_ide_config, None);
+    }
+
+    /// The automatic path's refusals are silent: no effect, no stored
+    /// report, no toast — unlike the explicit "generate now".
+    #[test]
+    fn auto_configure_refusals_are_silent() {
+        for detected in [None, Some(frust_dap::ide_config::ParentIde::IntelliJ)] {
+            let mut st = dap_workbench(detected);
+            register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+            st.dap = Some(dap_handle(0));
+            let out = update(&mut st, Message::DapListening(0, 4849));
+            assert_eq!(out.effect, None, "detected={detected:?}");
+            assert_eq!(st.dap_settings.last_ide_config, None);
+            assert!(st.toasts.items.is_empty());
+
+            let out = launch_from_run_config(&mut st);
+            assert!(
+                matches!(out.effect, Some(Effect::LaunchSessions(_))),
+                "a refused config never holds up the launch, got {:?}",
+                out.effect
+            );
+            assert_eq!(st.dap_settings.last_ide_config, None);
+        }
+    }
+
+    /// Stop the one registered session (so its target is free again) and
+    /// launch the desktop target from the run-config modal.
+    fn launch_from_run_config(st: &mut AppState) -> Outcome {
+        let ids: Vec<SessionId> = st.sessions.iter().map(|s| s.id).collect();
+        for session in ids {
+            update(
+                st,
+                Message::Session(SessionEvent {
+                    id: session,
+                    kind: SessionEventKind::State(crate::supervise::SessionState::Exited(true)),
+                }),
+            );
+        }
+        update(st, Message::OpenRunConfig); // desktop checked by default
+        update(st, Message::RunConfigLaunch)
+    }
+
+    /// A launch while the server listens (auto-configure on) also writes the
+    /// launched project's config, never rewriting an existing entry.
+    #[test]
+    fn a_launch_with_dap_listening_batches_an_ide_config_for_the_launched_project() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 41_234));
+        update(&mut st, Message::OpenRunConfig);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::Batch(effects)) = out.effect else {
+            panic!("expected a Batch, got {:?}", out.effect);
+        };
+        assert_eq!(effects.len(), 2);
+        let Effect::LaunchSessions(specs) = &effects[0] else {
+            panic!("the launch comes first, got {:?}", effects[0]);
+        };
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            effects[1],
+            Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
+                ide: frust_dap::ide_config::ParentIde::Zed,
+                port: 41_234,
+                project_root: specs[0].project_root.clone(),
+                mode: WriteMode::IfAbsent,
+            })
+        );
+        assert_eq!(specs[0].project_root, PathBuf::from("/tmp/huddle"));
+    }
+
+    /// Several targets of one project are one config write, not one per
+    /// target.
+    #[test]
+    fn a_multi_target_launch_writes_one_config_per_distinct_project() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        run_config_on_devices(&mut st, vec![pixel_7()]);
+        update(&mut st, Message::RunConfigToggleTargetAt(0)); // + desktop
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+
+        let Some(Effect::Batch(effects)) = out.effect else {
+            panic!("expected a Batch, got {:?}", out.effect);
+        };
+        assert!(matches!(&effects[0], Effect::LaunchSessions(specs) if specs.len() == 2));
+        let configs: Vec<_> = effects[1..]
+            .iter()
+            .filter(|e| matches!(e, Effect::GenerateIdeConfig(_)))
+            .collect();
+        assert_eq!(configs.len(), 1, "one project, one config: {effects:?}");
+        assert_eq!(effects.len(), 2);
+    }
+
+    /// No listening server, or auto-configure off: a launch is only a launch.
+    #[test]
+    fn a_launch_without_a_listening_server_or_with_auto_configure_off_is_plain() {
+        // No server at all.
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            "got {:?}",
+            out.effect
+        );
+
+        // A server still starting (no bound port yet).
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(_))),
+            "got {:?}",
+            out.effect
+        );
+
+        // Listening, but auto-configure off.
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.auto_configure_ide = false;
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        update(&mut st, Message::OpenRunConfig);
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(
+            matches!(out.effect, Some(Effect::LaunchSessions(_))),
+            "got {:?}",
+            out.effect
+        );
+    }
+
+    /// "Run on all devices" is the other launch path; it batches the config
+    /// write the same way.
+    #[test]
+    fn run_on_all_devices_batches_the_ide_config_too() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        update(&mut st, Message::DevicesLoaded(vec![pixel_7()]));
+
+        let out = run_on_all_devices(&mut st);
+
+        let Some(Effect::Batch(effects)) = out.effect else {
+            panic!("expected a Batch, got {:?}", out.effect);
+        };
+        assert!(matches!(&effects[0], Effect::LaunchSessions(_)));
+        assert!(matches!(
+            &effects[1],
+            Effect::GenerateIdeConfig(request)
+                if request.mode == WriteMode::IfAbsent
+                    && request.project_root == std::path::Path::new("/tmp/huddle")
+        ));
     }
 
     /// Every refusal is decided in the pure core and *reported*, never a
@@ -5455,7 +7898,9 @@ mod tests {
                 ide: frust_dap::ide_config::ParentIde::Zed,
                 port: 41_234,
                 project_root: PathBuf::from("/tmp/huddle"),
-            }))
+                mode: WriteMode::Refresh,
+            })),
+            "the explicit path always refreshes"
         );
     }
 

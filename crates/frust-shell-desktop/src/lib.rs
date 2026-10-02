@@ -15,6 +15,7 @@ mod cache;
 pub mod config;
 pub mod extensions;
 mod logger;
+mod platform_view;
 mod render;
 
 pub use app_handler::{run_desktop, run_desktop_with};
@@ -24,9 +25,12 @@ pub use extensions::{CloseAction, DesktopEventLoopBuilder, DesktopExtensions, No
 /// The desktop event loop's user-event type, `pub` only so
 /// [`DesktopEventLoopBuilder`] (the builder-stage hook's parameter) can name
 /// it. `#[doc(hidden)]` keeps it out of published docs — the same escape
-/// [`paced_wake`] uses.
+/// [`paced_wake`] uses. [`PasteText`] rides along for the same reason and no
+/// other: it is the payload of that type's clipboard-answer variant (the text
+/// the clipboard worker thread read), and a variant carrying a type the crate
+/// root cannot name is a lint, not an API.
 #[doc(hidden)]
-pub use app_handler::ShellUserEvent;
+pub use app_handler::{PasteText, ShellUserEvent};
 
 /// Pure, winit-free decision logic behind `ShellHandler`'s paced-wake
 /// mechanism (see the module's own docs). `run_desktop`/`ShellHandler` are

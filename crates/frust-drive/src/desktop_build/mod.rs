@@ -5,13 +5,13 @@
 //! identity, compile the app through [`crate::process::ProcessRunner`], locate
 //! the produced binary, and lay out
 //!
-//! - macOS — `dist/macos/<Display Name>.app/Contents/{MacOS,Resources}` +
-//!   `Info.plist`, optionally `codesign`ed;
-//! - Windows — `dist/windows/<binary>.exe` (the icon is embedded by the
-//!   project's own `windows/build.rs`, which this pipeline feeds by generating
-//!   `windows/icon.ico` *before* the compile);
-//! - Linux — `dist/linux/<binary>/` with the binary, a `<identifier>.desktop`
-//!   entry and a `share/icons/hicolor/` tree.
+//! - macOS — `build/desktop/macos/<Display Name>.app/Contents/{MacOS,Resources}`
+//!   + `Info.plist`, optionally `codesign`ed;
+//! - Windows — `build/desktop/windows/<binary>.exe` (the icon is embedded by
+//!   the project's own `windows/build.rs`, which this pipeline feeds by
+//!   generating `build/desktop/windows/icon.ico` *before* the compile);
+//! - Linux — `build/desktop/linux/<binary>/` with the binary, a
+//!   `<identifier>.desktop` entry and a `share/icons/hicolor/` tree.
 //!
 //! **Host-locked**, like every other desktop toolchain: a macOS bundle can
 //! only be assembled on macOS, and so on. The check reads
@@ -65,7 +65,7 @@
 //!
 //! **But an identity value that isn't a safe path is a hard refusal.** The
 //! display name, identifier and binary name each become a file or directory
-//! under `dist/` — one that a rebuild deletes recursively — so a value carrying
+//! under `build/desktop/` — one that a rebuild deletes recursively — so a value carrying
 //! a separator, a `..`, or a leading `/` fails the build with a typed error
 //! before anything is written ([`DesktopBuildError::UnsafeDesktopIdentity`],
 //! and [`DesktopBuildError::UnsafeIconPath`] for an icon path pointing out of
@@ -89,6 +89,7 @@ mod windows;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::build_dirs::BuildLayout;
 use crate::build_info::BuildInfo;
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::manifest;
@@ -103,8 +104,16 @@ pub use installer::{
 };
 
 /// The project-relative directory every desktop build output lands under, and
-/// the containment root [`bundle::prepare_dir`] refuses to step outside of.
-const DIST_DIR: &str = "dist";
+/// the containment root [`bundle::prepare_dir`] refuses to step outside of —
+/// `build/desktop`, derived from [`BuildLayout::desktop`] (any target works;
+/// all three share the same parent) rather than duplicating its `"desktop"`
+/// segment as a second literal.
+fn desktop_root() -> PathBuf {
+    BuildLayout::desktop(DesktopBundleTarget::Linux)
+        .parent()
+        .expect("BuildLayout::desktop always nests one segment under build/desktop")
+        .to_path_buf()
+}
 
 /// The bundle `frust build macos|windows|linux` requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +125,7 @@ pub enum DesktopBundleTarget {
 
 impl DesktopBundleTarget {
     /// The lowercase target name — the `frust build <name>` subcommand word,
-    /// and the `dist/<name>/` output directory segment.
+    /// and the `build/desktop/<name>/` output directory segment.
     pub fn as_str(self) -> &'static str {
         match self {
             DesktopBundleTarget::Macos => "macos",
@@ -145,11 +154,11 @@ impl DesktopBundleTarget {
         DesktopBundleTarget::host() == Some(self)
     }
 
-    /// The per-OS output root under the project: `dist/macos`, `dist/windows`,
-    /// `dist/linux`. The bundle itself lands inside it (see
-    /// [`BundleReport::root`]).
-    pub fn dist_dir(self, project_dir: &Path) -> PathBuf {
-        project_dir.join(DIST_DIR).join(self.as_str())
+    /// The per-OS output root under the project: `build/desktop/macos`,
+    /// `build/desktop/windows`, `build/desktop/linux`. The bundle itself lands
+    /// inside it (see [`BundleReport::root`]).
+    pub fn output_dir(self, project_dir: &Path) -> PathBuf {
+        project_dir.join(BuildLayout::desktop(self))
     }
 }
 
@@ -163,8 +172,8 @@ impl fmt::Display for DesktopBundleTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleReport {
     pub target: DesktopBundleTarget,
-    /// The bundle root: the `.app` directory (macOS), `dist/windows`
-    /// (Windows), or `dist/linux/<binary>` (Linux).
+    /// The bundle root: the `.app` directory (macOS), `build/desktop/windows`
+    /// (Windows), or `build/desktop/linux/<binary>` (Linux).
     pub root: PathBuf,
     /// The executable inside the bundle — what a launcher entry or a `dmg`
     /// packaging step points at.
@@ -173,14 +182,15 @@ pub struct BundleReport {
     /// container(s), launcher metadata). Directories are not listed.
     pub artifacts: Vec<PathBuf>,
     /// The entitlements file **this** build's `codesign` step was given: the
-    /// generated `dist/macos/<binary>.entitlements` when a plugin contributed
-    /// an entitlement, else the project's own `macos/app.entitlements` when it
-    /// ships one. `None` on every non-macOS target, on an unsigned build, and
-    /// on a build with no entitlements at all.
+    /// generated `build/desktop/macos/<binary>.entitlements` when a plugin
+    /// contributed an entitlement, else the project's own
+    /// `macos/app.entitlements` when it ships one. `None` on every non-macOS
+    /// target, on an unsigned build, and on a build with no entitlements at
+    /// all.
     ///
     /// Carried on the report so a later packaging pass signs with exactly what
     /// the bundle was signed with, rather than re-deriving it by probing the
-    /// dist path and trusting whatever file happens to sit there (see
+    /// output path and trusting whatever file happens to sit there (see
     /// [`installer::build_installer`]).
     pub entitlements: Option<PathBuf>,
     /// Everything worth telling a human that is not a failure — see
@@ -218,6 +228,15 @@ pub enum BundleNote {
     /// `.exe` carries are compiled in by the project's own
     /// `windows/build.rs` — nothing this pipeline writes can override them.
     WindowsVersionOverridesNotApplied,
+    /// The project's own `windows/build.rs` predates the `build/` layout: it
+    /// still embeds the legacy `windows/icon.ico` path rather than
+    /// `build/desktop/windows/icon.ico` (there is no `frust upgrade` to
+    /// regenerate it, docs/CLI_ARCHITECTURE.md's `build macos|windows|linux`
+    /// section). Rather than rewrite the project's own file, the icon this
+    /// run generated was *also* copied to the legacy path — one release's
+    /// compatibility window, mirroring `android_build`'s read fallback for a
+    /// project scaffolded before a template change.
+    LegacyWindowsIconAlsoWritten,
     /// The project's own `macos/Info.plist` (copied verbatim) declares a
     /// `CFBundleIdentifier` other than the one `frust.toml` resolves to. Not
     /// fatal: the copied plist wins, so the `.app` is simply identified by the
@@ -305,6 +324,12 @@ impl fmt::Display for BundleNote {
                 "`[windows] file-version`/`product-version` are compiled in by the project's own \
                  windows/build.rs — edit that file to change them"
             ),
+            BundleNote::LegacyWindowsIconAlsoWritten => write!(
+                f,
+                "windows/build.rs predates the build/ layout; icon also written to \
+                 windows/icon.ico — see docs/DEVELOPMENT.md \"Migrating an already-scaffolded \
+                 app to the build/ layout\""
+            ),
             BundleNote::IdentifierIdentityMismatch { plist, manifest } => write!(
                 f,
                 "`macos/Info.plist` declares CFBundleIdentifier '{plist}', but frust.toml \
@@ -373,7 +398,7 @@ pub enum DesktopBuildError {
     },
     #[error(
         "`{field}` is '{value}', which cannot be used as a file name — this value \
-         becomes a directory or file under `dist/`, so it must be a plain name: no \
+         becomes a directory or file under `build/desktop/`, so it must be a plain name: no \
          `/` or `\\`, no `..`, no leading `/`, not empty, no control characters. \
          Rename it in the manifest; it is refused rather than silently rewritten"
     )]
@@ -385,10 +410,10 @@ pub enum DesktopBuildError {
     UnsafeIconPath { icon: String, reason: &'static str },
     #[error(
         "refusing to prepare the bundle directory '{path}': it is not inside the \
-         project's own '{dist_root}' output directory — preparing a bundle directory \
-         deletes it recursively first, so a target outside `dist/` is never touched"
+         project's own '{output_root}' output directory — preparing a bundle directory \
+         deletes it recursively first, so a target outside `build/desktop/` is never touched"
     )]
-    UnsafeBundleDir { path: PathBuf, dist_root: PathBuf },
+    UnsafeBundleDir { path: PathBuf, output_root: PathBuf },
     #[error(
         "the project's own `macos/Info.plist` names `CFBundleExecutable` '{found}', but this \
          build put '{expected}' in `Contents/MacOS` — the .app would not launch. That plist is \
@@ -452,9 +477,32 @@ pub fn build(
     target: DesktopBundleTarget,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BundleReport, DesktopBuildError> {
+    build_with_env(runner, &RealEnv, project_dir, info, target, on_line)
+}
+
+/// [`build`], with `env` injected so `CARGO_TARGET_DIR` resolution (the
+/// `cargo` submodule's `resolve_target_dir`, reached through
+/// `locate_binary`) can be driven without touching the real process
+/// environment.
+///
+/// `pub` — unlike the crate's other `*_with_env` seams (`web_build`,
+/// `android_build`, `android_run`, `ios_build`), which stay private because
+/// only this crate's own tests need them — because `frust-cli`'s
+/// `commands::build` test module needs to exercise the desktop lane
+/// hermetically too (a test asserting on a fixture binary under a tempdir
+/// must not have the assertion depend on whether `CARGO_TARGET_DIR` happens
+/// to be set in the process running the test).
+pub fn build_with_env(
+    runner: &dyn ProcessRunner,
+    env: &dyn EnvLookup,
+    project_dir: &Path,
+    info: &BuildInfo,
+    target: DesktopBundleTarget,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<BundleReport, DesktopBuildError> {
     build_with_host(
         runner,
-        &RealEnv,
+        env,
         project_dir,
         info,
         target,
@@ -463,7 +511,7 @@ pub fn build(
     )
 }
 
-/// The testable core of [`build`]: `host` is injected (rather than read from
+/// The testable core of [`build_with_env`]: `host` is injected (rather than read from
 /// `cfg!`/[`DesktopBundleTarget::host`]) so all three assemblies can be
 /// exercised from one machine, and `env` is injected so `CARGO_TARGET_DIR`
 /// resolution can be driven without touching the real process environment.
@@ -508,14 +556,25 @@ fn build_with_contributions(
         reason: format!("{err:#}"),
     })?;
     // Path-checked as it is resolved: a `[desktop] name`/`identifier`, an
-    // `[app] name` or a `[package] name` that would step outside `dist/`
-    // refuses here, before the first directory is created (let alone removed).
+    // `[app] name` or a `[package] name` that would step outside
+    // `build/desktop/` refuses here, before the first directory is created
+    // (let alone removed).
     let config = DesktopConfig::resolve(project_dir, &manifest)?;
 
     let mut notes = Vec::new();
     // Windows only: the project's own `windows/build.rs` embeds
-    // `windows/icon.ico` into the `.exe`, so the icon has to exist BEFORE the
-    // compile — every other target's icon work happens at assembly time.
+    // `build/desktop/windows/icon.ico` into the `.exe`, so the icon has to
+    // exist BEFORE the compile — every other target's icon work happens at
+    // assembly time. `generate_exe_icon` writes straight into
+    // `build/desktop/windows` without clearing it first: that directory may
+    // still hold a previous, still-good bundle, and a compile failure below
+    // must leave it intact rather than emptied (the regression PROBLEM 2
+    // fixes — `prepare_dir` used to run here, before the compile, so a
+    // failing compile always lost the previous bundle). The directory is
+    // only cleared once the compile that reads this icon has actually
+    // succeeded — see the `bundle::prepare_dir_keeping` call beside
+    // `windows::assemble` below, which clears stale content while keeping
+    // the icon this run just generated (and the compile just read).
     let prebuilt = match target {
         DesktopBundleTarget::Windows => {
             windows::generate_exe_icon(project_dir, &config, &mut notes)
@@ -544,6 +603,15 @@ fn build_with_contributions(
             macos::assemble(runner, project_dir, info, &config, &binary, &mut notes)?
         }
         DesktopBundleTarget::Windows => {
+            // The compile above already succeeded (its `?` would have
+            // returned otherwise) and has read this run's icon, so it is now
+            // safe to clear whatever the directory held from a previous run.
+            // `prepare_dir_keeping` preserves exactly the icon
+            // `generate_exe_icon` wrote, so `assemble` still finds it to
+            // report as an artifact.
+            let windows_root = DesktopBundleTarget::Windows.output_dir(project_dir);
+            let keep: Vec<&Path> = prebuilt.iter().map(PathBuf::as_path).collect();
+            bundle::prepare_dir_keeping(&windows_root, project_dir, &keep)?;
             windows::assemble(project_dir, &config, &binary, prebuilt, &mut notes)?
         }
         DesktopBundleTarget::Linux => linux::assemble(project_dir, &config, &binary, &mut notes)?,
@@ -631,7 +699,7 @@ mod tests {
         }
 
         fn file(self, rel: &str, body: &str) -> Fixture {
-            let path = self.dir.join(rel);
+            let path = self.path(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, body).unwrap();
             self
@@ -659,12 +727,29 @@ mod tests {
             self
         }
 
+        /// Join `rel` onto the fixture root **one component at a time**
+        /// (`rel` is always written `/`-separated, even in a test's own
+        /// literal) rather than via a single `self.dir.join(rel)` push.
+        /// `PathBuf::join`/`push` never re-splits the string it is given, so
+        /// a single push of a multi-segment literal leaves those embedded
+        /// `/`s verbatim inside an otherwise backslash-separated path on
+        /// Windows — harmless for opening the file (Windows accepts either
+        /// separator), but it breaks byte-for-byte comparison against a path
+        /// the product code built one `.join()` call per component (e.g.
+        /// [`super::macos::codesign`]'s `--entitlements`/app-bundle
+        /// arguments, matched against a [`FakeProcessRunner`] registration
+        /// key by exact string). Splitting here keeps every fixture path
+        /// separator-identical to the product's own.
         fn path(&self, rel: &str) -> PathBuf {
-            self.dir.join(rel)
+            let mut path = self.dir.clone();
+            for component in rel.split('/') {
+                path.push(component);
+            }
+            path
         }
 
         fn read(&self, rel: &str) -> String {
-            fs::read_to_string(self.dir.join(rel)).unwrap_or_else(|e| panic!("reading {rel}: {e}"))
+            fs::read_to_string(self.path(rel)).unwrap_or_else(|e| panic!("reading {rel}: {e}"))
         }
     }
 
@@ -818,8 +903,8 @@ mod tests {
                         "{target} {value:?}: {err}"
                     );
                     assert!(
-                        !fixture.path("dist").exists(),
-                        "{target} {value:?}: wrote into dist/ anyway"
+                        !fixture.path("build/desktop").exists(),
+                        "{target} {value:?}: wrote into build/desktop/ anyway"
                     );
                 }
             }
@@ -848,23 +933,24 @@ mod tests {
                 matches!(err, DesktopBuildError::UnsafeDesktopIdentity { .. }),
                 "{value:?}: {err}"
             );
-            assert!(!fixture.path("dist").exists(), "{value:?}");
+            assert!(!fixture.path("build/desktop").exists(), "{value:?}");
         }
     }
 
     /// The defect in its concrete form: a display name climbing out of
-    /// `dist/macos` puts the `.app` — and the `remove_dir_all` that prepares
-    /// it — on top of an existing directory outside the build output. The
-    /// canary sits at exactly the path the unguarded code would have deleted.
+    /// `build/desktop/macos` puts the `.app` — and the `remove_dir_all` that
+    /// prepares it — on top of an existing directory outside the build
+    /// output. The canary sits at exactly the path the unguarded code would
+    /// have deleted.
     #[test]
-    fn a_display_name_climbing_out_of_dist_never_reaches_remove_dir_all() {
+    fn a_display_name_climbing_out_of_build_desktop_never_reaches_remove_dir_all() {
         let fixture = Fixture::new("escape-canary")
             .manifest(
                 "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
                  [desktop]\nname = \"../../victim\"\n",
             )
             .binary("my_app");
-        // `<project>/dist/macos/../../victim.app` is `<project>/victim.app`.
+        // `<project>/build/desktop/macos/../../victim.app` is `<project>/victim.app`.
         let victim = fixture.path("victim.app");
         fs::create_dir_all(victim.join("nested")).unwrap();
         fs::write(victim.join("nested/keep.txt"), b"precious").unwrap();
@@ -882,7 +968,7 @@ mod tests {
         );
         assert!(
             victim.join("nested/keep.txt").is_file(),
-            "the bundle assembly deleted a directory outside dist/"
+            "the bundle assembly deleted a directory outside build/desktop/"
         );
     }
 
@@ -905,7 +991,7 @@ mod tests {
                 matches!(err, DesktopBuildError::UnsafeIconPath { .. }),
                 "{value:?}: {err}"
             );
-            assert!(!fixture.path("dist").exists(), "{value:?}");
+            assert!(!fixture.path("build/desktop").exists(), "{value:?}");
         }
     }
 
@@ -923,13 +1009,16 @@ mod tests {
 
         let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
 
-        assert_eq!(report.root, fixture.path("dist/linux/my_app"));
-        assert_eq!(report.executable, fixture.path("dist/linux/my_app/my_app"));
+        assert_eq!(report.root, fixture.path("build/desktop/linux/my_app"));
+        assert_eq!(
+            report.executable,
+            fixture.path("build/desktop/linux/my_app/my_app")
+        );
         assert!(report.executable.is_file());
 
         // The project's own entry, copied verbatim under the identifier name
         // a `.desktop` install expects.
-        let entry = fixture.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        let entry = fixture.read("build/desktop/linux/my_app/dev.f0x.my_app.desktop");
         assert!(entry.contains("Name=My App"), "{entry}");
         assert!(entry.contains("Exec=my_app"), "{entry}");
         assert!(
@@ -942,7 +1031,7 @@ mod tests {
         // entry's `Icon=` key resolves.
         for size in [16, 32, 48, 64, 128, 256, 512] {
             let icon = fixture.path(&format!(
-                "dist/linux/my_app/share/icons/hicolor/{size}x{size}/apps/dev.f0x.my_app.png"
+                "build/desktop/linux/my_app/share/icons/hicolor/{size}x{size}/apps/dev.f0x.my_app.png"
             ));
             assert!(icon.is_file(), "missing {}", icon.display());
         }
@@ -970,7 +1059,7 @@ mod tests {
         assert!(report.notes.contains(&BundleNote::GeneratedDesktopEntry));
         // Identifier and display name both fall back: `[app]` name/org, via
         // the same derivation the scaffold uses.
-        let entry = fixture.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        let entry = fixture.read("build/desktop/linux/my_app/dev.f0x.my_app.desktop");
         assert!(entry.contains("Name=my_app"), "{entry}");
         assert!(entry.contains("Exec=my_app"), "{entry}");
         assert!(entry.contains("Icon=dev.f0x.my_app"), "{entry}");
@@ -1022,18 +1111,18 @@ mod tests {
 
         let report = run(&runner, &fixture, DesktopBundleTarget::Macos).unwrap();
 
-        assert_eq!(report.root, fixture.path("dist/macos/My App.app"));
+        assert_eq!(report.root, fixture.path("build/desktop/macos/My App.app"));
         assert_eq!(
             report.executable,
-            fixture.path("dist/macos/My App.app/Contents/MacOS/my_app")
+            fixture.path("build/desktop/macos/My App.app/Contents/MacOS/my_app")
         );
         assert!(report.executable.is_file());
         assert!(
             fixture
-                .path("dist/macos/My App.app/Contents/Resources/my_app.icns")
+                .path("build/desktop/macos/My App.app/Contents/Resources/my_app.icns")
                 .is_file()
         );
-        let plist = fixture.read("dist/macos/My App.app/Contents/Info.plist");
+        let plist = fixture.read("build/desktop/macos/My App.app/Contents/Info.plist");
         assert!(plist.contains("CFBundleExecutable"), "{plist}");
         assert!(!report.notes.contains(&BundleNote::GeneratedInfoPlist));
         assert!(report.notes.contains(&BundleNote::Unsigned));
@@ -1227,7 +1316,7 @@ mod tests {
         let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Macos).unwrap();
 
         assert!(report.notes.contains(&BundleNote::GeneratedInfoPlist));
-        let plist = fixture.read("dist/macos/My App.app/Contents/Info.plist");
+        let plist = fixture.read("build/desktop/macos/My App.app/Contents/Info.plist");
         for expected in [
             "<key>CFBundleName</key>\n\t<string>My App</string>",
             "<key>CFBundleExecutable</key>\n\t<string>my_app</string>",
@@ -1250,8 +1339,20 @@ mod tests {
             .binary("my_app")
             .file("macos/app.entitlements", "<plist><dict/></plist>");
 
-        let app = fixture.path("dist/macos/My App.app");
-        let entitlements = fixture.path("macos/app.entitlements");
+        let app = fixture.path("build/desktop/macos/My App.app");
+        // Built as `fixture.dir.join("macos/app.entitlements")` — one push of
+        // the same compound literal `contributions::apply`'s own
+        // `project_dir.join(PROJECT_ENTITLEMENTS_REL)` uses to resolve the
+        // project's own entitlements file — rather than through
+        // `Fixture::path`'s per-component join. `PathBuf::push` only ever
+        // inserts a separator at the *join boundary*; it never rewrites a
+        // `/` already embedded in the pushed argument itself, so a
+        // two-segment literal pushed as one argument keeps that inner `/`
+        // even on Windows. `Fixture::path`'s per-component splitting matches
+        // how `build_dirs::BuildLayout`'s own accessors (e.g. `app`, above)
+        // build a path — a different, unrelated convention this one
+        // literal does not follow.
+        let entitlements = fixture.dir.join("macos/app.entitlements");
         // A Developer ID identity is Apple-issued: both `--options runtime`
         // (Hardened Runtime, always) and `--timestamp` (a secure timestamp,
         // Apple-issued identities only) are present, in this exact order.
@@ -1290,7 +1391,7 @@ mod tests {
             )
             .binary("my_app");
 
-        let app = fixture.path("dist/macos/My App.app");
+        let app = fixture.path("build/desktop/macos/My App.app");
         let runner = cargo_ok().with(
             format!(
                 "codesign --force --sign My Self Signed --options runtime {}",
@@ -1358,12 +1459,16 @@ mod tests {
 
         let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
 
-        assert_eq!(report.root, fixture.path("dist/windows"));
-        assert_eq!(report.executable, fixture.path("dist/windows/my_app.exe"));
+        assert_eq!(report.root, fixture.path("build/desktop/windows"));
+        assert_eq!(
+            report.executable,
+            fixture.path("build/desktop/windows/my_app.exe")
+        );
         assert!(report.executable.is_file());
-        // The `.ico` lands in the PROJECT (where `windows/build.rs` reads it),
-        // not in the dist dir — and is reported as an artifact all the same.
-        let ico = fixture.path("windows/icon.ico");
+        // The `.ico` lands in the same output dir the `.exe` does (where
+        // `windows/build.rs` reads it from, relative to the project root),
+        // and is reported as an artifact all the same.
+        let ico = fixture.path("build/desktop/windows/icon.ico");
         assert!(ico.is_file());
         assert!(report.artifacts.contains(&ico), "{:?}", report.artifacts);
     }
@@ -1383,7 +1488,187 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DesktopBuildError::CargoSpawn { .. }), "{err}");
-        assert!(fixture.path("windows/icon.ico").is_file());
+        assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+    }
+
+    /// The icon and the `.exe` now share one output directory
+    /// (`build/desktop/windows`), generated at two different pipeline stages
+    /// (icon before the compile, `.exe` after it) — proving the second stage
+    /// does not wipe the first stage's file, while a genuinely stale file
+    /// from an earlier run still gets cleared **once the compile that
+    /// produced this run's replacement has actually succeeded**. PROBLEM 2:
+    /// a *failing* compile must leave the previous, still-good bundle
+    /// untouched instead — before this fix, `prepare_dir` ran before the
+    /// compile and would already have emptied the directory by the time
+    /// `cargo build` failed.
+    #[test]
+    fn windows_reassembly_clears_stale_content_but_keeps_this_runs_icon() {
+        let fixture = Fixture::new("windows-rebuild")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe");
+        run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+        let stale = fixture.path("build/desktop/windows/stale-from-a-previous-run");
+        fs::write(&stale, b"x").unwrap();
+
+        // A failing compile must not touch the directory at all — the stale
+        // file (standing in for the previous, still-valid bundle) survives,
+        // and so does the previous run's own exe.
+        let failing = FakeProcessRunner::new().with(
+            RELEASE_BUILD,
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error[E0308]: mismatched types".to_string(),
+            },
+        );
+        let err = run(&failing, &fixture, DesktopBundleTarget::Windows).unwrap_err();
+        assert!(
+            matches!(err, DesktopBuildError::CargoFailed { .. }),
+            "{err}"
+        );
+        assert!(
+            stale.exists(),
+            "a failing compile emptied the previous bundle before it even ran"
+        );
+        assert!(fixture.path("build/desktop/windows/my_app.exe").is_file());
+        assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+
+        // A succeeding compile clears the stale content and keeps this run's
+        // icon.
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+        assert!(!stale.exists());
+        assert!(report.executable.is_file());
+        assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+    }
+
+    /// PROBLEM 1 fix: a project scaffolded before the `build/` layout still
+    /// carries a `windows/build.rs` rendered from the old template, which
+    /// embeds the legacy `windows/icon.ico` path verbatim rather than
+    /// `build/desktop/windows/icon.ico` — there is no `frust upgrade` to
+    /// regenerate it. Without a dual write the `.exe` would silently lose its
+    /// icon while the bundle report claims one was generated.
+    #[test]
+    fn a_legacy_windows_build_rs_also_gets_the_icon_at_the_old_path() {
+        let legacy_build_rs = "fn main() {\n    \
+             let icon_path = std::path::Path::new(\"windows/icon.ico\");\n}\n";
+        let fixture = Fixture::new("windows-legacy-build-rs")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe")
+            .file("windows/build.rs", legacy_build_rs);
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert!(fixture.path("build/desktop/windows/icon.ico").is_file());
+        assert!(
+            fixture.path("windows/icon.ico").is_file(),
+            "legacy windows/icon.ico was not also written"
+        );
+        assert!(
+            fixture
+                .path(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER)
+                .is_file(),
+            "the mirror marker `clean` relies on was not written"
+        );
+        assert!(
+            report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// A symlink parked at the legacy path is never written through (that
+    /// would overwrite whatever it points at, outside the pipeline's own
+    /// output): no copy, no marker, no note.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_legacy_icon_path_is_never_written_through() {
+        let legacy_build_rs = "fn main() {\n    \
+             let icon_path = std::path::Path::new(\"windows/icon.ico\");\n}\n";
+        let fixture = Fixture::new("windows-legacy-symlink")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe")
+            .file("windows/build.rs", legacy_build_rs)
+            .file("elsewhere/target.ico", "user-owned bytes");
+        std::os::unix::fs::symlink(
+            fixture.path("elsewhere/target.ico"),
+            fixture.path("windows/icon.ico"),
+        )
+        .unwrap();
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(fixture.path("elsewhere/target.ico")).unwrap(),
+            "user-owned bytes"
+        );
+        assert!(
+            !fixture
+                .path(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER)
+                .exists()
+        );
+        assert!(
+            !report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// The inverse: a `windows/build.rs` already naming the new
+    /// `build/desktop/windows/icon.ico` path never gets a legacy copy or a
+    /// note — it isn't stale.
+    #[test]
+    fn a_new_windows_build_rs_gets_no_legacy_icon_copy() {
+        let new_build_rs = "fn main() {\n    \
+             let icon_path = std::path::Path::new(\"build/desktop/windows/icon.ico\");\n}\n";
+        let fixture = Fixture::new("windows-new-build-rs")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe")
+            .file("windows/build.rs", new_build_rs);
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert!(!fixture.path("windows/icon.ico").exists());
+        assert!(
+            !fixture
+                .path(crate::build_dirs::LEGACY_WINDOWS_ICON_MARKER)
+                .exists()
+        );
+        assert!(
+            !report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// A project with no `windows/build.rs` at all (still on defaults, or one
+    /// hand-deleted) is likewise left alone.
+    #[test]
+    fn a_project_with_no_windows_build_rs_gets_no_legacy_icon_copy() {
+        let fixture = Fixture::new("windows-no-build-rs")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app.exe");
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Windows).unwrap();
+
+        assert!(!fixture.path("windows/icon.ico").exists());
+        assert!(
+            !report
+                .notes
+                .contains(&BundleNote::LegacyWindowsIconAlsoWritten),
+            "{:?}",
+            report.notes
+        );
     }
 
     #[test]
@@ -1411,7 +1696,7 @@ mod tests {
         let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
         assert!(report.notes.contains(&BundleNote::IconNotConfigured));
         assert!(report.executable.is_file());
-        assert!(!fixture.path("dist/linux/my_app/share").exists());
+        assert!(!fixture.path("build/desktop/linux/my_app/share").exists());
     }
 
     #[test]
@@ -1468,7 +1753,9 @@ mod tests {
         );
         assert!(
             fixture
-                .path("dist/linux/my_app/share/icons/hicolor/512x512/apps/dev.f0x.my_app.png")
+                .path(
+                    "build/desktop/linux/my_app/share/icons/hicolor/512x512/apps/dev.f0x.my_app.png"
+                )
                 .is_file()
         );
     }
@@ -1506,12 +1793,12 @@ mod tests {
     fn reassembly_replaces_the_previous_bundle_contents() {
         let fixture = Fixture::new("rebuild").default_manifest().binary("my_app");
         run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
-        let stale = fixture.path("dist/linux/my_app/stale-from-a-previous-run");
+        let stale = fixture.path("build/desktop/linux/my_app/stale-from-a-previous-run");
         fs::write(&stale, b"x").unwrap();
 
         run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
         assert!(!stale.exists());
-        assert!(fixture.path("dist/linux/my_app/my_app").is_file());
+        assert!(fixture.path("build/desktop/linux/my_app/my_app").is_file());
     }
 
     /// Progress lines leave through `on_line` — the print-free contract's
@@ -1595,13 +1882,13 @@ mod tests {
                  [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
             )
             .binary("my_app");
-        let entitlements = fixture.path("dist/macos/my_app.entitlements");
+        let entitlements = fixture.path("build/desktop/macos/my_app.entitlements");
         let runner = cargo_ok().with(
             format!(
                 "codesign --force --sign Developer ID Application: Example --options runtime \
                  --entitlements {} --timestamp {}",
                 entitlements.display(),
-                fixture.path("dist/macos/My App.app").display()
+                fixture.path("build/desktop/macos/My App.app").display()
             ),
             Output {
                 success: true,
@@ -1622,7 +1909,7 @@ mod tests {
         )
         .unwrap();
 
-        let plist = fixture.read("dist/macos/My App.app/Contents/Info.plist");
+        let plist = fixture.read("build/desktop/macos/My App.app/Contents/Info.plist");
         assert!(
             plist.contains(
                 "<key>NSCameraUsageDescription</key>\n\t\
@@ -1639,9 +1926,9 @@ mod tests {
             "{plist}"
         );
 
-        // The entitlements are a generated dist artifact; the project ships
+        // The entitlements are a generated build artifact; the project ships
         // none, so nothing of the project's was read or written.
-        let merged = fixture.read("dist/macos/my_app.entitlements");
+        let merged = fixture.read("build/desktop/macos/my_app.entitlements");
         assert!(
             merged.contains("<key>com.apple.security.device.camera</key>"),
             "{merged}"
@@ -1705,10 +1992,14 @@ mod tests {
         );
         assert!(
             fixture
-                .read("dist/macos/My App.app/Contents/Info.plist")
+                .read("build/desktop/macos/My App.app/Contents/Info.plist")
                 .contains("NSCameraUsageDescription")
         );
-        assert!(fixture.path("dist/macos/my_app.entitlements").is_file());
+        assert!(
+            fixture
+                .path("build/desktop/macos/my_app.entitlements")
+                .is_file()
+        );
         assert!(
             lines
                 .iter()
@@ -1717,7 +2008,7 @@ mod tests {
         );
     }
 
-    /// A copied plist is merged exactly like a generated one — into the dist
+    /// A copied plist is merged exactly like a generated one — into the build
     /// copy, never the project's file — and a key the project already
     /// declares wins, however the plugin would have spelled it. The fixture
     /// nests a dictionary so the insertion anchor (the LAST `</dict>`) is
@@ -1746,7 +2037,7 @@ mod tests {
         )
         .unwrap();
 
-        let merged = fixture.read("dist/macos/My App.app/Contents/Info.plist");
+        let merged = fixture.read("build/desktop/macos/My App.app/Contents/Info.plist");
         assert!(merged.contains("<string>My own words</string>"), "{merged}");
         assert!(!merged.contains("Scan a document"), "{merged}");
         // The new key landed in the ROOT dict, after the nested one closed.
@@ -1794,7 +2085,11 @@ mod tests {
                 .notes
                 .contains(&BundleNote::EntitlementsSkippedUnsigned { count: 1 })
         );
-        assert!(!fixture.path("dist/macos/my_app.entitlements").exists());
+        assert!(
+            !fixture
+                .path("build/desktop/macos/my_app.entitlements")
+                .exists()
+        );
         assert!(report.notes.contains(&BundleNote::Unsigned));
         // Nothing was signed, so there is no entitlements file to report.
         assert_eq!(report.entitlements, None);
@@ -1844,7 +2139,7 @@ mod tests {
             &[row(&DESKTOP_MIME)],
         )
         .unwrap();
-        let entry = generated.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        let entry = generated.read("build/desktop/linux/my_app/dev.f0x.my_app.desktop");
         assert!(entry.contains("\nMimeType=image/png;\n"), "{entry}");
         assert!(
             entry.contains("# Handled file types (frust plugin: camera)"),
@@ -1868,7 +2163,7 @@ mod tests {
             &[row(&DESKTOP_CATEGORIES), row(&DESKTOP_MIME)],
         )
         .unwrap();
-        let entry = copied.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        let entry = copied.read("build/desktop/linux/my_app/dev.f0x.my_app.desktop");
         assert!(entry.contains("\nCategories=Utility;\n"), "{entry}");
         assert!(!entry.contains("Graphics;"), "{entry}");
         assert!(entry.contains("\nMimeType=image/png;\n"), "{entry}");
@@ -1906,7 +2201,7 @@ mod tests {
         );
         assert!(
             !fixture
-                .read("dist/linux/my_app/dev.f0x.my_app.desktop")
+                .read("build/desktop/linux/my_app/dev.f0x.my_app.desktop")
                 .contains("frust plugin")
         );
 
@@ -1977,16 +2272,18 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("real linux bundle build failed: {err}\n{lines:#?}"));
 
-        assert_eq!(report.root, fixture.path("dist/linux/my_app"));
+        assert_eq!(report.root, fixture.path("build/desktop/linux/my_app"));
         assert!(report.executable.is_file());
         assert!(
             fixture
-                .path("dist/linux/my_app/dev.f0x.my_app.desktop")
+                .path("build/desktop/linux/my_app/dev.f0x.my_app.desktop")
                 .is_file()
         );
         assert!(
             fixture
-                .path("dist/linux/my_app/share/icons/hicolor/256x256/apps/dev.f0x.my_app.png")
+                .path(
+                    "build/desktop/linux/my_app/share/icons/hicolor/256x256/apps/dev.f0x.my_app.png"
+                )
                 .is_file()
         );
 
@@ -2068,10 +2365,10 @@ mod tests {
             )
         });
 
-        assert_eq!(report.root, fixture.path("dist/linux/my_app"));
+        assert_eq!(report.root, fixture.path("build/desktop/linux/my_app"));
         assert!(report.executable.is_file());
         // The scaffolded entry is copied verbatim, under the identifier name.
-        let entry = fixture.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        let entry = fixture.read("build/desktop/linux/my_app/dev.f0x.my_app.desktop");
         assert!(entry.contains("Name=My App"), "{entry}");
         // The template's placeholder logo is below the icon pipeline's floor:
         // a note, and a bundle with no icon tree — never a failed build.

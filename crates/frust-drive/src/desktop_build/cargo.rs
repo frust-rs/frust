@@ -280,10 +280,18 @@ mod tests {
     fn cargo_target_dir_from_the_environment_wins() {
         let dir = temp_dir("env-target-dir");
         let runner = metadata_runner("/should/not/be/used");
-        let env = FakeEnv::new().set("CARGO_TARGET_DIR", "/elsewhere/target");
+        // A forward-slash-rooted value with no drive letter (`/elsewhere/target`)
+        // is not `Path::is_absolute()` on Windows — real usage always sets
+        // `CARGO_TARGET_DIR` to a drive-rooted path there, so use one to keep
+        // this fixture meaningful on every host.
+        #[cfg(windows)]
+        const ABSOLUTE_TARGET: &str = "C:\\elsewhere\\target";
+        #[cfg(not(windows))]
+        const ABSOLUTE_TARGET: &str = "/elsewhere/target";
+        let env = FakeEnv::new().set("CARGO_TARGET_DIR", ABSOLUTE_TARGET);
         assert_eq!(
             resolve_target_dir(&runner, &env, &dir),
-            PathBuf::from("/elsewhere/target")
+            PathBuf::from(ABSOLUTE_TARGET)
         );
         let _ = fs::remove_dir_all(&dir);
     }

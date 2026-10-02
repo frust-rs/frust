@@ -17,10 +17,10 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS         │  ! Android SDK/NDK                                             │▓▓               
    New project · │      ANDROID_NDK_HOME not set                                  │▓▓               
    Add plugin · a│  ✗ Xcode                                                       │▓▓               
-   Doctor · d    │      Xcode not found. Run: xcode-select --install              │▓▓               
+   Doctor · i    │      Xcode not found. Run: xcode-select --install              │▓▓               
    Build · b     │                                                                │▓▓               
-   Clean · c     │   Re-run     Close                                             │▓▓               
-   MCP off · M   │  r re-run · Esc close                                          │▓▓               
+   Clean · c     │   Re-run     Close     Toolchain setup                         │▓▓               
+   MCP off · M   │  r re-run · t toolchain · Esc close                            │▓▓               
    DAP off · D   ╰────────────────────────────────────────────────────────────────╯▓▓               
                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓               
                          │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

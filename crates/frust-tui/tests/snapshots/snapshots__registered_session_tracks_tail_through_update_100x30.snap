@@ -18,9 +18,9 @@ expression: "redact_clock(&render_to_string(100, 30, &state))"
  ACTIONS                 │   --:--:-- [app]    line 85                                              
    New project · n       │   --:--:-- [app]    line 86                                              
    Add plugin · a        │   --:--:-- [app]    line 87                                              
-   Doctor · d            │   --:--:-- [app]    line 88                                              
+   Doctor · i            │   --:--:-- [app]    line 88                                              
    Build · b             │   --:--:-- [app]    line 89                                              
-   Clean · c             │   --:--:-- [app]    line 90                                              
+   Clean                 │   --:--:-- [app]    line 90                                              
    MCP off · M           │   --:--:-- [app]    line 91                                              
    DAP off · D           │   --:--:-- [app]    line 92                                              
                          │   --:--:-- [app]    line 93                                              
@@ -31,4 +31,4 @@ expression: "redact_clock(&render_to_string(100, 30, &state))"
                          │   --:--:-- [app]    line 98                                              
                          │   --:--:-- [app]    line 99                                             █
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

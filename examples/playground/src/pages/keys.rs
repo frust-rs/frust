@@ -145,9 +145,9 @@ use frust::authoring::text::{
     FontFamily, GenericSlot, LineHeight, TextContext, TextLayout, TextStyle,
 };
 use frust::authoring::{
-    BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, ImeContentType,
-    ImeEvent, ImeState, InputEvent, Key, LayoutCtx, Modifiers, NamedKey, PaintCtx, PaintScene,
-    Point, PointerPhase, Rect, Size, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, EditCommand, EditingState, EventCtx, EventResult,
+    ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx, Modifiers, NamedKey, PaintCtx,
+    PaintScene, Point, PointerPhase, Rect, Size, View, Widget,
 };
 use frust::{
     AnyView, Axis, Color, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, RwSignal, Set,
@@ -567,6 +567,10 @@ fn named_key_name(named: NamedKey) -> &'static str {
         NamedKey::End => "end",
         NamedKey::Escape => "escape",
         NamedKey::Tab => "tab",
+        NamedKey::Copy => "copy",
+        NamedKey::Cut => "cut",
+        NamedKey::Paste => "paste",
+        NamedKey::Insert => "insert",
     }
 }
 
@@ -612,6 +616,7 @@ pub fn sentinel_ime_state(active: bool, caret: Option<Rect>) -> ImeState {
         editing: sentinel_editing_state(),
         caret,
         content_type: ImeContentType::NoSuggestions,
+        suppress_soft_keyboard: false,
     }
 }
 
@@ -1315,6 +1320,38 @@ impl KeyProbeWidget {
         EventResult::Handled
     }
 
+    /// An `EditCommand` routed through focus.
+    fn on_edit_command(&mut self, ctx: &mut EventCtx, cmd: &EditCommand) -> EventResult {
+        match cmd {
+            EditCommand::Paste(text) => {
+                let derived = classify_committed(text);
+                self.probe.borrow_mut().key_events += 1;
+                let stream_total_after = {
+                    let probe = self.probe.borrow();
+                    probe.stream_total + derived.bytes.len()
+                };
+                let for_log = (text.clone(), derived.clone());
+                self.absorb(ctx, &derived, move |n, republished| {
+                    format!(
+                        "{LOG_PREFIX} edit n={n} cmd=paste class={} detail={} bytes={} \
+                         republish={} stream_len={stream_total_after}",
+                        field(for_log.1.class.name()),
+                        field(for_log.1.detail.name()),
+                        hex_bytes(&for_log.1.bytes),
+                        u8::from(republished),
+                    )
+                });
+                EventResult::Handled
+            }
+            EditCommand::Copy | EditCommand::Cut | EditCommand::SelectAll => {
+                // These operations don't produce input bytes for a terminal.
+                // Copy and Cut only manage clipboard; SelectAll only affects UI selection.
+                // This widget focuses on character input and paste events.
+                EventResult::Ignored
+            }
+        }
+    }
+
     /// Re-shape the two zone labels (the toggle's carries the `active` flag).
     fn reshape(&mut self, ctx: &mut LayoutCtx, size: Size) {
         let active = self.probe.borrow().active;
@@ -1456,10 +1493,22 @@ impl Widget for KeyProbeWidget {
                 self.on_ime(ctx, e)
             }
             InputEvent::Scroll { .. } => EventResult::Ignored,
+            InputEvent::EditCommand(cmd) => {
+                if !ctx.has_focus() {
+                    return EventResult::Ignored;
+                }
+                self.on_edit_command(ctx, cmd)
+            }
             // Not user input — this widget queues no deferred callback for the
             // broadcast to run, so it simply falls through (see
             // `InputEvent::Housekeeping`'s own doc for the routing contract).
             InputEvent::Housekeeping => EventResult::Ignored,
+            // A broadcast for some portal owner elsewhere; this probe hosts none.
+            InputEvent::Overlay(_) => EventResult::Ignored,
+            // `InputEvent` grows (a scale gesture and file drops are planned);
+            // this probe handles only the variants named above and ignores the
+            // rest, like the broadcast arms.
+            _ => EventResult::Ignored,
         }
     }
 }

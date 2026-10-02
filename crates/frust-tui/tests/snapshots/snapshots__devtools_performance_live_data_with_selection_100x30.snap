@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │ rebuild 8.0ms 50%  layout 4.0ms 25%  paint 2.0ms 12%  encode 1.0ms 6%  ac
    New project · n       │                                                                          
    Add plugin · a        │                                                                          
-   Doctor · d            │                                                                          
+   Doctor · i            │                                                                          
    Build · b             │                                                                          
-   Clean · c             │                                                                          
+   Clean                 │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
                          │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: performance │ [1234][ ] tabs · Esc back to log        [mouse ✓]
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

@@ -13,9 +13,12 @@ off this index — read this plus the one that covers what you are touching:
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
   crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
-  `frust-shell-desktop`, `frust-shell-linux`, `frust`) stays `unsafe`-free — where
-  Masonry/xilem-style code would reach for `unsafe` downcasting, use trait upcasting instead:
-  bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
+  `frust-shell-desktop`, `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free —
+  where Masonry/xilem-style code would reach for `unsafe` downcasting, use trait upcasting
+  instead: bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`.
+  `frust-shell-web`'s frame waker in particular needs no sanctioned zone of its own: it is a
+  capture-nothing closure over a `thread_local` `EventLoopProxy` slot
+  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`). The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
   in one function/module with a `# Safety` doc comment stating the caller contract:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
@@ -66,21 +69,32 @@ off this index — read this plus the one that covers what you are touching:
     `unsafe impl Send/Sync` (serial-queue confinement, one `# Safety` note), and
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1** — a +0
     borrow proved unhonourable across the FFI boundary).
-  - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked`
-    for hot per-frame property setters, confined to one `# Safety`-documented helper
-    (`call_void_cached`, `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule)
-    with a per-call-site note pairing the cached id to its class/signature; cold setters use
-    the checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend
-    closes objc2's nullability-unannotated `unsafe` (not a memory-safety claim) behind
-    **safe** property wrappers, each `// SAFETY:`-noted at its one call site; the same arm's
-    `define_class!`/`extern_protocol!` factory/event-target registration and
-    `addTarget:action:` attach/detach are the other confined sites.
+  - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked` for hot
+    per-frame property setters, confined to one `# Safety`-documented helper (`call_void_cached`,
+    `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule); cold setters use the
+    checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend closes objc2's
+    nullability-unannotated `unsafe` (not a memory-safety claim) behind **safe** property wrappers,
+    each `// SAFETY:`-noted at its call site; the arm's `define_class!`/`extern_protocol!`
+    factory/event-target registration and `addTarget:action:` attach/detach are its other sites. Its
+    presentation arms add `apple_host::on_main`'s `MainThreadMarker::new_unchecked()`, proving
+    the `dispatch2` main-queue bounce, and `apple_alert`/`apple_sheet`/`appkit_alert`'s
+    `define_class!` controller and `block2` handlers — each `SAFETY`-noted.
   - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the
     Swift glue's singleton by runtime-only class name (no generated binding for it), plus two
     completion blocks (`RcBlock`) receiving raw `NSString` pointers whose validity only the
     glue's own contract establishes; each site is `# Safety`/`SAFETY`-noted and wraps its body
     in `catch_unwind` per the no-unwind rule below. Its `android` backend holds no `unsafe`
     block at all — only its two JNI exports' `#[unsafe(no_mangle)]` attributes.
+  - `frust-auth-session`'s `apple` backend — every `objc2-authentication-services` call is
+    `unsafe` in the binding: the deprecated `ASWebAuthenticationSession` initializer, its
+    presentation-context/ephemeral-session setters, and `-start`; the completion handler's raw
+    `NSURL`/`NSError` derefs plus one `extern` static read (`ASWebAuthenticationSessionErrorDomain`);
+    the `define_class!` presentation-anchor class (`#[unsafe(super(NSObject))]`/
+    `#[unsafe(method_id(…))]` plus two `unsafe impl` conformances, counted as one zone, and its
+    `msg_send![super(this), init]`); and one `MainThreadMarker::new_unchecked()` proving the
+    main-queue bounce. Each site is `# Safety`/`SAFETY`-noted and the completion body runs under
+    `catch_unwind`. Its `android` backend holds no `unsafe` block at all — only its one JNI
+    export's `#[unsafe(no_mangle)]` attribute, mirroring `frust-iap`'s Android backend above.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
@@ -183,23 +197,28 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
 
 ## Platform-View Conventions
 
-- **Mode B is a build-time host configuration, never an app Rust opt-in.** The embedding
-  module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s constructor
-  parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open var` —
-  different override mechanisms per platform, not a symmetric API) must drive the window
-  pixel format, the host's native-sibling z-order, and the
-  `declare_host_translucent_surface` call *together*, in the same branch — splitting them is
-  the exact defect that once shipped black rectangles. App Rust has no matching call; only the two shells' own
-  FFI-glue may declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
-- **Mode B paint contract: an unpainted region is a window, not a compositor bug.**
-  `platform_view` punches its own slot rect automatically; any other chrome region left
-  unpainted by a Mode B host shows raw OS content behind the frust surface — pair
-  translucency with an explicit opaque app-root background (the catalog's `AppBackground`
-  precedent).
-- **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is
-  OS-routed through the host's own view hierarchy, not `EventCtx` — there is no
-  hit-test/dispatch seam for a hosted view; don't add pointer handling to
-  `PlatformViewWidget`.
+- **Mode B is a build-time host configuration, never an app Rust opt-in, and Android/iOS only.** The
+  embedding module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s constructor
+  parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open var` — per-platform
+  mechanisms, not a symmetric API) must drive the window pixel format, the host's native-sibling z-order
+  and the `declare_host_translucent_surface` call *together*, in the same branch — splitting them is the
+  exact defect that once shipped black rectangles. App Rust has no matching call; only the two mobile
+  shells' own FFI glue may declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
+- **A desktop host is Mode A: `DesktopExtensions`' platform-view hooks, never an FFI poller.** It
+  resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate, leaves
+  rects and clips in **logical points** (no physical conversion, unlike the mobile FFI boundary), and
+  treats `on_platform_views_suspended` as remove-not-hide — the surface-recreate replay is the way back.
+- **A desktop-hosted `NSControl` owns its input; `interactive` means nothing there.** AppKit's
+  responder chain routes it, so `frust-shell-macos`' Mode-A host ignores `interactive` and shields —
+  add no shielding or hit-test forwarding for `plugins/native-widgets/src/appkit/`'s controls.
+- **Mode B paint contract: an unpainted region is a window, not a compositor bug.** `platform_view`
+  punches its own slot rect automatically; any other chrome region a Mode B host leaves unpainted shows
+  raw OS content — pair translucency with an opaque app-root background (the `AppBackground` precedent).
+- **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is OS-routed
+  through the host's own view hierarchy, not `EventCtx` — there is no hit-test/dispatch seam for a
+  hosted view; don't add pointer handling to `PlatformViewWidget`.
+- **A modal is never a slot.** An alert or sheet is host-owned, imperatively requested modal UI — no
+  `platform_view` slot, rect or Mode, and no slot inside it (`plugins/native-widgets/src/present/mod.rs`).
 
 ## GPU / Render-Engine Rules
 
@@ -257,18 +276,15 @@ for any future value crossing this boundary.
 
 ### Reaching into a design-system plugin's internals from a design-system crate
 
-**BAD:** a `templates/design-system/`-derived crate's `Cargo.toml` declaring a dependency on
+**BAD:** a `crates/frust-drive/templates/design-system/`-derived crate's `Cargo.toml` declaring a dependency on
 `frust-glyph`/`frust-material`/`frust-cupertino` to reach one convenience symbol, or depending on
 `frust-widgets`/`frust-core` directly instead of the facade.
 
 **GOOD:** depend on `frust::authoring` only (`frust`, `default-features = false`), and file a gap
-against `authoring` instead. The historical Cargo-feature-unification hazard this anti-pattern used
-to warn about (one `features = ["glyph"]` line silently turning a catalog back on for every
-dependent app) no longer applies — `frust` carries no catalog cargo feature at all; the three
-built-ins are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
+against `authoring` instead. `frust` carries no catalog cargo feature at all — the three built-ins
+are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
 Design-System Plugins). `design-system-sample`'s `cargo tree -e features -i frust -p sample-app`
-gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) now proves out-of-tree resolution realism rather than
-a catalog-off contract.
+gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) proves out-of-tree resolution realism.
 
 ### Printing directly from a `frust-drive` build/run core
 
@@ -283,8 +299,7 @@ against every drive core outside a small CLI-entry allowlist.
 
 ## Interaction Semantics
 
-Conventions for `Widget::event` implementations, followed by every interactive
-widget in `frust-widgets`:
+Conventions for `Widget::event` implementations in every interactive `frust-widgets` widget:
 
 - **Fire on up-inside, not down.** A press captures the pointer on `Down` and tracks a
   `pressed` visual on `Move`, but the callback fires only on `Up` and only if the release
@@ -299,13 +314,14 @@ widget in `frust-widgets`:
   ```
 
 - **Only `PointerButton::Primary` starts a press/capture/activation.** A secondary (or other
-  non-primary) press is a context gesture, not an activation — the sanctioned consumer is a
-  context-menu trigger, never the widget's own `on_press`/`on_toggle`/`on_change`. A barrier or
-  light-dismiss layer may still consume any button to close, but must not enter press state from a
-  non-primary one, while focus/IME session re-claims stay button-agnostic. Every widget tree
-  carries its own crate-private predicate for the rule — `frust_widgets::authoring::presses`,
-  `frust_shadcn::hit::presses`, and `press::presses` in each catalog crate — no cross-crate
-  dependency.
+  non-primary) press is a context gesture, not an activation — the sanctioned consumers are a
+  context-menu trigger and the baseline text input's selection toolbar (a secondary press on an
+  interactive `TextInput` claims focus, moves no caret, and toggles that toolbar), never the
+  widget's own `on_press`/`on_toggle`/`on_change`. A barrier or light-dismiss layer may still
+  consume any button to close, but must not enter press state from a non-primary one, while
+  focus/IME session re-claims stay button-agnostic. Every widget tree carries its own crate-private
+  predicate for the rule — `frust_widgets::authoring::presses`, `frust_shadcn::hit::presses`, and
+  `press::presses` in each catalog crate — no cross-crate dependency.
 
 - **Controlled components never self-mutate.** `Checkbox`/`Slider` report the *requested*
   value through `on_toggle`/`on_change` and leave `checked`/`value` untouched until the next
@@ -315,32 +331,31 @@ widget in `frust-widgets`:
   value win next frame.
 
 - **A container checks `InputEvent::is_broadcast()` before anything else.** A broadcast
-  (`InputEvent::Housekeeping`) is not user input: every routing helper forwards it to *every*
-  child unconditionally, ahead of the capture/focus/hit-test branches below, and always reports
-  `Ignored` regardless of what children returned — a broadcast is never consumed and never
-  short-circuited by a captured or focused child (`docs/CORE_ARCHITECTURE.md`'s event-routing data
-  flow).
+  (`InputEvent::Housekeeping`, `InputEvent::Overlay`) is not user input: every routing helper
+  forwards it to *every* child unconditionally, ahead of the capture/focus/hit-test branches below,
+  and always reports `Ignored` whatever children returned — it is never consumed and never
+  short-circuited by a captured or focused child, and only the owner whose `OverlayKey` an `Overlay`
+  quotes acts on it (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow).
 
-- **Focus routes by recorded path, like capture; `Key`/`Ime` events never hit-test.** A
-  container simply forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
-  (re)claim focus on the child it hits blurs the chain. **A structural container rebuild
-  clears capture and focus only where identity is actually lost** —
-  stable-prefix/key-matched, not a blanket clear. A reconciler that tears down (or type-swaps) a
-  focused pod cannot reach `RenderRoot` itself (no handle inside a `BuildCtx` pass), so it marks the
-  pod orphaned instead, but only *on the live focus chain* — gate the mark on
-  `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone, since a
-  hand-rolled container's own teardown/type-swap path can hit a stale flag under an
+- **Focus routes by recorded path, like capture; `Key`/`Ime`/`EditCommand` events never hit-test.**
+  A container simply forwards them to its focused child; a `Down` that doesn't (re)claim focus on
+  the child it hits blurs the chain. **A structural container rebuild clears capture and focus only
+  where identity is actually lost** — stable-prefix/key-matched, not a blanket clear. A reconciler
+  that tears down (or type-swaps) a focused pod cannot reach `RenderRoot` itself (no handle inside a
+  `BuildCtx` pass), so it marks the pod orphaned instead, but only *on the live focus chain* — gate
+  the mark on `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone,
+  since a hand-rolled container's own teardown/type-swap path can hit a stale flag under an
   already-blurred ancestor; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same
   rebuild that raised the mark, not merely "eventually" on a later event pass
-  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container
-  that publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
+  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container that
+  publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
   `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
-  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is
-  the page being **covered**. Two severing paths are known to be **uncovered** and are
-  registered rather than fixed: a type swap through a doubly-erased pod, which no reconciler
-  can observe (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item
-  lists, which never clear or mark a truncated item's own focus link
-  (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
+  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is the
+  page being **covered**. Two severing paths are known to be **uncovered** and are registered rather
+  than fixed: a type swap through a doubly-erased pod, which no reconciler can observe
+  (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item lists, which never
+  clear or mark a truncated item's own focus link (`focus-navbar-item-truncation-unmarked`). See
+  `docs/LIMITATIONS.md`.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
@@ -366,13 +381,11 @@ widget in `frust-widgets`:
 - **A self-sizing chrome widget consumes its own window inset exactly once, in its own
   `layout`, never pre-inset by its container** (`Scaffold`'s R-B4-inset: `app_bar`/`bottom_bar`
   self-size for top/bottom this way, so a bar that doesn't self-inset must wrap itself in
-  `safe_area(...)` instead — see `docs/WIDGETS_ARCHITECTURE.md`'s Scaffold flow).
+  `safe_area(...)` instead — see `docs/WIDGETS_ARCHITECTURE.md`'s Scaffold flow). `safe_area` removes what it consumed, so wrapping a self-insetting bar in it is harmless but leaves the band unpainted — pick one.
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear internal flags
-  (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A structural container
-  rebuild can synthesize a `Cancel` to a still-captured child delivered over a throwaway
-  `()` state (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — a handler reaching for real state
-  there panics on the `()` downcast, a deliberate tripwire.
+  (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A rebuild can synthesize a
+  `Cancel` to a still-captured child over a throwaway `()` state (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — reaching for real state there panics on the `()` downcast, a deliberate tripwire.
 
 - **A container that suppresses routing to its children must cancel their capture, clear
   their focus, and publish a cleared IME surface — in that order, with no bypass.** This
@@ -509,10 +522,10 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
   `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
   those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
-  Version-Pin Policy). Mechanically enforced
-  across `benchmarks/frust_bench` and the four in-repo example apps by
-  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt
-  ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
+  Version-Pin Policy). Mechanically enforced across `benchmarks/frust_bench` and the five
+  in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
+  `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
+  the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
@@ -580,7 +593,7 @@ shipped instance.
 - **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` catches
   plan-phase (dotted `9.B`, parenthesized, hyphenated `Phase-N`, "the Phase N"), plan-task
   (`task-NN`), findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
-  plan-document (`PLAN <tag>`, `workflow/plans/`), phase-adjacent `req N`, and `review finding
+  plan-document (`PLAN <tag>`, a plan-directory path), phase-adjacent `req N`, and `review finding
   <id>` refs — sanctioned citations (LIMITATIONS ids, R-rules, external rev pins) exempt only
   their match span, not the line. Bare internal PR numbers (vs. upstream wgpu's `#7057`) and
   bare plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed — still banned, swept on sight

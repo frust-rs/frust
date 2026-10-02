@@ -13,19 +13,24 @@ Every table below is reproducible from `benchmarks/raw/<device>/<app>/<sN>/`
 which runs `harness/stats.py` — the one shared statistics script — over both
 apps' raw lines. Percentiles are nearest-rank over non-skipped frames; the first
 2 of 12 runs are warm-up and excluded; miss counts are per frame attempted. Each
-device's "vs 2026-09-05" table is `harness/compare.py` over two of those JSON
-dumps, both regenerated from the committed raw trees; Δ positive = slower.
+device's delta table ("vs 2026-09-05"; "vs 2026-07-21" on the Xiaomi 12) is `harness/compare.py` over two of those JSON
+dumps, both regenerated from the committed raw trees; Δ positive = slower. Prose mentions of an
+earlier pass's own idle-memory figure are likewise recomputed from that pass's raw series in git
+history, not copied from its published text (`de265855` Pixel 5, `32597904` OnePlus 9, `15559808`
+Xiaomi 12).
 
-> **Post-optimization pass, 2026-09-06.** Every Frust series below for the
-> OnePlus 9, iPhone SE and Pixel 5 is a `--profile` build of `21076221` on the
-> frust-owned `frust-engine` strip pipeline with the render-thread split, and
-> replaces that device's 2026-09-05 series (PROTOCOL §2.6); each device section
-> carries a compact delta table against it. **All three devices ran the full
-> 16 blocks**, in one unattended `matrix.sh` session each: OnePlus 9 (USB,
-> 120 Hz pinned), iPhone SE (network `devicectl`), Pixel 5 (adb-over-Wi-Fi,
-> unpinned). Frust's `vello` renderer was deleted on 2026-09-02 and the
-> 2026-07-21 vello-era matrix retired with it; the Xiaomi 12 section below is
-> the condensed remnant of that pass and the one device still awaiting a re-run.
+> **Post-optimization pass, 2026-09-06.** Every Frust series below is a
+> `--profile` build of `21076221` on the frust-owned `frust-engine` strip
+> pipeline with the render-thread split. On the OnePlus 9, iPhone SE and Pixel 5
+> it replaces that device's 2026-09-05 series (PROTOCOL §2.6) and each section
+> carries a compact delta table against it; on the Xiaomi 12 it is the first
+> engine-renderer pass, replacing the 2026-07-21 vello-era series, and its
+> section carries a renderer-transition comparison instead. **All four devices
+> ran the full 16 blocks**, in one unattended `matrix.sh` session each: OnePlus 9
+> (USB, 120 Hz pinned), iPhone SE (network `devicectl`), Pixel 5 (adb-over-Wi-Fi,
+> unpinned), Xiaomi 12 (USB, 120 Hz pinned, 21:13–23:14 UTC after the other
+> three). Frust's `vello` renderer was deleted on 2026-09-02 and the 2026-07-21
+> vello-era matrix retired with it.
 > Toolchain for this pass: Rust 1.98.1 (pinned), Flutter 3.47.2 stable /
 > Dart 3.13.2, Xcode 26.2 (17C52), `wgpu` 30.0.1 (pinned).
 
@@ -157,9 +162,9 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 27–27; Fl
 | External cold start (`am start -W` TotalTime, median of kept launches) | ~159 ms (164/159/144; first of 4 discarded) | ~638 ms (611/651/638; first of 4 discarded) |
 | Framework-reported first-frame span | ~172 ms median (`first_frame_presented`, 161–186 across 12 launches; `adapter_ready` median 43 ms) | ~162 ms median (`first_frame_ms`, 158–216 across 12 launches) |
 | Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | 0 samples | 0 samples |
-| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~96.5 MB (96.0–96.8, 10 kept snapshots) | ~120.9 MB (117.9–129.0, 10 kept snapshots) |
+| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~94.2 MiB (93.8–94.6, 10 kept snapshots) | ~118.1 MiB (115.2–126.0, 10 kept snapshots) |
 
-**Frust starts ~4× faster and idles ~20 % lighter.** External cold start 159 vs 638 ms (`am start -W` TotalTime), idle TOTAL PSS 96.5 vs 120.9 MB. The framework first-frame spans are close on this device (172 vs 162 ms median) and, as always, are measured from each framework's own entry point. Neither app appeared in `dumpsys cpuinfo` during the idle window, i.e. idle CPU ~0 % for both.
+**Frust starts ~4× faster and idles ~20 % lighter.** External cold start 159 vs 638 ms (`am start -W` TotalTime), idle TOTAL PSS 94.2 vs 118.1 MiB. The framework first-frame spans are close on this device (172 vs 162 ms median) and, as always, are measured from each framework's own entry point. Neither app appeared in `dumpsys cpuinfo` during the idle window, i.e. idle CPU ~0 % for both.
 
 ### S8
 
@@ -193,7 +198,7 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 | S6 | 6.82→7.88 | +15.7% | 8.71→10.15 | +16.5% | 0.09%→0.37% | 88.8→88.4 |
 | S3 (overall) | 5.97→6.61 | +10.7% | 9.60→10.84 | +12.9% | 0.16%→0.53% | n/a→n/a |
 
-**Read this table with the control beside it, not on its own.** Frust moved +2.5…+15.7 % on p50 (S5 −1.1 %), but the **Flutter control on the same runs moved −39.5 % to +38.1 %** — S2 p50 22.65→31.28 (+38.1 %), S4 p95 18.55→6.74 (−63.7 %), S6 p50 16.94→10.25 (−39.5 %), S5 p50 6.27→8.39 (+33.9 %). An unchanged control app swinging by up to 64 % between the two sessions means this device's session-to-session variance is several times the Frust delta, so **no per-scenario conclusion should be drawn from the Frust column here**. Two environmental differences are documented and plausibly responsible: the 2026-09-05 session ran **on battery** (99 → 78 %) while this one ran **on AC for S1–S4 and frust S5 and on battery from flutter S5 onward** (100 → 91 %, charger disconnected mid-session), and the panel idled at **90 Hz** this session against 60 Hz last time — on an unpinned device both feed directly into the DVFS and refresh policy the frame loop runs under. Off the frame axis, where the metrics are not per-frame, the pass is better: external cold start 137→159 ms is worse but idle TOTAL PSS falls 104.7→96.5 MB (Frust) and 142.4→120.9 MB (Flutter). A clean re-measurement of this device with the charger state matched to the baseline is the way to settle the frame rows.
+**Read this table with the control beside it, not on its own.** Frust moved +2.5…+15.7 % on p50 (S5 −1.1 %), but the **Flutter control on the same runs moved −39.5 % to +38.1 %** — S2 p50 22.65→31.28 (+38.1 %), S4 p95 18.55→6.74 (−63.7 %), S6 p50 16.94→10.25 (−39.5 %), S5 p50 6.27→8.39 (+33.9 %). An unchanged control app swinging by up to 64 % between the two sessions means this device's session-to-session variance is several times the Frust delta, so **no per-scenario conclusion should be drawn from the Frust column here**. Two environmental differences are documented and plausibly responsible: the 2026-09-05 session ran **on battery** (99 → 78 %) while this one ran **on AC for S1–S4 and frust S5 and on battery from flutter S5 onward** (100 → 91 %, charger disconnected mid-session), and the panel idled at **90 Hz** this session against 60 Hz last time — on an unpinned device both feed directly into the DVFS and refresh policy the frame loop runs under. Off the frame axis, where the metrics are not per-frame: external cold start 136→159 ms is worse, and idle TOTAL PSS rose 88.5→94.2 MiB (Frust) and 110.3→118.1 MiB (Flutter) on both sides, so it is not a Frust-side change. A clean re-measurement of this device with the charger state matched to the baseline is the way to settle the frame rows.
 
 ### Methodology deviations (this device)
 
@@ -306,9 +311,9 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 35–35; Fl
 | External cold start (`am start -W` TotalTime, median of kept launches) | ~128 ms (141/128/126; first of 4 discarded) | ~422 ms (422/430/409; first of 4 discarded) |
 | Framework-reported first-frame span | ~95 ms median (`first_frame_presented`, 89–104 across 12 launches; `adapter_ready` median 36 ms) | ~79 ms median (`first_frame_ms`, 66–86 across 12 launches) |
 | Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | 0 samples | 0 samples |
-| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~116.8 MB (116.5–117.2, 10 kept snapshots) | ~157.4 MB (157.1–157.7, 10 kept snapshots) |
+| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~114.1 MiB (113.8–114.5, 10 kept snapshots) | ~153.7 MiB (153.4–154.0, 10 kept snapshots) |
 
-**Frust starts ~3.3× faster and idles ~26 % lighter.** External cold start 128 vs 422 ms (`am start -W` TotalTime), idle TOTAL PSS 116.8 vs 157.4 MB. Flutter reports the shorter framework first-frame span (79 vs 95 ms median), measured from each framework's own entry point, so the two spans bound different work; the external `am start` figure is the one measured identically on both sides. Neither app appeared in `dumpsys cpuinfo` during the idle window (0 samples both), i.e. idle CPU ~0 % for both.
+**Frust starts ~3.3× faster and idles ~26 % lighter.** External cold start 128 vs 422 ms (`am start -W` TotalTime), idle TOTAL PSS 114.1 vs 153.7 MiB. Flutter reports the shorter framework first-frame span (79 vs 95 ms median), measured from each framework's own entry point, so the two spans bound different work; the external `am start` figure is the one measured identically on both sides. Neither app appeared in `dumpsys cpuinfo` during the idle window (0 samples both), i.e. idle CPU ~0 % for both.
 
 ### S8
 
@@ -342,7 +347,7 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 | S6 | 8.19→8.44 | +3.0% | 8.90→9.16 | +2.9% | 0.12%→0.14% | 120.2→120.1 |
 | S3 (overall) | 5.57→5.66 | +1.7% | 12.16→12.26 | +0.8% | 2.14%→1.91% | n/a→n/a |
 
-Frust's per-frame cost sum is 2–5 % higher on every scenario while the presented cadence is unchanged at ~120.1 fps, and the Flutter control moved −1.7…+2.3 % on the same runs, so the control is stable and the Frust move is real but small. Two caveats bound how far it can be read: only the frust blocks carried an extra composited system layer (deviation 1), and Frust's `acquire_us` — the swapchain wait, which that layer would lengthen — accounts for most of the difference (S1 1.28→1.61 ms, S5 1.12→1.32, S6 0.96→1.21). **S5 is not a regression at all**: it is +2.0 % while compositing an image column the 2026-09-05 capture dropped roughly half of. Off the frame axis the pass is faster: external cold start 137→128 ms, framework first frame 105→95 ms, `adapter_ready` 50→36 ms. Idle TOTAL PSS rose 104.7→116.8 MB (Frust) and 142.4→157.4 MB (Flutter), i.e. on both sides, so it is not a Frust-side change.
+Frust's per-frame cost sum is 2–5 % higher on every scenario while the presented cadence is unchanged at ~120.1 fps, and the Flutter control moved −1.7…+2.3 % on the same runs, so the control is stable and the Frust move is real but small. Two caveats bound how far it can be read: only the frust blocks carried an extra composited system layer (deviation 1), and Frust's `acquire_us` — the swapchain wait, which that layer would lengthen — accounts for most of the difference (S1 1.28→1.61 ms, S5 1.12→1.32, S6 0.96→1.21). **S5 is not a regression at all**: it is +2.0 % while compositing an image column the 2026-09-05 capture dropped roughly half of. Off the frame axis the pass is faster: external cold start 137→128 ms, framework first frame 105→95 ms, `adapter_ready` 50→36 ms. Idle TOTAL PSS rose 102.2→114.1 MiB (Frust) and 139.0→153.7 MiB (Flutter), i.e. on both sides, so it is not a Frust-side change.
 
 **The 8.33 ms column counts cost, not vsync misses** — under the render-thread split `total_us` is a two-thread cost sum, and this device's S1 is the worked example in the criteria section above (8.55 ms p50, 63.05 % "over budget", 120.1 fps presented).
 
@@ -513,44 +518,75 @@ The per-frame work row is unchanged within noise on four of six scenarios (−0.
 
 ---
 
-## Device: Xiaomi 12 (cupid, Snapdragon 8 Gen 1 / Adreno 730) — headline-tier Android — **vello-era pass, pending re-run**
+## Device: Xiaomi 12 (cupid, Snapdragon 8 Gen 1 / Adreno 730) — headline-tier Android
 
-**Status:** run 2026-07-21 on the **vello renderer (retired 2026-09-02, PROTOCOL §2.6)** — the
-device was not at desk for the 2026-09-05 engine pass, so this section stands as the only
-headline-tier data point until it is re-run. 12 runs × 30 s per scenario per app (S7 60 s),
-first 2 discarded. **Frust = RELEASE build of `a55e09e` (pre-§2.5 methodology, instrumentation
-compiled in via the `perf.rs` touch recipe); Flutter 3.44.2 profile.** Raw series (v2 format)
-committed under `raw/xiaomi12/frust_release/<sN>/` and `raw/xiaomi12/flutter/<sN>/`. Tables
-regenerated from those raws with `harness/summarize.py` on 2026-09-05; the original narrative
-section is in git history (`git show f64be636:benchmarks/RESULTS.md`).
+**Status:** run 2026-09-06 21:13–23:14 UTC, **12 runs × 30 s per scenario per app (S7: 60 s runs), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** **Frust = PROFILE build of `21076221`** (engine renderer with the render-thread split; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4 — the same binary the other three device sections ran), **Flutter = profile build** (`flutter build … --profile`, Flutter 3.47.2). Raw series under `raw/xiaomi12/frust_profile/<sN>/` and `raw/xiaomi12/flutter/<sN>/` (run-NN.log + run-NN.pss_before/after.txt, stats.txt; S7 adds cpuinfo.txt/coldstart.txt). One unattended `matrix.sh` session, all 16 blocks captured and graded `ok` on attempt 1. **This is the device's first engine-renderer pass; it replaces the 2026-07-21 vello-era release-build pass** (its `frust_release` raws left `benchmarks/raw/` with this pass — `git show 0b4b79c6:benchmarks/raw/xiaomi12/`; original narrative `git show f64be636:benchmarks/RESULTS.md`). Of the 2026-09-06 success criteria, the two with a device analogue hold here as well: S5 `skipped=0` over the whole column and `create 1k` 352 frames; S1 `gpu_main` reads 5.20 ms (the 5.0 ms bar was set for the OnePlus 9).
 
-- Chipset: Snapdragon 8 Gen 1 (SM8450) / Adreno 730; model 2201123G (cupid), serial redacted
-- OS: LineageOS 23.2 (Android 16, userdebug) — not stock MIUI/HyperOS
-- Display: 1080×2400, 120 Hz mode active for the whole session; both budgets reported. High-refresh
-  opt-in on both apps (Frust `Surface.setFrameRate`, Flutter `flutter_displaymode`)
-- Controls: brightness 128 fixed, airplane on, Wi-Fi/BT off, `dumpsys battery unplug` spoof per
-  block, thermal gate ≤38 °C never stalled (35.1 → 32.5 °C), visual gate passed on every scenario
-  incl. S5 edge-to-edge parity, all 192 logs whitelist-clean
+- Chipset: Snapdragon 8 Gen 1 (SM8450, board `taro`) / Adreno 730, GLES driver V@0615.95. Model: Xiaomi 12 2201123G (serial redacted).
+- OS: LineageOS 23.2 — Android 16, build `BP4A.251205.006`, SDK 36; the fingerprint still reports the stock `cupid_global` Android 15 build (`OS3.0.3.0`). Not MIUI/HyperOS.
+- Display: 1080×2400 @ ~422 dpi; modes id 0 = 60 Hz, id 1 = 120 Hz (active at session start). **Both `min_refresh_rate`/`peak_refresh_rate` pinned to 120 for every block** (`--pin-refresh 120`, read-back `peak=120.0 min=120.0`, restored to `Infinity`/`0.0` afterwards); Frust's in-app FPS readout showed 120 in S5. Both budgets (16.67 / 8.33 ms) reported — the 8.33 ms column counts cost sums, not missed vsyncs (see the OnePlus 9 note "What the 8.33 ms column no longer means"); `platform-view period_us` read 8.23–8.24 ms at p50 and p95 on every frame scenario, i.e. the presented cadence is the 120 Hz period.
+- High-refresh opt-in engaged on both apps (§6): Frust `Surface.setFrameRate`, Flutter `flutter_displaymode`. Achieved (active frames ÷ 300 s): Frust ~120.5–120.8 fps in every frame scenario; Flutter ~105.3 (S1), ~111.1 (S5), ~119.8–119.9 (S4/S6); S2/S3 Flutter paint is event-driven.
+- Brightness fixed 128/255, auto-brightness off (`device_state.sh`); airplane on (read-back 1), Wi-Fi off, Bluetooth off (both on before the session and restored after), battery saver off, screen timeout 30 min, `svc power stayon true` during blocks; all restored and read back at 23:13 UTC.
+- Charger: USB/AC-connected throughout (`AC powered: true` at both ends of the session, real level 45 % → 100 %, full from the S7 blocks on); `dumpsys battery unplug` spoofed on-battery state before every block; the `--min-level 30` guard never waited.
+- Thermal: gate ceiling 38 °C / 120 s cooldown before every block. Session start 31.9 °C, peak 39.0 °C (after the frust S2 block), end 29.4 °C. **Two cooldown timeouts** (deviation 2); no other block stalled. 30 s blocks 383–385 s wall (506 / 505 s for the two that waited), 60 s S7 blocks 743 s each.
+- Toolchain: Rust 1.98.1 (pinned), `wgpu` 30.0.1 (pinned); Flutter 3.47.2 stable / Dart 3.13.2. Frust APK arm64-only, 12,008,167 B (md5 1715cb35…); Flutter APK fat profile build, 70,462,089 B (md5 43132929…) — packaged differently, not a size comparison (see the App size section). Both installed fresh by the driver, md5 re-verified.
+- Visual gate (driver screencap per block, all 16 reviewed by bottom-band luma, the frust S5 frame inspected): **content PASS on every block, both apps; no soft keyboard or other foreign window on any capture** (bottom-band luma 19–54 on fifteen blocks; the frust S5 capture's 114 is its own image column). **S5 geometry PASS — Frust's column is edge-to-edge with every visible cell fully decoded.**
+- Sanitization: driver staging `RAW_OK` (192 run logs, 384 PSS snapshots, 16 stats.txt, S7 cpuinfo/coldstart), whitelist self-check passed.
 
 ### S1
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (release) | 4.87 | 5.77 | 6.72 | 63.52 | 35 (0.10%) | 212 (0.59%) | 35,902 (~119.7 fps avg) |
-| Flutter (profile) | 9.03 | 18.59 | 22.48 | 38.63 | 1,759 (5.44%) | 26,699 (82.62%) | 32,315 (~107.7 fps avg) |
+| Frust (profile) | 7.85 | 10.18 | 11.28 | 63.25 | 40 (0.11%) | 13,916 (38.49%) | 36,155 (~120.5 fps avg) |
+| Flutter (profile) | 9.45 | 19.92 | 23.80 | 36.40 | 1,802 (5.70%) | 28,145 (89.06%) | 31,601 (~105.3 fps avg) |
 
+Frust pass p50 (ms): rebuild 0.17, layout 0.00, paint 0.39, encode 0.05, acquire 1.40, submit 5.99; layout_us>0 on 46/36,155 frames; GPU (gpu_q=1 on 36,115) total p50/p95 5.25/5.37 ms
 
-**Frust wins S1 decisively** — 4.9 ms median at a locked ~120 fps vs Flutter's 9.0 ms and 5.4 % of frames past the 60 Hz budget. Neither field settled within any 30 s window (0 skipped frames on both).
+**Frust wins S1** — p50 7.85 vs 9.45 ms, p95 10.18 vs 19.92, p99 11.28 vs 23.80, and 0.11 % vs 5.70 % of frames over the 60 Hz budget, at ~120.5 vs ~105.3 fps; Flutter's worst single frame is lower (36.40 vs 63.25 ms — Frust's worst is the launch frame of each run). The pass breakdown puts 5.99 ms of Frust's 7.85 ms in submit and 5.25 ms of GPU pass time under it, `gpu_main` p50 5.20 ms — S1 is GPU-bound on this device too, 1.2 ms lighter than the Adreno 660's 6.37 ms.
 
 ### S2
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (release) | 10.35 | 16.40 | 18.96 | 52.60 | 825 (4.23%) | 14,390 (73.73%) | 19,518 (~65.1 fps avg) |
-| Flutter (profile) | 13.57 | 23.21 | 26.68 | 38.28 | 1,605 (24.85%) | 5,186 (80.28%) | 6,460 (~21.5 fps avg) |
+| Frust (profile) | 7.09 | 9.05 | 9.68 | 64.85 | 17 (0.05%) | 5,465 (15.09%) | 36,222 (~120.7 fps avg) |
+| Flutter (profile) | 14.79 | 25.41 | 28.57 | 41.10 | 1,995 (33.93%) | 5,231 (88.98%) | 5,879 (~19.6 fps avg) |
 
+Frust pass p50 (ms): rebuild 0.07, layout 1.37, paint 0.20, encode 0.05, acquire 0.10, submit 5.54; layout_us>0 on 36,219/36,222 frames; GPU (gpu_q=1 on 36,182) total p50/p95 3.07/3.16 ms
 
-**Frust wins S2** — median 10.4 vs 13.6 ms, p95 16.4 vs 23.2 ms, ~6× lower 60 Hz-miss rate. Flutter's smaller absolute counts reflect its event-driven paint (~3× fewer frames), not better per-frame cost.
+**Frust wins S2 decisively** — p50 7.09 vs 14.79 ms, p95 9.05 vs 25.41, p99 9.68 vs 28.57, and 0.05 % vs 33.93 % of frames over the 60 Hz budget. Frust holds ~120.7 fps continuously while Flutter's paint is event-driven (~19.6 fps of painted frames), so the fps columns are not comparable; the per-frame figures are. Frust re-lays out every frame here (`layout_us>0` on 36,219/36,222) at 1.37 ms median; GPU pass time 3.07 ms.
+
+### S4
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 3.43 | 7.89 | 8.95 | 75.06 | 12 (0.03%) | 1,085 (3.00%) | 36,202 (~120.7 fps avg) |
+| Flutter (profile) | 3.92 | 5.64 | 5.92 | 66.49 | 1 (0.00%) | 10 (0.03%) | 35,969 (~119.9 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.18, layout 0.00, paint 0.08, encode 0.02, acquire 0.11, submit 3.01; layout_us>0 on 27/36,202 frames; GPU (gpu_q=1 on 36,162) total p50/p95 0.71/0.77 ms
+
+**Split on S4.** Frust takes the median (3.43 vs 3.92 ms); Flutter takes the tail (p95 5.64 vs 7.89, p99 5.92 vs 8.95) — both at ~120 fps and both essentially never over the 60 Hz budget (0.00 % vs 0.03 %). Frust's GPU pass time is 0.71 ms; the frames that overlap the JSON parse windows set its tail.
+
+### S5
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 6.57 | 7.16 | 7.38 | 66.18 | 10 (0.03%) | 55 (0.15%) | 36,227 (~120.8 fps avg) |
+| Flutter (profile) | 5.93 | 10.31 | 12.33 | 26.67 | 26 (0.08%) | 6,561 (19.69%) | 33,326 (~111.1 fps avg) |
+
+Frust pass p50 (ms): rebuild 1.38, layout 0.06, paint 0.10, encode 0.02, acquire 0.11, submit 4.86; layout_us>0 on 36,226/36,227 frames; GPU (gpu_q=1 on 36,187) total p50/p95 5.51/5.63 ms
+
+**Split: Flutter the median, Frust the tail and the cadence.** Flutter p50 5.93 vs 6.57 ms; Frust p95 7.16 vs 10.31, p99 7.38 vs 12.33, 60 Hz miss 0.03 % vs 0.08 %, ~120.8 vs ~111.1 fps. **The capture composites the whole image column**: 35,095 `frust-perf img` lines across the kept runs report `skipped=0` on every one, with 55,422 evictions and up to 63 resident images against the mobile-tier 1024×1024×4 atlas (`transient_saves_memory=true` on the Adreno 730, the same tier as the OnePlus 9) — PROTOCOL §7's content gate is met with eviction-only degradation. Frust's rebuild is 1.38 ms median, which is that re-upload traffic; GPU pass time 5.51 ms.
+
+### S6
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 6.38 | 8.91 | 10.77 | 79.65 | 44 (0.12%) | 3,498 (9.67%) | 36,180 (~120.6 fps avg) |
+| Flutter (profile) | 7.82 | 10.05 | 10.90 | 14.45 | 0 (0.00%) | 13,057 (36.34%) | 35,930 (~119.8 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.06, layout 0.08, paint 0.12, encode 0.05, acquire 0.06, submit 5.90; layout_us>0 on 36,180/36,180 frames; GPU (gpu_q=1 on 36,140) total p50/p95 1.19/1.29 ms
+
+**Frust wins S6 on the median and p95; Flutter on the tail's end.** p50 6.38 vs 7.82 ms, p95 8.91 vs 10.05, p99 10.77 vs 10.90; Flutter never misses the 60 Hz budget (0.00 % vs 0.12 %) and its worst frame is 14.45 vs 79.65 ms (Frust's again the launch frame). Frust's GPU pass time is 1.19 ms median — the cost here is shaping and upload on the CPU side, not the strip pipeline.
 
 ### S3
 
@@ -558,177 +594,702 @@ Per-op reconcile-frame timing (`s3-*` sub-markers aggregated across all cycles i
 
 | Op | Frust p50/p95/p99/worst (ms) | n frames | Flutter p50/p95/p99/worst (ms) | n frames |
 |---|---|---|---|---|
-| create 1k | 7.25 / 8.64 / 48.70 / 50.03 | 326 | **not captured** | 0 |
-| create 10k | 13.62 / 21.52 / 23.84 / 25.36 | 325 | **not captured** | 0 |
-| update every 10th of 10k | 10.90 / 13.53 / 18.99 / 20.18 | 324 | **not captured** | 0 |
-| swap | 10.03 / 11.55 / 16.71 / 19.60 | 321 | **not captured** | 0 |
-| clear | 11.41 / 12.81 / 20.14 / 23.26 | 320 | **not captured** | 0 |
+| create 1k | 12.37 / 18.39 / 25.48 / 51.36 | 352 | 10.10 / 10.17 / 10.17 / 10.17 | 2 |
+| create 10k | 12.93 / 23.00 / 25.31 / 26.16 | 360 | **not captured** | 0 |
+| update every 10th of 10k | 10.73 / 18.38 / 21.02 / 21.55 | 359 | **not captured** | 0 |
+| swap | 10.22 / 16.64 / 19.01 / 20.79 | 354 | **not captured** | 0 |
+| clear | 10.34 / 20.08 / 21.15 / 21.35 | 349 | **not captured** | 0 |
 
 Overall S3 frame series (whole capture incl. settle gaps — continuous vs event-driven paint, not apples-to-apples):
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (release) | 4.87 | 9.99 | 13.17 | 50.03 | 85 (0.26%) | 3,018 (9.36%) | 32,255 (~107.5 fps avg) |
-| Flutter (profile) | 13.81 | 30.07 | 34.64 | 39.58 | 327 (35.47%) | 784 (85.03%) | 922 (~3.1 fps avg) |
+| Frust (profile) | 4.83 | 8.59 | 15.10 | 64.30 | 174 (0.49%) | 1,810 (5.11%) | 35,444 (~118.1 fps avg) |
+| Flutter (profile) | 14.50 | 30.12 | 35.73 | 39.34 | 344 (37.55%) | 854 (93.23%) | 916 (~3.1 fps avg) |
 
-Cycle health — Frust (release) `s3-create1k` reopens per kept run: 32–33; Flutter (profile) `s3-create1k` reopens per kept run: 19–19.
+Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 36–36; Flutter (profile) `s3-create1k` reopens per kept run: 19–19.
 
-Frust's per-op reconcile frames all sit inside one 60 Hz frame except create-10k (13.6 ms); **Flutter's per-op capture landed zero frames in every sub-marker window** (the `addTimingsCallback` async-delivery gap seen on every device), so no cross-app per-op comparison exists. No overall winner is declared from the whole-series rows (continuous vs event-driven paint).
-
-### S4
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (release) | 4.50 | 5.49 | 6.08 | 59.36 | 12 (0.03%) | 41 (0.11%) | 36,150 (~120.5 fps avg) |
-| Flutter (profile) | 3.64 | 5.41 | 5.72 | 15.99 | 0 (0.00%) | 16 (0.04%) | 35,999 (~120.0 fps avg) |
-
-
-**Roughly a tie, Flutter marginally smoother** — both hold ~120 fps while the parse runs off the UI thread; Flutter's tail is tighter (worst 16.0 vs 59.4 ms).
-
-### S5
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (release) | 5.72 | 12.29 | 13.42 | 53.16 | 35 (0.13%) | 7,968 (29.99%) | 26,572 (~88.6 fps avg) |
-| Flutter (profile) | 5.29 | 9.29 | 11.21 | 19.27 | 2 (0.01%) | 4,218 (12.17%) | 34,671 (~115.6 fps avg) |
-
-
-**Flutter wins S5 narrowly at the median** (5.3 vs 5.7 ms) and clearly at the tail (p95 9.3 vs 12.3 ms); Frust settled at ~89 fps vs Flutter's ~116 fps under the full-width cell geometry.
-
-### S6
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (release) | 6.21 | 11.20 | 12.58 | 50.63 | 50 (0.19%) | 8,081 (30.60%) | 26,410 (~88.0 fps avg) |
-| Flutter (profile) | 7.43 | 9.72 | 10.69 | 13.35 | 0 (0.00%) | 9,724 (27.08%) | 35,914 (~119.7 fps avg) |
-
-
-**Split — Frust wins the median (6.2 vs 7.4 ms), Flutter wins the tail** (p95 9.7 vs 11.2 ms, worst 13.4 vs 50.6 ms, zero 60 Hz misses).
+**Frust wins S3 on every comparable axis.** All five Frust reconcile ops land frames (349–360 each) through the frame-indexed markers, with per-op medians of 10.2–12.9 ms (`create 1k` 12.37) — inside two 120 Hz periods. Flutter lands 2 frames, on `create 1k` alone (its `addTimingsCallback` delivery gap), so the per-op columns are not a like-for-like race. On the overall series Frust is at 4.83 ms p50 / 8.59 p95 over 35,444 painted frames against Flutter's 14.50 / 30.12 over 916 — continuous vs event-driven paint, so read the per-op table for the reconcile cost and the overall table only for cadence.
 
 ### S7
 
-| Metric | Frust (release) | Flutter (profile) |
+| Metric | Frust (profile) | Flutter (profile) |
 |---|---|---|
-| External cold start (`am start -W` TotalTime, median of kept launches) | not captured | not captured |
-| Framework-reported first-frame span | ~87 ms median (`first_frame_presented`, 82–104 across 12 launches; `adapter_ready` median 33 ms) | ~64 ms median (`first_frame_ms`, 49–71 across 12 launches) |
-| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | n/a | n/a |
-| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~53.7 MB (53.4–54.0, 10 kept snapshots) | ~89.6 MB (86.3–90.7, 10 kept snapshots) |
+| External cold start (`am start -W` TotalTime, median of kept launches) | ~107 ms (108/105/107; first of 4 discarded) | ~379 ms (379/390/368; first of 4 discarded) |
+| Framework-reported first-frame span | ~97 ms median (`first_frame_presented`, 84–110 across 12 launches; `adapter_ready` median 35 ms) | ~72 ms median (`first_frame_ms`, 67–90 across 12 launches) |
+| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | 0 samples | ~0.3% avg (max 0.3%, 2 samples) |
+| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~54.9 MiB (54.6–55.1, 10 kept snapshots) | ~85.2 MiB (84.9–85.4, 10 kept snapshots) |
 
-**Frust wins S7 on memory** (~54 vs ~90 MB idle PSS); Flutter's self-reported first frame is earlier (64 vs 87 ms). External cold start was measured post-matrix in the original pass (Frust ~150 ms vs Flutter ~300 ms class, see git history); idle CPU read 0 % on both.
+**Frust starts ~3.5× faster and idles ~36 % lighter.** External cold start 107 vs 379 ms (`am start -W` TotalTime), idle TOTAL PSS 54.9 vs 85.2 MiB. Flutter reports the shorter framework first-frame span (72 vs 97 ms median), measured from each framework's own entry point, so the two spans bound different work; the external `am start` figure is the one measured identically on both sides. Frust did not appear in `dumpsys cpuinfo` during the idle window (0 samples) and Flutter averaged ~0.3 % over 2 samples — idle CPU ~0 % for both.
 
 ### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
 
-| Op | Frust (release) (µs/call) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
+| Op | Frust (profile) (µs/call) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
 |---|---|---|---|
-| write bool | 97 | 288 | n/a |
-| write i64 | 75 | 285 | n/a |
-| write f64 | 70 | 300 | n/a |
-| write String | 68 | 228 | n/a |
-| write Vec\<String\> | 69 | 231 | n/a |
-| read (unique key, forces channel) bool | 20 | 5133† | ~0 |
-| read (unique key, forces channel) i64 | 19 | 5133† | ~0 |
-| read (unique key, forces channel) f64 | 20 | 5133† | ~0 |
-| read (unique key, forces channel) String | 20 | 5133† | ~0 |
-| read (unique key, forces channel) Vec\<String\> | 20 | 5133† | ~0 |
+| write bool | 107 | 293 | n/a |
+| write i64 | 76 | 286 | n/a |
+| write f64 | 75 | 282 | n/a |
+| write String | 74 | 255 | n/a |
+| write Vec\<String\> | 75 | 249 | n/a |
+| read (unique key, forces channel) bool | 22 | 5254† | ~0 |
+| read (unique key, forces channel) i64 | 21 | 5254† | ~0 |
+| read (unique key, forces channel) f64 | 21 | 5254† | ~0 |
+| read (unique key, forces channel) String | 21 | 5254† | ~0 |
+| read (unique key, forces channel) Vec\<String\> | 21 | 5254† | ~0 |
 
 `s8-errors` marker lines across kept logs: frust 0, flutter 0. †Flutter's only channel-crossing read is the package's `reload()` whole-store re-read (one figure for every read row).
 
-**Frust wins S8 decisively** — ~3–4× on writes (68–97 vs 228–300 µs), and its per-key read (~20 µs) is a real backend call where Flutter's only channel-crossing read is a whole-store `reload()` (5.1 ms).
+**Frust wins S8 decisively** — writes 74–107 vs 249–293 µs/call (~2.7–3.8×); a per-key Frust read costs 21–22 µs while Flutter's only channel-crossing read is the whole-store `reload()` at 5,254 µs (its ~0 µs cached read is a Dart-map lookup, not a boundary crossing). Zero `s8-errors` on either app.
+
+### vs 2026-07-21 (vello renderer, release build) — renderer transition, cross-methodology
+
+`harness/compare.py` over two `summarize.py` JSON dumps: the retired vello series, regenerated from the committed `frust_release` raws before their replacement, against this pass; Δ positive = slower.
+
+| Scenario | p50 old→new (ms) | Δp50 | p95 old→new (ms) | Δp95 | miss@16.67 old→new | fps old→new |
+|---|---|---|---|---|---|---|
+| S1 | 4.87→7.85 | +61.1% | 5.77→10.18 | +76.4% | 0.10%→0.11% | 119.7→120.5 |
+| S2 | 10.35→7.09 | -31.5% | 16.40→9.05 | -44.8% | 4.23%→0.05% | 65.1→120.7 |
+| S4 | 4.50→3.43 | -23.8% | 5.49→7.89 | +43.6% | 0.03%→0.03% | 120.5→120.7 |
+| S5 | 5.72→6.57 | +14.7% | 12.29→7.16 | -41.8% | 0.13%→0.03% | 88.6→120.8 |
+| S6 | 6.21→6.38 | +2.7% | 11.20→8.91 | -20.5% | 0.19%→0.12% | 88.0→120.6 |
+| S3 (overall) | 4.87→4.83 | -0.8% | 9.99→8.59 | -14.1% | 0.26%→0.49% | n/a→n/a |
+
+**Read this as a renderer change under a methodology change, not as a same-renderer delta.** The old pass was a RELEASE build under the pre-§2.5 method, whose `total_us` never included the GPU wait (vello's compute ran asynchronously and was not measured); the engine's `submit_us` waits on the GPU inside the cost sum. So S1's median "+61 %" (4.87→7.85 ms) is bookkeeping — 5.99 ms of the 7.85 is submit with 5.25 ms of GPU pass time under it — the same effect the Renderer transition section records for the iPhone SE. The Flutter control is not fixed either (3.44.2 → 3.47.2; it moved +4.6…+12.1 % on p50 across the same rows). What survives both caveats is the cadence and the tails: **the engine holds 120.5–120.8 fps on every frame scenario where vello dropped to 65.1 (S2), 88.6 (S5) and 88.0 fps (S6)**; p95 falls on S2 (16.40→9.05 ms), S5 (12.29→7.16), S6 (11.20→8.91) and S3 (9.99→8.59); S2's 60 Hz miss rate falls from 4.23 % to 0.05 %. S4's median improves (4.50→3.43) while its p95 rises (5.49→7.89) at the same 120 fps. Off the frame axis: framework first-frame span 87→97 ms median (the profile build now carries the perf trace; the old pass captured no external cold start), idle PSS 52.5→54.9 MiB for Frust against 87.5→85.2 for Flutter; S8 per-op costs are within 10 % of the old pass on both sides.
 
 ### Methodology deviations (this device)
 
-1. Vello renderer, release build, pre-2026-07-23 methodology — not comparable with the engine-pass
-   sections above without the §2.5/§2.6 bounds; kept only because no engine pass exists yet.
-2. Flutter S3 per-op capture landed zero frames (structural `addTimingsCallback` gap).
-3. S4 parse wall-time not recoverable (timestamp-free capture); S8 burst-during-animation variant
-   and Flutter release-mode cross-check not run.
+1. **Cross-methodology baseline only.** The only earlier pass on this device is the 2026-07-21 vello release-build pass (pre-§2.5 method, Flutter 3.44.2), so the comparison above is a bounded renderer-transition read, not a same-renderer "vs 2026-09-05" delta like the other devices carry.
+2. **Two thermal cooldown timeouts.** The flutter S2 block opened at 39.0 °C and the frust S3 block at 38.1 °C; in neither case did the 120 s wait clear the 38 °C ceiling and the driver proceeded (506 / 505 s wall). Both follow the session's peak; no other block stalled and the session ended at 29.4 °C.
+3. **APK packaging differs between the two apps** — the Frust APK is arm64-only (12,008,167 B) and the Flutter APK a fat profile build (70,462,089 B); both installed fresh with md5 re-verified; neither figure is a size comparison.
+4. **Flutter S2 rows are not comparable to any Flutter S2 row before 2026-09-05** — the Flutter bench app was changed to single-line ellipsis for row-text parity with Frust; the 2026-07-21 Flutter S2 row predates that change.
+5. **S3 Flutter per-op capture:** 2 frames on `create 1k` and none for the other ops (the known `addTimingsCallback` delivery gap) — no cross-app per-op comparison.
+6. As on prior passes: Flutter release-mode in-app cross-check not captured; S4 parse wall time not recoverable (timestamp-free capture); S8 burst-during-animation variant not run.
 
 ---
 
-## App size (release) — Frust re-measured 2026-09-06, Flutter 2026-09-05
+## App size (release) — Frust Android re-measured 2026-09-17, iOS 2026-09-19, Flutter 2026-09-05
 
-Frust's rows are release builds of `21076221`; the Flutter column is the
-2026-09-05 `app_size.sh` snapshot of Flutter 3.47.2 (`flutter build apk
---release [--split-per-abi]` / `flutter build ios --release`), unchanged this
-pass and dated accordingly. The Frust Android release is signed with a
-throwaway local keystore purely to satisfy the CLI's release-signing gate;
-signing does not change the size class. Sizes are MiB alongside the exact byte
-count, which is the authoritative figure.
+Frust's rows are release builds of this checkout, rebuilt after the app-size
+plan's font/link-flag/opt-level/pin levers landed; the Flutter column is
+unchanged since the 2026-09-05 `app_size.sh` snapshot of Flutter 3.47.2
+(`flutter build apk --release [--split-per-abi]` / `flutter build ios
+--release`) and dated accordingly. This pass builds via the `cargo ndk` +
+Gradle `assembleRelease -x cargoNdkBuild` route directly (`frust build apk
+--release` refuses without release signing and has no
+`--no-default-features` knob), so no keystore is configured and Gradle falls
+back to debug signing with a warning — signing does not change the size
+class either way. Sizes are MiB alongside the exact byte count, which is the
+authoritative figure. The iOS rows were **re-measured on a macOS host on
+2026-09-19** (Xcode 26.2 / 17C52, `frust build ios --release` — a signed
+`Release`/`iphoneos` build with the app's `lean` feature on — the route
+`app_size.sh`'s iOS half names), replacing the 2026-09-18 11,716 KB /
+11,903,616 B with the rows below; the iOS column has no `db`-off axis
+because `frust build ios` has no `--no-default-features` knob either.
+
+**iOS Runner rows.** `frust build ios --release` (a plain `xcodebuild build`) ships this
+project's Release Runner **unstripped** — `COPY_PHASE_STRIP = NO`, no
+`DEPLOYMENT_POSTPROCESSING` override, so `[profile.release]`'s `strip = "symbols"` never
+reaches it (Xcode links the Rust staticlib in, untouched by cargo's own strip). The
+stripped row below is a scratch-copy full `xcrun strip` (`app_size.sh`; the artifact
+itself is never modified) — measured within 0.29 % of a real `xcodebuild archive` Runner
+with the same symbol count (dated note below), so **it, not the unstripped row, is the
+figure comparable to Android's stripped-`.so` rows above.**
 
 | Axis | Frust, `db` on (default) | Frust, `db` off (`--no-default-features --features lean`) | Flutter (2026-09-05) |
 |---|---|---|---|
-| Android universal release APK (3 ABIs) | **31.47 MiB** (33,002,246 B) | not built as universal | 49.36 MiB (51,762,140 B) |
-| Android arm64-v8a split APK | **10.95 MiB** (11,480,155 B) | **9.09 MiB** (9,533,659 B) | 17.45 MiB (18,295,458 B) |
-| in-APK `lib/arm64-v8a/libfrustbench.so` | 10.83 MiB (11,352,480 B) | 8.97 MiB (9,405,968 B) | 16.55 MiB (engine + app) |
-| on-disk arm64 `.so` (stripped) | 10.83 MiB (11,352,488 B) | 8.97 MiB (9,405,976 B) | n/a |
-| iOS release `.app` (`du -sk`) | **11.63 MiB** (11,908 KB) | not built | 16.64 MiB |
-| iOS `Runner` binary | 11.54 MiB (12,103,152 B) | not built | n/a |
+| Android universal release APK (3 ABIs) | **24.58 MiB** (25,775,054 B) | not built as universal | 49.36 MiB (51,762,140 B) |
+| Android arm64-v8a split APK | **8.57 MiB** (8,981,843 B) | **6.63 MiB** (6,953,291 B) | 17.45 MiB (18,295,458 B) |
+| in-APK `lib/arm64-v8a/libfrustbench.so` | 8.43 MiB (8,837,768 B) | 6.49 MiB (6,809,216 B) | 16.55 MiB (engine + app) |
+| on-disk arm64 `.so` (stripped), 2026-09-19 | 8.74 MiB (9,167,552 B) | 6.77 MiB (7,103,296 B) | n/a |
+| iOS release `.app` (`du -sk`), 2026-09-19 | 11.30 MiB (11,568 KB) | not built | 16.64 MiB |
+| iOS `Runner` binary (unstripped), 2026-09-19 | 11.21 MiB (11,755,184 B) | not built | n/a |
+| iOS `Runner` binary (**stripped**, plain `xcrun strip` scratch copy), 2026-09-19 | **8.16 MiB** (8,559,536 B; real `xcodebuild archive` Runner measures 8,534,544 B, −0.29 %) | not built | n/a |
 
-Two findings from this measurement, both about where the bytes are:
+The on-disk `.so` row was re-measured on 2026-09-19, after `jni`, then `tokio` and the three
+accesskit crates, and then `wgpu-core` and `wgpu-types` left the cold set (per-lever table
+below); the other Android rows were not, and predate all three changes. Against it, the arm64
+split-APK and in-APK `.so` rows read low by at least those three per-lever deltas (`jni`
++30,184 B lean / +30,576 B db-on; `tokio` + accesskit +21,944 B lean / +39,384 B db-on;
+`wgpu-core` + `wgpu-types` +237,104 B lean / +254,904 B db-on, each measured on its own base).
+The universal APK carries one `.so` per ABI, so it likely reads low by more than that — not
+measured. The in-APK and on-disk `.so` rows are also not directly comparable: beyond those three
+changes, their lean gap includes ~4.3 KB of unrelated work that landed between the measurements.
 
-- **Routing `wgpu` per target saves ~0 bytes.** Restricting each target to the
-  backends and `naga` writers it can actually use (Android → `vulkan`/`spv-out`,
-  Apple → `metal`/`msl-out`, Windows → `dx12`+`vulkan`/`hlsl-out`+`spv-out`,
-  from `dx12`+`metal`+`vulkan` everywhere) moves the universal APK by 0 bytes
-  and the arm64 `.so` by +16 B. Fat LTO with `codegen-units = 1` had already
-  dead-stripped the unreferenced writers: per-crate attribution of the
-  unstripped arm64 `.so` is byte-identical across the change — `naga` 890,515 B
-  both ways, attributed total 7,406,938 → 7,406,834 B. The change is build
-  hygiene and correctness of intent, not a size lever.
-- **The `db` feature gate is the lever.** Turning the DB scenarios off drops the
-  arm64 `.so` from 11,352,488 to 9,405,976 B (−1,946,512 B, −17.1 %) and the
-  arm64 split APK by the same −1,946,496 B (−17.0 %). Attributed symbol bytes
-  fall 7,406,834 → 5,722,214; the rows that disappear are bundled `sqlite3`
-  (671,557 B), its unmangled C helpers (951,967 B) and `rusqlite`. What remains
-  on top is led by `naga` 890,515, `core` 660,128, `wgpu_core` 550,868,
-  `harfrust` 387,678 and `skrifa` 288,148 — so the next size question is the
-  shader-translation and GPU-plumbing tier, not SQLite.
+**Per-lever contributions**, each measured on the lean arm64 release `.so` of
+its own base by the card that landed it — quoted as measured, never summed
+into a total; Frust's totals above come only from re-measurement (the 2026-09-17 pass, or
+2026-09-18 where a row says so):
 
-Frust stays the smaller artifact on every axis it shares with Flutter. Against
-the 2026-07-21 vello-era snapshot it is still larger (universal 21.25 → 31.47
-MB, arm64 `.so` 7.42 → 10.83 MiB, iOS 7.96 → 11.63 MiB), and the bench app itself
-grew between the two snapshots because the `d1`/`d2` scenarios pull in
-`frust-database` with a bundled SQLite — the `db`-off column above is the size
-of that difference, and the remainder is the open renderer-attribution question.
+| Lever | Base → after (B) | Δ (B) | Note |
+|---|---|---|---|
+| Material Roboto Flex wght-only instance | 9,471,648 → 7,962,896 | −1,508,752 | font file 1,684,624 → 175,900 B. Render parity is **not device-verified** on either platform: the 2026-09-18 device legs below used material3-demo's landing screen, which shapes in the platform's system UI face and never requests Roboto Flex, so neither leg could test the font (a wght-only instance at default axis values rendering identically remains plausible from the instancing itself; it is unverified on a device). **iOS-relevant**: the face is linked into the Mach-O on iOS too (found verbatim in `__TEXT` in both trees' `frust_bench` binaries); it accounts for 1,508,724 B of that section's `__TEXT.__const` drop of 1,515,120 B (2,478,804 → 963,684) across the same two trees |
+| shadcn Inter instance (font bytes) | 879,708 → 636,684 | −243,024 | `frust-shadcn` is not in this bench app, so it does not appear in these artifacts |
+| Glyph italics | measured-keep | 0 | no italic subset landed |
+| `.cargo/config.toml` `--pack-dyn-relocs=android` + `--icf=all` | 9,471,776 → 9,033,120 | −438,656 | `.rela.dyn` 310,680 → 41,384 B; `ANDROID_RELA` confirmed on the shipped `.so` and the artifact run on-device 2026-09-18 (see below). **Android-only**: `.cargo/config.toml` scopes both flags to the four `*-linux-android*` targets, so no iOS artifact is affected |
+| Per-crate `opt-level = "z"` cold set (17 crates, `wgpu-hal` excluded) | 7,523,288 → 6,833,696 | −689,592 | `.text` −17.9 %; unwind tables measured-keep (−645,376 B rejected — removes native backtraces); **the 5 % render-CPU bar was adjudicated on the OnePlus 9 on 2026-09-17 and cleared** — see the dated note below. **iOS-relevant**: `[profile.release.package.*]` is not target-scoped, so the cold set applies to `aarch64-apple-ios` as well — with a second-order cost there, see the iOS-delta note below. `jni`, `tokio`, the three accesskit crates, `wgpu-core` and `wgpu-types` have since left this set (rows below) |
+| `jni` removed from the cold set, 2026-09-18 | 6,812,880 → 6,843,064 | +30,184 | db-on +30,576 B (8,841,504 → 8,872,080). The render-CPU bar could not see `jni`'s per-frame work: Android's per-frame JNI polls run in separate JNI entries after `nativeOnFrame` returns, outside every span `total_us` sums. Removed rather than kept on an unmeasured exception. The bar does see per-frame cost inside the frame's own spans — the submit-path cost S5 shows below comes from the cold set |
+| `tokio` and the three accesskit crates removed from the cold set, 2026-09-19 | 6,843,736 → 6,865,680 | +21,944 | db-on +39,384 B (8,872,752 → 8,912,136). The render-CPU bar could not see either one's per-frame work (the reactive pump; the semantics publish on every frame whose semantics changed), so both were measured directly instead — see the microbench note below: at `z`, accesskit's publish failed the cold set's CPU rule on a little core (at a 2,000-node tree), and `z` saved `tokio` no size. Removed on the owner's decision after that pass |
+| `wgpu-core` and `wgpu-types` removed together from the cold set, 2026-09-19 | 6,866,192 → 7,103,296 | +237,104 | db-on +254,904 B (8,912,648 → 9,167,552). Neither is cold: `wgpu-core` sits on the per-frame queue-write/submit path (the dated S5 attribution note below isolated ~0.2 ms of `submit` p50 to its `z` build) and `wgpu-types` was larger at `z`, not smaller. That note measured each alone (`wgpu-core` +246,232 lean / +263,104 db-on; `wgpu-types` −6,888 lean / −7,264 db-on); removing them together was not measured there, hence this row. This pass's own full-set build reads 512 B above the previously committed on-disk row (6,865,680 / 8,912,136) — the same build-to-build offset the S5 attribution note recorded and did not decompose, so it cancels in this row's own Δ. Removed on the owner's decision after that pass |
+| `parley` 0.11.1 pin (single `skrifa`/`read-fonts` copies) | 6,833,696 → 6,812,656 | −21,040 | **iOS-relevant** (a workspace dependency, not target-scoped); its iOS share is folded into the `__TEXT.__text` figure in the note below and was not isolated |
+| `jni` 0.21 pin | wont_fix | 0 | `android-activity` requires `jni` `^0.22.4` |
+| `android_logger` regex feature off | dependency hygiene | ~0 | |
+| bundled-fonts opt-out feature | default on | 0 in these artifacts | an app opting out saves its own bundled font bytes. Measured once on iOS, on `material3-demo` (not this bench app): `Runner` 18,383,328 → 18,019,504 B, −363,824 with `default-features = false` on its `frust-material` row — the two faces (175,900 + 181,388 B) plus their table padding, and neither sfnt is left in the binary |
+
+**Cold-set 5 % CPU bar — adjudicated 2026-09-17 (OnePlus 9), cleared.** The bar the
+`opt-level = "z"` row above is gated on was re-measured under control and passes on every
+scenario. Two `--profile` APKs differing only in the cold set (arm64 `.so` 9,134,208 B with it,
+9,878,576 B without) were interleaved B,V,B,V per scenario — 12 runs × 30 s per block, each
+block's own first 2 runs discarded — on a OnePlus 9 over USB adb with airplane mode on, refresh
+pinned to 120 Hz and brightness fixed. That order spreads session drift across both variants
+rather than cancelling it (an ABBA order would cancel it outright), and the figures below are
+the **uncorrected** ones. That is still the conservative choice: the measured B1→B2 drift is
+positive in every scenario, so correcting for it shrinks exactly the deltas that could threaten
+the bar (S5 +3.4 → +2.9 %, S4 +1.0 → +0.9 %). It moves the two negative deltas the other way —
+S1 −1.0 → −2.0 %, S6 −0.3 → −0.3 % — which costs the cold set nothing, since a negative delta is
+the cold set running faster. Cost-sum p50/p95 (cold set vs none, mean of each variant's two blocks):
+S1 −1.0 %/+0.5 %, S4 +1.0 %/−0.4 %, S5 +3.4 %/+3.3 %, S6 −0.3 %/+0.0 %. CPU-work phases
+(rebuild+layout+paint+encode) p50: −0.3 %, −3.0 %, −0.1 %, +0.8 %. S1 `gpu_main` 6.31 ms both
+variants (+0.01 %); all sixteen blocks held ~120 fps. S5 is the one real signal — both cold-set
+blocks put ~0.2 ms more in `submit` (5.58/5.59 → 5.78/5.80 ms) on the image-upload path; no
+per-crate isolation was run in this pass (`wgpu-core` was the plausible candidate; the dated S5
+attribution note below isolated it on 2026-09-19 and confirms `wgpu-core`). It passes, but the
+headroom is not wide: S5's +3.4 % leaves 1.6
+percentage points against an S1 block-order drift of 2.15 % on the same rig. Unlike the Pixel 5
+attempt, this rig's own drift is smaller than the bar: re-running the *identical* no-cold-set
+binary later in the session moved cost-sum p50 by 0.04–2.15 % per scenario, against that
+session's +14 %/+24 %. What the bar covers is the frame's own spans. It never measured
+`jni`'s per-frame work, which falls outside them: Android's per-frame JNI polls run in separate
+JNI entries after `nativeOnFrame` returns, outside every span `total_us` sums, however often they
+execute. `jni` was therefore removed from the cold set on 2026-09-18 (per-lever table above)
+rather than kept on an unmeasured exception, which also retires the focused-text-field S1 leg
+this pass could not run. `jni` was not the only cold-set crate with per-frame work outside those
+spans: `tokio`'s runtime-context entry (`Handle::enter`)
+runs at every reactive pump — at least four times a frame: once before the rebuild span, then at
+the top of `native_ime_state` and of both clipboard drains (`native_take_clipboard_write`,
+`native_take_paste_request`), with more on frames that carry input — and `frame()` calls the accesskit semantics publish between the layout
+and paint spans. This bar could not measure either; both were measured directly instead (next
+note) and have since left the cold set. A further caveat: `dumpsys battery unplug` only made
+the framework report unpowered — the phone stayed on USB power with its level pinned at 100 %,
+so PROTOCOL §3's charger-off control was not literally met and these absolute numbers are not
+comparable to battery-run passes.
+
+**`tokio`/accesskit per-frame cost, settled by microbench — OnePlus 9, 2026-09-18.** The bar
+above sums only the frame's own spans and cannot resolve either crate's per-frame work (previous
+paragraph): on this rig the bar's own block-order drift is 0.04–2.15 % of S1's 8.55 ms cost-sum
+p50 (≈3–180 µs), while a `tokio` runtime-context entry's or an accesskit publish's `z`-vs-`3`
+*difference* — the quantity this pass measures, not either operation's own total cost (a single
+N=2000 publish costs 1.4–5.9 ms on its own; see the results below) — is expected to cost well
+under that. A frame-level A/B would "pass" with no power to detect a difference that small. This
+pass uses a sub-microsecond instrument instead, against the **pre-registered rule fixed before
+measuring**: a crate stays in the cold set iff its measured per-frame extra cost at `z` vs `3` is
+< 0.5 % of S1's cost-sum p50 (0.5 % of 8.55 ms = **42.75 µs** — this is the threshold itself, not
+a base to take a further 0.5 % of), on the worse of a big core and a little core.
+
+*Method.* Two standalone `aarch64-linux-android` bench crates, outside this repo's workspace
+(own `[workspace]`, `[profile.release]` hand-copied from this checkout's
+`lto`/`codegen-units`/`strip`/`panic`, `Cargo.lock` copied from this checkout so every shared
+dependency resolves identically — confirmed on build: `tokio` 1.53.1, `any_spawner` 0.3.0,
+`reactive_graph` 0.2.14, `accesskit` 0.24.1), each built twice, byte-identical except the one
+crate's own `opt-level` override under test (`z` vs `3`; the four resulting binaries were
+confirmed to differ pairwise by `md5`). Sources and raw per-block logs are attached to the task
+that produced this pass. The `tokio` bench path-depends on `frust-reactive` and calls
+`ReactiveRuntime::pump_local()` directly — idle queue, and with one task (spawned via
+`any_spawner::Executor::spawn_local`) parked on `tokio::time::sleep(1h)`, registered once outside
+the timed region so the pump has a live registered timer in scope without being re-polled each
+call. The accesskit
+bench depends on `accesskit` alone — matching `frust-core`'s own dependency; `accesskit_consumer`/
+`accesskit_android` never entered either build's graph, so only `accesskit`'s own override was
+exercised (the card allows this: "only accesskit matters for the TalkBack-off path") — and times
+one "publish": build N `accesskit::Node`s the way `frust-widgets/src/button.rs`'s `semantics()`
+does (`Role::Button`, bounds from a synthetic per-row layout, a text label, `Action::Click` or the
+disabled state — a representative mix, every 5th node disabled), clone the `Vec` (mirroring
+`tree_update_from_semantics`'s `update.nodes.clone()`), clone again (mirroring
+`publish_semantics`'s `tree_update.clone()` into the late-activation snapshot slot), drop all
+three — the TalkBack-off cost `frust-shell-android`'s frame path pays on every changed-generation
+frame regardless of whether a screen reader is listening. Timing is `std::time::Instant`-batched
+(several batches of many iterations each; the median batch ns/iter is reported, with min/max as
+the spread). Cores are `taskset`-pinned: little = cpu0 (A55). Big was meant to be one fixed index
+in cpu4-6 (A78), but this rig's Qualcomm `core_ctl` dynamically isolates individual big cores
+under low load (`/sys/devices/system/cpu/cpuN/isolate` flips a single core's `sched_setaffinity`
+to `EINVAL` for anywhere from seconds to ~2 minutes, confirmed via the `isolate` sysfs file, not a
+thermal effect — `dumpsys thermalservice` read Thermal Status 0/NONE throughout), so the big-core
+mask actually used is the cpu4-6 **union**, letting the scheduler place each run on whichever of
+the three is currently de-isolated — still "a big core" per the card, not a fixed one. ABBA order
+`z,3,3,z` × 2 rounds per (workload, core) combination. Each of the four runs in a round collapses
+to its own median ns/iter (the bench binary's own batch median); a round's drift-cancelled delta
+is `mean(the two z-position runs' medians) − mean(the two 3-position runs' medians)`, and the
+reported delta is the mean of the two rounds' deltas — the same arithmetic the ABBA driver script
+computes. The result tables' `z`/`3` columns below report that same mean-of-medians, not a
+straight median of the four runs — the two differ slightly (e.g. accesskit's little core: 91,847
+ns from the mean-of-medians below vs 89,708 ns from a plain median-of-the-four instead), so read
+the columns as "mean of the two same-variant runs' own medians," matching how Δ is built. Battery
+temperature was sampled at the start and end of each script invocation (bracketing its 2 rounds,
+not sampled between individual rounds) and stayed flat within every such bracket (`dumpsys
+battery`, at most 0.8 °C drift start-to-end, always on USB power — PROTOCOL §3's charger-off
+control is not met here either, the same caveat as the rest of this device's rows).
+
+*Positive control.* A ~1 µs `Instant`-based busy-wait (accurate independent of CPU frequency)
+injected into the same timed loop, baseline vs injected: `tokio` bench (idle workload, big core)
+51.2 ns/iter → 1179.6 ns/iter, **delta 1128 ns**; accesskit bench (N=1 — at N=500 the loop's own
+~2 µs batch-to-batch band swamps a 1 µs signal against a 344 µs baseline, so the control was
+re-run at N=1 to get a clean baseline) 752.7 ns/iter → 1881.0 ns/iter, **delta 1128 ns**. Both
+resolve the ~1 µs injected signal to within ~13 %, validating that the batched-`Instant` timing
+methodology behind every result below correctly recovers a known signal at that scale — the real
+deltas measured below are not themselves ~1 µs (`tokio`'s are two orders of magnitude smaller;
+accesskit's at N=2000 are up to three orders of magnitude larger), so this control speaks to the
+instrument's fidelity, not to a shared magnitude with either bench's own result.
+
+*A/A noise floor* (same binary run twice back to back, no ABBA): `tokio` idle, little core
+**1.07 ns**/pump, big core **1.45 ns**/pump — both far below the real deltas the little core shows
+below. accesskit N=2000, little core **16.8 µs**/publish (0.29 % of its own 5.88 ms baseline), big
+core **7.2 µs**/publish (0.51 % of its own 1.43 ms baseline) — the big-core accesskit delta below
+sits *inside* this noise floor and is flagged low-confidence on its own; the little-core delta is
+~5.5× this floor and clearly resolved.
+
+**`tokio` result** (ns/pump, ABBA-cancelled `z − 3`; `z`/`3` columns are each the mean of that
+variant's two same-position runs' own medians, per the Method note above):
+
+| Workload | Core | `z` | `3` | Δ (`z − 3`) |
+|---|---|---|---|---|
+| idle (empty queue) | little (cpu0) | 232.4 ns | 220.3 ns | **+12.11 ns** |
+| idle (empty queue) | big (cpu4-6) | 52.10 ns | 52.09 ns | +0.01 ns (noise) |
+| timer (one parked task) | little (cpu0) | 259.4 ns | 244.6 ns | **+14.75 ns** |
+| timer (one parked task) | big (cpu4-6) | 54.35 ns | 52.95 ns | +1.40 ns (≈ its own A/A floor) |
+
+Worst case is the little core's timer workload. Per-frame extrapolation (≥4 pumps/frame, per the
+card): 14.75 ns × 4 = **59.0 ns/frame**, which is **0.14 % of the 42.75 µs threshold** — far under
+the threshold. **`tokio` meets the rule.**
+
+**accesskit result** (ns/publish, `z − 3`; `z`/`3` columns are each the mean of that variant's
+two same-position runs' own medians, per the Method note above):
+
+| N | Core | `z` | `3` | Δ (`z − 3`) | Method |
+|---|---|---|---|---|---|
+| 2000 | little (cpu0) | 5.870 ms | 5.778 ms | **+91,847 ns** | full ABBA, 2 rounds |
+| 2000 | big (cpu4-6) | 1.414 ms | 1.413 ms | +1,075 ns | full ABBA, 2 rounds — inside the big-core A/A floor, low confidence alone |
+| 500 | big (cpu4-6) | 344.4 µs | 338.9 µs | +5,494 ns | single order (`z` then `3`), informative only, no ABBA |
+| 100 | big (cpu4-6) | 58.72 µs | 60.29 µs | −1,572 ns | single order, informative only; opposite sign — at very small N the direction is not established |
+
+The N=500/N=100 rows are supplementary (single-order, not ABBA-controlled, and only run on the
+big core — see *Largest tree* below for why N=2000 is the number the rule actually uses). At
+N=2000, the little core reads **91,847 ns/publish = 2.15× the 42.75 µs threshold** — clearly
+resolved, at ~5.5× the little core's own A/A floor. The big core's N=2000 point, taken alone, is
+**1,075 ns = 2.5 % of the threshold** and would *pass* on that core by itself (and sits inside
+its own 7.2 µs A/A floor, so it is not a confidently-resolved signal either way) — but the rule
+is defined on the worse of the two cores, and the little core is unambiguously worse here, so
+**accesskit fails the rule at N=2000**. This was measured only at N=2000 on the little core (the
+value the rule uses) plus the two single-order, big-core-only points above; whether the little-core
+delta scales with N was not measured. If it scaled linearly (untested), the 91,847 ns delta at
+N=2000 implies roughly 46 ns/node, which would cross the 42.75 µs threshold near **N ≈ 930** — a
+hypothetical extrapolation from one measured point, not a second measurement, and not the basis
+for the verdict above.
+
+**Largest `frust_bench` scenario tree — not established by a host run; N=2000 used as the
+conservative stand-in per the card's own fallback.** Building a headless host harness that
+constructs a scenario's `View`/`Widget` tree and calls `RenderRoot::semantics().nodes.len()` was
+out of scope for this pass's time budget, so no scenario's real node count was measured. What
+follows is code-inspection **inference**, not a measurement: S2 (`s2_list.rs`) materializes only
+the visible viewport plus `BUFFER_ROWS = 3` above/below (`ITEM_EXTENT = 72.0`, so a ~2400 px-tall
+device viewport would hold ~33 rows, +3+3 buffer ≈ 39 materialized rows by this reading of the
+constants alone — `CACHE_MARGIN_ROWS = 12` extends the *shaped-text* cache, not the semantics
+tree); S3 (`s3_table.rs`, `ROW_EXTENT = 40.0`) reads as a similarly virtualized grid by the same
+kind of inspection. Neither scenario's live tree was counted, so "far below 2000 nodes" is an
+inference from the constants, not a measured bound; it is offered only to argue that N=2000 is
+plausibly a conservative (harder-to-pass, not easier-to-pass) stand-in, per the card's own
+fallback intent — not as evidence about the real crossing point.
+
+**Size give-back (`tokio`).** Measured the same way as the `jni` row above: the lean arm64
+release `libfrustbench.so` (`benchmarks/frust_bench`, `cargo ndk -t arm64-v8a build --release
+--no-default-features --features lean`) and the `db`-on default build, each built twice —
+`[profile.release.package.tokio]` present (`z`, the current committed state) vs a temporary local
+removal of that block from `benchmarks/frust_bench/Cargo.toml` (falls back to the profile's `3`
+default), reverted after each measurement and confirmed by `git status`/`git diff` showing no
+change to that file. `cargo ndk` reused every unaffected cached object both times (only `tokio`
+and its dependents recompiled), so the two `.so`s in each pair differ only in that one override.
+
+| Build | with override (`z`, present) | without (`3`, removed) | Δ (removed − present) |
+|---|---|---|---|
+| lean (`--no-default-features --features lean`) | 6,844,248 B | 6,843,000 B | **−1,248 B** |
+| `db` on (default) | 8,873,264 B | 8,873,568 B | **+304 B** |
+
+Both "with override" (`z`, present) builds above came out **1,184 B above** the committed
+reference rows (6,843,064 B lean / 8,872,080 B db-on) — the expected gap from toolchain/date
+drift since that pass; the "without" (`3`, removed) builds have no reference row to compare
+against. Unlike `jni`'s row (a consistent +30 KB in both builds when removed), `tokio`'s sign
+**flips between the two builds** — a section breakdown of the lean pair (`llvm-size -A`, on the
+exact two `.so` files the 6,844,248 B / 6,843,000 B row above was measured from) shows why: under
+`z`, `tokio`'s own `.text` shrinks (−12,312 B vs `3`), but `.eh_frame`/`.eh_frame_hdr` grow by
+almost exactly as much (+8,292 B / +3,928 B = +12,220 B combined — more, smaller functions under
+`z` means less inlining and more per-function unwind-table entries), and
+`.rodata`/`.data.rel.ro`/`.rela.dyn` add a further +808 / +544 / +51 B; summed over every section
+`llvm-size -A` lists (including `.got` −16 B and the `.relro_padding` alignment gap −1,248 B),
+these sections net **+47 B** larger under `z` — which is not the same figure as the lean row's
+**+1,248 B** `wc -c` delta above (the authoritative one for the give-back table): 1,201 B of that
+gap falls outside what `-A` lists per-section (ELF section-header-table/string-table bytes and
+inter-segment alignment, not attributed to a named section here) and is not decomposed further.
+Both figures agree on direction and rough scale: **`opt-level = "z"` buys `tokio` no reliable size
+reduction in this binary** — the size axis gives no reason to keep it in the cold set even though
+the CPU rule above says it may stay.
+
+*accesskit's give-back, measured the same way (optional per the card, all three of its cold-set
+overrides removed together, lean build only):* 6,844,248 B (present) → 6,867,728 B (removed),
+**Δ +23,480 B** — a real, one-directional cost, the same shape as `jni`'s row (unlike `tokio`'s
+above). Removing accesskit from the cold set, which its CPU result above recommends, is not free
+on size; that tension is a conductor-level call, not one this pre-registered CPU-only rule
+resolves.
+
+**Outcome under the pre-registered rule.** `tokio`: **meets the rule** — its worst-case per-frame
+extra (little core, timer workload) is 0.14 % of the 42.75 µs threshold, far under the
+threshold — stays. accesskit: **fails the rule at N=2000**, the value the rule uses — its little-core
+delta (the worse of the two cores, and the one clearly resolved above its own A/A floor) is 2.15×
+the threshold; its big-core delta alone would meet the rule (2.5 % of the threshold) but sits
+inside its own A/A floor and is not the core the rule selects. Recommended out, on the same
+unmeasured-per-frame-work grounds `jni` already left on, though unlike `jni`'s size story,
+removing accesskit would cost size rather than give it back. Applied on 2026-09-19:
+on the owner's decision, `tokio` and all three accesskit crates left the cold set (per-lever
+table above) — accesskit on this rule's outcome, `tokio` because `z` saved it no size.
+
+**S5's `submit` cost attributed to `wgpu-core` — OnePlus 9, 2026-09-19.** The cold-set bar note
+above left one real signal unattributed: both cold-set S5 blocks put ~0.2 ms more into `submit`.
+This pass re-confirms that cost against the current 12-crate cold set, then removes one override
+at a time. **The cost comes from `wgpu-core`'s `opt-level = "z"`.** Removing that one block takes
+209.0 / 193.5 µs off S5's `submit` p50 in the two rounds, which is 94 % / 87 % of the whole cold
+set's gap. Removing `gpu-allocator`, `ash` or `wgpu-types` moves it by no more than the
+same-binary drift.
+
+*Method.* The pass used `--profile` arm64 APKs of `benchmarks/frust_bench`, built with
+`frust build apk --profile --define FRUST_TRACE_RAW=1 --target-platform android-arm64`. The APKs
+differ only in which `[profile.release.package.*]` blocks `benchmarks/frust_bench/Cargo.toml`
+carried. Each variant was a temporary edit, reverted after its build. A second full-set build
+reproduced the first APK byte for byte (same md5), so each variant differs from the full set by
+its override alone. Every block drove S5 only, through one `run.sh` call: 12 runs × 30 s, the
+first 2 discarded, leaving 35,980–36,011 kept frames. Each block ran behind `device_state.sh`'s
+fixed brightness and 38 °C cooldown gate. Every block reinstalled its APK and checked the
+installed copy's md5 on the device. The per-block tables and a manifest of the raw per-run logs
+are attached to the task that produced this pass.
+
+The rig was the OnePlus 9 on USB adb, with airplane mode on and `min_refresh_rate` and
+`peak_refresh_rate` pinned to 120. `dumpsys battery unplug` was issued before each block. As
+before, that is a framework-level override only: the phone stayed on USB power and read 100 % at
+every block boundary, so these numbers are not battery-run numbers. All 34 blocks held
+119.9–120.0 fps, and battery temperature ran 27.1–38.1 °C. In six step-2 blocks the cooldown
+gate timed out at 38.1 °C and the block proceeded: three full-set blocks and one each of the
+`ash`, `wgpu-types` and `gpu-allocator` variants, none of them a `wgpu-core` variant block.
+
+*Arithmetic.* Each per-block figure is `stats.py`'s nearest-rank percentile over the pooled kept
+frames. A quad's Δ is the mean of its two variant blocks minus the mean of its two full-set
+blocks. Its A/A drift is the gap between the two blocks of one binary inside it. **The A/A floor
+is the largest such gap on `submit` p50 in the session, 61 µs.** The 20 within-quad pairs span
+0–61 µs, and the two back-to-back full-set pairs at round boundaries are 25 and 32 µs. A removal
+counts as responsible only if its Δ exceeds that floor in both rounds.
+
+*Step 1: the cost is still there.* Full set (Z) vs no overrides (N), order Z,N,N,Z × 2. Δ is
+N − Z, the effect of removing the set.
+
+| Round | `submit` p50, Z → N (ms) | Δ `submit` p50 | Δ `submit` p95 | Δ cost-sum p50 | A/A `submit` p50 (Z / N pair) |
+|---|---|---|---|---|---|
+| 1 | 5.870, 5.813 → 5.600, 5.601 | **−241.0 µs** | −158.5 µs | −160.0 µs | 57 / 1 µs |
+| 2 | 5.788, 5.785 → 5.577, 5.593 | **−201.5 µs** | −140.5 µs | −426.5 µs | 3 / 16 µs |
+
+The cold set costs S5 +4.30 % / +3.61 % on `submit` p50 (Z over N). That is the same size as on
+2026-09-17 (5.58/5.59 → 5.78/5.80 ms). Every Z block (5.785–5.870 ms) sits above every N block
+(5.577–5.601 ms). The CPU-work phases and GPU time do not move: rebuild+layout+paint+encode
+differs by 6.0 / 6.5 µs at p50, and `gpu_main` p50 by 3.5 / 4.5 µs.
+
+Cost-sum p50 reads +2.04 % / **+5.54 %** (Z over N), a mean of +3.8 %. The second round crosses
+the 5 % bar. `acquire` accounts for 149 µs of that round's 426.5 µs; the Z pair's `acquire` gap
+alone is 90 µs, and within-quad `acquire` p50 gaps reach 224 µs across the session. Cost-sum p50
+gaps reach 294 µs. Cost-sum therefore cannot resolve a 0.2 ms effect one quad at a time;
+`submit`, whose floor is 61 µs, can.
+
+S5 was the one scenario in which the 2026-09-17 bar found this signal, and its workload explains
+why. It streams 240 distinct 256×256 images through the mobile-tier atlas
+(`budget=1024x1024x4`), which holds about 60 of them. So the engine evicts and re-uploads about
+1.5 images every frame: `frust-perf img … evicted=` sums to 1.53 per kept frame in a Z block and
+1.54 in an N block. Each re-upload is one `queue.write_texture`, added to the frame's own queue
+writes and submits. All of it runs inside `submit_us`, and all of it goes through `wgpu-core`.
+
+*Step 2: isolation.* Each variant removes one override from the full set. Each variant ran as
+Z,V,V,Z, with neighbouring quads sharing a Z block. Round 1 took the variants in the order
+`wgpu-core`, `gpu-allocator`, `ash`, `wgpu-types`, and round 2 reversed it. `image` and `png`
+were not candidates. S5 decodes each of its 240 images once per process, one cached decode task
+per image id, not once per frame. Its per-frame image work is the atlas re-upload, and that path
+does not call either crate. Δ is V − Z.
+
+| Override removed | Round | `submit` p50, Z → V (ms) | Δ `submit` p50 | A/A (Z / V pair) | Δ cost-sum p50 |
+|---|---|---|---|---|---|
+| `wgpu-core` | 1 | 5.836, 5.812 → 5.614, 5.616 | **−209.0 µs** | 24 / 2 µs | −255.0 µs |
+| `wgpu-core` | 2 | 5.762, 5.781 → 5.589, 5.567 | **−193.5 µs** | 19 / 22 µs | −325.5 µs |
+| `gpu-allocator` | 1 | 5.812, 5.812 → 5.790, 5.835 | +0.5 µs | 0 / 45 µs | −71.0 µs |
+| `gpu-allocator` | 2 | 5.802, 5.762 → 5.785, 5.827 | +24.0 µs | 40 / 42 µs | −133.5 µs |
+| `ash` | 1 | 5.812, 5.806 → 5.849, 5.820 | +25.5 µs | 6 / 29 µs | −193.5 µs |
+| `ash` | 2 | 5.805, 5.802 → 5.792, 5.755 | −30.0 µs | 3 / 37 µs | +31.5 µs |
+| `wgpu-types` | 1 | 5.806, 5.818 → 5.824, 5.763 | −18.5 µs | 12 / 61 µs | +122.0 µs |
+| `wgpu-types` | 2 | 5.850, 5.805 → 5.814, 5.824 | −8.5 µs | 45 / 10 µs | +10.0 µs |
+
+**Attribution: `wgpu-core`.** Removing it exceeds the 61 µs floor in both rounds, by 3.4× and
+3.2×. It closes 94 % and 87 % of step 1's mean 221 µs gap. Its four variant blocks (5.567–5.616
+ms) are indistinguishable from the four no-cold-set blocks (5.577–5.601 ms). So the other eleven
+overrides combined leave no residual that can be resolved across the session; that is a
+cross-step comparison, not an ABBA. `gpu-allocator`, `ash` and `wgpu-types` stay inside the
+floor in both rounds and show no consistent sign (`ash` +25.5 µs then −30.0 µs). Where inside
+`wgpu-core` the time goes was not isolated. The cost-sum column is noisier than `submit` in every
+quad, for the `acquire` reason above. Read it as not contradicting the attribution, not as a
+second measurement of it. This was not measured on iOS, where the same override applies because
+`[profile.release.package.*]` is not target-scoped.
+
+*Size give-back.* Each size is the stripped arm64 release `libfrustbench.so`, measured with
+`wc -c`. The builds are `cargo ndk -t arm64-v8a build --release`, with `--no-default-features
+--features lean` for the lean build, run from `benchmarks/frust_bench`. Each removed one override
+from the full set as a temporary edit, reverted after it.
+
+| Override removed | lean (B) | Δ lean (B) | `db` on (B) | Δ `db` on (B) |
+|---|---|---|---|---|
+| none (full set) | 6,866,192 | — | 8,912,648 | — |
+| `wgpu-core` | 7,112,424 | **+246,232** | 9,175,752 | **+263,104** |
+| `wgpu-types` | 6,859,304 | −6,888 | 8,905,384 | −7,264 |
+| `gpu-allocator` | 6,870,168 | +3,976 | 8,916,776 | +4,128 |
+| `ash` | 6,877,624 | +11,432 | 8,924,216 | +11,568 |
+| all twelve | 7,503,560 | +637,368 | 9,576,784 | +664,136 |
+
+Two full-set builds, one before the variants and one after, were byte-identical. Both come out
+512 B above the committed on-disk row (6,865,680 / 8,912,136 B). That offset is common to every
+build here and was not decomposed, so it cancels in each Δ. `wgpu-core`'s give-back is 38.6 % of
+the whole cold set's lean saving and 39.6 % of its `db`-on saving. Each removal was measured
+alone; removing `wgpu-core` and `wgpu-types` together was not measured.
+
+**Finding and recommendation (the owner decides; no manifest was changed).** `wgpu-core` is not
+cold. Every frame's queue writes and submits run through it. On S5's upload-heavy frames its `z`
+build costs about 0.2 ms of `submit`, 3.35–3.59 % of the full-set p50, and that is nearly all of
+the cold set's S5 cost. The manifests' rationale comment groups it with crates that "run at
+pipeline-creation and resource-allocation time, not per frame". That description is wrong for
+`wgpu-core` whichever way this is decided. Its override buys 246,232 B lean and 263,104 B
+`db`-on, so this is a real trade, not a free fix.
+
+**Recommended: take `wgpu-core` out of the cold set.** Its cost sits on the per-frame upload and
+submit path. S5 is the only scenario measured with per-frame uploads, so how large the cost gets
+under heavier upload traffic is unknown. In one of this pass's two step-1 rounds, the cold set's
+S5 cost-sum p50 already reached +5.54 % against the 5 % bar. The same manifests keep `wgpu-hal`,
+which is also on the submit path, out of the set: its gain was 37 KB and its cost stayed inside
+the noise. `wgpu-core`'s gain is larger, but its cost is resolved. Keeping it is defensible only
+as a named exception, with the comment corrected.
+
+Separately, **`wgpu-types` can leave at no cost**. At `z` it is larger (removing its block saves
+6,888 B lean / 7,264 B `db`-on), and it moved S5 by nothing resolvable. `gpu-allocator` and `ash`
+save 3,976 and 11,432 B lean with no resolvable S5 cost, so nothing here argues for moving them.
+
+**Applied on 2026-09-19:** on the owner's decision, both `wgpu-core` and `wgpu-types` left the
+cold set (per-lever table above, combined-removal row), and the manifests' rationale comment was
+corrected to match.
+
+**Device legs — OnePlus 9, 2026-09-18 (release builds).** The two owed on-device checks for
+the font and link-flag levers above.
+
+*Material font parity — measured, but this screen could not test the font.* material3-demo's
+landing screen, built from the merged tree, matches the same screen built from `dev` @
+`f8fcd07b` (the full pre-instance Roboto Flex) at mean |ΔLuma| **0.000002** outside the status
+bar — max 1, five differing pixels out of 2,462,400 — against a two-capture noise floor of
+exactly **0.000000** per build. That is a true measurement of the screen, but not of the font:
+the landing screen's text never asks for Roboto Flex. The app bar title, the navigation-bar
+labels and the list-row text are plain `text(..)` views with no `.family(..)`, so they take
+`TextStyle::default()`'s `FontFamily::SystemUi`, and `TextWidget::effective_style` copies only
+the colour from the theme, never the family — the whole screen shapes in the platform's system UI
+face, whatever `frust-material` bundles. (Components that read `theme.type_scale` — buttons,
+tabs, text-field labels — do get Roboto Flex.) So this leg has **no power** over the font lever,
+and was first recorded here as a pass in error. Nothing measured shows the instance rendering
+*differently* either; a wght-only instance at default axis values rendering identically remains
+plausible from the instancing itself, but a real device check needs a screen built from
+type-scale components, and none was run on either platform (see the iPhone SE leg below, which
+proved the same blind spot with negative controls). `frust_bench` S6 cannot be adjudicated this
+way and is reported as such rather than scored: it animates a width-driven relayout, so two
+captures of the *same* build already differ by mean 21.42 (merged) / 21.55 (baseline), and the
+cross-build figure, 13.91, is **below either build's own floor** — no font-attributable
+difference is detectable above animation phase. A still-frame luma bar is simply the wrong
+instrument for a live scenario. (The owed leg named a material3-demo "typography screen"; the
+app has no such screen — its sections are Do/Pick/View/Nav/Find — so its landing screen was
+used instead; as above, that screen does not render the Material type scale's family.)
+
+*Packed relocations + ICF.* `llvm-readelf -d` on the shipped lean arm64 release `.so`
+(6,813,384 B, in a 6,957,455 B APK) reports `ANDROID_RELA` at `0x60000011` with
+`ANDROID_RELASZ` 42,104 B, and `.rela.dyn` carries section type `ANDROID_RELA` — the packed
+format, against the 310,680 B unpacked figure in the table above — with `BIND_NOW` set. The
+APK installs, launches and sustains a full S1 block (12 × 30 s) with **zero crashes and zero
+process-liveness failures**, mean TOTAL PSS 113.6 MiB (`dumpsys meminfo` reports KiB; the
+12-run mean is 116,328.5 KiB), and a launch screencap carrying 238 distinct luma levels with
+97.01 % of pixels above 8/255 outside the status bar — real content, so `--icf=all` has not
+produced the blank-surface failure its accepted risk class would imply. **No frame percentiles
+come from this leg**: a release build compiles in no `perf-trace`, so `frust-perf raw` emits
+nothing (verified: 0 lines), and SurfaceFlinger's `--latency` ring returns no frame rows for
+the app's BLAST layer on Android 15, so present cadence could not be sampled either. This leg
+evidences load-and-run correctness, not performance.
+
+**Device legs — iPhone SE (2nd gen), 2026-09-18.** iOS 26.7 (23H24), Xcode 26.2 / 17C52,
+`devicectl` 506.6, Developer Mode on. **Transport was wireless throughout — no cable** (the
+handset was `unavailable` to CoreDevice for the first few minutes of the session and
+re-appeared on its own once a tunnel was acquired), and every capture's status bar carries the
+charging glyph, so the device stayed on power: PROTOCOL §3's charger-off control is not met
+here either. Brightness, thermal and radio state remain uncontrolled — no iOS CLI exposes them.
+
+*A screenshot path on a physical iPhone now exists.* `devicectl` still has no screenshot
+subcommand and libimobiledevice's `screenshotr` is refused on iOS 17+ ("Invalid service"), so
+this leg drove `XCUIScreen.main.screenshot()` from a host-app-less XCUITest bundle built
+outside the repository, signed under the existing team's development profile, and pulled the
+PNGs out of the result bundle with `xcrun xcresulttool export attachments` — 750 × 1334, 8-bit
+RGB, one per capture. Comparisons crop the top 40 px (the 20 pt status bar) and score BT.709
+integer luma over the remaining 970,500 px. This supersedes the "no iOS screenshot CLI" clause
+in the 2026-09-06 pass's deviations for future passes; that pass had no such gate.
+
+*Capture protocol: uninstall before every install.* An in-place `devicectl device install app`
+over an existing install leaves the previous build's glyph rasterisation in effect. Two capture
+sets taken that way differ from clean-install captures by mean |ΔLuma| **0.48**, confined to
+the text rows, with ink-run boundaries agreeing to ±1 px — the same face rasterised differently,
+and enough on its own to swamp a < 1/255 bar. Only clean-install captures are reported below.
+
+*Material font parity — bar met, but the screen has no power to test it.* material3-demo's
+landing screen (the app has no "typography screen"; its sections are Do/Pick/View/Nav/Find —
+the same substitution the OnePlus 9 leg made) is **pixel-identical** between the merged tree
+and `dev` @ `f8fcd07b`: mean |ΔLuma| **0.000000**, max 0, 0 differing pixels of 970,500. Both
+floors are 0.000000 too — two captures of one running process, and two independent clean
+installs of the same build (byte-identical PNGs). But that same screen is *also* pixel-identical
+when `frust-material` is built `default-features = false` (no font bytes linked at all) and when
+its bundled Roboto Flex is byte-replaced by Space Mono (found byte-for-byte in that build's
+`Runner`, with Roboto Flex absent). The reason is the one given for the OnePlus 9 leg above:
+Roboto Flex *is* registered — `frust_material::install()` runs before the shell's
+construction-time font drain, and a per-frame drain follows — but this screen never asks for it.
+Its text is plain `text(..)` with the default `FontFamily::SystemUi`, and the themed text path
+copies only the colour, so every build shapes in the system UI face (San Francisco on iOS)
+through frust's own parley/fontique stack. The < 1/255 result is therefore recorded as **an
+instrument with no power**, not as evidence that the instanced face renders identically to the
+full one. (Supporting observation only: the handset carries no Roboto family — 86 CoreText
+families, and CoreText resolves `"Roboto Flex"` to Helvetica — but frust does not shape through
+CoreText, so that lookup is not the mechanism.) A device check of the font lever needs a screen
+built from type-scale components (buttons, tabs, text-field labels); none was run.
+
+*bundled-fonts opt-out on iOS.* The `default-features = false` build (temporary manifest patch,
+reverted; `Runner` 18,383,328 → 18,019,504 B, with neither sfnt left in the binary) launches and
+renders the whole screen with **no missing glyphs and no `.notdef` boxes**, in the system UI
+face. That face is not a fallback here: the bundled, fonts-off and Space-Mono builds all render
+this screen in San Francisco, which is exactly why the screen cannot test the bundled font. What
+the leg does show is that turning `bundled-fonts` off leaves nothing on this screen unrendered.
+
+*S6 (text-heavy) after the `harfrust` 0.10 → 0.12 / `parley` 0.11.0 → 0.11.1 move.* One full
+PROTOCOL §4 block from the merged tree (`--profile`, `FRUST_TRACE_RAW=1`, 12 × 30 s, first 2
+discarded, 18,201 frames) against this device's recorded 2026-09-06 S6 (18,505 frames). Its raw
+logs were kept outside the repository and are **not** committed under `raw/iphone_se/`. On the
+per-frame comparison row — `total − acquire` — the median is lower: p50 5.57 → 5.45 ms
+(−2.2 %), with the two per-run p50 bands not overlapping (recorded 5.55–5.60, new 5.43–5.47).
+p95 lands inside the recorded spread (6.28 → 6.32 ms; bands 6.21–6.32 vs 6.25–6.36), the 60 Hz
+miss rate on the work row is 0.00 % in both, GPU pass time is unchanged (p50/p95 1.64/1.86 →
+1.65/1.86 ms), and the shaping-side pass costs are flat — layout p50 0.16 → 0.16 ms, paint
+0.25 → 0.24 ms — while rebuild p50 rose 0.07 → 0.10 ms. **The tail is worse and unexplained**:
+p99 6.64 → 7.07 ms (+6.5 %), worst 13.80 → 14.52 ms, and frames over 8.33 ms 12 → 30. The block
+also crosses an OS change (26.6.1 → 26.7), a different transport and twelve days of unrelated
+tree movement, and those confounds could hide a regression as easily as they could produce the
+lower median. What this block supports is **no median regression and flat layout/paint p50**
+after the shaper move — not a gain, and not a clean tail.
+
+**iOS delta, and where it went — 2026-09-18.** The move from the 2026-09-06 iOS rows
+(11,908 KB / 12,103,152 B) is not attributable to the app-size levers: twelve days of
+unrelated work sit between those rows and these. So the same signed `Release`/`iphoneos`
+build was made twice on one host minutes apart, same Xcode and same pinned rustc, once from
+`dev` @ `f8fcd07b` — the last `dev` commit before the size-lever commits, and the same baseline
+the font-parity legs use — and once from the merged tree (that window also carries a few
+unrelated commits): `.app` 12,008 → 11,716 KB, `Runner`
+**12,203,888 → 11,903,616 B (−300,272 B, −2.46 %)**. That net is far smaller than the levers
+themselves, and the Mach-O says why (`otool -l` + `size -m`):
+
+| Segment / section | `f8fcd07b` | merged | Δ (B) |
+|---|---|---|---|
+| `__TEXT` | 9,469,952 | 7,094,272 | **−2,375,680** |
+| — `__TEXT.__const` | 2,478,804 | 963,684 | −1,515,120 |
+| — `__TEXT.__text` | 6,626,664 | 5,775,428 | −851,236 |
+| `__DATA_CONST` | 294,912 | 311,296 | +16,384 |
+| `__LINKEDIT` | 2,389,872 | 4,448,896 | **+2,059,024** |
+| file total | 12,203,888 | 11,903,616 | −300,272 |
+
+The levers did land — `__const` falls by almost exactly the font instance (1,684,624 →
+175,900 B, both blobs located verbatim in their binaries) and `__text` by 851,236 B — but
+**87 % of that is given back by `__LINKEDIT`**, which here is symbol material: the symbol
+string table 1,589,592 → 2,821,216 B (+1,231,624), the nlist table 20,696 → 33,778 symbols
+(+209,312 B) and the exports trie 317,576 → 927,960 B (+610,384). **The iOS `Runner` from a
+plain `xcodebuild build`/`frust build ios --release` is not stripped.** Xcode links the Rust
+`staticlib` into it and `xcodebuild build` runs no strip phase, so `[profile.release]`'s
+`strip = "symbols"` governs cargo's own links and never reaches this artifact. Stripping
+copies of both binaries (`xcrun strip -x -S`, scratch copies — the measured artifacts were
+not modified) gives 10,894,880 → 10,235,120 B, **−659,760 B (−6.06 %)** — measured with
+`-x -S`, which keeps every global symbol, so it undercounts what an archive actually strips
+(dated note below). The symbol growth tracks the `opt-level = "z"` cold set: the largest
+per-crate symbol-count
+increases are `wgpu_core` +554, `naga` +354, `tokio` +241, `wgpu_types` +120, `image` +60 and
+`png` +47 — members of the cold set at the time (`tokio`, `wgpu_core` and `wgpu_types` have
+since left it) whose functions
+survive as distinct symbols under `z`. That is *consistent with* the cold set, not proven by
+it; no per-lever iOS isolation build was made.
+
+**`xcodebuild archive` measured directly, settling the open archive question — 2026-09-19.**
+`(cd benchmarks/frust_bench/ios && xcodebuild -project Runner.xcodeproj -scheme Runner
+-configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -archivePath
+<path> archive)`, with the same `FRUST_FEATURES=bGVhbg==` (`lean`, base64)/`DEVELOPMENT_TEAM`/
+codesigning environment `frust build ios --release` passes, succeeds (`** ARCHIVE
+SUCCEEDED **`) and produces an archived Runner of **8,534,544 B**, against the same
+commit's plain `xcodebuild build` Runner (**11,755,184 B** — this pass's App-size table
+unstripped row above): **−3,220,640 B (−27.40 %)**. `size -m` shows `__TEXT` (7,143,424 B),
+`__DATA_CONST` (311,296 B) and `__DATA` (65,536 B) byte-identical between the plain build and
+the archive — the compiled code does not change — and only `__LINKEDIT` differs: 4,259,840 →
+1,032,192 B. `otool -l`'s `LC_SYMTAB` explains why: `nsyms` 32,451 → 522 (`nm` count
+27,379 → 521); the `LC_DYLD_EXPORTS_TRIE` is untouched at 877,000 B both times.
+
+A **plain (no-flags) `xcrun strip`** on a scratch copy of the same plain-build Runner
+matches the archive almost exactly: **8,559,536 B**, `nm` **521**, `__LINKEDIT`
+**1,064,960 B** — within **24,992 B (0.29 %)** of the archive's 8,534,544 B, with the same
+symbol count. That is because Xcode's own default `STRIP_STYLE=all` for an app executable
+is what a plain `xcrun strip` applies too, so `app_size.sh`'s stripped-Runner row now uses a
+full strip, not `-x -S`: `-x -S` only removes local symbols and debug info, keeping every
+global/exported one, so it understates the savings (10,141,104 B on this same plain build —
+~1.6 MB above both the full strip and the real archive).
+
+**`xcodebuild archive` does strip the Runner**, via its own deployment-postprocessing pass,
+regardless of this project's `COPY_PHASE_STRIP = NO` and absent `DEPLOYMENT_POSTPROCESSING`
+override — that project setting only governs a plain `xcodebuild build`/`frust build ios
+--release`, which really does ship unstripped if used directly (e.g. sideloading via
+`devicectl`), not the App Store archive route. **No Xcode template/product change follows
+from this**: the artifact that actually reaches users (an App Store or ad-hoc `.ipa` built
+via `archive` + export) was never the unstripped one this investigation worried about — a
+plain `xcodebuild build`/`frust build ios --release` output (e.g. a `devicectl`-sideloaded
+development build) was, and it remains genuinely unstripped.
+
+**Attribution stays Android-only.** `size_attribute.py` reads ELF (`llvm-readelf` sections,
+`llvm-nm` symbols) and does not parse Mach-O, so the iOS split above comes from
+`otool -l`/`size -m` and carries no per-crate byte attribution.
+
+**Size attribution (re-run, de-duplicated).** `size_attribute.py --nm-dir
+<ndk bin>` on this pass's unstripped lean arm64 `.so` (15,728,352 B
+unstripped; 6,812,544 B allocated/`SHF_ALLOC`): attributed total 4,623,257 B,
+led by `core` 498,008 B, `naga` 414,759 B, `harfrust` 332,786 B, `wgpu_core`
+321,020 B, `read_fonts` 313,648 B and `skrifa` 288,192 B; `sqlite3` does not
+appear (this is the `db`-off/lean build). These rows replace the previously
+published pre-dedup ones (`naga` 890,515 B, attributed total 7,406,938 →
+7,406,834 B, `core` 660,128 B, `wgpu_core` 550,868 B, `sqlite3` 671,557 B) —
+the de-duplicated tool attributes each `(address, size)` region once, so the
+old and new rows are not comparable byte-for-byte.
+
+Frust stays the smaller artifact on every axis it shares with Flutter. The
+`db` feature gate is still the largest single lever available to an app: the
+arm64 `.so` drops 8,837,776 → 6,809,224 B (−2,028,552 B, −22.9 %) with `db`
+off, on top of everything the font/link-flag/opt-level/pin levers above
+already removed from both builds.
 
 ## Renderer transition (vello → frust-engine) — regression check, 2026-09-05
 
-Recorded once, on the 2026-09-05 pass: `harness/compare.py` over two
-`summarize.py` JSON dumps, the retired vello series (git history,
-`git show f64be636:benchmarks/raw/…`) against that pass's raws; Δ negative =
-faster. The same-build-mode (`--profile`) vello rows were the renderer
-comparison proper, the 2026-07-21 release rows cross-methodology (PROTOCOL
-§2.5, tails only). The full per-device comparison tables were folded into this
-summary on 2026-09-06, when the post-optimization pass above replaced the
-device sections they were computed against; they remain in git history
-(`git show de265855:benchmarks/RESULTS.md`).
+Recorded once, on the 2026-09-05 pass: `harness/compare.py` over two `summarize.py` JSON dumps, the retired vello series (git history, `git show f64be636:benchmarks/raw/…`) against that pass's raws; Δ negative = faster. The same-build-mode (`--profile`) vello rows were the renderer comparison proper, the 2026-07-21 release rows cross-methodology (PROTOCOL §2.5, tails only). The full per-device comparison tables were folded into this summary on 2026-09-06, when the post-optimization pass above replaced the device sections they were computed against; they remain in git history (`git show de265855:benchmarks/RESULTS.md`).
 
-**Verdict: no per-frame renderer regression on Android or iOS in the
-like-for-like rows.** Its two open measurement caveats — S5 content on the
-OnePlus 9 and S3 per-op attribution — are settled by the 2026-09-06 pass above;
-its iOS tail items are carried into that pass's criteria section.
+**Verdict: no per-frame renderer regression on Android or iOS in the like-for-like rows.** Its two open measurement caveats — S5 content on the OnePlus 9 and S3 per-op attribution — are settled by the 2026-09-06 pass above; its iOS tail items are carried into that pass's criteria section.
 
-- **Same build mode, the renderer comparison proper** (vello `--profile`
-  2026-09-01 → engine `--profile` 2026-09-05). OnePlus 9: S1 p50 14.84→8.20 ms
-  (−45 %), S2 17.99→8.83 (−51 %), S5 22.07→7.78 (−65 %), S6 flat, every cell
-  moving from 47–68 fps to a locked 120 fps. Pixel 5 (unpinned): the largest
-  gains of that matrix — S1 48.40→14.86 (−69 %), S2 42.96→8.91 (−79 %), S5
-  95.56→13.19 (−86 %), S6 23.23→6.82 (−71 %), with every vello cell missing the
-  60 Hz budget on 100 % of frames against the engine's 0.1–1.7 %. iPhone SE: the
-  60 Hz cadence identical, per-frame cost fully observable at CPU 0.14–2.7 ms
-  plus GPU 4.4 / 3.1 / 1.6 ms for S1 / S2 / S6; its "CPU work" row rose
-  +8…+22 % only because the engine's `submit_us` waits on the GPU inside it
-  while vello's compute was asynchronous and never measured — bookkeeping.
-  Engine-to-engine drift was −3…−10 % (OnePlus 9) and within ±5 % (Pixel 5).
-- **Cross-methodology** (vello RELEASE 2026-07-21 → engine profile, OnePlus 9):
-  S1/S2/S5 tails −22…−56 %, S3 per-op −10…−22 %, cold start 185→135 ms, first
-  frame 128→105 ms. The two rows that moved the wrong way are §2.5 artefacts:
-  S6 p50 5.67→8.19 ms is the 120 Hz pin (period 8.33 ms; the same-build row is
-  flat) and S8 writes 65–67→94–95 µs are plugin calls, not renderer work.
-  Flutter's own 3.44.2→3.47.2 drift stayed <7 %, so the cross-app verdicts are
-  not a Flutter artefact.
+- **Same build mode, the renderer comparison proper** (vello `--profile` 2026-09-01 → engine `--profile` 2026-09-05). OnePlus 9: S1 p50 14.84→8.20 ms (−45 %), S2 17.99→8.83 (−51 %), S5 22.07→7.78 (−65 %), S6 flat, every cell moving from 47–68 fps to a locked 120 fps. Pixel 5 (unpinned): the largest gains of that matrix — S1 48.40→14.86 (−69 %), S2 42.96→8.91 (−79 %), S5 95.56→13.19 (−86 %), S6 23.23→6.82 (−71 %), with every vello cell missing the 60 Hz budget on 100 % of frames against the engine's 0.1–1.7 %. iPhone SE: the 60 Hz cadence identical, per-frame cost fully observable at CPU 0.14–2.7 ms plus GPU 4.4 / 3.1 / 1.6 ms for S1 / S2 / S6; its "CPU work" row rose +8…+22 % only because the engine's `submit_us` waits on the GPU inside it while vello's compute was asynchronous and never measured — bookkeeping. Engine-to-engine drift was −3…−10 % (OnePlus 9) and within ±5 % (Pixel 5).
+- **Cross-methodology** (vello RELEASE 2026-07-21 → engine profile, OnePlus 9): S1/S2/S5 tails −22…−56 %, S3 per-op −10…−22 %, cold start 185→135 ms, first frame 128→105 ms. The two rows that moved the wrong way are §2.5 artefacts: S6 p50 5.67→8.19 ms is the 120 Hz pin (period 8.33 ms; the same-build row is flat) and S8 writes 65–67→94–95 µs are plugin calls, not renderer work. Flutter's own 3.44.2→3.47.2 drift stayed <7 %, so the cross-app verdicts are not a Flutter artefact.
+- **Headline tier, cross-methodology** (vello RELEASE 2026-07-21 → engine profile 2026-09-06, Xiaomi 12, added when that device was re-run): see its section — the engine holds 120.5–120.8 fps on every frame scenario where vello dropped to 65–89 fps on S2/S5/S6, with p95 down 14–45 % there and S1's median rise the same submit/GPU-wait bookkeeping as the iPhone SE row.
 
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 

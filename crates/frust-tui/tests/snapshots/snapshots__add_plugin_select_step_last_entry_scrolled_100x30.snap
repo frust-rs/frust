@@ -7,17 +7,17 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (6-14 of 14)        │▓▓                
- DEVICES ↻ r      │    ( ) clipboard                                             │▓▓                
-   none found     │        Synchronous plain-text clipboard access               │▓▓                
-                  │    ( ) haptics                                               │▓▓                
- SESSIONS         │        Minimal haptic feedback (selection tick, impact,      │▓▓                
-   none running   │    ( ) iap                                                   │▓▓                
-                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
+                  │  Choose a plugin to add to this project  (10-18 of 18)       │▓▓                
+ DEVICES ↻ r      │    ( ) oauth-native                                          │▓▓                
+   none found     │        OAuth 2.0 native-app helper: PKCE (S256), state,      │▓▓                
+                  │    ( ) iap                                                   │▓▓                
+ SESSIONS         │        In-app purchases and subscriptions over Play Billing  │▓▓                
+   none running   │    ( ) video-player                                          │▓▓                
+                  │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
  ACTIONS          │    ( ) database                                              │▓▓                
    New project · n│        Embedded SQL database (SQLite via rusqlite;           │▓▓                
    Add plugin · a │    ( ) i18n                                                  │▓▓                
-   Doctor · d     │        Fluent Project-based                                  │▓▓                
+   Doctor · i     │        Fluent Project-based                                  │▓▓                
    Build · b      │    ( ) glyph                                                 │▓▓                
    Clean · c      │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
    MCP off · M    │    ( ) material                                              │▓▓                
@@ -31,4 +31,4 @@ expression: rendered
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │   12:00:31 [frust]  frust-perf raw n=29 total_us=3073 rebuild_us=200 layo
    New project · n       │   12:00:32 [frust]  frust-perf raw n=30 total_us=3110 rebuild_us=200 layo
    Add plugin · a        │   12:00:33 [frust]  frust-perf raw n=31 total_us=3147 rebuild_us=200 layo
-   Doctor · d            │   12:00:34 [frust]  frust-perf raw n=32 total_us=3184 rebuild_us=200 layo
+   Doctor · i            │   12:00:34 [frust]  frust-perf raw n=32 total_us=3184 rebuild_us=200 layo
    Build · b             │   12:00:35 [frust]  frust-perf raw n=33 total_us=3221 rebuild_us=200 layo
-   Clean · c             │   12:00:36 [frust]  frust-perf raw n=34 total_us=3258 rebuild_us=200 layo
+   Clean                 │   12:00:36 [frust]  frust-perf raw n=34 total_us=3258 rebuild_us=200 layo
    MCP off · M           │   12:00:37 [frust]  frust-perf raw n=35 total_us=3295 rebuild_us=200 layo
    DAP off · D           │   12:00:38 [frust]  frust-perf raw n=36 total_us=3332 rebuild_us=200 layo
                          │   12:00:39 [frust]  frust-perf raw n=37 total_us=3369 rebuild_us=200 layo
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │  ▄▄▄▄▄▅▅▅▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇█                                
                          │  perf n=40 p50=8ms p95=14ms p99=22ms skipped=0 total_frames=40           
                          │  startup: app_created=2ms first_frame_presented=45ms                     
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

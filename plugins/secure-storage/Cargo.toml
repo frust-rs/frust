@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Secure key-value storage for Frust apps: Keychain on Apple, Keystore on Android, the keyring stack on Linux and Windows, with an optional biometric gate."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # SecureStorageError variants callers match on — thiserror per CODE_STANDARDS.
@@ -83,7 +89,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # re-export) for this crate's own JNI signature calls
 # (`KeyGenParameterSpec`/`Cipher`/`BiometricPrompt`).
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 jni = { workspace = true }
 
 # Desktop secret store (storage only — biometric gate stays

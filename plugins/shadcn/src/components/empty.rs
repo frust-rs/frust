@@ -29,8 +29,8 @@
 use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor, View, Widget,
-    any,
+    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor,
+    ThemeTextType, View, Widget, any,
 };
 use frust::{Theme, text};
 use peniko::Color;
@@ -311,6 +311,7 @@ pub fn empty_title(label: impl Into<String>) -> frust::TextView {
     text(label)
         .size(TITLE_TEXT_SIZE as f32)
         .weight(FontWeight::MEDIUM)
+        .themed_family(ThemeTextType::TitleMedium)
         .themed_role(ThemeTextColor::OnSurface)
 }
 
@@ -318,6 +319,7 @@ pub fn empty_title(label: impl Into<String>) -> frust::TextView {
 pub fn empty_description(label: impl Into<String>) -> frust::TextView {
     text(label)
         .size(style::TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurfaceVariant)
 }
 
@@ -393,6 +395,34 @@ mod tests {
         assert!(
             title_h > desc_h,
             "the empty title renders larger than the description"
+        );
+    }
+
+    // ---- Typeface: the title and description follow the live theme ------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn header(_: &mut ()) -> EmptyColumnView<()> {
+        empty_header(vec![
+            any(empty_title("No projects yet")),
+            any(empty_description("Create a project to get started.")),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "an empty state's title and description",
+            header,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_description_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "an empty state's title and description",
+            header,
         );
     }
 }

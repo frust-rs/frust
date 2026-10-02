@@ -16,17 +16,34 @@ rust-version.workspace = true
 # graphics-shapes lineage, Material Icons path data) and OFL-1.1 font bytes,
 # so no MIT-only arm is offerable for the combined artifact. See NOTICE.
 license = "Apache-2.0 AND OFL-1.1"
+description = "Material 3 (Expressive) design-system catalog for Frust: HCT seed-color tokens, shape morphing, icons, widgets and bundled Roboto fonts."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
-frust = { path = "../../crates/frust", default-features = false }
+frust = { path = "../../crates/frust", version = "0.5.0", default-features = false }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 
+[features]
+default = ["bundled-fonts"]
+# Roboto Flex + Roboto Mono, compiled in via `include_bytes!`. An app that
+# ships its own fonts or is content with the platform's system sans (Roboto
+# on Android, San Francisco on iOS, via fontique's system-font discovery) can
+# turn this off to drop the bundled bytes from its binary; `font_data()`
+# returns an empty slice and `install()`/`native_typefaces()` register
+# nothing, so the type scale's named families fall back to whatever fontique
+# resolves for them. Default on: unchanged out-of-the-box behavior.
+bundled-fonts = []
+
 [dev-dependencies]
-frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
+frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.0", features = ["test-support"] }
 # `test-support` compiles `PaintCtx::for_test` (a `FrameTime`-seeded `PaintCtx`
 # constructor) into the test build, so a clock-dependent widget — the overlay
 # seam's enter/exit ramps — can be painted at a chosen time without a
 # `RenderRoot`; the same dev-dependency shape `frust-shadcn` carries. Test-only:
 # the feature ships in nothing.
-frust-core = { path = "../../crates/frust-core", features = ["test-support"] }
+frust-core = { path = "../../crates/frust-core", version = "0.5.0", features = ["test-support"] }

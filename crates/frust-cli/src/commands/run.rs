@@ -1,5 +1,7 @@
 //! `frust run`: Android drive pipeline, with a `cargo run`
-//! desktop-preview fallback when no Android device is available.
+//! desktop-preview fallback when no Android device is available, and a
+//! `-d web` browser lane that builds for `wasm32` and serves the artifact
+//! directory instead of installing/launching anything.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -15,18 +17,21 @@ use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
 use frust_drive::ios_run;
+use frust_drive::manifest;
 use frust_drive::process::{ProcessRunner, StreamHandle, TryRecvError};
+use frust_drive::web_build::{self, RequestLog};
 
 /// The testable core of `run`, taking an injected [`ProcessRunner`].
 /// `commands::dispatch` constructs the real runner and calls this (the CLI's
 /// one `Real` construction site). A thin wrapper over [`run_in_with_hooks`],
-/// always passing the real [`WatchHooks`] — the production default.
+/// always passing the real [`RunHooks`] — the production default.
 pub fn run_in(
     runner: &dyn ProcessRunner,
     build_args: BuildFlags,
     device_id: Option<String>,
     watch: bool,
     verbose: bool,
+    no_open: bool,
 ) -> Result<u8> {
     run_in_with_hooks(
         runner,
@@ -34,21 +39,24 @@ pub fn run_in(
         device_id,
         watch,
         verbose,
-        WatchHooks::real(),
+        no_open,
+        RunHooks::real(),
     )
 }
 
-/// [`run_in`]'s actual body, parameterized on [`WatchHooks`] so a test can
+/// [`run_in`]'s actual body, parameterized on [`RunHooks`] so a test can
 /// reach every branch `run_in` reaches (including the `--watch` desktop-only
-/// short-circuit) without ever installing a real, process-global Ctrl-C
-/// handler or filesystem watcher — see [`WatchHooks`]'s doc.
+/// short-circuit and the `-d web` dev-server lane) without ever installing a
+/// real, process-global Ctrl-C handler or filesystem watcher — see
+/// [`RunHooks`]'s doc.
 fn run_in_with_hooks(
     runner: &dyn ProcessRunner,
     build_args: BuildFlags,
     device_id: Option<String>,
     watch: bool,
     verbose: bool,
-    hooks: WatchHooks,
+    no_open: bool,
+    hooks: RunHooks,
 ) -> Result<u8> {
     // `--watch` is desktop-preview only — its
     // kill/rebuild/relaunch loop only knows how to drive a local `cargo
@@ -76,7 +84,22 @@ fn run_in_with_hooks(
     // non-deterministic. Reaches the exact call the `Desktop` arm below
     // would make anyway, just one step earlier.
     if watch {
-        return run_desktop_fallback(runner, &info, &extra_features, watch, hooks);
+        return run_desktop_fallback(runner, &info, &extra_features, watch, hooks.watch);
+    }
+
+    // `-d web` is a reserved device id, not a discovered one: `frust-drive`'s
+    // `devices::Platform` carries no browser variant (a wasm build has no
+    // adb/simctl/devicectl counterpart to enumerate), so this is a CLI-side
+    // sentinel checked before device discovery ever runs — mirroring
+    // `--watch`'s own before-discovery short-circuit above, and for the same
+    // reason: an attached-but-unselected device must never change what an
+    // explicit `-d web` does.
+    if device_id
+        .as_deref()
+        .is_some_and(|id| id.eq_ignore_ascii_case("web"))
+    {
+        let cwd = std::env::current_dir().context("reading current directory")?;
+        return run_web(runner, &cwd, &info, &extra_features, no_open, hooks.web);
     }
 
     let discoverers = devices::default_discoverers();
@@ -89,7 +112,7 @@ fn run_in_with_hooks(
 
     match android_run::select_device(&found, device_id.as_deref()) {
         DeviceSelection::Desktop => {
-            run_desktop_fallback(runner, &info, &extra_features, watch, hooks)
+            run_desktop_fallback(runner, &info, &extra_features, watch, hooks.watch)
         }
         DeviceSelection::Auto(device) => run_on_device(runner, &device, &info, &extra_features),
         DeviceSelection::Ambiguous(candidates) => {
@@ -248,6 +271,83 @@ impl WatchHooks {
             spawn_watcher: Box::new(|_root, _tx| Ok(Box::new(()) as Box<dyn std::any::Any>)),
         }
     }
+}
+
+/// `run_in_with_hooks`'s combined injectable seam — [`WatchHooks`] for the
+/// `--watch` desktop loop plus [`WebRunHooks`] for the `-d web` dev-server
+/// wait, bundled so `run_in`/`run_in_with_hooks` carry one hooks parameter
+/// rather than two unrelated ones that happen to always travel together.
+struct RunHooks {
+    watch: WatchHooks,
+    web: WebRunHooks,
+}
+
+impl RunHooks {
+    /// The production defaults: [`WatchHooks::real`] plus [`WebRunHooks::real`].
+    fn real() -> Self {
+        Self {
+            watch: WatchHooks::real(),
+            web: WebRunHooks::real(),
+        }
+    }
+
+    /// A no-op pair for tests — see [`WatchHooks::fake`] and
+    /// [`WebRunHooks::fake`].
+    #[cfg(test)]
+    fn fake() -> Self {
+        Self {
+            watch: WatchHooks::fake(),
+            web: WebRunHooks::fake(),
+        }
+    }
+}
+
+/// Injectable seam for [`run_web`]'s "keep the dev server up until
+/// interrupted" wait: `ctrlc::set_handler` is the same process-global,
+/// install-once resource [`WatchHooks::install_ctrlc`] guards, so a test
+/// reaching `run_web` must never install a real handler either — `-d web`
+/// and `--watch` are mutually exclusive within one `frust run` invocation
+/// (the combination bails before either hooks type is ever used), so this
+/// never races [`WatchHooks`]'s own install.
+type WaitForInterrupt = Box<dyn FnOnce() -> Result<()>>;
+
+struct WebRunHooks {
+    /// Blocks the calling thread until Ctrl-C (or an equivalent external
+    /// signal) says the dev server should stop.
+    wait_for_interrupt: WaitForInterrupt,
+}
+
+impl WebRunHooks {
+    /// The production default: a real [`wait_for_ctrlc`].
+    fn real() -> Self {
+        Self {
+            wait_for_interrupt: Box::new(wait_for_ctrlc),
+        }
+    }
+
+    /// Returns immediately instead of blocking — reaching `run_web` in a
+    /// test must never wait on a real Ctrl-C that will never arrive.
+    #[cfg(test)]
+    fn fake() -> Self {
+        Self {
+            wait_for_interrupt: Box::new(|| Ok(())),
+        }
+    }
+}
+
+/// Installs a process-wide Ctrl-C handler and blocks until it fires (or the
+/// sending end is otherwise dropped), for [`run_web`]'s "serve until
+/// interrupted" wait. Reached only through [`WebRunHooks::real`] — see that
+/// type's doc for the one-handler-per-process rule this shares with
+/// [`install_real_ctrlc_handler`].
+fn wait_for_ctrlc() -> Result<()> {
+    let (tx, rx) = mpsc::channel::<()>();
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })
+    .context("failed to install Ctrl-C handler")?;
+    let _ = rx.recv();
+    Ok(())
 }
 
 /// Installs the real, process-wide Ctrl-C handler that group-kills
@@ -573,6 +673,109 @@ fn run_android(
     android_run::run(runner, &cwd, device, info, extra_features)
 }
 
+/// `frust run -d web`'s dev-server lane: builds through
+/// [`web_build::build`] (the same pipeline `frust build web` drives), serves
+/// the resulting artifact directory, optionally opens a browser at it, then
+/// blocks (via `hooks.wait_for_interrupt`) until told to stop — the browser
+/// counterpart of `run_android`/`ios_run::run` staying up until Ctrl-C, just
+/// serving files instead of streaming device logs.
+fn run_web(
+    runner: &dyn ProcessRunner,
+    project_dir: &Path,
+    info: &BuildInfo,
+    extra_features: &[String],
+    no_open: bool,
+    hooks: WebRunHooks,
+) -> Result<u8> {
+    // `web_build::build`'s entry point carries no parameter for it — the
+    // same reason `build macos|windows|linux` refuse it
+    // (`commands::build::reject_unplumbed_features`).
+    if !extra_features.is_empty() {
+        bail!(
+            "`frust run -d web` does not support --features yet (requested: {}); \
+             the browser pipeline (`frust_drive::web_build::build`) carries no parameter for it",
+            extra_features.join(", ")
+        );
+    }
+
+    let project_manifest = manifest::load_optional(project_dir).context("reading `frust.toml`")?;
+
+    let mut on_line = |line: &str| println!("{line}");
+    let report = web_build::build(runner, project_dir, info, &mut on_line)?;
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+    println!("Built: {}", report.root.display());
+
+    let options = web_build::ServeOptions::from_manifest(project_manifest.as_ref());
+    let on_request: RequestLog = Arc::new(|line: &str| println!("{line}"));
+    let server = web_build::serve(&report.root, options, Some(on_request))?;
+    println!(
+        "Serving `{}` at {} (Ctrl-C to stop)…",
+        server.root().display(),
+        server.url()
+    );
+
+    if !no_open && let Err(err) = open_browser(runner, &server.url()) {
+        println!("Note: could not open a browser automatically: {err:#}");
+    }
+
+    (hooks.wait_for_interrupt)()?;
+    server.shutdown();
+    Ok(0)
+}
+
+/// Best-effort opens `url` in the host's default browser through the
+/// injected [`ProcessRunner`] — the seam every other child `run` starts goes
+/// through, so the launch is scriptable in tests like the rest of the
+/// command. The opener is [`browser_command`]'s: `open` on macOS, `cmd /C
+/// start` on Windows, `xdg-open` elsewhere.
+///
+/// Spawned, never waited for: [`ProcessRunner::spawn_streaming`] returns as
+/// soon as the opener is running — in its own process group, with its stdio
+/// piped rather than inherited, so it can neither block this process nor
+/// receive its Ctrl-C — and the [`StreamHandle`] it returns is dropped on the
+/// spot. Dropping a handle neither kills nor joins the child (only an
+/// explicit `kill`/`wait` does), so the opener runs to completion on its own
+/// while `run_web` moves straight on to its interrupt wait. The one failure
+/// this can observe is the spawn itself (no `xdg-open` on PATH, say), and
+/// that is returned for the caller to render as a note: the dev server is
+/// already up and its URL already printed, so a missing browser is a
+/// degraded convenience, not a failed `run`.
+fn open_browser(runner: &dyn ProcessRunner, url: &str) -> Result<()> {
+    let (program, args) = browser_command(url);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let handle = runner
+        .spawn_streaming(program, &args, None, &[])
+        .with_context(|| format!("spawning `{program}` to open {url}"))?;
+    drop(handle);
+    Ok(())
+}
+
+/// The host's URL opener and its argv for `url`: `open` on macOS, `cmd /C
+/// start "" <url>` on Windows (`start` is a `cmd.exe` builtin, not a
+/// standalone executable — the empty title argument keeps a URL containing
+/// `&` from being misparsed as a second `start` argument), `xdg-open`
+/// elsewhere. Split out of [`open_browser`] so a test can register the exact
+/// invocation with a [`frust_drive::process::FakeProcessRunner`].
+fn browser_command(url: &str) -> (&'static str, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
+    } else if cfg!(target_os = "windows") {
+        (
+            "cmd",
+            vec![
+                "/C".to_string(),
+                "start".to_string(),
+                String::new(),
+                url.to_string(),
+            ],
+        )
+    } else {
+        ("xdg-open", vec![url.to_string()])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,6 +1009,7 @@ mod tests {
             Some("emulator-5554".to_string()),
             true,
             false,
+            false,
         )
         .unwrap_err();
         let message = err.to_string();
@@ -825,7 +1029,7 @@ mod tests {
     /// --installed` check) — proving discovery was never consulted.
     ///
     /// Drives [`run_in_with_hooks`] directly (the exact dispatch logic
-    /// [`run_in`] delegates to) with [`WatchHooks::fake`] instead of calling
+    /// [`run_in`] delegates to) with [`RunHooks::fake`] instead of calling
     /// public `run_in` — this test genuinely reaches `run_desktop_watch`
     /// (`--watch` always does), and a real `ctrlc::set_handler`/`notify`
     /// watcher has no place running during `cargo test` (the former is also
@@ -849,12 +1053,124 @@ mod tests {
             None,
             true,
             false,
-            WatchHooks::fake(),
+            false,
+            RunHooks::fake(),
         )
         .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("cargo"), "{message}");
         assert!(!message.contains("Rust target"), "{message}");
+    }
+
+    /// `-d web` is checked before device discovery too — with no
+    /// `Cargo.toml`/`frust.toml` fixture in the test process's own cwd (the
+    /// `frust-cli` crate root), `run_web` fails at its own `package_name`
+    /// read rather than ever reaching `devices::discover_all` (no responses
+    /// are registered for `adb`/`xcrun` here, so a discovery call would fail
+    /// loudly and differently).
+    #[test]
+    fn run_in_with_device_web_skips_device_discovery() {
+        let runner = FakeProcessRunner::new();
+        let err = run_in_with_hooks(
+            &runner,
+            BuildFlags::default(),
+            Some("web".to_string()),
+            false,
+            false,
+            true,
+            RunHooks::fake(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+    }
+
+    /// `-d web` is matched case-insensitively — `-d Web`/`-d WEB` reach the
+    /// same lane as `-d web`.
+    #[test]
+    fn run_in_with_device_web_is_case_insensitive() {
+        let runner = FakeProcessRunner::new();
+        let err = run_in_with_hooks(
+            &runner,
+            BuildFlags::default(),
+            Some("WEB".to_string()),
+            false,
+            false,
+            true,
+            RunHooks::fake(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+    }
+
+    /// `--watch -d web` is refused by the same pre-discovery bail every other
+    /// `--watch` + `-d <device>` combination hits — the watch loop has no
+    /// browser-side kill/rebuild/relaunch story either.
+    #[test]
+    fn run_in_rejects_watch_combined_with_device_web() {
+        let runner = FakeProcessRunner::new();
+        let err = run_in(
+            &runner,
+            BuildFlags::default(),
+            Some("web".to_string()),
+            true,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--watch"), "{err}");
+    }
+
+    /// `-d web` refuses `--features` before touching the filesystem at all —
+    /// mirrors `build_web_rejects_features_passthrough` in `commands::build`.
+    /// The browser opener goes through the runner like every other child of
+    /// `run`: the platform's exact invocation, registered as a scripted
+    /// stream, is what gets spawned — and the handle is dropped without
+    /// waiting, so the call returns while the fake "opener" is still alive.
+    #[test]
+    fn open_browser_spawns_the_platform_opener_through_the_runner() {
+        let url = "http://127.0.0.1:8000/";
+        let (program, args) = browser_command(url);
+        let key = std::iter::once(program.to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let runner = FakeProcessRunner::new().with_stream(key, Vec::<String>::new(), true);
+        open_browser(&runner, url).expect("a registered opener spawns");
+    }
+
+    /// A spawn failure (no opener on PATH) is the caller's to report — it
+    /// surfaces as the `Err` `run_web` renders as its "could not open a
+    /// browser" note, instead of being swallowed inside the opener.
+    #[test]
+    fn open_browser_reports_a_spawn_failure_instead_of_swallowing_it() {
+        let runner = FakeProcessRunner::new();
+        let err = open_browser(&runner, "http://127.0.0.1:8000/").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("spawning `"), "{rendered}");
+        assert!(rendered.contains("http://127.0.0.1:8000/"), "{rendered}");
+    }
+
+    #[test]
+    fn run_web_rejects_features_passthrough() {
+        let runner = FakeProcessRunner::new();
+        let build = BuildFlags {
+            features: vec!["devtools".to_string()],
+            ..Default::default()
+        };
+        let err = run_in_with_hooks(
+            &runner,
+            build,
+            Some("web".to_string()),
+            false,
+            false,
+            true,
+            RunHooks::fake(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not support --features"),
+            "{err}"
+        );
     }
 
     /// A raw change tick kills the running child and relaunches a fresh

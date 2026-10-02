@@ -49,7 +49,7 @@ frust-material = { path = "../../plugins/material" }
 # builds only (riding the same features plumbing that turns on
 # `frust/perf-trace` for debug/profile), so release strips stray info/debug
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
+# `frust-perf` output. Mirrors `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
 # Headless integration-test harness only (`tests/showcase.rs`):
@@ -80,7 +80,7 @@ reactive_graph = "0.2"
 # release-only opt-in rather than an unconditional manifest feature. The CLI
 # passes `--features lean` for `--release` builds; debug/profile builds omit
 # it (and enable `frust/perf-trace` instead). Mirrors
-# `templates/app/Cargo.toml.tmpl`'s block verbatim.
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
@@ -106,6 +106,44 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
+# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
+# per-frame path (shader translation, one-shot parsing/decode) while every
+# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
+# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
+# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+
+[profile.release.package.naga]
+opt-level = "z"
+
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+[profile.release.package.ash]
+opt-level = "z"
+
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
+[profile.release.package.roxmltree]
+opt-level = "z"
+
+[profile.release.package.fontique]
+opt-level = "z"
+
+[profile.release.package.mio]
+opt-level = "z"
+
+[profile.release.package.image]
+opt-level = "z"
+
+[profile.release.package.png]
+opt-level = "z"
+# END release cold-set opt-level overrides
 
 # `--profile` mode: release performance with symbols + tracing kept for
 # on-device performance measurement. Artifacts land in

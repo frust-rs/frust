@@ -13,8 +13,18 @@
 pub mod android_build;
 pub mod android_id;
 pub mod android_run;
+/// Single source of truth for where a Frust app's build output lives under
+/// `build/`, and the directories [`clean`] removes ([`build_dirs::CLEAN_DIRS`]
+/// plus the pre-migration [`build_dirs::LEGACY_CLEAN_DIRS`]).
+pub mod build_dirs;
 pub mod build_info;
 pub mod cargo_manifest;
+/// Print-free `frust clean` core: `cargo clean` via the injected
+/// [`process::ProcessRunner`], then [`build_dirs::CLEAN_DIRS`]/
+/// [`build_dirs::LEGACY_CLEAN_DIRS`] removal, reporting through an `on_line`
+/// sink — the shared implementation `frust-cli`'s `clean` command and
+/// `frust-tui`'s clean session both call into.
+pub mod clean;
 /// Desktop bundle assembly (`cargo build` + the per-OS `.app`/dist-dir/bundle
 /// layouts, icons, optional macOS codesign) — host-locked per target.
 pub mod desktop_build;
@@ -25,6 +35,12 @@ pub mod desktop_run;
 pub mod devices;
 pub mod devtools_client;
 pub mod doctor;
+/// Windows verbatim-path (`\\?\...`) simplification and portable
+/// (forward-slash) path rendering shared by every scaffold-time `frust`-path
+/// resolver, the plugin/web-embedder sibling lookups that read one back from
+/// an existing `Cargo.toml`, and (`same_path`/`is_under`) a front-end's own
+/// path-identity checks.
+pub mod host_path;
 pub mod icons;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines
@@ -43,3 +59,10 @@ pub mod metrics;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;
+/// Browser build assembly (`cargo build --target wasm32-unknown-unknown` +
+/// `wasm-bindgen` + an optional `wasm-opt` pass into a servable artifact
+/// directory), the static development server that hands that directory to a
+/// browser, and the host-toolchain preflight both depend on. The web tier's
+/// counterpart to [`desktop_build`]; unlike it, host-independent — a browser
+/// artifact is the same on every OS.
+pub mod web_build;

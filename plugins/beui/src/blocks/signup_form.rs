@@ -97,7 +97,7 @@ use crate::components::input::{self as beui_input, MESSAGE_RISE, input};
 use crate::motion::{Presence, Ramp};
 use crate::press::{Lane, presses};
 use crate::style;
-use crate::text::Label;
+use crate::text::{Label, ThemeTextType};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 use crate::tokens::{BeuiTokens, sans_family};
 
@@ -602,6 +602,7 @@ impl<State: 'static> SignupFormView<State> {
         // has no error of its own.
         let valid = touched && shown_error.is_none() && field.is_filled(&self.values);
 
+        // Value and placeholder not themed: `input`'s baseline field has no opt-in.
         let mut view =
             input::<State, _>(field.text(&self.values), move |state: &mut State, text| {
                 let mut next = values.clone();
@@ -972,7 +973,23 @@ impl FormColors {
     }
 }
 
-/// `font-semibold` at `size`.
+/// The type-scale role the form's title takes its family from at layout.
+const TITLE_ROLE: ThemeTextType = ThemeTextType::TitleLarge;
+
+/// The type-scale role the description and the terms label take their family
+/// from at layout.
+const BODY_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
+/// The type-scale role the measured field label takes its family from at
+/// layout: the role the wrapped `input` shapes its own label in.
+const FIELD_LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the error lines and the strength line take their
+/// family from at layout.
+const CAPTION_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// `font-semibold` at `size`. The family here is the unthemed base; `layout`
+/// shapes in the run's role family.
 fn semibold(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -983,7 +1000,8 @@ fn semibold(size: f64, color: Color) -> TextStyle {
     }
 }
 
-/// `font-medium` at `size`.
+/// `font-medium` at `size`. The family here is the unthemed base; `layout`
+/// shapes in the run's role family.
 fn medium(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -994,7 +1012,8 @@ fn medium(size: f64, color: Color) -> TextStyle {
     }
 }
 
-/// A plain run at `size`.
+/// A plain run at `size`. The family here is the unthemed base; `layout`
+/// shapes in the run's role family.
 fn plain(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1060,22 +1079,27 @@ impl Widget for SignupFormWidget {
         self.width = width;
         let content = (width - FORM_PADDING * 2.0).max(1.0);
 
-        let title = self.title.layout(ctx, &semibold(TITLE_SIZE, colors.ink));
-        let description = self
-            .description
-            .layout(ctx, &plain(style::TEXT_SM, colors.muted));
+        let title = self
+            .title
+            .layout_themed(ctx, &semibold(TITLE_SIZE, colors.ink), TITLE_ROLE);
+        let description =
+            self.description
+                .layout_themed(ctx, &plain(style::TEXT_SM, colors.muted), BODY_ROLE);
         self.terms_label
-            .layout(ctx, &plain(style::TEXT_SM, colors.ink));
+            .layout_themed(ctx, &plain(style::TEXT_SM, colors.ink), BODY_ROLE);
         // Shaped in the wrapped field's own label style (`text-sm font-medium`).
-        let field_label = self
-            .field_label
-            .layout(ctx, &medium(style::TEXT_SM, colors.ink));
+        let field_label = self.field_label.layout_themed(
+            ctx,
+            &medium(style::TEXT_SM, colors.ink),
+            FIELD_LABEL_ROLE,
+        );
+        let error_style = plain(style::TEXT_XS, colors.destructive);
         self.terms_error
-            .layout(ctx, &plain(style::TEXT_XS, colors.destructive));
+            .layout_themed(ctx, &error_style, CAPTION_ROLE);
         self.form_error
-            .layout(ctx, &plain(style::TEXT_XS, colors.destructive));
+            .layout_themed(ctx, &error_style, CAPTION_ROLE);
         self.strength_label
-            .layout(ctx, &plain(style::TEXT_XS, colors.muted));
+            .layout_themed(ctx, &plain(style::TEXT_XS, colors.muted), CAPTION_ROLE);
 
         let loose = BoxConstraints::new(Size::ZERO, Size::new(content, f64::INFINITY));
 
@@ -2316,6 +2340,66 @@ mod tests {
         assert!(
             debug_str.contains("<redacted>"),
             "Debug should mark passwords as redacted"
+        );
+    }
+
+    // ---- Typeface: the form's own text follows the live theme --------------
+
+    use crate::text::typeface_probe::{Face, Probe, assert_control, mono_role_theme};
+
+    /// The empty form with a form-level error. The submit label is empty, so
+    /// the only runs are the form's own text, the wrapped inputs' labels, and
+    /// the four placeholders the baseline fields paint in the system face (the
+    /// wrapped baseline field has no themed-family opt-in).
+    fn probe_view(_: &mut ()) -> SignupFormView<()> {
+        signup_form::<(), _>(SignupValues::default(), |_: &mut (), _| {})
+            .submit_label("")
+            .error_message("Could not create the account")
+    }
+
+    /// The runs the form's own text and the inputs' labels paint: the title,
+    /// the description, four field labels, the terms label and the error.
+    const THEMED_RUNS: usize = 8;
+
+    /// The runs the four wrapped baseline fields paint: their placeholders.
+    const FIELD_RUNS: usize = 4;
+
+    /// How many of `faces` are Geist, Geist Mono and anything else.
+    fn census(faces: &[Face]) -> [usize; 3] {
+        let count = |face| faces.iter().filter(|f| **f == face).count();
+        [
+            count(Face::Geist),
+            count(Face::GeistMono),
+            count(Face::Other),
+        ]
+    }
+
+    #[test]
+    fn form_text_paints_in_geist_under_the_beui_theme() {
+        assert_control("the form's text", WINDOW);
+        let faces = Probe::new(probe_view, WINDOW, crate::theme()).frame();
+        assert_eq!(
+            census(&faces),
+            [THEMED_RUNS, 0, FIELD_RUNS],
+            "the form's text in Geist, only the placeholders in the system face: {faces:?}"
+        );
+    }
+
+    #[test]
+    fn form_text_follows_a_live_theme_family_swap() {
+        let mut probe = Probe::new(probe_view, WINDOW, crate::theme());
+        assert_eq!(census(&probe.frame()), [THEMED_RUNS, 0, FIELD_RUNS]);
+        probe.swap_theme(mono_role_theme());
+        assert_eq!(
+            census(&probe.frame()),
+            [0, THEMED_RUNS, FIELD_RUNS],
+            "every Geist run followed the swap to Geist Mono roles"
+        );
+        probe.swap_theme(crate::theme());
+        assert_eq!(
+            census(&probe.frame()),
+            [THEMED_RUNS, 0, FIELD_RUNS],
+            "and back"
         );
     }
 }

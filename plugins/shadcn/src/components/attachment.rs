@@ -36,7 +36,7 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect, SemanticsCtx, Shape,
-    Size, ThemeTextColor, View, Widget, any,
+    Size, ThemeTextColor, ThemeTextType, View, Widget, any,
 };
 use frust::{Theme, text};
 use peniko::Color;
@@ -525,6 +525,7 @@ pub fn attachment_title(label: impl Into<String>) -> frust::TextView {
     text(label)
         .size(style::TEXT_SM as f32)
         .weight(FontWeight::MEDIUM)
+        .themed_family(ThemeTextType::TitleSmall)
         .themed_role(ThemeTextColor::OnSurface)
 }
 
@@ -536,7 +537,10 @@ pub fn attachment_description(label: impl Into<String>, error: bool) -> frust::T
     } else {
         ThemeTextColor::OnSurfaceVariant
     };
-    text(label).size(style::TEXT_XS as f32).themed_role(role)
+    text(label)
+        .size(style::TEXT_XS as f32)
+        .themed_family(ThemeTextType::BodySmall)
+        .themed_role(role)
 }
 
 // ---- AttachmentActions / AttachmentGroup ---------------------------------
@@ -741,5 +745,36 @@ mod tests {
         layout(&mut w, Size::new(200.0, 40.0));
         assert_eq!(w.children[0].origin().x, 0.0);
         assert_eq!(w.children[1].origin().x, 10.0 + style::SPACING_UNIT * 2.0);
+    }
+
+    // ---- Typeface: the title and descriptions follow the live theme ------
+
+    /// A title plus both description inks, stacked.
+    #[cfg(feature = "bundled-fonts")]
+    fn titled(_: &mut ()) -> AttachmentView<()> {
+        attachment(vec![
+            any(attachment_title("report.pdf")),
+            any(attachment_description("2.4 MB", false)),
+            any(attachment_description("Upload failed", true)),
+        ])
+        .orientation(AttachmentOrientation::Vertical)
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_descriptions_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "an attachment's title and descriptions",
+            titled,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_title_and_descriptions_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "an attachment's title and descriptions",
+            titled,
+        );
     }
 }

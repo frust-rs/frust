@@ -246,17 +246,22 @@ macro_rules! android_app {
         ///
         /// `action` is the normalised phase code (`0`=down, `1`=move, `2`=up,
         /// `3`=cancel — an ABI shared with the Kotlin `FrustSurfaceView`);
-        /// `x`/`y` are physical view-local pixels.
+        /// `pointer_id` is that contact's own `MotionEvent.pointerId`; `x`/`y`
+        /// are physical view-local pixels. A BREAKING signature change
+        /// (`(JIIFF)V`, was `(JIFF)V`) — the Kotlin `external` declaration
+        /// gains the `pointerId` argument alongside it, carrying every active
+        /// contact rather than only the primary one.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnTouch<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
             _class: $crate::__jni::JClass<'local>,
             handle: $crate::__jni::jlong,
             action: $crate::__jni::jint,
+            pointer_id: $crate::__jni::jint,
             x: $crate::__jni::jfloat,
             y: $crate::__jni::jfloat,
         ) {
-            $crate::jni_glue::native_on_touch(handle, action, x, y)
+            $crate::jni_glue::native_on_touch(handle, action, pointer_id, x, y)
         }
 
         /// JNI `nativeOnResume`: activity resumed (bookkeeping only in v0).
@@ -473,6 +478,44 @@ macro_rules! android_app {
             handle: $crate::__jni::jlong,
         ) -> $crate::__jni::jlong {
             $crate::jni_glue::native_system_ui_state(handle)
+        }
+
+        /// JNI `nativeFocusGeneration`: the focus/IME session generation — a
+        /// counter over changes to the published focus/IME surface. Retained
+        /// for Kotlin generated before `nativeFocusEpoch`, which is what the
+        /// embedding's clipboard resolver binds to now: this one stands still
+        /// when focus crosses between two fields that publish alike, and moves
+        /// for an edit that never left the field (see
+        /// `jni_glue::native_focus_generation`). A missing handle returns `0`,
+        /// which is ALSO a reachable live value here — do not read this
+        /// export's `0` as "no session". Additive: older generated Kotlin that
+        /// never calls this is unaffected.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeFocusGeneration<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jlong {
+            $crate::jni_glue::native_focus_generation(handle)
+        }
+
+        /// JNI `nativeFocusEpoch`: the live focus session's identity, so the
+        /// Kotlin clipboard resolver can bind an async URI-backed paste to the
+        /// session that asked for it. `EditCommand::Paste` is focus-routed, so
+        /// a slow `ContentProvider`'s answer would otherwise land in whatever
+        /// field holds focus when it arrives. Advanced once per honoured focus
+        /// claim and once per session release, so it moves when focus crosses
+        /// fields (published surface or not) and stands still through an edit
+        /// inside one session. A missing handle returns `0`, which no live
+        /// root ever reports (see `jni_glue::native_focus_epoch`). Additive:
+        /// older generated Kotlin that never calls this is unaffected.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeFocusEpoch<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jlong {
+            $crate::jni_glue::native_focus_epoch(handle)
         }
 
         /// JNI `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU

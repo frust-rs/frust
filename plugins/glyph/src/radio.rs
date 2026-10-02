@@ -27,20 +27,20 @@
 //! row it replaces pixel-for-pixel, not because a Glyph design-system source
 //! pins these numbers.
 //!
-//! # Label typography: Glyph-authored, theme-inked
+//! # Label typography: Glyph-authored metrics, theme-resolved face and ink
 //!
 //! Following [`crate::list`]/[`crate::badge`]'s convention for a widget that
-//! shapes its own label rather than nesting a `Text` child: family
-//! (IBM Plex Mono — the UI face every Glyph body/label role uses, see
-//! `crate::tokens::scales`), weight and size are fixed Glyph-authored
-//! constants ([`LABEL_SIZE`], matching `crate::list`'s `TITLE_SIZE`'s 13px
-//! floor), never theme-resolved; only the *ink* is — `on_surface`, themed,
-//! falling back to the literal Glyph dark `--fg` hex unthemed. That is what
-//! makes the label themeable in the sense that actually matters here: a
-//! brightness swap re-inks it correctly, and the resolved color feeds the
-//! same layout-time-baked-color contract every catalog text run keeps
+//! shapes its own label rather than nesting a `Text` child: weight and size
+//! are fixed Glyph-authored constants ([`LABEL_SIZE`], matching
+//! `crate::list`'s `TITLE_SIZE`'s 13px floor), never theme-resolved. The
+//! *family* is read at layout from the live theme's `bodyLarge` type-scale
+//! role (IBM Plex Mono under Glyph's own scale, see `crate::tokens::scales`),
+//! and the *ink* is `on_surface`; unthemed, they fall back to Glyph's IBM
+//! Plex Mono stack and the literal Glyph dark `--fg` hex. Both feed the same
+//! layout-time-baked style every catalog text run keeps
 //! (`docs/WIDGETS_CODE_STANDARDS.md`'s Theming & Animation Conventions), so a
-//! theme swap forces a re-shape via `ChangeFlags::LAYOUT`.
+//! theme swap forces a re-shape via `ChangeFlags::LAYOUT` — re-inked and, if
+//! the scale's family changed, in the new face.
 //!
 //! # Accent-role split
 //!
@@ -120,11 +120,17 @@ const RADIO_ACCENT: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
 /// Label ink — `--fg`, themed `on_surface`.
 const RADIO_LABEL_FG: Color = Color::from_rgb8(0xf2, 0xea, 0xd9);
 
-/// The label's fixed style (family/weight/size are Glyph-authored constants,
-/// not theme-resolved — see the module docs); only `color` varies.
-fn label_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the label's unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The label's style: weight and size are Glyph-authored constants; the
+/// family is the theme's `bodyLarge` role, or [`ui_face`] unthemed (see the
+/// module docs); `color` is the resolved ink.
+fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.body_large.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(LABEL_SIZE, color)
     }
@@ -359,8 +365,9 @@ impl Widget for RadioWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let label_color = resolve_radio_colors(theme, self.selected).label;
+        let label_style = label_style(theme, label_color);
         self.label_size = match &mut self.label {
-            Some(label) => label.layout(ctx, &label_style(label_color)),
+            Some(label) => label.layout(ctx, &label_style),
             None => Size::ZERO,
         };
         let gap = if self.label.is_some() { GAP } else { 0.0 };
@@ -821,5 +828,29 @@ mod tests {
         assert_eq!(w.label_text.as_deref(), Some("weekly"));
         assert!(flags.needs_layout());
         assert!(flags.needs_paint());
+    }
+
+    // ---- Typeface: the label's family follows its type-scale role ---------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn labelled_radio(_: &mut ()) -> RadioView<()> {
+        radio(true, |_s: &mut ()| {}).label("weekly")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_paints_in_its_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(labelled_radio, crate::baseline(), Size::new(400.0, 100.0));
+        assert_eq!(faces, [Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_label_follows_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(labelled_radio, Size::new(400.0, 100.0));
+        assert_eq!(before, [Face::PlexMono]);
+        assert_eq!(after, [Face::SpaceMono]);
     }
 }

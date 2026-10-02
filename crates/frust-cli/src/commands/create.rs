@@ -4,7 +4,10 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use frust_drive::scaffold::{self, DesignSystemContext, TemplateContext, context};
+use frust_drive::host_path;
+use frust_drive::scaffold::{
+    self, DesignSystemContext, ScaffoldPlatform, TemplateContext, context,
+};
 
 /// Parsed + defaulted arguments for `frust create` (mirrors
 /// `cli::Command::Create`; kept separate so `scaffold` stays decoupled
@@ -28,6 +31,11 @@ pub struct CreateArgs {
     /// `String` rather than `crate::cli::ArchArg` so `scaffold` stays
     /// decoupled from `clap` (mirrors every other field here).
     pub arch: Option<String>,
+    /// `--platforms`: comma-separated platform tags, or `None` for the
+    /// default set (android, ios, macos, windows, linux). Kept a plain
+    /// `String` (the comma-separated list) rather than a parsed `Vec` so
+    /// `scaffold` stays decoupled from `clap`.
+    pub platforms: Option<String>,
     /// `--design-system`: scaffold a design-system crate (see
     /// `cli::Command::Create`'s doc comment) instead of an app.
     pub design_system: bool,
@@ -65,13 +73,33 @@ pub fn run(args: CreateArgs) -> Result<u8> {
         deeplink_host: args.deeplink_host,
     };
 
+    // Parse the platforms list from the comma-separated string, or use DEFAULT.
+    let platforms: Vec<ScaffoldPlatform> = match args.platforms.as_deref() {
+        Some(list) => {
+            let tags: Vec<&str> = list.split(',').map(|s| s.trim()).collect();
+            let mut platforms = Vec::new();
+            for tag in tags {
+                let platform = ScaffoldPlatform::from_tag(tag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown platform tag `{tag}` (expected one of: {})",
+                        scaffold::known_platform_tags().join(", ")
+                    )
+                })?;
+                platforms.push(platform);
+            }
+            platforms
+        }
+        None => ScaffoldPlatform::DEFAULT.to_vec(),
+    };
+
     let template_dir_override = args.template_dir.as_deref().map(Path::new);
-    let written = scaffold::generate(
+    let written = scaffold::generate_with_platforms(
         &dest,
         &ctx,
         template_dir_override,
         args.overwrite,
         args.arch.as_deref(),
+        &platforms,
     )?;
 
     println!("Created {} file(s) in {}", written.len(), dest.display());
@@ -158,21 +186,26 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
 /// repo-root value can otherwise silently bake `frust = { path =
 /// "<repo-root>" }`, a virtual-workspace manifest with no `[package]` table
 /// and a hard Cargo error at build time instead of scaffold time.
+///
+/// Both the default and the (normalised) override value are rendered through
+/// [`host_path::to_portable_string`] before returning: on Windows,
+/// `Path::canonicalize()` returns a verbatim `\\?\C:\...` path, which is
+/// both an invalid TOML escape sequence once substituted into `Cargo.toml`'s
+/// `frust = { path = "..." }` and unresolvable by a template's `..`-relative
+/// sibling joins — the portable, forward-slash form Cargo/Gradle/Xcode all
+/// accept on Windows fixes both. Identity on every other host.
 fn resolve_frust_path(overridden: Option<&str>) -> Result<String> {
     if let Some(path) = overridden {
         let resolved = context::resolve_frust_crate_path(Path::new(path))?;
-        let resolved = resolved.to_string_lossy().into_owned();
+        let resolved = host_path::to_portable_string(&resolved);
         if resolved != path {
             println!("note: --frust-path `{path}` normalised to `{resolved}`");
         }
         return Ok(resolved);
     }
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    Ok(raw
-        .canonicalize()
-        .unwrap_or(raw)
-        .to_string_lossy()
-        .into_owned())
+    let canonical = raw.canonicalize().unwrap_or(raw);
+    Ok(host_path::to_portable_string(&canonical))
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`
@@ -262,6 +295,7 @@ mod tests {
             deeplink_scheme: None,
             deeplink_host: None,
             arch: None,
+            platforms: None,
             design_system: false,
         }
     }
@@ -338,6 +372,74 @@ mod tests {
 
         let err = run(args).unwrap_err();
         assert!(err.to_string().contains("--design-system"), "{err}");
+        assert!(!dest.join("Cargo.toml").exists());
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// Default (None) platforms produces the current byte-identical output
+    /// by using ScaffoldPlatform::DEFAULT.
+    #[test]
+    fn run_default_platforms_unchanged() {
+        let dest = unique_temp_dir("default-platforms");
+        let args = base_args(&dest);
+
+        assert!(run(args).is_ok());
+        assert!(dest.join("Cargo.toml").exists());
+        // DEFAULT includes android, ios, macos, windows, linux but NOT web
+        assert!(dest.join("android").exists());
+        assert!(dest.join("ios").exists());
+        assert!(!dest.join("web").exists());
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// `--platforms web` adds the web host page alongside native platforms.
+    #[test]
+    fn run_with_platforms_web_includes_web_files() {
+        let dest = unique_temp_dir("platforms-web");
+        let mut args = base_args(&dest);
+        args.platforms = Some("web".to_string());
+
+        assert!(run(args).is_ok());
+        assert!(dest.join("Cargo.toml").exists());
+        assert!(
+            dest.join("web/index.html").exists(),
+            "web/index.html must exist"
+        );
+        assert!(
+            dest.join("web/frust_web.js").exists(),
+            "web/frust_web.js must exist"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// `--platforms android,web` includes both android and web.
+    #[test]
+    fn run_with_platforms_android_web() {
+        let dest = unique_temp_dir("platforms-android-web");
+        let mut args = base_args(&dest);
+        args.platforms = Some("android,web".to_string());
+
+        assert!(run(args).is_ok());
+        assert!(dest.join("Cargo.toml").exists());
+        assert!(dest.join("android").exists());
+        assert!(dest.join("web/index.html").exists());
+        assert!(!dest.join("ios").exists());
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// An unknown platform tag is rejected before any file is written.
+    #[test]
+    fn run_rejects_unknown_platform_tag() {
+        let dest = unique_temp_dir("unknown-platform");
+        let mut args = base_args(&dest);
+        args.platforms = Some("android,bogus".to_string());
+
+        let err = run(args).unwrap_err();
+        assert!(err.to_string().contains("unknown platform tag"), "{err}");
         assert!(!dest.join("Cargo.toml").exists());
 
         let _ = std::fs::remove_dir_all(&dest);

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "wgpu adapter, device and surface foundation for Frust: capability probing, surface lifecycle and pooled GPU resources."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 wgpu.workspace = true
@@ -59,11 +65,11 @@ android_system_properties.workspace = true
 # what is COMPILED IN, never what is requested. Do not "simplify" a target to
 # one backend to match its default adapter.
 #
-# wasm32-unknown-unknown and wasm32-wasip1 are neither `unix` nor `windows`,
-# so they resolve to zero backends (no arm needed). wasm32-unknown-emscripten
-# is `unix` and routes to the vulkan arm, but that feature is inert there.
-# Frust ships no wasm shell; the browser arm would be `webgpu`, deliberately
-# dropped in the workspace row.
+# wasm32-unknown-unknown routes to the wasm section below (webgpu+webgl).
+# wasm32-unknown-emscripten is `unix` (and `target_arch = "wasm32"`) but matches
+# the all(unix, not(apple)) row above to route to the vulkan arm, where the
+# feature is inert. wasip1 (wasm32-wasip1-unknown) currently unverified;
+# if verified, will match the wasm row; otherwise narrow to wasm32-unknown-unknown only.
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
@@ -74,6 +80,22 @@ wgpu = { workspace = true, features = ["vulkan"] }
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { workspace = true, features = ["dx12", "vulkan"] }
+
+# wasm32 targets (browser only; emscripten routes through the unix/vulkan row
+# above): `webgl` is wgpu's wasm32 WebGL2 backend; `webgpu` routes the
+# web-gpu surface (desktop Chrome/Edge only, not mobile). `gles` is the
+# native/Emscripten backend (inert on wasm, not used here). `fragile-send-sync-non-atomic-wasm`:
+# wgpu's build.rs marks its handle types `Send`/`Sync` only on native, so
+# `pipeline.rs`'s threaded warm-up (`P: Send + Sync` bounds, a cloned `Device`
+# captured by the compiler closure) fails to type-check on wasm32 without it —
+# 91 E0277 errors, found by the web-shell Phase-0 spike (examples/web-spike/RESULTS.md).
+# The impls are sound on wasm32-unknown-unknown because nothing can cross a thread there,
+# and wgpu gates the feature on `not(target_feature = "atomics")` so it can never take
+# effect on a threads-enabled wasm build. Runtime: the warm-up spawn fails and falls back
+# to the inline path (pipeline.rs handles a failed `Builder::spawn`); cfg-gating the thread
+# off on wasm32 outright is the tracked structural follow-up.
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
+wgpu = { workspace = true, features = ["webgpu", "webgl", "fragile-send-sync-non-atomic-wasm"] }
 
 [dev-dependencies]
 pollster = "0.4"

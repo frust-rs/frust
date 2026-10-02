@@ -30,21 +30,20 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 frust = { path = "../../crates/frust" }
 
 # frust-material: playground's home-page chrome (the [`app_bar`], the
-# section-switching [`navigation_bar`]) and the "Native Widgets" section's
-# frust-side comparison column ([`switch`]/[`linear_progress`]/`ProgressValue`)
-# use the Material widget catalog — the flat symbols the in-tree catalog
-# feature graph used to re-export through `frust` directly (dissolved — see
-# docs/DEVELOPMENT.md's Version-Pin Policy). Playground is the plugin/
-# capability testing ground, not a design-system showcase, so it takes only
-# Material (no Cupertino/Glyph usage anywhere in this app).
+# section-switching [`navigation_bar`]) uses the Material widget catalog —
+# the flat symbols the in-tree catalog feature graph used to re-export
+# through `frust` directly (dissolved — see docs/DEVELOPMENT.md's
+# Version-Pin Policy). Playground is the plugin/capability testing ground,
+# not a design-system showcase, so it takes only Material (no Cupertino/Glyph
+# usage anywhere in this app).
 frust-material = { path = "../../plugins/material" }
 # `frust` is the ONLY framework line this app ships for widget authoring.
 # `AppBackground` (`lib.rs`) and the `FrameTicker`/`GateFrameTicker` pair
-# (`pages/camera.rs`, `pages/native_widgets.rs`) — every hand-rolled
-# `View`/`Widget` pair this app needs — reach the full trait vocabulary plus
-# geometry through `frust::authoring` (and `frust::kurbo`/`frust::peniko`, the
-# long-tail valve, where a type isn't lifted by name); no production code
-# names `frust-core`/`kurbo`/`peniko` directly.
+# (`pages/camera.rs`) — every hand-rolled `View`/`Widget` pair this app
+# needs — reach the full trait vocabulary plus geometry through
+# `frust::authoring` (and `frust::kurbo`/`frust::peniko`, the long-tail
+# valve, where a type isn't lifted by name); no production code names
+# `frust-core`/`kurbo`/`peniko` directly.
 
 # `vt100`: the terminal emulator the Terminal section
 # (`src/pages/terminal.rs`) replays the checked-in fixture bytes through.
@@ -81,36 +80,57 @@ log = "0.4"
 # Plugin contribution, so hand-added exactly as the applier would add it.
 frust-camera = { path = "../../plugins/camera" }
 
-# frust-native-widgets: playground is the device-gate vehicle for the
-# "Native Widgets" section — `src/pages/native_widgets.rs`. Same
-# hand-added-path-dep shape as `frust-camera` above (not yet a `frust tui` Add
-# Plugin contribution — that registry entry is future packaging work).
-# Default features on: this app wants the `frust-api` builders
-# (`native_button`/etc.), not just the bare platform plugin.
-#
-# `demo-components` is the plugin's NON-default demo
-# feature: `DemoCard`, one `NativeComponent` owning a real native subtree. It
-# ships inside the plugin rather than here because implementing that trait needs
-# `jni::objects::JObject` (Android) / `objc2-ui-kit` (iOS) in the *implementing*
-# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an
-# `examples/*` app on `frust` plus plugin crates only — never a raw FFI
-# dependency — see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
-# adds NO dependency to this app (it resolves to the same `frust-api` set the
-# default already pulls); the page mounts the card behind an on-page toggle that
-# is OFF by default, so the six-slot gate constant is unchanged at rest.
-frust-native-widgets = { path = "../../plugins/native-widgets", features = [
-    "demo-components",
-] }
-
 # frust-i18n: playground is the device-gate vehicle for the "i18n" section —
-# `src/pages/i18n.rs`. Same hand-added-path-dep shape as `frust-camera`/
-# `frust-native-widgets` above (not yet a `frust tui` Add Plugin
-# contribution). Default features on: this app wants both `frust-api` (the
-# reactive `I18n` handle/context hooks) and `formatting` (the ICU4X
-# decimal/currency/date/time formatters the formatting-matrix section calls
-# directly, and the `NUMBER`/`DATETIME` Fluent placeables `locales/*/main.ftl`
-# uses).
+# `src/pages/i18n.rs`. Same hand-added-path-dep shape as `frust-camera`
+# above (not yet a `frust tui` Add Plugin contribution). Default features
+# on: this app wants both `frust-api` (the reactive `I18n` handle/context
+# hooks) and `formatting` (the ICU4X decimal/currency/date/time formatters
+# the formatting-matrix section calls directly, and the `NUMBER`/`DATETIME`
+# Fluent placeables `locales/*/main.ftl` uses).
 frust-i18n = { path = "../../plugins/i18n" }
+
+# frust-video-player: playground is the device-gate vehicle for the "Video"
+# section — `src/pages/video_player.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-i18n` above (not yet a `frust tui` Add Plugin
+# contribution). Default features on: this app wants the `frust-api`
+# builders (`VideoPlayerHandle`/`use_video_player`/`video_view`), not just
+# the bare platform plugin.
+frust-video-player = { path = "../../plugins/video-player" }
+
+# frust-url-launcher: playground is the device-gate vehicle for the "URL"
+# section — `src/pages/url_launcher.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-i18n`/`frust-video-player` above (not yet a `frust
+# tui` Add Plugin contribution). Carries no features of its own —
+# `UrlLauncher::open_external` is the crate's whole public surface.
+frust-url-launcher = { path = "../../plugins/url-launcher" }
+
+# frust-auth-session: playground is the device-gate vehicle for the "Auth"
+# section — `src/pages/auth_session.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-i18n`/`frust-video-player`/`frust-url-launcher`
+# above (not yet a `frust tui` Add Plugin contribution). Carries no
+# features of its own — `AuthSession::start` is the crate's whole public
+# surface.
+frust-auth-session = { path = "../../plugins/auth-session" }
+
+# frust-oauth-native: pairs with `frust-auth-session` above for the "Auth"
+# section's Desktop loopback block (`src/pages/auth_session.rs`) — PKCE,
+# `state`, the authorization URL and callback/token-grant builders behind
+# `LoopbackSession`. Same hand-added-path-dep shape as the plugins above
+# (not yet a `frust tui` Add Plugin contribution); a pure-Rust crate with no
+# features of its own (see its own README's charter).
+frust-oauth-native = { path = "../../plugins/oauth-native" }
+
+# frust-database: playground is the device-gate vehicle for the "DB"
+# section — `src/pages/database.rs`. Same hand-added-path-dep shape as
+# `frust-camera`/`frust-i18n`/`frust-video-player`/`frust-url-launcher`/
+# `frust-auth-session` above (not yet a `frust tui` Add Plugin
+# contribution). The section exists to prove `frust_paths::data_dir()`
+# resolves on Android — the app process has neither `HOME` nor an XDG
+# variable, so `Database::open`'s standard-location resolution is only
+# provably correct once it has run inside a real app process. Default
+# features on (`engine-sqlite`): this app wants the bundled-SQLite backend
+# the smoke test runs against, not the opt-in `engine-turso` bridge.
+frust-database = { path = "../../plugins/database" }
 
 # Test-harness-only, NOT an escape hatch: the headless smoke test
 # (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
@@ -159,6 +179,44 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
+# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
+# per-frame path (shader translation, one-shot parsing/decode) while every
+# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
+# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
+# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+
+[profile.release.package.naga]
+opt-level = "z"
+
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+[profile.release.package.ash]
+opt-level = "z"
+
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
+[profile.release.package.roxmltree]
+opt-level = "z"
+
+[profile.release.package.fontique]
+opt-level = "z"
+
+[profile.release.package.mio]
+opt-level = "z"
+
+[profile.release.package.image]
+opt-level = "z"
+
+[profile.release.package.png]
+opt-level = "z"
+# END release cold-set opt-level overrides
 
 # `--profile` mode: release performance with symbols + tracing kept for
 # on-device performance measurement. Artifacts land in

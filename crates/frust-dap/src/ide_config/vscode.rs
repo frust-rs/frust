@@ -25,7 +25,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::merge::{FRUST_CONFIG_NAME, clean_jsonc, merge_json_array_entry, to_pretty_json};
+use super::merge::{
+    FRUST_CONFIG_NAME, clean_jsonc, find_json_entry_by_field, merge_json_array_entry,
+    to_pretty_json,
+};
 use super::{IdeConfigError, IdeConfigGenerator, Result};
 
 /// Abstracts home-directory environment lookups so [`detect_workspace_root`]'s
@@ -48,12 +51,11 @@ impl EnvLookup for RealEnv {
     }
 }
 
-/// Resolve the user's home directory, trying every convention this crate's
-/// supported dev hosts use: `HOME` (Unix — Linux/macOS), then `USERPROFILE`
-/// (the Windows convention; `HOME` is normally *unset* there, so consulting
-/// only `HOME` would leave a Windows developer with no boundary at all), then
-/// `HOMEDRIVE` + `HOMEPATH` concatenated (the older Windows pair, still set by
-/// some shells when `USERPROFILE` is not).
+/// Resolve the user's home directory — [`frust_drive::host_path::home_dir_from`]'s
+/// shared `HOME`/`USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` chain, fed by this
+/// module's own [`EnvLookup`] seam. The same resolver backs
+/// `frust-tui`'s `engine::persist::home_dir` and `frust-drive`'s
+/// `android_run::home_dir`, so the three can no longer drift apart.
 ///
 /// Returns `None` only when none of those resolve to a non-empty value.
 /// Callers treat that as "the containment boundary is unknown" and **fail
@@ -63,24 +65,7 @@ impl EnvLookup for RealEnv {
 /// exists to prevent: a walk that climbs into a user's home directory, which
 /// holds a `.vscode/` for essentially every VS Code user.
 fn home_dir(env: &dyn EnvLookup) -> Option<PathBuf> {
-    if let Some(home) = env_value(env, "HOME") {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = env_value(env, "USERPROFILE") {
-        return Some(PathBuf::from(profile));
-    }
-    // `HOMEDRIVE` is a bare drive (`C:`) and `HOMEPATH` a drive-relative path
-    // (`\Users\someone`); the home directory is their plain concatenation, not
-    // a `Path::join` (joining a rooted second component would discard the
-    // drive).
-    let drive = env_value(env, "HOMEDRIVE")?;
-    let path = env_value(env, "HOMEPATH")?;
-    Some(PathBuf::from(format!("{drive}{path}")))
-}
-
-/// A non-empty environment value, or `None` for unset-or-empty.
-fn env_value(env: &dyn EnvLookup, key: &str) -> Option<String> {
-    env.get(key).filter(|value| !value.is_empty())
+    frust_drive::host_path::home_dir_from(|key| env.get(key))
 }
 
 /// Detect the workspace root for a frust project.
@@ -233,6 +218,27 @@ impl VSCodeGenerator {
     }
 }
 
+/// `existing`'s `"Frust (TUI DAP)"` launch entry, found by the marker
+/// [`VSCodeGenerator::merge_config`] matches on. An empty file, or one with
+/// no `configurations` key, has none; a `configurations` that is not an
+/// array is the same error `merge_config` reports.
+fn frust_launch_entry(existing: &str) -> Result<Option<serde_json::Value>> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let root: serde_json::Value = serde_json::from_str(&clean_jsonc(existing))?;
+    let Some(configurations) = root.get("configurations") else {
+        return Ok(None);
+    };
+    let configurations = configurations
+        .as_array()
+        .ok_or_else(|| IdeConfigError::message("`configurations` is not an array"))?;
+    Ok(
+        find_json_entry_by_field(configurations, "name", FRUST_CONFIG_NAME)
+            .map(|idx| configurations[idx].clone()),
+    )
+}
+
 impl IdeConfigGenerator for VSCodeGenerator {
     fn config_path(&self, project_root: &Path) -> PathBuf {
         let workspace_root = detect_workspace_root(project_root);
@@ -279,6 +285,30 @@ impl IdeConfigGenerator for VSCodeGenerator {
         );
 
         Ok(to_pretty_json(&root))
+    }
+
+    /// Whether `existing`'s `configurations` already hold an entry named
+    /// `"Frust (TUI DAP)"` — the marker [`merge_config`](Self::merge_config)
+    /// matches on. An empty file, or one with no `configurations` key, has
+    /// none; a `configurations` that is not an array is the same error
+    /// `merge_config` reports.
+    fn has_frust_entry(&self, existing: &str) -> Result<bool> {
+        Ok(frust_launch_entry(existing)?.is_some())
+    }
+
+    /// The `debugServer` port of `existing`'s `"Frust (TUI DAP)"` entry —
+    /// `None` when there is no such entry, or when its `debugServer` is not
+    /// a number in `u16` range (a hand-edited entry).
+    fn frust_entry_port(&self, existing: &str) -> Result<Option<u16>> {
+        Ok(frust_launch_entry(existing)?
+            .and_then(|entry| entry.get("debugServer").and_then(serde_json::Value::as_u64))
+            .and_then(|port| u16::try_from(port).ok()))
+    }
+
+    /// The detected workspace root — where `.vscode/` lives, already vetted
+    /// against the home boundary by [`guard_workspace_root`].
+    fn containment_root(&self, project_root: &Path) -> PathBuf {
+        detect_workspace_root(project_root)
     }
 
     fn ide_name(&self) -> &'static str {
@@ -880,5 +910,38 @@ mod tests {
     #[test]
     fn test_vscode_ide_name() {
         assert_eq!(VSCodeGenerator.ide_name(), "VS Code");
+    }
+
+    #[test]
+    fn test_vscode_frust_entry_port_reads_the_marked_entry() {
+        let generator = VSCodeGenerator;
+        let existing = r#"{
+            // JSONC is fine
+            "configurations": [
+                {"name": "Rust", "debugServer": 9},
+                {"name": "Frust (TUI DAP)", "type": "frust", "debugServer": 1234},
+            ]
+        }"#;
+        assert_eq!(generator.frust_entry_port(existing).unwrap(), Some(1234));
+        assert_eq!(generator.frust_entry_port("").unwrap(), None);
+        assert_eq!(
+            generator
+                .frust_entry_port(r#"{"configurations": [{"name": "Rust"}]}"#)
+                .unwrap(),
+            None
+        );
+        // Present but portless (or out of range): present, no port to name.
+        for portless in [
+            r#"{"configurations": [{"name": "Frust (TUI DAP)"}]}"#,
+            r#"{"configurations": [{"name": "Frust (TUI DAP)", "debugServer": 70000}]}"#,
+        ] {
+            assert!(generator.has_frust_entry(portless).unwrap());
+            assert_eq!(generator.frust_entry_port(portless).unwrap(), None);
+        }
+        assert!(
+            generator
+                .frust_entry_port(r#"{"configurations": 1}"#)
+                .is_err()
+        );
     }
 }

@@ -85,7 +85,7 @@ use frust::{FrameTime, SpringDescription, Theme};
 use crate::motion::Ramp;
 use crate::press::{Lane, inside_inclusive as inside, presses};
 use crate::style;
-use crate::text::Label as ShapedText;
+use crate::text::{Label as ShapedText, ThemeTextType};
 use crate::tokens::motion::{SPRING_GLIDE, SPRING_PANEL, SPRING_PRESS};
 use crate::tokens::sans_family;
 
@@ -898,7 +898,22 @@ pub struct RangeSliderWidget {
     on_value_change: frust::authoring::ErasedArgCallback<f64>,
 }
 
-/// The ruler readout's style: `text-3xl font-semibold tabular-nums`.
+/// The type-scale role the ruler readout's family resolves from at layout.
+const READOUT_ROLE: ThemeTextType = ThemeTextType::HeadlineMedium;
+
+/// The type-scale role the bubble readout's and the fluid pill's family
+/// resolves from at layout.
+const BUBBLE_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the ruler unit's family resolves from at layout.
+const UNIT_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
+/// The type-scale role a ruler tick label's family resolves from at layout.
+const TICK_LABEL_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
+/// The ruler readout's style: `text-3xl font-semibold tabular-nums`. The
+/// family here is the unthemed base; `layout` shapes in [`READOUT_ROLE`]'s
+/// family.
 fn readout_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -909,7 +924,8 @@ fn readout_style(color: Color) -> TextStyle {
     }
 }
 
-/// The bubble readout's style: `text-sm font-medium tabular-nums`.
+/// The bubble readout's style: `text-sm font-medium tabular-nums`. The family
+/// here is the unthemed base; `layout` shapes in [`BUBBLE_ROLE`]'s family.
 fn bubble_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -920,7 +936,8 @@ fn bubble_style(color: Color) -> TextStyle {
     }
 }
 
-/// The ruler unit's style: `text-sm text-muted-foreground`.
+/// The ruler unit's style: `text-sm text-muted-foreground`. The family here
+/// is the unthemed base; `layout` shapes in [`UNIT_ROLE`]'s family.
 fn unit_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -931,6 +948,8 @@ fn unit_style(color: Color) -> TextStyle {
 }
 
 /// A ruler tick label's style: `text-[10px] tabular-nums text-muted-foreground`.
+/// The family here is the unthemed base; `layout` shapes in
+/// [`TICK_LABEL_ROLE`]'s family.
 fn tick_label_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1102,27 +1121,41 @@ impl Widget for RangeSliderWidget {
             RangeSliderVariant::Bubble => BUBBLE_HEIGHT,
             RangeSliderVariant::Wave => WAVE_HEIGHT,
             RangeSliderVariant::Fluid => {
-                self.fluid_label_on_track
-                    .layout(ctx, &bubble_style(tint(colors.ink)));
-                self.fluid_label_on_fill
-                    .layout(ctx, &bubble_style(tint(colors.page)));
-                self.fluid_value_on_track
-                    .layout(ctx, &bubble_style(tint(colors.ink)));
-                self.fluid_value_on_fill
-                    .layout(ctx, &bubble_style(tint(colors.page)));
+                self.fluid_label_on_track.layout_themed(
+                    ctx,
+                    &bubble_style(tint(colors.ink)),
+                    BUBBLE_ROLE,
+                );
+                self.fluid_label_on_fill.layout_themed(
+                    ctx,
+                    &bubble_style(tint(colors.page)),
+                    BUBBLE_ROLE,
+                );
+                self.fluid_value_on_track.layout_themed(
+                    ctx,
+                    &bubble_style(tint(colors.ink)),
+                    BUBBLE_ROLE,
+                );
+                self.fluid_value_on_fill.layout_themed(
+                    ctx,
+                    &bubble_style(tint(colors.page)),
+                    BUBBLE_ROLE,
+                );
                 FLUID_HEIGHT
             }
             RangeSliderVariant::Ruler => {
-                let readout = self.readout.layout(ctx, &readout_style(tint(colors.ink)));
+                let readout =
+                    self.readout
+                        .layout_themed(ctx, &readout_style(tint(colors.ink)), READOUT_ROLE);
                 let unit = match &mut self.unit_text {
-                    Some(text) => text.layout(ctx, &unit_style(tint(colors.dim))),
+                    Some(text) => text.layout_themed(ctx, &unit_style(tint(colors.dim)), UNIT_ROLE),
                     None => Size::ZERO,
                 };
                 self.sync_ticks();
                 let label_style = tick_label_style(tint(colors.dim));
                 for tick in &mut self.ticks {
                     if let Some(label) = &mut tick.label {
-                        label.layout(ctx, &label_style);
+                        label.layout_themed(ctx, &label_style, TICK_LABEL_ROLE);
                     }
                 }
                 RULER_READOUT_PADDING_TOP
@@ -1133,7 +1166,8 @@ impl Widget for RangeSliderWidget {
         };
 
         if self.variant == RangeSliderVariant::Bubble {
-            self.readout.layout(ctx, &bubble_style(tint(colors.page)));
+            self.readout
+                .layout_themed(ctx, &bubble_style(tint(colors.page)), BUBBLE_ROLE);
         }
 
         self.size = bc.constrain(Size::new(width, height));
@@ -2715,5 +2749,76 @@ mod tests {
             "the thumb did not follow the range change: {}",
             w.pos.value()
         );
+    }
+
+    // ---- Typeface: every variant's text follows the live theme -------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap,
+        assert_follows_a_live_family_swap_on, assert_paints_only_in_geist,
+    };
+
+    /// The window every typeface probe paints a slider into.
+    const PROBE_WINDOW: Size = Size::new(WIDTH, 200.0);
+
+    /// A slider in `variant` carrying a label and a unit, so every text run
+    /// the variant owns has content.
+    fn probe_logic(variant: RangeSliderVariant) -> impl FnMut(&mut ()) -> RangeSliderView<()> {
+        move |_: &mut ()| {
+            range_slider::<(), _>(50.0, |_: &mut (), _: f64| {})
+                .variant(variant)
+                .label("Volume")
+                .unit("dB")
+        }
+    }
+
+    /// The bubble variant held by a press, so its readout bubble is out.
+    fn grabbed_bubble() -> Probe<RangeSliderView<()>, impl FnMut(&mut ()) -> RangeSliderView<()>> {
+        let mut probe = Probe::new(
+            probe_logic(RangeSliderVariant::Bubble),
+            PROBE_WINDOW,
+            crate::theme(),
+        );
+        probe.frame();
+        probe.event(&pointer(PointerPhase::Down, 120.0, 60.0));
+        probe
+    }
+
+    #[test]
+    fn fluid_and_ruler_text_paints_in_geist_under_the_beui_theme() {
+        for variant in [RangeSliderVariant::Fluid, RangeSliderVariant::Ruler] {
+            assert_paints_only_in_geist(
+                &format!("the {variant:?} slider's text"),
+                probe_logic(variant),
+                PROBE_WINDOW,
+            );
+        }
+    }
+
+    #[test]
+    fn fluid_and_ruler_text_follows_a_live_theme_family_swap() {
+        for variant in [RangeSliderVariant::Fluid, RangeSliderVariant::Ruler] {
+            assert_follows_a_live_family_swap(
+                &format!("the {variant:?} slider's text"),
+                probe_logic(variant),
+                PROBE_WINDOW,
+            );
+        }
+    }
+
+    #[test]
+    fn the_grabbed_bubble_paints_in_geist_under_the_beui_theme() {
+        assert_control("the bubble readout", PROBE_WINDOW);
+        assert_all(
+            "the bubble readout",
+            "under the beUI theme",
+            &grabbed_bubble().frame(),
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn the_grabbed_bubble_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on("the bubble readout", &mut grabbed_bubble());
     }
 }

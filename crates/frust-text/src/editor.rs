@@ -44,6 +44,7 @@
 //! Selection/IME byte↔UTF-16 indexing is unaffected by newlines — a `'\n'` is
 //! one byte / one UTF-16 unit and flows through the same conversion helpers.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use kurbo::{Point, Rect, Size};
@@ -326,6 +327,47 @@ impl TextEditor {
         self.editor.raw_text()
     }
 
+    /// The selected text slice, or `None` if the selection is collapsed.
+    ///
+    /// Returns the `text()[min(base, extent)..max(base, extent)]` slice when
+    /// a non-collapsed selection exists. Returns `None` when the selection is
+    /// collapsed (`base == extent`).
+    ///
+    /// On a preedit/composing state, this operation is infallible (asserted in
+    /// debug, returns `None` in release if byte offsets are not valid char
+    /// boundaries). This mirrors Flutter's TextEditingValue.selection.textBefore
+    /// and textAfter derivatives on the selected slice.
+    pub fn selected_text(&self) -> Option<&str> {
+        let text = self.text();
+        let selection = self.editor.raw_selection();
+        let base = selection.anchor().index();
+        let extent = selection.focus().index();
+
+        if base == extent {
+            return None;
+        }
+
+        let start = base.min(extent);
+        let end = base.max(extent);
+
+        // Debug: assert char boundaries; release: return None if invalid.
+        #[cfg(debug_assertions)]
+        assert!(
+            text.is_char_boundary(start) && text.is_char_boundary(end),
+            "selected text byte offsets are not char boundaries: start={}, end={}, text.len()={}",
+            start,
+            end,
+            text.len()
+        );
+
+        #[cfg(not(debug_assertions))]
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return None;
+        }
+
+        Some(&text[start..end])
+    }
+
     /// The measured size of the laid-out text (Y-down logical pixels).
     ///
     /// Returns [`Size::ZERO`] before the first [`apply`](Self::apply) has
@@ -461,6 +503,47 @@ pub fn utf16_to_byte(text: &str, utf16_idx: usize) -> usize {
         units = next;
     }
     text.len()
+}
+
+/// Normalizes pasted text for insertion, handling line-ending differences.
+///
+/// This function prepares text from the clipboard or external sources by
+/// normalizing line endings according to the target field's mode:
+///
+/// - **Single-line mode** (`single_line: true`): removes every `'\r'` and `'\n'`
+///   entirely, denying multi-line input. This mirrors Flutter's
+///   [`singleLineFormatter`](https://api.flutter.dev/flutter/services/TextInputFormatter-class.html),
+///   which denies newlines to prevent multi-line input in fields like password
+///   fields or search boxes.
+/// - **Multi-line mode** (`single_line: false`): replaces `"\r\n"` and lone `'\r'`
+///   with `'\n'`, normalizing Windows and old Mac line endings to Unix. All other
+///   characters pass through unchanged.
+///
+/// Returns a `Cow::Borrowed` reference when the input text is unchanged;
+/// returns `Cow::Owned` when filtering has occurred.
+///
+/// This function performs no other filtering: no trimming, no stripping of
+/// control characters, no Unicode normalization. It is the caller's
+/// responsibility to apply additional validation if needed.
+pub fn sanitize_paste(text: &str, single_line: bool) -> Cow<'_, str> {
+    if single_line {
+        // Single-line: remove all CR and LF.
+        if text.contains('\r') || text.contains('\n') {
+            let sanitized = text.replace(['\r', '\n'], "");
+            Cow::Owned(sanitized)
+        } else {
+            Cow::Borrowed(text)
+        }
+    } else {
+        // Multi-line: normalize CRLF and lone CR to LF.
+        if text.contains('\r') {
+            // Replace CRLF with LF first, then lone CR with LF.
+            let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            Cow::Owned(normalized)
+        } else {
+            Cow::Borrowed(text)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -978,5 +1061,141 @@ mod tests {
             ed.layout_size().width > 0.0,
             "bold+italic edit-style defaults should still shape text"
         );
+    }
+
+    // --- selected_text ---
+
+    #[test]
+    fn selected_text_returns_none_when_collapsed() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        // Caret is at start; selection is collapsed.
+        assert_eq!(ed.selected_text(), None);
+    }
+
+    #[test]
+    fn selected_text_returns_slice_with_forward_selection() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: true }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: true }, &mut cx);
+        // Selection is "he" (bytes 0..2).
+        assert_eq!(ed.selected_text(), Some("he"));
+    }
+
+    #[test]
+    fn selected_text_returns_same_slice_with_backward_selection() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::End { select: false }, &mut cx);
+        ed.apply(EditOp::MoveLeft { select: true }, &mut cx);
+        ed.apply(EditOp::MoveLeft { select: true }, &mut cx);
+        // Backward selection from end (byte 5): two moves left lands at byte 3 = "lo".
+        assert_eq!(ed.selected_text(), Some("lo"));
+    }
+
+    #[test]
+    fn selected_text_spans_multi_byte_emoji_correctly() {
+        let (mut ed, mut cx) = editor();
+        // Insert text with an emoji in the middle.
+        ed.apply(EditOp::Insert(format!("a{EMOJI}b")), &mut cx);
+        // Select all.
+        ed.apply(EditOp::SelectAll, &mut cx);
+        // Full slice includes the emoji.
+        let selected = ed.selected_text().expect("full selection should exist");
+        assert_eq!(selected, format!("a{EMOJI}b"));
+    }
+
+    #[test]
+    fn selected_text_can_select_just_the_emoji() {
+        let (mut ed, mut cx) = editor();
+        // Buffer: "a😀b" — "a" is 1 byte, emoji is 4 bytes, "b" is 1 byte.
+        ed.apply(EditOp::Insert(format!("a{EMOJI}b")), &mut cx);
+        // Move to after "a" (byte 1), then extend right 1 char (the emoji).
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: false }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: true }, &mut cx);
+        // Selection is just the emoji (bytes 1..5).
+        assert_eq!(ed.selected_text(), Some(EMOJI));
+    }
+
+    // --- sanitize_paste ---
+
+    #[test]
+    fn sanitize_paste_single_line_removes_crlf() {
+        let result = sanitize_paste("a\r\nb\n", true);
+        assert_eq!(result, Cow::Borrowed::<str>("ab") as Cow<str>);
+        assert_eq!(result.as_ref(), "ab");
+    }
+
+    #[test]
+    fn sanitize_paste_single_line_removes_lone_cr() {
+        let result = sanitize_paste("a\rb", true);
+        assert_eq!(result.as_ref(), "ab");
+    }
+
+    #[test]
+    fn sanitize_paste_single_line_removes_lone_lf() {
+        let result = sanitize_paste("a\nb", true);
+        assert_eq!(result.as_ref(), "ab");
+    }
+
+    #[test]
+    fn sanitize_paste_multi_line_normalizes_crlf_and_cr() {
+        let result = sanitize_paste("a\r\nb\rc", false);
+        assert_eq!(result.as_ref(), "a\nb\nc");
+    }
+
+    #[test]
+    fn sanitize_paste_multi_line_keeps_existing_lf() {
+        let result = sanitize_paste("a\nb\nc", false);
+        assert_eq!(result, Cow::Borrowed("a\nb\nc"));
+    }
+
+    #[test]
+    fn sanitize_paste_returns_borrowed_when_unchanged() {
+        let text = "hello world";
+        let result_single = sanitize_paste(text, true);
+        assert_eq!(result_single, Cow::Borrowed(text));
+
+        let result_multi = sanitize_paste(text, false);
+        assert_eq!(result_multi, Cow::Borrowed(text));
+    }
+
+    #[test]
+    fn sanitize_paste_single_line_multiple_newlines() {
+        let result = sanitize_paste("line1\nline2\nline3", true);
+        assert_eq!(result.as_ref(), "line1line2line3");
+    }
+
+    #[test]
+    fn sanitize_paste_multi_line_complex_mixed_endings() {
+        // Mix of CRLF, lone CR, and lone LF.
+        let result = sanitize_paste("a\r\nb\rc\nd", false);
+        assert_eq!(result.as_ref(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn sanitize_paste_empty_string() {
+        let result_single = sanitize_paste("", true);
+        assert_eq!(result_single, Cow::Borrowed(""));
+
+        let result_multi = sanitize_paste("", false);
+        assert_eq!(result_multi, Cow::Borrowed(""));
+    }
+
+    #[test]
+    fn sanitize_paste_only_newlines_single_line() {
+        let result = sanitize_paste("\r\n\n\r", true);
+        assert_eq!(result.as_ref(), "");
+    }
+
+    #[test]
+    fn sanitize_paste_preserves_other_whitespace() {
+        let text = "a  \t  b";
+        let result = sanitize_paste(text, true);
+        assert_eq!(result.as_ref(), text);
     }
 }

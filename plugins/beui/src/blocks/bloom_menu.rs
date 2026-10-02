@@ -89,7 +89,7 @@ use crate::components::popover::{PanelChrome, lerp, paint_panel, resolve_panel};
 use crate::motion::Ramp;
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -603,16 +603,14 @@ impl<State: 'static> View<State> for BloomMenuView<State> {
     }
 }
 
-/// A label's style (`text-sm font-medium`).
+/// A label's style (`text-sm font-medium`), in the theme's `label_large`
+/// family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
 /// Paint lucide's `plus` mark — two strokes — centred on `centre`.
@@ -1687,5 +1685,39 @@ mod tests {
         let rec = h.read();
         assert_eq!(rec.inks.len(), 1, "just the trigger's label");
         assert!(rec.strokes > 0, "the hairline and the plus");
+    }
+
+    // ---- Typeface: the trigger, heading and item labels follow the theme ----
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The menu with glyph-free icons, closed (the trigger's label) or open
+    /// (the heading and every item's label).
+    fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
+        move |_: &mut ()| {
+            let items = ["Doc", "Board", "Table"]
+                .into_iter()
+                .map(|label| bloom_menu_item(icon::<()>(), label))
+                .collect();
+            frust::Stack(vec![any(
+                bloom_menu::<(), _>(items, |_: &mut (), _| {}).open(open)
+            )])
+        }
+    }
+
+    #[test]
+    fn menu_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the closed menu's trigger", probe_logic(false), WINDOW);
+        assert_paints_only_in_geist("the open menu's labels", probe_logic(true), WINDOW);
+        let open = Probe::new(probe_logic(true), WINDOW, crate::theme()).frame();
+        assert_eq!(open.len(), 4, "the heading and three item labels");
+    }
+
+    #[test]
+    fn menu_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the closed menu's trigger", probe_logic(false), WINDOW);
+        assert_follows_a_live_family_swap("the open menu's labels", probe_logic(true), WINDOW);
     }
 }

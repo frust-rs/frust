@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │                                                                          
    New project · n       │                                                                          
    Add plugin · a        │    ✗  Could not reach devtools service                                   
-   Doctor · d            │    connection refused after 3s — the service may have exited             
+   Doctor · i            │    connection refused after 3s — the service may have exited             
    Build · b             │                                                                          
-   Clean · c             │                          ╭──────────────────╮                            
+   Clean                 │                          ╭──────────────────╮                            
    MCP off · M           │                          │ ⟳  Retry         │                            
    DAP off · D           │                          ╰──────────────────╯                            
                          │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: failed │ r retry · Esc back to log                    [mouse ✓]
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

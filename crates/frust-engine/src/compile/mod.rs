@@ -1731,7 +1731,26 @@ impl SceneCompiler {
         self.clips.clip_run(&mut frame.strips, start, alpha_start);
         let strip_range = start..frame.strips.strips.len();
 
-        if strip_range.is_empty() {
+        // A run is only a draw when it carries content. Under a mask clip
+        // `vello_common::clip::intersect_impl` gates its trailing sentinel on
+        // the *whole* target buffer being non-empty, not on what this call
+        // added — and `frame.strips` is one `Append`-mode buffer shared by
+        // every draw of the frame, so a masked path that contributed no rows
+        // (zero-area geometry, coverage the mask removed entirely) after an
+        // earlier draw's content still gets a sentinel: a *lone* sentinel.
+        // The renderer's pairwise walk reads each span's extent off the strip
+        // after it, so that is not a run at all — roll it back exactly like an
+        // empty one. Every generation path pairs a content strip with its own
+        // sentinel in the same call, so a one-strip run can only be that
+        // sentinel; the assertion keeps a future generator change from being
+        // swallowed here as "nothing to draw".
+        if strip_range.len() < 2 {
+            debug_assert!(
+                strip_range.is_empty() || frame.strips.strips[start].is_sentinel(),
+                "a one-strip run must be a lone sentinel, not an unterminated content strip"
+            );
+            frame.strips.strips.truncate(start);
+            frame.strips.alphas.truncate(alpha_start);
             return false;
         }
 

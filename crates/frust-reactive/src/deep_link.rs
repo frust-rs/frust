@@ -44,6 +44,7 @@
 //! the *cold-start* link specifically (that path is always delivered after
 //! init, once the native handle exists).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use reactive_graph::signal::RwSignal;
@@ -58,14 +59,25 @@ use crate::executor::is_ui_thread;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeepLink {
     pub url: String,
+    /// Monotonic per-process delivery counter; compare sequences, not URLs, to
+    /// apply each delivery exactly once — two identical URLs delivered twice
+    /// are two deliveries.
+    pub sequence: u64,
 }
 
 impl DeepLink {
-    /// Wrap a raw URL/location string.
+    /// Wrap a raw URL/location string. Auto-assigns the next monotonic sequence.
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+        let sequence = SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
+        Self {
+            url: url.into(),
+            sequence,
+        }
     }
 }
+
+/// Process-wide monotonic sequence counter: incremented on each `DeepLink::new`.
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// The app-facing deep-link read surface (see the module docs' `app_links`
 /// semantics). Obtained via [`deep_links`] (`frust::deep_links()` at the
@@ -78,8 +90,9 @@ pub struct DeepLinks {
     /// calls to [`deep_links`] see the same `initial` once it exists.
     pub initial: Option<String>,
     /// The most recently pushed link — cold-start or warm, uniformly (see
-    /// the module docs). Read/track it with the `Get`/`Track` traits
-    /// (`frust::{Get, Track}`) the same way any other `RwSignal` is read.
+    /// the module docs). Use [`DeepLink::sequence`] to deduplicate deliveries.
+    /// Read/track it with the `Get`/`Track` traits (`frust::{Get, Track}`)
+    /// the same way any other `RwSignal` is read.
     pub latest: RwSignal<Option<DeepLink>>,
 }
 
@@ -119,6 +132,17 @@ fn slot() -> &'static Slot {
     })
 }
 
+/// Test-only: clears the recorded `initial` URL so a test can observe a first
+/// push regardless of which tests ran earlier in the same process. The slot is
+/// shared process-wide, so callers must hold `WAKER_TEST_LOCK`.
+#[cfg(test)]
+fn reset_initial_for_test() {
+    *slot()
+        .initial
+        .lock()
+        .expect("frust-reactive: deep_link initial mutex poisoned") = None;
+}
+
 /// Deliver a platform deep link (cold-start or warm) into the process-wide
 /// source. Called by a shell (the Android/iOS FFI glue) on the UI
 /// thread; app code never calls this directly.
@@ -127,7 +151,9 @@ fn slot() -> &'static Slot {
 /// [`DeepLinks::initial`] (idempotent — later calls do not overwrite it);
 /// every call (including the first) also writes [`DeepLinks::latest`], so a
 /// tracked reader observes both cold-start and warm links through the same
-/// signal (see the module docs' `app_links` semantics).
+/// signal (see the module docs' `app_links` semantics). Each delivered link
+/// is tagged with a monotonically increasing [`DeepLink::sequence`] — use it
+/// to deduplicate deliveries rather than comparing URL text.
 ///
 /// # Panics
 ///
@@ -204,10 +230,108 @@ mod tests {
         (waker, seen)
     }
 
-    /// Every acceptance criterion in one `#[test]`, serialized on the shared
-    /// waker lock (`ReactiveRuntime::init` here swaps the process-wide waker,
-    /// which would otherwise race the other waker-asserting tests in this
-    /// crate — see `WAKER_TEST_LOCK`'s doc comment in `lib.rs`).
+    /// Acceptance criterion (a): two pushes of the same URL yield sequences n
+    /// and n+1 with equal URLs.
+    #[test]
+    fn sequence_increments_on_identical_urls() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let (waker, _) = recording_waker();
+        let _rt = ReactiveRuntime::init(waker);
+
+        let url = "frust-test://identical".to_string();
+        push_deep_link(url.clone());
+        let link1 = deep_links().latest.get_untracked().unwrap();
+
+        push_deep_link(url.clone());
+        let link2 = deep_links().latest.get_untracked().unwrap();
+
+        // Same URL, but strictly increasing sequences
+        assert_eq!(link1.url, link2.url);
+        assert_eq!(link1.sequence + 1, link2.sequence);
+    }
+
+    /// Acceptance criterion (b): `initial` (if constructed through
+    /// DeepLink::new) has a sequence lower than any later push.
+    #[test]
+    fn initial_sequence_lower_than_later_push() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let (waker, _) = recording_waker();
+        let _rt = ReactiveRuntime::init(waker);
+
+        let url1 = "frust-test://initial".to_string();
+        push_deep_link(url1.clone());
+        let links1 = deep_links();
+        let initial_seq = links1
+            .latest
+            .get_untracked()
+            .expect("initial push should have produced a link")
+            .sequence;
+
+        let url2 = "frust-test://later".to_string();
+        push_deep_link(url2);
+        let links2 = deep_links();
+        let later_seq = links2
+            .latest
+            .get_untracked()
+            .expect("second push should have produced a link")
+            .sequence;
+
+        assert!(
+            initial_seq < later_seq,
+            "initial sequence {} should be lower than later sequence {}",
+            initial_seq,
+            later_seq
+        );
+    }
+
+    /// Acceptance criterion (c): sequences are strictly increasing across
+    /// mixed URLs.
+    #[test]
+    fn sequences_strictly_increasing_across_mixed_urls() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let (waker, _) = recording_waker();
+        let _rt = ReactiveRuntime::init(waker);
+
+        let urls = vec![
+            "frust-test://a",
+            "frust-test://b",
+            "frust-test://a", // repeat
+            "frust-test://c",
+            "frust-test://b", // repeat
+        ];
+
+        let mut sequences = Vec::new();
+        for url in urls {
+            push_deep_link(url);
+            let seq = deep_links()
+                .latest
+                .get_untracked()
+                .expect("push should produce a link")
+                .sequence;
+            sequences.push(seq);
+        }
+
+        // Verify strictly increasing
+        for i in 1..sequences.len() {
+            assert!(
+                sequences[i - 1] < sequences[i],
+                "sequence {} should be strictly less than {}",
+                sequences[i - 1],
+                sequences[i]
+            );
+        }
+    }
+
+    /// Original waker/wake-bridge contract test, adapted for the sequence field.
     #[test]
     fn deep_link_push_and_wake_bridge() {
         let _guard = crate::WAKER_TEST_LOCK
@@ -216,6 +340,10 @@ mod tests {
 
         let (waker, wakes) = recording_waker();
         let _rt = ReactiveRuntime::init(waker);
+
+        // Other tests push links into the same process-wide slot, so start
+        // from a state where no link has been recorded as `initial`.
+        reset_initial_for_test();
 
         // Criterion: push before any tracked read — a late subscriber sees it
         // immediately via BOTH the `initial` snapshot and the live `latest`
@@ -226,16 +354,23 @@ mod tests {
 
         let links = deep_links();
         assert_eq!(links.initial.as_deref(), Some(url1.as_str()));
-        assert_eq!(
-            links.latest.get_untracked(),
-            Some(DeepLink::new(url1.clone()))
-        );
+        let link1 = links
+            .latest
+            .get_untracked()
+            .expect("should have pushed a link");
+        assert_eq!(link1.url, url1);
+        assert!(link1.sequence > 0, "sequence should be assigned");
 
         // A tracked scope reading `latest` after the push observes the
         // already-pushed link with no wake needed — an ordinary read.
         let scope = TrackedScope::new();
         let seen = scope.track(|| deep_links().latest.get());
-        assert_eq!(seen, Some(DeepLink::new(url1.clone())));
+        let seen_link = seen.expect("should have a link");
+        assert_eq!(seen_link.url, url1);
+        assert_eq!(
+            seen_link.sequence, link1.sequence,
+            "sequence should be stable"
+        );
         assert!(!scope.is_dirty(), "a fresh track starts clean");
 
         // Criterion: push after a tracked read fires the signal-write -> wake
@@ -262,7 +397,15 @@ mod tests {
             Some(url1.as_str()),
             "initial is set once and stays"
         );
-        assert_eq!(links2.latest.get_untracked(), Some(DeepLink::new(url2)));
+        let link2 = links2
+            .latest
+            .get_untracked()
+            .expect("should have pushed a second link");
+        assert_eq!(link2.url, url2);
+        assert!(
+            link2.sequence > link1.sequence,
+            "second sequence should be higher"
+        );
     }
 
     /// Criterion: the UI-thread contract is enforced (mirrors

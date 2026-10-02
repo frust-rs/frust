@@ -153,6 +153,7 @@ fn cleared_ime_state() -> ImeState {
         },
         caret: None,
         content_type: Default::default(),
+        suppress_soft_keyboard: false,
     }
 }
 
@@ -702,6 +703,7 @@ mod tests {
             },
             caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
             content_type: Default::default(),
+            suppress_soft_keyboard: false,
         }
     }
 

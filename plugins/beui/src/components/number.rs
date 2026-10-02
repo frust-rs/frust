@@ -68,6 +68,7 @@ use peniko::{Brush, Color};
 
 use crate::motion::Ramp;
 use crate::style::TEXT_BASE;
+use crate::text::{ThemeTextType, themed_style};
 use crate::tokens::BEUI_LIGHT;
 use crate::tokens::motion::{EASE_OUT, SPRING_SWAP};
 
@@ -395,15 +396,15 @@ impl NumberWidget {
         self.columns = columns;
     }
 
-    /// The style the digits and literals are shaped with.
+    /// The style the digits and literals are shaped with, in the theme's
+    /// `body_medium` family. `layout` keys the shaped digits on it, so a theme
+    /// swap that changes the family reshapes them.
     fn run_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
-        let family = theme.map_or_else(crate::tokens::mono_family, |t| {
-            t.type_scale.body_medium.family.clone()
-        });
-        TextStyle {
-            family,
-            ..TextStyle::new(self.size, ink)
-        }
+        themed_style(
+            TextStyle::new(self.size, ink),
+            ThemeTextType::BodyMedium,
+            theme,
+        )
     }
 
     /// The resolved ink: the explicit override, else the theme's `on_surface`,
@@ -1067,5 +1068,27 @@ mod tests {
             widget.positions(Duration::from_secs(5)),
             vec![0.0, 0.0, 0.0, 7.0]
         );
+    }
+
+    // ---- Typeface: digits and literals follow the live theme ---------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A grouped, prefixed roll, so both the digit columns and the literal
+    /// runs paint.
+    fn probe_view(_: &mut ()) -> NumberView<()> {
+        number::<()>(1234.0).group(true).prefix("$")
+    }
+
+    #[test]
+    fn digits_and_literals_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the number's digits", probe_view, BOX);
+    }
+
+    #[test]
+    fn digits_and_literals_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the number's digits", probe_view, BOX);
     }
 }

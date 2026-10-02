@@ -51,9 +51,10 @@ use jni::errors::LogErrorAndDefault;
 use jni::objects::{JClass, JObject, JString};
 use jni::refs::Global;
 use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
+use jni::{Env, jni_sig, jni_str};
 use ndk::native_window::NativeWindow;
 
-use frust_core::event::{EditingState, ImeContentType, ImeState};
+use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
@@ -69,8 +70,9 @@ use crate::app::{
     AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
 };
 use crate::ffi_support::{
-    ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
-    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
+    EditCommandWire, ImeJsonState, PlatformViewCommandJson, build_ime_state_json,
+    build_platform_view_commands_json, edit_command_from_code, load_pipeline_cache,
+    normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 
@@ -236,6 +238,21 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> ji
 /// context (not the Activity) is stored deliberately: it is stable across
 /// activity recreation, so retaining it can't leak an Activity.
 ///
+/// ALSO installs the app's files/cache directories into `frust-paths`
+/// (`Context.getFilesDir()`/`Context.getCacheDir()`, first-wins) — the first
+/// thing the `Once` body does, before either of the two steps above. This is
+/// what makes `frust_paths::data_dir()`/`cache_dir()` — and therefore
+/// `frust_database::Database::open` — work on Android: both stay `None` until
+/// this call has run. A resolution failure is logged and the directory install
+/// is skipped, but the plugin platform-handle install below it always
+/// continues regardless (a directories failure can never take the handle
+/// install down with it). Any Java exception thrown by `Context.getFilesDir()`
+/// or `Context.getCacheDir()` is cleared before returning, leaving the JNI env
+/// exactly as it was found so the subsequent JavaVM/global-ref/handle install
+/// and return to Kotlin behave as if the directory step never existed. The
+/// pipeline-cache `cacheDir` string `nativeInit` separately receives (see
+/// [`native_init`]) is an older, unrelated channel, left as-is by this change.
+///
 /// A hand-written, process-wide export (like [`JNI_OnLoad`]) rather than a
 /// per-app `android_app!`-generated one — the handles are process state, not
 /// per-`AppHandle` state. Routed through [`guard`] like every export so a panic
@@ -259,6 +276,65 @@ pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeInitPlatform<'local
 fn native_init_platform(mut env: EnvUnowned, context: JObject) {
     guard("nativeInitPlatform", (), || {
         PLATFORM_INIT.call_once(|| {
+            // Resolve + install the app's files/cache directories into
+            // frust-paths FIRST — before the JavaVM null-check below — so this
+            // step can never be taken down by a (defensive-only) JNI_OnLoad
+            // ordering failure. See this function's rustdoc for the full
+            // ordering contract.
+            let resolved_dirs = env
+                .with_env(
+                    |env| -> jni::errors::Result<Option<frust_paths::AndroidDirs>> {
+                        match resolve_android_dirs(env, &context) {
+                            Ok(dirs) => Ok(Some(dirs)),
+                            Err(err) => {
+                                // The directory step must leave the JNI env exactly as it found it —
+                                // no pending exception — so the JavaVM/global-ref/handle install below
+                                // and the return to Kotlin behave as before this step existed.
+                                if env.exception_check() {
+                                    env.exception_clear();
+                                }
+                                log::error!(
+                                    "frust-shell-android: nativeInitPlatform failed to resolve \
+                                 Context.getFilesDir()/getCacheDir() (Java exception cleared): {err}"
+                                );
+                                Ok(None)
+                            }
+                        }
+                    },
+                )
+                .resolve::<LogErrorAndDefault>();
+            match resolved_dirs {
+                Some(dirs) => match frust_paths::install_android_dirs(dirs.clone()) {
+                    Ok(()) => {
+                        log::debug!(
+                            "frust-shell-android: frust-paths Android dirs installed: data={} \
+                             cache={}",
+                            dirs.data_dir.display(),
+                            dirs.cache_dir.display()
+                        );
+                    }
+                    Err(frust_paths::InstallAndroidDirsError::AlreadyInstalled) => {
+                        // Cannot happen under this `Once` (this is the only
+                        // caller), but handled defensively —
+                        // `install_android_dirs`'s own contract is first-wins,
+                        // independent of this call site.
+                        log::debug!(
+                            "frust-shell-android: frust-paths Android dirs already installed"
+                        );
+                    }
+                    Err(err @ frust_paths::InstallAndroidDirsError::NotAbsolute { .. }) => {
+                        log::error!("frust-shell-android: {err}");
+                    }
+                },
+                None => {
+                    log::error!(
+                        "frust-shell-android: nativeInitPlatform could not resolve \
+                         Context.getFilesDir()/getCacheDir(); frust_paths::data_dir()/cache_dir() \
+                         will stay None on this device (frust-database open will fail)"
+                    );
+                }
+            }
+
             let vm_ptr = JAVA_VM.load(Ordering::Acquire);
             if vm_ptr.is_null() {
                 log::error!(
@@ -297,6 +373,70 @@ fn native_init_platform(mut env: EnvUnowned, context: JObject) {
             log::debug!("frust-shell-android: plugin platform handles installed");
         });
     });
+}
+
+/// Resolve `Context.getFilesDir()`/`Context.getCacheDir()` into the
+/// [`frust_paths::AndroidDirs`] pair [`native_init_platform`] installs, via two
+/// plain no-arg JNI method calls (`jni` 0.22 idiom — see
+/// `plugins/shared-preferences/src/android.rs`'s `with_prefs`/`read_string` for
+/// the same `jni_str!`/`jni_sig!` call shape). A null `File` returned by either
+/// getter, or a null string returned by `File.getAbsolutePath()`, is treated as
+/// an error ([`jni::errors::Error::NullPtr`]) — never silently coerced to an
+/// empty path, which `frust_paths::install_android_dirs`'s absolute-path check
+/// would otherwise reject anyway, just less legibly.
+fn resolve_android_dirs(
+    env: &mut Env,
+    context: &JObject,
+) -> Result<frust_paths::AndroidDirs, jni::errors::Error> {
+    let files_dir = env
+        .call_method(
+            context,
+            jni_str!("getFilesDir"),
+            jni_sig!("()Ljava/io/File;"),
+            &[],
+        )?
+        .l()?;
+    if files_dir.is_null() {
+        return Err(jni::errors::Error::NullPtr("Context.getFilesDir()"));
+    }
+    let data_dir = file_absolute_path(env, &files_dir)?;
+
+    let cache_dir_file = env
+        .call_method(
+            context,
+            jni_str!("getCacheDir"),
+            jni_sig!("()Ljava/io/File;"),
+            &[],
+        )?
+        .l()?;
+    if cache_dir_file.is_null() {
+        return Err(jni::errors::Error::NullPtr("Context.getCacheDir()"));
+    }
+    let cache_dir = file_absolute_path(env, &cache_dir_file)?;
+
+    Ok(frust_paths::AndroidDirs {
+        data_dir: PathBuf::from(data_dir),
+        cache_dir: PathBuf::from(cache_dir),
+    })
+}
+
+/// `File.getAbsolutePath()` on a live `java.io.File` object, the shared body
+/// of [`resolve_android_dirs`]'s two directory lookups. A null result is
+/// treated as an error, not an empty path (see [`resolve_android_dirs`]'s docs).
+fn file_absolute_path(env: &mut Env, file: &JObject) -> Result<String, jni::errors::Error> {
+    let path = env
+        .call_method(
+            file,
+            jni_str!("getAbsolutePath"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )?
+        .l()?;
+    if path.is_null() {
+        return Err(jni::errors::Error::NullPtr("File.getAbsolutePath()"));
+    }
+    let jstr = env.cast_local::<JString>(path)?;
+    Ok(jstr.to_string())
 }
 
 /// Spawn the single background GPU pre-init thread, best-effort and
@@ -1348,17 +1488,24 @@ pub fn native_on_frame(handle: jlong, frame_time_nanos: jlong) -> jboolean {
 ///
 /// `action` is the normalised phase code the Kotlin side sends
 /// (`0`=down, `1`=move, `2`=up, `3`=cancel — see
-/// [`crate::ffi_support::touch_phase_from_action`]); `x`/`y` are physical,
-/// view-local pixels (`MotionEvent.x`/`.y`), converted to logical space inside
-/// [`AndroidAppHandle::dispatch_touch`]. Single-pointer in v1: Kotlin forwards
-/// only the primary pointer.
-pub fn native_on_touch(handle: jlong, action: jint, x: jfloat, y: jfloat) {
+/// [`crate::ffi_support::touch_phase_from_action`]); `pointer_id` is that
+/// contact's own `MotionEvent.pointerId` (Android's device-wide identity for
+/// this contact, not yet the small gesture-local slot
+/// [`frust_core::event::PointerId::touch`] takes — `dispatch_touch` maps one
+/// onto the other); `x`/`y` are physical, view-local pixels (the same
+/// contact's own `MotionEvent.getX/getY(index)`), converted to logical space
+/// inside [`AndroidAppHandle::dispatch_touch`]. Kotlin forwards every active
+/// contact: one call per pointer for `ACTION_MOVE`/`ACTION_CANCEL`, and the
+/// single changed pointer (`event.actionIndex`) for
+/// `ACTION_DOWN`/`ACTION_POINTER_DOWN`/`ACTION_UP`/`ACTION_POINTER_UP` — see
+/// `FrustSurfaceView.onTouchEvent`.
+pub fn native_on_touch(handle: jlong, action: jint, pointer_id: jint, x: jfloat, y: jfloat) {
     guard("nativeOnTouch", (), || {
         pump_reactive_runtime();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let phase = crate::ffi_support::touch_phase_from_action(action);
-            app.dispatch_touch(phase, x, y);
+            app.dispatch_touch(phase, pointer_id, x, y);
         }
     });
 }
@@ -1485,6 +1632,155 @@ pub fn native_ime_action(handle: jlong, action: jint) {
     });
 }
 
+// ---------------------------------------------------------------------
+// The clipboard route: two one-shot drains Kotlin polls once per frame, and one
+// inbound command dispatch.
+//
+// All three are hand-written exports like `nativeInitPlatform` above rather
+// than `android_app!`-generated ones: each takes only the opaque handle and
+// names no app type, so nothing about them varies per app and the macro has
+// nothing to bind. The clipboard itself lives entirely on the JVM side
+// (`ClipboardManager` is a system service with no Rust-reachable counterpart),
+// so this seam carries text across the boundary instead of owning any.
+// ---------------------------------------------------------------------
+
+/// `nativeTakeClipboardWrite`: drain the text a focused editable asked to put
+/// on the host clipboard and return it as a `java.lang.String`, or `null` when
+/// nothing was copied.
+///
+/// **Destructive** — the slot is a one-shot edge (see
+/// [`AndroidAppHandle::take_clipboard_write`]), so a drained value Kotlin drops
+/// is lost. Kotlin calls this once per frame from `doFrame`, right after the
+/// post-dispatch IME poll, and hands any non-null result to
+/// `ClipboardManager.setPrimaryClip`.
+///
+/// A missing handle returns `null` too: "no native side" and "the channel was
+/// empty" are the same answer to Kotlin — there is nothing to write either way.
+///
+/// The drained text is never logged here. It is the user's selection, and a
+/// copied secret is exactly as sensitive as the pasted one [`EditCommand`]'s
+/// own redacting `Debug` exists for.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeTakeClipboardWrite<'local>(
+    env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jstring {
+    native_take_clipboard_write(env, handle)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeTakeClipboardWrite`], split
+/// out so the export stays a thin `extern "system"` shim (the
+/// [`native_init_platform`] shape).
+fn native_take_clipboard_write(mut env: EnvUnowned, handle: jlong) -> jstring {
+    guard("nativeTakeClipboardWrite", std::ptr::null_mut(), || {
+        pump_reactive_runtime();
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(text) = app.take_clipboard_write() else {
+            return std::ptr::null_mut();
+        };
+        env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &text)?.into()))
+            .resolve::<LogErrorAndDefault>()
+            .into_raw()
+    })
+}
+
+/// `nativeTakePasteRequest`: drain whether a focused editable asked this shell
+/// to read the host clipboard back to it.
+///
+/// **Destructive** for [`Java_dev_frust_FrustSurfaceView_nativeTakeClipboardWrite`]'s
+/// reason, and drained in the same per-frame place. On `true` Kotlin reads
+/// `ClipboardManager` and dispatches the answer back through
+/// [`Java_dev_frust_FrustSurfaceView_nativeEditCommand`] as a paste carrying the
+/// text — a *new* dispatch, not a return value, because the read is the JVM's to
+/// perform and may legitimately yield nothing (Android 10+ hands no clip at all
+/// to an app that does not have input focus). A missing handle answers `false`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeTakePasteRequest<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    native_take_paste_request(handle)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeTakePasteRequest`].
+fn native_take_paste_request(handle: jlong) -> jboolean {
+    guard("nativeTakePasteRequest", false, || {
+        pump_reactive_runtime();
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        match unsafe { handle_mut(handle) } {
+            Some(app) => app.take_paste_request(),
+            None => false,
+        }
+    })
+}
+
+/// `nativeEditCommand`: dispatch one decoded clipboard/selection verb to the
+/// focused editable — a hardware `Ctrl` chord, an IME context-menu action, or
+/// the answer to a paste request.
+///
+/// `cmd` is a fixed numeric ABI shared with the Kotlin side — DO NOT renumber
+/// without changing both sides (the rule the touch ABI carries):
+///   0 = copy
+///   1 = cut
+///   2 = paste — `text` carries the clipboard content
+///   3 = select all
+///
+/// [`edit_command_from_code`] owns the decode and is host-tested; an
+/// unrecognised code is logged and dropped rather than defaulted to a verb,
+/// because every verb here edits a document.
+///
+/// `text` is read only for a paste and may be `null` for every other verb; an
+/// unreadable/`null` string falls back to empty, which a focused field treats as
+/// nothing to insert. It is never logged — see [`EditCommand`]'s own redacting
+/// `Debug`.
+///
+/// Same thread contract as `nativeImeApply`: called on the JVM's UI thread —
+/// from the Choreographer callback, an `InputConnection` callback, or
+/// `onKeyDown` — never from the render thread. A missing handle is a no-op.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeEditCommand<'local>(
+    env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    cmd: jint,
+    text: JString<'local>,
+) {
+    native_edit_command(env, handle, cmd, text)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeEditCommand`].
+fn native_edit_command(mut env: EnvUnowned, handle: jlong, cmd: jint, text: JString) {
+    guard("nativeEditCommand", (), || {
+        pump_reactive_runtime();
+        let Some(wire) = edit_command_from_code(cmd) else {
+            log::warn!("frust-shell-android: nativeEditCommand dropped unknown command code {cmd}");
+            return;
+        };
+        // Read the Java string before touching the handle (that releases the
+        // `env` borrow), exactly as `native_ime_apply` does — and only for the
+        // one verb that carries text, so a copy/cut/select-all pays no string
+        // conversion at all.
+        let command = match wire {
+            EditCommandWire::Copy => EditCommand::Copy,
+            EditCommandWire::Cut => EditCommand::Cut,
+            EditCommandWire::SelectAll => EditCommand::SelectAll,
+            EditCommandWire::Paste => EditCommand::Paste(
+                env.with_env(|env| text.try_to_string(env))
+                    .resolve::<LogErrorAndDefault>(),
+            ),
+        };
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.edit_command(command);
+        }
+    });
+}
+
 /// `nativeSetAppearance`: flip the app's theme brightness (config/uiMode
 /// change), re-publishing it through both delivery paths (mirrors the
 /// desktop shell's `apply_theme`). `dark` is a JNI `jboolean` (this `jni` crate's
@@ -1547,6 +1843,77 @@ pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
             app.set_reduce_motion(reduce);
         }
     });
+}
+
+/// `nativeFocusGeneration`: return the focus/IME session generation — a
+/// counter over *changes to the published focus/IME surface*.
+///
+/// The same cheap per-frame-pollable `jlong` read `nativeSystemUiState` is,
+/// but per-handle rather than process-global.
+///
+/// Retained for Kotlin generated before [`native_focus_epoch`], which is what
+/// the embedding's clipboard resolver binds to now. This counter cannot
+/// answer "is this still the session that asked?": focus can move from one
+/// field to another without moving it at all (claiming focus while some field
+/// is already focused writes `true` over `true`, and the published `ImeState`
+/// names no widget), while an edit that never left the field does move it.
+///
+/// A missing handle returns `0`, which a caller must disambiguate itself: the
+/// counter returned here is built at `0` and advanced with a bare
+/// `wrapping_add`, so `0` is a reachable live value. That is a real difference
+/// from [`native_focus_epoch`], which never returns `0` for a live root — do
+/// not carry a sentinel argument from one of these two exports to the other.
+///
+/// Deliberately does NOT `pump_reactive`: nothing reactive writes this counter
+/// outside an event or paint pass, so a caller always reads a value the last
+/// frame already settled.
+pub fn native_focus_generation(handle: jlong) -> jlong {
+    guard("nativeFocusGeneration", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        app.focus_generation() as jlong
+    })
+}
+
+/// `nativeFocusEpoch`: return the live focus session's identity, for Kotlin's
+/// clipboard resolver to bind an async paste to the session that asked for it.
+///
+/// `EditCommand::Paste` is focus-routed and carries no identity of its own, so
+/// without this compare a slow `ContentProvider`'s answer lands in whatever
+/// field holds focus whenever it finally arrives. The JVM half snapshots this
+/// value when it hands a URI-backed clip to its background resolver and
+/// compares it again when the text comes back, dispatching only on a match.
+///
+/// What it reports, exactly: `AppTree::focus_epoch` advances once per honoured
+/// focus claim and once per session release, and on nothing else. So a move to
+/// another field moves it whether or not that field publishes an IME surface,
+/// and an edit, a caret move, or the field being repositioned under the user
+/// leaves it alone. Its neighbour [`native_focus_generation`] gets both of
+/// those cases the other way round, which is why the two are separate exports
+/// rather than one renamed.
+///
+/// A missing handle returns `0`, and that sentinel is unambiguous *here* on
+/// its own: the underlying counter is built at `1` and steps past `0` on wrap,
+/// so no live root ever reports `0`. A caller needs no second check to read a
+/// dead handle's answer as "not the session that asked".
+///
+/// Deliberately does NOT `pump_reactive`, for the same reason as its
+/// neighbour: nothing reactive writes this counter outside an event or paint
+/// pass. Every request-side read is on the main thread, where the counter is
+/// already settled: inside `doFrame` on the framework-driven route, and on the
+/// originating callback for a hardware chord or an edit-menu action. The
+/// arrival-side comparison runs later, off the main looper's queue, which is
+/// why it re-reads rather than trusting its snapshot.
+pub fn native_focus_epoch(handle: jlong) -> jlong {
+    guard("nativeFocusEpoch", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        app.focus_epoch() as jlong
+    })
 }
 
 /// `nativeSystemUiState`: return the process-wide system-UI override slot's
@@ -1956,6 +2323,9 @@ fn content_type_wire(content_type: ImeContentType) -> &'static str {
 /// [`ImeState::content_type`] maps through [`content_type_wire`] onto the
 /// explicitly-encoded wire string — never a `Debug` rendering, which is exactly
 /// what [`ImeState`]'s own hand-written `Debug` impl redacts for a secret field.
+/// [`ImeState::suppress_soft_keyboard`] rides straight through unchanged —
+/// `FrustSurfaceView`'s `pollImeAfterDispatch` is what turns it into "keep the
+/// `InputConnection`, skip `showSoftInput`" behaviour.
 fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
     let Some(state) = state else {
         return ImeJsonState::default();
@@ -1978,6 +2348,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
         comp_ext: state.editing.composing_extent,
         caret,
         content_type: content_type_wire(state.content_type),
+        suppress_soft_keyboard: state.suppress_soft_keyboard,
     }
 }
 
@@ -2063,6 +2434,27 @@ mod ime_content_type_wire {
         // but it's still the wrong default — "normal" is what "no field" is).
         let json = build_ime_state_json(&ime_state_to_json(None));
         assert!(json.contains(r#""contentType":"normal""#));
+        // Nothing focused means nothing to suppress; the hint must not default on.
+        assert!(json.contains(r#""suppressSoftKeyboard":false"#));
+    }
+
+    #[test]
+    fn published_suppressed_state_carries_the_flag_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "read-only".to_string(),
+                selection_base: 9,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Normal,
+            suppress_soft_keyboard: true,
+        };
+        let json = build_ime_state_json(&ime_state_to_json(Some(state)));
+        assert!(json.contains(r#""suppressSoftKeyboard":true"#));
     }
 
     #[test]
@@ -2078,6 +2470,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::Password,
+            suppress_soft_keyboard: false,
         };
         let json = build_ime_state_json(&ime_state_to_json(Some(state)));
         assert!(json.contains(r#""contentType":"password""#));
@@ -2101,6 +2494,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::NoSuggestions,
+            suppress_soft_keyboard: false,
         };
         let json = build_ime_state_json(&ime_state_to_json(Some(state)));
         assert!(json.contains(r#""contentType":"noSuggestions""#));
@@ -2119,6 +2513,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::Terminal,
+            suppress_soft_keyboard: false,
         };
         let json = build_ime_state_json(&ime_state_to_json(Some(state)));
         assert!(json.contains(r#""contentType":"terminal""#));

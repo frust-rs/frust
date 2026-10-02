@@ -11,6 +11,15 @@
 //! (the v0 subset) on this thread — rebuild → layout → paint — then hands the
 //! finished scene to the executor for encode → acquire → submit.
 //!
+//! The host clipboard is the other thread this file owns. A lazily spawned
+//! `frust-clipboard` worker ([`ClipboardWorker`]) holds the process's one
+//! `arboard::Clipboard` and runs every read and write on its own thread,
+//! because a clipboard read blocks for as long as the process that owns the
+//! selection takes to answer — measured at 24 s on X11 against a stopped
+//! owner. A successful read returns as a [`ShellUserEvent::ClipboardPaste`]
+//! user event and becomes one top-level `EditCommand::Paste` dispatch in
+//! `user_event`.
+//!
 //! It also owns an `accesskit_winit` [`Adapter`]: created in
 //! `resumed` with the same [`EventLoopProxy`](winit::event_loop::EventLoopProxy)
 //! the [`ShellUserEvent`] wake mechanism already uses (extended with an
@@ -28,8 +37,10 @@
 //! — safe to construct in a headless/no-AT-client CI environment.
 
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use accesskit_winit::{
     Adapter, Event as AccessibilityEvent, WindowEvent as AccessibilityWindowEvent,
@@ -40,9 +51,11 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    CursorIcon, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers,
-    NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    CursorIcon, EditCommand, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent,
+    Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScaleEvent, ScalePhase,
+    ScrollDelta,
 };
+use frust_core::input::WHEEL_LINE_PX;
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
@@ -58,7 +71,7 @@ use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{
@@ -69,6 +82,7 @@ use winit::window::{
 use crate::config::DesktopConfig;
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
 use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
+use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
@@ -245,6 +259,11 @@ fn window_size_config() -> (LogicalSize<u32>, bool, WindowKnobSource) {
 /// a unit type) so future user-driven events can be added without changing the
 /// loop's user-event type.
 ///
+/// The proxy is how *every* off-UI-thread answer re-enters this shell, not
+/// just a wake: the render thread reports back through it, and so does the
+/// clipboard worker thread, whose [`ShellUserEvent::ClipboardPaste`] carries
+/// the text of a finished read (see [`ClipboardWorker`]).
+///
 /// [`ShellUserEvent::Accessibility`] is the second producer of
 /// this same proxy: `accesskit_winit`'s [`Adapter::with_event_loop_proxy`]
 /// requires its `T: From<accesskit_winit::Event>` bound, satisfied below. Its
@@ -283,6 +302,12 @@ pub enum ShellUserEvent {
     /// failed). Surfaced back so `run_desktop` returns it as `Err`, mirroring the
     /// inline path's fatal handling.
     RenderFatal(anyhow::Error),
+    /// The clipboard worker thread read the host clipboard and got text (see
+    /// [`ClipboardWorker`]): the UI thread turns it into exactly one
+    /// top-level `EditCommand::Paste` dispatch. A read that failed — for any
+    /// reason, including the host's misleading "the clipboard is empty" —
+    /// posts nothing at all, so this variant is only ever a successful answer.
+    ClipboardPaste(PasteText),
     /// The devtools service queued a request that needs UI-thread state (a
     /// widget-tree snapshot, an injected event). This shell idles under
     /// [`ControlFlow::Wait`], so the queue is drained on the loop turn this
@@ -296,6 +321,504 @@ impl From<AccessibilityEvent> for ShellUserEvent {
     fn from(event: AccessibilityEvent) -> Self {
         ShellUserEvent::Accessibility(event)
     }
+}
+
+/// Text one clipboard read produced, on its way from the clipboard worker
+/// thread to the UI thread inside [`ShellUserEvent::ClipboardPaste`].
+///
+/// A newtype for exactly one reason: its [`Debug`] **redacts** the text.
+/// Clipboard contents are user data — a password manager's paste is the
+/// motivating case — and this payload rides an enum anything logging a loop
+/// turn formats wholesale, so the redaction has to live on the payload itself.
+/// Mirrors [`EditCommand`]'s own redacting `Debug` in `frust-core`.
+///
+/// `pub` (and re-exported `#[doc(hidden)]` from the crate root) only because it
+/// appears in [`ShellUserEvent`]'s variant — never part of this shell's
+/// intended API.
+#[doc(hidden)]
+pub struct PasteText(String);
+
+impl PasteText {
+    /// Unwrap the text for the [`EditCommand::Paste`] dispatch that answers the
+    /// request — its single consumer, on the UI thread.
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for PasteText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PasteText").field(&"<redacted>").finish()
+    }
+}
+
+/// How long [`ShellHandler::shutdown_clipboard`] waits for the clipboard worker
+/// to let go of the host clipboard before the process moves on.
+///
+/// Bounded deliberately. The wait exists so a copy made just before the app
+/// quits survives it (see [`spawn_clipboard_worker`]), and `arboard`'s own
+/// handover to a clipboard manager caps itself at 100 ms inside that drop, so
+/// half a second is ample for the healthy case. It is deliberately *not* enough
+/// to sit out a hung read the shutdown request is queued behind: a host whose
+/// selection owner is not answering has nothing to hand over anyway, and
+/// quitting must not wait on it. Runs after `run_app` has returned, with no
+/// window and no event loop left to stall.
+const CLIPBOARD_SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
+
+/// One unit of work for the clipboard worker thread — see [`ClipboardWorker`].
+enum ClipboardRequest {
+    /// Read the host clipboard. Text answers the UI thread with
+    /// [`ShellUserEvent::ClipboardPaste`]; every failure answers nothing.
+    Read,
+    /// Write this text to the host clipboard (a copy or a cut).
+    Write(String),
+    /// Stop the loop, drop the `arboard::Clipboard`, then acknowledge — the
+    /// teardown handshake [`ShellHandler::shutdown_clipboard`] drives once the
+    /// event loop has returned.
+    Shutdown,
+}
+
+/// The clipboard failure kinds this shell warns about — one [`log::warn!`] per
+/// kind per run (see [`ClipboardWarnings`]). A missing or hung clipboard
+/// repeats on every copy and every paste, and a warning per keystroke would be
+/// its own defect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardFailure {
+    /// `arboard::Clipboard::new()` failed: no reachable clipboard mechanism at
+    /// all (a headless Linux session with neither X11 nor Wayland, say).
+    Unavailable,
+    /// The read came back `arboard::Error::ContentNotAvailable`, whose message
+    /// — *"The clipboard contents were not available in the requested format or
+    /// the clipboard is empty"* — is not trustworthy: `arboard` returns it both
+    /// for a genuinely empty clipboard and for a selection owner that never
+    /// answered, which is the X11 case this worker exists for. There its
+    /// `get_text` reaches this error only after exhausting six candidate
+    /// target atoms, each with its own 4 s window — a worst-case total, not
+    /// six independent recovery chances, since a late answer is rescued only
+    /// when it lands inside the window currently being tried (see
+    /// [`ClipboardWorker`]'s `# Why a thread at all` for the measured
+    /// evidence). The two causes are indistinguishable from here, so the
+    /// warning says so rather than repeating the host's claim.
+    Unanswered,
+    /// The read failed some other way.
+    ReadFailed,
+    /// The write failed: the copy or cut is lost.
+    WriteFailed,
+}
+
+/// A clipboard operation's failure: the [`ClipboardFailure`] kind the warn-once
+/// bookkeeping keys on, plus the host's own message.
+struct ClipboardError {
+    kind: ClipboardFailure,
+    detail: String,
+}
+
+impl ClipboardError {
+    fn new(kind: ClipboardFailure, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Which [`ClipboardFailure`] kinds have already been logged this run, owned by
+/// the worker thread's loop.
+#[derive(Default)]
+struct ClipboardWarnings {
+    unavailable: bool,
+    unanswered: bool,
+    read_failed: bool,
+    write_failed: bool,
+}
+
+impl ClipboardWarnings {
+    /// `true` the first time `kind` is seen and `false` after, so the caller
+    /// logs exactly one line per kind. Kinds are independent: a host that can
+    /// neither read nor write still says both things once.
+    fn first_time(&mut self, kind: ClipboardFailure) -> bool {
+        let seen = match kind {
+            ClipboardFailure::Unavailable => &mut self.unavailable,
+            ClipboardFailure::Unanswered => &mut self.unanswered,
+            ClipboardFailure::ReadFailed => &mut self.read_failed,
+            ClipboardFailure::WriteFailed => &mut self.write_failed,
+        };
+        let first = !*seen;
+        *seen = true;
+        first
+    }
+}
+
+/// The worker thread's view of the host clipboard.
+///
+/// A seam, not an abstraction tier: [`ArboardClipboard`] is the only shipped
+/// implementation and nothing outside this file sees this trait. It exists so
+/// [`clipboard_loop`] — plumbing that otherwise needs a window, an event loop
+/// and a real desktop session to reach — can be unit-tested against a fake.
+trait ClipboardAccess {
+    /// Read the clipboard's text. Blocking by nature: on X11 this is the call
+    /// measured at 24 005 ms against a stopped selection owner.
+    fn read(&mut self) -> Result<String, ClipboardError>;
+    /// Write `text` to the clipboard.
+    fn write(&mut self, text: &str) -> Result<(), ClipboardError>;
+}
+
+/// **The** host clipboard instance: one `arboard::Clipboard`, created lazily on
+/// the clipboard worker thread's first request and owned by that thread — only
+/// ever that thread — until the worker stops.
+///
+/// # The ownership rule
+///
+/// One instance, one owner, the process's lifetime. On X11 (and Wayland) the
+/// clipboard's content is served *live* by whichever process claimed the
+/// selection, so the instance that claimed it has to stay alive and reachable
+/// or the copy vanishes the moment it drops, on any desktop with no clipboard
+/// manager running to adopt it. That rules out constructing one per call (the
+/// shape `plugins/clipboard/src/desktop.rs` uses — correct there, since a
+/// plugin has no "for as long as the app runs" owner to hold one), and it rules
+/// out sharing one behind a lock, which would put the UI thread straight back
+/// into the waiting business a hung read creates. So **both** operations run
+/// here, serialised on this one thread, and the UI thread reaches them only by
+/// posting a [`ClipboardRequest`].
+///
+/// That serialisation has one visible consequence, accepted deliberately: a
+/// copy issued while a read is hung waits behind it instead of overtaking it.
+/// It is delayed, never lost. The alternative — a second instance on the UI
+/// thread for writes — would mean two `Clipboard` instances touching one host
+/// clipboard concurrently, which `plugins/clipboard`'s own notes record as
+/// having crashed `arboard`'s macOS `NSPasteboard` backend. The single queue
+/// also keeps a copy and a paste issued after it in order, which two threads
+/// racing one host clipboard would not.
+///
+/// Creating the instance *on* the worker rather than moving one across also
+/// keeps every platform backend on the thread that will use it, which is the
+/// pattern `NSPasteboard` is safe under: never shared, never concurrent.
+#[derive(Default)]
+struct ArboardClipboard {
+    clipboard: Option<arboard::Clipboard>,
+}
+
+impl ArboardClipboard {
+    /// The instance, created on first use.
+    ///
+    /// A `new()` failure is reported as [`ClipboardFailure::Unavailable`] and
+    /// retried on the next request rather than latched forever: the attempt
+    /// costs the *worker* thread a failed connection, never the event loop, and
+    /// a session that gains a clipboard mid-run (an X server reappearing behind
+    /// a reconnecting remote display) then simply starts working. The warning
+    /// is still emitted exactly once, by [`ClipboardWarnings`].
+    fn get(&mut self) -> Result<&mut arboard::Clipboard, ClipboardError> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new().map_err(|err| {
+                ClipboardError::new(
+                    ClipboardFailure::Unavailable,
+                    format!("the host clipboard is unavailable ({err})"),
+                )
+            })?);
+        }
+        // Just filled above when it was empty, so this is `Some`; spelled
+        // `ok_or_else` rather than `expect` because nothing on a clipboard path
+        // may panic.
+        self.clipboard.as_mut().ok_or_else(|| {
+            ClipboardError::new(
+                ClipboardFailure::Unavailable,
+                "the host clipboard is unavailable",
+            )
+        })
+    }
+}
+
+impl ClipboardAccess for ArboardClipboard {
+    fn read(&mut self) -> Result<String, ClipboardError> {
+        match self.get()?.get_text() {
+            Ok(text) => Ok(text),
+            // The misleading one — see `ClipboardFailure::Unanswered`.
+            Err(arboard::Error::ContentNotAvailable) => Err(ClipboardError::new(
+                ClipboardFailure::Unanswered,
+                "the host reported no text in the requested format",
+            )),
+            Err(err) => Err(ClipboardError::new(
+                ClipboardFailure::ReadFailed,
+                err.to_string(),
+            )),
+        }
+    }
+
+    fn write(&mut self, text: &str) -> Result<(), ClipboardError> {
+        self.get()?
+            .set_text(text)
+            .map_err(|err| ClipboardError::new(ClipboardFailure::WriteFailed, err.to_string()))
+    }
+}
+
+/// The one-per-kind warning line for `err`. `elapsed` is how long the host took
+/// to fail — the number that makes a hung selection owner visible in a log,
+/// where the measured X11 case spends ~24 000 ms before failing.
+fn clipboard_warning(err: &ClipboardError, elapsed: Duration) -> String {
+    let ms = elapsed.as_millis();
+    match err.kind {
+        ClipboardFailure::Unavailable => format!(
+            "frust-shell-desktop: {}; copy/cut/paste no-op until it comes back \
+             (logged once)",
+            err.detail
+        ),
+        ClipboardFailure::Unanswered => format!(
+            "frust-shell-desktop: the host clipboard produced no text for a paste after {ms} ms \
+             ({}); the host reports the same error whether the clipboard is empty or its \
+             selection owner never answered, so the paste is dropped rather than guessed at \
+             (logged once)",
+            err.detail
+        ),
+        ClipboardFailure::ReadFailed => format!(
+            "frust-shell-desktop: failed to read the host clipboard for a paste after {ms} ms \
+             ({}); the paste is dropped (logged once)",
+            err.detail
+        ),
+        ClipboardFailure::WriteFailed => format!(
+            "frust-shell-desktop: failed to write the host clipboard ({}); the copy/cut is lost \
+             (logged once)",
+            err.detail
+        ),
+    }
+}
+
+/// The clipboard worker thread's whole loop: take one [`ClipboardRequest`] at a
+/// time, run it against the host clipboard, and answer a successful read by
+/// handing `answer` the [`ShellUserEvent::ClipboardPaste`] to post back into
+/// the event loop.
+///
+/// Every failure is warned once per [`ClipboardFailure`] kind and dispatches
+/// **nothing** — never a panic, never an `unwrap`, and in particular never a
+/// synthesized empty paste, which would silently clear a selection the user
+/// meant to replace.
+///
+/// Returns when a [`ClipboardRequest::Shutdown`] arrives or the request channel
+/// closes (the `ShellHandler` was dropped without the handshake).
+///
+/// Generic over its collaborators purely so it is testable: the shipped call
+/// site passes [`ArboardClipboard`] and a closure posting through the
+/// [`EventLoopProxy`](winit::event_loop::EventLoopProxy), while the unit tests
+/// below pass a fake clipboard and a collecting closure — which is as far into
+/// this plumbing as anything can reach without a window.
+/// Re-opens the paste coalescing gate ([`ClipboardWorker::read_in_flight`]) as
+/// it drops.
+///
+/// The gate closes before a [`ClipboardRequest::Read`] is sent and must re-open
+/// once the answer — or the decision not to send one — is behind us. Doing that
+/// in `Drop` rather than on the way out of the match arm is what stops a panic
+/// inside a platform clipboard backend from wedging paste for the rest of the
+/// run: the worker thread unwinds, this guard still runs, the gate re-opens,
+/// and the next paste request therefore reaches
+/// [`ShellHandler::send_clipboard_request`], whose failing send is what detects
+/// the dead worker and warns. Left on the success path instead, the flag would
+/// stay `true` forever and
+/// [`ShellHandler::request_clipboard_read`] would coalesce every later paste
+/// away silently, with no warning and no route to recovery.
+///
+/// Release builds pin `panic = "abort"`, so the process is gone either way and
+/// this guard is a debug-build concern — which is precisely where a developer
+/// needs the diagnosis.
+struct ReadGate<'a>(&'a AtomicBool);
+
+impl Drop for ReadGate<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn clipboard_loop<A: ClipboardAccess>(
+    requests: &Receiver<ClipboardRequest>,
+    access: &mut A,
+    answer: &mut dyn FnMut(ShellUserEvent),
+    read_in_flight: &AtomicBool,
+) {
+    let mut warnings = ClipboardWarnings::default();
+    while let Ok(request) = requests.recv() {
+        let started = Instant::now();
+        match request {
+            ClipboardRequest::Read => {
+                // Re-opens the coalescing gate on the way out of this arm —
+                // including out of a panic unwinding from the backend. See
+                // `ReadGate` and `ShellHandler::request_clipboard_read`.
+                let _gate = ReadGate(read_in_flight);
+                match access.read() {
+                    Ok(text) => answer(ShellUserEvent::ClipboardPaste(PasteText(text))),
+                    Err(err) => {
+                        if warnings.first_time(err.kind) {
+                            log::warn!("{}", clipboard_warning(&err, started.elapsed()));
+                        }
+                    }
+                }
+            }
+            ClipboardRequest::Write(text) => {
+                if let Err(err) = access.write(&text)
+                    && warnings.first_time(err.kind)
+                {
+                    log::warn!("{}", clipboard_warning(&err, started.elapsed()));
+                }
+            }
+            ClipboardRequest::Shutdown => break,
+        }
+    }
+}
+
+/// Spawn the clipboard worker thread and hand back the UI thread's
+/// [`ClipboardWorker`] handle, or `None` when the thread could not be spawned —
+/// warned here, because the caller latches the failure and never retries.
+fn spawn_clipboard_worker(
+    proxy: winit::event_loop::EventLoopProxy<ShellUserEvent>,
+) -> Option<ClipboardWorker> {
+    let (requests_tx, requests_rx) = channel::<ClipboardRequest>();
+    let (stopped_tx, stopped_rx) = channel::<()>();
+    let read_in_flight = Arc::new(AtomicBool::new(false));
+    let worker_in_flight = Arc::clone(&read_in_flight);
+
+    let spawned = std::thread::Builder::new()
+        .name("frust-clipboard".to_string())
+        .spawn(move || {
+            let mut access = ArboardClipboard::default();
+            clipboard_loop(
+                &requests_rx,
+                &mut access,
+                // `send_event` fails only once the loop has closed (a shutdown
+                // race) — benign, exactly like the frame waker's own send.
+                &mut |event| {
+                    let _ = proxy.send_event(event);
+                },
+                &worker_in_flight,
+            );
+            // Drop the instance here, on the thread that owns it and *before*
+            // acknowledging: on X11 `arboard`'s own `Drop` is what offers the
+            // selection to a clipboard manager, so a copy made just before the
+            // app quits survives the app. The bounded wait on the other end of
+            // `stopped` exists for exactly this send.
+            drop(access);
+            let _ = stopped_tx.send(());
+        });
+
+    match spawned {
+        // The join handle is dropped on purpose: the thread is detached and
+        // stopped through its channel, never joined. Joining would hand the UI
+        // thread back the unbounded wait this whole change removes.
+        Ok(_detached) => Some(ClipboardWorker {
+            requests: requests_tx,
+            stopped: stopped_rx,
+            read_in_flight,
+        }),
+        Err(err) => {
+            log::warn!(
+                "frust-shell-desktop: could not spawn the clipboard worker thread ({err}); \
+                 copy/cut/paste no-op for the rest of this run"
+            );
+            None
+        }
+    }
+}
+
+/// The UI thread's handle on the clipboard worker thread — the whole of this
+/// shell's clipboard access from the event loop's side.
+///
+/// # Why a thread at all
+///
+/// Reading the host clipboard blocks for as long as the *other* process owning
+/// the selection takes to answer, and on X11 that is unbounded in practice:
+/// measured at 24 005 ms against a stopped selection owner, because `arboard`'s
+/// X11 backend tries its `ConvertSelection` round trip once per candidate
+/// target atom, each with its own 4 s bound, before giving up on that atom and
+/// moving to the next. That 24 s is a worst-case TOTAL across all six atoms,
+/// not six independent chances at recovery: once an atom's 4 s window has
+/// lapsed, an owner answering late does not rescue the read — recovery needs
+/// the owner to answer within the window currently being tried. Measured on
+/// the same rig: an owner SIGSTOPped then resumed at +4.9 s (after the first
+/// atom's window had already lapsed at 4 s) never recovered — every remaining
+/// atom timed out and the full 24 004 ms warning fired even though the owner
+/// was serving normally from +4.9 s on; an owner resumed at +2.9 s (inside the
+/// first atom's own window) answered within ~5 ms of the resume. Run on the
+/// winit event-loop thread — as this shell did until this change — that
+/// worst case is 24 s with no frames, no input, no resize and no close: a
+/// window indistinguishable from a hung app.
+/// `frust-core` was designed for the answer to arrive late (see
+/// `EventCtx::request_paste`: *"The answer is a new dispatch, never a return
+/// value"*), so only the shell had to move.
+///
+/// This handle is therefore one-way plumbing: [`ClipboardRequest`]s go down the
+/// channel, and the worker's single answer — text from a successful read —
+/// comes back into the loop as a [`ShellUserEvent::ClipboardPaste`] user event
+/// through the [`EventLoopProxy`](winit::event_loop::EventLoopProxy), which
+/// [`ShellHandler::user_event`] turns into a fresh, top-level
+/// `EditCommand::Paste` dispatch. Nothing here ever waits on the worker except
+/// the bounded teardown handshake ([`CLIPBOARD_SHUTDOWN_WAIT`]).
+///
+/// This supersedes the plan's decision D11 — "one lazily created
+/// `arboard::Clipboard` for the process lifetime **on the UI thread**" — on the
+/// measured evidence above. The instance rule D11 was protecting is kept whole:
+/// one instance, one owner, the process's lifetime. It simply lives on the
+/// worker thread now, and a write reaches it as a request rather than a direct
+/// call; see [`ArboardClipboard`].
+struct ClipboardWorker {
+    /// Requests to the worker. A `send` fails only once the worker has stopped
+    /// (its thread panicked inside a platform backend), which the UI side
+    /// treats as "no clipboard for the rest of this run".
+    requests: Sender<ClipboardRequest>,
+    /// The worker's acknowledgement that it has dropped its
+    /// `arboard::Clipboard` — see [`spawn_clipboard_worker`] and
+    /// [`CLIPBOARD_SHUTDOWN_WAIT`].
+    stopped: Receiver<()>,
+    /// Whether a read is queued or running — the coalescing gate. Held from the
+    /// request until the worker's read arm ends, which is once the answer has
+    /// been posted rather than once the UI thread has taken it.
+    ///
+    /// While a read is hung, no further read is started behind it, so a user
+    /// pressing Ctrl+V six more times at
+    /// a frozen selection owner does not buy six more 24 s reads, nor six late
+    /// pastes landing minutes later in whatever holds focus by then. Two
+    /// presses far enough apart to be two keystrokes are never coalesced: a
+    /// healthy read answers in 1-2 ms.
+    read_in_flight: Arc<AtomicBool>,
+}
+
+/// The dispatch a clipboard answer becomes: exactly one top-level
+/// [`EditCommand::Paste`] carrying the text the worker read.
+///
+/// Says nothing about *whether* the answer should be dispatched at all — that
+/// is [`paste_answer_dispatch`]'s question, and it is a separate one, because
+/// focus routing alone hands a late answer to whichever field holds focus when
+/// it lands rather than to the one that asked.
+fn paste_input_event(text: PasteText) -> InputEvent {
+    InputEvent::EditCommand(EditCommand::Paste(text.into_string()))
+}
+
+/// The dispatch a clipboard answer becomes, or `None` when the answer no longer
+/// belongs to the focus session that asked for it.
+///
+/// `asked_in` is the session recorded when the read was requested
+/// ([`ShellHandler::paste_session`]); `live` is
+/// [`RenderRoot::focus_epoch`] read again at the moment the answer arrives.
+///
+/// The comparison is the whole of the guard, and it is needed because focus
+/// routing covers only half the hazard. A session that was *released* while the
+/// read was outstanding does drop the answer on its own — with nothing focused
+/// the synthesized command reaches no widget (`EventCtx::request_paste`'s own
+/// contract). A focus *move*, though, leaves a field standing to receive it,
+/// and that field never asked for a paste; the clip the user meant for one
+/// field is silently typed into another. That is what this refuses.
+///
+/// [`RenderRoot::focus_epoch`] is the right counter for the question and
+/// `focus_ime_generation` is not: this one advances once per honoured focus
+/// claim and once per session release and on nothing else, so it moves when
+/// focus crosses two fields publishing identical surfaces, and stands still
+/// through an edit or a caret move inside the one session. Both accessors
+/// document the contrast.
+///
+/// `None` for `asked_in` means nothing on record addresses this answer, so it
+/// is not this shell's to deliver: either nothing asked, or an earlier answer
+/// already took the record — which is how a second read that raced the
+/// coalescing gate open loses its own answer. See
+/// [`ShellHandler::paste_session`] for why that is the accepted cost.
+///
+/// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
+fn paste_answer_dispatch(asked_in: Option<u64>, live: u64, text: PasteText) -> Option<InputEvent> {
+    (asked_in == Some(live)).then(move || paste_input_event(text))
 }
 
 /// Run `app_logic` over `state` in a desktop preview window until it is closed.
@@ -370,6 +893,10 @@ where
     // hand the accesskit_winit `Adapter` its own event-loop proxy — the waker
     // closure below consumes its own clone, so neither producer starves.
     let accesskit_proxy = proxy.clone();
+    // A third, for the clipboard worker thread the handler spawns lazily on the
+    // first copy/cut/paste: it answers a paste request with
+    // `ShellUserEvent::ClipboardPaste` from off the event-loop thread.
+    let clipboard_proxy = proxy.clone();
     let waker: FrameWaker = Arc::new(move || {
         let _ = proxy.send_event(ShellUserEvent::SignalsDirty);
     });
@@ -417,6 +944,7 @@ where
         text_ctx: TextContext::new(),
         executor,
         scene: Scene::new(),
+        platform_views: DesktopPlatformViews::new(),
         cursor: Point::ZERO,
         modifiers: Modifiers::default(),
         secondary_down_delivered: false,
@@ -425,6 +953,7 @@ where
         cursor_icon: CursorIcon::Default,
         window: None,
         accesskit_proxy,
+        clipboard_proxy,
         adapter: None,
         // The generation `RenderRoot::new()` starts at (0); the first rebuild
         // always dirties it to a different value (a first `rebuild_view` always
@@ -451,6 +980,12 @@ where
         paced_wake: None,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
         window_metrics: WindowMetricsPublisher::new(),
+        // Spawned lazily on the first clipboard action — see the `clipboard`
+        // field's doc.
+        clipboard: None,
+        clipboard_unreachable_logged: false,
+        // Nothing has asked for a paste yet — see the field's doc.
+        paste_session: None,
     };
 
     // Construction-time font drain: apply any fonts registered via
@@ -460,7 +995,13 @@ where
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
-    event_loop.run_app(&mut handler)?;
+    // The loop's own result is held rather than propagated with `?` so the
+    // clipboard worker is always stopped — including on the error path. The
+    // handshake is what gives a copy made just before quitting its chance to
+    // reach a clipboard manager; see `ShellHandler::shutdown_clipboard`.
+    let loop_result = event_loop.run_app(&mut handler);
+    handler.shutdown_clipboard();
+    loop_result?;
     finish(handler.fatal)
 }
 
@@ -681,6 +1222,78 @@ fn map_scroll_delta(delta: MouseScrollDelta, scale: f64) -> ScrollDelta {
     }
 }
 
+/// Multiplicative rate for the ctrl/⌘+wheel desktop zoom mapping: each
+/// wheel-notch "line" of vertical delta scales the view by a factor of
+/// `exp(WHEEL_SCALE_RATE_PER_LINE)` (~10% per notch).
+///
+/// **Community-approximate**: there is no published "the" wheel-zoom rate —
+/// this is chosen to match the feel of ctrl+wheel zoom in mainstream
+/// browsers and image viewers, where a handful of notches noticeably zooms
+/// the view without a single notch feeling abrupt.
+const WHEEL_SCALE_RATE_PER_LINE: f64 = 0.1;
+
+/// Map a winit [`MouseScrollDelta`] to a multiplicative
+/// [`ScaleEvent::scale_delta`] for the ctrl/⌘+wheel desktop zoom mapping.
+///
+/// Both delta shapes are first reduced to a line-equivalent vertical count —
+/// a `LineDelta` is already in lines; a `PixelDelta` is physical, so it is
+/// converted to logical px via `scale` and then to a line-equivalent count by
+/// dividing by [`WHEEL_LINE_PX`], the same constant `ScrollView` uses for a
+/// precision-trackpad delta — then fed through
+/// `exp(WHEEL_SCALE_RATE_PER_LINE * lines)`.
+///
+/// Sign: unlike [`map_scroll_delta`], the vertical component is **not**
+/// negated here. Winit's raw positive `y` is the wheel-up gesture (see that
+/// function's sign note — it is what `map_scroll_delta` negates into a
+/// negative `ScrollDelta`, which this function never produces), and wheel up
+/// must zoom in, so a positive raw `y` must map directly to a
+/// `scale_delta > 1.0`.
+///
+/// Pulled out as a free function, the same shape as [`map_scroll_delta`], so
+/// the mapping stays pure and directly unit-testable.
+fn map_wheel_scale_delta(delta: MouseScrollDelta, scale: f64) -> f64 {
+    let lines = match delta {
+        MouseScrollDelta::LineDelta(_, y) => y as f64,
+        MouseScrollDelta::PixelDelta(px) => (px.y / scale) / WHEEL_LINE_PX,
+    };
+    (WHEEL_SCALE_RATE_PER_LINE * lines).exp()
+}
+
+/// Whether `modifiers` holds the desktop ctrl/⌘+wheel zoom chord: ⌘ (`meta`)
+/// on macOS, `ctrl` on every other desktop OS (Linux, Windows) — the
+/// convention mainstream browsers and image viewers use for a discrete wheel
+/// zoom step.
+///
+/// Takes `is_macos` as a plain `bool` rather than gating the whole function
+/// behind `#[cfg(target_os = "macos")]`, so the OS branch itself stays
+/// directly unit-testable on any host — the same split `frust-paths`' per-OS
+/// directory-resolution helpers use. The call site passes `cfg!(target_os =
+/// "macos")`.
+fn wheel_zoom_chord_held(modifiers: Modifiers, is_macos: bool) -> bool {
+    if is_macos {
+        modifiers.meta
+    } else {
+        modifiers.ctrl
+    }
+}
+
+/// Map winit's wheel/pinch gesture bracket ([`TouchPhase`]) to [`ScalePhase`].
+///
+/// Shared by the `MouseWheel` zoom mapping and macOS's `PinchGesture`: an
+/// ordinary notch wheel reports `Moved` for every tick with no bracket of its
+/// own (a lone [`ScalePhase::Update`] stream), while a bracketed gesture —
+/// trackpad-driven scroll momentum, or a real pinch — reports `Started`/
+/// `Ended` around it. [`TouchPhase::Cancelled`] maps to
+/// [`ScalePhase::End`] too: [`ScalePhase`] carries no cancelled variant (see
+/// its docs).
+fn map_gesture_phase(phase: TouchPhase) -> ScalePhase {
+    match phase {
+        TouchPhase::Started => ScalePhase::Begin,
+        TouchPhase::Moved => ScalePhase::Update,
+        TouchPhase::Ended | TouchPhase::Cancelled => ScalePhase::End,
+    }
+}
+
 /// Map a winit [`MouseButton`] to our [`PointerButton`] vocabulary, or `None`
 /// for a button we forward nothing for yet (Middle/Back/Forward — dropped
 /// rather than misreported, until those gestures are specced; `PointerButton`
@@ -757,6 +1370,14 @@ fn mouse_button_should_dispatch(
 /// or `None` for a named key we carry no editing semantics for
 /// (function keys, media keys, etc. — those fall through to `KeyboardInput`
 /// being dropped rather than misreported as text).
+///
+/// `Copy`/`Cut`/`Paste`/`Insert` are the dedicated hardware clipboard keys
+/// some full-size/multimedia keyboards carry (see each [`NamedKey`] variant's
+/// own doc) — mapped straight through like every other editing-semantics key
+/// here, so [`map_key_event`] delivers them as [`Key::Named`] and the
+/// `KeyboardInput` arm dispatches an [`InputEvent::Key`] the tree's own
+/// chord decode turns into an [`InputEvent::EditCommand`], the same as it
+/// would for a `Cmd+C`/`Ctrl+C` modifier chord.
 fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
     Some(match key {
         WinitNamedKey::Enter => NamedKey::Enter,
@@ -770,6 +1391,10 @@ fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::End => NamedKey::End,
         WinitNamedKey::Escape => NamedKey::Escape,
         WinitNamedKey::Tab => NamedKey::Tab,
+        WinitNamedKey::Copy => NamedKey::Copy,
+        WinitNamedKey::Cut => NamedKey::Cut,
+        WinitNamedKey::Paste => NamedKey::Paste,
+        WinitNamedKey::Insert => NamedKey::Insert,
         _ => return None,
     })
 }
@@ -817,6 +1442,32 @@ fn map_modifiers(state: ModifiersState) -> Modifiers {
 /// composed text, not `KeyboardInput.text`). `repeat` passes through unfiltered
 /// — callers decide whether to honor auto-repeat. Only key-down (`Pressed`)
 /// events map; releases produce `None` (spec: `KeyEvent` has no up/down phase).
+///
+/// # The ctrl/meta `text`-less fallback
+///
+/// Winit's `KeyEvent.text` is documented as the resolved text a keypress
+/// *would* produce, but it is not populated on every backend while a
+/// Ctrl (or, on macOS, Cmd) chord is held — an unmodified `Ctrl+C` can arrive
+/// with `text: None` even though `logical_key` is still
+/// `Key::Character("c")` (the unshifted letter the key produces with no
+/// modifier). Requiring `text` unconditionally would silently drop the whole
+/// chord instead of letting a widget's own decode see it as
+/// `Key::Character("c")` with `modifiers.ctrl` set. So when `logical_key`
+/// is itself a [`WinitKey::Character`] and `text` came back empty while
+/// ctrl or meta is held, this falls back to the logical key's own string
+/// instead of giving up — the same text a keypress with no modifier held
+/// would have produced. Unconditionally trusting `logical_key` regardless of
+/// modifiers would be wrong (it is the *unmodified* character, not
+/// necessarily what plain typing should insert), so the fallback stays
+/// scoped to the documented ctrl/meta case rather than replacing the `text`
+/// path outright.
+///
+/// Measured on Linux/X11 (2026-09-13, KDE on Xorg, winit at this workspace's
+/// pin): `text` IS populated under Ctrl for the whole chord set tried —
+/// Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A — so this arm never fires on that backend.
+/// It is retained for the macOS Cmd case it was written for, which this
+/// observation does not disprove, and for the backends (including Wayland)
+/// this one rig's session never exercised.
 fn map_key_event(
     logical_key: &WinitKey,
     text: Option<&str>,
@@ -840,6 +1491,15 @@ fn map_key_event(
             Key::Character(text.unwrap_or(" ").to_string())
         }
         WinitKey::Named(named) => Key::Named(map_named_key(*named)?),
+        // The ctrl/meta `text`-less fallback (see this function's doc) — scoped
+        // to `Character` keys only, so `Unidentified`/`Dead` still requires a
+        // resolved `text` payload exactly as before.
+        WinitKey::Character(resolved) if text.is_none() && (modifiers.ctrl || modifiers.meta) => {
+            if composing {
+                return None;
+            }
+            Key::Character(resolved.to_string())
+        }
         _ => {
             if composing {
                 return None;
@@ -1026,6 +1686,11 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// split path a finished scene is moved out (replaced with a fresh one) to
     /// cross the handoff channel; inline reuses it in place.
     scene: Scene,
+    /// The platform-view host: the shared differ plus this shell's sequencing
+    /// around it (ingest after paint, push to the extension after submit, and
+    /// the surface-recreate/suspend resets). Costs nothing until a
+    /// `platform_view` widget actually paints — see [`crate::platform_view`].
+    platform_views: DesktopPlatformViews,
     /// Last known cursor position in logical pixels, updated on every
     /// `CursorMoved`. `MouseInput` (button press/release) carries no position of
     /// its own, so it reuses this — mirroring how winit models the two events.
@@ -1059,6 +1724,11 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// (`run_desktop`) so `resumed` can construct the adapter without needing
     /// to unpick it from the (already-moved-into-a-closure) waker.
     accesskit_proxy: winit::event_loop::EventLoopProxy<ShellUserEvent>,
+    /// The event-loop proxy the clipboard worker thread answers a paste
+    /// through, cloned into that thread when it is spawned. Held separately
+    /// from `accesskit_proxy` so each producer owns its own handle, the same
+    /// way the frame waker and the render thread do.
+    clipboard_proxy: winit::event_loop::EventLoopProxy<ShellUserEvent>,
     /// The `accesskit_winit` platform adapter, created once in
     /// `resumed` alongside the window (it must be constructed before the
     /// window is first shown — see [`Adapter::with_event_loop_proxy`]'s
@@ -1142,6 +1812,105 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// a decorated desktop window. Mobile's own standalone `WindowInsets`
     /// context is unaffected.
     window_metrics: WindowMetricsPublisher,
+    /// The clipboard worker thread's handle — spawned lazily, on the first
+    /// copy/cut/paste, and then held for the rest of the process's lifetime.
+    /// `None` until that first use, and again for the rest of the run once the
+    /// worker could not be spawned or has stopped (see
+    /// [`clipboard_unreachable_logged`](ShellHandler::clipboard_unreachable_logged)).
+    ///
+    /// The host clipboard is never touched from this thread: the one
+    /// process-lifetime `arboard::Clipboard` lives on the worker, which is what
+    /// keeps a 24-second X11 read off the event loop. [`ClipboardWorker`]
+    /// carries the measured evidence and the reply path; [`ArboardClipboard`]
+    /// carries why one instance, never one per call, and why a write is routed
+    /// to the same thread rather than made here.
+    clipboard: Option<ClipboardWorker>,
+    /// Whether the clipboard *worker* has already been reported unreachable —
+    /// a thread that would not spawn, or a send to one that stopped — via
+    /// [`log::warn!`]. Latched: a host that cannot run the worker gets exactly
+    /// one warning for the whole run rather than one per copy/cut/paste, and is
+    /// never retried, matching this file's shape for a host-integration failure
+    /// that cannot recover mid-run. Failures *inside* a running worker (no
+    /// reachable clipboard mechanism, a selection owner that never answers) are
+    /// warned once per kind on the worker itself — see [`ClipboardWarnings`].
+    clipboard_unreachable_logged: bool,
+    /// The focus session ([`RenderRoot::focus_epoch`]) recorded by the most
+    /// recent paste request — `None` before anything has asked, and again as
+    /// soon as an answer takes it. Nothing else clears it, so a value outlasts
+    /// a read that answered nothing; the next request overwrites it, and no
+    /// answer can reach this slot without one.
+    ///
+    /// An `EditCommand::Paste` is focus-routed and carries text but no identity
+    /// of its own, so an answer that arrives after focus has moved lands in
+    /// whichever field holds focus by then: a field that never asked for it.
+    /// The host read is asynchronous and its wait belongs to another process —
+    /// 24 seconds, measured, against an unresponsive X11 selection owner (see
+    /// [`ClipboardWorker`]) — and a Tab press inside a window that wide is an
+    /// ordinary thing for a user to do. So the asking session is recorded here
+    /// when the request is drained and compared against the live one when the
+    /// answer arrives; see [`ShellHandler::request_clipboard_read`] and
+    /// [`paste_answer_dispatch`].
+    ///
+    /// # One slot, however many reads are out
+    ///
+    /// More than one read genuinely can be outstanding, so this slot does not
+    /// describe what is in flight and does not try to. The coalescing gate
+    /// ([`ClipboardWorker::read_in_flight`]) re-opens as the worker's read arm
+    /// ends — after the answer has been posted through the proxy, but before
+    /// the UI thread has consumed it — so a paste request raised inside that
+    /// window finds the gate open and starts a second read instead of folding
+    /// into the first.
+    ///
+    /// One slot is still enough, because an answer is decided against this
+    /// value alone and there are only three outcomes. It names the live
+    /// session: deliver, into a session in which a paste was requested, since
+    /// nothing but a request ever writes here. It names one since gone: drop.
+    /// It is empty, an earlier answer having taken it: drop. None of the three
+    /// asks which read an answer came from, so threading an identity through
+    /// [`ClipboardRequest`] and [`ShellUserEvent`] would buy a pairing the
+    /// decision never consults.
+    ///
+    /// # A surplus answer is dropped
+    ///
+    /// The record is taken, not copied, so one recorded request is answered
+    /// once. A second read that does get past the gate therefore finds the slot
+    /// empty when its answer lands: two presses close enough together to race
+    /// it, inside one *unchanged* session, now produce one paste where this
+    /// shell previously produced two. That is a real lost paste, and the
+    /// tolerable direction of one — a paste that did not happen is a keystroke
+    /// away, and a paste that landed in the wrong field is not.
+    ///
+    /// # Why the record is not simply left standing
+    ///
+    /// Letting it survive its answer is the obvious-looking repair for that
+    /// lost paste, and it is wrong. Two fields and one race:
+    ///
+    /// 1. Field A holds the session. It asks, the record becomes A's, a read
+    ///    starts.
+    /// 2. The worker reads, posts its answer, and the gate re-opens. The UI
+    ///    thread has not drained that answer yet.
+    /// 3. Focus moves to field B, which asks **once**. The record is
+    ///    overwritten to B's, and the gate being open, a *second* read starts.
+    /// 4. Both answers now meet a record naming B and a live session of B, so
+    ///    both match.
+    ///
+    /// Left standing, the record hands B the clip twice for the one press it
+    /// made. Taken, the second answer finds nothing on record and is dropped,
+    /// and B gets the single paste it asked for.
+    ///
+    /// Note what does *not* save the standing record: "every value here is a
+    /// session in which a paste was requested" stays true throughout that
+    /// sequence. It is simply not enough, because it says nothing about how
+    /// many answers one ask may absorb. Consuming the record is what bounds
+    /// that at one.
+    ///
+    /// So the lost paste above is paid for knowingly. A paste that did not
+    /// happen inserts nothing and costs a keystroke; a duplicate inserts text
+    /// the user never asked for, and has to be noticed before it can be undone.
+    /// A text field wants the stronger of those two guarantees.
+    ///
+    /// [`RenderRoot::focus_epoch`]: frust_core::RenderRoot::focus_epoch
+    paste_session: Option<u64>,
 }
 
 impl<State, Logic, V, E> ShellHandler<State, Logic, V, E>
@@ -1156,9 +1925,12 @@ where
     /// event pass never repaints, it only sets `needs_redraw`, which we turn into
     /// a single `request_redraw()` so the `Wait` loop wakes for exactly one frame.
     ///
-    /// Also re-syncs the platform IME ([`ShellHandler::sync_ime`]) after every
-    /// dispatch: a focus change, blur, or caret move can all happen as
-    /// a side effect of any event, not just keyboard/IME ones.
+    /// Also re-syncs the platform IME ([`ShellHandler::sync_ime`]), the
+    /// cursor shape ([`ShellHandler::sync_cursor`]), and the host clipboard
+    /// ([`ShellHandler::sync_clipboard`]) after every dispatch, in that
+    /// order: a focus change, blur, caret move, cursor request, or clipboard
+    /// write/paste-request can all happen as a side effect of any event, not
+    /// just keyboard/IME/pointer ones.
     ///
     /// The event pass itself runs under the reactive root [`Owner`] — see
     /// [`event_under_owner`], which is what makes `use_context` work from a
@@ -1169,6 +1941,7 @@ where
         let outcome = event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
         self.sync_ime(window);
         self.sync_cursor(window);
+        self.sync_clipboard();
         if outcome.needs_redraw {
             window.request_redraw();
         }
@@ -1236,6 +2009,141 @@ where
                 window.set_ime_cursor_area(area.0, area.1);
                 self.ime_sync.cursor_area = Some(area);
             }
+        }
+    }
+
+    /// Ensure the clipboard worker thread exists, spawning it on first use.
+    ///
+    /// Lazy for the same reason the `arboard::Clipboard` instance it owns is:
+    /// an app that never copies or pastes should pay for neither a thread nor
+    /// an X11 connection. A spawn failure is warned once (inside
+    /// [`spawn_clipboard_worker`]) and then latched — the worker is not
+    /// retried, and every clipboard action for the rest of the run is a silent
+    /// no-op.
+    fn ensure_clipboard_worker(&mut self) {
+        if self.clipboard.is_none() && !self.clipboard_unreachable_logged {
+            self.clipboard = spawn_clipboard_worker(self.clipboard_proxy.clone());
+            self.clipboard_unreachable_logged = self.clipboard.is_none();
+        }
+    }
+
+    /// Hand one [`ClipboardRequest`] to the worker.
+    ///
+    /// Returns immediately — a channel send, never a touch of the host
+    /// clipboard. A send that fails means the worker thread is gone (it
+    /// panicked inside a platform clipboard backend): drop the handle, warn
+    /// once, and no-op for the rest of the run.
+    fn send_clipboard_request(&mut self, request: ClipboardRequest) {
+        self.ensure_clipboard_worker();
+        let worker_lost = self
+            .clipboard
+            .as_ref()
+            .is_some_and(|worker| worker.requests.send(request).is_err());
+        if worker_lost {
+            self.clipboard = None;
+            self.clipboard_unreachable_logged = true;
+            log::warn!(
+                "frust-shell-desktop: the clipboard worker thread has stopped; copy/cut/paste \
+                 no-op for the rest of this run"
+            );
+        }
+    }
+
+    /// Ask the worker for a paste, unless one is already outstanding, and
+    /// record the focus session that is doing the asking.
+    ///
+    /// The coalescing gate ([`ClipboardWorker::read_in_flight`]) is the
+    /// difference between a hung selection owner costing one dropped paste and
+    /// costing a queue of them: the swap publishes "a read is outstanding"
+    /// before the request is sent, and the worker clears it once the answer —
+    /// or the decision not to send one — is behind it.
+    ///
+    /// # The recorded session is the most recent asker, not the first
+    ///
+    /// Because a request can be coalesced into a read someone else started, the
+    /// asker and the reader need not be the same session, and the recorded
+    /// value has to belong to one of them deliberately. It is overwritten on
+    /// every request, so the single answer serves whoever asked last.
+    ///
+    /// That is the only choice that can deliver anything at all in the case
+    /// where the two differ. An answer can no longer reach the earlier
+    /// session once focus has left it; keeping the earlier
+    /// session on record would therefore throw the answer away *and* leave the
+    /// field now focused — which explicitly asked for a paste — with nothing.
+    /// Overwriting cannot misdeliver either: every value written here is a
+    /// session in which a paste was requested, and [`paste_answer_dispatch`]
+    /// still requires it to
+    /// be the live one when the answer lands.
+    fn request_clipboard_read(&mut self) {
+        self.ensure_clipboard_worker();
+        // Written before the coalescing branch: a request folded into a read
+        // already under way is still a request, and still names who to answer.
+        self.paste_session = Some(self.root.focus_epoch());
+        let outstanding = self
+            .clipboard
+            .as_ref()
+            .is_some_and(|worker| worker.read_in_flight.swap(true, Ordering::AcqRel));
+        if outstanding {
+            log::debug!(
+                "frust-shell-desktop: a clipboard read is still outstanding; coalescing this \
+                 paste request into it"
+            );
+            return;
+        }
+        self.send_clipboard_request(ClipboardRequest::Read);
+    }
+
+    /// Drain the tree's one-shot clipboard write / paste-request slots
+    /// ([`RenderRoot::take_clipboard_write`]/[`RenderRoot::take_paste_request`])
+    /// and hand each to the clipboard worker thread, after every dispatch —
+    /// beside [`sync_ime`](ShellHandler::sync_ime) and
+    /// [`sync_cursor`](ShellHandler::sync_cursor), for the same reason: either
+    /// slot can fill as a side effect of any event, not just a keyboard one (a
+    /// widget's own chord decode, an edit-menu command, …).
+    ///
+    /// Neither branch touches the host clipboard from here. Both are channel
+    /// sends that return at once, which is the whole point: the read one of
+    /// them stands in for blocks for as long as another process feels like
+    /// taking — 24 s, measured, on X11 (see [`ClipboardWorker`]). That is also
+    /// why this method no longer takes the window: a paste answer is not
+    /// dispatched from inside it any more, but from
+    /// [`ShellHandler::user_event`] when the worker posts one back.
+    ///
+    /// Which retires the re-entrancy note this method used to carry. It once
+    /// answered a paste request with a nested [`ShellHandler::dispatch`] call
+    /// and had to argue that the recursion was bounded at depth one; the answer
+    /// now arrives as a fresh user event on a later loop turn, so there is no
+    /// nesting left to bound.
+    ///
+    /// [`RenderRoot::take_clipboard_write`]: frust_core::RenderRoot::take_clipboard_write
+    /// [`RenderRoot::take_paste_request`]: frust_core::RenderRoot::take_paste_request
+    fn sync_clipboard(&mut self) {
+        if let Some(text) = self.root.take_clipboard_write() {
+            self.send_clipboard_request(ClipboardRequest::Write(text));
+        }
+
+        if self.root.take_paste_request() {
+            self.request_clipboard_read();
+        }
+    }
+
+    /// Stop the clipboard worker and wait, briefly, for it to let go of the
+    /// host clipboard — the teardown half of the ownership rule (see
+    /// [`ArboardClipboard`]): while this process owns an X11 selection it is
+    /// also the process serving it, and `arboard` offers that content to a
+    /// clipboard manager only when its instance drops. Called once, from
+    /// [`run_desktop`], after `run_app` has returned.
+    ///
+    /// Bounded by [`CLIPBOARD_SHUTDOWN_WAIT`] and never fatal: a worker stuck
+    /// in a hung read — with the shutdown request sitting behind it in the
+    /// queue — is left to the process exit, because a host whose selection
+    /// owner is not answering has nothing to hand over anyway.
+    fn shutdown_clipboard(&mut self) {
+        let Some(worker) = self.clipboard.take() else {
+            return;
+        };
+        if worker.requests.send(ClipboardRequest::Shutdown).is_ok() {
+            let _ = worker.stopped.recv_timeout(CLIPBOARD_SHUTDOWN_WAIT);
         }
     }
 
@@ -1497,6 +2405,27 @@ where
                 }
             }
             ShellUserEvent::Accessibility(event) => self.handle_accessibility_event(event),
+            // The clipboard worker answered a paste request (see
+            // `ClipboardWorker`): dispatch it as a fresh, top-level edit
+            // command, on this loop turn rather than nested inside the pass
+            // that asked. Two things withhold it. No window means the answer
+            // outlived the window it was asked for — the same answer
+            // `DevtoolsUi::dispatch` gives an injection racing startup. A focus
+            // session that has moved since the request means the answer belongs
+            // to nobody who asked for it, and dispatching it would type the
+            // clip into a field that did not (see `paste_answer_dispatch`). The
+            // record is taken either way, so one request is answered once — and
+            // a surplus answer, from a second read that raced the coalescing
+            // gate open, finds the slot empty and is dropped.
+            ShellUserEvent::ClipboardPaste(text) => {
+                let asked_in = self.paste_session.take();
+                if let Some(window) = self.window.clone()
+                    && let Some(event) =
+                        paste_answer_dispatch(asked_in, self.root.focus_epoch(), text)
+                {
+                    self.dispatch(&window, event);
+                }
+            }
             // The render thread lost its surface (split path): re-create it here
             // on the main thread (where winit yields the window handle), hand a
             // fresh surface across, and repaint. Rare path — correctness over
@@ -1512,6 +2441,10 @@ where
                             scale: window.scale_factor(),
                         },
                     );
+                    // The host's view hierarchy went with the lost surface:
+                    // replay `Create` + `Update` for every live slot on the next
+                    // drain, which the redraw below drives.
+                    self.platform_views.on_surface_recreated();
                     window.request_redraw();
                 }
             }
@@ -1593,6 +2526,13 @@ where
                 event_loop.exit();
                 return;
             }
+            // A surface just came online, so any hosted native view the previous
+            // one carried is gone (`suspended` told the host to drop them all):
+            // queue the live-slot replay before the first paint after the
+            // resume, whose ingest would otherwise emit a bare `Update` for a
+            // view the host no longer has. A no-op on the first bring-up, where
+            // there are no live slots yet.
+            self.platform_views.on_surface_recreated();
         }
 
         // Seed the theme once, before the first rebuild: read the window's
@@ -1619,6 +2559,10 @@ where
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // Hosted native views go before the surface they were composited with,
+        // while the window is still intact for the host to detach them from. The
+        // matching replay is queued in `resumed`, which is the only way back.
+        self.platform_views.suspend(&mut self.extensions);
         // Drop the surface on suspend: rare on macOS, but keeps the
         // NoSurface path exercised on desktop and matches Android's lifecycle. In
         // the split path this is a barriered `SurfaceDestroyed` — the shell
@@ -1682,7 +2626,17 @@ where
             // hangs off the frame executor's drop once `run_app` returns, not
             // off this event.
             WindowEvent::CloseRequested => match self.extensions.on_close_requested() {
-                CloseAction::Exit => event_loop.exit(),
+                CloseAction::Exit => {
+                    // The window is about to be destroyed: let the host tear its
+                    // hosted views out of a hierarchy that still exists, rather
+                    // than leaving them to be dropped with it.
+                    self.platform_views.suspend(&mut self.extensions);
+                    event_loop.exit();
+                }
+                // Not a teardown — a macOS shell is only hiding its retained
+                // window, and the hosted views hide with it. Removing them here
+                // would strand the host with nothing to restore on reopen, since
+                // no surface is re-created on that path to replay them.
                 CloseAction::KeepRunning => {}
             },
 
@@ -1775,15 +2729,59 @@ where
                 }
             }
 
-            // Both the unit and the sign conversion live in `map_scroll_delta`.
-            WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = map_scroll_delta(delta, window.scale_factor());
+            // ctrl (Linux/Windows) / ⌘ (macOS) held turns a wheel tick into a
+            // desktop zoom gesture instead of a scroll — see
+            // `wheel_zoom_chord_held`/`map_wheel_scale_delta`. The wheel's own
+            // gesture bracket (`phase`, discarded on the plain-scroll arm
+            // above a moment ago but read here) becomes the `Scale` event's
+            // phase via `map_gesture_phase`; the focal point is the last
+            // known cursor position, exactly like the plain scroll's.
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                if wheel_zoom_chord_held(self.modifiers, cfg!(target_os = "macos")) {
+                    let scale_delta = map_wheel_scale_delta(delta, window.scale_factor());
+                    self.dispatch(
+                        &window,
+                        InputEvent::Scale(ScaleEvent {
+                            phase: map_gesture_phase(phase),
+                            scale_delta,
+                            focal: self.cursor,
+                            // Neither a notch wheel nor a precision trackpad's
+                            // `MouseWheel` delta carries a rate — only
+                            // winit's `PinchGesture`/a touch recognizer would.
+                            velocity: 0.0,
+                        }),
+                    );
+                } else {
+                    let scroll = map_scroll_delta(delta, window.scale_factor());
+                    self.dispatch(
+                        &window,
+                        InputEvent::Scroll {
+                            position: self.cursor,
+                            delta: scroll,
+                        },
+                    );
+                }
+            }
+
+            // macOS/iOS-only two-finger trackpad pinch (see winit's
+            // `PinchGesture` docs). Winit never emits this variant on
+            // Linux/Windows at this winit pin, so a trackpad pinch there has
+            // no desktop `Scale` source yet — only the ctrl/⌘+wheel mapping
+            // above (a `docs/LIMITATIONS.md` row to add, not yet recorded).
+            // `delta` is already the multiplicative increment winit reports
+            // (positive magnifies), so `scale_delta = 1.0 + delta` turns it
+            // into the same "multiply the running scale" contract the wheel
+            // mapping above produces.
+            WindowEvent::PinchGesture { delta, phase, .. } => {
                 self.dispatch(
                     &window,
-                    InputEvent::Scroll {
-                        position: self.cursor,
-                        delta: scroll,
-                    },
+                    InputEvent::Scale(ScaleEvent {
+                        phase: map_gesture_phase(phase),
+                        scale_delta: 1.0 + delta,
+                        focal: self.cursor,
+                        // winit's `PinchGesture` carries no velocity either.
+                        velocity: 0.0,
+                    }),
                 );
             }
 
@@ -1949,6 +2947,17 @@ where
                 };
                 let paint_dur = paint_start.elapsed();
 
+                // Platform views: ingest the pass that just painted — retire the
+                // slots whose widgets were torn down, then diff this pass's
+                // published frames into commands. Immediately after `paint` and
+                // never earlier: `RenderRoot::platform_view_frames` reflects only
+                // the most recent paint. Outside the paint span above, so the
+                // diff is not charged to paint time. The returned "anything
+                // changed" flag is deliberately not consulted — the drain below
+                // runs unconditionally because a backlog can also come from a
+                // surface-recreate replay that no ingest produced.
+                self.platform_views.after_paint(&mut self.root);
+
                 // Animation driver (spec v1 seam): if paint advanced animation
                 // state (e.g. a scroll fling) it asks for another frame here.
                 // `ControlFlow::Wait` would otherwise idle with no pending input,
@@ -2049,6 +3058,21 @@ where
                     frame_time,
                     size,
                 );
+
+                // Hand the platform-view batch to the per-OS host, on this
+                // thread, right after the scene is submitted. One call site
+                // covers both executors: `FrameExecutor::submit_frame` is the
+                // single entry for the inline and split paths alike
+                // (`crate::render`), so there is no second place a frame leaves
+                // the UI thread from. The batch describes the scene just
+                // submitted, so a hosted view leads the content it is pinned to
+                // by at most one frame — the present-sync gate that would close
+                // that gap needs a presented-frame *id* this crate's executor
+                // does not publish (see `crate::platform_view`'s timing
+                // section). Logical points, not physical px: `scale` rides along
+                // for a host that needs to convert.
+                self.platform_views
+                    .drain(&mut self.extensions, &window, scale);
             }
 
             _ => {}
@@ -2059,29 +3083,557 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
+        ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, LogicalSize,
-        MouseScrollDelta, NoExtensions, Tree, TreeId, WindowKnobSource, WinitCursorIcon, WinitKey,
-        WinitNamedKey, WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
-        brightness_from_winit, build_tree_update, cursor_change_to_apply, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers,
-        map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
-        parse_window_maximized, parse_window_size, physical_to_logical, resolved_window_knob,
-        theme_after_override_poll, window_attributes, winit_cursor_for,
+        MouseScrollDelta, NoExtensions, PasteText, ShellUserEvent, Tree, TreeId,
+        WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey, WinitNamedKey,
+        WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
+        brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
+        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
+        map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
+        map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
+        parse_window_maximized, parse_window_size, paste_answer_dispatch, paste_input_event,
+        physical_to_logical, resolved_window_knob, theme_after_override_poll,
+        wheel_zoom_chord_held, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
         Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    // `InputEvent` is deliberately absent: the event-dispatch section further
+    // down already imports it from `super`, and this module is one scope.
     use frust_core::event::{
-        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
-        ScrollDelta,
+        CursorIcon, EditCommand, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey,
+        PointerButton, ScalePhase, ScrollDelta,
     };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
     use winit::dpi::PhysicalPosition;
     use winit::event::MouseButton;
+    use winit::event::TouchPhase;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
+
+    // --- clipboard worker plumbing ---
+
+    /// Test double for [`ClipboardAccess`] — the worker loop's seam onto the
+    /// host clipboard, so the plumbing can be driven with no window, no event
+    /// loop and no real desktop session (`Fake<Trait>`, per
+    /// `docs/CODE_STANDARDS.md`'s naming table).
+    #[derive(Default)]
+    struct FakeClipboard {
+        /// What a read answers: text, or the failure kind to fail with.
+        read: Option<Result<String, ClipboardFailure>>,
+        /// Every text written, in order.
+        written: Vec<String>,
+        /// How many reads were attempted.
+        reads: usize,
+    }
+
+    impl FakeClipboard {
+        fn answering(read: Result<String, ClipboardFailure>) -> Self {
+            Self {
+                read: Some(read),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl ClipboardAccess for FakeClipboard {
+        fn read(&mut self) -> Result<String, ClipboardError> {
+            self.reads += 1;
+            match self.read.clone() {
+                Some(Ok(text)) => Ok(text),
+                Some(Err(kind)) => Err(ClipboardError::new(kind, "fake host failure")),
+                None => Err(ClipboardError::new(
+                    ClipboardFailure::Unanswered,
+                    "fake host with nothing set",
+                )),
+            }
+        }
+
+        fn write(&mut self, text: &str) -> Result<(), ClipboardError> {
+            self.written.push(text.to_string());
+            Ok(())
+        }
+    }
+
+    /// Run [`clipboard_loop`] over `requests` and collect every answer it
+    /// posts. The sender is dropped before the loop starts, so the loop drains
+    /// the queue and returns rather than blocking — the same exit a dropped
+    /// `ShellHandler` produces in the shipped path.
+    fn run_clipboard_loop(
+        requests: Vec<ClipboardRequest>,
+        access: &mut FakeClipboard,
+        read_in_flight: &AtomicBool,
+    ) -> Vec<ShellUserEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for request in requests {
+            tx.send(request).expect("the receiver is still alive");
+        }
+        drop(tx);
+
+        let mut answers = Vec::new();
+        clipboard_loop(
+            &rx,
+            access,
+            &mut |event| answers.push(event),
+            read_in_flight,
+        );
+        answers
+    }
+
+    /// A [`ClipboardAccess`] whose read panics the way a platform backend can,
+    /// instead of returning an `Err` — the one case [`ReadGate`] exists for.
+    struct PanickingClipboard;
+
+    impl ClipboardAccess for PanickingClipboard {
+        fn read(&mut self) -> Result<String, ClipboardError> {
+            panic!("the platform clipboard backend panicked");
+        }
+
+        fn write(&mut self, _text: &str) -> Result<(), ClipboardError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_panicking_read_still_reopens_the_coalescing_gate() {
+        // Seeded `true` the way `request_clipboard_read` leaves it before the
+        // request goes out. Before `ReadGate`, a panic out of the backend left
+        // the flag stuck `true` for the rest of the run: `request_clipboard_read`
+        // then took its coalescing branch every time, returning WITHOUT ever
+        // attempting the channel send whose failure is what reports a dead
+        // worker — so paste died silently, with no warning and no recovery.
+        let read_in_flight = AtomicBool::new(true);
+
+        // The panic is the point of the test, so keep its backtrace out of the
+        // suite's output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(ClipboardRequest::Read)
+                .expect("the receiver is still alive");
+            drop(tx);
+            clipboard_loop(&rx, &mut PanickingClipboard, &mut |_| {}, &read_in_flight);
+        }));
+        std::panic::set_hook(hook);
+
+        assert!(
+            unwound.is_err(),
+            "the backend panic must propagate and end the worker, not be swallowed",
+        );
+        assert!(
+            !read_in_flight.load(Ordering::Acquire),
+            "the coalescing gate must re-open on an unwind, so the next paste request \
+             reaches send_clipboard_request and its failing send reports the dead worker",
+        );
+    }
+
+    #[test]
+    fn a_successful_clipboard_read_answers_exactly_one_paste() {
+        let mut access = FakeClipboard::answering(Ok("copied text".to_string()));
+        // Seeded `true` the way `request_clipboard_read` leaves it before the
+        // request goes out.
+        let read_in_flight = AtomicBool::new(true);
+
+        let answers =
+            run_clipboard_loop(vec![ClipboardRequest::Read], &mut access, &read_in_flight);
+
+        assert_eq!(answers.len(), 1, "one read, one answer: {answers:?}");
+        let text = match answers.into_iter().next() {
+            Some(ShellUserEvent::ClipboardPaste(text)) => text,
+            other => panic!("expected a ClipboardPaste answer, got {other:?}"),
+        };
+        // …and that answer becomes exactly one top-level `EditCommand::Paste`.
+        match paste_input_event(text) {
+            InputEvent::EditCommand(EditCommand::Paste(pasted)) => {
+                assert_eq!(pasted, "copied text");
+            }
+            other => panic!("expected an EditCommand::Paste dispatch, got {other:?}"),
+        }
+        assert!(
+            !read_in_flight.load(Ordering::Acquire),
+            "the coalescing gate must re-open for the next paste"
+        );
+    }
+
+    #[test]
+    fn a_failed_clipboard_read_dispatches_nothing() {
+        // Every failure kind a read can produce, including the host's
+        // misleading "the clipboard is empty" (`Unanswered`) — the one the
+        // measured X11 hang ends in after ~24 s. None of them may synthesize a
+        // paste: an empty one would silently clear the selection the user meant
+        // to replace.
+        for kind in [
+            ClipboardFailure::Unavailable,
+            ClipboardFailure::Unanswered,
+            ClipboardFailure::ReadFailed,
+        ] {
+            let mut access = FakeClipboard::answering(Err(kind));
+            let read_in_flight = AtomicBool::new(true);
+
+            let answers =
+                run_clipboard_loop(vec![ClipboardRequest::Read], &mut access, &read_in_flight);
+
+            assert!(answers.is_empty(), "{kind:?} dispatched {answers:?}");
+            assert_eq!(access.reads, 1, "{kind:?} must still have tried once");
+            assert!(
+                !read_in_flight.load(Ordering::Acquire),
+                "{kind:?} must re-open the coalescing gate, or pasting stops for the run"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clipboard_write_reaches_the_host_and_answers_nothing() {
+        let mut access = FakeClipboard::default();
+        let read_in_flight = AtomicBool::new(false);
+
+        let answers = run_clipboard_loop(
+            vec![ClipboardRequest::Write("copied".to_string())],
+            &mut access,
+            &read_in_flight,
+        );
+
+        assert!(answers.is_empty(), "a write is not an answer: {answers:?}");
+        assert_eq!(access.written, vec!["copied".to_string()]);
+        assert_eq!(access.reads, 0);
+    }
+
+    #[test]
+    fn clipboard_shutdown_abandons_what_was_queued_behind_it() {
+        // The teardown handshake stops at `Shutdown` so `run_desktop`'s bounded
+        // wait cannot be starved by work that arrived after it asked the worker
+        // to stop.
+        let mut access = FakeClipboard::answering(Ok("late".to_string()));
+        let read_in_flight = AtomicBool::new(false);
+
+        let answers = run_clipboard_loop(
+            vec![ClipboardRequest::Shutdown, ClipboardRequest::Read],
+            &mut access,
+            &read_in_flight,
+        );
+
+        assert!(answers.is_empty(), "{answers:?}");
+        assert_eq!(
+            access.reads, 0,
+            "the read queued behind Shutdown never runs"
+        );
+    }
+
+    #[test]
+    fn clipboard_warnings_fire_once_per_kind() {
+        let mut warnings = ClipboardWarnings::default();
+
+        assert!(warnings.first_time(ClipboardFailure::Unanswered));
+        assert!(!warnings.first_time(ClipboardFailure::Unanswered));
+        // Kinds are independent: a host that can neither read nor write still
+        // says both things once.
+        assert!(warnings.first_time(ClipboardFailure::WriteFailed));
+        assert!(!warnings.first_time(ClipboardFailure::WriteFailed));
+        assert!(warnings.first_time(ClipboardFailure::Unavailable));
+        assert!(warnings.first_time(ClipboardFailure::ReadFailed));
+    }
+
+    #[test]
+    fn the_unanswered_warning_refuses_the_hosts_empty_clipboard_claim() {
+        // `arboard` returns `ContentNotAvailable` both for an empty clipboard
+        // and for a selection owner that never answered; the measured X11 case
+        // is the latter, after ~24 s. The line must not repeat the host's "or
+        // the clipboard is empty" as if it were the truth, and must carry the
+        // wait that makes a hung owner visible in a log.
+        let line = clipboard_warning(
+            &ClipboardError::new(ClipboardFailure::Unanswered, "the host reported no text"),
+            Duration::from_millis(24_005),
+        );
+
+        assert!(line.contains("24005 ms"), "{line}");
+        assert!(line.contains("never answered"), "{line}");
+        assert!(line.contains("dropped"), "{line}");
+    }
+
+    #[test]
+    fn a_paste_answer_never_logs_the_clipboard_text() {
+        // The user event is `Debug`-formatted wholesale by anything logging a
+        // loop turn, and clipboard text is user data — a password manager's
+        // paste being the motivating case. Matches `EditCommand`'s own
+        // redacting `Debug` in `frust-core`.
+        let rendered = format!(
+            "{:?}",
+            ShellUserEvent::ClipboardPaste(PasteText("hunter2".to_string()))
+        );
+
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    // --- binding a late paste answer to the focus session that asked ---
+    //
+    // The host read is asynchronous and its wait belongs to another process, so
+    // the answer arrives on a later loop turn — by which time focus may have
+    // moved. `EditCommand::Paste` carries text and no identity, so focus
+    // routing alone would hand it to whatever field holds focus at delivery.
+    //
+    // These two drive a real `RenderRoot`, and move the focus session the way
+    // the user does — a press the field answers with a focus claim of its own —
+    // rather than by writing a counter, so they keep their meaning if the
+    // session mechanism is reimplemented. They are a matched pair on purpose: a
+    // guard that dropped every answer would pass the second one alone.
+    //
+    // What they do NOT reach is the wiring on either side of
+    // `paste_answer_dispatch`: that `ShellHandler::request_clipboard_read`
+    // records `RenderRoot::focus_epoch` and not `focus_ime_generation`, and that
+    // `user_event`'s `ClipboardPaste` arm takes the record rather than copying
+    // it and compares it against a freshly read `focus_epoch`. Both sites live
+    // on a handler owning an `EventLoopProxy`, which cannot exist without an
+    // event loop, so no unit test can construct one — the same wall
+    // `clipboard_loop` meets, and the reason it takes its collaborators
+    // generically. Those two sites are pinned by prose,
+    // not by a test: swapping the counter at the request site would leave both
+    // tests below green.
+
+    /// A focusable stand-in for a text field: takes the focus session on a
+    /// press inside itself, and records every paste it is handed.
+    struct PasteField {
+        /// The texts this field received, in order — the proof of where a paste
+        /// actually landed.
+        pasted: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for PasteField {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::EditCommand(EditCommand::Paste(text)) => {
+                    self.pasted.borrow_mut().push(text.clone());
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// Two stacked fields: a press hit-tests, a paste follows the focus chain.
+    struct PasteFields {
+        first: frust_core::widget::ChildPod,
+        second: frust_core::widget::ChildPod,
+    }
+
+    impl Widget for PasteFields {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.first.layout_child(ctx, bc);
+            self.first.set_origin(Point::ZERO);
+            self.second.layout_child(ctx, bc);
+            self.second.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_focus_routed() {
+                for pod in [&mut self.first, &mut self.second] {
+                    if pod.is_focused() {
+                        return pod.event_child(ctx, event);
+                    }
+                }
+                return EventResult::Ignored;
+            }
+            let position = event.position();
+            let blurs = matches!(
+                event,
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down
+            );
+            let mut result = EventResult::Ignored;
+            let mut hit = false;
+            for pod in [&mut self.first, &mut self.second] {
+                if !hit && pod.contains(position) {
+                    hit = true;
+                    result = pod.event_child(ctx, event);
+                } else if blurs {
+                    // A press landing elsewhere blurs the chain, exactly as
+                    // `frust-widgets`' routers do.
+                    pod.set_focused(false);
+                }
+            }
+            result
+        }
+    }
+
+    /// The fixture's view. It carries the two record handles so each test can
+    /// read what its field received without reaching into the built tree.
+    #[derive(Clone)]
+    struct PasteFieldsView {
+        first: Rc<RefCell<Vec<String>>>,
+        second: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl View<()> for PasteFieldsView {
+        type Element = PasteFields;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PasteFields {
+            PasteFields {
+                first: frust_core::widget::ChildPod::new(Box::new(PasteField {
+                    pasted: self.first.clone(),
+                })),
+                second: frust_core::widget::ChildPod::new(Box::new(PasteField {
+                    pasted: self.second.clone(),
+                })),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PasteFields,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// Which of the fixture's two fields.
+    #[derive(Clone, Copy)]
+    enum PasteTarget {
+        First,
+        Second,
+    }
+
+    /// A laid-out `RenderRoot` over the two fields, plus their paste records.
+    struct PasteHarness {
+        root: RenderRoot<(), PasteFieldsView>,
+        state: (),
+        first: Rc<RefCell<Vec<String>>>,
+        second: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl PasteHarness {
+        fn new() -> Self {
+            let mut root: RenderRoot<(), PasteFieldsView> = RenderRoot::new();
+            let mut state = ();
+            let view = PasteFieldsView {
+                first: Rc::new(RefCell::new(Vec::new())),
+                second: Rc::new(RefCell::new(Vec::new())),
+            };
+            let (first, second) = (view.first.clone(), view.second.clone());
+            root.rebuild(&mut move |_: &mut ()| view.clone(), &mut state);
+            root.layout(Size::new(100.0, 60.0));
+            PasteHarness {
+                root,
+                state,
+                first,
+                second,
+            }
+        }
+
+        /// Press a field the way a user does — inside its bounds — which is
+        /// what makes it claim the focus session.
+        fn press(&mut self, target: PasteTarget) {
+            let y = match target {
+                PasteTarget::First => 15.0,
+                PasteTarget::Second => 45.0,
+            };
+            let press = InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(50.0, y),
+                button: PointerButton::Primary,
+            });
+            self.root.event(&mut self.state, &press);
+        }
+
+        fn dispatch(&mut self, event: &InputEvent) {
+            self.root.event(&mut self.state, event);
+        }
+
+        /// What each field has been handed so far.
+        fn pasted(&self) -> (Vec<String>, Vec<String>) {
+            (self.first.borrow().clone(), self.second.borrow().clone())
+        }
+    }
+
+    #[test]
+    fn a_paste_answer_still_lands_when_the_focus_session_never_moved() {
+        // The control, and the half that keeps the other half honest: the
+        // ordinary paste, where the answer comes back into the same session
+        // that asked and must be delivered in full.
+        let mut harness = PasteHarness::new();
+        harness.press(PasteTarget::First);
+        // What `request_clipboard_read` records at the moment the tree asks.
+        let asked_in = Some(harness.root.focus_epoch());
+
+        // …and what `user_event` decides when the worker answers.
+        let dispatch = paste_answer_dispatch(
+            asked_in,
+            harness.root.focus_epoch(),
+            PasteText("copied text".to_string()),
+        )
+        .expect("an answer arriving in the session that asked must still dispatch");
+        harness.dispatch(&dispatch);
+
+        let (first, second) = harness.pasted();
+        assert_eq!(
+            first,
+            vec!["copied text".to_string()],
+            "exactly one paste, with the text the worker read, into the field that asked"
+        );
+        assert!(second.is_empty(), "{second:?}");
+    }
+
+    #[test]
+    fn a_paste_answer_is_withheld_once_the_focus_session_has_moved_on() {
+        let mut harness = PasteHarness::new();
+        harness.press(PasteTarget::First);
+        let asked_in = Some(harness.root.focus_epoch());
+
+        // The user moves on while the read is still outstanding. Nothing about
+        // the request is replayed — only the tree's focus session moves, and it
+        // moves through an honoured claim, the way it does in a running app.
+        harness.press(PasteTarget::Second);
+        assert_ne!(
+            Some(harness.root.focus_epoch()),
+            asked_in,
+            "fixture precondition: an honoured focus claim moves the session"
+        );
+
+        assert!(
+            paste_answer_dispatch(
+                asked_in,
+                harness.root.focus_epoch(),
+                PasteText("copied text".to_string()),
+            )
+            .is_none(),
+            "an answer whose session is gone must not become a dispatch"
+        );
+        let (first, second) = harness.pasted();
+        assert!(
+            first.is_empty() && second.is_empty(),
+            "nothing may be pasted at all: {first:?} {second:?}"
+        );
+
+        // What makes the assertion above mean something: the very same answer,
+        // dispatched with no session check, does land — in the field the user
+        // moved to, which never asked for it. The tree would not have dropped
+        // this paste on its own, so the withholding above is the guard's doing
+        // and nothing else's.
+        harness.dispatch(&paste_input_event(PasteText("copied text".to_string())));
+        let (first, second) = harness.pasted();
+        assert!(
+            first.is_empty(),
+            "the field that asked cannot be reached once focus has left it: {first:?}"
+        );
+        assert_eq!(
+            second,
+            vec!["copied text".to_string()],
+            "unguarded, the clip is typed into the field that never asked"
+        );
+    }
 
     // --- brightness_from_winit ---
 
@@ -2279,6 +3831,74 @@ mod tests {
         );
     }
 
+    // --- map_wheel_scale_delta / wheel_zoom_chord_held / map_gesture_phase ---
+
+    #[test]
+    fn map_wheel_scale_delta_wheel_up_zooms_in() {
+        // Unlike `map_scroll_delta`, the sign is NOT flipped: winit's raw
+        // positive `y` (the wheel-up gesture) must map directly to
+        // `scale_delta > 1.0`.
+        let zoom_in = map_wheel_scale_delta(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
+        assert!(zoom_in > 1.0, "wheel up must zoom in, got {zoom_in}");
+        assert_eq!(zoom_in, (WHEEL_SCALE_RATE_PER_LINE).exp());
+    }
+
+    #[test]
+    fn map_wheel_scale_delta_wheel_down_zooms_out() {
+        let zoom_out = map_wheel_scale_delta(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
+        assert!(zoom_out < 1.0, "wheel down must zoom out, got {zoom_out}");
+        assert_eq!(zoom_out, (-WHEEL_SCALE_RATE_PER_LINE).exp());
+    }
+
+    #[test]
+    fn map_wheel_scale_delta_is_a_no_op_at_zero_lines() {
+        assert_eq!(
+            map_wheel_scale_delta(MouseScrollDelta::LineDelta(0.0, 0.0), 1.0),
+            1.0
+        );
+    }
+
+    #[test]
+    fn map_wheel_scale_delta_scales_pixel_deltas_by_the_line_height() {
+        // A 2x HiDPI display: a physical 80px vertical delta is logical 40px,
+        // which is exactly one `WHEEL_LINE_PX` (40.0) — one line-equivalent.
+        let one_line = map_wheel_scale_delta(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 80.0)),
+            2.0,
+        );
+        assert_eq!(one_line, WHEEL_SCALE_RATE_PER_LINE.exp());
+    }
+
+    #[test]
+    fn wheel_zoom_chord_held_gates_on_meta_for_macos_and_ctrl_elsewhere() {
+        let ctrl_only = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let meta_only = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        // macOS: ⌘ (meta) holds the chord, ctrl alone does not.
+        assert!(wheel_zoom_chord_held(meta_only, true));
+        assert!(!wheel_zoom_chord_held(ctrl_only, true));
+        // Linux/Windows: ctrl holds the chord, meta (Super) alone does not —
+        // Super+wheel is left for the host's own window-management shortcuts.
+        assert!(wheel_zoom_chord_held(ctrl_only, false));
+        assert!(!wheel_zoom_chord_held(meta_only, false));
+        // Neither modifier held zooms nothing, on either OS.
+        assert!(!wheel_zoom_chord_held(Modifiers::default(), true));
+        assert!(!wheel_zoom_chord_held(Modifiers::default(), false));
+    }
+
+    #[test]
+    fn map_gesture_phase_brackets_started_moved_ended() {
+        assert_eq!(map_gesture_phase(TouchPhase::Started), ScalePhase::Begin);
+        assert_eq!(map_gesture_phase(TouchPhase::Moved), ScalePhase::Update);
+        assert_eq!(map_gesture_phase(TouchPhase::Ended), ScalePhase::End);
+        assert_eq!(map_gesture_phase(TouchPhase::Cancelled), ScalePhase::End);
+    }
+
     #[test]
     fn finish_propagates_fatal_error_with_context() {
         let err = anyhow::anyhow!("boom").context("frust: failed to create window");
@@ -2332,6 +3952,11 @@ mod tests {
         assert_eq!(map_named_key(WinitNamedKey::End), Some(NamedKey::End));
         assert_eq!(map_named_key(WinitNamedKey::Escape), Some(NamedKey::Escape));
         assert_eq!(map_named_key(WinitNamedKey::Tab), Some(NamedKey::Tab));
+        // The dedicated hardware clipboard keys.
+        assert_eq!(map_named_key(WinitNamedKey::Copy), Some(NamedKey::Copy));
+        assert_eq!(map_named_key(WinitNamedKey::Cut), Some(NamedKey::Cut));
+        assert_eq!(map_named_key(WinitNamedKey::Paste), Some(NamedKey::Paste));
+        assert_eq!(map_named_key(WinitNamedKey::Insert), Some(NamedKey::Insert));
     }
 
     #[test]
@@ -2414,6 +4039,96 @@ mod tests {
                 repeat: false,
             })
         );
+    }
+
+    #[test]
+    fn map_key_event_falls_back_to_the_logical_key_when_ctrl_withholds_text() {
+        // Winit's `KeyEvent.text` is documented not populated on every
+        // backend while Ctrl is held (an unmodified `Ctrl+C`); the logical
+        // `Character` key still carries the unmodified letter, so the chord
+        // must still reach the widget rather than being dropped.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character("c".to_string()),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_falls_back_to_the_logical_key_when_meta_withholds_text() {
+        // The same fallback applies to `meta` (Cmd on macOS) — `Cmd+C`.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers {
+                meta: true,
+                ..Modifiers::default()
+            },
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character("c".to_string()),
+                modifiers: Modifiers {
+                    meta: true,
+                    ..Modifiers::default()
+                },
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_drops_a_textless_character_with_no_ctrl_or_meta() {
+        // The fallback is scoped to the documented ctrl/meta case — a
+        // textless `Character` key with neither modifier held stays dropped,
+        // exactly as before this fallback existed.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn map_key_event_ctrl_fallback_still_drops_while_composing() {
+        // The composing dedupe rule applies to the fallback path too.
+        let event = map_key_event(
+            &WinitKey::Character("c".into()),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            true, // composing
+        );
+        assert_eq!(event, None);
     }
 
     #[test]

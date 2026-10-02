@@ -157,11 +157,11 @@ pub trait PaintScene {
     /// recorder scenes stay valid; the `SceneBuilder` implementation records a
     /// real shader-quad command.
     ///
-    /// **Currently paints nothing on the engine renderer** — the command is
-    /// recognised and dropped with a once-per-process warning; see
-    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` (removed when the
-    /// GPU-seam work wires the command through). The contract below still
-    /// binds: it is the correct usage the wiring will serve.
+    /// **Renders on the engine renderer** via the external-texture path (see
+    /// `crates/frust-engine/src/effects/shader_quad.rs`); there is no CPU-oracle
+    /// golden for a user-supplied fragment shader, so engine-side correctness
+    /// is proven on a real device instead — see `docs/LIMITATIONS.md`'s
+    /// `engine-shader-quad-goldens-uncomparable`.
     ///
     /// # Cache-once contract
     ///
@@ -567,8 +567,21 @@ pub struct LayoutCtx<'a> {
     /// concrete core-owned type carried by copy — global (origin-independent,
     /// see the [`crate::insets`] module docs), so the single layout context the
     /// render root threads down carries it unchanged to every widget in the
-    /// tree. Defaults to the zero inset in bare-core tests and pre-insets apps.
+    /// tree — except inside a [`LayoutCtx::with_window_insets`] scope, where a
+    /// consuming ancestor (`SafeArea`) installs a reduced value for its subtree.
+    /// Defaults to the zero inset in bare-core tests and pre-insets apps.
     window_insets: WindowInsets,
+    /// The window's logical size, threaded down by the render root
+    /// ([`crate::app::RenderRoot::layout`]) exactly like `window_insets` above —
+    /// one layout context reaches the whole tree, so the value is set once at the
+    /// root and every widget reads the same one. [`Size::ZERO`] in bare-core
+    /// tests and before the first layout, a supported state.
+    ///
+    /// Its consumer is the overlay portal: a widget that floats a pod
+    /// ([`crate::overlay`]) lays that pod out against the *window*, not against
+    /// its own constraints, because the pod will be painted at an absolute window
+    /// rect rather than inside its owner. See [`LayoutCtx::window_size`].
+    window_size: Size,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -580,6 +593,7 @@ impl<'a> LayoutCtx<'a> {
             text_ctx: None,
             theme: None,
             window_insets: WindowInsets::default(),
+            window_size: Size::ZERO,
         }
     }
 
@@ -593,6 +607,7 @@ impl<'a> LayoutCtx<'a> {
             text_ctx: Some(text_ctx),
             theme: None,
             window_insets: WindowInsets::default(),
+            window_size: Size::ZERO,
         }
     }
 
@@ -606,6 +621,7 @@ impl<'a> LayoutCtx<'a> {
             text_ctx,
             theme,
             window_insets: WindowInsets::default(),
+            window_size: Size::ZERO,
         }
     }
 
@@ -643,9 +659,10 @@ impl<'a> LayoutCtx<'a> {
 
     /// The window's insets ([`WindowInsets`]) for this layout pass (a cheap
     /// copy). Global and origin-independent (see the [`crate::insets`] module
-    /// docs), so every widget in the tree reads the same value regardless of its
-    /// position; defaults to the zero inset when no shell pushed one. A
-    /// `SafeArea` widget insets by [`WindowInsets::padding`].
+    /// docs), so every widget reads the same value regardless of its position —
+    /// save that a consuming ancestor may have narrowed it for its subtree via
+    /// [`LayoutCtx::with_window_insets`]; defaults to the zero inset when no
+    /// shell pushed one. A `SafeArea` widget insets by [`WindowInsets::padding`].
     pub fn window_insets(&self) -> WindowInsets {
         self.window_insets
     }
@@ -656,6 +673,59 @@ impl<'a> LayoutCtx<'a> {
     /// so no per-child adjustment is needed.
     pub(crate) fn set_window_insets(&mut self, insets: WindowInsets) {
         self.window_insets = insets;
+    }
+
+    /// Run `f` with `insets` installed as this context's window insets, then
+    /// restore the previous value and return `f`'s result.
+    ///
+    /// The window insets are otherwise a single root-seeded, global value that
+    /// every widget reads unchanged. This scoped override is how a widget that
+    /// has already padded its subtree by some inset edges removes them from
+    /// that subtree (Flutter's `MediaQuery.removePadding`): `SafeArea` lays its
+    /// child out inside
+    /// `ctx.with_window_insets(ctx.window_insets().consuming(..), |ctx| ..)`, so
+    /// a self-insetting descendant reads zero padding on the consumed edges
+    /// instead of insetting a second time. Pair it with
+    /// [`PaintCtx::with_window_insets`] around the matching `paint_child` so a
+    /// paint-time read agrees with the layout-time one.
+    ///
+    /// The restore is a plain assignment after `f` returns — there is no drop
+    /// guard, so if `f` panics the override is not undone (the pass is being
+    /// unwound anyway).
+    pub fn with_window_insets<R>(
+        &mut self,
+        insets: WindowInsets,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = std::mem::replace(&mut self.window_insets, insets);
+        let result = f(self);
+        self.window_insets = saved;
+        result
+    }
+
+    /// The window's logical size for this layout pass (a cheap copy).
+    ///
+    /// Global and origin-independent like [`LayoutCtx::window_insets`], so every
+    /// widget in the tree reads the same value regardless of where it sits or
+    /// what constraints its parent handed it; [`Size::ZERO`] when no root has laid
+    /// out yet (bare-core leaf tests).
+    ///
+    /// **The constraint an overlay pod is laid out against.** A widget floating a
+    /// pod through [`crate::overlay`] sizes it with
+    /// `BoxConstraints::loose(ctx.window_size())` rather than with its own `bc`:
+    /// the pod escapes its owner's box entirely, so the owner's constraints say
+    /// nothing about how much room the floated surface has, and the window is the
+    /// only bound that does.
+    pub fn window_size(&self) -> Size {
+        self.window_size
+    }
+
+    /// Seed the window size lent by the render root
+    /// ([`crate::app::RenderRoot::layout`]). One layout context is threaded down
+    /// the whole tree, so this is set once at the root and inherited unchanged,
+    /// exactly like [`LayoutCtx::set_window_insets`].
+    pub(crate) fn set_window_size(&mut self, size: Size) {
+        self.window_size = size;
     }
 }
 
@@ -758,7 +828,8 @@ pub struct PaintCtx<'a> {
     paced_interval: Option<Duration>,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
-    /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
+    /// from its pod's recorded link *on the live session*
+    /// ([`ChildPod::holds_live_focus`]'s composition, spelled out inline) by
     /// [`ChildPod::paint_child`], and from [`crate::app::RenderRoot`]'s
     /// `focus_active` at the root. The paint-pass mirror of
     /// [`EventCtx::has_focus`]: an editable gates its focus chrome (accent
@@ -783,6 +854,16 @@ pub struct PaintCtx<'a> {
     /// counts as hovered only while it equals this; see the [`crate::event`] module
     /// docs for the epoch mechanism.
     hover_epoch: u64,
+    /// The live focus epoch — the identity of the focus session the root
+    /// currently holds, threaded from [`crate::app::RenderRoot::paint`] and
+    /// copied into each child by [`ChildPod::paint_child`] (global, like the
+    /// clock and the hover epoch).
+    ///
+    /// A pod's recorded focus stamp ([`ChildPod::focus_epoch`]) counts as a link
+    /// on the live session only while it equals this, which is what strands the
+    /// link of a branch the session has left — including one no container can
+    /// reach to clear. See [`set_live_focus_session`].
+    focus_epoch: u64,
     /// The shell-provided time for this frame, threaded from
     /// [`crate::app::RenderRoot::paint`] and seeded into each child by
     /// [`ChildPod::paint_child`]. Defaults to [`FrameTime::ZERO`] (the "no time
@@ -883,6 +964,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: false,
             hovered: false,
             hover_epoch: 0,
+            focus_epoch: 0,
             frame_time: FrameTime::ZERO,
             theme: None,
             window_insets: WindowInsets::default(),
@@ -962,8 +1044,9 @@ impl<'a> PaintCtx<'a> {
 
     /// The window's insets ([`WindowInsets`]) for this paint pass (a cheap
     /// copy). The paint-pass mirror of [`LayoutCtx::window_insets`]:
-    /// global/origin-independent, so every widget reads the same value; defaults
-    /// to the zero inset when no shell pushed one.
+    /// global/origin-independent, so every widget reads the same value (unless a
+    /// consuming ancestor narrowed it via [`PaintCtx::with_window_insets`]);
+    /// defaults to the zero inset when no shell pushed one.
     pub fn window_insets(&self) -> WindowInsets {
         self.window_insets
     }
@@ -980,6 +1063,31 @@ impl<'a> PaintCtx<'a> {
     /// (copied, so it holds no borrow of `self`).
     pub(crate) fn window_insets_ref(&self) -> WindowInsets {
         self.window_insets
+    }
+
+    /// Run `f` with `insets` installed as this context's window insets, then
+    /// restore the previous value and return `f`'s result.
+    ///
+    /// The paint-pass mirror of [`LayoutCtx::with_window_insets`]. The value is
+    /// otherwise root-seeded and copied down unchanged by
+    /// [`ChildPod::paint_child`]; because `paint_child` copies it from the
+    /// parent context it is handed, wrapping `paint_child` in this scope hands
+    /// the override to the whole painted subtree. `SafeArea` does exactly that
+    /// with the same consumed value it laid its child out under, so a widget
+    /// that reads insets at paint time sees what it was laid out with.
+    ///
+    /// The restore is a plain assignment after `f` returns — there is no drop
+    /// guard, so if `f` panics the override is not undone (the pass is being
+    /// unwound anyway).
+    pub fn with_window_insets<R>(
+        &mut self,
+        insets: WindowInsets,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = std::mem::replace(&mut self.window_insets, insets);
+        let result = f(self);
+        self.window_insets = saved;
+        result
     }
 
     /// The shell's running count of frames the render thread has actually
@@ -1044,9 +1152,9 @@ impl<'a> PaintCtx<'a> {
     }
 
     /// Seed whether the widget being painted holds focus. Called by
-    /// [`ChildPod::paint_child`] (from the pod's recorded focus flag) and by
-    /// [`crate::app::RenderRoot::paint`] (from `focus_active`) — the paint mirror
-    /// of [`EventCtx::set_has_focus`].
+    /// [`ChildPod::paint_child`] (from the pod's recorded link, its session stamp
+    /// and the chain above it) and by [`crate::app::RenderRoot::paint`] (from
+    /// `focus_active`) — the paint mirror of [`EventCtx::set_has_focus`].
     pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
     }
@@ -1092,6 +1200,20 @@ impl<'a> PaintCtx<'a> {
     /// The live hover epoch a pod's recorded stamp is compared against.
     pub(crate) fn hover_epoch(&self) -> u64 {
         self.hover_epoch
+    }
+
+    /// Seed the live focus epoch. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root (and for each floated pod)
+    /// and threaded unchanged into every child by [`ChildPod::paint_child`],
+    /// mirroring how the hover epoch flows.
+    pub(crate) fn set_focus_epoch(&mut self, epoch: u64) {
+        self.focus_epoch = epoch;
+    }
+
+    /// The live focus epoch: a pod whose recorded stamp equals this holds a link
+    /// on the session the root currently has.
+    pub(crate) fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
     }
 
     /// The shell-provided time for this frame (monotonic, arbitrary origin).
@@ -1398,6 +1520,70 @@ impl<'a> PaintCtx<'a> {
         std::mem::take(&mut self.input_shields)
     }
 
+    /// Float `entry`'s pod above the whole app for this frame, and register its
+    /// rect for the next frame's input routing.
+    ///
+    /// # The owner must not paint the pod
+    ///
+    /// A registered pod is painted by [`crate::app::RenderRoot::paint`], **after**
+    /// the main tree — that is the only way it escapes its owner's paint order
+    /// and every ancestor's clip. An owner that also paints it itself draws the
+    /// surface twice: once clipped in place, once floated.
+    ///
+    /// # Per pass, in registration order
+    ///
+    /// The registry is cleared when each paint pass begins, so a surface stays
+    /// alive only while its owner keeps registering it — there is nothing to
+    /// unregister, and an owner that stops (or is unmounted) simply disappears
+    /// from the routing table after the next paint. Within a
+    /// [band](crate::overlay::OverlayBand), later registration paints and
+    /// hit-tests above earlier; the band itself outranks registration order.
+    ///
+    /// [`OverlayEntry::window_rect`](crate::overlay::OverlayEntry::window_rect)
+    /// is absolute logical window space, so an owner computes it from
+    /// [`PaintCtx::origin`] — the only absolute anchor a widget has. Recomputing
+    /// it every paint is what makes an anchored surface follow its owner with no
+    /// subscription of any kind.
+    ///
+    /// Registering outside a root-driven paint pass (a leaf unit test painting a
+    /// bare [`PaintCtx`]) is harmless: the entry is dropped by the next real
+    /// pass's clear rather than leaking into it.
+    pub fn register_overlay(&mut self, entry: crate::overlay::OverlayEntry) {
+        crate::overlay::register(entry);
+    }
+
+    /// Publish "this field is focused, these verbs apply, and here is where a
+    /// menu would go" for this frame.
+    ///
+    /// Resolved by [`crate::app::RenderRoot::paint`] into
+    /// [`RenderRoot::selection_toolbar`](crate::app::RenderRoot::selection_toolbar)
+    /// plus a generation a shell diffs
+    /// ([`selection_toolbar_generation`](crate::app::RenderRoot::selection_toolbar_generation)),
+    /// for the platform edit-menu route.
+    ///
+    /// **Publish under either policy.** A field drawing its own toolbar through
+    /// the overlay portal ([`crate::selection_toolbar::SelectionToolbarPolicy::Framework`])
+    /// publishes this too: it costs one pointer-sized write, and it keeps a single
+    /// code path rather than one per route.
+    ///
+    /// **A focused field publishes whether or not it has a selection, and whether
+    /// or not any bar is up.** The verbs are a level a platform responder chain
+    /// must be able to read at any moment — a hardware Cmd+C/X/V/A is asked for
+    /// with no menu on screen — so gating the publish on a bar being open is what
+    /// used to leave those shortcuts unanswerable. Whether a menu should be
+    /// *presented* rides in the request's own flag instead.
+    ///
+    /// Pass-scoped and last-writer-wins, like every other paint-time request: a
+    /// pass in which nothing publishes resolves to "no field is focused", which is
+    /// what puts the toolbar away on a blur without any widget having to retract
+    /// anything.
+    pub fn publish_selection_toolbar(
+        &mut self,
+        request: crate::selection_toolbar::SelectionToolbarRequest,
+    ) {
+        crate::selection_toolbar::publish(request);
+    }
+
     /// Report a tagged ("hero") element's absolute paint `bounds` and read back
     /// what it should do this frame.
     ///
@@ -1469,6 +1655,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: self.has_focus,
             hovered: self.hovered,
             hover_epoch: self.hover_epoch,
+            focus_epoch: self.focus_epoch,
             frame_time: self.frame_time,
             theme: self.theme,
             window_insets: self.window_insets,
@@ -1823,8 +2010,8 @@ pub struct PaintOutcome {
 ///
 /// `Widget: Any` so the render root can downcast a boxed widget back to the
 /// concrete element type its originating view produced (needed during rebuild).
-/// Implementors get [`Widget::downcast_mut`] for free — no boilerplate method to
-/// write.
+/// Implementing types get [`Widget::downcast_mut`] for free — no boilerplate
+/// method to write.
 pub trait Widget: Any {
     /// Choose a size within `bc` and return it. The chosen size must satisfy
     /// `bc` (callers may additionally clamp via [`BoxConstraints::constrain`]).
@@ -1977,15 +2164,61 @@ pub struct ChildPod {
     widget: Box<dyn Widget>,
     origin: Point,
     size: Size,
+    /// An optional transform placing the child under an arbitrary
+    /// [`Affine`] relative to its `origin` — `None` (the default) for every pod
+    /// that never calls [`ChildPod::set_transform`], which then takes exactly the
+    /// untransformed paint/event/hit-test/semantics path. See
+    /// [`ChildPod::set_transform`] for the mapping contract.
+    transform: Option<Affine>,
     /// Set when the child captured the pointer, so the container can route
     /// subsequent moves/releases straight to it (capture-by-recorded-path).
     /// Cleared by the container on `Up`/`Cancel` via [`ChildPod::set_active`].
     active: bool,
+    /// Whether the child widget itself called
+    /// [`EventCtx::capture_contacts`] on the capture that set `active` — the
+    /// pod a non-claimant contact's forward-only walk ends at (see
+    /// [`ChildPod::event_child`]). Meaningful only while `active`; reset when a
+    /// fresh capture is recorded and whenever the link is cleared.
+    contacts_captor: bool,
+    /// Whether the child or a widget below it called
+    /// [`EventCtx::capture_contacts`] on the capture that set `active` — what
+    /// [`EventCtx::release_captured_child`] asks to decide whether releasing
+    /// this pod ends the gesture's contact opt-in. Same lifetime as
+    /// `contacts_captor`.
+    contacts_path: bool,
     /// Set when the child holds the focus path, so the container can route
     /// keyboard/IME events straight to it with no hit test (focus is the
     /// second recorded path, a mirror of `active`). Maintained by
     /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
+    ///
+    /// **A set flag on its own says nothing about the live session.** It records
+    /// that a claim once passed through this pod, and the only routes that clear
+    /// it are a container's own blur sweep and a reconciler severing the link —
+    /// neither of which can reach a pod held off-tree (a floated overlay
+    /// surface). `focus_epoch` below is what makes the record falsifiable; read
+    /// [`ChildPod::holds_live_focus`], not this flag, to decide anything.
     focused: bool,
+    /// The focus epoch this pod's recorded link belongs to — stamped by
+    /// [`ChildPod::set_focused`]`(true)` from the session standing on this
+    /// thread ([`set_live_focus_session`]) and never cleared.
+    ///
+    /// The focus analog of `hover_epoch` below, and for the same reason: a
+    /// session that moves has no way to visit the branch it left. The root
+    /// advances its epoch around every dispatch that could record a new chain,
+    /// so a claim recorded in that dispatch carries the new value and every link
+    /// recorded by an older claim is stranded by arithmetic — including one
+    /// belonging to a pod no container owns. `0` until a claim first passes
+    /// through.
+    focus_epoch: u64,
+    /// The identity of the [`RenderRoot`](crate::app::RenderRoot) whose session
+    /// `focus_epoch` names, recorded with it and never cleared either. `0` until
+    /// a claim first passes through.
+    ///
+    /// Exactly `hover_root`'s job below: epoch counters are per-root and collide
+    /// by construction, so the identity is what keeps one root's pod from
+    /// reading as a holder of another root's identically-numbered session — and
+    /// what keeps a dying pod from ending a session it was never part of.
+    focus_root: u64,
     /// The hover epoch this pod's recorded hover link belongs to — stamped by
     /// [`ChildPod::event_child`] when a [`EventCtx::claim_hover`] bubbles through
     /// it, and never explicitly cleared. `0` until a claim first passes through —
@@ -2044,6 +2277,68 @@ thread_local! {
     /// shape: the widget tree is single-threaded, and an inspect walk runs
     /// behind `&self` with no allocator in scope to thread down.
     static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
+
+    /// The focus session standing on this thread right now, as `(root identity,
+    /// live epoch, claim epoch)` — published by [`crate::app::RenderRoot`] and
+    /// compared against by every [`ChildPod`] that records, reads or drops a
+    /// focus link.
+    ///
+    /// The two epochs are the same value except during a dispatch, where the
+    /// root opens a *candidate* session the claim recorded in that dispatch is
+    /// stamped with (see [`focus_claim_stamp`]) while reads still answer against
+    /// the session standing when the dispatch began. That is hover's
+    /// `hover_epoch`/`hover_claim_epoch` split, in a channel rather than on the
+    /// context — and the reason both are visible at once is that a claim
+    /// recorded on the way back up must be observable to the container that is
+    /// still unwinding: a blur sweep deciding which child *kept* focus, and a
+    /// portal noticing that its surface just took the session, both ask after
+    /// the claim they are reacting to.
+    ///
+    /// `(0, 0, 0)` until a root publishes, which is also what a dispatch driven
+    /// without any root at all (a widget unit test) sees: a pod claiming focus
+    /// there stamps `0` too, so its link reads live and routing behaves exactly
+    /// as it did before this channel existed. A real root's identity starts at
+    /// `1` and its epoch at `1`, so it can never publish that triple.
+    static LIVE_FOCUS_SESSION: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Publish the focus session standing on this thread: `live` is the session a
+/// recorded link must name to count, `claim` the one a link recorded *now* takes
+/// (equal to `live` outside a dispatch).
+///
+/// # Why a thread-local, and not the running context
+///
+/// The hover epoch rides [`EventCtx`]/[`PaintCtx`] because every reader of it is
+/// inside a pass the root itself seeded. A focus link has two readers that are
+/// not: a container deciding where a focus-routed event goes runs its own
+/// dispatch (a component boundary and an overlay slot both substitute a context
+/// of their own on the way down, so a value threaded from the root does not
+/// survive the trip), and a pod's destructor runs with no context at all. The
+/// triple is therefore published where both can reach it, exactly as the hover
+/// link's own `(root, epoch)` pair already is for the destructor's sake
+/// (`crate::event::set_live_hover_link`).
+///
+/// It mirrors **one** root: a second [`crate::app::RenderRoot`] driving passes on
+/// the same thread republishes before each of its own passes, which is why the
+/// identity rides along — a pod of the other root can then never match by an
+/// epoch integer the two happen to share.
+pub(crate) fn set_live_focus_session(root: u64, live: u64, claim: u64) {
+    LIVE_FOCUS_SESSION.with(|slot| slot.set((root, live, claim)));
+}
+
+/// The `(root identity, epoch)` a link recorded right now is stamped with — the
+/// candidate session while a dispatch is open, the live one otherwise.
+fn focus_claim_stamp() -> (u64, u64) {
+    let (root, _live, claim) = LIVE_FOCUS_SESSION.with(|slot| slot.get());
+    (root, claim)
+}
+
+/// Whether `(root, epoch)` names the session standing on this thread — either
+/// the live one, or the candidate a dispatch currently open is recording claims
+/// against.
+fn names_live_focus_session(root: u64, epoch: u64) -> bool {
+    let (live_root, live, claim) = LIVE_FOCUS_SESSION.with(|slot| slot.get());
+    root == live_root && (epoch == live || epoch == claim)
 }
 
 impl Drop for ChildPod {
@@ -2074,6 +2369,23 @@ impl Drop for ChildPod {
         if crate::event::live_hover_link_is(self.hover_root, self.hover_epoch) {
             crate::event::mark_hover_orphaned(self.hover_root);
         }
+        // The focus half of the same report. The reconcilers raise this mark for
+        // every pod they sever themselves (`teardown_child` and friends), which
+        // covers the whole main tree; a pod floated by the overlay portal is
+        // reached by none of them — its owner holds it behind an `Rc` and can
+        // drop it with no view to tear it down through — so the pod reports its
+        // own severance here, with nothing for an owner to remember to call.
+        //
+        // Gated on the stamp exactly as the hover half is, and additionally on a
+        // non-zero epoch: a pod that never held a link carries `(0, 0)`, which is
+        // precisely what a dispatch driven without a root publishes, and a
+        // rootless test dropping pods owes no release.
+        if self.focused
+            && self.focus_epoch != 0
+            && names_live_focus_session(self.focus_root, self.focus_epoch)
+        {
+            crate::event::mark_focus_orphaned();
+        }
     }
 }
 
@@ -2095,8 +2407,13 @@ impl ChildPod {
             widget,
             origin: Point::ZERO,
             size: Size::ZERO,
+            transform: None,
             active: false,
+            contacts_captor: false,
+            contacts_path: false,
             focused: false,
+            focus_epoch: 0,
+            focus_root: 0,
             hover_epoch: 0,
             hover_root: 0,
             semantics_id: Cell::new(None),
@@ -2195,6 +2512,58 @@ impl ChildPod {
         self.origin = origin;
     }
 
+    /// The child's transform, if any (see [`ChildPod::set_transform`]).
+    pub fn transform(&self) -> Option<Affine> {
+        self.transform
+    }
+
+    /// Place the child under an arbitrary `transform`, or clear it with `None`.
+    ///
+    /// The transform is applied in the child's own local space, **before** the
+    /// `origin` offset: a child-local point `p` lands at
+    /// `origin + transform * p` in the container's space. So
+    /// `Affine::scale_about(2.0, center)` zooms the child about its own local
+    /// `center`, and a pan/zoom container can leave `origin` at zero and drive
+    /// the whole placement through the transform.
+    ///
+    /// While one is set:
+    ///
+    /// * [`ChildPod::paint_child`] wraps the child's paint in
+    ///   [`PaintScene::push_transform`]/[`PaintScene::pop_transform`], and maps
+    ///   an ancestor's visible rect back into the child's frame (the bounding box
+    ///   of its inverse image), so a culling descendant still culls against what
+    ///   is really on screen;
+    /// * [`ChildPod::contains`] maps the point through the inverse before the
+    ///   bounds test, so it hits exactly what paint drew — a rotated child hits
+    ///   along its rotated edges, not its axis-aligned bounding box (the same
+    ///   test as [`crate::hit::point_in_transformed_rect`]);
+    /// * [`ChildPod::event_child`] maps pointer, scroll and scale positions
+    ///   through the inverse ([`InputEvent::transformed`]), so the child sees
+    ///   local coordinates exactly as an untransformed child does;
+    /// * [`ChildPod::semantics_child`] reports the subtree at the
+    ///   **axis-aligned bounding box** of the transformed child rect. This is an
+    ///   approximation (v1): the pod's frame becomes that box, and descendants
+    ///   are offset from its corner unscaled and unrotated.
+    ///
+    /// A transform with no inverse (a zero scale, a collapsed axis, a non-finite
+    /// coefficient — see [`crate::hit::checked_inverse`]) draws nothing and hits
+    /// nothing: `contains` is `false` and paint skips the subtree. An event that
+    /// still reaches the child through a recorded capture or focus path is
+    /// delivered translated by `-origin` only, so a capture can always release.
+    ///
+    /// Out of v1's reach: rects a descendant reports in window space from
+    /// `paint` (platform-view frames, input shields, hero rects, overlay anchors)
+    /// are not mapped through the transform.
+    pub fn set_transform(&mut self, transform: Option<Affine>) {
+        self.transform = transform;
+    }
+
+    /// The child's local→container mapping for a set `transform`:
+    /// `translate(origin) * transform`.
+    fn local_to_container(&self, transform: Affine) -> Affine {
+        Affine::translate(self.origin.to_vec2()) * transform
+    }
+
     /// Whether this child currently holds the recorded active (captured) path.
     pub fn is_active(&self) -> bool {
         self.active
@@ -2202,22 +2571,120 @@ impl ChildPod {
 
     /// Set (or clear) the recorded active path — the container clears this on
     /// `Up`/`Cancel` when capture auto-releases.
+    ///
+    /// **The link is keyed on the gesture's claimant.** While the root is
+    /// delivering a *non-claimant* contact down a live capture's path (rule (c)
+    /// of [`InputEvent::PointerContact`](crate::event::InputEvent::PointerContact)'s
+    /// multi-contact contract), a clear is refused: that contact's `Up`/`Cancel`
+    /// reaches every container on the path, and a container clearing its link on
+    /// it would strand the claimant's own follow-ups. Outside such a pass — every
+    /// single-pointer dispatch, a rebuild, a container's own teardown — a clear
+    /// takes effect as always.
+    ///
+    /// A container that clears the link to take the gesture over from its
+    /// child (rather than because the gesture ended) should release it through
+    /// [`EventCtx::release_captured_child`] instead, which also ends the
+    /// gesture's contact opt-in when the released subtree held it.
     pub fn set_active(&mut self, active: bool) {
+        if !active && crate::event::in_secondary_contact_pass() {
+            return;
+        }
         self.active = active;
+        if !active {
+            self.contacts_captor = false;
+            self.contacts_path = false;
+        }
     }
 
-    /// Whether this child currently holds the recorded focus path — keyboard/IME
-    /// events route straight to it (the focus mirror of [`ChildPod::is_active`]).
+    /// Whether this pod's recorded active path leads to the widget that opted
+    /// into the gesture's other contacts ([`EventCtx::capture_contacts`]) —
+    /// the child itself, or a widget below it.
+    pub(crate) fn holds_contact_opt_in(&self) -> bool {
+        self.active && self.contacts_path
+    }
+
+    /// Whether this child has a recorded focus path at all — **not** whether
+    /// that record belongs to the session the root currently holds.
+    ///
+    /// The raw flag, kept for the things that legitimately want it: a paint-time
+    /// culling exemption, a blur sweep clearing whatever it finds, a container
+    /// asking "did I ever record a link here". Deciding *where a focus-routed
+    /// event goes*, or whether a widget may speak for the focus session, needs
+    /// [`ChildPod::holds_live_focus`] instead — a link this flag reports can be
+    /// one a moved session left behind, and there is no pass that visits an
+    /// abandoned branch to clear it.
     pub fn is_focused(&self) -> bool {
         self.focused
     }
 
-    /// Set (or clear) the recorded focus path. Containers clear it on
-    /// blur-on-outside-tap and set it when a child requests focus; the flag is
-    /// maintained automatically by [`ChildPod::event_child`] on a
-    /// `focus_requested`/`focus_released` bubble.
+    /// Record (or drop) this child's focus path **against the live session**.
+    ///
+    /// Setting it stamps the session standing on this thread
+    /// (`set_live_focus_session`) beside the flag, so the link says which session
+    /// it belongs to rather than merely that one existed; clearing it leaves the
+    /// stamp alone, which costs nothing because the flag gates every read.
+    /// Containers clear it on blur-on-outside-tap and set it when a child
+    /// requests focus; the flag is maintained automatically by
+    /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+        if focused {
+            let (root, epoch) = focus_claim_stamp();
+            self.focus_root = root;
+            self.focus_epoch = epoch;
+        }
+    }
+
+    /// The focus epoch this pod's recorded link was stamped with — the focus
+    /// counterpart of [`ChildPod::hover_epoch`], and just as much an identity
+    /// rather than an ordering or a boolean.
+    ///
+    /// Diagnostic only, for the same reason the hover stamp's accessor is: a
+    /// stamp is never cleared, only stranded by the next session, so a non-zero
+    /// value means "a claim passed through here once", never "focused". Ask
+    /// [`ChildPod::holds_live_focus`], which is the comparison this exists for.
+    pub fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
+    }
+
+    /// Whether this child holds a focus link **on the session the root currently
+    /// has** — the read every routing and provenance decision wants.
+    ///
+    /// `true` only while the flag is set *and* the stamp names the live session
+    /// (`set_live_focus_session`). Two branches can both carry a set flag — an
+    /// overlay pod's claim reaches no container's blur sweep, so the branch it
+    /// superseded keeps its own record — and this is what tells them apart
+    /// without either branch having to be visited.
+    ///
+    /// A dispatch driven with no root at all reads `(0, 0)` on both sides, so a
+    /// pod that claimed focus during such a dispatch answers `true`: with no
+    /// session to be stale relative to, the flag is all there is.
+    pub fn holds_live_focus(&self) -> bool {
+        self.focused && names_live_focus_session(self.focus_root, self.focus_epoch)
+    }
+
+    /// Drop a recorded focus link that the live session has already stranded,
+    /// reporting whether one was dropped.
+    ///
+    /// The retirement seam a [`RenderRoot`](crate::app::RenderRoot) needs and
+    /// cannot otherwise have. A pod floated by the overlay portal lives off the
+    /// tree, behind its owner's `Rc`, and the root borrows it for exactly the
+    /// length of the paint pass that floats it — so the one moment the root can
+    /// act on such a link is that pass, and the one thing it can honestly say
+    /// about it is what the stamp already decides. Calling this keeps the raw
+    /// flag and the stamp telling the same story, which is what the consumers of
+    /// [`ChildPod::is_focused`] that cannot consult an epoch depend on.
+    ///
+    /// Deliberately *not* a bare `set_focused(false)` at the call site: the
+    /// condition is the whole contract, and a pod whose link is live must never
+    /// be retired by a pass that merely walked past it.
+    pub fn retire_stale_focus_link(&mut self) -> bool {
+        if self.focused && !self.holds_live_focus() {
+            self.focused = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// The hover epoch this pod's recorded hover link belongs to — the hover
@@ -2268,7 +2735,51 @@ impl ChildPod {
     /// back into the parent `ctx`, mirroring [`ChildPod::event_child`]'s absorb of
     /// the child's redraw/capture flags — so a nested flinging widget keeps the
     /// whole tree's frames coming.
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) additionally wraps
+    /// that paint in [`PaintScene::push_transform`]/[`PaintScene::pop_transform`]
+    /// (and skips it entirely when the transform has no inverse); an
+    /// untransformed pod pushes nothing.
     pub fn paint_child(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Fast path first: an untransformed pod is the pre-transform code path,
+        // threading the ancestor's visible rect down unchanged.
+        let Some(transform) = self.transform else {
+            let visible_rect = ctx.visible_rect_ref();
+            self.paint_child_in(ctx, scene, visible_rect);
+            return;
+        };
+        // A singular transform collapses the child to a line or a point: there is
+        // nothing to draw, and no inverse to map the visible rect through.
+        if crate::hit::checked_inverse(&transform).is_none() {
+            return;
+        }
+        // The scene speaks absolute coordinates, and the child paints at its
+        // absolute origin, so conjugate the child-local transform by that
+        // origin: a local point `p` drawn at `abs + p` lands at
+        // `abs + transform * p`.
+        let abs = (ctx.origin() + self.origin.to_vec2()).to_vec2();
+        let around = Affine::translate(abs) * transform * Affine::translate(-abs);
+        // Culling descendants compare their own (untransformed) absolute rects
+        // against the visible rect, so hand them its preimage: the bounding box
+        // of the visible rect mapped back through the inverse — conservative,
+        // never culling anything actually on screen.
+        let visible_rect = match (ctx.visible_rect_ref(), crate::hit::checked_inverse(&around)) {
+            (Some(rect), Some(inverse)) => Some(inverse.transform_rect_bbox(rect)),
+            _ => None,
+        };
+        scene.push_transform(around);
+        self.paint_child_in(ctx, scene, visible_rect);
+        scene.pop_transform();
+    }
+
+    /// [`ChildPod::paint_child`]'s body: paint the child at its absolute origin
+    /// with `visible_rect` as the child's culling rect.
+    fn paint_child_in(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        visible_rect: Option<Rect>,
+    ) {
         let child_origin = ctx.origin() + self.origin.to_vec2();
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
         // Thread the shared shell clock down unchanged so every widget in the
@@ -2290,23 +2801,36 @@ impl ChildPod {
         // Thread the scroll ancestor's visible rect down unchanged (absolute
         // coords, so a nested container tests its children directly against it),
         // mirroring the theme/insets. `None` in the normal case (no scroll
-        // ancestor culling), so paint descends into every child as before.
-        child_ctx.set_visible_rect(ctx.visible_rect_ref());
+        // ancestor culling), so paint descends into every child as before. A
+        // transformed pod passes the rect's preimage instead (see `paint_child`).
+        child_ctx.set_visible_rect(visible_rect);
         // Thread the shell's surface-translucency flag down unchanged (copied
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
         child_ctx.set_translucent(ctx.is_translucent());
-        // Thread the pod's recorded focus path into paint (the mirror of how
-        // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
-        // observes a container-routed blur that never reached its `event()`.
-        // COMPOSED with the ancestor's paint focus: paint descends into every
-        // child unconditionally (no focus-routing gate like the event pass), and
-        // a container-routed blur only clears the focused pod at the
-        // nearest-common-ancestor link — flags deeper in the blurred subtree
-        // legitimately go stale. ANDing with `ctx.has_focus()` makes any cleared
-        // link force `has_focus == false` for the whole subtree below it,
-        // matching the effective gating focus-path routing gives events.
-        child_ctx.set_has_focus(self.focused && ctx.has_focus());
+        // Thread the live focus epoch down unchanged (global, like the clock),
+        // and seed this child's focus from its own recorded link against it —
+        // the mirror of how `event_child` seeds the child `EventCtx`, so a
+        // focus-dependent widget observes a blur that never reached its
+        // `event()`. Three conjuncts, each load-bearing:
+        //
+        // * `self.focused` — a link was recorded here at all;
+        // * the stamp — that link belongs to the session the root has *now*, not
+        //   to one it has since left. Paint descends into every branch
+        //   unconditionally and a branch the session left is reached by no pass
+        //   that could clear its flag, so without this a field the user has
+        //   walked away from goes on painting a caret and republishing the
+        //   surface it described while it still had the session;
+        // * `ctx.has_focus()` — the ancestor chain, since a blur clears the link
+        //   at the nearest common ancestor only and flags deeper in the blurred
+        //   subtree legitimately go stale.
+        //
+        // Exactly the composition the hover seed below uses, for exactly the
+        // same reason.
+        child_ctx.set_focus_epoch(ctx.focus_epoch());
+        child_ctx.set_has_focus(
+            self.focused && self.focus_epoch == ctx.focus_epoch() && ctx.has_focus(),
+        );
         // Thread the live hover epoch down unchanged (global, like the clock), and
         // seed this child's hover link from its own recorded stamp against it —
         // ANDed with the ancestor's hover, exactly like `focused` above. Both halves
@@ -2392,9 +2916,29 @@ impl ChildPod {
     /// [`ChildPod`]s so their nodes attach under the container's node (or, for a
     /// transparent container, under whatever encloses it — see
     /// [`crate::semantics`]).
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) reports its subtree at
+    /// the axis-aligned bounding box of the transformed child rect — an
+    /// approximation: descendants are offset from that box's corner, unscaled
+    /// and unrotated.
     pub fn semantics_child(&self, ctx: &mut SemanticsCtx) {
         let base = self.semantics_base(ctx);
-        ctx.descend_into_pod(base, self.origin.to_vec2(), self.size, |ctx| {
+        let (offset, size) = match self.transform {
+            None => (self.origin.to_vec2(), self.size),
+            Some(transform) => {
+                let bounds = self
+                    .local_to_container(transform)
+                    .transform_rect_bbox(self.size.to_rect());
+                if bounds.is_finite() {
+                    (bounds.origin().to_vec2(), bounds.size())
+                } else {
+                    // A non-finite transform has no meaningful box: report an
+                    // empty frame at the origin rather than NaN bounds.
+                    (self.origin.to_vec2(), Size::ZERO)
+                }
+            }
+        };
+        ctx.descend_into_pod(base, offset, size, |ctx| {
             self.widget.semantics(ctx);
         });
     }
@@ -2426,8 +2970,107 @@ impl ChildPod {
     /// `route_event`/`route_event_single` helpers instead, which check
     /// [`ChildPod::is_active`] first and forward unconditionally to a captured
     /// child.
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) maps positions
+    /// through the inverse of its local→container mapping instead
+    /// ([`InputEvent::transformed`]); everything else about the dispatch —
+    /// capture, contact and focus bookkeeping, hover — is identical.
+    ///
+    /// # Another contact walks the active path forward-only
+    ///
+    /// A non-claimant contact the root delivers down a live capture (rule (c) of
+    /// [`InputEvent::PointerContact`]'s contract) is meant for the widget that
+    /// opted in with [`EventCtx::capture_contacts`] — **the captor** — and for
+    /// nothing above it. The containers between the root and the captor must
+    /// not run their own pointer handling on it: a scroll view that saw a second
+    /// finger's `Down` as its own would re-arm its drag from the wrong finger and
+    /// take the gesture away from the captor on the claimant's next move.
+    ///
+    /// A pod cannot reach into its child widget's own pods, so the walk travels
+    /// on the one route every container already provides without running its
+    /// pointer machinery: the broadcast-first rule. While the root walks such a
+    /// contact, each container on the path is handed an inert carrier (an
+    /// [`InputEvent::Overlay`] addressed to a key no overlay owner holds, which
+    /// every widget ignores and every container forwards to its children before
+    /// anything else), and the real event rides beside it, re-based into each
+    /// pod's space on the way down. This method then decides, per pod:
+    ///
+    /// * **Off the recorded active path:** nothing — the child widget is not
+    ///   called at all.
+    /// * **The captor** (the child itself opted in on the capture that made
+    ///   this pod active): the child receives the real event, translated as
+    ///   usual, with the walk closed, so it — and whatever it routes below
+    ///   itself — handles the contact the ordinary way. The walk ends here: a
+    ///   widget below the captor that also opted in hears the contact only if
+    ///   the captor forwards it.
+    /// * **On the path, above the captor:** the child receives the carrier, so
+    ///   its own handler runs but none of its gesture, capture, focus, blur or
+    ///   hit-test logic does; the walk continues into its children. The result
+    ///   reported upward is the captor's, not the carrier's `Ignored`. If the
+    ///   carrier never reaches a pod on the path (a container whose captured
+    ///   child is not one of its broadcast targets — an overlay owner whose
+    ///   captured pod is a floated surface), this child alone is handed the
+    ///   real event the ordinary way instead.
+    ///
+    /// Everything this method folds back into `ctx` — redraw, capture, focus,
+    /// IME — still bubbles from the captor through every pod on the way back
+    /// up. No hover, cursor or blur bookkeeping moves: the root opens no hover
+    /// pass for a non-claimant contact, and no container above the captor runs
+    /// the blur sweep it would run on a `Down`. Every other dispatch, including
+    /// the claimant's own events, takes exactly the path described above this
+    /// section.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let local = event.translated(-self.origin.to_vec2());
+        if let Some(real) = crate::event::secondary_walk_event(event) {
+            return self.walk_secondary(ctx, &real);
+        }
+        let local = self.localize(event);
+        self.dispatch_local(ctx, &local)
+    }
+
+    /// `event` (in the container's space) mapped into the child's local space —
+    /// translated by `-origin`, or through the inverse of a set transform.
+    fn localize(&self, event: &InputEvent) -> InputEvent {
+        match self.transform {
+            None => event.translated(-self.origin.to_vec2()),
+            Some(transform) => {
+                match crate::hit::checked_inverse(&self.local_to_container(transform)) {
+                    Some(inverse) => event.transformed(&inverse),
+                    // No inverse: `contains` never hits such a pod, so only a
+                    // recorded capture/focus path reaches here. Deliver the event
+                    // translated as if untransformed so that path can still end.
+                    None => event.translated(-self.origin.to_vec2()),
+                }
+            }
+        }
+    }
+
+    /// One step of a non-claimant contact's forward-only walk (see
+    /// [`ChildPod::event_child`]); `real` is the contact's event in the
+    /// container's space.
+    fn walk_secondary(&mut self, ctx: &mut EventCtx, real: &InputEvent) -> EventResult {
+        if !self.active {
+            return EventResult::Ignored;
+        }
+        let local = self.localize(real);
+        let result = if self.contacts_captor {
+            crate::event::without_secondary_walk(|| self.dispatch_local(ctx, &local))
+        } else {
+            let carrier = crate::event::secondary_walk_carrier();
+            let (_, delivered) = crate::event::run_secondary_walk(local.clone(), || {
+                self.dispatch_local(ctx, &carrier)
+            });
+            match delivered {
+                Some(result) => result,
+                None => crate::event::without_secondary_walk(|| self.dispatch_local(ctx, &local)),
+            }
+        };
+        crate::event::note_secondary_delivered(result);
+        result
+    }
+
+    /// Dispatch `local` (already in the child's space) to the child widget and
+    /// fold everything it bubbled back into `ctx`.
+    fn dispatch_local(&mut self, ctx: &mut EventCtx, local: &InputEvent) -> EventResult {
         // The child's hover link, composed with the ancestor chain exactly like
         // `focused` (see `paint_child`).
         let hovered = self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered();
@@ -2442,7 +3085,21 @@ impl ChildPod {
         // instead and closes the pass to its own subtree.
         let hover_eligible = ctx.is_hover_eligible() && !ctx.is_hover_claimed() && !self.active;
         let claim_epoch = ctx.hover_claim_epoch();
-        let (captured, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {
+        // The child context inherits `ctx.pointer_id()` unchanged (see
+        // `EventCtx::child_ctx`), so every widget on the routed path reports the
+        // same contact.
+        let (
+            (opted_in, opted_in_at_or_below),
+            captured,
+            contacts,
+            released,
+            hover_claimed,
+            focus_req,
+            focus_rel,
+            redraw,
+            ime,
+            result,
+        ) = {
             let mut child_ctx = ctx.child_ctx(
                 self.origin,
                 self.size,
@@ -2450,9 +3107,17 @@ impl ChildPod {
                 hovered,
                 hover_eligible,
             );
-            let result = self.widget.event(&mut child_ctx, &local);
+            // The frame attributes a `capture_contacts` call to this child (or
+            // to a widget below it) across a component boundary, and marks the
+            // dispatch as running under the live opt-in's holder.
+            let frame = crate::event::ContactFrame::enter(self.active && self.contacts_captor);
+            let result = self.widget.event(&mut child_ctx, local);
+            let (opted_in, opted_in_at_or_below) = frame.close();
             (
+                (opted_in, opted_in_at_or_below),
                 child_ctx.is_pointer_captured(),
+                child_ctx.is_contact_capture_requested(),
+                child_ctx.is_capture_released(),
                 child_ctx.is_hover_claimed(),
                 child_ctx.is_focus_requested(),
                 child_ctx.is_focus_released(),
@@ -2462,7 +3127,15 @@ impl ChildPod {
             )
         };
         if captured {
+            if !self.active {
+                // A fresh capture: whatever opt-in the last gesture recorded
+                // here is gone.
+                self.contacts_captor = false;
+                self.contacts_path = false;
+            }
             self.active = true;
+            self.contacts_captor |= opted_in;
+            self.contacts_path |= opted_in_at_or_below;
         }
         // Stamp the claim onto this pod so the whole path from the claimant up to
         // the root carries the epoch the next paint compares against. Never
@@ -2478,13 +3151,30 @@ impl ChildPod {
         // `focus_requested` bubble records this child as the focused one; a
         // `focus_released` bubble drops it. A request wins over a release in the
         // rare case both fire in one dispatch (a re-focus supersedes a blur).
+        //
+        // The record goes through `set_focused`, which stamps the session the
+        // claim belongs to beside the flag: the whole chain from the claimant up
+        // to the root is on one bubble and therefore takes one stamp, which is
+        // what lets a container later ask which of two flagged children is on the
+        // live chain.
         if focus_rel {
-            self.focused = false;
+            self.set_focused(false);
         }
         if focus_req {
-            self.focused = true;
+            self.set_focused(true);
         }
-        ctx.absorb_child(redraw, captured, hover_claimed, focus_req, focus_rel, ime);
+        // The contact opt-in bubbles exactly like the capture it accompanies; the
+        // `active` link above stays keyed on the claimant (see `set_active`).
+        ctx.absorb_child(
+            redraw,
+            captured,
+            contacts,
+            released,
+            hover_claimed,
+            focus_req,
+            focus_rel,
+            ime,
+        );
         result
     }
 
@@ -2496,11 +3186,151 @@ impl ChildPod {
     /// ([`ChildPod::is_active`]), subsequent events must bypass this check and
     /// go straight to the captured child regardless of where the point now
     /// falls — see `frust-widgets`' `route_event`/`route_event_single`.
+    ///
+    /// A pod with a [`transform`](ChildPod::set_transform) maps `point` back
+    /// through the transform first, so the test agrees with what paint drew; a
+    /// transform with no inverse hits nothing.
     pub fn contains(&self, point: Point) -> bool {
+        if let Some(transform) = self.transform {
+            return crate::hit::point_in_transformed_rect(
+                point,
+                self.size.to_rect(),
+                &self.local_to_container(transform),
+            );
+        }
         point.x >= self.origin.x
             && point.x < self.origin.x + self.size.width
             && point.y >= self.origin.y
             && point.y < self.origin.y + self.size.height
+    }
+}
+
+#[cfg(test)]
+mod focus_link_tests {
+    use super::*;
+
+    /// A guard restoring the focus channel this thread started with, so a test
+    /// that publishes a session of its own cannot leak it into a neighbour.
+    struct Session(u64, u64, u64);
+
+    impl Session {
+        fn enter(root: u64, live: u64, claim: u64) -> Self {
+            let previous = LIVE_FOCUS_SESSION.with(|slot| slot.get());
+            set_live_focus_session(root, live, claim);
+            Session(previous.0, previous.1, previous.2)
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            set_live_focus_session(self.0, self.1, self.2);
+        }
+    }
+
+    /// A do-nothing leaf: these tests exercise the pod's own bookkeeping, so
+    /// the widget inside it never runs.
+    struct Inert;
+
+    impl Widget for Inert {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    fn pod() -> ChildPod {
+        ChildPod::new(Box::new(Inert))
+    }
+
+    #[test]
+    fn a_recorded_link_counts_only_while_its_stamp_names_the_live_session() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        pod.set_focused(true);
+        assert!(pod.holds_live_focus(), "recorded against the live session");
+        assert_eq!(pod.focus_epoch(), 3);
+
+        // The session moves on. Nothing visits this pod; its flag is untouched.
+        set_live_focus_session(7, 4, 4);
+        assert!(
+            pod.is_focused(),
+            "the raw record survives, as it always did"
+        );
+        assert!(
+            !pod.holds_live_focus(),
+            "but it no longer names the session the root has"
+        );
+    }
+
+    #[test]
+    fn a_link_of_another_root_never_counts_however_the_epochs_line_up() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        pod.set_focused(true);
+
+        // A second root on the same thread, with the identical epoch integer —
+        // which two roots hold as a rule, not as a fluke.
+        set_live_focus_session(8, 3, 3);
+        assert!(!pod.holds_live_focus());
+    }
+
+    #[test]
+    fn a_claim_recorded_during_a_dispatch_counts_before_the_dispatch_commits_it() {
+        // The root opened a candidate session: reads still answer against the
+        // live one, and a link recorded now takes the candidate.
+        let _session = Session::enter(7, 3, 4);
+        let mut claimed = pod();
+        claimed.set_focused(true);
+        assert_eq!(claimed.focus_epoch(), 4, "stamped with the candidate");
+        assert!(
+            claimed.holds_live_focus(),
+            "and observable to the container still unwinding around the claim"
+        );
+
+        let mut standing = pod();
+        standing.focused = true;
+        standing.focus_root = 7;
+        standing.focus_epoch = 3;
+        assert!(
+            standing.holds_live_focus(),
+            "while a link recorded before this dispatch still reads live"
+        );
+
+        // The dispatch commits the claim: the older link is stranded.
+        set_live_focus_session(7, 4, 4);
+        assert!(claimed.holds_live_focus());
+        assert!(!standing.holds_live_focus());
+    }
+
+    #[test]
+    fn retiring_a_link_drops_only_one_the_live_session_has_already_stranded() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        pod.set_focused(true);
+        assert!(
+            !pod.retire_stale_focus_link(),
+            "a live link is never retired by a pass that merely walked past it"
+        );
+        assert!(pod.is_focused());
+
+        set_live_focus_session(7, 4, 4);
+        assert!(pod.retire_stale_focus_link(), "a stranded link is dropped");
+        assert!(
+            !pod.is_focused(),
+            "so the raw flag and the stamp tell one story"
+        );
+        assert!(
+            !pod.retire_stale_focus_link(),
+            "and retiring is idempotent — there is nothing left to drop"
+        );
+    }
+
+    #[test]
+    fn a_pod_that_never_held_a_link_reports_nothing_to_retire() {
+        let _session = Session::enter(7, 3, 3);
+        let mut pod = pod();
+        assert!(!pod.holds_live_focus());
+        assert!(!pod.retire_stale_focus_link());
     }
 }
 
@@ -2730,6 +3560,25 @@ mod tests {
         let mut ctx = LayoutCtx::new();
         let bc = BoxConstraints::loose(Size::new(200.0, 100.0));
         assert_eq!(w.layout(&mut ctx, &bc), Size::new(200.0, 100.0));
+    }
+
+    #[test]
+    fn with_window_insets_scopes_and_restores_on_both_contexts() {
+        use crate::insets::EdgeInsets;
+        let root = WindowInsets::new(EdgeInsets::new(1.0, 2.0, 3.0, 4.0), EdgeInsets::ZERO);
+        let scoped = root.consuming(true, true, true, true);
+
+        let mut lctx = LayoutCtx::new();
+        lctx.set_window_insets(root);
+        let inside = lctx.with_window_insets(scoped, |ctx| ctx.window_insets());
+        assert_eq!(inside, scoped);
+        assert_eq!(lctx.window_insets(), root, "layout override restored");
+
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        pctx.set_window_insets(root);
+        let inside = pctx.with_window_insets(scoped, |ctx| ctx.window_insets());
+        assert_eq!(inside, scoped);
+        assert_eq!(pctx.window_insets(), root, "paint override restored");
     }
 
     #[test]
@@ -3769,7 +4618,7 @@ mod tests {
     }
 
     /// A scene recorder that overrides the shadow/layer `PaintScene` additions, to
-    /// prove they reach an implementor that opts in.
+    /// prove they reach an implementing scene that opts in.
     #[derive(Default)]
     struct ShadowLayerRecordingScene {
         shadows: Vec<(Point, Size, f64, f64, Color)>,
@@ -3829,7 +4678,7 @@ mod tests {
     }
 
     /// A scene recorder overriding the path additions, proving they
-    /// reach an implementor that opts in.
+    /// reach an implementing scene that opts in.
     #[derive(Default)]
     struct PathRecordingScene {
         fills: Vec<(Point, BezPath)>,
@@ -4469,5 +5318,511 @@ mod tests {
             "expected PopSnapshot, got {:?}",
             commands[2]
         );
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use std::f64::consts::FRAC_PI_4;
+
+    use kurbo::Vec2;
+
+    use super::*;
+    use crate::event::{
+        PointerButton, PointerEvent, PointerId, PointerPhase, ScaleEvent, ScalePhase, ScrollDelta,
+    };
+
+    /// One recorded paint operation, in order.
+    #[derive(Clone, Debug, PartialEq)]
+    enum Op {
+        Rect(Point, Size),
+        Push(Affine),
+        Pop,
+    }
+
+    /// A scene recorder that keeps the transform stack interleaved with draws,
+    /// so a test can see exactly what a pod pushed around its child.
+    #[derive(Default)]
+    struct OpLog(Vec<Op>);
+
+    impl PaintScene for OpLog {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
+            self.0.push(Op::Rect(origin, size));
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_transform(&mut self, transform: Affine) {
+            self.0.push(Op::Push(transform));
+        }
+        fn pop_transform(&mut self) {
+            self.0.push(Op::Pop);
+        }
+    }
+
+    /// A leaf that fills its whole box, records every event it receives (in
+    /// local space), captures on `Down`, and contributes one semantics node.
+    #[derive(Default)]
+    struct Recorder {
+        events: Vec<InputEvent>,
+    }
+
+    impl Widget for Recorder {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.events.push(event.clone());
+            if matches!(
+                event,
+                InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    ..
+                })
+            ) {
+                ctx.capture_pointer();
+            }
+            EventResult::Handled
+        }
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            ctx.push_node(accesskit::Role::Label, |_| {});
+        }
+    }
+
+    /// A leaf that records the visible rect its paint context carries.
+    struct VisibleProbe(std::rc::Rc<Cell<Option<Rect>>>);
+
+    impl Widget for VisibleProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.0.set(ctx.visible_rect());
+        }
+    }
+
+    fn pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// A laid-out `Recorder` pod of `size` at `origin`.
+    fn recorder_pod(origin: Point, size: Size) -> ChildPod {
+        let mut pod = ChildPod::new(Box::new(Recorder::default()));
+        pod.layout_child(&mut LayoutCtx::new(), &BoxConstraints::tight(size));
+        pod.set_origin(origin);
+        pod
+    }
+
+    fn recorded(pod: &mut ChildPod) -> Vec<InputEvent> {
+        pod.widget_mut()
+            .downcast_mut::<Recorder>()
+            .expect("recorder pod")
+            .events
+            .clone()
+    }
+
+    fn paint(pod: &mut ChildPod, visible: Option<Rect>) -> (Vec<Op>, Option<Rect>) {
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        ctx.set_visible_rect(visible);
+        let mut scene = OpLog::default();
+        pod.paint_child(&mut ctx, &mut scene);
+        (scene.0, ctx.visible_rect_ref())
+    }
+
+    fn dispatch(pod: &mut ChildPod, event: &InputEvent) -> EventResult {
+        let mut state = 0u32;
+        let mut ctx = EventCtx::new(&mut state, Point::ZERO, Size::new(400.0, 400.0));
+        pod.event_child(&mut ctx, event)
+    }
+
+    #[test]
+    fn a_child_under_scale_and_translate_receives_down_at_its_local_point() {
+        let mut pod = recorder_pod(Point::new(10.0, 20.0), Size::new(50.0, 50.0));
+        // Local p lands at origin + translate(5, 5) * scale(2) * p.
+        pod.set_transform(Some(
+            Affine::translate(Vec2::new(5.0, 5.0)) * Affine::scale(2.0),
+        ));
+        // Local (7, 9) is drawn at (10 + 5 + 14, 20 + 5 + 18) = (29, 43).
+        let at = Point::new(29.0, 43.0);
+        assert!(pod.contains(at));
+        assert_eq!(
+            dispatch(&mut pod, &pointer(PointerPhase::Down, at.x, at.y)),
+            EventResult::Handled
+        );
+        assert!(pod.is_active(), "capture bookkeeping is unchanged");
+        // Scroll positions and scale focal points take the same mapping; their
+        // magnitudes do not.
+        dispatch(
+            &mut pod,
+            &InputEvent::Scroll {
+                position: at,
+                delta: ScrollDelta::Pixels(0.0, 12.0),
+            },
+        );
+        dispatch(
+            &mut pod,
+            &InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Update,
+                scale_delta: 1.1,
+                focal: at,
+                velocity: 0.0,
+            }),
+        );
+        let local = Point::new(7.0, 9.0);
+        assert_eq!(
+            recorded(&mut pod),
+            vec![
+                pointer(PointerPhase::Down, local.x, local.y),
+                InputEvent::Scroll {
+                    position: local,
+                    delta: ScrollDelta::Pixels(0.0, 12.0),
+                },
+                InputEvent::Scale(ScaleEvent {
+                    phase: ScalePhase::Update,
+                    scale_delta: 1.1,
+                    focal: local,
+                    velocity: 0.0,
+                }),
+            ]
+        );
+        // The child now covers (15..115, 25..125): the untransformed box's
+        // corner misses, and a point past its untransformed extent hits.
+        assert!(!pod.contains(Point::new(12.0, 22.0)));
+        assert!(pod.contains(Point::new(100.0, 100.0)));
+        assert!(!pod.contains(Point::new(116.0, 60.0)));
+        // A contact's inner event is mapped the same way.
+        let contact = InputEvent::PointerContact {
+            pointer_id: PointerId::touch(1),
+            event: PointerEvent {
+                phase: PointerPhase::Move,
+                position: at,
+                button: PointerButton::Primary,
+            },
+        };
+        dispatch(&mut pod, &contact);
+        assert_eq!(
+            recorded(&mut pod).last(),
+            Some(&InputEvent::PointerContact {
+                pointer_id: PointerId::touch(1),
+                event: PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: local,
+                    button: PointerButton::Primary,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn contains_agrees_with_paint_for_rotated_content_at_the_corners() {
+        let size = Size::new(100.0, 100.0);
+        let mut pod = recorder_pod(Point::new(40.0, 40.0), size);
+        pod.set_transform(Some(Affine::rotate_about(
+            FRAC_PI_4,
+            Point::new(50.0, 50.0),
+        )));
+        let (ops, _) = paint(&mut pod, None);
+        let [Op::Push(drawn), Op::Rect(rect_origin, rect_size), Op::Pop] = ops.as_slice() else {
+            panic!("expected push/rect/pop, got {ops:?}");
+        };
+        assert_eq!((*rect_origin, *rect_size), (Point::new(40.0, 40.0), size));
+        let rect = Rect::from_origin_size(*rect_origin, *rect_size);
+        let center = *drawn * rect.center();
+        for corner in [
+            Point::new(rect.x0, rect.y0),
+            Point::new(rect.x1, rect.y0),
+            Point::new(rect.x1, rect.y1),
+            Point::new(rect.x0, rect.y1),
+        ] {
+            // Where paint actually put this corner (the parent paints at the
+            // absolute origin zero, so absolute space is the container's space).
+            let painted = *drawn * corner;
+            let inward = (center - painted).normalize();
+            assert!(
+                pod.contains(painted + inward),
+                "just inside painted corner {painted:?}"
+            );
+            assert!(
+                !pod.contains(painted - inward),
+                "just outside painted corner {painted:?}"
+            );
+            // The untransformed box's own corner is outside the painted
+            // diamond: the hit test is not an AABB test.
+            let unrotated = corner + (rect.center() - corner) * 0.02;
+            assert!(!pod.contains(unrotated), "AABB corner {unrotated:?}");
+        }
+    }
+
+    #[test]
+    fn an_untransformed_pod_paints_and_routes_exactly_as_before() {
+        let origin = Point::new(12.0, 34.0);
+        let size = Size::new(60.0, 40.0);
+        let events = [
+            pointer(PointerPhase::Down, 20.0, 40.0),
+            pointer(PointerPhase::Move, 90.0, 10.0),
+            pointer(PointerPhase::Up, 30.0, 50.0),
+            InputEvent::Scroll {
+                position: Point::new(25.0, 45.0),
+                delta: ScrollDelta::Lines(0.0, 1.0),
+            },
+            InputEvent::Scale(ScaleEvent {
+                phase: ScalePhase::Begin,
+                scale_delta: 1.0,
+                focal: Point::new(15.0, 35.0),
+                velocity: 0.0,
+            }),
+            InputEvent::Housekeeping,
+        ];
+        let visible = Some(Rect::new(0.0, 0.0, 50.0, 50.0));
+
+        // Baseline: a pod that never had a transform.
+        let mut baseline = recorder_pod(origin, size);
+        let baseline_paint = paint(&mut baseline, visible);
+        for event in &events {
+            dispatch(&mut baseline, event);
+        }
+        let baseline_events = recorded(&mut baseline);
+        // The baseline is the pre-transform contract: no transform pushed, the
+        // child drawn at its origin, the visible rect threaded unchanged, and
+        // every event translated by `-origin` and nothing else.
+        assert_eq!(baseline_paint.0, vec![Op::Rect(origin, size)]);
+        assert_eq!(baseline_paint.1, visible);
+        let translated: Vec<_> = events
+            .iter()
+            .map(|e| e.translated(-origin.to_vec2()))
+            .collect();
+        assert_eq!(baseline_events, translated);
+
+        // A pod whose transform was set and then cleared is indistinguishable.
+        let mut cleared = recorder_pod(origin, size);
+        cleared.set_transform(Some(Affine::rotate(1.0) * Affine::scale(3.0)));
+        cleared.set_transform(None);
+        assert_eq!(cleared.transform(), None);
+        assert_eq!(paint(&mut cleared, visible), baseline_paint);
+        for event in &events {
+            dispatch(&mut cleared, event);
+        }
+        assert_eq!(recorded(&mut cleared), baseline_events);
+        for point in [
+            Point::new(12.0, 34.0),
+            Point::new(71.9, 73.9),
+            Point::new(72.0, 50.0),
+            Point::new(11.9, 50.0),
+        ] {
+            assert_eq!(cleared.contains(point), baseline.contains(point));
+        }
+    }
+
+    #[test]
+    fn a_singular_transform_hits_nothing_and_never_panics() {
+        let origin = Point::new(10.0, 10.0);
+        for singular in [
+            Affine::scale(0.0),
+            Affine::scale_non_uniform(2.0, 0.0),
+            Affine::new([1.0, 2.0, 2.0, 4.0, 0.0, 0.0]),
+            Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        ] {
+            let mut pod = recorder_pod(origin, Size::new(50.0, 50.0));
+            pod.set_transform(Some(singular));
+            for point in [origin, Point::new(20.0, 20.0), Point::new(10.0, 30.0)] {
+                assert!(!pod.contains(point), "{singular:?} hit {point:?}");
+            }
+            // Paint skips the collapsed subtree entirely.
+            assert_eq!(
+                paint(&mut pod, Some(Rect::new(0.0, 0.0, 99.0, 99.0))).0,
+                vec![]
+            );
+            // An event reaching it through a recorded path still arrives,
+            // translated as if untransformed, so a capture can end.
+            dispatch(&mut pod, &pointer(PointerPhase::Up, 20.0, 25.0));
+            assert_eq!(
+                recorded(&mut pod),
+                vec![pointer(PointerPhase::Up, 10.0, 15.0)]
+            );
+            // Semantics never reports NaN bounds.
+            let mut sem = SemanticsCtx::new(Size::new(200.0, 200.0), 2);
+            pod.semantics_child(&mut sem);
+            let update = sem.finish(accesskit::NodeId(1));
+            let bounds = update.nodes[0].1.bounds().expect("bounds");
+            assert!(
+                [bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+                    .iter()
+                    .all(|v| v.is_finite()),
+                "{singular:?} gave {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transformed_pod_maps_the_visible_rect_and_reports_its_bounding_box() {
+        let mut pod = recorder_pod(Point::new(10.0, 20.0), Size::new(50.0, 50.0));
+        pod.set_transform(Some(Affine::scale(2.0)));
+        // Paint: the transform is conjugated by the absolute origin, and the
+        // visible rect reaches the child as its preimage. The parent's own
+        // visible rect is untouched.
+        let visible = Some(Rect::new(10.0, 20.0, 110.0, 120.0));
+        let (ops, parent_visible) = paint(&mut pod, visible);
+        assert_eq!(parent_visible, visible);
+        assert_eq!(
+            ops,
+            vec![
+                Op::Push(
+                    Affine::translate(Vec2::new(10.0, 20.0))
+                        * Affine::scale(2.0)
+                        * Affine::translate(Vec2::new(-10.0, -20.0))
+                ),
+                Op::Rect(Point::new(10.0, 20.0), Size::new(50.0, 50.0)),
+                Op::Pop,
+            ]
+        );
+        // What the child itself culls against: the visible rect mapped back
+        // through the inverse — (10, 20) .. (60, 70) in its own absolute frame.
+        let seen = std::rc::Rc::new(Cell::new(None));
+        let mut probe = ChildPod::new(Box::new(VisibleProbe(seen.clone())));
+        probe.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(50.0, 50.0)),
+        );
+        probe.set_origin(Point::new(10.0, 20.0));
+        probe.set_transform(Some(Affine::scale(2.0)));
+        paint(&mut probe, visible);
+        assert_eq!(seen.get(), Some(Rect::new(10.0, 20.0, 60.0, 70.0)));
+        // Semantics: the transformed box, (10, 20) .. (110, 120).
+        let mut sem = SemanticsCtx::new(Size::new(400.0, 400.0), 2);
+        pod.semantics_child(&mut sem);
+        let update = sem.finish(accesskit::NodeId(1));
+        let bounds = update.nodes[0].1.bounds().expect("bounds");
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (10.0, 20.0, 110.0, 120.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod contact_release_tests {
+    use super::*;
+    use crate::event::{ContactPass, PointerButton, PointerEvent, PointerId, PointerPhase};
+
+    /// A leaf that captures on `Down`, opting into the gesture's other contacts
+    /// when `opt_in` is set.
+    struct Grab {
+        opt_in: bool,
+    }
+    impl Widget for Grab {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(20.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.capture_pointer();
+                if self.opt_in {
+                    ctx.capture_contacts();
+                }
+            }
+            EventResult::Handled
+        }
+    }
+
+    /// A single-child container that takes the gesture over from its captured
+    /// child on any `Move`.
+    struct Taker {
+        inner: ChildPod,
+    }
+    impl Widget for Taker {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner.layout_child(ctx, bc);
+            bc.constrain(Size::new(20.0, 20.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p)
+                    if p.phase == PointerPhase::Move && self.inner.is_active() =>
+                {
+                    ctx.release_captured_child(&mut self.inner);
+                    EventResult::Handled
+                }
+                _ => self.inner.event_child(ctx, event),
+            }
+        }
+    }
+
+    /// An outer pod around a [`Taker`] around a [`Grab`].
+    fn nested(opt_in: bool) -> ChildPod {
+        let mut pod = ChildPod::new(Box::new(Taker {
+            inner: ChildPod::new(Box::new(Grab { opt_in })),
+        }));
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(20.0, 20.0)),
+        );
+        pod
+    }
+
+    fn pointer(phase: PointerPhase) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Dispatch into `pod` from a fresh context; whether a capture release
+    /// bubbled out of it.
+    fn released(pod: &mut ChildPod, phase: PointerPhase) -> bool {
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(20.0, 20.0));
+        pod.event_child(&mut ctx, &pointer(phase));
+        ctx.is_capture_released()
+    }
+
+    fn inner_active(pod: &mut ChildPod) -> bool {
+        pod.widget_mut()
+            .downcast_mut::<Taker>()
+            .expect("a Taker")
+            .inner
+            .is_active()
+    }
+
+    #[test]
+    fn releasing_the_opted_in_child_signals_and_bubbles() {
+        let mut pod = nested(true);
+        assert!(!released(&mut pod, PointerPhase::Down));
+        assert!(pod.holds_contact_opt_in(), "the opt-in below is recorded");
+        assert!(
+            released(&mut pod, PointerPhase::Move),
+            "and its release bubbles"
+        );
+        assert!(!inner_active(&mut pod), "the child left the active path");
+        assert!(pod.is_active(), "the container that took over keeps it");
+    }
+
+    #[test]
+    fn releasing_a_child_without_the_opt_in_clears_the_link_silently() {
+        let mut pod = nested(false);
+        released(&mut pod, PointerPhase::Down);
+        assert!(!pod.holds_contact_opt_in());
+        assert!(!released(&mut pod, PointerPhase::Move));
+        assert!(!inner_active(&mut pod));
+    }
+
+    #[test]
+    fn a_non_claimant_contact_cannot_release_anything() {
+        let mut pod = nested(true);
+        released(&mut pod, PointerPhase::Down);
+        let _pass = ContactPass::enter(PointerId::touch(1), true);
+        assert!(!released(&mut pod, PointerPhase::Move));
+        assert!(inner_active(&mut pod), "the claimant's link stands");
     }
 }

@@ -13,9 +13,11 @@
 //! # Module map
 //!
 //! This root file holds the handle's shape (the cross-frame state), its
-//! construction, and its theme/appearance ownership — the precedence ladder
+//! construction, its theme/appearance ownership — the precedence ladder
 //! (`base_theme` → seeded default → app override) plus every arm that installs a
-//! `Theme`. Each remaining concern is one submodule:
+//! `Theme` — and the clipboard seam: the two one-shot drains the JVM side polls
+//! each frame plus the decoded edit-command dispatch that answers them. Each
+//! remaining concern is one submodule:
 //!
 //! | Module | Responsibility |
 //! |--------|----------------|
@@ -42,13 +44,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use frust_core::event::PointerEvent;
+use frust_core::event::{EditCommand, InputEvent};
 use frust_core::insets::WindowInsets;
 use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
 use frust_scene::Scene;
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::platform_view::FramePairing;
-use frust_shell_common::resample::PointerResampler;
+use frust_shell_common::resample::{PointerResampler, ResampledPointer};
 use frust_shell_common::{
     AppTree, FrameGate, PlatformViewState, ThemeOverrideWatcher, WindowMetricsPublisher,
     default_theme, effective_brightness_for_platform_change, sanitize_scale,
@@ -57,6 +59,7 @@ use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
 use ndk::native_window::NativeWindow;
 
+use crate::ffi_support::TouchSlotMap;
 use crate::sync_tail::ScrollSyncTail;
 
 use self::a11y::AndroidA11y;
@@ -275,6 +278,11 @@ pub struct AndroidAppHandle {
     /// into the frame gate's `events_since_last_frame` so a too-new sample never
     /// starves the gate (see `PointerResampler::has_pending`).
     resampler: PointerResampler,
+    /// Maps each currently-down Android `MotionEvent.pointerId` onto the small
+    /// gesture-local slot [`Self::dispatch_touch`] stamps into
+    /// `PointerId::touch` — see [`TouchSlotMap`]'s doc for the
+    /// first-contact-is-0 / no-renumber-on-release contract.
+    touch_slots: TouchSlotMap,
     /// The monotonic epoch every resampler timestamp is measured from — the raw
     /// samples ([`Self::dispatch_touch`]) and the per-frame sample query
     /// ([`Self::frame`]) are both stamped from this one `Instant`, so they share
@@ -287,7 +295,7 @@ pub struct AndroidAppHandle {
     /// Scratch buffer the resampler drains into each frame, reused across frames
     /// (cleared, not reallocated) so a drag's per-frame resample allocates
     /// nothing on the hot path.
-    pointer_scratch: Vec<PointerEvent>,
+    pointer_scratch: Vec<ResampledPointer>,
     /// The previous Choreographer tick's `frameTimeNanos`, for the deadline-
     /// aware pacing estimate: the tick-to-tick delta is this
     /// frame's deadline budget (see `resample::frame_interval_nanos`). `None`
@@ -639,6 +647,7 @@ impl AndroidAppHandle {
             last_paced_interval: None,
             first_layout_done: false,
             resampler: PointerResampler::new(),
+            touch_slots: TouchSlotMap::new(),
             resample_clock: Instant::now(),
             pointer_scratch: Vec::new(),
             last_frame_time_nanos: None,
@@ -750,6 +759,64 @@ impl AndroidAppHandle {
             effective_reduce_motion(self.authored_reduce_motion, reduce);
         self.appearance_dirty = true;
         self.push_theme();
+    }
+
+    /// `nativeTakeClipboardWrite`: drain the text a focused editable asked to
+    /// put on the host clipboard
+    /// ([`AppTree::take_clipboard_write`](frust_shell_common::AppTree::take_clipboard_write)).
+    ///
+    /// The outbound half of the clipboard channel. Android is the one host
+    /// where the clipboard is not reachable from Rust at all — `ClipboardManager`
+    /// is a JVM service — so this shell does not own a clipboard the way the
+    /// desktop shell's worker thread does; it hands the drained text straight
+    /// back over JNI and Kotlin performs the write.
+    ///
+    /// **Destructive**, unlike the level reads beside it ([`Self::is_dark_theme`],
+    /// `ime_state`): the slot is a one-shot edge, so a drained value that is
+    /// dropped is lost. Kotlin drains it once per frame, right after the
+    /// post-dispatch IME poll.
+    pub(crate) fn take_clipboard_write(&mut self) -> Option<String> {
+        self.app.take_clipboard_write()
+    }
+
+    /// `nativeTakePasteRequest`: drain whether a focused editable asked this
+    /// shell to read the host clipboard back to it
+    /// ([`AppTree::take_paste_request`](frust_shell_common::AppTree::take_paste_request)).
+    ///
+    /// The inbound half, drained in the same place. The answer does not return
+    /// through this call: Kotlin reads `ClipboardManager` and dispatches a fresh
+    /// [`Self::edit_command`] carrying the text, because the read is the JVM's
+    /// to perform and may legitimately yield nothing (Android 10+ hands out no
+    /// clip at all to an app without input focus). That answer is focus-routed
+    /// and therefore self-cancelling — if focus moved while the read happened it
+    /// reaches no widget — so neither side has to remember who asked.
+    ///
+    /// **Destructive**, for [`Self::take_clipboard_write`]'s reason.
+    pub(crate) fn take_paste_request(&mut self) -> bool {
+        self.app.take_paste_request()
+    }
+
+    /// `nativeEditCommand`: dispatch one decoded clipboard/selection verb down
+    /// the focus path as an [`InputEvent::EditCommand`].
+    ///
+    /// The Android counterpart to the desktop shell's chord decode: the JVM
+    /// side resolves an IME context-menu action, a hardware `Ctrl` chord, or the
+    /// answer to a paste request into one verb, so no widget has to know which
+    /// gesture means copy on which host. Mirrors `ime_action`'s shape exactly —
+    /// the same focus-routed `AppTree::event` seam under the reactive root owner
+    /// (see [`input::under_root_owner`]), and the same frame-gate latch, so the
+    /// tick carrying the edit can never be gated away.
+    ///
+    /// Refusal stays the widget's call: a read-only or secret field is free to
+    /// ignore the verb, and a command that reaches no focused widget is simply
+    /// dropped — which is why nothing is reported back from here.
+    pub(crate) fn edit_command(&mut self, command: EditCommand) {
+        let event = InputEvent::EditCommand(command);
+        // Frame-gate latch: an edit between frames must force the next
+        // frame to run so the tree reflects it (see `dispatch_touch`).
+        self.events_since_last_frame = true;
+        let app = &mut self.app;
+        let _ = input::under_root_owner(|| app.event(&event));
     }
 
     /// Push the current [`Self::theme`] to both delivery paths — boxed

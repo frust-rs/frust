@@ -13,8 +13,8 @@
 //! Cloned in shape from [`super::create_wizard`] (the create-wizard modal
 //! precedent): a linear step enum, sibling-gated selection cards, an off-thread
 //! action step, and an error step with retry. No registry entry is
-//! sibling-gated today — `clean-signals-frust` was the sole
-//! `requires_sibling` user before `clean-signals` moved to a git+rev pin
+//! sibling-gated today — `clean-signals-frust` needs no
+//! `requires_sibling` because `clean-signals` is a crates.io dependency
 //! — but [`PluginEntry::sibling_gated`]/
 //! [`AddPluginDialog::set_sibling_available`] stay in place as the generic
 //! mechanism a future facade-tier plugin would reuse.
@@ -338,9 +338,8 @@ mod tests {
 
     #[test]
     fn no_registry_entry_is_currently_sibling_gated() {
-        // clean-signals-frust was the sole `requires_sibling` user before
-        // clean-signals moved to a git+rev pin; every card starts
-        // enabled today.
+        // clean-signals-frust needs no `requires_sibling` (clean-signals is
+        // a crates.io dependency), so every card starts enabled.
         let d = dialog();
         assert!(d.entries.iter().all(|e| !e.sibling_gated && e.enabled));
     }

@@ -1,0 +1,196 @@
+# `frust-video-player`: the video-playback platform plugin. Leaf platform
+# plugin per `docs/CODE_STANDARDS.md`'s Plugin Conventions — `frust-plugin` +
+# FFI crates only — with the app-facing half behind the default-on
+# `frust-api` feature (`frust-native-widgets`'/`frust-i18n`'s shape), so
+# `cargo check -p frust-video-player --no-default-features` still resolves to
+# the platform-plugin charter line. Every objc2 feature list below is
+# annotated the way `plugins/camera/Cargo.toml` documents its own.
+[package]
+name = "frust-video-player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Video playback for Frust apps over Media3 ExoPlayer on Android and AVFoundation on iOS and macOS, hosted in a native platform view."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+default = ["frust-api"]
+# The app-facing half (`src/api`). Default-on so an app that adds this crate
+# gets it for free; `--no-default-features` is the charter-line gate, checked
+# with `cargo tree -p frust-video-player --no-default-features -e normal`
+# (no `frust` facade crate anywhere in the tree).
+frust-api = ["dep:frust"]
+
+[dependencies]
+# VideoError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The backends and the host-callback paths log rather than print (platform
+# plugins never own stdout/stderr the way `frust-drive` does) — a leaf,
+# framework-free dependency.
+log = { workspace = true }
+
+# The Android `(JavaVM, application Context)` platform-handle substrate the
+# Android backend calls through (`frust_plugin::android::with_jni_env`).
+# Unconditional per this crate's platform-plugin charter: **no other
+# `frust-*` dependency** (see `docs/ARCHITECTURE.md`'s Module Structure /
+# `docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions).
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
+
+# The app-facing `frust-api` feature's only dependency — optional, gated
+# above. A literal `path` dependency, not `{ workspace = true }`: Cargo
+# forbids a workspace-inherited dependency from overriding `default-features`
+# unless the workspace-level entry already sets it explicitly, and the root
+# `frust` entry doesn't (`plugins/i18n/Cargo.toml` carries the same note).
+frust = { path = "../../crates/frust", version = "0.5.0", default-features = false, optional = true }
+
+# Android: this plugin's own JNI surface — the exports the Kotlin host calls
+# back through and the Rust→Kotlin player calls — needs `jni` directly,
+# matching every other plugin's Android arm.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# Apple (iOS AND macOS — one AVPlayer session backend serves both; only the
+# view layer differs, `src/ios_view.rs` vs `src/macos_view.rs`). Every objc2
+# crate below is `default-features = false` + an explicit feature list, and
+# repeats the workspace pin literally rather than inheriting it: Cargo's
+# workspace-dependency inheritance forbids a member from overriding
+# `default-features` unless the workspace-level entry already sets it
+# explicitly, and none of these do (see `plugins/camera/Cargo.toml`'s
+# identical note).
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true }
+# `std`: baseline. `NSObject`/`NSString`/`NSError`: the session's error
+# messages and the observer classes `define_class!` builds. `NSURL`: every
+# `AVPlayerItem` is created from one (file, bundle resource, or remote URL).
+# `NSNotification`: `AVPlayerItemDidPlayToEndTime` (the looping/Ended edge).
+# `NSValue` (where `NSNumber` lives) + `NSDictionary` + `NSArray`: the
+# key-value-observing change dictionary the player-status/buffering observer
+# receives. `NSKeyValueObserving`: that observer's own
+# `addObserver:forKeyPath:options:context:` surface. `NSGeometry` +
+# `objc2-core-foundation`: `NSRect`/`NSPoint`/`NSSize` (the view layer's
+# frame math) are exposed only with BOTH — `NSGeometry` declares them and
+# `objc2-core-foundation` is where the `CGFloat` they are built from lives.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSString",
+    "NSError",
+    "NSURL",
+    "NSNotification",
+    "NSValue",
+    "NSDictionary",
+    "NSArray",
+    "NSKeyValueObserving",
+    "NSGeometry",
+    "objc2-core-foundation",
+] }
+# Needed to *construct* blocks (`block2::RcBlock`) for the periodic
+# time-observer and the seek-completion handler, not merely to name the
+# `DynBlock` parameter types — so `block2` is a direct dependency, not only
+# an `objc2-av-foundation` feature.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# The main-queue dispatch the periodic time observer and every host→Rust
+# event hop ride on (all events are published on the platform main thread).
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2",
+] }
+# Coverage, one feature per confirmed surface:
+#   - `AVPlayer`: the player itself, rate/volume/seek/`addPeriodicTimeObserver`.
+#   - `AVPlayerItem`: the item, its status/duration/presentationSize.
+#   - `AVPlayerLayer`: the CALayer both view layers host. The feature alone
+#     gates only the class — `AVPlayer` is what gates
+#     `playerLayerWithPlayer:`/`setPlayer:`, and `AVAnimation` is what gates
+#     `videoGravity` plus the `AVLayerVideoGravityResizeAspect`/
+#     `ResizeAspectFill` statics the fit mapping needs.
+#   - `AVAsset`: the asset an item is built from.
+#   - `AVMediaFormat`: the media-type constants asset/track queries take.
+#   - `AVError`: the AVFoundation `NSError` domain/code constants the error
+#     mapping reads.
+#   - `block2`/`dispatch2`/`objc2-core-foundation`/`objc2-core-media`/
+#     `objc2-quartz-core`: `objc2-av-foundation`'s own optional-dependency
+#     features, activated here so its `#[cfg(feature = "...")]`-gated
+#     methods (block-taking observers, `CMTime` positions, the `CALayer`
+#     base of `AVPlayerLayer`) actually compile in.
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVPlayer",
+    "AVPlayerItem",
+    "AVPlayerLayer",
+    "AVAnimation",
+    "AVAsset",
+    "AVMediaFormat",
+    "AVError",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-media",
+    "objc2-quartz-core",
+] }
+# `CMTime`: every position/duration/seek value AVPlayer speaks in. `CMBase`
+# is the module `CMTime`'s own primitives live in. Direct dependency (not
+# only `objc2-av-foundation`'s transitively activated one) since the session
+# names `objc2_core_media` types itself.
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMTime",
+] }
+# `CALayer` ONLY — `AVPlayerLayer` itself lives in `objc2-av-foundation`,
+# not here. `CAMediaTiming` matches `objc2-av-foundation`'s own internal
+# feature request for this crate.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CAMediaTiming",
+] }
+
+# iOS only: the hosting `UIView` subclass and the audio-session category the
+# player needs to be audible with the ringer switch silenced.
+[target.'cfg(target_os = "ios")'.dependencies]
+# `UIView`/`UIResponder`: the `define_class!` player view's superclass chain.
+# `UIColor`: the view's own background before the first frame. NOT a control
+# gate: `objc2-core-foundation` is a *type* gate — `initWithFrame:` takes a
+# `CGRect`, and every `CGFloat`-taking constructor in objc2-ui-kit is
+# `#[cfg(feature = "objc2-core-foundation")]`-gated because `CGFloat` lives
+# in that crate (`plugins/native-widgets/Cargo.toml`'s row is the model).
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIView",
+    "UIResponder",
+    "UIColor",
+    "objc2-core-foundation",
+] }
+# `AVAudioSession` gates the class plus `sharedInstance`/`setActive:error:`;
+# `AVAudioSessionTypes` gates `setCategory:withOptions:error:`, the
+# `AVAudioSessionCategoryPlayback` constant and
+# `AVAudioSessionCategoryOptions::MixWithOthers` — BOTH are required, the
+# category call is unreachable with either one alone. iOS-only: macOS has no
+# `AVAudioSession` at all (the asymmetry is the platform's, not this
+# crate's).
+objc2-avf-audio = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVAudioSession",
+    "AVAudioSessionTypes",
+] }
+
+# macOS only: the hosting `NSView` subclass.
+[target.'cfg(target_os = "macos")'.dependencies]
+# `NSView`/`NSResponder`: the `define_class!` player view's superclass chain.
+# `objc2-quartz-core`: a *type* gate rather than a control —
+# `NSView::layer`/`setLayer:` are `#[cfg(feature = "objc2-quartz-core")]`-gated
+# in objc2-app-kit because `CALayer` lives in that crate, and hosting the
+# `AVPlayerLayer` is the whole point of this view. No `NSColor`: the
+# pre-first-frame background is set on the CALayer, not the view.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSView",
+    "NSResponder",
+    "objc2-quartz-core",
+] }

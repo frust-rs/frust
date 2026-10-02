@@ -105,14 +105,114 @@ pub use frust_widgets::{
     IconButtonView, IconData, IconSource, IconView, IconWidget, Image, ImageError, ImageFit,
     ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
-    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
-    PushOptions, Radio, RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView,
-    ScaffoldView, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SpringDescription, Stack, StackView, TextInput,
-    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
-    VisibilityCallback, button, checkbox, colored_box, container, divider, flexible, hero, icon,
-    icon_button, inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider,
-    text, text_input,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView,
+    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox, SizedBoxView,
+    Slider, SliderView, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
+    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, button, checkbox,
+    colored_box, container, divider, flexible, hero, icon, icon_button, inflexible, keyed,
+    list_view, overlay_portal, radio, safe_area, scaffold, scroll_view, slider, text, text_input,
+};
+
+/// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:
+/// which z-band a floated surface sits in, whether the pointer reaches it, and
+/// what a press landing outside it delivers.
+///
+/// [`overlay_portal`] floats a surface above the whole app, anchored to its
+/// child's bounds and painted after the entire main tree — so it escapes both
+/// the child's paint order and every ancestor's clip, and follows the child
+/// across scroll and relayout with nothing subscribed. The surface is mounted
+/// while [`OverlayPortalView::overlay`] is `Some`; a widget that hosts a
+/// surface of its own instead reaches for `authoring::OverlaySlot`.
+///
+/// Lifted flat for [`EditCommand`]'s reason: an app or design system naming a
+/// band, an input class or a light-dismiss policy is configuring a portal, not
+/// authoring a widget.
+///
+/// ```
+/// use frust::{
+///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, any, overlay_portal, text,
+/// };
+///
+/// struct App {
+///     hovering: bool,
+/// }
+///
+/// // A tooltip: above its trigger, in the topmost band, and transparent to the
+/// // pointer so hovering the trigger is never interrupted by its own tip.
+/// fn trigger(state: &mut App) -> impl View<App> + use<> {
+///     overlay_portal(text("Save"))
+///         .overlay(state.hovering.then(|| any(text("Save the document"))))
+///         .placement(OverlayPlacement::on(OverlaySide::Top))
+///         .band(OverlayBand::Tooltip)
+///         .input(OverlayInput::Transparent)
+/// }
+/// # let _ = trigger;
+/// ```
+pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
+
+/// The clipboard/selection command vocabulary, flat-re-exported from
+/// `frust-core::event` (and also available through
+/// [`authoring::EditCommand`]).
+///
+/// [`InputEvent::EditCommand`](authoring::InputEvent) delivers one of
+/// [`EditCommand::Copy`], [`EditCommand::Cut`], [`EditCommand::Paste`] or
+/// [`EditCommand::SelectAll`] down the focus chain, already decoded by the shell
+/// from the platform's own gesture — `Cmd+C` on macOS, `Ctrl+C` or `Ctrl+Insert`
+/// elsewhere, a hardware clipboard key, an Android `ACTION_PROCESS_TEXT`, an iOS
+/// edit-menu tap — so app and design-system code never decodes a chord itself.
+///
+/// Lifted flat rather than left inside [`authoring`] for [`CursorIcon`]'s reason:
+/// a design system's own context menu or toolbar builder names these verbs in
+/// its public API without being a widget author. `Paste` carries its text
+/// because the shell has already read the host clipboard; its [`Debug`] redacts
+/// that text, since a paste payload can be a password or a token.
+pub use frust_core::EditCommand;
+
+/// The selection-toolbar seam: the request a text field publishes when it
+/// has a selection ([`SelectionToolbarRequest`]/[`SelectionToolbarActions`]),
+/// and the knobs that decide who draws it.
+///
+/// [`set_selection_toolbar_policy`] chooses
+/// [`SelectionToolbarPolicy::Framework`] (the default — a field floats its
+/// own pod through the overlay portal) or [`SelectionToolbarPolicy::Native`]
+/// (the platform's own edit menu, e.g. iOS's `UIEditMenuInteraction`) — see
+/// that type's own docs for the two-route split. This is **not** an
+/// unconditional free choice, though: a platform shell whose system owns the
+/// menu can LOCK it instead, with `frust_core::lock_selection_toolbar_policy`
+/// — once locked, [`set_selection_toolbar_policy`] is refused rather than
+/// obeyed, so an app cannot silently undo a platform requirement it doesn't
+/// know exists. iOS's shell locks [`SelectionToolbarPolicy::Native`] at
+/// start-up for exactly this reason: a framework-drawn toolbar's own Paste
+/// button would break the exemption that keeps iOS's per-app paste-permission
+/// prompt from firing on every paste.
+///
+/// [`set_selection_toolbar_builder`] installs the view a `Framework`-policy
+/// pod floats, **replacing** whatever the framework's own baseline (installed
+/// at bootstrap, before the first frame) or an earlier design system already
+/// installed. A design system's own installer should reach for
+/// `frust_core::install_selection_toolbar_builder_if_unset` instead — the
+/// cooperative, set-if-unset half of the same pair — so two catalogs linked
+/// into one binary never fight over the slot, and neither ever undoes an
+/// app's own explicit override.
+///
+/// ```
+/// use frust::{
+///     SelectionToolbarPolicy, lock_selection_toolbar_policy, set_selection_toolbar_policy,
+/// };
+///
+/// // A shell whose platform owns its own system edit menu locks the route,
+/// // so that requirement wins no matter what app code does afterward.
+/// let claimed = lock_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+/// assert!(claimed, "the first claim always takes the lock");
+///
+/// // An app's later override is refused rather than obeyed once locked.
+/// set_selection_toolbar_policy(SelectionToolbarPolicy::Framework);
+/// ```
+pub use frust_core::{
+    SelectionToolbarActions, SelectionToolbarPolicy, SelectionToolbarRequest,
+    lock_selection_toolbar_policy, set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
@@ -176,6 +276,104 @@ pub use frust_widgets::{
 /// painted every frame, and the shell hands the overlapping ones to the host
 /// with the slot's placement.
 pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
+
+/// Declarative custom painting over the [`PaintScene`] trait object — a chart,
+/// a node-and-edge graph, a game board — without hand-rolling a `View`/
+/// `Widget` pair. [`canvas`] takes a paint closure that runs in **local
+/// space** (the widget's own top-left is always `(0, 0)`, and painting past
+/// its own size is clipped, never a bug to chase) — flat-re-exported from
+/// `frust-widgets` so app code never names that crate directly. See
+/// [`CanvasView`]'s own doc for the full builder contract (`.size`/`.expand`
+/// sizing, `.on_hit`-gated `.on_tap`/`.on_pointer`, and `.repaint_key` for
+/// paint-only dirtying driven by data outside the ordinary `View` diff).
+///
+/// ```no_run
+/// use frust::authoring::{PaintCtx, PaintScene};
+/// use frust::{AnyView, Component, any, canvas};
+/// use kurbo::{Point, Size};
+/// use peniko::Color;
+///
+/// #[derive(Default)]
+/// struct Clock;
+///
+/// impl Component for Clock {
+///     type State = u32;
+///
+///     fn init(&self) -> Self::State {
+///         0
+///     }
+///
+///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///         let ticks = *state;
+///         any(canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x10, 0x10, 0x10));
+///         })
+///         .expand()
+///         .repaint_key(ticks))
+///     }
+/// }
+///
+/// frust::app!(Clock);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
+
+/// A pan/zoom viewport over one child — a node-and-edge graph, a map, a large
+/// image — without hand-rolling the gesture math. [`pan_zoom`] lays its child
+/// out at its natural size and places it under a scale-then-translate
+/// transform ([`PanZoomTransform`]) the user drives: primary drag pans (unless
+/// the child claims the press), a touch pinch or a desktop ctrl/⌘+wheel and
+/// trackpad pinch zooms about the gesture's focal point, clamped to
+/// `.min_scale`/`.max_scale`. A plain wheel still reaches the child, and the
+/// child sees its own unscaled local coordinates at any zoom. Flat-re-exported
+/// from `frust-widgets` so app code never names that crate directly; see
+/// [`PanZoomView`]'s own doc for the full contract (`.inertia` glide,
+/// `.on_transform` notification, and the [`PanZoomController`] handle's
+/// `jump_to`/`fit_to_bounds`/`fit_rect`).
+///
+/// ```no_run
+/// use frust::authoring::{PaintCtx, PaintScene};
+/// use frust::{AnyView, Component, PanZoomController, PanZoomTransform, any, canvas, pan_zoom};
+/// use kurbo::{Point, Size};
+/// use peniko::Color;
+///
+/// #[derive(Default)]
+/// struct Board;
+///
+/// struct BoardState {
+///     zoom: PanZoomController,
+///     transform: PanZoomTransform,
+/// }
+///
+/// impl Component for Board {
+///     type State = BoardState;
+///
+///     fn init(&self) -> Self::State {
+///         BoardState {
+///             zoom: PanZoomController::new(),
+///             transform: PanZoomTransform::IDENTITY,
+///         }
+///     }
+///
+///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///         let board = canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
+///         })
+///         .size(Size::new(2000.0, 1500.0));
+///         any(pan_zoom(board)
+///             .max_scale(4.0)
+///             .inertia(true)
+///             .controller(state.zoom.clone())
+///             .on_transform(|state: &mut BoardState, t| state.transform = t))
+///     }
+/// }
+///
+/// frust::app!(Board);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{
+    PanZoomController, PanZoomTransform, PanZoomView, PanZoomWidget, pan_zoom,
+};
 
 /// The vendored Material Symbols starter icon set,
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
@@ -413,6 +611,19 @@ pub mod authoring {
         WidgetId, any,
     };
 
+    /// The clipboard/selection vocabulary an editable widget matches on —
+    /// [`InputEvent::EditCommand`] carries one of these four verbs, already
+    /// decoded from whatever chord, hardware key or edit-menu tap produced it.
+    /// A widget answers copy/cut through
+    /// [`EventCtx::write_clipboard`](frust_core::EventCtx::write_clipboard) and
+    /// asks for a paste through
+    /// [`EventCtx::request_paste`](frust_core::EventCtx::request_paste); the shell
+    /// owns the host clipboard at both ends. Also re-exported flat as
+    /// [`frust::EditCommand`](crate::EditCommand), for the same reason
+    /// [`CursorIcon`] is: a design system's public API can name a verb without
+    /// authoring a widget.
+    pub use frust_core::EditCommand;
+
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
     /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a
     /// [`CornerRadii`], `stroke_path_dashed` a [`DashPattern`]. Lifted for the
@@ -431,8 +642,9 @@ pub mod authoring {
     /// The inset vocabulary [`LayoutCtx::window_insets`]/[`PaintCtx::window_insets`]
     /// return — lifted because a widget that lays itself out around the status
     /// bar, notch, or on-screen keyboard cannot otherwise name the value those
-    /// accessors hand it.
-    pub use frust_core::{WindowEdgeInsets, WindowInsets};
+    /// accessors hand it. A bar laying out around the iPadOS window control
+    /// names the corner value, [`CornerInsets`].
+    pub use frust_core::{CornerInset, CornerInsets, WindowEdgeInsets, WindowInsets};
 
     /// The window-shape value recovered via
     /// `use_context::<`[`WindowMetrics`]`>()` inside `Component::build` — lifted
@@ -1302,6 +1514,175 @@ pub use frust_shell_android::android_app;
 // are each `#[cfg(target_os = "ios")]`, so it is inert off-iOS.
 pub use frust_shell_ios::ios_app;
 
+// Hidden, wasm32-only re-export of the `wasm-bindgen` crate.
+// [`web_app!`]'s generated `#[wasm_bindgen(start)]` shim references the
+// attribute through `$crate::__wasm_bindgen::prelude::wasm_bindgen` rather
+// than a bare `wasm_bindgen::prelude::wasm_bindgen`, so a generated app never
+// needs `wasm-bindgen` in its own `Cargo.toml` — the same reason
+// `frust-shell-android`'s `android_app!` routes its JNI types through that
+// crate's own `__jni` re-export instead of naming `jni` directly (see that
+// crate's `lib.rs`).
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub use wasm_bindgen as __wasm_bindgen;
+
+// Hidden, wasm32-only re-export of the browser shell crate, for the identical
+// reason as `__wasm_bindgen` above. [`web_app!`]'s generated shim hands the
+// initialized state and app-logic closure to `__frust_shell_web::run_app`
+// (`fn run_app<State: 'static, Logic, V>(state: State, app_logic: Logic)`,
+// mirroring `frust_shell_desktop::run_desktop_with`'s `(state, logic, ..)`
+// convention), the browser shell's entry point: it wraps `spawn_app`, which
+// owns the canvas-bound event loop and the `requestAnimationFrame` frame
+// pipeline, and reports an event-loop construction failure through the `log`
+// facade because the `wasm_bindgen(start)` shim has nowhere to return one to.
+// The reference lives inside a `macro_rules!` body, so it is type-checked
+// only where a caller invokes [`web_app!`]/[`app!`] for a wasm32 target —
+// `cargo check --target wasm32-unknown-unknown -p frust --tests` covers it.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub use frust_shell_web as __frust_shell_web;
+
+/// Browser panic hook + console log sink, installed once at the top of
+/// [`web_app!`]'s generated start shim — the wasm32 counterpart of the
+/// bring-up boilerplate a desktop binary gets for free from a terminal.
+/// Without the panic hook a Rust panic reaches the browser console as a bare
+/// `unreachable` trap with no message; without the log sink, `log::warn!`
+/// and friends (including `frust-render`/`frust-gpu`/`wgpu`'s own records)
+/// go nowhere, since stderr is a silent no-op in a browser. Mirrors the
+/// proven shape in the browser render probe (`examples/web-spike/src/main.rs`'s
+/// `mod web::start`), at `Warn` rather than that probe's `Debug`/`Info` — a
+/// shipped app's default should not carry wgpu's naga typifier chatter.
+///
+/// `#[doc(hidden)]` and free-standing (not inside the macro body): this
+/// function only calls real, already-present dependencies
+/// (`console_error_panic_hook`, `console_log`, `log`), so it is safe to keep
+/// as ordinary always-compiled code rather than deferring it into
+/// `web_app!`'s uninstantiated macro text the way [`__frust_shell_web`]'s
+/// `run_app` reference must be.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn __web_bootstrap() {
+    console_error_panic_hook::set_once();
+    let _ = console_log::init_with_level(log::Level::Warn);
+}
+
+/// Brings up the process-wide [`frust_reactive::ReactiveRuntime`] (the w0-04
+/// wasm arm — `ReactiveRuntime::init`'s `#[cfg(target_family = "wasm")]` arm
+/// calls `Executor::init_wasm_bindgen()` explicitly, since no automatic wasm
+/// executor default exists; see `frust_reactive::runtime`'s module docs) and
+/// runs `state_init` under its root [`frust_reactive::Owner`], exactly the
+/// [`run_with_setup_and_config`] shape every other platform's entry uses —
+/// so a signal or context `state_init` creates already has a runtime and an
+/// owner to be created under.
+///
+/// Real, already-present dependencies only (`frust-reactive`), so — like
+/// [`__web_bootstrap`] — this stays ordinary always-compiled code rather than
+/// living inside [`web_app!`]'s macro text.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn __web_init_state<State: 'static>(state_init: impl FnOnce() -> State) -> State {
+    let rt = frust_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+    rt.with_owner(state_init)
+}
+
+/// Install the baseline framework-drawn selection-toolbar view
+/// ([`frust_widgets::selection_toolbar`]) as the process's default
+/// [`SelectionToolbarBuilder`](frust_core::SelectionToolbarBuilder), **set-if-
+/// unset** (`frust_core::install_selection_toolbar_builder_if_unset`) — so a
+/// design system that already installed its own keeps it, whether that
+/// install happened earlier in `main` (before `frust::app!`/`frust::run`
+/// ran at all) or inside an `app!` `setup = { .. }` block.
+///
+/// Called once, on the UI thread, at the same point on every platform this
+/// crate starts an app from — after any `setup = { .. }` block and
+/// immediately before the root [`Component::init`] (Android/iOS/wasm32, from
+/// inside [`app!`]'s `@emit_mobile` closures) or before the desktop shell is
+/// constructed ([`run_desktop_configured`], which every desktop entry point —
+/// [`App::run`], [`run`], [`run_with_setup`], [`run_desktop_config`],
+/// [`run_with_setup_and_config`] and `app!`'s desktop arm — funnels through).
+/// Running it *after* setup, not before, is deliberate: a design system's own
+/// cooperative install (also `install_selection_toolbar_builder_if_unset`,
+/// called from inside a `setup = { .. }` block) must get first claim on the
+/// empty slot, or this baseline would win the race and leave the design
+/// system's own catalog toolbar never installed.
+///
+/// `#[doc(hidden)]`, not part of the public API: reached only through
+/// `$crate::` from [`app!`]'s macro expansion and this crate's own desktop
+/// entry points, exactly like [`__web_bootstrap`]/[`__web_init_state`].
+#[doc(hidden)]
+pub fn __install_default_selection_toolbar() {
+    frust_core::install_selection_toolbar_builder_if_unset(std::sync::Arc::new(|req, _win| {
+        frust_widgets::selection_toolbar(req)
+    }));
+}
+
+/// The browser counterpart of [`android_app!`]/[`ios_app!`]: binds a
+/// [`Component`]'s state and app-logic to the browser shell's wasm-bindgen
+/// entry point. Takes the identical two-argument (state type + app-logic
+/// expression, state built via `Default`) / three-argument (state type +
+/// explicit state-init expression + app-logic expression) shape
+/// `android_app!` does, and `app!` drives it through the three-argument form
+/// exactly the way it drives `android_app!`/`ios_app!` (see `@emit_mobile`
+/// below) — most apps reach this through `app!`/`web_app!` rather than
+/// hand-writing the explicit `state_init` form.
+///
+/// Expands to two `#[cfg(target_arch = "wasm32")]` functions — so, like
+/// [`ios_app!`], the invocation itself is unconditional and self-gating:
+/// calling `web_app!` off wasm32 expands to nothing. `__frust_web_start` is
+/// `#[wasm_bindgen(start)]` — wasm-bindgen's own module-init entry point, run
+/// once when the browser instantiates the compiled `.wasm` — and its body is
+/// a single call into `__frust_web_run`, kept deliberately separate: feeding
+/// `wasm_bindgen`'s attribute macro a body built straight out of
+/// `$state_init`/`$app_logic` (closures that can carry a macro-substituted
+/// `$($setup)?` block nested inside another closure — see `app!`'s
+/// `@emit_mobile` arm) trips its own re-parse of the function into a spurious
+/// syntax error on that nested-block shape; a plain, macro-fragment-free call
+/// is all it ever sees. `__frust_web_run` carries the real work, in order:
+///
+/// 1. [`__web_bootstrap`]: installs the panic hook and console log sink.
+/// 2. [`__web_init_state`]: brings up the [`frust_reactive::ReactiveRuntime`]
+///    and runs `$state_init` under its root owner — the point at which a
+///    `setup = { .. }` block bundled into `$state_init` by `app!` (see
+///    `@emit_mobile`) runs, identically ordered to every other platform.
+/// 3. Hands the initialized state and `$app_logic` to
+///    `frust_shell_web::run_app` (via the hidden [`__frust_shell_web`]
+///    re-export) — the browser shell's own entry point, which owns the
+///    canvas-bound event loop and the `requestAnimationFrame` frame pipeline
+///    (see [`__frust_shell_web`]'s doc comment for the contract).
+#[macro_export]
+macro_rules! web_app {
+    ($state_ty:ty, $app_logic:expr $(,)?) => {
+        $crate::web_app!(
+            $state_ty,
+            <$state_ty as ::core::default::Default>::default,
+            $app_logic
+        );
+    };
+    ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
+        // Factored out of the `#[wasm_bindgen(start)]` function below rather
+        // than inlined into it: `wasm_bindgen`'s attribute macro re-parses
+        // the function it is attached to, and a body built straight out of
+        // `$state_init`/`$app_logic` — themselves closures that may carry a
+        // macro-substituted `$($setup)?` block nested inside another closure
+        // (see `app!`'s `@emit_mobile` arm) — trips it into a spurious parse
+        // error on that nested-block shape. A plain, macro-fragment-free call
+        // is all `#[wasm_bindgen(start)]` ever sees; this function carries
+        // the real work instead.
+        #[cfg(target_arch = "wasm32")]
+        fn __frust_web_run() {
+            $crate::__web_bootstrap();
+            let __frust_state: $state_ty = $crate::__web_init_state($state_init);
+            $crate::__frust_shell_web::run_app(__frust_state, $app_logic);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[$crate::__wasm_bindgen::prelude::wasm_bindgen(start)]
+        pub fn __frust_web_start() {
+            __frust_web_run();
+        }
+    };
+}
+
 /// The desktop app's identity and native-integration vocabulary, re-exported
 /// from the desktop core so app code never names a shell crate:
 /// [`DesktopConfig`] (the whole declaration — app name, reverse-DNS id, window
@@ -1335,13 +1716,14 @@ pub use frust_shell_ios::ios_app;
 /// ```
 ///
 /// **Desktop-only**, unlike the [`menu_events`] read side: these types are
-/// defined in `frust-shell-desktop`, which is not in a mobile build's
-/// dependency graph at all (see this crate's `Cargo.toml`). Code shared with a
-/// mobile target keeps a `DesktopConfig` behind its own
-/// `#[cfg(not(any(target_os = "android", target_os = "ios")))]` — or, more
-/// simply, writes it inline in [`app!`]'s `desktop = { .. }` argument, which
-/// the macro already emits only on the targets that have it.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// defined in `frust-shell-desktop`, which is not in a mobile build's or a
+/// wasm32 build's dependency graph at all (see this crate's `Cargo.toml`).
+/// Code shared with a mobile or wasm32 target keeps a `DesktopConfig` behind
+/// its own
+/// `#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]`
+/// — or, more simply, writes it inline in [`app!`]'s `desktop = { .. }`
+/// argument, which the macro already emits only on the targets that have it.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 pub use frust_shell_desktop::{
     DEFAULT_APP_NAME, DesktopConfig, IconData as DesktopIconData, MenuItemSpec, MenuRole, MenuSpec,
 };
@@ -1362,7 +1744,10 @@ pub use frust_shell_desktop::{
 // On a mobile target the fields are consumed only by the desktop-gated `run`,
 // so they read as dead there; the app is driven through `android_app!`/JNI or
 // `ios_app!`/C-ABI instead.
-#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "android", target_os = "ios", target_arch = "wasm32"),
+    allow(dead_code)
+)]
 pub struct App<State, Logic> {
     state: State,
     logic: Logic,
@@ -1372,7 +1757,7 @@ pub struct App<State, Logic> {
     ///
     /// Absent on mobile rather than carried and ignored: the type itself lives
     /// in the desktop core, which is not in a mobile build's graph at all.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     config: DesktopConfig,
 }
 
@@ -1385,13 +1770,13 @@ impl<State, Logic> App<State, Logic> {
         Self {
             state,
             logic,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
             config: DesktopConfig::default(),
         }
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 impl<State: 'static, Logic> App<State, Logic> {
     /// Give the app a desktop identity — name, reverse-DNS id, window icon,
     /// native menu bar, last-window-close policy (see [`DesktopConfig`]).
@@ -1444,7 +1829,18 @@ impl<State: 'static, Logic> App<State, Logic> {
 /// constructor takes `&DesktopConfig` and clones out the fields it acts on
 /// (`app_id`, `window_icon`, `menu_spec`, the close policy), while the core
 /// itself takes ownership to title the window.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+///
+/// This is the single desktop choke point every desktop entry funnels
+/// through — [`App::run`] directly, and [`run`]/[`run_with_setup`]/
+/// [`run_desktop_config`]/[`run_with_setup_and_config`]/`app!`'s desktop arm
+/// indirectly, via `App::new(..).desktop(config).run()` — which is why
+/// [`__install_default_selection_toolbar`] sits here rather than duplicated
+/// across each of those: whatever path an app took to get here, any `setup`
+/// it ran (and any explicit override that ran even earlier, in `main`) has
+/// already had its chance to claim the selection-toolbar builder slot before
+/// this call, and this is the one point strictly before the shell — and
+/// therefore the first frame — starts.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 fn run_desktop_configured<State, Logic, V>(
     state: State,
     logic: Logic,
@@ -1455,6 +1851,7 @@ where
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
 {
+    __install_default_selection_toolbar();
     let extensions = desktop_extensions(&config);
     frust_shell_desktop::run_desktop_with(state, logic, config, extensions)
 }
@@ -1497,7 +1894,8 @@ fn desktop_extensions(
     target_os = "ios",
     target_os = "macos",
     target_os = "windows",
-    target_os = "linux"
+    target_os = "linux",
+    target_arch = "wasm32"
 )))]
 fn desktop_extensions(
     config: &DesktopConfig,
@@ -1534,7 +1932,7 @@ fn desktop_extensions(
 /// Zero-config: the window is [`DesktopConfig::default()`]'s. Name the app, its
 /// icon or its menu bar with [`run_desktop_config`] (or [`app!`]'s
 /// `desktop = { .. }` argument) instead.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
     run_with_setup(root, || {})
 }
@@ -1556,7 +1954,7 @@ pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
 /// reaches this through [`app!`] rather than calling it directly.
 ///
 /// Desktop-only, matching [`run`]/[`App::run`].
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Result<()> {
     run_with_setup_and_config(root, setup, DesktopConfig::default())
 }
@@ -1585,7 +1983,7 @@ pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Re
 /// ```
 ///
 /// Desktop-only, matching [`run`]/[`App::run`].
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 pub fn run_desktop_config<C: Component>(root: C, config: DesktopConfig) -> anyhow::Result<()> {
     run_with_setup_and_config(root, || {}, config)
 }
@@ -1599,7 +1997,7 @@ pub fn run_desktop_config<C: Component>(root: C, config: DesktopConfig) -> anyho
 /// [`App::desktop`]).
 ///
 /// Desktop-only, matching [`run`]/[`App::run`].
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 pub fn run_with_setup_and_config<C: Component>(
     root: C,
     setup: impl FnOnce(),
@@ -1775,6 +2173,7 @@ macro_rules! app {
             <$root as $crate::Component>::State,
             || {
                 $($setup)?
+                $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
             },
             {
@@ -1789,6 +2188,30 @@ macro_rules! app {
             <$root as $crate::Component>::State,
             || {
                 $($setup)?
+                $crate::__install_default_selection_toolbar();
+                $crate::Component::init(&<$root as ::core::default::Default>::default())
+            },
+            {
+                let __frust_root = <$root as ::core::default::Default>::default();
+                move |state: &mut <$root as $crate::Component>::State| {
+                    $crate::Component::build(&__frust_root, state)
+                }
+            }
+        );
+
+        // The fourth platform: [`web_app!`] self-gates the same way
+        // `ios_app!` does (its one generated symbol is itself
+        // `#[cfg(target_arch = "wasm32")]`), so this call is additionally
+        // gated here too — belt-and-braces, matching `android_app!`'s
+        // call-site-gated style right above, and making the wasm32 arm easy
+        // to find beside the other two platforms' calls without reading
+        // `web_app!`'s own body.
+        #[cfg(target_arch = "wasm32")]
+        $crate::web_app!(
+            <$root as $crate::Component>::State,
+            || {
+                $($setup)?
+                $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
             },
             {
@@ -1822,7 +2245,7 @@ macro_rules! app {
     (@emit $root:ty, $($setup:block)?) => {
         $crate::app!(@emit_mobile $root, $($setup)?);
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         #[doc(hidden)]
         pub fn __frust_main() {
             let __frust_setup = || { $($setup)? };
@@ -1841,7 +2264,7 @@ macro_rules! app {
     (@emit_desktop $root:ty, $config:expr, $($setup:block)?) => {
         $crate::app!(@emit_mobile $root, $($setup)?);
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         #[doc(hidden)]
         pub fn __frust_main() {
             let __frust_setup = || { $($setup)? };
@@ -1875,7 +2298,7 @@ macro_rules! app {
 }
 
 /// Compile-only smoke of [`app!`]'s `setup = { .. }` form: a
-/// `Component + Default` fixture bound to all three platforms in one call —
+/// `Component + Default` fixture bound to all four platforms in one call —
 /// `cargo test --workspace` compiles this on host (criterion 1: `__frust_main`
 /// present, no Android JNI symbols), and `cargo check --target
 /// aarch64-linux-android -p frust --tests` / `--target
@@ -1884,7 +2307,15 @@ macro_rules! app {
 /// `__frust_main` absent on Android). Lives behind `cfg(test)` — never
 /// linked into a cdylib/staticlib/binary, so the fixed JNI/C-ABI export names
 /// `app!` stamps out (via `android_app!`/`ios_app!`) never collide with a
-/// real generated app's.
+/// real generated app's; [`web_app!`]'s single `#[wasm_bindgen(start)]`
+/// function is the same kind of fixed, per-crate-unique export name, for the
+/// same reason.
+///
+/// The fourth platform's own compile-check, `cargo check --target
+/// wasm32-unknown-unknown -p frust --tests`, type-checks `web_app!`'s
+/// generated shim (which calls `frust_shell_web::run_app` — see
+/// [`__frust_shell_web`]'s doc comment) and is part of the documented wasm
+/// gate in `docs/DEVELOPMENT.md`.
 ///
 /// **Exactly one `app!` invocation may be compiled per target** — a second one
 /// would stamp the same fixed JNI/C-ABI export names — so this fixture takes
@@ -1939,7 +2370,10 @@ mod macro_expansion {
 /// one-invocation-per-target reason spelled out on [`macro_expansion`] above:
 /// on a mobile target this module is cfg'd out so the fixture there stays the
 /// single setup-form invocation.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
+))]
 mod macro_expansion_no_setup {
     #[derive(Default)]
     #[allow(dead_code)]
@@ -1975,7 +2409,10 @@ mod macro_expansion_no_setup {
 /// ([`DesktopConfig`] + [`MenuSpec`]/[`MenuItemSpec`]/[`MenuRole`]) through the
 /// facade only, so a re-export dropped from `lib.rs` fails to compile here
 /// rather than in an app.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
+))]
 mod macro_expansion_desktop_config {
     #[derive(Default)]
     #[allow(dead_code)]
@@ -2051,7 +2488,10 @@ mod macro_expansion_desktop_config {
 ///
 /// Opening a window isn't testable headless, so this asserts against the value
 /// `run` would hand `run_desktop_with` rather than the window itself.
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(all(
+    test,
+    not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
+))]
 mod desktop_config_threading {
     use crate::{App, DesktopConfig, View, text};
 
@@ -2435,6 +2875,88 @@ mod push_with_options_dismiss_animated {
             1,
             "back fired the dismiss signal exactly once, for the modal's own \
              widget to stage its exit animation on"
+        );
+    }
+}
+
+/// [`__install_default_selection_toolbar`]'s two contracts: it installs the
+/// framework baseline when the slot is empty, and a prior explicit
+/// [`set_selection_toolbar_builder`] always survives it.
+///
+/// `frust-core` keeps its builder slot private and offers no way to reset it
+/// (unlike its own in-crate tests, which reach the static directly) — this is
+/// the only test in this crate's suite that touches the process-global slot,
+/// so its very first touch below really is that slot's virgin state in this
+/// process; every assertion after that is made deterministic by an explicit
+/// `set_selection_toolbar_builder`/[`Arc::ptr_eq`] check instead of relying on
+/// ambient state again.
+#[cfg(test)]
+mod selection_toolbar_bootstrap {
+    use std::any::Any;
+    use std::sync::Arc;
+
+    use frust_core::{BuildCtx, SelectionToolbarBuilder};
+    use kurbo::{Rect, Size};
+
+    use crate::{
+        __install_default_selection_toolbar, SelectionToolbarActions, SelectionToolbarRequest,
+        View, any, set_selection_toolbar_builder, text,
+    };
+
+    fn sample_request() -> SelectionToolbarRequest {
+        SelectionToolbarRequest {
+            anchor: Rect::new(0.0, 0.0, 10.0, 10.0),
+            actions: SelectionToolbarActions {
+                copy: true,
+                ..Default::default()
+            },
+            present_menu: true,
+        }
+    }
+
+    #[test]
+    fn installs_the_baseline_when_unset_and_yields_to_a_prior_explicit_install() {
+        // The slot's virgin state (see the module doc comment above): nothing
+        // has claimed it yet in this process, so the bootstrap call must take
+        // it.
+        __install_default_selection_toolbar();
+        let installed = frust_core::selection_toolbar_builder()
+            .expect("the bootstrap install must take the empty slot");
+
+        // Prove it really is the framework baseline — the widget it builds is
+        // `frust_widgets::selection_toolbar`'s own type, not merely
+        // "something" — by comparing the boxed elements' concrete `TypeId`s,
+        // the same type-swap-detection technique
+        // `frust_widgets::authoring::rebuild_child_tracked` uses internally.
+        let sample = sample_request();
+        let probe_view = installed(&sample, Size::new(400.0, 600.0));
+        let mut probe_id = 0u64;
+        let probe_widget = View::<()>::build(&probe_view, &mut BuildCtx::new(&mut probe_id));
+
+        let baseline_view = frust_widgets::selection_toolbar(&sample);
+        let mut baseline_id = 0u64;
+        let baseline_widget =
+            View::<()>::build(&baseline_view, &mut BuildCtx::new(&mut baseline_id));
+
+        let probe_any: &dyn Any = &*probe_widget;
+        let baseline_any: &dyn Any = &*baseline_widget;
+        assert_eq!(
+            probe_any.type_id(),
+            baseline_any.type_id(),
+            "the installed default must build selection_toolbar's own widget"
+        );
+
+        // Now the other half: an explicit `set_selection_toolbar_builder`
+        // always outranks the bootstrap's own set-if-unset call, whatever the
+        // slot already held going in (the framework's own baseline, just
+        // installed above, included).
+        let marker: SelectionToolbarBuilder = Arc::new(|_req, _win| any(text("prior-marker")));
+        set_selection_toolbar_builder(Arc::clone(&marker));
+        __install_default_selection_toolbar();
+        let after = frust_core::selection_toolbar_builder().expect("a builder is installed");
+        assert!(
+            Arc::ptr_eq(&after, &marker),
+            "a prior explicit set_selection_toolbar_builder must survive the bootstrap install"
         );
     }
 }

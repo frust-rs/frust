@@ -32,8 +32,14 @@
 //!   `ColorScheme` role exists for it, so a true alpha wash stands in).
 //! - **title** = `on_surface`; **desc** = `on_surface_variant`.
 //! - **dashed border** = `outline`.
+//! - **families**, read at layout from the live type scale: the glyph char
+//!   from `displaySmall` (Space Mono under Glyph's own scale), the title from
+//!   `titleMedium` and the description from `bodyMedium` (both IBM Plex
+//!   Mono), so a theme swap reshapes every run (see [`super::badge`]'s
+//!   Typeface section).
 //!
-//! Unthemed, each falls back to the literal Glyph **dark** constant.
+//! Unthemed, each falls back to the literal Glyph **dark** constant (each
+//! family to the matching Glyph stack).
 //!
 //! # Dashed border
 //!
@@ -232,9 +238,9 @@ impl EmptyGlyphSlot {
         }
     }
 
-    fn layout(&mut self, ctx: &mut LayoutCtx, color: Color) -> Size {
+    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         match self {
-            EmptyGlyphSlot::Char(label) => label.layout(ctx, &glyph_style(color), None),
+            EmptyGlyphSlot::Char(label) => label.layout(ctx, style, None),
             // A vector icon occupies the same square box the glyph char's
             // face size defines — no text shaping involved.
             EmptyGlyphSlot::Icon(_) => Size::new(EMPTY_GLYPH_SIZE as f64, EMPTY_GLYPH_SIZE as f64),
@@ -342,25 +348,40 @@ impl<State: 'static> View<State> for EmptyStateView<State> {
     }
 }
 
-fn glyph_style(color: Color) -> TextStyle {
+/// Glyph's display face stack (Space Mono): the glyph char's unthemed
+/// family.
+fn display_face() -> FontFamily {
+    FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
+}
+
+/// Glyph's UI face stack (IBM Plex Mono): the title's and description's
+/// unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The glyph char's style; family from the theme's `displaySmall` role.
+fn glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(display_face, |t| t.type_scale.display_small.family.clone()),
         weight: FontWeight::BOLD,
         ..TextStyle::new(EMPTY_GLYPH_SIZE, color)
     }
 }
 
-fn title_style(color: Color) -> TextStyle {
+/// The title's style; family from the theme's `titleMedium` role.
+fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.title_medium.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(EMPTY_TITLE_SIZE, color)
     }
 }
 
-fn desc_style(color: Color) -> TextStyle {
+/// The description's style; family from the theme's `bodyMedium` role.
+fn desc_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.body_medium.family.clone()),
         weight: FontWeight::REGULAR,
         line_height: LineHeight::FontSizeRelative(EMPTY_DESC_LINE_HEIGHT),
         ..TextStyle::new(EMPTY_DESC_SIZE, color)
@@ -438,8 +459,15 @@ fn stroke_dashed_rect(scene: &mut dyn PaintScene, origin: Point, size: Size, col
 
 impl<State: 'static> Widget for EmptyStateWidget<State> {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve every style up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (_, glyph_c, title_c, desc_c) = resolve_colors(theme);
+        let (glyph_style, title_style, desc_style) = (
+            glyph_style(theme, glyph_c),
+            title_style(theme, title_c),
+            desc_style(theme, desc_c),
+        );
 
         let inner_max_w = if bc.max().width.is_finite() {
             Some((bc.max().width - EMPTY_PADDING * 2.0).max(0.0) as f32)
@@ -447,9 +475,9 @@ impl<State: 'static> Widget for EmptyStateWidget<State> {
             None
         };
 
-        self.glyph_size = self.glyph.layout(ctx, glyph_c);
-        self.title_size = self.title.layout(ctx, &title_style(title_c), inner_max_w);
-        self.desc_size = self.desc.layout(ctx, &desc_style(desc_c), inner_max_w);
+        self.glyph_size = self.glyph.layout(ctx, &glyph_style);
+        self.title_size = self.title.layout(ctx, &title_style, inner_max_w);
+        self.desc_size = self.desc.layout(ctx, &desc_style, inner_max_w);
 
         let mut content_h = self.glyph_size.height
             + EMPTY_GLYPH_GAP
@@ -767,5 +795,33 @@ mod tests {
             !node.children().is_empty(),
             "the action is a semantics child"
         );
+    }
+
+    // ---- Typeface: every run's family follows its type-scale role ---------
+
+    /// An empty state with an ASCII glyph char (inside both bundled families'
+    /// coverage, unlike the default `∅`) and no action slot, so every painted
+    /// run is one of the widget's own.
+    #[cfg(feature = "bundled-fonts")]
+    fn ascii_glyph(_: &mut ()) -> EmptyStateView<()> {
+        empty_state("No results", "Try another search").glyph("?")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(ascii_glyph, crate::baseline(), Size::new(300.0, 300.0));
+        // Glyph char, title, description.
+        assert_eq!(faces, [Face::SpaceMono, Face::PlexMono, Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(ascii_glyph, Size::new(300.0, 300.0));
+        assert_eq!(before, [Face::SpaceMono, Face::PlexMono, Face::PlexMono]);
+        assert_eq!(after, [Face::PlexMono, Face::SpaceMono, Face::SpaceMono]);
     }
 }

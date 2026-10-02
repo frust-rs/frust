@@ -25,19 +25,20 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `CORE` | crates/frust-core, frust-scene, frust-reactive, frust, frust-paths | A D |
 | `RENDER` | crates/frust-render, frust-text | A D |
 | `WIDGETS` | crates/frust-widgets, frust-theme | A C |
-| `SHELLS` | crates/frust-shell-{common,desktop,macos,windows,linux,android,ios} | A D |
-| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database,i18n,glyph,material,cupertino,shadcn,beui} | A D C |
+| `SHELLS` | crates/frust-shell-{common,desktop,macos,windows,linux,android,ios,web} | A D |
+| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,url-launcher,auth-session,iap,video-player,clean-signals-frust,database,i18n,glyph,material,cupertino,shadcn,beui} | A D C |
 | `NATIVE_WIDGETS` | plugins/native-widgets | A |
 | `CLI` | crates/frust-cli, frust-drive, frust-mcp, frust-dap | A D |
 | `TUI` | crates/frust-tui | A D C |
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
 | `GPU`/`ENGINE` | crates/frust-gpu, crates/frust-engine | – |
 
-**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, editors/vscode-frust.
+**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/web-spike, examples/web-gallery, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, examples/native-widgets-demo, editors/vscode-frust.
 
 NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, one plugin charter).
 GPU/ENGINE get no spoke of their own — they document inside RENDER's (`RENDER_ARCHITECTURE.md`,
 `RENDER_DEVELOPMENT.md`) since the engine plan folds them into that unit's render pipeline.
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics
-conventions, platform-view contract) stay in the shared indexes, not a spoke. `docs/TESTING.md`
-and `docs/LIMITATIONS.md` are auxiliary curated docs outside this schema set.
+conventions, platform-view contract) stay in the shared indexes, not a spoke. `docs/TESTING.md`,
+`docs/LIMITATIONS.md` and `docs/RELEASING.md` (target 200 lines) are auxiliary curated docs outside
+this schema set.

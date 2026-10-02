@@ -455,8 +455,8 @@ class SliceScenarioTests(unittest.TestCase):
         self.assertEqual(s.p50_us, 200)
 
     def test_s3_shape_indexed_window_is_exactly_the_ops_own_frame(self):
-        # The canonical S3 bracket and the whole point of the rework
-        # (act_000001a070c818837NtGqevW): `start` is raised in the build that
+        # The canonical S3 bracket and the whole point of the rework:
+        # `start` is raised in the build that
         # applies the op (frame 2) and `end` in the build after it (frame 3),
         # so the half-open [2, 3) window is exactly frame 2 — one frame, the
         # op's own. Under the shipped emitter each marker line is written by
@@ -909,7 +909,7 @@ class SliceOpScenarioTests(unittest.TestCase):
         self.assertIsNone(ops[0].scenario)
 
     def test_retrofitted_s8_inline_scenario_honours_parent_id_query(self):
-        # act_000001a0738ef5026feTx6k9: post-retrofit, both S8 op families
+        # Post-retrofit, both S8 op families
         # carry an inline `scenario=s8-write`/`scenario=s8-read` field (no
         # bracket needed to attribute them). A parent-id query (`--scenario
         # s8`) must still find every op across both phases, exactly like a

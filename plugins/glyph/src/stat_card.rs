@@ -21,7 +21,15 @@
 //! - **background/border/radius** mirror [`super::card`] exactly
 //!   (`surface_container` / `outline` / `shape.large`).
 //!
-//! Unthemed, every value falls back to a literal Glyph **dark** constant.
+//! # Typeface
+//!
+//! Each run reads its family at layout from the live type scale — the value
+//! from `headlineLarge` (Space Mono under Glyph's own scale), the label from
+//! `labelSmall` and the delta from `labelMedium` (both IBM Plex Mono) — so a
+//! theme swap reshapes every run (see [`super::badge`]'s Typeface section).
+//!
+//! Unthemed, every value falls back to a literal Glyph **dark** constant, and
+//! every family to the matching Glyph stack.
 
 use frust::authoring::Role;
 use frust::authoring::text::{
@@ -241,26 +249,40 @@ impl<State: 'static> View<State> for StatCardView {
     }
 }
 
-fn label_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the label's and delta's unthemed
+/// family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// Glyph's display face stack (Space Mono): the value's unthemed family.
+fn display_face() -> FontFamily {
+    FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
+}
+
+/// The label's style; family from the theme's `labelSmall` role.
+fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()),
         weight: FontWeight::MEDIUM,
         letter_spacing: STAT_LABEL_TRACKING,
         ..TextStyle::new(STAT_LABEL_SIZE, color)
     }
 }
 
-fn value_style(color: Color) -> TextStyle {
+/// The value's style; family from the theme's `headlineLarge` role.
+fn value_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(display_face, |t| t.type_scale.headline_large.family.clone()),
         weight: FontWeight::BOLD,
         ..TextStyle::new(STAT_VALUE_SIZE, color)
     }
 }
 
-fn delta_style(color: Color) -> TextStyle {
+/// The delta's style; family from the theme's `labelMedium` role.
+fn delta_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(STAT_DELTA_SIZE, color)
     }
@@ -308,20 +330,24 @@ fn resolve_radius(theme: Option<&Theme>, size: Size) -> f64 {
 
 impl Widget for StatCardWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        // Resolve every color up front (copying out of the borrowed theme)
+        // Resolve every style up front (copying out of the borrowed theme)
         // before any `.layout` call needs `ctx` mutably.
         let theme = Theme::from_layout_ctx(ctx);
         let (_, _, label_fg, value_fg) = resolve_chrome(theme);
-        let delta_color = self.delta_dir.map(|dir| resolve_delta_color(theme, dir));
+        let label_style = label_style(theme, label_fg);
+        let value_style = value_style(theme, value_fg);
+        let delta_style = self
+            .delta_dir
+            .map(|dir| delta_style(theme, resolve_delta_color(theme, dir)));
 
-        self.label_size = self.label.layout(ctx, &label_style(label_fg), None);
-        self.value_size = self.value.layout(ctx, &value_style(value_fg), None);
+        self.label_size = self.label.layout(ctx, &label_style, None);
+        self.value_size = self.value.layout(ctx, &value_style, None);
 
         let mut content_height = self.label_size.height + STAT_LABEL_GAP + self.value_size.height;
         let mut content_width = self.label_size.width.max(self.value_size.width);
 
-        if let (Some(color), Some(delta)) = (delta_color, self.delta.as_mut()) {
-            self.delta_size = delta.layout(ctx, &delta_style(color), None);
+        if let (Some(style), Some(delta)) = (delta_style, self.delta.as_mut()) {
+            self.delta_size = delta.layout(ctx, &style, None);
             content_height += STAT_DELTA_GAP + self.delta_size.height;
             content_width = content_width.max(self.delta_size.width);
         } else {
@@ -539,5 +565,30 @@ mod tests {
             .expect("stat card contributes a Role::Label node");
         assert_eq!(node.label(), Some("Sessions"));
         assert_eq!(node.description(), Some("1,284, up"));
+    }
+
+    // ---- Typeface: every run's family follows its type-scale role ---------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn sessions(_: &mut ()) -> StatCardView {
+        stat_card("Sessions", "1284").delta(StatDelta::Up, "12%")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(sessions, crate::baseline(), Size::new(300.0, 300.0));
+        // Label, value, delta.
+        assert_eq!(faces, [Face::PlexMono, Face::SpaceMono, Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(sessions, Size::new(300.0, 300.0));
+        assert_eq!(before, [Face::PlexMono, Face::SpaceMono, Face::PlexMono]);
+        assert_eq!(after, [Face::SpaceMono, Face::PlexMono, Face::SpaceMono]);
     }
 }

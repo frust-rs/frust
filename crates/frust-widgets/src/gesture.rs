@@ -9,6 +9,7 @@
 //! interactive descendants keep working. v1 recognises **tap + long-press**;
 //! double-tap is deferred, and lacking an input-kind flag on events the slop is
 //! [`TOUCH_SLOP`] uniformly.
+//! Two-finger pinch lives in [`crate::pinch`] ([`crate::pinch::pinch_detector`]).
 //!
 //! # Long-press firing semantics
 //!
@@ -123,7 +124,28 @@ use crate::authoring::presses;
 /// Android's `ViewConfiguration` long-press timeout defaults to ~400–500ms and
 /// iOS's `UILongPressGestureRecognizer.minimumPressDuration` defaults to 0.5s.
 /// 500ms sits at that shared upper bound.
-const LONG_PRESS_MS: f64 = 500.0;
+///
+/// `pub(crate)` because [`crate::textinput`] recognises its own stationary
+/// long-press — a text field cannot delegate the gesture to a wrapper, since
+/// the recogniser has to reach the editor's own hit test — and a field that
+/// held for a different duration than every `GestureDetector` around it would
+/// read as an inconsistency rather than a tuning choice. The matching slop is
+/// [`frust_core::TOUCH_SLOP`], which both already share.
+pub(crate) const LONG_PRESS_MS: f64 = 500.0;
+
+/// The window within which a second press near the first is a double-tap.
+///
+/// Android publishes this one as a real constant:
+/// `ViewConfiguration.getDoubleTapTimeout()` is `DOUBLE_TAP_TIMEOUT = 300`ms
+/// (`android.view.ViewConfiguration`). Apple exposes no equivalent number —
+/// `UITapGestureRecognizer` recognises a multi-tap internally and publishes no
+/// timeout — so the one published value stands for both platforms, paired with
+/// the same [`frust_core::TOUCH_SLOP`] the long-press uses.
+///
+/// Consumed by [`crate::textinput`]'s select-the-word-on-double-tap; the
+/// detector in this module still recognises tap + long-press only (double-tap
+/// is deferred there — see the [module docs](self)).
+pub(crate) const DOUBLE_TAP_MS: f64 = 300.0;
 
 /// A view-held, typed gesture callback (erased on build). Shared by `on_tap`
 /// and `on_long_press` — both are `Fn(&mut State)`.

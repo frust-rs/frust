@@ -19,12 +19,23 @@
 //! [`EventPayload`] straight into a signal write, which is what wakes
 //! exactly one frust frame.
 //!
-//! # One listener, five kinds, no JSON
+//! # One listener, eight kinds, no JSON
+//!
+//! Kinds 1-5 are emitted on Android; the sixth,
+//! [`EVENT_KIND_SELECTION`], is appended for the Apple-arm-only segmented
+//! control and is emitted only by the two Apple target classes today (its
+//! Kotlin twin exists purely to keep the shared table whole; the iOS tab bar
+//! reports its selections through it too). The seventh,
+//! [`EVENT_KIND_DATE`], is appended after it for the date picker and is
+//! emitted by all three arms. The eighth, [`EVENT_KIND_RESELECTED`], is the
+//! iOS-only tab bar's tap on its showing item — emitted by the iOS target
+//! class alone, its Kotlin twin again kept only for table parity.
 //!
 //! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,
 //! `CompoundButton.OnCheckedChangeListener`,
-//! `SeekBar.OnSeekBarChangeListener` — and funnels all of them into the one
+//! `SeekBar.OnSeekBarChangeListener`, `DatePicker.OnDateChangedListener` —
+//! and funnels all of them into the one
 //! native method `nativeOnEvent(slotId, kind, detail)`
 //! (`crate::android::Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent`).
 //! `detail` packs a primitive payload into a `jlong`; a value listener can
@@ -36,8 +47,10 @@
 //! `FrustNativeListener.kt`'s companion `KIND_*` constants — edit both
 //! tables together.** This is mechanically enforced, not just a comment:
 //! `plugins/native-widgets/tests/kotlin_conformance.rs` scans both files and
-//! fails on any drift in the `KIND_*`/`EVENT_KIND_*` values or in
-//! [`pack_value_changed`]/[`unpack_value_changed`]'s mask/shift contract.
+//! fails on any drift in the `KIND_*`/`EVENT_KIND_*` values, in
+//! [`pack_value_changed`]/[`unpack_value_changed`]'s mask/shift contract, or
+//! in [`pack_date`]'s field layout (Kotlin's `onDateChanged` packs the same
+//! three fields by hand).
 //!
 //! # Slider values are platform-space until they leave this module
 //!
@@ -49,6 +62,7 @@
 //! sees; every other decode function in this module has no such conversion
 //! because no other control maps its range.
 
+use crate::controls::date_picker::CivilDate;
 use crate::runtime::NativeEvent;
 
 // --- the kind vocabulary -----------------------------------------------
@@ -66,6 +80,37 @@ pub(crate) const EVENT_KIND_VALUE_CHANGED: i32 = 3;
 pub(crate) const EVENT_KIND_DRAG_START: i32 = 4;
 /// `SeekBar.OnSeekBarChangeListener.onStopTrackingTouch` — `detail` unused.
 pub(crate) const EVENT_KIND_DRAG_END: i32 = 5;
+/// A segmented control's `ValueChanged` action (`UISegmentedControl` on iOS,
+/// `NSSegmentedControl`'s action on macOS) — `detail` packs the reported
+/// segment index, see [`pack_index`]/[`unpack_index`].
+///
+/// **Appended, Apple-arm-only in this build.** Kotlin's `KIND_SELECTION`
+/// carries the same value so the two tables stay one table
+/// (`tests/kotlin_conformance.rs`), but no Android listener ever emits it:
+/// the segmented control has no Android arm yet (`crate::controls::segmented`'s
+/// module doc).
+pub(crate) const EVENT_KIND_SELECTION: i32 = 6;
+/// A date picker's committed date change (`DatePicker.OnDateChangedListener`
+/// on Android, `UIDatePicker`'s `ValueChanged` action on iOS,
+/// `NSDatePicker`'s action on macOS) — `detail` packs the reported civil
+/// date, see [`pack_date`]/[`unpack_date`].
+///
+/// **Appended** after [`EVENT_KIND_SELECTION`], never renumbered into the
+/// table: kinds 1-6 are shipped wire values. Unlike `SELECTION`, all three
+/// arms emit it (`crate::controls::date_picker` is a shared control).
+pub(crate) const EVENT_KIND_DATE: i32 = 7;
+/// A tab bar's tap on the item it was already showing
+/// (`UITabBarDelegate.tabBar:didSelectItem:` for the showing item) — `detail`
+/// packs the item index exactly as [`EVENT_KIND_SELECTION`] does
+/// ([`pack_index`]); a tap on any other item reports `SELECTION` instead
+/// (`crate::controls::tab_bar::tap_kind`).
+///
+/// **Appended** after [`EVENT_KIND_DATE`], **iOS-only in this build**: the tab
+/// bar has no macOS or Android arm (`crate::controls::tab_bar`'s module doc).
+/// Kotlin's `KIND_RESELECTED` carries the same value so the two tables stay
+/// one table (`tests/kotlin_conformance.rs`), though no Android listener emits
+/// it.
+pub(crate) const EVENT_KIND_RESELECTED: i32 = 8;
 
 // --- the typed vocabulary the app-facing api wraps into a signal -----------
 
@@ -103,6 +148,21 @@ pub(crate) enum EventPayload {
     DragStart,
     /// `Slider`'s drag gesture ended (`onStopTrackingTouch`).
     DragEnd,
+    /// A segmented control reported this segment as the **requested**
+    /// selection — controlled, like [`Self::Toggled`]: the app confirms it by
+    /// feeding the index back as props (`crate::controls::segmented`).
+    Selected(usize),
+    /// A date picker reported this date as the **requested** one —
+    /// controlled, like [`Self::Selected`]: the app confirms it by feeding
+    /// the date back as props (`crate::controls::date_picker`). Always a
+    /// valid civil date ([`unpack_date`] refuses anything else).
+    Date(CivilDate),
+    /// A tab bar's item at this index was tapped **while already showing** —
+    /// an app's "scroll to top / pop to root" signal, not a selection
+    /// request. A tab bar's *selection* request rides [`Self::Selected`]
+    /// (`crate::controls::tab_bar::decode_event`); the builder maps both
+    /// indices back to the item's `TabId`.
+    Reselected(usize),
 }
 
 // --- the detail codec -------------------------------------------------------
@@ -132,6 +192,61 @@ pub(crate) fn unpack_value_changed(detail: i64) -> (i32, bool) {
     let platform_value = (detail & 0xFFFF_FFFF) as i32;
     let from_user = (detail >> 32) & 1 != 0;
     (platform_value, from_user)
+}
+
+/// Pack a platform-reported segment index into `detail` —
+/// [`EVENT_KIND_SELECTION`]'s whole payload. **Layout: the whole 64-bit
+/// `detail` is the platform's own signed index, sign-extended** — no mask, no
+/// flag bits (unlike [`pack_value_changed`]). Taking the signed `NSInteger`
+/// verbatim keeps the platforms' "no segment selected" sentinel
+/// (`UISegmentedControlNoSegment`, `-1` on both Apple arms) representable, so
+/// [`unpack_index`] can refuse it rather than a caller having to guess.
+pub(crate) fn pack_index(platform_index: isize) -> i64 {
+    platform_index as i64
+}
+
+/// [`pack_index`]'s inverse: the reported segment, or `None` for a negative
+/// (no-selection) report — which carries no requested segment to deliver.
+pub(crate) fn unpack_index(detail: i64) -> Option<usize> {
+    usize::try_from(detail).ok()
+}
+
+/// Pack a civil date into `detail` — [`EVENT_KIND_DATE`]'s whole payload.
+///
+/// **Layout** (the low 32 bits of the `i64`; bits 32-63 are always zero):
+///
+/// | bits | field | range |
+/// |---|---|---|
+/// | 16-31 | `year` | 1-9999 (fits the 16-bit field with room to spare) |
+/// | 8-15 | `month` | **1-based**, 1-12 (Android's `monthOfYear` is 0-based — the Kotlin listener adds 1 before packing) |
+/// | 0-7 | `day` | 1-31 |
+///
+/// Unlike [`pack_value_changed`]'s `progress | fromUser << 32`, no flag bit
+/// rides along: a date report carries no `fromUser`, because no arm can
+/// tell (and the runtime's re-entrancy drop already swallows the only
+/// programmatic echo — `crate::controls::date_picker`'s module doc).
+/// `FrustNativeListener.onDateChanged` duplicates this arithmetic by hand;
+/// `tests/kotlin_conformance.rs` pins the masks, the shifts and the month
+/// offset against this body.
+pub(crate) fn pack_date(date: CivilDate) -> i64 {
+    ((i64::from(date.year) & 0xFFFF) << 16)
+        | ((i64::from(date.month) & 0xFF) << 8)
+        | (i64::from(date.day) & 0xFF)
+}
+
+/// [`pack_date`]'s inverse — validated: `None` for any `detail` that is not
+/// exactly a packed, real calendar date (stray high bits, a zero or
+/// out-of-range field, a 31st of a 30-day month, a 29 February outside a
+/// leap year), so a corrupted report can never reach an app callback as a
+/// date the calendar does not have.
+pub(crate) fn unpack_date(detail: i64) -> Option<CivilDate> {
+    if detail >> 32 != 0 {
+        return None;
+    }
+    let year = ((detail >> 16) & 0xFFFF) as i32;
+    let month = ((detail >> 8) & 0xFF) as u8;
+    let day = (detail & 0xFF) as u8;
+    CivilDate::new(year, month, day)
 }
 
 /// Decode an [`EVENT_KIND_CLICK`] firing — `Button`'s whole event surface,
@@ -169,6 +284,96 @@ mod tests {
             assert_eq!(decoded_value, value);
             assert_eq!(decoded_from_user, from_user);
         }
+    }
+
+    #[test]
+    fn a_segment_index_round_trips_and_no_selection_decodes_to_none() {
+        for index in [0usize, 1, 7, 63] {
+            assert_eq!(
+                unpack_index(pack_index(index as isize)),
+                Some(index),
+                "index {index}"
+            );
+        }
+        // `UISegmentedControlNoSegment` / `NSSegmentedControl`'s `-1`.
+        assert_eq!(unpack_index(pack_index(-1)), None);
+        assert_eq!(unpack_index(i64::MIN), None);
+    }
+
+    #[test]
+    fn a_date_round_trips_across_every_field_boundary() {
+        // Year 1..9999, month 1..12, day 1..31 — each boundary with the
+        // other two fields at both of theirs, where the calendar allows it.
+        for (year, month, day) in [
+            (1, 1, 1),
+            (1, 12, 31),
+            (9999, 1, 1),
+            (9999, 12, 31),
+            (2026, 9, 29),
+            (2024, 2, 29),
+            (2000, 2, 29),
+            (1970, 1, 1),
+            (255, 12, 31),
+            (256, 1, 1),
+        ] {
+            let date = CivilDate::new(year, month, day)
+                .unwrap_or_else(|| panic!("{year}-{month}-{day} is a real date"));
+            let detail = pack_date(date);
+            assert_eq!(detail >> 32, 0, "only the low 32 bits are used");
+            assert_eq!(unpack_date(detail), Some(date), "{year}-{month}-{day}");
+        }
+    }
+
+    #[test]
+    fn the_date_layout_is_year_month_day_high_to_low() {
+        let date = CivilDate::new(2026, 9, 29).unwrap();
+        assert_eq!(pack_date(date), (2026 << 16) | (9 << 8) | 29);
+        assert_eq!(
+            pack_date(CivilDate::new(9999, 12, 31).unwrap()),
+            0x270F_0C1F
+        );
+        assert_eq!(pack_date(CivilDate::new(1, 1, 1).unwrap()), 0x0001_0101);
+    }
+
+    #[test]
+    fn an_invalid_packed_date_decodes_to_none() {
+        let pack = |year: i64, month: i64, day: i64| (year << 16) | (month << 8) | day;
+        for (what, detail) in [
+            ("year 0", pack(0, 1, 1)),
+            ("year 10000", pack(10_000, 1, 1)),
+            ("month 0", pack(2026, 0, 1)),
+            ("month 13", pack(2026, 13, 1)),
+            ("day 0", pack(2026, 1, 0)),
+            ("day 32", pack(2026, 1, 32)),
+            ("31 April", pack(2026, 4, 31)),
+            ("29 Feb, common year", pack(2026, 2, 29)),
+            ("29 Feb, century non-leap", pack(1900, 2, 29)),
+            ("a stray high bit", pack(2026, 1, 1) | (1 << 40)),
+            ("negative", -1),
+            ("zero", 0),
+        ] {
+            assert_eq!(unpack_date(detail), None, "{what}");
+        }
+    }
+
+    #[test]
+    fn the_kind_table_is_append_only() {
+        // Kinds 1-5 are shipped wire values; SELECTION, DATE and then
+        // RESELECTED are appended after them, never renumbered into the
+        // middle.
+        assert_eq!(
+            [
+                EVENT_KIND_CLICK,
+                EVENT_KIND_TOGGLED,
+                EVENT_KIND_VALUE_CHANGED,
+                EVENT_KIND_DRAG_START,
+                EVENT_KIND_DRAG_END,
+                EVENT_KIND_SELECTION,
+                EVENT_KIND_DATE,
+                EVENT_KIND_RESELECTED,
+            ],
+            [1, 2, 3, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]

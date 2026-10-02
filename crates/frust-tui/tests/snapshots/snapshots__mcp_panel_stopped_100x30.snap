@@ -17,7 +17,7 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS             │  start it to let an agent drive this workbench's       │▓▓                   
    New project · n   │  own sessions                                          │▓▓                   
    Add plugin · a    │                                                        │▓▓                   
-   Doctor · d        │  no clients connected                                  │▓▓                   
+   Doctor · i        │  no clients connected                                  │▓▓                   
    Build · b         │                                                        │▓▓                   
    Clean · c         │   Start     Close                                      │▓▓                   
    MCP off · M       │  s start · Esc close                                   │▓▓                   
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

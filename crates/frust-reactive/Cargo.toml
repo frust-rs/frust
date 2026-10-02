@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Reactive substrate for Frust: process-wide runtime, async executor, frame waker and shell event sources."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # reactive_graph has no default features, so no `features`/`default-features`
@@ -11,9 +17,42 @@ license.workspace = true
 # Version-Pin Policy): the frame path is a custom subscriber, not `RenderEffect`.
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
+# Not yet a workspace dependency; pinned directly here for future use.
+futures = "0.3"
+
+# `tokio` is target-gated: `wasm32-unknown-unknown` has no OS threads and no
+# mio-backed reactor, so `rt-multi-thread` and `net` fail to compile there
+# (mio needs epoll/kqueue-equivalent syscalls absent on wasm — see
+# `examples/web-spike/RESULTS.md`). See `src/runtime.rs`'s module docs for
+# what the wasm arm builds instead and what it costs (`use_task`/
+# `spawn_blocking` have no working wasm equivalent yet).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 # `net` is the smallest feature that satisfies tokio's `enable_io()` gate
 # (cfg_io_driver requires `net`, or `process`/`signal` on unix) — the IO
 # driver `frust::spawn`'s background tasks need to host real sockets.
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
-# Not yet a workspace dependency; pinned directly here for future use.
-futures = "0.3"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# `rt` alone (no `rt-multi-thread`, no `time`, no `net`) is the only tokio
+# feature set that compiles for wasm32-unknown-unknown; it gives
+# `tokio::runtime::Handle`/`AbortHandle`, which `executor.rs`/`task.rs` use
+# unconditionally (their type signatures, not their wasm behaviour — see
+# `runtime.rs`).
+tokio = { workspace = true, features = ["rt"] }
+# `any_spawner`'s wasm precedent: no automatic default, so
+# `ReactiveRuntime::init`'s wasm arm installs a `CustomExecutor` explicitly
+# (see `runtime.rs`) rather than relying on any implicit default —
+# `runtime.rs` no longer calls `Executor::init_wasm_bindgen()`, so this
+# feature no longer buys us that function; kept anyway since it is still the
+# feature any_spawner's own wasm-bindgen-futures optional dep hangs off, and
+# dropping it is out of scope for this fix (not asked for, and this crate's
+# own direct `wasm-bindgen-futures` row below is what our `CustomExecutor`
+# actually calls).
+any_spawner = { workspace = true, features = ["wasm-bindgen"] }
+# A REAL direct dependency, not just a transitively-resolved one: the wasm
+# `CustomExecutor` in `runtime.rs` calls `wasm_bindgen_futures::spawn_local`
+# directly for both `spawn` and `spawn_local` (a browser has one JS thread,
+# so both collapse to the same operation there) — that call site is this
+# crate's own code, not something `any_spawner`'s `wasm-bindgen` feature
+# alone would pull in for us to use.
+wasm-bindgen-futures = "0.4.50"

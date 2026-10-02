@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Android shell for Frust apps: the Rust half of the JNI bridge, with the android_app! macro and the frame pipeline."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # Unconditional: the `android_app!` macro is defined on every target (it only
@@ -84,3 +90,7 @@ devtools = ["frust-shell-common/devtools"]
 # features reachable, with nothing here yet calling `install_gpu_handle`.
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
 
+
+[package.metadata.docs.rs]
+default-target = "aarch64-linux-android"
+targets = ["aarch64-linux-android"]

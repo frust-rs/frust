@@ -4,7 +4,7 @@
 
 use frust_core::event::{
     EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
-    PointerEvent, PointerPhase,
+    PointerEvent, PointerId, PointerPhase,
 };
 use frust_reactive::ReactiveRuntime;
 use frust_shell_common::perf;
@@ -57,13 +57,28 @@ impl AndroidAppHandle {
     /// in — the same `sanitize_scale` value `frame()` uses, so hit-testing and
     /// layout never disagree.
     ///
-    /// Single-pointer in v1: the Kotlin side forwards only the primary pointer,
-    /// so every contact is a [`PointerButton::Primary`] event. The redraw the
+    /// The Kotlin side forwards every active contact (one `nativeOnTouch` call
+    /// per pointer — see `FrustSurfaceView.onTouchEvent`), each carrying its own
+    /// Android `MotionEvent.pointerId` in `android_pointer_id`. That id is
+    /// stable for a contact's lifetime but platform-chosen and not small, so
+    /// `self.touch_slots` ([`crate::ffi_support::TouchSlotMap`]) maps it onto
+    /// the gesture-local slot [`PointerId::touch`] takes: assigned on `Down`,
+    /// freed on `Up`/`Cancel`, with the gesture's first contact always landing
+    /// on slot `0` (the primary-sequence latch `frust_core`'s multi-contact
+    /// contract keys capture off). Every contact is a
+    /// [`PointerButton::Primary`] event, delivered as an
+    /// [`InputEvent::PointerContact`]. The redraw the
     /// tree requests is implicit here — the Choreographer loop already posts a
     /// frame every vsync, so the mutated state is picked up on the next
     /// `frame()` without an explicit schedule (contrast the desktop shell's
     /// `request_redraw`).
-    pub(crate) fn dispatch_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
+    pub(crate) fn dispatch_touch(
+        &mut self,
+        phase: TouchPhase,
+        android_pointer_id: i32,
+        x: f32,
+        y: f32,
+    ) {
         let scale = sanitize_scale(self.scale);
         let position = Point::new(x as f64 / scale, y as f64 / scale);
         let core_phase = match phase {
@@ -97,25 +112,52 @@ impl AndroidAppHandle {
             );
         }
 
+        // Resolve this Android pointer id onto its gesture-local slot: a `Down`
+        // assigns one (the gesture's first contact always lands on slot 0 —
+        // see `TouchSlotMap`'s doc); every other phase looks up the slot that
+        // contact's own `Down` already assigned, falling back to a fresh
+        // assignment if none was recorded (a corrupt/out-of-order event
+        // sequence — the safe default is to still deliver the contact rather
+        // than drop it silently). `Up`/`Cancel` free the slot afterward so a
+        // later `Down` may reuse it.
+        let slot = match phase {
+            TouchPhase::Down => self.touch_slots.assign(android_pointer_id),
+            _ => self
+                .touch_slots
+                .slot_for(android_pointer_id)
+                .unwrap_or_else(|| self.touch_slots.assign(android_pointer_id)),
+        };
+        if matches!(phase, TouchPhase::Up | TouchPhase::Cancel) {
+            self.touch_slots.release(android_pointer_id);
+        }
+
         // Pointer resampling: buffer the raw sample (stamped
         // on the shared resample clock) so [`Self::frame`] can emit a
         // frame-boundary-interpolated position; Down/Up/Cancel still pass through
         // losslessly. When the kill switch disabled the resampler, deliver
         // directly instead — pre-resampling behavior verbatim.
+        //
+        // Travels as an identified `PointerContact` so the root's multi-contact
+        // contract (and the resampler's per-contact lane) apply to it.
+        let pointer_id = PointerId::touch(slot);
         if self.resampler.is_enabled() {
             let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.resampler.push(RawPointerSample {
+                pointer_id,
                 phase: core_phase,
                 position,
                 button: PointerButton::Primary,
                 time_nanos,
             });
         } else {
-            let event = InputEvent::Pointer(PointerEvent {
-                phase: core_phase,
-                position,
-                button: PointerButton::Primary,
-            });
+            let event = InputEvent::PointerContact {
+                pointer_id,
+                event: PointerEvent {
+                    phase: core_phase,
+                    position,
+                    button: PointerButton::Primary,
+                },
+            };
             let app = &mut self.app;
             let _ = under_root_owner(|| app.event(&event));
         }
@@ -142,6 +184,43 @@ impl AndroidAppHandle {
     /// `AppTree::ime_state`; `None` when nothing is focused.
     pub(crate) fn ime_state(&self) -> Option<ImeState> {
         self.app.ime_state()
+    }
+
+    /// The focus/IME session generation — `nativeFocusGeneration`'s whole
+    /// payload, a counter over *changes to the published focus/IME surface*.
+    ///
+    /// Kept for Kotlin generated before [`Self::focus_epoch`] existed. It is
+    /// **not** the counter to bind an asynchronous answer to: it moves for an
+    /// edit or a caret move that never left the field, and it stands still for
+    /// a focus move between two fields that publish alike. The embedding's
+    /// clipboard resolver reads the session identity instead — see
+    /// [`Self::focus_epoch`], and `AppTree::focus_epoch` for the full contrast.
+    pub(crate) fn focus_generation(&self) -> u64 {
+        self.app.focus_ime_generation()
+    }
+
+    /// The live focus session's identity, for the Kotlin side to bind a
+    /// clipboard resolution it started to the session that started it.
+    ///
+    /// `nativeFocusEpoch`'s whole payload. The JVM half snapshots this when it
+    /// hands a URI-backed clip to its background resolver and compares it again
+    /// when the text comes back: a paste is dispatched only if the session is
+    /// still the one that asked, because `EditCommand::Paste` is focus-routed
+    /// and would otherwise land wherever focus happens to be when a slow
+    /// `ContentProvider` finally answers.
+    ///
+    /// `AppTree::focus_epoch` advances once per honoured focus claim and once
+    /// per session release, so it answers that question directly rather than by
+    /// proxy: a move to another field moves it whether or not the field taking
+    /// focus publishes anything, and an edit or a reposition *inside* one
+    /// session leaves it alone — which is what lets a paste the user is still
+    /// waiting for survive a keystroke.
+    ///
+    /// It never returns `0` for a live root (the counter is built at `1` and
+    /// steps past `0` on wrap), which is what leaves `0` free as the FFI
+    /// layer's dead-handle answer.
+    pub(crate) fn focus_epoch(&self) -> u64 {
+        self.app.focus_epoch()
     }
 
     /// Forward a soft-keyboard editor action (`nativeImeAction`, e.g.

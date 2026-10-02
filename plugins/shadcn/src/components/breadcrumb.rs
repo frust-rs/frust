@@ -30,7 +30,7 @@ use frust::authoring::text::TextStyle;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, View, Widget, any,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any,
 };
 use frust::{Theme, text};
 use kurbo::{Line, Shape};
@@ -38,7 +38,7 @@ use peniko::Color;
 
 use crate::hit::{inside, presses};
 use crate::style;
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 
 /// `gap-1.5` — the gap between breadcrumb parts.
 const LIST_GAP: f64 = style::SPACING_UNIT * 1.5;
@@ -176,11 +176,15 @@ impl Widget for BreadcrumbListWidget {
 
 // ---- BreadcrumbLink ---------------------------------------------------
 
-/// The text style a link's label is shaped with: `text-sm` at the sentinel ink
-/// every paint-time-recolored run uses (the hover ink is applied per paint —
-/// see [`LabelRun`]).
-fn link_style() -> TextStyle {
-    TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+/// The text style a link's label is shaped with: `text-sm` in the live theme's
+/// `BodyMedium` family, at the sentinel ink every paint-time-recolored run uses
+/// (the hover ink is applied per paint — see [`LabelRun`]).
+fn link_style(theme: Option<&Theme>) -> TextStyle {
+    themed_family(
+        TextStyle::new(style::TEXT_SM as f32, SHAPING_INK),
+        theme,
+        ThemeTextType::BodyMedium,
+    )
 }
 
 /// A view-held, typed click callback (erased on build).
@@ -256,7 +260,8 @@ fn resolve_link_ink(hovered: bool, theme: Option<&Theme>) -> Color {
 
 impl Widget for BreadcrumbLinkWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        bc.constrain(self.label.layout(ctx, &link_style()))
+        let style = link_style(Theme::from_layout_ctx(ctx));
+        bc.constrain(self.label.layout(ctx, &style))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -334,6 +339,7 @@ impl Widget for BreadcrumbLinkWidget {
 pub fn breadcrumb_page(label: impl Into<String>) -> frust::TextView {
     text(label)
         .size(style::TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium)
         .themed_role(ThemeTextColor::OnSurface)
 }
 
@@ -688,5 +694,36 @@ mod tests {
             }),
         );
         assert_eq!(state, 1);
+    }
+
+    // ---- Typeface: the link and page labels follow the live theme --------
+
+    /// A link (a paint-recolored run shaped here), a separator (a path, no
+    /// glyphs) and the current page (a `text` child).
+    #[cfg(feature = "bundled-fonts")]
+    fn trail(_: &mut ()) -> BreadcrumbListView<()> {
+        breadcrumb(vec![
+            any(breadcrumb_link::<()>("Home")),
+            any(breadcrumb_separator::<()>()),
+            any(breadcrumb_page("Settings")),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_link_and_page_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a breadcrumb's link and page",
+            trail,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_link_and_page_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a breadcrumb's link and page",
+            trail,
+        );
     }
 }

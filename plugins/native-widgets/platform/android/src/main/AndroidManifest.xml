@@ -1,19 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Deliberately empty. This plugin needs **no** permission and declares **no**
-  manifest component: every control it hosts is a plain `android.widget` view
-  built from Rust over JNI, and its one factory class is instantiated
-  reflectively by the embedding's `FrustViewHost`, not by the system.
+  This plugin needs **no** permission. Every control it hosts is a plain
+  `android.widget` view built from Rust over JNI, and its one factory class is
+  instantiated reflectively by the embedding's `FrustViewHost`, not by the
+  system — neither needs a manifest entry.
 
-  The file exists anyway so this module matches the shape both other plugin
-  modules use (`plugins/camera/platform/android`,
-  `plugins/secure-storage/platform/android`) and so a future addition has an
-  obvious home. The R8 keep rules that the camera module's manifest-declared
-  provider needs have no counterpart here — this plugin's two keep rules ride
-  `consumer-rules.pro` alone.
+  The one manifest component is the provider below: it is how
+  `FrustNativePresenter` (native presentations — alerts) obtains the
+  application `Context` BEFORE any Activity exists, to register its
+  process-wide `Application.ActivityLifecycleCallbacks` and so know which
+  Activity is resumed when an app asks for an alert. The first Activity is
+  otherwise the only `Context` this plugin would see, and that is too late to
+  observe its own first resume. A no-op `ContentProvider` whose `onCreate` runs
+  at process start is the standard library-self-initialization mechanism for
+  exactly this (`androidx.startup`'s `InitializationProvider`), mirroring
+  `plugins/auth-session/platform/android`'s `FrustAuthSessionInitProvider`
+  (no `initOrder`, like that one: nothing here depends on another provider
+  having run first).
+
+  `${applicationId}` is substituted by AGP at manifest-merge time, so the
+  authority is unique per consuming app (two apps on one device cannot
+  collide). `exported="false"`: nothing outside the app may reach it — it
+  exposes no data and every ContentProvider operation returns null/0.
 
   No `package` attribute: AGP takes the module's package from
   `android.namespace` in `build.gradle.kts` (`dev.frust.nativewidgets`).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="dev.frust.nativewidgets.FrustNativePresenterInitProvider"
+            android:authorities="${applicationId}.frustnativepresenter"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
 </manifest>

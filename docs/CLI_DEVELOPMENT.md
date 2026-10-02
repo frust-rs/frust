@@ -7,7 +7,7 @@ design lives in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 ## Template development
 
-`frust create` embeds `templates/app/` into the binary at compile time; the hidden,
+`frust create` embeds `crates/frust-drive/templates/app/` into the binary at compile time; the hidden,
 development-only `--template-dir <path>` flag iterates on template files without
 rebuilding the embedded copy. Every scaffold also gets a default launcher icon set and
 the platform-specific edge-to-edge/safe-area/keyboard-inset and back-navigation glue
@@ -16,9 +16,20 @@ host-signal flow.
 
 `--arch clean-signals` scaffolds a clean-architecture variant (controller + use-case +
 `async_view` over `clean-signals-frust`) instead of the default notes-app template;
-`clean-signals` is git+rev-pinned to its public GitHub repo (see
+`clean-signals` is a crates.io dependency (see
 [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)'s version pins), so the scaffold builds on any
 machine with no sibling checkout required.
+
+A generated app ships the `build/` root layout by construction — `.cargo/config.toml`'s
+`[build] target-dir = "build/rust"`, the Gradle build-directory redirect, the jniLibs source set,
+and the `.gitignore` entries all render pre-migrated; see [DEVELOPMENT.md](DEVELOPMENT.md)'s Build
+Output Layout for the shape and *Migrating an already-scaffolded app to the build/ layout* for a
+pre-existing app that predates it. `crates/frust-cli/tests/profile_sync.rs`'s
+`android_cargo_config_identical_between_root_and_template` test compares the template's
+`.cargo/config.toml` against the repo root's structurally, not byte-for-byte: their `[target.*]`
+rustflags tables must match, and the template's `[build]` table must be exactly `target-dir =
+"build/rust"` — the root's config deliberately carries no `[build]` table, since this checkout's
+own `target/` is referenced directly by docs and CI and must not move.
 
 **Platform embedding modules ship in-repo, not templated.**
 `platform/android/frust-embedding` and `platform/ios/FrustEmbedding` are consumed by a
@@ -57,7 +68,7 @@ pin RENDER already owns exactly (see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.
 | Pin | Why | Tripwire |
 |---|---|---|
 | `cargo-packager 0.11.8` exact (external tool, shelled out to by `desktop_build::installer`) | Builds `.dmg`/NSIS/WiX/`.deb`/`.AppImage` installers over an assembled bundle; `frust doctor`'s `CargoPackagerValidator` gates on an exact version match (non-fatal — only `frust build --installer` needs it) and reports the install hint `cargo install cargo-packager --version 0.11.8 --locked` on a mismatch or absence | `cargo install cargo-packager --version 0.11.8 --locked` smoke + `cargo test -p frust-drive` |
-| `winresource 0.1` (generated app's own build-dependency, `templates/app/Cargo.toml.tmpl` — not a workspace pin) | Embeds `windows/icon.ico` plus file/product version into the compiled `.exe`; the actively-maintained fork of `winres`, unmaintained since 2021 | scaffold e2e (`create_e2e`) |
+| `winresource 0.1` (generated app's own build-dependency, `crates/frust-drive/templates/app/Cargo.toml.tmpl` — not a workspace pin) | Embeds `windows/icon.ico` plus file/product version into the compiled `.exe`; the actively-maintained fork of `winres`, unmaintained since 2021 | scaffold e2e (`create_e2e`) |
 
 ## `frust-mcp`
 
@@ -89,11 +100,13 @@ bundler, no npm dependency) registering debug type `frust`. It never spawns a pr
 `DebugAdapterDescriptorFactory` returns a `vscode.DebugAdapterServer`, connecting to whatever port
 a launch config's `debugServer` names, falling back to the `frust.dapPort` workspace setting and
 then the `frust-dap` default (4849) — attach-by-port against the TUI's own embedded server, always.
-`frust-dap`'s launch-config generation (the DAP settings dialog's `g`, or the auto-configure flow on
-server start) writes a matching `.vscode/launch.json` entry through
-`frust_dap::ide_config::vscode`, so a project the TUI has configured needs no manual `launch.json`
-edit — only the extension itself installed (`npx @vscode/vsce package` → a local `.vsix`, run by
-hand, not by any workspace gate — Node.js is not required to build or test the Rust workspace).
+`frust-dap`'s launch-config generation (the DAP settings dialog's `g`, which refreshes the entry; or
+the automatic flow, which fires on an app launch and, on a fresh server bind, for the active
+session's project — and never rewrites a frust entry already present) writes a matching
+`.vscode/launch.json` entry through `frust_dap::ide_config::vscode`, so a project the TUI has
+configured needs no manual `launch.json` edit — only the extension itself installed
+(`npx @vscode/vsce package` → a local `.vsix`, run by hand, not by any workspace gate — Node.js is
+not required to build or test the Rust workspace).
 
 ## See Also
 

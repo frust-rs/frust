@@ -2,21 +2,65 @@
 //! wired straight into the SAME `(kind, detail)` runtime dispatch Android's
 //! `FrustNativeListener` feeds.
 //!
-//! # One class, five actions — the Android mirror
+//! # One class, eight actions — the Android mirror
 //!
 //! Android's `dev.frust.nativewidgets.FrustNativeListener` implements every
 //! listener interface a v1 control needs (`OnClickListener`/
-//! `OnCheckedChangeListener`/`OnSeekBarChangeListener`) on ONE class, with one
+//! `OnCheckedChangeListener`/`OnSeekBarChangeListener`/
+//! `OnDateChangedListener`) on ONE class, with one
 //! method per callback. [`FrustNativeControlTarget`] is the same shape for
-//! UIKit target-action: one class, five action selectors
+//! UIKit target-action: one class, eight action selectors
 //! ([`Self::handle_click`], [`Self::handle_switch_value_changed`],
 //! [`Self::handle_slider_value_changed`], [`Self::handle_slider_drag_start`],
-//! [`Self::handle_slider_drag_end`]), and a control wires only the ones it
-//! needs via [`Self::attach_button`]/[`Self::attach_switch`]/
-//! [`Self::attach_slider`] — exactly as Android attaches the shared listener
+//! [`Self::handle_slider_drag_end`], [`Self::handle_segment_value_changed`],
+//! [`Self::handle_stepper_value_changed`],
+//! [`Self::handle_date_value_changed`]), and a control wires only the ones
+//! it needs via [`Self::attach_button`]/[`Self::attach_switch`]/
+//! [`Self::attach_slider`]/[`Self::attach_segmented`]/[`Self::attach_stepper`]/
+//! [`Self::attach_date_picker`]
+//! — exactly as Android attaches the shared listener
 //! only as the one interface a given control implements. Adding a control
 //! never adds a second target class, matching the crate's "ONE generic
 //! factory, ONE generic listener" charter (`crate`'s module doc).
+//!
+//! [`Self::handle_stepper_value_changed`] is its own action rather than a
+//! reuse of [`Self::handle_slider_value_changed`], even though both report
+//! [`EVENT_KIND_VALUE_CHANGED`] off a `value`-named property: `UISlider.value`
+//! is a `float`-returning selector and `UIStepper.value` a `double`-returning
+//! one, and the Rust binding [`Self::handle_slider_value_changed`] is typed
+//! against reads that return type off the wire via `msg_send!`'s ABI —
+//! calling it against a real `UIStepper` sender would read the wrong bit
+//! width off the return register. Same wire shape, same kind, genuinely
+//! different sender type — `crate::controls::stepper`'s module doc names the
+//! shared shape.
+//!
+//! # One class, many delegates
+//!
+//! A control that reports through a **delegate protocol** rather than
+//! target-action gets that conformance on this same class, never a second
+//! one: `UITabBar` is not a `UIControl` and reports taps only through
+//! `UITabBarDelegate.tabBar:didSelectItem:`, so [`FrustNativeControlTarget`]
+//! conforms to `UITabBarDelegate` and `TabBar`'s iOS arm sets a target as the
+//! bar's (weak) delegate ([`Self::attach_tab_bar`]). The one piece of
+//! per-instance state beyond the slot id lives in [`TargetIvars`]: the tab
+//! the app last confirmed ([`Self::note_tab_showing`], called only from a
+//! `Setter::SelectedTab` apply — never a tap), which is what tells a
+//! reselect from a selection (`crate::controls::tab_bar::tap_kind`): a tap
+//! the app rejects leaves it unchanged, so retapping that same item still
+//! classifies as a selection, even though UIKit has already moved
+//! `selectedItem` and the highlight to it either way. UIKit calls the
+//! delegate for every tap on an enabled item — the showing one included —
+//! and never for a programmatic `selectedItem` write, so the *No echo guard*
+//! rule below holds for it too.
+//!
+//! A public `NativeComponent` reaches the same class through
+//! `FrustNativeControlTarget::attach_component` (called by
+//! `crate::component::ComponentCtx::attach_listener`), which wires the same
+//! selector/event pairs for whichever families the component asks for, onto
+//! any control it built. The component's context supplies the slot id, so a
+//! component never holds one; its target lives in the component's
+//! `ListenerHandle`, whose `Drop` runs `detach_component` — the same
+//! retention and detach discipline as below, one owner over.
 //!
 //! # Kind/detail parity is automatic, not re-derived
 //!
@@ -67,7 +111,7 @@
 //!
 //! # No echo guard here, either
 //!
-//! None of the five actions below needs one. Every action UIKit ever sends
+//! None of the eight actions below needs one. Every action UIKit ever sends
 //! here is genuinely user-caused: Apple's UIControl guidance is *"As a rule
 //! UIKit does not send events when programmatic changes are made to
 //! controls"*, and `switch.rs`'s module doc is the full account (the two
@@ -105,40 +149,92 @@
 //! `Self::alloc`/`Self::class()` call regardless, with no separate trigger
 //! required.
 
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_ui_kit::{UIButton, UIControl, UIControlEvents, UISlider, UISwitch};
+#[cfg(feature = "frust-api")]
+use objc2_ui_kit::UIView;
+use objc2_ui_kit::{
+    UIButton, UIControl, UIControlEvents, UIDatePicker, UISegmentedControl, UISlider, UIStepper,
+    UISwitch, UITabBar, UITabBarDelegate, UITabBarItem,
+};
 
+use crate::controls::date_picker::foundation::civil_date;
+use crate::controls::tab_bar::tap_kind;
 use crate::events::{
-    EVENT_KIND_CLICK, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_TOGGLED,
-    EVENT_KIND_VALUE_CHANGED, pack_bool, pack_value_changed,
+    EVENT_KIND_CLICK, EVENT_KIND_DATE, EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START,
+    EVENT_KIND_SELECTION, EVENT_KIND_TOGGLED, EVENT_KIND_VALUE_CHANGED, pack_bool, pack_date,
+    pack_index, pack_value_changed,
 };
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent};
 
+/// [`FrustNativeControlTarget`]'s per-instance state: the slot every event
+/// reports for, plus `showing_tab`, which is `TabBar`-only (module doc's
+/// *One class, many delegates*):
+/// the tab index the app last confirmed selected via a `Setter::SelectedTab`
+/// apply, `None` before any confirmation — a tap never writes it, and every
+/// other control's target leaves it untouched.
+pub(crate) struct TargetIvars {
+    slot: SlotId,
+    showing_tab: Cell<Option<usize>>,
+}
+
 define_class!(
     // SAFETY:
     // - `NSObject` has no subclassing requirements.
-    // - The ivars are a plain `SlotId` (`u64`) with no `Drop` impl, so the
-    //   macro's generated `dealloc` has nothing extra to uphold.
+    // - The ivars are a plain `SlotId` (`u64`) and a `Cell<Option<usize>>`,
+    //   neither with a `Drop` impl, so the macro's generated `dealloc` has
+    //   nothing extra to uphold.
     #[unsafe(super(NSObject))]
     // See the module doc's *Threading*: every action fires on the main
     // thread, so construction (`Self::alloc`) must too.
     #[thread_kind = MainThreadOnly]
-    #[ivars = SlotId]
+    #[ivars = TargetIvars]
     pub(crate) struct FrustNativeControlTarget;
 
     unsafe impl NSObjectProtocol for FrustNativeControlTarget {}
 
+    // `TabBar`'s delegate conformance — a `UITabBar` reports taps through its
+    // delegate, not target-action (module doc's *One class, many delegates*).
+    unsafe impl UITabBarDelegate for FrustNativeControlTarget {
+        /// A tap on an enabled item → [`EVENT_KIND_SELECTION`], or
+        /// [`crate::events::EVENT_KIND_RESELECTED`] when it is the tab the
+        /// app last confirmed ([`tap_kind`]), `detail` the item's `tag` —
+        /// which `TabBar`'s iOS arm sets to the item's index — packed with
+        /// [`pack_index`]. The tap never updates `showing_tab` itself — only
+        /// a `Setter::SelectedTab` apply does ([`Self::note_tab_showing`]) —
+        /// so a tap the app rejects (no write-back) leaves a same-tab retap
+        /// classified as another selection, not a reselect, even though
+        /// UIKit has already moved `selectedItem` and the highlight to it
+        /// either way.
+        #[unsafe(method(tabBar:didSelectItem:))]
+        fn tab_bar_did_select_item(&self, _tab_bar: &UITabBar, item: &UITabBarItem) {
+            let tag = item.tag();
+            let Ok(index) = usize::try_from(tag) else {
+                log::debug!(
+                    "frust-native-widgets: slot {} tab item has a negative tag — dropped",
+                    self.slot()
+                );
+                return;
+            };
+            let kind = tap_kind(self.ivars().showing_tab.get(), index);
+            self.dispatch(kind, pack_index(tag), "tabBar:didSelectItem:");
+        }
+    }
+
     impl FrustNativeControlTarget {
         /// `Button`'s `TouchUpInside` action → [`EVENT_KIND_CLICK`], `detail`
         /// unused — the same shape as `crate::events::decode_click`'s whole
-        /// input.
+        /// input. Typed `UIControl` rather than `UIButton` because a
+        /// component may click-attach any control
+        /// ([`Self::attach_component`]); the sender is never read, and an
+        /// object argument's encoding is the same either way.
         #[unsafe(method(handleClick:))]
-        fn handle_click(&self, _sender: &UIButton) {
+        fn handle_click(&self, _sender: &UIControl) {
             self.dispatch(EVENT_KIND_CLICK, 0, "handleClick:");
         }
 
@@ -197,6 +293,66 @@ define_class!(
         fn handle_slider_drag_end(&self, _sender: &UISlider) {
             self.dispatch(EVENT_KIND_DRAG_END, 0, "handleSliderDragEnd:");
         }
+
+        /// `Segmented`'s `ValueChanged` action → [`EVENT_KIND_SELECTION`].
+        /// Reads the requested segment straight off the sender's
+        /// `selectedSegmentIndex` and packs it with [`pack_index`] — the
+        /// signed `NSInteger` verbatim, so a `UISegmentedControlNoSegment`
+        /// (`-1`) report survives the wire and decodes to no event
+        /// (`crate::controls::segmented::decode_event`). Every firing is a
+        /// genuine user tap (module doc's *No echo guard*).
+        #[unsafe(method(handleSegmentValueChanged:))]
+        fn handle_segment_value_changed(&self, sender: &UISegmentedControl) {
+            let detail = pack_index(sender.selectedSegmentIndex());
+            self.dispatch(EVENT_KIND_SELECTION, detail, "handleSegmentValueChanged:");
+        }
+
+        /// `Stepper`'s `ValueChanged` action → [`EVENT_KIND_VALUE_CHANGED`].
+        ///
+        /// `sender.value()` is already **platform-space**, the identical
+        /// shape [`Self::handle_slider_value_changed`] documents
+        /// (`crate::controls::stepper`'s module doc's *The `[0, span]`
+        /// mapping, exactly as `Slider`'s*): `create` pins `minimumValue` at
+        /// `0` and `maximumValue` at the app's span, so no `min` of its own;
+        /// `crate::controls::stepper::decode_event` adds it back identically
+        /// on both Apple arms. A genuinely separate action from the slider's
+        /// (module doc's top-level note) because `UIStepper.value` returns a
+        /// `double`, not the `float` `UISlider.value` returns — reusing the
+        /// slider's binding would read the wrong return width. `from_user` is
+        /// unconditionally `true` for the same reason
+        /// [`Self::handle_slider_value_changed`] gives: UIKit never sends
+        /// `ValueChanged` for a programmatic `setValue:`.
+        #[unsafe(method(handleStepperValueChanged:))]
+        fn handle_stepper_value_changed(&self, sender: &UIStepper) {
+            let detail = pack_value_changed(sender.value().round() as i32, true);
+            self.dispatch(
+                EVENT_KIND_VALUE_CHANGED,
+                detail,
+                "handleStepperValueChanged:",
+            );
+        }
+
+        /// `DatePicker`'s `ValueChanged` action → [`EVENT_KIND_DATE`].
+        ///
+        /// Reads the requested date straight off the sender's `date`,
+        /// converts it to a civil date through the shared Gregorian mapping
+        /// (`crate::controls::date_picker::foundation`, the one the control's
+        /// own setters use) and packs it with [`pack_date`]. A date outside
+        /// the representable range (a BC era, a year past 9999) has no
+        /// civil date to report and is dropped with a debug line rather than
+        /// fabricated. Every firing is a genuine user pick (module doc's *No
+        /// echo guard*).
+        #[unsafe(method(handleDateValueChanged:))]
+        fn handle_date_value_changed(&self, sender: &UIDatePicker) {
+            let Some(date) = civil_date(&sender.date()) else {
+                log::debug!(
+                    "frust-native-widgets: slot {} picked a date outside 0001-9999 — dropped",
+                    self.slot()
+                );
+                return;
+            };
+            self.dispatch(EVENT_KIND_DATE, pack_date(date), "handleDateValueChanged:");
+        }
     }
 );
 
@@ -205,7 +361,10 @@ impl FrustNativeControlTarget {
     /// [`Self::attach_button`]/[`Self::attach_switch`]/[`Self::attach_slider`]
     /// are the whole public construction surface.
     fn new(mtm: MainThreadMarker, slot: SlotId) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(slot);
+        let this = Self::alloc(mtm).set_ivars(TargetIvars {
+            slot,
+            showing_tab: Cell::new(None),
+        });
         // SAFETY: `NSObject`'s designated initializer, called on a freshly
         // allocated instance whose ivars are already set (mirrors
         // `crate::apple` camera's — `plugins/camera/src/apple.rs`'s
@@ -215,7 +374,7 @@ impl FrustNativeControlTarget {
 
     /// The slot this target reports events for.
     fn slot(&self) -> SlotId {
-        *self.ivars()
+        self.ivars().slot
     }
 
     /// Decode `(kind, detail)` and forward to
@@ -355,6 +514,225 @@ impl FrustNativeControlTarget {
             sel!(handleSliderDragEnd:),
             UIControlEvents::TouchUpInside | UIControlEvents::TouchUpOutside,
         );
+    }
+
+    /// Build a target for `slot` and wire it as `view`'s `ValueChanged`
+    /// action — `Segmented`'s whole selection-attach (Apple-arm-only control,
+    /// `crate::controls::APPLE_KINDS`).
+    pub(crate) fn attach_segmented(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UISegmentedControl,
+    ) -> Retained<Self> {
+        let target = Self::new(mtm, slot);
+        target.add(
+            view,
+            sel!(handleSegmentValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+        target
+    }
+
+    /// [`Self::attach_segmented`]'s inverse — called from `Segmented::dispose`.
+    pub(crate) fn detach_segmented(&self, view: &UISegmentedControl) {
+        self.remove(
+            view,
+            sel!(handleSegmentValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+    }
+
+    /// Build a target for `slot` and wire it as `view`'s `ValueChanged`
+    /// action — `Stepper`'s whole value-attach (Apple-arm-only control,
+    /// `crate::controls::APPLE_KINDS`). No drag-edge pair, unlike
+    /// [`Self::attach_slider`]: a stepper has no drag gesture to report
+    /// (`crate::controls::stepper`'s module doc's *No drag events*).
+    pub(crate) fn attach_stepper(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UIStepper,
+    ) -> Retained<Self> {
+        let target = Self::new(mtm, slot);
+        target.add(
+            view,
+            sel!(handleStepperValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+        target
+    }
+
+    /// [`Self::attach_stepper`]'s inverse — called from `Stepper::dispose`.
+    pub(crate) fn detach_stepper(&self, view: &UIStepper) {
+        self.remove(
+            view,
+            sel!(handleStepperValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+    }
+
+    /// Build a target for `slot` and wire it as `view`'s `ValueChanged`
+    /// action — `DatePicker`'s whole date-attach (a shared control; its
+    /// Android twin is `FrustNativeListener`'s `OnDateChangedListener`).
+    pub(crate) fn attach_date_picker(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UIDatePicker,
+    ) -> Retained<Self> {
+        let target = Self::new(mtm, slot);
+        target.add(
+            view,
+            sel!(handleDateValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+        target
+    }
+
+    /// [`Self::attach_date_picker`]'s inverse — called from
+    /// `DatePicker::dispose`.
+    pub(crate) fn detach_date_picker(&self, view: &UIDatePicker) {
+        self.remove(
+            view,
+            sel!(handleDateValueChanged:),
+            UIControlEvents::ValueChanged,
+        );
+    }
+
+    /// A target for `TabBar` slot `slot`, not yet the bar's delegate — the
+    /// bar's create plan runs against it first (every
+    /// [`Setter::SelectedTab`](crate::controls::Setter::SelectedTab) apply
+    /// calls [`Self::note_tab_showing`]), then [`Self::attach_tab_bar`] wires
+    /// it (iOS-only control, `crate::controls::IOS_ONLY_KINDS`).
+    pub(crate) fn tab_bar_target(mtm: MainThreadMarker, slot: SlotId) -> Retained<Self> {
+        Self::new(mtm, slot)
+    }
+
+    /// Record the item index the app has confirmed `view` shows (`None`: no
+    /// selection) — what the next tap is classified against ([`tap_kind`]).
+    /// Called only from a `Setter::SelectedTab` apply, never from a tap.
+    pub(crate) fn note_tab_showing(&self, index: Option<usize>) {
+        self.ivars().showing_tab.set(index);
+    }
+
+    /// Make this target `view`'s delegate — `TabBar`'s whole attach.
+    /// `UITabBar.delegate` is weak, so the caller's `State` retains `self`.
+    pub(crate) fn attach_tab_bar(&self, view: &UITabBar) {
+        view.setDelegate(Some(ProtocolObject::from_ref(self)));
+    }
+
+    /// [`Self::attach_tab_bar`]'s inverse — called from `TabBar::dispose`.
+    pub(crate) fn detach_tab_bar(&self, view: &UITabBar) {
+        view.setDelegate(None);
+    }
+
+    /// Build a target for `slot` and wire it onto `view` for whichever of the
+    /// three families are asked — the public `NativeComponent` path's attach
+    /// (`crate::component::ComponentCtx::attach_listener`), which supplies
+    /// `slot` from the component's context so the component never sees it.
+    ///
+    /// Each family is wired exactly as the matching built-in control wires
+    /// itself: `click` → [`Self::attach_button`]'s `TouchUpInside`,
+    /// `toggled` → [`Self::attach_switch`]'s `ValueChanged`,
+    /// `value_changed` → [`Self::attach_slider`]'s three pairs.
+    ///
+    /// `view` is checked **before** anything is attached, because two of the
+    /// action methods read their payload straight off the sender: `toggled`
+    /// needs a `UISwitch` (`isOn`) and `value_changed` a `UISlider`
+    /// (`value`), and `click` needs at least a `UIControl` to add a target
+    /// to. A mismatch answers `Err` naming it, with nothing wired.
+    ///
+    /// Answers the target (the caller's to retain — targets are held weakly)
+    /// and the control, retained so the caller can detach later
+    /// ([`Self::detach_component`]).
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn attach_component(
+        mtm: MainThreadMarker,
+        slot: SlotId,
+        view: &UIView,
+        click: bool,
+        toggled: bool,
+        value_changed: bool,
+    ) -> Result<(Retained<Self>, Retained<UIControl>), String> {
+        use objc2::Message as _;
+
+        let any: &AnyObject = view;
+        let control = any.downcast_ref::<UIControl>().ok_or_else(|| {
+            "iOS attach_listener: the view is not a UIControl, so no target-action can be \
+             attached to it"
+                .to_string()
+        })?;
+        if toggled && any.downcast_ref::<UISwitch>().is_none() {
+            return Err(
+                "iOS attach_listener: TOGGLED reads a UISwitch's isOn, and this control is no \
+                 UISwitch"
+                    .into(),
+            );
+        }
+        if value_changed && any.downcast_ref::<UISlider>().is_none() {
+            return Err(
+                "iOS attach_listener: VALUE_CHANGED reads a UISlider's value, and this control \
+                 is no UISlider"
+                    .into(),
+            );
+        }
+        let target = Self::new(mtm, slot);
+        target.wire(control, click, toggled, value_changed, true);
+        Ok((target, control.retain()))
+    }
+
+    /// [`Self::attach_component`]'s inverse: remove every target-action pair
+    /// it added for the same families. Removing a pair that is not there is a
+    /// documented UIKit no-op, so this is safe to run twice.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn detach_component(
+        &self,
+        control: &UIControl,
+        click: bool,
+        toggled: bool,
+        value_changed: bool,
+    ) {
+        self.wire(control, click, toggled, value_changed, false);
+    }
+
+    /// Add (`attach`) or remove every `(selector, events)` pair the requested
+    /// families mean — the one table [`Self::attach_component`] and
+    /// [`Self::detach_component`] share, so the two can never disagree.
+    #[cfg(feature = "frust-api")]
+    fn wire(
+        &self,
+        control: &UIControl,
+        click: bool,
+        toggled: bool,
+        value_changed: bool,
+        attach: bool,
+    ) {
+        let mut pairs: Vec<(Sel, UIControlEvents)> = Vec::with_capacity(5);
+        if click {
+            pairs.push((sel!(handleClick:), UIControlEvents::TouchUpInside));
+        }
+        if toggled {
+            pairs.push((
+                sel!(handleSwitchValueChanged:),
+                UIControlEvents::ValueChanged,
+            ));
+        }
+        if value_changed {
+            pairs.push((
+                sel!(handleSliderValueChanged:),
+                UIControlEvents::ValueChanged,
+            ));
+            pairs.push((sel!(handleSliderDragStart:), UIControlEvents::TouchDown));
+            pairs.push((
+                sel!(handleSliderDragEnd:),
+                UIControlEvents::TouchUpInside | UIControlEvents::TouchUpOutside,
+            ));
+        }
+        for (action, events) in pairs {
+            if attach {
+                self.add(control, action, events);
+            } else {
+                self.remove(control, action, events);
+            }
+        }
     }
 }
 

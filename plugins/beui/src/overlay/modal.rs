@@ -800,13 +800,19 @@ impl ModalWidget {
             // Hand the keyboard chain back: the panel is leaving, and nothing
             // inside it should keep the focus path. `EventCtx::release_focus`
             // only reaches the root's own focus session on a `Scroll`/`Key`/
-            // `Ime` dispatch (the root's event loop never consults a release
-            // on the `Pointer` arm), so a dismissal reached from the backdrop
-            // Up is deferred instead of dropped — [`Self::drain_focus_release`]
-            // fires it on this host's next pass of one of those kinds.
+            // `Ime`/`EditCommand` dispatch (the root's event loop never consults
+            // a release on the `Pointer` arm), so a dismissal reached from the
+            // backdrop Up is deferred instead of dropped — [`Self::drain_focus_release`]
+            // fires it on this host's next pass of one of those kinds. This set
+            // must mirror the exhaustive match in [`RenderRoot::event`]
+            // (crates/frust-core/src/app.rs) — see its arms for `Scroll`/`Key`/
+            // `Ime`/`EditCommand`.
             if matches!(
                 event,
-                InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_)
+                InputEvent::Scroll { .. }
+                    | InputEvent::Key(_)
+                    | InputEvent::Ime(_)
+                    | InputEvent::EditCommand(_)
             ) {
                 ctx.release_focus();
             } else {
@@ -822,7 +828,10 @@ impl ModalWidget {
         if !self.pending_focus_release
             || !matches!(
                 event,
-                InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_)
+                InputEvent::Scroll { .. }
+                    | InputEvent::Key(_)
+                    | InputEvent::Ime(_)
+                    | InputEvent::EditCommand(_)
             )
         {
             return;
@@ -1149,6 +1158,12 @@ impl Widget for ModalWidget {
             // on a keystroke its content declined.
             return EventResult::Handled;
         }
+        if matches!(event, InputEvent::EditCommand(_)) {
+            // Edit commands (Copy, Cut, Paste, SelectAll) are swallowed too:
+            // nothing behind a modal may act on an edit command its content
+            // declined.
+            return EventResult::Handled;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
@@ -1324,7 +1339,7 @@ mod tests {
     use frust::authoring::{
         Color, KeyEvent, Modifiers, PointerButton, PointerEvent, text::TextContext,
     };
-    use frust_core::RenderRoot;
+    use frust_core::{EditCommand, RenderRoot};
     use std::any::Any;
 
     const WINDOW: Size = Size::new(400.0, 600.0);
@@ -1694,6 +1709,12 @@ mod tests {
         fn escape(&mut self) -> bool {
             self.key(Key::Named(NamedKey::Escape))
         }
+
+        fn edit_command(&mut self, cmd: EditCommand) -> bool {
+            self.root
+                .event(&mut self.state, &InputEvent::EditCommand(cmd))
+                .handled
+        }
     }
 
     /// Where the centred panel lands in the test window.
@@ -1849,6 +1870,36 @@ mod tests {
         assert!(
             !h.root.is_focus_active(),
             "the deferred release lands on this settled-closed pass"
+        );
+    }
+
+    #[test]
+    fn a_backdrop_dismissal_still_releases_focus_on_an_edit_command_dispatch() {
+        let mut h = Harness::new(ModalConfig::centered());
+        h.settle();
+        h.pointer(PointerPhase::Down, 2.0, 2.0);
+        assert!(
+            h.root.is_focus_active(),
+            "the down seated the focus session"
+        );
+        h.pointer(PointerPhase::Up, 2.0, 2.0);
+        assert_eq!(h.state.dismissed, 1);
+        assert!(
+            h.root.is_focus_active(),
+            "the root's own event loop never consults a release on the \
+             pointer dispatch, so it cannot have moved yet"
+        );
+
+        // A rebuild syncs `open` onto the widget, same as a real reactive app
+        // — and the barrier, still mid-exit, still answers an edit command.
+        h.pass();
+        assert!(
+            h.edit_command(EditCommand::SelectAll),
+            "still up and still swallowing edit commands"
+        );
+        assert!(
+            !h.root.is_focus_active(),
+            "the deferred release lands on this edit command dispatch"
         );
     }
 

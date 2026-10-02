@@ -47,24 +47,21 @@ frust-material = { path = "../../plugins/material" }
 frust-cupertino = { path = "../../plugins/cupertino" }
 frust-glyph = { path = "../../plugins/glyph" }
 
-# clean-signals (the async/use-case/controller/retry substrate) is
-# git+rev-pinned to the public repo rather than the sibling `clean-signals-rs`
-# checkout, so a scaffolded `--arch clean-signals` project builds on any
+# clean-signals (the async/use-case/controller/retry substrate) resolves from
+# crates.io, so a scaffolded `--arch clean-signals` project builds on any
 # machine with no local checkout required. Both this crate and the in-repo
-# glue plugin (`plugins/clean-signals-frust`) MUST resolve `clean-signals` by
-# the identical `git`+`rev` spec — a hard requirement, not a convenience: two
-# different resolution routes (e.g. one git, one path) would build TWO
+# glue plugin (`plugins/clean-signals-frust`) MUST declare the identical
+# `clean-signals` requirement — a hard requirement, not a convenience: two
+# different resolution routes (e.g. one registry, one path) would build TWO
 # distinct crate identities for `clean-signals`, and the controller's
 # `AsyncState`/`ControllerCore`/`Failure` types would NOT unify with the glue
 # crate's `use_controller`/`async_view`/`use_failure_listener` bounds
-# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy). Package
-# `clean-signals` is a workspace member on `master`, so the git dep resolves
-# it by name with no subdirectory needed. Never enable the `effects` feature
-# (`clean-signals`'s own gate onto `reactive_graph/effects`) — the frame path
-# is a custom subscriber, not `RenderEffect` (same rule as the workspace's own
-# `reactive_graph` pin). Bump the `rev` and this comment's rationale together,
-# never silently.
-clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
+# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy). Never
+# enable the `effects` feature (`clean-signals`'s own gate onto
+# `reactive_graph/effects`) — the frame path is a custom subscriber, not
+# `RenderEffect` (same rule as the workspace's own `reactive_graph` pin).
+# Change the requirement at every site together, never silently.
+clean-signals = "0.1"
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
 # `log` facade dependency, present only so the release-only `lean` feature
@@ -78,7 +75,7 @@ clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 # builds only (riding the same features plumbing that turns on
 # `frust/perf-trace` for debug/profile), so release strips stray info/debug
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
+# `frust-perf` output. Mirrors `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
 # Test-harness-only, NOT an escape hatch: the headless screen tests
@@ -114,7 +111,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 # release-only opt-in rather than an unconditional manifest feature. The CLI
 # passes `--features lean` for `--release` builds; debug/profile builds omit
 # it (and enable `frust/perf-trace` instead). Mirrors
-# `templates/app/Cargo.toml.tmpl`'s block verbatim.
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
@@ -137,7 +134,7 @@ lean = ["log/release_max_level_warn"]
 # that protects render-path perf is in place, so `opt-level` stays at its
 # default (3) and no carve-out is needed. This block, its `[profile.profile]`
 # counterpart, and the `[profile.dev.package."*"]` wildcard below are
-# hand-synced across the root `Cargo.toml` and `templates/app/
+# hand-synced across the root `Cargo.toml` and `crates/frust-drive/templates/app/
 # Cargo.toml.tmpl` (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
 # the `catalog` and `inbox` examples this used to also be hand-synced
 # against were later deleted along with the examples themselves).
@@ -146,6 +143,44 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
+# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
+# per-frame path (shader translation, one-shot parsing/decode) while every
+# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
+# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
+# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+
+[profile.release.package.naga]
+opt-level = "z"
+
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+[profile.release.package.ash]
+opt-level = "z"
+
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
+[profile.release.package.roxmltree]
+opt-level = "z"
+
+[profile.release.package.fontique]
+opt-level = "z"
+
+[profile.release.package.mio]
+opt-level = "z"
+
+[profile.release.package.image]
+opt-level = "z"
+
+[profile.release.package.png]
+opt-level = "z"
+# END release cold-set opt-level overrides
 
 # `--profile` mode: release performance with symbols + tracing kept for
 # on-device performance measurement. Artifacts land in
@@ -161,7 +196,7 @@ strip = "none"
 # a debug `frust run` before the synchronous, main-thread launch-time
 # shader compile finishes — huddle is the iOS device vehicle,
 # so it needs this fix too. Identical values to the root `Cargo.toml`/
-# `templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p frust-cli
+# `crates/frust-drive/templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p frust-cli
 # --test profile_sync` is the automated tripwire.
 [profile.dev.package.wgpu]
 opt-level = 2
@@ -190,7 +225,7 @@ opt-level = 2
 # profile-override docs); this app's own code stays at the fast default dev
 # opt-level, and the named shader-stack overrides above (opt-level 2) still
 # win over this wildcard since a named package override takes precedence over
-# `"*"`. Hand-synced across the root `Cargo.toml` and `templates/app/
+# `"*"`. Hand-synced across the root `Cargo.toml` and `crates/frust-drive/templates/app/
 # Cargo.toml.tmpl` (the `catalog` and `inbox` examples this used to also be
 # hand-synced against were later deleted along with the examples
 # themselves).

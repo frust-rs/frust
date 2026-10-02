@@ -1581,4 +1581,32 @@ mod tests {
             "Here is the patch: the validation gap is closed and the suite is green."
         );
     }
+
+    // ---- Typeface: the assembled transcript follows the live theme ----------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// One finished exchange with an empty composer. The composer's field is
+    /// the wrapped baseline `text_input`, which has no themed-family opt-in, so
+    /// it carries neither a value nor a placeholder and paints no run here; the
+    /// transcript's avatars and message bodies are what these tests pin.
+    fn probe_view(_: &mut ()) -> ChatConversationView<()> {
+        let mut model = ChatModel::new();
+        assert!(model.submit("Is the gap closed?"));
+        model.push_token(REPLY);
+        model.finish_reply();
+        chat_conversation::<()>(&model).placeholder("")
+    }
+
+    #[test]
+    fn the_transcript_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the conversation", probe_view, PANE);
+    }
+
+    #[test]
+    fn the_transcript_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the conversation", probe_view, PANE);
+    }
 }

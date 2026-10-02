@@ -327,6 +327,8 @@ impl<State: 'static> PromptInputView<State> {
     /// and the Enter contract set.
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
+        // The prompt and placeholder keep the baseline `text_input`'s own
+        // family: that field has no themed-family seam.
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })

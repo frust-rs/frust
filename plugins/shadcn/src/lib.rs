@@ -74,13 +74,16 @@
 //!
 //! # Fonts
 //!
-//! Inter Variable and JetBrains Mono Variable are bundled **unconditionally**
-//! (`include_bytes!`) — depending on this plugin is itself the opt-in, so there
-//! is no second feature to switch them off with. Both are OFL-1.1 with no
-//! Reserved Font Name, and ship with their license text and provenance record
-//! (`plugins/shadcn/fonts/README.md`). [`install`] registers both faces and the
-//! theme binds Inter into the `NativeTypefaces` slots native controls read;
-//! [`font_data`] exposes the raw bytes for a host that wants them directly.
+//! Inter Variable and JetBrains Mono Variable are compiled in and registered
+//! by [`install`] behind the crate's `bundled-fonts` feature (default on); an
+//! app that sets `default-features = false` on this dependency compiles in
+//! no font bytes, `install()` registers neither face, and text falls back to
+//! the platform's system faces through fontique (Roboto on Android). Both
+//! are OFL-1.1 with no Reserved Font Name, and ship with their license text
+//! and provenance record (`plugins/shadcn/fonts/README.md`). When bundled,
+//! the theme binds Inter into the `NativeTypefaces` slots native controls
+//! read; [`font_data`] exposes the raw bytes for a host that wants them
+//! directly.
 
 mod components;
 mod hit;
@@ -130,8 +133,9 @@ pub use tokens::theme::theme;
 ///    exactly what shadcn's own `.dark` class variant does on the web).
 /// 2. `frust::register_app_fonts` for both bundled faces, so the type scale's
 ///    Inter stack and [`mono_family`](tokens::mono_family)'s JetBrains Mono
-///    stack actually resolve. The faces are compiled in unconditionally (see the
-///    crate docs' *Fonts* section).
+///    stack actually resolve. The faces are compiled in behind the crate's
+///    `bundled-fonts` feature (default on) — see the crate docs' *Fonts*
+///    section for the `default-features = false` opt-out.
 ///
 /// The seeded theme is the `neutral` base preset; an app wanting another calls
 /// `set_default_theme` itself with one of the `theme_*` constructors.
@@ -186,7 +190,11 @@ mod tests {
         let _: crate::ShadcnSidebar = crate::ShadcnBase::Zinc.dark().sidebar;
         let _: crate::ShadcnRadius = crate::ShadcnTokens::shadcn().radius;
         assert_eq!(crate::RADIUS_BASE, theme.shape.medium);
-        assert_eq!(crate::font_data().len(), 2);
+        if cfg!(feature = "bundled-fonts") {
+            assert_eq!(crate::font_data().len(), 2);
+        } else {
+            assert!(crate::font_data().is_empty());
+        }
 
         // ...and the module paths the components consume read-only.
         assert_eq!(crate::style::HEIGHT_DEFAULT, 36.0);
@@ -236,5 +244,103 @@ mod tests {
     fn install_is_safe_to_call_twice() {
         crate::install();
         crate::install();
+    }
+
+    /// Read a big-endian `u16` out of an sfnt-family byte slice at `offset`.
+    #[cfg(feature = "bundled-fonts")]
+    fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    /// Read a big-endian `u32` out of an sfnt-family byte slice at `offset`.
+    #[cfg(feature = "bundled-fonts")]
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    /// Minimal sfnt `fvar` table reader: locates the `fvar` table via the
+    /// sfnt table directory, then returns the axis tag of every axis record
+    /// (`fvar+8` axisCount, `fvar+4` offsetToAxesArray, 20-byte axis records —
+    /// see OpenType spec "Variable Fonts" § `fvar`). No third-party font
+    /// parser: the whole point of this check is a dependency-free regression
+    /// tripwire on `frust-shadcn`'s own bundled bytes, mirroring
+    /// `frust-material`'s identical check on Roboto Flex.
+    ///
+    /// Returns an empty `Vec` for a font with no `fvar` table (i.e. a static,
+    /// non-variable font) rather than panicking.
+    #[cfg(feature = "bundled-fonts")]
+    fn fvar_axis_tags(bytes: &[u8]) -> Vec<[u8; 4]> {
+        let num_tables = read_u16(bytes, 4) as usize;
+        let mut fvar_offset = None;
+        for i in 0..num_tables {
+            let record = 12 + i * 16;
+            let tag = &bytes[record..record + 4];
+            if tag == b"fvar" {
+                fvar_offset = Some(read_u32(bytes, record + 8) as usize);
+                break;
+            }
+        }
+        let Some(fvar_offset) = fvar_offset else {
+            return Vec::new();
+        };
+
+        let axes_array_offset = read_u16(bytes, fvar_offset + 4) as usize;
+        let axis_count = read_u16(bytes, fvar_offset + 8) as usize;
+        let axis_size = read_u16(bytes, fvar_offset + 10) as usize;
+        assert_eq!(axis_size, 20, "fvar axis record size must be 20 bytes");
+
+        (0..axis_count)
+            .map(|i| {
+                let record = fvar_offset + axes_array_offset + i * axis_size;
+                let mut tag = [0u8; 4];
+                tag.copy_from_slice(&bytes[record..record + 4]);
+                tag
+            })
+            .collect()
+    }
+
+    /// Inter must be the `wght`-only instance `tokens::fonts`'s module doc
+    /// documents, not the 2-axis (`opsz`+`wght`) upstream font: one `fvar`
+    /// axis, tagged `wght`. A regression back to the full variable font (or
+    /// the loss of `wght` variability) must fail this test, not silently
+    /// re-bloat the plugin's bundled bytes.
+    ///
+    /// Indexes `font_data()[0]` directly rather than through
+    /// `tokens::fonts::INTER_VARIABLE_INDEX` (private to the `tokens::fonts`
+    /// module): `font_data`'s own doc comment documents the array's fixed
+    /// order as "Inter Variable, then JetBrains Mono Variable", so `[0]` is
+    /// Inter by that public contract, not an incidental array position.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn inter_is_a_wght_only_instance() {
+        let bytes = crate::font_data()[0];
+        let axes = fvar_axis_tags(bytes);
+        assert_eq!(
+            axes,
+            vec![*b"wght"],
+            "Inter must carry exactly one fvar axis, `wght`; got {axes:?}"
+        );
+    }
+
+    /// Length ceiling on the vendored Inter bytes: well above the ~636 KB
+    /// instanced size, but far below the ~880 KB upstream `opsz`+`wght` font,
+    /// so a regression to the full variable font fails this test instead of
+    /// silently landing in a release build. See `inter_is_a_wght_only_instance`
+    /// for why `[0]` is Inter.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn inter_is_smaller_than_the_upstream_variable_font() {
+        let bytes = crate::font_data()[0];
+        assert!(
+            bytes.len() < 700_000,
+            "Inter must be the wght-only instance (< 700,000 B); got {} B \
+             — did the bundled font regress to the full upstream variable font?",
+            bytes.len()
+        );
     }
 }

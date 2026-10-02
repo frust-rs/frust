@@ -45,6 +45,13 @@
 //!   no variant for it, and reporting one as `ios-sim:<udid>` would be a lie.
 //! - **`restart_app` on a session with no launch record** — nothing here can
 //!   reconstruct a spec it never saw ([`EmbeddedError::Unsupported`]).
+//! - **`run_app` onto a (project, target) the workbench is already running**
+//!   — refused as [`EmbeddedError::AlreadyRunning`], naming the live session
+//!   so an agent can `stop_app` or `restart_app` it. The guard reads the
+//!   workbench's *own* sessions, not only MCP-launched ones (one session
+//!   world), and runs before the cap check and before any bookkeeping.
+//!   `restart_app` excludes the session it restarts — it stops it first — so
+//!   a 1-for-1 relaunch is never refused by its own predecessor.
 //! - **`run_app`/`restart_app` once [`MCP_RECORD_CAP`] MCP-launched sessions
 //!   are already live** — refused as [`EmbeddedError::TooManySessions`],
 //!   with **no bookkeeping**: no record, no `RegisterSession`, no ad-hoc tab.
@@ -62,7 +69,7 @@
 //!   truly unknown id gets, not a crash, but a real divergence this doc
 //!   records rather than hides.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -84,7 +91,9 @@ use super::{
     DeviceTarget, DevtoolsBridge, SessionEvent, SessionEventKind, SessionId, SessionSpec,
     SessionState, Supervisor,
 };
-use crate::engine::{AppState, ConnState, DevtoolsLaunch, Message, SamplingState, SessionView};
+use crate::engine::{
+    AppState, ConnState, DevtoolsLaunch, Message, SamplingState, SessionTarget, SessionView,
+};
 
 /// How long a backend method waits for the event loop to answer before
 /// reporting [`EmbeddedError::WorkbenchUnreachable`].
@@ -161,6 +170,22 @@ pub enum EmbeddedError {
     TooManySessions {
         /// The cap that was hit ([`MCP_RECORD_CAP`]).
         cap: usize,
+    },
+    /// The workbench is already running this project on this target. Refused
+    /// **before any bookkeeping**, exactly like [`Self::TooManySessions`] —
+    /// one live session per (project, device), whichever front end launched
+    /// it. The message names the session an agent can act on, since the
+    /// blocker may well be one the *user* started by hand.
+    #[error(
+        "session {session} is already running {target} — stop it (stop_app) or restart it \
+         (restart_app)"
+    )]
+    AlreadyRunning {
+        /// The live session occupying the target.
+        session: u64,
+        /// The target it occupies, named the way the workbench names it
+        /// (`desktop`, or the device's own name).
+        target: String,
     },
 }
 
@@ -414,6 +439,14 @@ pub struct SessionRecord {
 #[derive(Debug, Default)]
 pub struct McpSessionRecords {
     by_id: HashMap<SessionId, SessionRecord>,
+    /// Record ids that have been seen with a session view in `AppState` at
+    /// least once ([`Self::observe`]). A record in here whose view is gone
+    /// had its tab removed (closed, restarted, or cleared) — terminal, not
+    /// the not-yet-registered fresh launch a missing view otherwise means.
+    observed: HashSet<SessionId>,
+    /// Record ids whose session was explicitly replaced or closed by the
+    /// runner ([`Self::mark_closed`]) — terminal even if never observed.
+    closed: HashSet<SessionId>,
 }
 
 impl McpSessionRecords {
@@ -452,27 +485,53 @@ impl McpSessionRecords {
         self.by_id.get(&id)
     }
 
+    /// Mark every record whose session currently has a view in `state` as
+    /// observed — the half of [`Self::record_is_terminal`]'s join that lets a
+    /// record whose tab has since been *removed* count as terminal.
+    ///
+    /// The runner calls this after every `update()` application: the pure
+    /// engine removes tabs (close, restart, a close-on-exit session ending)
+    /// without being able to tell the runner-owned records, so this is how a
+    /// removal becomes visible here. O(tabs) — one map lookup per view.
+    pub fn observe(&mut self, state: &AppState) {
+        for view in &state.sessions {
+            if self.by_id.contains_key(&view.id) {
+                self.observed.insert(view.id);
+            }
+        }
+    }
+
+    /// Mark `id`'s session as closed — the runner calls this for the session
+    /// a keyboard restart replaces, before relaunching its spec, so the old
+    /// record stops counting as live even if its tab was removed before a
+    /// view was ever observed.
+    pub fn mark_closed(&mut self, id: SessionId) {
+        if self.by_id.contains_key(&id) {
+            self.closed.insert(id);
+        }
+    }
+
     /// Evict oldest-terminal-first past [`MCP_RECORD_CAP`], mirroring
     /// `frust_mcp::engine`'s own `insert_retaining` shape.
     ///
-    /// A record alone carries no live [`McpSessionState`] — only joining
-    /// against `state`'s session views through [`session_state`] can say
-    /// whether its session has actually ended (see this type's doc). A
-    /// record this pass cannot find a view for (the just-launched one, whose
-    /// `RegisterSession` the caller posted but the loop has not applied yet
-    /// — see [`serve_command`]'s ordering note) is treated as live, never
-    /// terminal: unprovable terminal-ness must never be evicted.
+    /// Terminal-ness is [`Self::record_is_terminal`]'s join against `state`'s
+    /// session views plus this registry's own observed/closed marks (see
+    /// that fn for both halves); unprovable terminal-ness — a just-launched
+    /// record with no view yet — is never evicted.
     fn retain_bounded(&mut self, state: &AppState) {
+        self.observe(state);
         let mut terminal: Vec<(SessionId, SystemTime)> = self
             .by_id
             .iter()
-            .filter(|(id, record)| record_is_terminal(state, **id, record))
+            .filter(|(id, record)| self.record_is_terminal(state, **id, record))
             .map(|(id, record)| (*id, record.started_at))
             .collect();
         terminal.sort_by_key(|(_, started_at)| *started_at);
         let excess = terminal.len().saturating_sub(MCP_RECORD_CAP);
         for (id, _) in terminal.into_iter().take(excess) {
             self.by_id.remove(&id);
+            self.observed.remove(&id);
+            self.closed.remove(&id);
         }
     }
 
@@ -485,21 +544,31 @@ impl McpSessionRecords {
         self.by_id
             .iter()
             .filter(|(id, _)| Some(**id) != exclude)
-            .filter(|(id, record)| !record_is_terminal(state, **id, record))
+            .filter(|(id, record)| !self.record_is_terminal(state, **id, record))
             .count()
     }
-}
 
-/// Whether `id`'s record is provably terminal, joining against `state`'s
-/// session views through [`session_state`] — see
-/// [`McpSessionRecords::retain_bounded`]. `false` (treated as live) when
-/// `state` does not yet contain a view for `id`, never assumed.
-fn record_is_terminal(state: &AppState, id: SessionId, record: &SessionRecord) -> bool {
-    state
-        .sessions
-        .iter()
-        .find(|view| view.id == id)
-        .is_some_and(|view| session_state(view, record).is_terminal())
+    /// Whether `id`'s record is provably terminal.
+    ///
+    /// With a view in `state`, the view decides (through
+    /// [`session_state`]). With none, two cases look alike and must not be
+    /// confused:
+    ///
+    /// - **Never seen with a view** — the just-launched session whose
+    ///   `RegisterSession` the caller posted but the loop has not applied yet
+    ///   (see [`serve_command`]'s ordering note). Treated as live: unprovable
+    ///   terminal-ness must never be evicted or uncounted.
+    /// - **Seen before, or explicitly closed** ([`Self::observe`],
+    ///   [`Self::mark_closed`]) — its tab has been removed (closed,
+    ///   replaced by a restart), so the session is gone: terminal, which is
+    ///   what keeps a long run of keyboard restarts from inflating
+    ///   [`Self::live_count`] and lets [`Self::retain_bounded`] evict it.
+    fn record_is_terminal(&self, state: &AppState, id: SessionId, record: &SessionRecord) -> bool {
+        match state.sessions.iter().find(|view| view.id == id) {
+            Some(view) => session_state(view, record).is_terminal(),
+            None => self.observed.contains(&id) || self.closed.contains(&id),
+        }
+    }
 }
 
 // ── The running server's handle ─────────────────────────────────────────────
@@ -914,9 +983,12 @@ fn no_devtools_reason(view: &SessionView) -> String {
 /// Launch one session for the workbench's active project.
 ///
 /// Refuses **before any bookkeeping** — no spec built, no supervisor call,
-/// no record, no `RegisterSession` — once [`MCP_RECORD_CAP`] MCP-launched
-/// sessions are already live: a refusal that still registered a session
-/// would grow `AppState::sessions` faster than a successful launch does.
+/// no record, no `RegisterSession` — in two cases: the workbench already has
+/// a live session for this project on this target
+/// ([`EmbeddedError::AlreadyRunning`]), or [`MCP_RECORD_CAP`] MCP-launched
+/// sessions are already live ([`EmbeddedError::TooManySessions`]). A refusal
+/// that still registered a session would grow `AppState::sessions` faster
+/// than a successful launch does.
 ///
 /// Otherwise, a launch that cannot start (no project open, or a spawn
 /// failure) still produces a session: it is registered under an ad-hoc id
@@ -928,6 +1000,19 @@ fn run_app(
     target: DeviceTarget,
     mode: BuildMode,
 ) -> Result<McpSessionId, EmbeddedError> {
+    // The duplicate guard runs first, and against the *workbench's* sessions
+    // rather than only MCP-launched ones: the session already on this target
+    // is as likely to be one the user started by hand, and launching a second
+    // one would replace its app behind its own still-streaming tab.
+    if let Some(project_root) = ctx.state.project_root.as_deref() {
+        let identity = SessionTarget::of(&target);
+        if let Some(live) = ctx.state.live_session_for(project_root, &identity) {
+            return Err(EmbeddedError::AlreadyRunning {
+                session: live.0,
+                target: identity.label(),
+            });
+        }
+    }
     if ctx.records.live_count(ctx.state, None) >= MCP_RECORD_CAP {
         return Err(EmbeddedError::TooManySessions {
             cap: MCP_RECORD_CAP,
@@ -970,6 +1055,9 @@ fn start_session(ctx: &mut McpServeCtx<'_>, spec: SessionSpec) -> McpSessionId {
                 project_root: spec.project_root.clone(),
                 target_label: label,
                 devtools: devtools_launch(&spec),
+                // An MCP/DAP launch owns its target exactly like a
+                // user-driven one — one session world, one guard.
+                target: Some(SessionTarget::of(&spec.target)),
             });
             ctx.records.insert(id, spec);
             ctx.records.retain_bounded(ctx.state);
@@ -1006,6 +1094,9 @@ fn failed_launch(
         project_root: spec.project_root.clone(),
         target_label: label,
         devtools: DevtoolsLaunch::unavailable(),
+        // A launch that never started occupies no target: this tab exists
+        // only to carry the error, and is `Exited` a message later anyway.
+        target: None,
     });
     let _ = ctx.tx.send(Message::Session(SessionEvent {
         id,
@@ -1025,7 +1116,18 @@ fn failed_launch(
 /// Refused at [`MCP_RECORD_CAP`] like `run_app`, but excluding the session
 /// being restarted from the live count: a 1-for-1 restart nets no growth in
 /// live sessions, so it must not be refused just because the cap is already
-/// exactly met.
+/// exactly met. The duplicate guard is excluded the same way and for the same
+/// reason — the session it would trip over is the one being replaced — while
+/// any *other* live session on that target still refuses it.
+///
+/// This and `crate::engine::update`'s `restart_session` (the `R` key /
+/// palette "Restart session" row) share one contract — the same duplicate
+/// guard (`live_session_for_excluding`, excluding the session being
+/// restarted), stop, relaunch the retained spec — one over an MCP id, the
+/// other over the active tab; keep them aligned rather than letting either
+/// drift. MCP additionally applies its record cap
+/// ([`McpSessionRecords::live_count`], excluding self); the keyboard path has
+/// no cap, like the keyboard's own launches.
 fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSessionId, EmbeddedError> {
     let Some(view) = mcp_view(ctx.state, ctx.records, id) else {
         return Err(EmbeddedError::NoSuchSession(id.0));
@@ -1039,6 +1141,19 @@ fn restart_app(ctx: &mut McpServeCtx<'_>, id: McpSessionId) -> Result<McpSession
             what: "restart_app",
             why: "this session never launched — it exists only to report the error. \
                   Fix the cause and call run_app again",
+        });
+    }
+    // The duplicate guard, excluding the session being restarted — it is
+    // stopped below, so it must not refuse its own relaunch. Any *other* live
+    // session on that target still does.
+    let identity = SessionTarget::of(&record.spec.target);
+    if let Some(live) =
+        ctx.state
+            .live_session_for_excluding(&record.spec.project_root, &identity, Some(session))
+    {
+        return Err(EmbeddedError::AlreadyRunning {
+            session: live.0,
+            target: identity.label(),
         });
     }
     if ctx.records.live_count(ctx.state, Some(session)) >= MCP_RECORD_CAP {
@@ -1357,6 +1472,29 @@ mod tests {
         )
     }
 
+    /// A *live* session that occupies `target` — what the duplicate guard
+    /// reads, as opposed to [`view`]'s targetless ad-hoc tab.
+    fn app_view(id: u64, target: SessionTarget) -> SessionView {
+        let mut view = SessionView::with_devtools(
+            SessionId(id),
+            PathBuf::from("/tmp/frust-tui-mcp-unit"),
+            target.label(),
+            DevtoolsLaunch::unavailable(),
+            Some(target),
+        );
+        view.state = SessionState::Running;
+        view
+    }
+
+    /// An `AppState` open on the unit-test project, holding `sessions`.
+    fn open_state(sessions: Vec<SessionView>) -> AppState {
+        AppState {
+            project_root: Some(PathBuf::from("/tmp/frust-tui-mcp-unit")),
+            sessions,
+            ..AppState::default()
+        }
+    }
+
     fn backend() -> TuiSessionBackend {
         let (tx, rx) = unbounded_channel();
         // The receiver is dropped on purpose in the callers that want the
@@ -1652,6 +1790,113 @@ mod tests {
         );
     }
 
+    /// A running view for `id` — what a registered, live session looks like.
+    fn running_view(id: u64) -> SessionView {
+        let mut v = view(id);
+        v.state = SessionState::Running;
+        v
+    }
+
+    #[test]
+    fn a_record_whose_tab_was_removed_after_registration_is_terminal_and_evictable() {
+        let mut records = McpSessionRecords::new();
+        // The single oldest record: pure age-sorted eviction would take it
+        // first, but only if it is terminal.
+        records.by_id.insert(
+            SessionId(0),
+            SessionRecord {
+                spec: spec(DeviceTarget::Desktop),
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                launch_error: None,
+            },
+        );
+        let registered = state_with(running_view(0));
+        records.observe(&registered);
+        assert_eq!(records.live_count(&registered, None), 1);
+
+        // Its tab is removed (closed / replaced) — the view is gone.
+        let mut views = Vec::new();
+        for seq in 1..=MCP_RECORD_CAP as u64 {
+            push_terminal(&mut records, &mut views, seq);
+        }
+        let removed = state_with_many(views);
+        assert_eq!(
+            records.live_count(&removed, None),
+            0,
+            "a record seen with a view that has since gone is not live"
+        );
+
+        records.retain_bounded(&removed);
+        assert!(
+            records.get(SessionId(0)).is_none(),
+            "the removed tab's record is the oldest terminal one and is evicted"
+        );
+        assert_eq!(records.by_id.len(), MCP_RECORD_CAP);
+    }
+
+    #[test]
+    fn a_fresh_launch_with_no_view_yet_is_still_live() {
+        let mut records = McpSessionRecords::new();
+        records.by_id.insert(
+            SessionId(0),
+            SessionRecord {
+                spec: spec(DeviceTarget::Desktop),
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                launch_error: None,
+            },
+        );
+        let mut views = Vec::new();
+        for seq in 1..=(MCP_RECORD_CAP + 1) as u64 {
+            push_terminal(&mut records, &mut views, seq);
+        }
+        // No view for session 0: its `RegisterSession` has not been applied.
+        let state = state_with_many(views);
+
+        assert_eq!(records.live_count(&state, None), 1);
+        records.retain_bounded(&state);
+        assert!(
+            records.get(SessionId(0)).is_some(),
+            "a never-registered launch is unprovably terminal and must survive"
+        );
+        assert_eq!(records.live_count(&state, None), 1);
+    }
+
+    #[test]
+    fn thirty_three_keyboard_restarts_leave_live_count_at_one() {
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let mut state = state_with(running_view(0));
+        records.observe(&state);
+
+        for id in 1..=33u64 {
+            // The runner's restart enactment: the replaced record is closed,
+            // the relaunch recorded; its tab has not registered yet and the
+            // old one is already gone.
+            records.mark_closed(SessionId(id - 1));
+            records.insert(SessionId(id), spec(DeviceTarget::Desktop));
+            state = state_with_many(Vec::new());
+            records.observe(&state);
+            assert_eq!(
+                records.live_count(&state, None),
+                1,
+                "restart {id}: only the unregistered relaunch counts as live"
+            );
+
+            // The relaunch registers.
+            state = state_with(running_view(id));
+            records.observe(&state);
+            records.retain_bounded(&state);
+            assert!(
+                records.by_id.len() <= MCP_RECORD_CAP + 1,
+                "restart {id}: the record map stays bounded ({} records)",
+                records.by_id.len()
+            );
+        }
+
+        assert_eq!(records.live_count(&state, None), 1);
+        assert!(records.get(SessionId(33)).is_some());
+    }
+
     #[test]
     fn run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached() {
         let (tx, mut rx) = unbounded_channel();
@@ -1704,6 +1949,154 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "the refusal must post no message onto the engine channel at all"
+        );
+    }
+
+    #[test]
+    fn run_app_refuses_a_target_the_workbench_is_already_running() {
+        let (tx, mut rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        // The blocker is a session the *user* started: no MCP record at all,
+        // so nothing but the workbench's own model can see it.
+        let state = open_state(vec![app_view(4, SessionTarget::Desktop)]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        let result = run_app(&mut ctx, DeviceTarget::Desktop, BuildMode::Debug);
+
+        assert_eq!(
+            result,
+            Err(EmbeddedError::AlreadyRunning {
+                session: 4,
+                target: "desktop".to_string(),
+            })
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("stop it (stop_app)") && message.contains("restart it (restart_app)"),
+            "the refusal must name the way out: {message}"
+        );
+        // Refused before any bookkeeping, exactly like the cap refusal.
+        assert!(records.by_id.is_empty(), "a refusal inserts no record");
+        assert!(
+            rx.try_recv().is_err(),
+            "a refusal posts no message onto the engine channel"
+        );
+    }
+
+    #[test]
+    fn run_app_allows_a_target_no_live_session_occupies() {
+        let (tx, _rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        let state = open_state(vec![app_view(4, SessionTarget::Desktop)]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        // A device is a different place from the desktop preview the live
+        // session occupies. (The launch itself still fails past the guard —
+        // `FakeProcessRunner` has no script for it — which is
+        // `start_session`'s concern, not this one.)
+        let result = run_app(
+            &mut ctx,
+            DeviceTarget::Device(device(Platform::Android, Kind::Emulator)),
+            BuildMode::Debug,
+        );
+
+        assert!(
+            !matches!(result, Err(EmbeddedError::AlreadyRunning { .. })),
+            "only the same (project, target) pair is exclusive: {result:?}"
+        );
+    }
+
+    #[test]
+    fn restart_app_is_never_refused_by_the_session_it_restarts() {
+        let (tx, _rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let state = open_state(vec![app_view(0, SessionTarget::Desktop)]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        let result = restart_app(&mut ctx, McpSessionId(0));
+
+        assert!(
+            !matches!(result, Err(EmbeddedError::AlreadyRunning { .. })),
+            "a restart stops the session it replaces, so it cannot block itself: {result:?}"
+        );
+    }
+
+    #[test]
+    fn restart_app_is_refused_when_another_session_holds_the_target() {
+        let (tx, _rx) = unbounded_channel();
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(0), spec(DeviceTarget::Desktop));
+        // A second, user-started session took the same target meanwhile.
+        let state = open_state(vec![
+            app_view(0, SessionTarget::Desktop),
+            app_view(1, SessionTarget::Desktop),
+        ]);
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut ctx = McpServeCtx {
+            state: &state,
+            supervisor: &mut supervisor,
+            records: &mut records,
+            tx: &tx,
+            next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
+        };
+
+        assert_eq!(
+            restart_app(&mut ctx, McpSessionId(0)),
+            Err(EmbeddedError::AlreadyRunning {
+                session: 1,
+                target: "desktop".to_string(),
+            }),
+            "the exemption covers the restarted session only"
         );
     }
 

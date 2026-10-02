@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Debug Adapter Protocol server for Frust, embedded in its host and sharing the host's app sessions."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 # A library only, and an *embedded* one: the DAP server runs inside its host
 # (`frust-tui`), on the host's runtime and over the host's session backend —
@@ -20,11 +26,11 @@ path = "src/lib.rs"
 # The device/build vocabulary a launch resolves into (`Device`, `BuildMode`,
 # the devtools-error classifiers) — the same library `frust-mcp`/`frust-tui`
 # build on.
-frust-drive = { path = "../frust-drive" }
+frust-drive = { path = "../frust-drive", version = "0.5.0" }
 # `SessionBackend` — the seam the embedded DAP server drives, so a DAP client
 # and an MCP client supervise the *same* sessions rather than each owning a
 # world of their own.
-frust-mcp = { path = "../frust-mcp" }
+frust-mcp = { path = "../frust-mcp", version = "0.5.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -56,4 +62,4 @@ tokio = { workspace = true, features = [
 # `frust-mcp`/`frust-tui` use, so an adapter test never shells out for real.
 # A feature toggle on a dependency this crate already has: no new package
 # enters the graph and `Cargo.lock` is unchanged.
-frust-drive = { path = "../frust-drive", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.5.0", features = ["test-util"] }

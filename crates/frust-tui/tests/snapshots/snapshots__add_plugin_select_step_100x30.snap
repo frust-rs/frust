@@ -7,7 +7,7 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (1-9 of 14)         │▓▓                
+                  │  Choose a plugin to add to this project  (1-9 of 18)         │▓▓                
  DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
    none found     │        Synchronous, thread-safe key-value store              │▓▓                
                   │    ( ) secure-storage                                        │▓▓                
@@ -17,18 +17,18 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
  ACTIONS          │    ( ) camera                                                │▓▓                
    New project · n│        Camera preview (a platform view), still capture, and  │▓▓                
    Add plugin · a │    ( ) native-widgets                                        │▓▓                
-   Doctor · d     │        Real OS controls (button, label, switch, slider,      │▓▓                
+   Doctor · i     │        Real OS controls (button, label, switch, slider,      │▓▓                
    Build · b      │    ( ) clipboard                                             │▓▓                
    Clean · c      │        Synchronous plain-text clipboard access               │▓▓                
    MCP off · M    │    ( ) haptics                                               │▓▓                
    DAP off · D    │        Minimal haptic feedback (selection tick, impact,      │▓▓                
-                  │    ( ) iap                                                   │▓▓                
-                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
-                  │    ( ) database                                              │▓▓                
-                  │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+                  │    ( ) url-launcher                                          │▓▓                
+                  │        Open an absolute http/https URL in the platform's     │▓▓                
+                  │    ( ) auth-session                                          │▓▓                
+                  │        OAuth round trip in the platform auth user agent —    │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

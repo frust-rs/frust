@@ -85,7 +85,7 @@ use frust::{FrameTime, Theme};
 use crate::motion::Ramp;
 use crate::press::presses;
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 /// One row's height, in logical px (`h-9`).
@@ -289,20 +289,18 @@ fn resolve_colors(theme: Option<&Theme>) -> TreeColors {
     }
 }
 
-/// The row name style (`text-sm`; a selected row is `font-medium`).
+/// The row name style (`text-sm`; a selected row is `font-medium`), in the
+/// theme's `label_large` family.
 fn name_style(theme: Option<&Theme>, selected: bool) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: if selected {
             FontWeight::MEDIUM
         } else {
             FontWeight::REGULAR
         },
         ..TextStyle::new(style::TEXT_SM as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
 /// Linear interpolation between two rects, `t` unclamped.
@@ -1491,5 +1489,38 @@ mod tests {
             guides.iter().any(|(o, _, _)| o.x == tree_branch_x(2)),
             "no depth-2 guide: {guides:?}"
         );
+    }
+
+    // ---- Typeface: the row names follow the live theme ----------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// An expanded folder with a selected (medium-weight) and a plain row, so
+    /// both name styles paint.
+    fn probe_view(_: &mut ()) -> FileTreeView<()> {
+        file_tree::<()>(vec![file_tree_folder(
+            "src",
+            "src",
+            vec![
+                file_tree_file("app", "app.rs"),
+                file_tree_file("lib", "lib.rs"),
+            ],
+        )])
+        .expanded(vec!["src".to_owned()])
+        .selected("app")
+    }
+
+    #[test]
+    fn row_names_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the tree's rows", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn row_names_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the tree's rows", probe_view, PROBE_WINDOW);
     }
 }

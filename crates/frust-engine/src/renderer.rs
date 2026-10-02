@@ -4150,14 +4150,22 @@ impl Placeholders {
 }
 
 /// A 1x1 transparent `Rgba8Unorm` texture's view, as a plain 2D texture or as
-/// a single-layer 2D array.
+/// a 2D array.
+///
+/// The array variant allocates **two** layers, not one, matching
+/// [`gpu::atlas::atlas_texture_descriptor`]'s own floor: wgpu-hal 30.0.1's
+/// GLES backend derives the GL target from the descriptor's layer count
+/// alone, and a one-layer array descriptor binds as `GL_TEXTURE_2D` rather
+/// than `GL_TEXTURE_2D_ARRAY` (see that function's doc comment for the
+/// file:line and upstream issue refs). Only layer zero of the two is ever
+/// sampled here.
 fn placeholder_view(device: &wgpu::Device, label: &str, array: bool) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: if array { 2 } else { 1 },
         },
         mip_level_count: 1,
         sample_count: 1,

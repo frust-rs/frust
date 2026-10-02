@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │                                                                          
    New project · n       │    ⚠  This build has no devtools service                                 
    Add plugin · a        │    release builds compile the listener out entirely — rerun              
-   Doctor · d            │    with `frust run` (debug) or `--profile` to inspect this               
+   Doctor · i            │    with `frust run` (debug) or `--profile` to inspect this               
    Build · b             │    session                                                               
-   Clean · c             │                                                                          
+   Clean                 │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
                          │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: unavailable │ Esc back to log                         [mouse ✓]
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

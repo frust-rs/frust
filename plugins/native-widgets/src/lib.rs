@@ -1,29 +1,40 @@
 //! `frust-native-widgets`: render REAL platform widgets (Android `View`s /
-//! UIKit views) from pure Rust — `native_button("Save")`, `native_switch(...)`
-//! etc. compose the framework's `platform_view`
+//! UIKit views / AppKit views) from pure Rust — `native_button("Save")`,
+//! `native_switch(...)` etc. compose the framework's `platform_view`
 //! slots for placement, while this plugin creates and mutates the actual
 //! native views through direct, same-thread FFI: `with_jni_env` + hand-curated
 //! JNI bindings on Android, `objc2-ui-kit` on iOS (the factory itself a Rust
-//! `define_class!` class — zero Swift). This crate holds the
+//! `define_class!` class — zero Swift), and `objc2-app-kit` on macOS (a Rust
+//! `frust_plugin::desktop::DesktopViewFactory` the desktop Mode-A host
+//! resolves by `view_type`). This crate holds the
 //! retained-handle [`registry`] every control's create/update/dispose path is
-//! built over, the `runtime` those paths dispatch through, the six `controls`
-//! (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`) that
-//! runtime serves, the typed `events` vocabulary their listeners decode into,
-//! the app-facing `api` builders, and both platform arms' factory glue. Each
-//! control now carries **both** platform halves — a
-//! `#[cfg(target_os = "android")] mod platform` and a
-//! `#[cfg(target_os = "ios")] mod platform`, side by side in the same file,
+//! built over, the `runtime` those paths dispatch through, the `controls` —
+//! eight shared (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`,
+//! `Spinner`, `DatePicker`), the two iOS/macOS-only ones (`Segmented`,
+//! `Stepper`) and the iOS-only `TabBar` —
+//! that runtime serves, the typed `events` vocabulary their listeners decode
+//! into, the app-facing `api` builders, and the three platform arms' factory
+//! glue. Each shared control carries one platform half per arm (`Segmented`/
+//! `Stepper` have no Android half and `TabBar` has only the iOS one — their
+//! builders render a refusal banner elsewhere) — a
+//! `#[cfg(target_os = "android")] mod platform`, a
+//! `#[cfg(target_os = "ios")] mod platform` and a
+//! `#[cfg(target_os = "macos")] mod platform`, side by side in the same file,
 //! executing the same shared setter plan and
 //! reporting a tap/toggle/drag back to the app through the same event
-//! dispatch on both platforms (`crate::apple::events`'s Rust target-action
-//! object, mirroring Android's shared listener). The theme ladder's Apple
-//! arm is also in: L1 (`crate::apple::theme`) pins brightness via
-//! `overrideUserInterfaceStyle` at control-creation time; L2 applies the
-//! same folded `Props` tokens through typed `objc2-ui-kit`/`CALayer`
-//! setters, including a themed background's corner radius; L3
-//! (`crate::apple::fonts`) resolves the embedded Glyph faces to a real
-//! `CTFont` via CoreText, degrading to the system font (one logged warning)
-//! on any resolution failure.
+//! dispatch on every platform (`crate::apple::events`'s and
+//! `crate::appkit::events`' Rust target-action objects, mirroring Android's
+//! shared listener). The macOS arm registers every kind iOS does except the
+//! iOS-only `TabBar` (macOS has no bottom-tab-bar idiom).
+//! The theme ladder's two Apple arms are in: L1 pins brightness per view
+//! (`crate::apple::theme`'s `overrideUserInterfaceStyle`,
+//! `crate::appkit::theme`'s `NSAppearance`), re-pinned on every update; L2
+//! applies the same folded `Props` tokens through typed
+//! `objc2-ui-kit`/`objc2-app-kit`/`CALayer` setters, including a themed
+//! background's corner radius; L3 (`crate::coretext`, shared by both arms)
+//! resolves the embedded Glyph faces to a real `CTFont` via CoreText,
+//! degrading to the system font (one logged warning) on any resolution
+//! failure.
 //!
 //! # One factory, one listener, N controls
 //!
@@ -31,24 +42,26 @@
 //! that holds for **your** components too: `NativeComponent` is the public
 //! trait a plugin author implements to drive a native view (or view
 //! hierarchy) from pure Rust, registered with `register_component` and served
-//! by the very same runtime, factory and listener as the six built-in
+//! by the very same runtime, factory and listener as the built-in
 //! controls (see the `component` module's own doc for the lifecycle contract;
 //! it ships with the `frust-api` feature, like the builders above).
 //!
-//! Two limits that doc states in full, repeated here because they decide
+//! One limit that doc states in full, repeated here because it decides
 //! whether the trait is for you at all. **An app crate cannot implement it
 //! today**: `create` has to name `jni::objects::JObject` on Android and
 //! `objc2-ui-kit`'s classes on iOS *in the implementing crate*, and this
 //! plugin re-exports neither FFI crate, so the practical audience today is
-//! plugin authors, not app authors (the only implementor here is this crate's
-//! own non-default `demo-components` composite). And **a component is
-//! display-only**: no production path attaches a listener to a view a
-//! component built — its root as much as its children — so overriding
-//! `NativeComponent::on_event` has no effect in this build, a deliberately
-//! deferred gap. Deliberately *not* "can never fire": the dispatch
-//! half is real and routes on the slot id alone, so a listener built with a
-//! **fabricated** id that happens to name a live component's slot still lands
-//! in the trait method — a misroute, not a route (see that method's own doc).
+//! plugin authors, not app authors (the only implementing type here is this crate's
+//! own non-default `demo-components` composite).
+//!
+//! A component hears its own views the way the built-in controls do: it
+//! attaches the platform's one listener to any view it built (root or child)
+//! with `ComponentCtx::attach_listener`, the listener is bound to the slot's
+//! own id by the context (never handed to the component), and the event
+//! reaches `NativeComponent::on_event` through the same slot-id routing —
+//! whose answer the app hears on `NativeComponentView::on_event`, the
+//! builders' events-as-signals idiom (the `component` module doc's *Listener
+//! attachment*).
 //!
 //! Every control is a Rust
 //! `NativeWidget` impl registered under a kind string in the plugin-internal
@@ -57,10 +70,42 @@
 //! `plugins/native-widgets/platform/android/`, driven by this crate's four
 //! JNI exports; iOS: a Rust `define_class!` factory registered straight into
 //! the Objective-C runtime, `crate::apple::factory` — zero Swift, and target
-//! -action instead of a listener class). Which control a `platform_view` slot
+//! -action instead of a listener class; macOS: a Rust `DesktopViewFactory`
+//! registered with `frust_plugin::desktop`, `crate::appkit::factory`, plus one
+//! target-action class). Which control a `platform_view` slot
 //! means travels in that slot's `params_json`, under two reserved keys the api
 //! layer injects — the same payload that carries the differ's slot id across a
 //! factory contract that does not pass it.
+//!
+//! # Native presentations
+//!
+//! Modal platform UI — an alert today — is not a `platform_view` slot: the
+//! differ owns a slot's lifetime and knows no modal stacking, while a modal
+//! belongs to the host (the resumed Android `Activity`, the topmost iOS view
+//! controller, the macOS key window). The [`present`] module therefore serves
+//! it imperatively: [`present::show_alert`] answers a [`Presentation`] future
+//! resolving exactly one [`AlertOutcome`], one presentation is live per
+//! process (a second request resolves [`PresentError::Busy`]), and
+//! [`present::dismiss`] takes one down. It needs no `frust-api` feature — a
+//! plain [`core::future::Future`] pollable from any executor. All three arms
+//! are built: iOS/iPadOS presents a `UIAlertController` (an iPad action
+//! sheet anchored as a popover on [`AnchorRect`]); macOS presents an
+//! `NSAlert` window sheet; Android presents a framework
+//! `android.app.AlertDialog` over the resumed `Activity` (one more Kotlin
+//! object, `FrustNativePresenter`, in the same Gradle module, tracking the
+//! resumed `Activity` from a manifest-declared init provider) — every other
+//! target answers [`PresentError::Unsupported`]. A **sheet**
+//! ([`present::show_sheet`]: a [`SheetSpec`]'s constrained native content —
+//! title, message, image, up to three action rows — resolving one
+//! [`SheetOutcome`], with detent changes streamed to a callback) is built
+//! on iOS/iPadOS only, a page sheet under `UISheetPresentationController`
+//! (an iPad in regular width shows a form sheet and ignores detents); every
+//! other target answers [`PresentError::Unsupported`]. Alerts and sheets
+//! share the one-at-a-time slot. With `frust-api` on, `show_native_alert` /
+//! `show_native_sheet` (the awaitable forms) and `show_native_alert_into` /
+//! `show_native_sheet_into` (writing the outcome into an `RwSignal`, spawned
+//! on `frust::spawn_local`) are the app-facing front door, re-exported at the
+//! crate root like the builders.
 //!
 //! # Charter: a platform plugin
 //!
@@ -86,7 +131,7 @@
 //! # Native-widget events bypass `RenderRoot::event`
 //!
 //! A native control's interaction is entirely platform-owned: a tap fires
-//! the platform's own listener (Android's `View.OnClickListener`, iOS
+//! the platform's own listener (Android's `View.OnClickListener`, iOS/macOS
 //! target-action), which this crate's plugin-private JNI/ObjC exports
 //! deliver straight into a registered Rust callback — never through
 //! `frust-core`'s `EventCtx`. That means every `frust-core`/`frust-widgets`
@@ -122,15 +167,20 @@ pub mod component;
 // Flat re-export, same convention as `api` above.
 #[cfg(feature = "frust-api")]
 pub use component::{
-    ComponentCtx, NativeChild, NativeComponent, NativeEvent, NativeRoot, register_component,
+    ComponentCtx, ListenerHandle, ListenerKinds, NativeChild, NativeComponent, NativeEvent,
+    NativeRoot, register_component,
 };
 
 // The demo composite — ONE `NativeComponent` owning a real
 // native subtree, behind the NON-default `demo-components` feature (which
 // enables `frust-api` above, since a component is only mountable through that
-// facade glue). It lives in this crate rather than in an example app because an
-// app crate cannot implement the trait without raw `jni`/`objc2-ui-kit` deps of
-// its own; see the module's own doc for what that does and does not prove.
+// facade glue). Three real arms build it — Android (`LinearLayout` + `TextView`
+// + `Button`s), iOS (`UIView` + `UILabel` + `UIButton`s) and macOS (`NSView` +
+// `NSTextField` + `NSButton`s) — and a Linux/Windows/web host compiles a
+// recorded stand-in its host tests assert against. It lives in this crate
+// rather than in an example app because an app crate cannot implement the trait
+// without raw `jni`/`objc2-ui-kit`/`objc2-app-kit` deps of its own; see the
+// module's own doc for what that does and does not prove.
 #[cfg(feature = "demo-components")]
 pub mod demo;
 // Flat re-export, same convention as `api`/`component` above.
@@ -138,6 +188,20 @@ pub mod demo;
 pub use demo::{
     DEMO_CARD_CHILDREN, DEMO_CARD_HEIGHT, DEMO_CARD_KIND, DEMO_CARD_WIDTH, DemoCard, DemoCardProps,
     DemoCardState, register_demo_components,
+};
+
+// Native presentations (alerts, sheets): imperative, host-owned modal UI resolving
+// one outcome through a plain `Future` — see the crate doc's *Native
+// presentations*. Deliberately outside the `frust-api` gate: it names no
+// framework type, so the bare platform plugin serves it too.
+pub mod present;
+// Flat re-export of the presentation vocabulary, same convention as `api`
+// above; the two entry points stay namespaced (`present::show_alert`,
+// `present::dismiss`).
+pub use present::{
+    ActionRole, AlertAction, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, Detent,
+    DismissReason, PresentError, Presentation, PresentationHandle, SheetAction, SheetContent,
+    SheetHandle, SheetOutcome, SheetSpec,
 };
 
 #[cfg(target_os = "android")]
@@ -148,12 +212,29 @@ mod android;
 // (UIKit doesn't exist on macOS).
 #[cfg(target_os = "ios")]
 mod apple;
-// The six v1 controls. Compiled on every target on purpose: each control's
+// The macOS arm: ONE Rust `DesktopViewFactory` registered with
+// `frust_plugin::desktop` under the api layer's `VIEW_TYPE` (the desktop
+// Mode-A host resolves it by that string) plus ONE target-action class —
+// AppKit, not UIKit, so its own module rather than a widened `apple` gate.
+#[cfg(target_os = "macos")]
+mod appkit;
+// Theme ladder L3's CoreText half — descriptor-from-bytes, the first-publish
+// latch and its caches — shared by both Apple arms: it touches neither UIKit
+// nor AppKit, so it sits beside them rather than inside `apple` (which stays
+// iOS-only, see above). Its only caller of `set_glyph_bytes` is the
+// `frust-api` feature's `api::theme`, hence the `allow` without that feature.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
+mod coretext;
+// The v1 controls (eight shared, the two Apple-only ones, `Segmented` and
+// `Stepper`, and the iOS-only `TabBar`). Compiled on every target on
+// purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
-// `NativeWidget` impl (the JNI half) is `#[cfg(target_os = "android")]` —
-// which is also why the modules live here rather than under `android/`. The
-// `allow` matches `runtime`'s below: on a non-Android host the whole
-// props/plan surface has no caller outside the tests.
+// `NativeWidget` impls (one per platform arm) are `#[cfg(target_os = ...)]`
+// — which is also why the modules live here rather than under a platform
+// directory. The `allow` matches `runtime`'s below: on a host with no arm
+// (Linux/Windows/web) the whole props/plan surface has no caller outside the
+// tests.
 #[allow(dead_code)]
 mod controls;
 // The typed event vocabulary (`EventPayload`) and the kind/detail codec every
@@ -163,11 +244,11 @@ mod controls;
 mod events;
 mod registry;
 // The runtime's surface is consumed by the platform arms — this crate's JNI
-// exports, the Apple `define_class!` factory, the six controls and their
-// listeners — plus its own host tests, which a plain (non-test) build does
-// not count. On a non-mobile host none of those arms compile, so much of the
-// surface is legitimately uncalled there; the attribute stays for that host
-// build rather than growing per-item `allow`s.
+// exports, the Apple `define_class!` factory, the macOS desktop factory, the
+// controls and their listeners — plus its own host tests, which a plain
+// (non-test) build does not count. On a host with no platform arm none of
+// those compile, so much of the surface is legitimately uncalled there; the
+// attribute stays for that host build rather than growing per-item `allow`s.
 #[allow(dead_code)]
 mod runtime;
 
@@ -175,9 +256,12 @@ pub use registry::{Registry, SlotId};
 
 #[cfg(target_os = "android")]
 pub use registry::android::AndroidHandle;
-// iOS only — see `Cargo.toml`'s comment on why this crate's Apple arm gates
-// on `target_os = "ios"` rather than `target_vendor = "apple"` (no macOS/
-// AppKit backend; UIKit doesn't exist there).
+// One handle per Apple arm, each gated on its own `target_os` rather than
+// `target_vendor = "apple"` — see `Cargo.toml`'s comment on why (UIKit doesn't
+// exist on macOS): `AppKitHandle` (macOS, `Retained<NSView>`) and
+// `AppleHandle` (iOS, `Retained<UIView>`).
+#[cfg(target_os = "macos")]
+pub use registry::appkit::AppKitHandle;
 #[cfg(target_os = "ios")]
 pub use registry::apple::AppleHandle;
 

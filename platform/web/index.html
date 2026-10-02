@@ -1,0 +1,150 @@
+<!doctype html>
+<!--
+  platform/web — the browser embedder's host-page template.
+
+  The third embedder, alongside `platform/android` and `platform/ios`: an
+  ordinary host page a `frust::web_app!` binary is consumed from by path, the
+  same way an Android/iOS app links `platform/android`/`platform/ios`'s own
+  embedding libraries. It carries no app logic of its own — see README.md for
+  the full host-page contract this file and `frust_web.js` together provide.
+
+  Point it at your own build with `?module=./pkg/<name>.js`, the `--out-name`
+  your own `wasm-bindgen` invocation used (defaults to `./pkg/app.js`, the
+  name a `crates/frust-drive/templates/app` web scaffold is expected to produce). See README.md's
+  "Build" section for the exact `cargo build` / `wasm-bindgen` recipe.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>frust app</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+      }
+      /* The canvas host element `frust_web.js` reparents winit's own canvas
+         into, once it appears. Sized to the viewport by default; embed the
+         app in a smaller box by resizing this rule instead (or by sizing
+         `#frust-host` from your own page's stylesheet — this ID is the only
+         part of the contract `frust_web.js` depends on by default, see
+         README.md). `frust_web.js`'s own `ResizeObserver` tracks whatever
+         box this element resolves to and keeps the canvas in sync with it,
+         live — see README.md's "Canvas host / resize / DPR contract"
+         section for why an ordinary `canvas { ... }` stylesheet rule cannot
+         do this job on its own. */
+      #frust-host {
+        display: block;
+        width: 100%;
+        height: 100%;
+        line-height: 0;
+      }
+      /* winit's own canvas: no border, padding, or transform on it — see
+         README.md's "CSS constraints" section for why each one desyncs
+         pointer coordinates from what the shell actually painted.
+         `frust_web.js` sets the load-bearing size/border/padding rules
+         itself (a stylesheet rule cannot outrank the inline style winit
+         pins at creation — see `frust_web.js`'s own comments); this rule is
+         a `display` cosmetic only. */
+      #frust-host > canvas {
+        display: block;
+      }
+      /* Load-failure mirror only — hidden unless something is written into
+         it, so a successful load shows nothing but the app's own canvas.
+         Mirrors `examples/web-gallery/index.html`'s identical `#log`. */
+      #frust-log:empty {
+        display: none;
+      }
+      #frust-log {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        margin: 0;
+        padding: 6px 8px;
+        background: #3a0d0d;
+        color: #ffd7d7;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="frust-host"></div>
+    <pre id="frust-log"></pre>
+    <script type="module">
+      import { mount, reportFailure } from "./frust_web.js";
+
+      // `?module=./pkg/<name>.js` selects which app's wasm-bindgen glue to
+      // load. Defaults to `./pkg/app.js` so this page works unedited once a
+      // build's output is placed there under that name.
+      const moduleUrl =
+        new URLSearchParams(location.search).get("module") || "./pkg/app.js";
+
+      // Validate an explicit `?module=` before importing it: a module
+      // specifier is a URL, so an unchecked override could pull attacker JS
+      // (cross-origin, `data:`) into the app's origin. Accepted only when it
+      // is same-origin, scheme-less, not a `//` network path, and resolves
+      // under this page's `./pkg/` — with every pathname segment checked
+      // AFTER percent-decoding, because `new URL()` leaves existing escapes
+      // in place: `pkg/%2e%2e%2fx.js` is one opaque segment to the URL
+      // parser but `pkg/../x.js` to a server that decodes it.
+      const moduleParam = new URLSearchParams(location.search).get("module");
+      let shouldImport = true;
+      if (moduleParam) {
+        const pkgPathPrefix = new URL("./pkg/", location.href).pathname;
+        let u = null;
+        try {
+          u = new URL(moduleParam, location.href);
+        } catch (_) {
+          u = null;
+        }
+        // Every decoded segment must be a plain file or directory name: not
+        // `.` or `..`, no encoded `/` or `\`, and no undecodable escape.
+        const segmentsAreSafe = (pathname) => {
+          for (const segment of pathname.split("/")) {
+            let decoded;
+            try {
+              decoded = decodeURIComponent(segment);
+            } catch (_) {
+              return false;
+            }
+            if (
+              decoded === "." ||
+              decoded === ".." ||
+              decoded.includes("/") ||
+              decoded.includes("\\")
+            ) {
+              return false;
+            }
+          }
+          return true;
+        };
+
+        if (
+          u === null ||
+          u.origin !== location.origin ||
+          /^[a-z][a-z0-9+.-]*:/i.test(moduleParam) ||
+          moduleParam.startsWith("//") ||
+          moduleParam.includes("..") ||
+          !u.pathname.startsWith(pkgPathPrefix) ||
+          !segmentsAreSafe(u.pathname)
+        ) {
+          reportFailure(
+            "Invalid module URL: must be same-origin, relative, under ./pkg/, " +
+              "with no scheme, // prefix, or dot segment (encoded or not)"
+          );
+          shouldImport = false;
+        }
+      }
+
+      if (shouldImport) {
+        import(moduleUrl)
+          .then(({ default: init }) => mount(init, { host: "#frust-host" }))
+          .catch((err) => reportFailure(err));
+      }
+    </script>
+  </body>
+</html>

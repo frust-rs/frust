@@ -65,8 +65,8 @@ use std::time::Duration;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx,
     EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any,
-    build_child, erase_callback_arg, rebuild_children, route_event_single, teardown_child,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
+    any, build_child, erase_callback_arg, rebuild_children, route_event_single, teardown_child,
     text::{FontWeight, TextStyle},
     visit_children,
 };
@@ -74,7 +74,7 @@ use frust::{AnimationController, Brightness, ChildKey, Curve, FrameTime, Theme};
 
 use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::ShadcnTokens;
 
 /// The tab strip's height, in logical px (`h-9`).
@@ -270,17 +270,18 @@ fn resolve_colors(theme: Option<&Theme>) -> TabsColors {
     }
 }
 
-/// The label style: the theme's (Inter) family at `text-sm`/`font-medium`, or the
-/// bundled sans stack unthemed.
+/// The label style: `text-sm`/`font-medium` in the live theme's `LabelLarge`
+/// family, or the bundled sans stack unthemed.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-    }
+    themed_family(
+        TextStyle {
+            family: crate::tokens::sans_family(),
+            weight: FontWeight::MEDIUM,
+            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::LabelLarge,
+    )
 }
 
 /// Whether `key` activates the focused tab.
@@ -1546,5 +1547,35 @@ mod tests {
             .filter_map(|(_, n)| n.value())
             .collect();
         assert_eq!(panels, vec!["account panel"]);
+    }
+
+    // ---- Typeface: the tab labels follow the live theme -------------------
+
+    /// An active, an inactive and a disabled tab over text-free panels, so
+    /// every painted glyph run is a tab label.
+    #[cfg(feature = "bundled-fonts")]
+    fn strip(_: &mut ()) -> TabsView<()> {
+        let blank = || frust::SizedBox(Some(10.0), Some(10.0));
+        tabs::<(), _>(
+            "account",
+            vec![
+                tabs_tab("account", "Account", blank()),
+                tabs_tab("password", "Password", blank()),
+                tabs_tab("billing", "Billing", blank()).disabled(true),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_tab_labels_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face("the tab labels", strip);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_tab_labels_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap("the tab labels", strip);
     }
 }

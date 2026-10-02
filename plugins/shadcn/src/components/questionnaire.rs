@@ -97,9 +97,9 @@ use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     CursorIcon, ErasedArgCallback, ErasedCallback, EventCtx, EventResult, InputEvent, Key,
     KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect,
-    Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextColor, Toggled, View, Widget, any,
-    build_child, erase_callback, erase_callback_arg, rebuild_children, route_event_single,
-    teardown_child, visit_children,
+    Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextColor, ThemeTextType, Toggled, View,
+    Widget, any, build_child, erase_callback, erase_callback_arg, rebuild_children,
+    route_event_single, teardown_child, visit_children,
 };
 use frust::{
     Axis, ColorScheme, CrossAxisAlignment, FlexView, SizedBox, Theme, inflexible, text, text_input,
@@ -107,7 +107,7 @@ use frust::{
 
 use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::{ShadcnRadius, ShadcnTokens, color_scheme_light, mono_family};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -535,30 +535,45 @@ fn check_path(origin: Point, size: f64) -> BezPath {
     path
 }
 
-/// The progress line's style (`text-xs font-medium`).
-fn progress_style() -> TextStyle {
-    TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_XS as f32, SHAPING_INK)
-    }
+/// The progress line's style (`text-xs font-medium`) in the live theme's
+/// `LabelMedium` family.
+fn progress_style(theme: Option<&Theme>) -> TextStyle {
+    themed_family(
+        TextStyle {
+            weight: FontWeight::MEDIUM,
+            ..TextStyle::new(style::TEXT_XS as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::LabelMedium,
+    )
 }
 
-/// An action button's label style (`text-sm font-medium`, `buttonVariants`).
-fn nav_style() -> TextStyle {
-    TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-    }
+/// An action button's label style (`text-sm font-medium`, `buttonVariants`) in
+/// the live theme's `LabelLarge` family.
+fn nav_style(theme: Option<&Theme>) -> TextStyle {
+    themed_family(
+        TextStyle {
+            weight: FontWeight::MEDIUM,
+            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::LabelLarge,
+    )
 }
 
-/// The error line's style (`text-sm`).
-fn error_style() -> TextStyle {
-    TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+/// The error line's style (`text-sm`) in the live theme's `BodyMedium` family.
+fn error_style(theme: Option<&Theme>) -> TextStyle {
+    themed_family(
+        TextStyle::new(style::TEXT_SM as f32, SHAPING_INK),
+        theme,
+        ThemeTextType::BodyMedium,
+    )
 }
 
 /// A shortcut badge's style (`font-mono text-[0.625rem] font-medium`).
 fn shortcut_style() -> TextStyle {
     TextStyle {
+        // Explicit, not themed: `TypeScale` has no monospace role to resolve from.
         family: mono_family(),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(SHORTCUT_TEXT as f32, SHAPING_INK)
@@ -660,10 +675,12 @@ impl<State: 'static> QuestionnaireView<State> {
         let mut views = vec![any(text(item.title.clone())
             .size(style::TEXT_BASE as f32)
             .weight(FontWeight::MEDIUM)
+            .themed_family(ThemeTextType::TitleMedium)
             .themed_role(ThemeTextColor::OnSurface))];
         if let Some(description) = &item.description {
             views.push(any(text(description.clone())
                 .size(style::TEXT_SM as f32)
+                .themed_family(ThemeTextType::BodyMedium)
                 .themed_role(ThemeTextColor::OnSurfaceVariant)));
         }
         for choice in &item.choices {
@@ -682,6 +699,9 @@ impl<State: 'static> QuestionnaireView<State> {
     /// [`crate::input`]: the questionnaire's field is `h-8 rounded-lg px-2.5`
     /// where the standalone control is `h-9 rounded-md px-3`, so only the wrapped
     /// baseline field is shared, not the chrome.
+    ///
+    /// Its typed text keeps the system UI family: `text_input` takes a style
+    /// only at build and has no theme-resolved family to opt into.
     fn input_view(&self, item: &QuestionnaireItem, placeholder: &str) -> AnyView<State> {
         let on_answer = self.on_answer.clone();
         let index = self.current;
@@ -721,6 +741,7 @@ fn choice_content<State: 'static>(choice: &QuestionnaireChoice) -> AnyView<State
     let label = text(choice.label.clone())
         .size(style::TEXT_SM as f32)
         .weight(FontWeight::MEDIUM)
+        .themed_family(ThemeTextType::LabelLarge)
         .themed_role(ThemeTextColor::OnSurface);
     let Some(description) = &choice.description else {
         return any(label);
@@ -733,6 +754,7 @@ fn choice_content<State: 'static>(choice: &QuestionnaireChoice) -> AnyView<State
             inflexible(
                 text(description.clone())
                     .size(style::TEXT_SM as f32)
+                    .themed_family(ThemeTextType::BodyMedium)
                     .themed_role(ThemeTextColor::OnSurfaceVariant),
             ),
         ],
@@ -1551,14 +1573,16 @@ impl Widget for QuestionnaireWidget {
         // The progress line.
         let progress_text = self.progress_text();
         self.progress.set_content(progress_text);
-        let progress_size = self.progress.layout(ctx, &progress_style());
+        let progress_style = progress_style(Theme::from_layout_ctx(ctx));
+        let progress_size = self.progress.layout(ctx, &progress_style);
         self.progress_origin = Point::ORIGIN;
         y += progress_size.height + QUESTIONNAIRE_GAP;
 
         // The action labels, measured up front so the row can be placed last.
         let mut nav_widths = [0.0f64; 4];
+        let nav_style = nav_style(Theme::from_layout_ctx(ctx));
         for button in NavButton::ALL {
-            let size = self.nav_labels[button.index()].layout(ctx, &nav_style());
+            let size = self.nav_labels[button.index()].layout(ctx, &nav_style);
             nav_widths[button.index()] = size.width + 2.0 * BUTTON_PAD_X;
         }
 
@@ -1638,7 +1662,8 @@ impl Widget for QuestionnaireWidget {
         if self.laid_out_invalid {
             self.error.set_content(self.error_text());
             y += ERROR_MARGIN_TOP;
-            let size = self.error.layout(ctx, &error_style());
+            let error_style = error_style(Theme::from_layout_ctx(ctx));
+            let size = self.error.layout(ctx, &error_style);
             self.error_origin = Some(Point::new(0.0, y));
             y += size.height;
         }
@@ -1770,9 +1795,17 @@ impl Widget for QuestionnaireWidget {
             }
             return EventResult::Ignored;
         }
+        if let InputEvent::Key(key) = event {
+            return self.handle_key(ctx, event, key);
+        }
+        // Ime composition and the clipboard verbs an `EditCommand` carries are
+        // both focus-routed like `Key` (handled above) and belong to the
+        // free-text field outright — branch on the shared predicate rather
+        // than enumerating `Ime`/`EditCommand` separately.
+        if event.is_focus_routed() {
+            return self.route_to_input(ctx, event);
+        }
         match event {
-            InputEvent::Key(key) => self.handle_key(ctx, event, key),
-            InputEvent::Ime(_) => self.route_to_input(ctx, event),
             InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p),
             _ => EventResult::Ignored,
         }
@@ -1885,7 +1918,8 @@ mod tests {
     use frust::FrameTime;
     use frust::authoring::text::TextContext;
     use frust::authoring::{
-        BezPath, EventOutcome, Modifiers, PointerButton, SemanticsUpdate, scene::GlyphRun,
+        BezPath, EditCommand, EventOutcome, Modifiers, PointerButton, SemanticsUpdate,
+        scene::GlyphRun,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -2588,6 +2622,96 @@ mod tests {
         assert_eq!(state.answered.len(), 1);
     }
 
+    /// `EditCommand::Paste` is focus-routed exactly like `Key`/`Ime`: a
+    /// clipboard paste dispatched at the widget while the free-text field
+    /// holds focus must reach it, closing the gap where a `Ctrl+V` chord's
+    /// `ctx.request_paste()` succeeds but the shell's separate top-level
+    /// `EditCommand::Paste(text)` dispatch it triggers is then swallowed here.
+    #[test]
+    fn a_paste_edit_command_reaches_the_focused_free_text_field() {
+        let (mut widget, size) = ready(1, Vec::new());
+        let mut state = Flow::default();
+        let rect = widget.input_rect.expect("the second item has an input");
+        // Tap the free-text field so it holds the recorded focus path.
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Down, rect.center().x, rect.center().y),
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Up, rect.center().x, rect.center().y),
+        );
+        assert!(
+            widget.input_focused(),
+            "the tap focused the free-text field"
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &InputEvent::EditCommand(EditCommand::Paste("hello".to_string())),
+        );
+        assert_eq!(
+            state.answered.last().map(|e| e.answer.text.as_str()),
+            Some("hello"),
+            "the pasted text must reach the focused free-text field"
+        );
+    }
+
+    /// Guard against over-forwarding: Enter confirms from anywhere — including
+    /// from inside the free-text field (module docs) — so `handle_key` must
+    /// keep intercepting it before `is_focus_routed()`'s wider catch-all ever
+    /// gets a look, even while the field holds focus.
+    #[test]
+    fn enter_confirms_and_is_not_forwarded_while_the_field_is_focused() {
+        // The item must already validate (it is not required, but an
+        // unanswered item still fails `is_valid`), so Enter reaches
+        // `confirm`'s navigate branch rather than its validation-latch one —
+        // either way proves Enter never reaches the field, but this keeps the
+        // assertion about *where the event went*, not about validity.
+        let (mut widget, size) = ready(
+            1,
+            vec![QuestionnaireAnswer::default(), answered(&["progress"])],
+        );
+        let mut state = Flow::default();
+        let rect = widget.input_rect.expect("the second item has an input");
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Down, rect.center().x, rect.center().y),
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &pointer(PointerPhase::Up, rect.center().x, rect.center().y),
+        );
+        assert!(
+            widget.input_focused(),
+            "the tap focused the free-text field"
+        );
+        dispatch(
+            &mut widget,
+            size,
+            &mut state,
+            &key(Key::Named(NamedKey::Enter)),
+        );
+        assert_eq!(
+            state.navigated,
+            vec![2],
+            "Enter confirmed the item and advanced, rather than reaching the field"
+        );
+        assert!(
+            state.answered.is_empty(),
+            "Enter must not be routed to the free-text field as text"
+        );
+    }
+
     // ---- Rebuild ----------------------------------------------------------
 
     #[test]
@@ -2674,11 +2798,19 @@ mod tests {
         }
     }
 
-    /// The widget-local geometry a harness test needs, read back off the widget
-    /// the root retains.
+    /// The widget-local geometry a harness test needs, read off a twin of the
+    /// widget the root retains. The twin is laid out the way the root lays out
+    /// its own, under the harness's theme and through its text context, because
+    /// the theme picks the text's family and so the heights the rows stack from.
     fn probe(h: &mut Harness) -> (Vec<Rect>, [Option<Rect>; 4]) {
         let mut widget = build(&view(h.state.current, h.state.answers.clone()));
-        layout(&mut widget);
+        let theme = crate::theme();
+        let mut lctx =
+            LayoutCtx::with_text_context(&mut h.tcx as &mut dyn Any).with_theme(&theme as &dyn Any);
+        widget.layout(
+            &mut lctx,
+            &BoxConstraints::loose(Size::new(WIDTH, f64::INFINITY)),
+        );
         (widget.choice_rects.clone(), widget.nav_rects)
     }
 
@@ -2909,5 +3041,133 @@ mod tests {
             rect.center().y,
         ));
         assert_eq!(h.root.cursor(), CursorIcon::Text);
+    }
+
+    // ---- Typeface: the flow's text follows the live theme -----------------
+
+    /// A flow holding only text that takes the theme's family: the progress
+    /// line, the current item's title and description, choice labels with and
+    /// without a description, and the Previous/Skip/Submit labels (the second
+    /// item is current and optional). It leaves out the shortcut badges, which
+    /// are monospace by design, and the free-text field, which is the baseline
+    /// `text_input` (see `QuestionnaireView::input_view`).
+    #[cfg(feature = "bundled-fonts")]
+    fn themed_flow(_: &mut ()) -> QuestionnaireView<()> {
+        questionnaire(
+            vec![
+                questionnaire_item("direction", "What should we build next?")
+                    .choices(vec![questionnaire_choice("timeline", "Tool call timeline")]),
+                questionnaire_item("timing", "When should work begin?")
+                    .description("Pick the closest option.")
+                    .choices(vec![
+                        questionnaire_choice("now", "Start now").description("This cycle."),
+                        questionnaire_choice("later", "Next cycle"),
+                    ]),
+            ],
+            1,
+            Vec::new(),
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_flow_text_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a questionnaire's text",
+            themed_flow,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_flow_text_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a questionnaire's text",
+            themed_flow,
+        );
+    }
+
+    /// The error line shows only after a blocked Next, and the shared probe
+    /// dispatches no input. So the validation is latched directly, and the
+    /// widget is laid out and painted under a theme with both bundled faces
+    /// registered. The line's runs (the only ones in the destructive ink) must
+    /// shape in the family the theme's `BodyMedium` role names, and follow that
+    /// role when a second theme on the same text context changes it.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_error_line_takes_the_family_of_the_themes_body_role() {
+        use crate::tokens::fonts::{INTER_VARIABLE_INDEX, JETBRAINS_MONO_VARIABLE_INDEX};
+        use crate::tokens::{font_data, mono_family};
+
+        /// The face of every glyph run painted in `ink`.
+        struct InkFaces {
+            ink: Color,
+            faces: Vec<&'static str>,
+        }
+
+        impl PaintScene for InkFaces {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn draw_glyph_run(&mut self, run: GlyphRun) {
+                if !matches!(run.brush, Brush::Solid(color) if color == self.ink) {
+                    return;
+                }
+                let bytes = run.font.font().data.as_ref();
+                self.faces
+                    .push(if bytes == font_data()[INTER_VARIABLE_INDEX] {
+                        "Inter"
+                    } else if bytes == font_data()[JETBRAINS_MONO_VARIABLE_INDEX] {
+                        "JetBrains Mono"
+                    } else {
+                        "another font"
+                    });
+            }
+        }
+
+        fn error_faces(
+            widget: &mut QuestionnaireWidget,
+            tcx: &mut TextContext,
+            theme: &Theme,
+        ) -> Vec<&'static str> {
+            let size = {
+                let mut lctx =
+                    LayoutCtx::with_text_context(tcx as &mut dyn Any).with_theme(theme as &dyn Any);
+                widget.layout(
+                    &mut lctx,
+                    &BoxConstraints::loose(Size::new(WIDTH, f64::INFINITY)),
+                )
+            };
+            let mut rec = InkFaces {
+                ink: theme.scheme().error,
+                faces: Vec::new(),
+            };
+            let mut ctx = PaintCtx::new(Point::ORIGIN, size).with_theme(theme as &dyn Any);
+            widget.paint(&mut ctx, &mut rec);
+            rec.faces
+        }
+
+        let mut tcx = TextContext::new();
+        for face in font_data() {
+            tcx.register_fonts(face.to_vec())
+                .expect("a bundled shadcn face registers");
+        }
+        let mut widget = build(&view(0, Vec::new()));
+        widget.validation_attempted = true;
+
+        let before = error_faces(&mut widget, &mut tcx, &crate::theme());
+        assert!(!before.is_empty(), "the latched error line paints");
+        assert!(
+            before.iter().all(|face| *face == "Inter"),
+            "under shadcn's theme the error line shaped in {before:?}"
+        );
+
+        let mut swapped = crate::theme();
+        swapped.type_scale.body_medium.family = mono_family();
+        let after = error_faces(&mut widget, &mut tcx, &swapped);
+        assert!(!after.is_empty(), "the latched error line still paints");
+        assert!(
+            after.iter().all(|face| *face == "JetBrains Mono"),
+            "with `BodyMedium` naming JetBrains Mono the error line shaped in {after:?}"
+        );
     }
 }

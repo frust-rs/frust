@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frust-auth-session gate: callback</title>
+</head>
+<body>
+<p>Redirecting back to the app&hellip;</p>
+<p>
+  If nothing happens, tap the link below:
+  <a id="fallback" href="#">continue</a>
+</p>
+<script>
+  const params = new URLSearchParams(location.search);
+  const scheme = params.get('scheme') || 'frustplay';
+
+  // Validate the custom scheme before building any target.
+  // Custom schemes must be unique per RFC 8252 §8.1; this guard prevents XSS
+  // via javascript:, data:, and similar pseudo-schemes that a browser would execute.
+  // The pattern and blocklist mirror the validation in frust-auth-session's own
+  // AuthSession::start() — see plugins/auth-session/src/lib.rs validate_callback_scheme.
+  const schemePattern = /^[a-z][a-z0-9+.-]{0,63}$/;
+  const blocklist = ['http', 'https', 'file', 'javascript', 'data', 'blob', 'intent', 'content', 'about'];
+
+  if (!schemePattern.test(scheme) || blocklist.includes(scheme)) {
+    // Reject the scheme: render a visible error and do not call location.replace.
+    document.body.innerHTML = '<p style="color: red; font-weight: bold;">unsupported scheme</p>';
+  } else {
+    // Scheme is valid; build the target and navigate.
+    const target = scheme + '://auth/callback?code=x&state=gate';
+    document.getElementById('fallback').href = target;
+    location.replace(target);
+  }
+</script>
+</body>
+</html>

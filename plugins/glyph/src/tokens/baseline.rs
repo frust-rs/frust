@@ -137,6 +137,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "bundled-fonts")]
     #[test]
     fn glyph_baseline_attaches_the_bundled_faces_by_byte_identity() {
         // The native publish guard de-duplicates by pointer/length, so the

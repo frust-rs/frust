@@ -19,6 +19,8 @@ use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
+use super::session_view::SessionTarget;
+use super::toast::ToastKind;
 use crate::supervise::mcp_backend::McpCommand;
 use crate::supervise::{SessionEvent, SessionId};
 
@@ -64,6 +66,9 @@ pub enum RegionId {
     RunFlavorRow,
     /// The run-config modal's defines text field; click focuses it.
     RunDefinesRow,
+    /// The run-config modal's "Watch src/ and restart on change" checkbox
+    /// row; click toggles it.
+    RunWatchRow,
     /// The run-config modal's launch button.
     RunLaunch,
     /// The run-config modal's cancel button.
@@ -76,9 +81,10 @@ pub enum RegionId {
     /// A row inside the open titlebar switcher dropdown (0-based index into
     /// `AppState::projects`); click switches and closes the dropdown.
     ProjectMenuItem(usize),
-    /// The titlebar toolchain chip; click opens the bootstrap wizard (the
-    /// doctor detail panel stays reachable via `d` / the sidebar "Doctor"
-    /// action).
+    /// The titlebar toolchain chip; click opens the bootstrap wizard directly
+    /// (the doctor detail panel stays reachable via `i` / the sidebar
+    /// "Doctor" action, and offers its own "Toolchain setup" button through
+    /// to this same wizard).
     DoctorChip,
     /// A step-tree row in the bootstrap wizard (0-based index into the wizard's
     /// visible node list); click selects it (a `Platforms` header row toggles
@@ -120,6 +126,9 @@ pub enum RegionId {
     DoctorRerun,
     /// The doctor panel's close button.
     DoctorClose,
+    /// The doctor panel's "Toolchain setup" button (`t` keyboard parity);
+    /// closes the panel and opens the bootstrap wizard.
+    DoctorToolchainSetup,
     /// The sidebar "Build" action row; click opens the build launcher.
     BuildAction,
     /// The build-launcher modal's artifact-kind selector.
@@ -148,6 +157,10 @@ pub enum RegionId {
     CleanConfirmYes,
     /// The clean-confirm dialog's cancel button.
     CleanConfirmNo,
+    /// The quit-confirm dialog's confirm button.
+    QuitConfirmYes,
+    /// The quit-confirm dialog's cancel button.
+    QuitConfirmNo,
     /// The log status row's "copy built artifact path(s)" affordance.
     CopyArtifactsAction,
     /// A command row in the open command palette (0-based index into the
@@ -161,6 +174,11 @@ pub enum RegionId {
     /// The keyboard/help overlay — a click anywhere in the panel
     /// closes it (mouse parity for `Esc`).
     HelpClose,
+    /// A drawn log row, carrying the absolute index of the line it draws;
+    /// click sets the line-selection mode's anchor / range end (outside the
+    /// mode the click is idle — the region is registered every frame either
+    /// way, so a scrolled viewport always maps rows to current lines).
+    LogRow(u64),
     /// A panic/backtrace block's `▶ n frames…` fold affordance row (the
     /// block's identity: the absolute index of its panic-header line); click
     /// toggles its collapsed state.
@@ -266,8 +284,15 @@ pub enum ContextTarget {
     DeviceRow(usize),
     /// A project row (index into `AppState::projects`).
     ProjectRow(usize),
-    /// The log view pane.
-    LogView,
+    /// The log view pane. `row` is the absolute log-line index of the row
+    /// under the cursor — `None` for the pane-wide region (empty space below
+    /// the last line), which is why the row-specific entries are gated on it
+    /// rather than assuming a row was hit.
+    LogView {
+        /// The absolute log-line index under the cursor, if a drawn row was
+        /// hit.
+        row: Option<u64>,
+    },
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -278,7 +303,11 @@ pub enum ContextTarget {
 /// `==`/`assert_eq!`, which `PartialEq` alone satisfies.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    /// Quit requested (`q` / `Ctrl+Q`). Sets `should_quit`; the loop exits.
+    /// The deliberate quit bypass — `Ctrl+Q` only. Sets `should_quit`
+    /// directly, skipping the quit-confirm dialog even with live sessions.
+    /// Every other former `Quit` producer (`q` from the welcome/workbench
+    /// screen or the DevTools pane, `Ctrl+C` with no running session, and the
+    /// palette's Quit entry) now emits [`Self::RequestQuit`] instead.
     Quit,
     /// A tick from the frame interval — ages the toast stack (the app's only
     /// animated state) and is otherwise a no-op (dirty-frame skip keeps it
@@ -356,6 +385,12 @@ pub enum Message {
         /// ad-hoc build/clean/toolchain session passes
         /// [`DevtoolsLaunch::unavailable`].
         devtools: DevtoolsLaunch,
+        /// *Where* the session runs, as the identity the one-live-session
+        /// guard compares ([`SessionTarget`]) — `Some` for every app launch
+        /// (the run-config modal, run-on-all-devices, and MCP/DAP's
+        /// `run_app`), `None` for an ad-hoc build/clean/toolchain-fix
+        /// session, which occupies no target.
+        target: Option<SessionTarget>,
     },
     /// Select the next / previous session tab (`Tab` / `Shift+Tab`).
     NextTab,
@@ -366,6 +401,62 @@ pub enum Message {
     /// Stop the active session (`Ctrl+C` / `x`) — routed to the supervisor as
     /// an [`super::Effect::StopSession`].
     StopSession,
+    /// Stop the active session and relaunch its retained launch spec as a
+    /// new session tab (`R` with a session active, and the palette's
+    /// "Restart session" row) — the keyboard twin of MCP `restart_app` / DAP
+    /// `frustRestart`
+    /// (`crate::supervise::mcp_backend::restart_app`), routed to the
+    /// supervisor as an [`super::Effect::RestartSession`]. Refused (no
+    /// effect, a toast explains why) for an ad-hoc session (no
+    /// [`SessionTarget`]) or when another live session already occupies the
+    /// same (project, target); an already-terminal active session still
+    /// restarts — a crashed session must be relaunchable, not just a running
+    /// one. The relaunch's tab becomes active when it registers.
+    RestartSession,
+    /// Toggle "Watch: restart on save" on the active session (the palette's
+    /// "Watch: restart on save" row, `W`): while on, any change under the
+    /// project's `src/` or its `Cargo.toml` restarts the session through the
+    /// [`Self::RestartSession`] path, once per save-burst. Desktop sessions
+    /// only — a device (or ad-hoc) session refuses with a toast, the
+    /// `frust run --watch` rule. Routed to the runner as
+    /// [`super::Effect::WatchSet`], which starts/stops the session's
+    /// `crate::supervise::SourceWatchers` entry.
+    ToggleWatch,
+    /// A watched session's source tree settled after a change burst (posted
+    /// by its `crate::supervise::SourceWatchers` debounce thread, already
+    /// debounced to one per burst). Restarts `session` through the shared
+    /// restart path when it still has watch on and no restart is already
+    /// pending for it; otherwise a no-op.
+    WatchTriggered {
+        /// The session whose sources changed.
+        session: SessionId,
+    },
+    /// Turn watch on for a just-registered desktop session without a toggle
+    /// — posted by the runner right after a launch that should carry the
+    /// flag registers: the relaunch of a watched session (how the flag
+    /// survives a restart), or a desktop launch from the run-config modal
+    /// with its watch checkbox ticked. Always arrives after that launch's
+    /// [`Self::RegisterSession`] (same channel, sent later).
+    EnableWatch {
+        /// The freshly launched session.
+        session: SessionId,
+    },
+    /// The runner could not start `session`'s source watcher: its watch flag
+    /// is cleared and `reason` toasted.
+    WatchFailed {
+        /// The session whose watcher failed to start.
+        session: SessionId,
+        /// Why, for the toast.
+        reason: String,
+    },
+    /// Close a tab by index into `sessions` (the context menu's "Close tab" /
+    /// "Stop & close" entries, and the palette's "Close tab" command). A
+    /// session already in a terminal state is removed immediately; a live
+    /// one is stopped exactly like [`Self::StopSession`] and removed once its
+    /// terminal event lands (see `super::update::on_session_event`).
+    CloseTab(usize),
+    /// [`Self::CloseTab`] for the active tab (`X`).
+    CloseActiveTab,
     /// Toggle follow-tail on the active session's log view (`f`).
     ToggleFollow,
     /// Toggle soft-wrap on the log view (`w`).
@@ -391,17 +482,41 @@ pub enum Message {
     SearchCommit,
     /// Close the search overlay without changing the committed filter (`Esc`).
     SearchCancel,
-    /// Begin a copy-while-scrolling selection at the newest line (`v`).
-    SelectionBegin,
-    /// Extend the selection toward older lines (`Shift+Up`).
-    SelectionExtendUp(u64),
-    /// Extend the selection toward newer lines (`Shift+Down`).
-    SelectionExtendDown(u64),
-    /// Clear the current selection (`Esc`).
-    SelectionClear,
+    /// Enter the active session's **line-selection mode** (`v`, the log
+    /// view's context menu, the palette's "Select lines…"): anchor a
+    /// one-line selection on the newest visible line and pause follow-tail.
+    /// A no-op on an empty (or wholly filtered-out) log — see
+    /// [`super::SessionView::enter_select_mode`].
+    SelectEnter,
+    /// Step the selection cursor `n` **visible** entries while in the mode
+    /// (negative = toward older lines): `↑`/`k`/`Shift+↑` and
+    /// `↓`/`j`/`Shift+↓`.
+    SelectMove(i64),
+    /// Move the selection cursor one page (sign only: `-1` = `PageUp`,
+    /// `1` = `PageDown`).
+    SelectPage(i8),
+    /// Jump the selection cursor to the oldest visible line (`Home`).
+    SelectHome,
+    /// Jump the selection cursor to the newest visible line (`End`).
+    SelectEnd,
+    /// Leave line-selection mode, dropping the selection (`Esc`, or `v`
+    /// again) — restores follow-tail only under
+    /// [`super::SessionView::exit_select_mode`]'s rule.
+    SelectExit,
+    /// A left click landed on the log row drawing absolute line index `n`
+    /// (every rendered row registers one; see `crate::ui::views::sessions`).
+    /// The runner stays dumb about the mode: outside it this is idle, inside
+    /// it the first click re-anchors the selection and every later one moves
+    /// its range end.
+    LogRowClicked(u64),
     /// Copy the current selection to the clipboard (`y`) — routed to the runner
-    /// as an [`super::Effect::Copy`].
+    /// as an [`super::Effect::Copy`]. In line-selection mode this also leaves
+    /// the mode, so `v`…`y` is a complete copy gesture.
     CopySelection,
+    /// Copy the single log line at absolute index `n` (the log view's
+    /// right-click "Copy line") — routed as an [`super::Effect::Copy`], or a
+    /// warning when the ring has already evicted it.
+    CopyLine(u64),
     /// Toggle a panic/backtrace block's fold state by its id (the block's
     /// panic-header absolute line index) — a click on its `▶ n frames…`
     /// affordance row.
@@ -445,6 +560,10 @@ pub enum Message {
     RunConfigToggleTarget,
     /// Toggle a target checkbox by index (mouse click parity).
     RunConfigToggleTargetAt(usize),
+    /// Toggle the modal's "Watch src/ and restart on change (desktop only)"
+    /// checkbox (mouse click parity; `Space` on the focused row reaches it
+    /// through [`Self::RunConfigToggleTarget`]).
+    RunConfigToggleWatch,
     /// Cycle the build mode by `delta` (`←`/`→`).
     RunConfigCycleMode(isize),
     /// Move modal focus to a specific control (mouse parity for the
@@ -477,17 +596,22 @@ pub enum Message {
     SwitchProject(usize),
 
     // ── Doctor panel + titlebar chip ──────────────────────────────────────────
-    /// Run the validator set off-thread (`d` from the workbench, the sidebar
-    /// "Doctor" action, the titlebar chip, or the panel's re-run affordance)
-    /// — routed to the runner as [`super::Effect::RunDoctor`]. Also fired
-    /// once at startup (`crate::runner`) to seed the chip.
+    /// Run the validator set off-thread (the panel's own `r` re-run
+    /// affordance / Re-run button) — routed to the runner as
+    /// [`super::Effect::RunDoctor`]. Also fired once at startup
+    /// (`crate::runner`) to seed the chip.
     RunDoctor,
     /// The off-thread validator run finished: replace the cached results.
     DoctorResults(Vec<DoctorCheck>),
-    /// Open the doctor panel.
+    /// Open the doctor panel (`i` from either screen, the sidebar "Doctor"
+    /// action, or the palette).
     OpenDoctorPanel,
-    /// Close the doctor panel (`Esc`).
+    /// Close the doctor panel (`Esc` / the panel's Close button).
     CloseDoctorPanel,
+    /// Close the doctor panel and open the bootstrap wizard (the panel's `t`
+    /// key / "Toolchain setup" button) — the toolchain setup moved here from
+    /// its old direct `i` binding.
+    OpenToolchainFromDoctor,
 
     // ── Bootstrap wizard + titlebar toolchain chip ───────────────────────────
     /// Run the component-level toolchain report off-thread
@@ -500,9 +624,10 @@ pub enum Message {
     /// directly (it derives `PartialEq`/`Eq`/`Clone`, so no mirror type is
     /// needed).
     BootstrapReport(DoctorReport),
-    /// Open the bootstrap wizard (the `i` key, or a titlebar toolchain-chip
-    /// click) — seeds it from the cached report, requesting a preflight first
-    /// if none is cached yet.
+    /// Open the bootstrap wizard (a titlebar toolchain-chip click, or the
+    /// doctor panel's `t` key / "Toolchain setup" button via
+    /// [`Message::OpenToolchainFromDoctor`]) — seeds it from the cached
+    /// report, requesting a preflight first if none is cached yet.
     OpenBootstrapWizard,
     /// Close the bootstrap wizard (`Esc` / the `[Esc] Close` title button).
     CloseBootstrapWizard,
@@ -601,6 +726,20 @@ pub enum Message {
     /// Confirm the clean (`Enter`/`y`) — routed to the runner as
     /// [`super::Effect::RunClean`].
     ConfirmClean,
+
+    // ── Quit confirm dialog ─────────────────────────────────────────────────────
+    /// Ask to quit (`q` from the welcome/workbench screen or the DevTools
+    /// pane, `Ctrl+C` with no running session, or the palette's Quit entry —
+    /// every former [`Self::Quit`] producer except `Ctrl+Q`). With no live
+    /// session ([`super::AppState::live_session_count`] `== 0`) this behaves
+    /// exactly like [`Self::Quit`]; otherwise it opens the quit-confirm
+    /// dialog (`state.quit_confirm = true`) instead of quitting outright.
+    RequestQuit,
+    /// Confirm the quit from the dialog (`Enter`/`y`) — the old unconditional
+    /// `Quit` behaviour: sets `should_quit` and clears the dialog.
+    ConfirmQuit,
+    /// Close the quit-confirm dialog without quitting (`Esc`/`n`).
+    CloseQuitConfirm,
 
     // ── Build artifact copy-path ──────────────────────────────────────────────
     /// Copy the active (build) session's reported artifact path(s) to the
@@ -884,4 +1023,18 @@ pub enum Message {
     /// An IDE-config generation finished (or was refused before it started):
     /// its outcome, retained for the dialog's status area.
     DapIdeConfig(DapIdeReport),
+
+    /// Show a toast from the runner — the seam an impure side effect the
+    /// pure core cannot see into (e.g. `crate::clipboard::write`'s outcome)
+    /// uses to reach `AppState::toasts`, since the runner has no direct
+    /// access to the model. `update`'s handling is pure (just a
+    /// `Toasts::push`); the runner decides the `level`/`text` and the
+    /// moment to send it (a startup clipboard-unavailable warning, or a
+    /// failed copy).
+    Notify {
+        /// The toast's severity.
+        level: ToastKind,
+        /// The toast's text.
+        text: String,
+    },
 }

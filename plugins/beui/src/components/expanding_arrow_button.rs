@@ -64,7 +64,7 @@ use crate::tokens::color_scheme_light;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_PRESS};
 
 use crate::press::{SpringScalar, inside, presses, stroke_outline};
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 
 // ---- Shared CTA metrics ----------------------------------------------------
 
@@ -85,6 +85,10 @@ const CTA_TEXT: f64 = 18.0;
 
 /// How long a CTA's own label cross-fade takes: `duration: 0.12`.
 const LABEL_FADE: Duration = Duration::from_millis(120);
+
+/// The type-scale role every CTA label takes its family from at layout — a
+/// control label, as on [`button`](super::button).
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 // ---- Expanding arrow -------------------------------------------------------
 
@@ -323,7 +327,9 @@ impl<State: 'static> View<State> for ExpandingArrowButtonView<State> {
 
 impl Widget for ExpandingArrowButtonWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        self.label_size = self.label.layout(ctx, &label_style(CTA_TEXT));
+        self.label_size = self
+            .label
+            .layout_themed(ctx, &label_style(CTA_TEXT), LABEL_ROLE);
         let width =
             (self.label_size.width + ARROW_LABEL_LEFT + ARROW_LABEL_RIGHT).max(CTA_MIN_WIDTH);
         bc.constrain(Size::new(width, CTA_HEIGHT))
@@ -808,7 +814,7 @@ impl Widget for HoldActionButtonWidget {
         let style = label_style(CTA_TEXT);
         let mut widest: f64 = 0.0;
         for (index, label) in self.labels.iter_mut().enumerate() {
-            let size = label.layout(ctx, &style);
+            let size = label.layout_themed(ctx, &style, LABEL_ROLE);
             self.label_sizes[index] = size;
             widest = widest.max(size.width);
         }
@@ -1192,8 +1198,8 @@ impl<State: 'static> View<State> for SlideActionButtonView<State> {
 impl Widget for SlideActionButtonWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let style = label_style(TEXT_SM);
-        self.label_size = self.label.layout(ctx, &style);
-        self.complete_size = self.complete_label.layout(ctx, &style);
+        self.label_size = self.label.layout_themed(ctx, &style, LABEL_ROLE);
+        self.complete_size = self.complete_label.layout_themed(ctx, &style, LABEL_ROLE);
         let size = bc.constrain(Size::new(CTA_MIN_WIDTH, CTA_HEIGHT));
         self.travel = Self::travel_for(size.width);
         size
@@ -2025,5 +2031,72 @@ mod tests {
         let size = lay_out(&mut slide_widget);
         let (_, more) = paint_at(&mut slide_widget, size, Some(&reduced), 0);
         assert!(!more, "an undragged slider rests");
+    }
+
+    // ---- Typeface: the three CTAs' labels follow the live theme -------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap,
+        assert_follows_a_live_family_swap_on, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 300.0);
+
+    /// All three CTAs at rest, each painting its idle label.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(expanding_arrow_button::<()>("Continue", |_| {})),
+            frust::any(hold_action_button::<()>("Delete", |_| {})),
+            frust::any(slide_action_button::<()>("Slide", |_| {})),
+        ])
+    }
+
+    #[test]
+    fn idle_labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the CTA labels", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn idle_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the CTA labels", probe_view, PROBE_WINDOW);
+    }
+
+    /// A slider dragged the whole way and released, so it paints its
+    /// completion label — held there by a reset delay no probe frame reaches.
+    fn completed_slider() -> Probe<frust::FlexView<()>, impl FnMut(&mut ()) -> frust::FlexView<()>>
+    {
+        let logic = |_: &mut ()| {
+            frust::Column(vec![frust::any(
+                slide_action_button::<()>("Slide", |_| {})
+                    .complete_label("Complete")
+                    .reset_delay(Duration::from_secs(3_600)),
+            )])
+        };
+        let mut probe = Probe::new(logic, PROBE_WINDOW, crate::theme());
+        probe.frame();
+        let y = CTA_HEIGHT / 2.0;
+        probe.event(&ev(PointerPhase::Down, SLIDE_PAD + SLIDE_THUMB / 2.0, y));
+        probe.event(&ev(PointerPhase::Move, CTA_MIN_WIDTH - 1.0, y));
+        probe.event(&ev(PointerPhase::Up, CTA_MIN_WIDTH - 1.0, y));
+        probe
+    }
+
+    #[test]
+    fn the_completion_label_paints_in_geist_under_the_beui_theme() {
+        assert_control("the slider's completion label", PROBE_WINDOW);
+        assert_all(
+            "the slider's completion label",
+            "under the beUI theme",
+            &completed_slider().frame(),
+            Face::Geist,
+        );
+    }
+
+    #[test]
+    fn the_completion_label_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap_on(
+            "the slider's completion label",
+            &mut completed_slider(),
+        );
     }
 }

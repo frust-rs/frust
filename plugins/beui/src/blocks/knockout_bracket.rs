@@ -73,7 +73,7 @@ use crate::components::popover::{PanelChrome, paint_panel_hairline, resolve_pane
 use crate::motion::Ramp;
 use crate::press::{Lane, inside, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -961,20 +961,13 @@ impl<State: 'static> View<State> for KnockoutBracketView<State> {
     fn teardown(&self, _element: &mut KnockoutBracketWidget, _ctx: &mut BuildCtx<'_>) {}
 }
 
-/// The label family: the theme's own scale, with the catalog's sans stack as
-/// the unthemed fallback.
-fn family_of(theme: Option<&Theme>) -> frust::authoring::text::FontFamily {
-    theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    })
-}
-
-/// One label style at `size`.
+/// One label style at `size`, in the theme's `label_large` family.
 fn bracket_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 impl Widget for KnockoutBracketWidget {
@@ -2088,5 +2081,53 @@ mod tests {
         assert!(rec.clips[1].1.height > BRACKET_CARD_HEIGHT);
         // The elbows are stroked paths, one per fed match.
         assert!(rec.strokes > 0, "no connector was drawn");
+    }
+
+    // ---- Typeface: headers and card runs follow the live theme -------------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A two-round draw — a finished, dated semi-final and a final with an
+    /// open side — plus a third-place match, so every kind of run paints: the
+    /// round headers, the third-place label, and each card's schedule, badge,
+    /// names, scores and initials.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        let team = |name: &str| bracket_side(bracket_team(name));
+        let rounds = vec![
+            bracket_round(
+                "Semi-finals",
+                vec![
+                    bracket_match("sf", team("Spain").score(2), team("Italy").score(1))
+                        .winner(BracketWinner::Home)
+                        .date("12 Jul"),
+                ],
+            ),
+            bracket_round(
+                "Final",
+                vec![bracket_match("f", team("Spain"), bracket_tbd())],
+            ),
+        ];
+        frust::Stack(vec![any(knockout_bracket::<()>(rounds).third_place(
+            bracket_match("third", team("Croatia").score(2), team("Morocco").score(1))
+                .winner(BracketWinner::Home),
+        ))])
+    }
+
+    #[test]
+    fn bracket_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the bracket's text", probe_view, WINDOW);
+        let runs = Probe::new(probe_view, WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            21,
+            "headers, the third-place label and every card run"
+        );
+    }
+
+    #[test]
+    fn bracket_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the bracket's text", probe_view, WINDOW);
     }
 }

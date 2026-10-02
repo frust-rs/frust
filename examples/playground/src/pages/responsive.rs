@@ -43,6 +43,19 @@
 //! orientation enum. On a desktop window this means orientation flips as you
 //! resize past square, independent of the width breakpoint below; that is
 //! expected behavior of the derivation, not a bug in this page.
+//!
+//! # Window-control corner insets (iPadOS 26+ only)
+//!
+//! `WindowMetrics.insets.corner_insets` publishes the physical footprints of
+//! the four window-control corners (the interactive control regions in the
+//! corners of the window — pause button, close button, etc. on iPadOS 26+
+//! windowed apps), zero on every other platform. The corners ride on every
+//! rebuild like `WindowMetrics` itself, republished whenever the shell's
+//! insets change (windowed ⇄ full-screen, control-style changes). A layout
+//! that needs to shift content out from under these controls (like the app bar
+//! in `frust_material` and `frust_glyph`) reads `corner_insets` the same way
+//! as `safe_area`. This line (the g4-01 gate readout) displays the current
+//! corner footprints for human verification.
 
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Orientation, Padding, SizedBox,
@@ -107,6 +120,30 @@ fn status_line(metrics: Option<WindowMetrics>) -> String {
         ),
         None => "WindowMetrics: not yet published by this shell — using the narrow fallback layout"
             .to_string(),
+    }
+}
+
+/// A one-line readout of the current `WindowMetrics.insets.corner_insets`
+/// (the four window-control corner footprints on iOS 26+, zero elsewhere),
+/// shown under the status line so a corner-insets-driven layout can be
+/// visibly verified without needing to inspect anything else.
+fn corner_line(metrics: Option<WindowMetrics>) -> String {
+    match metrics {
+        Some(m) => {
+            let c = &m.insets.corner_insets;
+            format!(
+                "Corner insets (window control, iPadOS 26+): TL {:.0}x{:.0}  TR {:.0}x{:.0}  BL {:.0}x{:.0}  BR {:.0}x{:.0}",
+                c.top_left.width,
+                c.top_left.height,
+                c.top_right.width,
+                c.top_right.height,
+                c.bottom_left.width,
+                c.bottom_left.height,
+                c.bottom_right.width,
+                c.bottom_right.height,
+            )
+        }
+        None => "Corner insets: not yet published by this shell — showing fallback".to_string(),
     }
 }
 
@@ -217,6 +254,7 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                 .color(muted))),
                 inflexible(any(SizedBox(None, Some(6.0)))),
                 inflexible(any(text(status_line(metrics)).size(10.5).color(muted))),
+                inflexible(any(text(corner_line(metrics)).size(10.5).color(muted))),
                 inflexible(any(text(
                     "Orientation is derived from size (portrait when height >= width), \
                      never platform-sourced — on a desktop window it flips as you resize \

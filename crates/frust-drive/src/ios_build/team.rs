@@ -4,6 +4,15 @@
 //! auto-detect from `security find-identity -v -p codesigning`. Zero detected
 //! teams while signing is required is an actionable error; multiple picks the
 //! first and prints how to override.
+//!
+//! Auto-detection reads each identity's team from its certificate's subject
+//! `OU` (`security find-certificate -c <label>`), **not** from the
+//! parenthesized id in the certificate name: for a *distribution* certificate
+//! the two coincide, but an *Apple Development* certificate issued to a
+//! member of an organization team carries the developer's own id in the name
+//! and the team in the `OU` — handing the name's id to `xcodebuild` as
+//! `DEVELOPMENT_TEAM` fails with `No Account for Team`. The name's id is kept
+//! only as the fallback when the certificate cannot be read.
 
 use std::path::Path;
 
@@ -74,32 +83,104 @@ pub fn resolve(
     }
 }
 
-/// Runs `security find-identity -v -p codesigning` and extracts the distinct
-/// team ids from its identity lines.
+/// Runs `security find-identity -v -p codesigning` and resolves the distinct
+/// team ids of its identity lines, in first-seen order: each identity's
+/// certificate `OU` ([`team_from_certificate`]), falling back to the id in
+/// the certificate name ([`extract_team`]) when the certificate cannot be
+/// read — see the module doc for why the `OU` is the authority.
 pub fn detect(runner: &dyn ProcessRunner) -> Result<Vec<String>> {
     let out = runner
         .run("security", &["find-identity", "-v", "-p", "codesigning"])
         .context("running `security find-identity`")?;
-    Ok(parse_identities(&out.stdout))
-}
-
-/// Parses `security find-identity` output, taking the first
-/// `([A-Z0-9]{10})` token on each identity line as its team id and deduping
-/// across identities (preserving first-seen order).
-fn parse_identities(output: &str) -> Vec<String> {
     let mut teams: Vec<String> = Vec::new();
-    for line in output.lines() {
-        if let Some(team) = extract_team(line)
+    for line in out.stdout.lines() {
+        let team = identity_label(line)
+            .and_then(|label| team_from_certificate(runner, label))
+            .or_else(|| extract_team(line));
+        if let Some(team) = team
             && !teams.contains(&team)
         {
             teams.push(team);
         }
     }
-    teams
+    Ok(teams)
+}
+
+/// The quoted certificate label of a `security find-identity` identity line
+/// (`  1) <hash> "Apple Development: Ada (ABCDEFGHIJ)"`), `None` for the
+/// summary line and anything else unquoted.
+fn identity_label(line: &str) -> Option<&str> {
+    let start = line.find('"')? + 1;
+    let end = line[start..].rfind('"')? + start;
+    (end > start).then(|| &line[start..end])
+}
+
+/// The team id in the subject `OU` of the certificate labelled `label`:
+/// `security find-certificate -c <label>` prints the subject as a DER hex
+/// blob (`"subj"<blob>=0x…`), and the first `organizationalUnitName` whose
+/// value is ten `[A-Z0-9]` characters is the team. `None` when the lookup
+/// fails or no such `OU` exists.
+fn team_from_certificate(runner: &dyn ProcessRunner, label: &str) -> Option<String> {
+    let out = runner
+        .run("security", &["find-certificate", "-c", label])
+        .ok()?;
+    if !out.success {
+        return None;
+    }
+    subject_team(&out.stdout)
+}
+
+/// The team id from a `security find-certificate` attribute dump — its
+/// `"subj"<blob>=0x…` line (hex, then a quoted ASCII rendering) decoded and
+/// scanned by [`team_from_subject_der`].
+fn subject_team(find_certificate_output: &str) -> Option<String> {
+    find_certificate_output.lines().find_map(|line| {
+        // The hex is followed by two spaces and a quoted ASCII rendering of
+        // the same bytes; only the first token is the DER.
+        let rest = line.trim().strip_prefix("\"subj\"<blob>=0x")?;
+        let der = decode_hex(rest.split_whitespace().next()?)?;
+        team_from_subject_der(&der)
+    })
+}
+
+/// Decodes an even-length string of hex digit pairs; `None` on any other
+/// input.
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// The first `OU` (OID `2.5.4.11`, DER `06 03 55 04 0B`) in a DER-encoded
+/// X.501 `Name` whose value is a ten-character `[A-Z0-9]` `PrintableString`
+/// (`0x13`) or `UTF8String` (`0x0C`) — an Apple team id. A pattern scan
+/// rather than a full ASN.1 parse: the subject is a flat sequence of
+/// attribute pairs, and an `OU` such as the WWDR issuer's `G3` fails the
+/// ten-character rule rather than being mistaken for a team.
+fn team_from_subject_der(der: &[u8]) -> Option<String> {
+    const OU_OID: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x0B];
+    const TEAM_LEN: usize = 10;
+    der.windows(OU_OID.len() + 2 + TEAM_LEN).find_map(|window| {
+        let (oid, rest) = window.split_at(OU_OID.len());
+        if oid != OU_OID || !(rest[0] == 0x13 || rest[0] == 0x0C) || rest[1] as usize != TEAM_LEN {
+            return None;
+        }
+        let value = &rest[2..];
+        value
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            .then(|| String::from_utf8_lossy(value).into_owned())
+    })
 }
 
 /// Returns the first `(XXXXXXXXXX)` substring whose 10 characters are all
-/// `[A-Z0-9]` — the certificate CN's parenthesized team id.
+/// `[A-Z0-9]` — the parenthesized id in a certificate name. The team id for a
+/// distribution certificate; the *developer's* id for an organization-team
+/// development certificate, which is why it is only the fallback.
 fn extract_team(line: &str) -> Option<String> {
     let bytes = line.as_bytes();
     (0..bytes.len()).find_map(|open| {
@@ -174,30 +255,127 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn parse_identities_handles_zero_one_and_several() {
-        assert_eq!(parse_identities(""), Vec::<String>::new());
+    /// A `security find-certificate -c <label>` attribute dump whose subject
+    /// is `UID=<uid>, CN=<cn>, OU=<ou>, O=Example` — the DER hand-assembled
+    /// the way Apple's certificates lay it out, one `SET { SEQUENCE { OID,
+    /// value } }` per attribute.
+    fn certificate_dump(cn: &str, ou: &str) -> String {
+        fn attr(oid: &[u8], tag: u8, value: &str) -> Vec<u8> {
+            let mut seq = vec![0x06, oid.len() as u8];
+            seq.extend_from_slice(oid);
+            seq.push(tag);
+            seq.push(value.len() as u8);
+            seq.extend_from_slice(value.as_bytes());
+            let mut set = vec![0x31, (seq.len() + 2) as u8, 0x30, seq.len() as u8];
+            set.extend(seq);
+            set
+        }
+        let mut name = Vec::new();
+        name.extend(attr(
+            &[0x09, 0x92, 0x26, 0x89, 0x93, 0xF2, 0x2C, 0x64, 0x01, 0x01],
+            0x0C,
+            "UID0000001",
+        ));
+        name.extend(attr(&[0x55, 0x04, 0x03], 0x0C, cn));
+        name.extend(attr(&[0x55, 0x04, 0x0B], 0x13, ou));
+        name.extend(attr(&[0x55, 0x04, 0x0A], 0x0C, "Example"));
+        let hex: String = name.iter().map(|b| format!("{b:02X}")).collect();
+        format!(
+            "keychain: \"login.keychain-db\"\n    \"labl\"<blob>=\"{cn}\"\n    \"subj\"<blob>=0x{hex}  \"0\\\"\n"
+        )
+    }
 
+    fn with_certificate(runner: FakeProcessRunner, label: &str, ou: &str) -> FakeProcessRunner {
+        runner.with(
+            format!("security find-certificate -c {label}"),
+            Output {
+                success: true,
+                stdout: certificate_dump(label, ou),
+                stderr: String::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn detect_reads_the_team_from_the_certificate_ou_not_the_name() {
+        // An organization-team development certificate: the name carries the
+        // developer's id, the `OU` the team — the a3-03 gate's exact shape.
+        let label = "Apple Development: Ada (DEVELOPER1)";
+        let runner = with_certificate(
+            identities(&format!(
+                "  1) HASH1 \"{label}\"\n     1 valid identities found"
+            )),
+            label,
+            "TEAMID1234",
+        );
+        assert_eq!(detect(&runner).unwrap(), vec!["TEAMID1234"]);
+    }
+
+    #[test]
+    fn detect_falls_back_to_the_name_when_the_certificate_is_unreadable() {
+        // No `find-certificate` response at all: the fake runner errors, and
+        // the name's parenthesized id stands in.
         let one = r#"  1) ABCDEF0123 "Apple Development: Ada (TEAMID1234)"
      1 valid identities found"#;
-        assert_eq!(parse_identities(one), vec!["TEAMID1234"]);
+        assert_eq!(detect(&identities(one)).unwrap(), vec!["TEAMID1234"]);
+        assert_eq!(detect(&identities("")).unwrap(), Vec::<String>::new());
 
         let several = r#"  1) HASH1 "Apple Development: Ada (TEAMID1234)"
   2) HASH2 "Apple Distribution: Corp (OTHERTEAM9)"
   3) HASH3 "Apple Development: Bob (TEAMID1234)"
      3 valid identities found"#;
         // TEAMID1234 deduped; order preserved.
-        assert_eq!(parse_identities(several), vec!["TEAMID1234", "OTHERTEAM9"]);
+        assert_eq!(
+            detect(&identities(several)).unwrap(),
+            vec!["TEAMID1234", "OTHERTEAM9"]
+        );
     }
 
     #[test]
-    fn parse_identities_skips_malformed_lines() {
+    fn detect_dedupes_across_certificates_that_share_a_team() {
+        let ada = "Apple Development: Ada (DEVELOPER1)";
+        let corp = "Apple Distribution: Corp (TEAMID1234)";
+        let listing =
+            format!("  1) HASH1 \"{ada}\"\n  2) HASH2 \"{corp}\"\n     2 valid identities found");
+        let runner = with_certificate(
+            with_certificate(identities(&listing), ada, "TEAMID1234"),
+            corp,
+            "TEAMID1234",
+        );
+        assert_eq!(detect(&runner).unwrap(), vec!["TEAMID1234"]);
+    }
+
+    #[test]
+    fn subject_team_ignores_short_or_lowercase_ous_and_malformed_blobs() {
+        // The WWDR issuer's `OU=G3` shape, and a lowercase value, are not teams.
+        assert_eq!(subject_team(&certificate_dump("Ada", "G3")), None);
+        assert_eq!(subject_team(&certificate_dump("Ada", "teamid1234")), None);
+        assert_eq!(subject_team("    \"subj\"<blob>=0xZZ\n"), None);
+        assert_eq!(subject_team("no subject line at all"), None);
+        assert_eq!(
+            subject_team(&certificate_dump("Ada (DEVELOPER1)", "TEAMID1234")),
+            Some("TEAMID1234".to_string())
+        );
+    }
+
+    #[test]
+    fn identity_label_takes_the_quoted_certificate_name() {
+        assert_eq!(
+            identity_label("  1) HASH \"Apple Development: Ada (TEAMID1234)\""),
+            Some("Apple Development: Ada (TEAMID1234)")
+        );
+        assert_eq!(identity_label("     1 valid identities found"), None);
+        assert_eq!(identity_label("  1) HASH \"\""), None);
+    }
+
+    #[test]
+    fn extract_team_skips_malformed_lines() {
         let mixed = r#"  garbage without parens
   1) HASH "Apple Development: Ada (SHORT)"
   2) HASH2 "Apple Development: Bob (TEAMID1234)"
   (nope)"#;
         // "(SHORT)" is not 10 chars; "(nope)" is lowercase/too short.
-        assert_eq!(parse_identities(mixed), vec!["TEAMID1234"]);
+        assert_eq!(detect(&identities(mixed)).unwrap(), vec!["TEAMID1234"]);
     }
 
     #[test]

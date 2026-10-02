@@ -7,7 +7,7 @@
 //! skip (only `terminal.draw` when the state changed or something is
 //! animating).
 
-use std::io::{self, IsTerminal, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,16 +30,18 @@ use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::clipboard::{self, Backend as ClipboardBackend, ClipboardMode};
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
     BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
-    Engine, Message, Outcome, RegionId, RunFocus, Screen, WizardStep,
+    Engine, Message, Outcome, RegionId, RunFocus, Screen, SessionTarget, ToastKind, WizardStep,
 };
 use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
     DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge,
     PendingWidgetTrees, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState,
-    SessionSubscribers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state, serve_command,
+    SessionSubscribers, SourceWatchers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state,
+    serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -148,6 +150,12 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // for the embedded server's snapshots and its `restart_app`. Empty (and
     // untouched) while no MCP server is running.
     let mut mcp_records = McpSessionRecords::new();
+    // The "Watch: restart on save" watchers (`crate::supervise::watch`): one
+    // `notify` watcher + debounce thread per watched desktop session,
+    // posting `Message::WatchTriggered` on the engine channel. Started and
+    // stopped only through `apply_effect`; dropped (every thread stopped and
+    // bounded-joined against one deadline) when this loop returns.
+    let mut watchers = SourceWatchers::new(msg_tx.clone());
     // The embedded servers' two deferred-answer registries (see
     // `crate::supervise::session_feeds`): the open session-event feeds a DAP
     // client's output/exit pumps read, and the widget-tree pulls waiting on a
@@ -163,6 +171,24 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         msg_tx.clone(),
         Arc::new(RealProcessRunner),
     ));
+    // The clipboard backend (`crate::clipboard`): picked once here, since
+    // stdout's TTY-ness is fixed for the process's life, and kept for the
+    // whole run through `EffectCtx` rather than re-detected on every copy.
+    // `FRUST_TUI_CLIPBOARD` (system|osc52|off; anything else/unset is auto)
+    // overrides the environment-detected choice.
+    let clipboard_mode = ClipboardMode::parse(std::env::var("FRUST_TUI_CLIPBOARD").ok().as_deref());
+    let clipboard_backend = clipboard::detect(
+        |name| std::env::var(name).ok(),
+        io::stdout().is_terminal(),
+        clipboard_mode,
+        clipboard::HOST_ALWAYS_HAS_DISPLAY,
+    );
+    if let ClipboardBackend::Disabled { reason } = clipboard_backend {
+        let _ = msg_tx.send(Message::Notify {
+            level: ToastKind::Warn,
+            text: format!("Clipboard unavailable: {reason}"),
+        });
+    }
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
     // populate on open (the doctor run is the titlebar chip's cached
@@ -200,6 +226,73 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         }
 
         tokio::select! {
+            // `biased` makes the branches below poll in the order written,
+            // never a random pick — so that order is a correctness decision,
+            // not cosmetics. Each branch is placed deliberately:
+            //
+            // 1. `tick` first. It is ready at most once per `TICK` interval,
+            //    so putting it ahead of everything else costs nothing (it is
+            //    essentially never the reason another branch waits) while
+            //    guaranteeing the reverse can't happen: a busier branch can
+            //    never starve the tick into never firing, which would stall
+            //    toast expiry for as long as that branch stays busy.
+            // 2. `reader.next()` (terminal input) next, ahead of both
+            //    internal channels, so keystrokes stay responsive even while
+            //    an MCP client or a launched session is generating traffic.
+            // 3. `rx` (the engine channel) before `session_rx`: a launch
+            //    posts its `RegisterSession` on `rx`, but the session's own
+            //    drain thread starts sending on `session_rx` immediately, so
+            //    by the time this `select!` next runs, both can already be
+            //    queued together. `update` drops a session event for an id
+            //    it hasn't registered yet, so if `session_rx` ever won that
+            //    race, the tab would sit in `Configuring` forever. Polling
+            //    `rx` first makes registration win every time, not just on
+            //    average.
+            // 4. `session_rx` last. A chatty child process is the branch
+            //    most likely to stay continuously ready, and with `biased` a
+            //    continuously-ready branch starves every branch *after* it —
+            //    so the potentially-busiest branch goes last, where it can
+            //    only ever delay itself, never input, MCP commands, or the
+            //    tick. The trade this accepts: a burst on the branches ahead
+            //    of it delays `session_rx`, but only for the burst's length —
+            //    every iteration where they're not ready still falls through
+            //    to `session_rx`, so this loop is never idle while the
+            //    receiver lives. If a burst is long enough to fill the
+            //    channel first, it's the supervisor's own overflow policy
+            //    that protects correctness, not this ordering (see
+            //    `crate::supervise::supervisor`'s module docs):
+            //    non-terminal events are dropped-newest and counted, a
+            //    terminal state gets a bounded blocking retry instead.
+            //    That's the same outcome this loop already lived with
+            //    before this change, and it takes a sustained flood to
+            //    reach — engine-channel traffic (MCP commands, internal
+            //    messages) is internal and bursty, not continuous.
+            biased;
+            _ = tick.tick() => {
+                // Only touch the model while something is animating (a live
+                // toast) — the dirty-frame skip keeps an idle workbench from
+                // aging/redrawing anything. The Tick transition drops expired
+                // toasts and reports whether the visible set changed.
+                if engine.state.animating() {
+                    let out = engine.handle(Message::Tick);
+                    needs_redraw |= out.redraw;
+                    apply_effect(
+                        out.effect,
+                        &mut EffectCtx {
+                            engine: &mut engine,
+                            supervisor: &mut supervisor,
+                            devtools: &mut devtools,
+                            metrics: &mut metrics,
+                            tx: &msg_tx,
+                            next_adhoc_id: &mut next_adhoc_id,
+                            records: &mut mcp_records,
+                            watchers: &mut watchers,
+                            backend: &backend,
+                            clipboard: clipboard_backend,
+                        },
+                    );
+                }
+            }
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
@@ -220,7 +313,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                     tx: &msg_tx,
                                     next_adhoc_id: &mut next_adhoc_id,
                                     records: &mut mcp_records,
+                                    watchers: &mut watchers,
                                     backend: &backend,
+                                    clipboard: clipboard_backend,
                                 },
                             );
                         }
@@ -265,7 +360,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            watchers: &mut watchers,
                             backend: &backend,
+                            clipboard: clipboard_backend,
                         },
                     );
                 }
@@ -287,32 +384,11 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         tx: &msg_tx,
                         next_adhoc_id: &mut next_adhoc_id,
                         records: &mut mcp_records,
+                        watchers: &mut watchers,
                         backend: &backend,
+                        clipboard: clipboard_backend,
                     },
                 );
-            }
-            _ = tick.tick() => {
-                // Only touch the model while something is animating (a live
-                // toast) — the dirty-frame skip keeps an idle workbench from
-                // aging/redrawing anything. The Tick transition drops expired
-                // toasts and reports whether the visible set changed.
-                if engine.state.animating() {
-                    let out = engine.handle(Message::Tick);
-                    needs_redraw |= out.redraw;
-                    apply_effect(
-                        out.effect,
-                        &mut EffectCtx {
-                            engine: &mut engine,
-                            supervisor: &mut supervisor,
-                            devtools: &mut devtools,
-                            metrics: &mut metrics,
-                            tx: &msg_tx,
-                            next_adhoc_id: &mut next_adhoc_id,
-                            records: &mut mcp_records,
-                            backend: &backend,
-                        },
-                    );
-                }
             }
         }
     }
@@ -322,6 +398,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // no-ops while nothing has started one.
     engine.stop_mcp();
     engine.stop_dap();
+    // …and stop every source watcher now, while the terminal is still ours,
+    // rather than whenever the locals happen to drop.
+    drop(watchers);
 
     Ok(())
 }
@@ -415,16 +494,29 @@ struct EffectCtx<'a> {
     next_adhoc_id: &'a mut u64,
     /// The MCP launch records a started session is recorded in.
     records: &'a mut McpSessionRecords,
+    /// The per-session "Watch: restart on save" source watchers, keyed by
+    /// session id alongside `records` (whose spec gives a watcher its root).
+    watchers: &'a mut SourceWatchers,
     /// The one [`TuiSessionBackend`] both embedded servers are started over —
     /// built once per run, so an MCP agent and a DAP client drive the same
     /// session world rather than two backends over the same supervisor.
     backend: &'a SharedBackend,
+    /// The clipboard backend `run_loop` picked once at startup (see
+    /// `crate::clipboard`'s module doc) — kept for the whole run rather than
+    /// re-detected on every copy.
+    clipboard: ClipboardBackend,
 }
 
 /// Enact an engine-requested [`Effect`] — the runner owns the side effects the
 /// pure engine can't perform: killing a session through the supervisor, writing
 /// the system clipboard, discovering devices off-thread, and launching
 /// sessions.
+///
+/// Every `update()` application in [`run_loop`] is followed by exactly one
+/// call here, so this is also where the launch records catch up with the
+/// model: [`McpSessionRecords::observe`] runs first, because the pure engine
+/// removes tabs (close, restart) without any way to tell the runner-owned
+/// records, and a record whose tab is gone must stop counting as live.
 fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
     let EffectCtx {
         engine,
@@ -434,20 +526,122 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         tx,
         next_adhoc_id,
         records,
+        watchers,
         backend,
+        clipboard: clipboard_backend,
     } = ctx;
+    records.observe(&engine.state);
     match effect {
-        Some(Effect::StopSession(id)) => supervisor.stop(id),
-        Some(Effect::Copy(text)) => copy_to_clipboard(&text),
+        Some(Effect::StopSession(id)) => {
+            supervisor.stop(id);
+            spawn_teardown(watchers.stop(id));
+        }
+        // The keyboard restart's enactment: `update()` has already applied
+        // its guard (`crate::supervise::mcp_backend::restart_app`'s doc
+        // names the shared contract this mirrors), so this only needs the
+        // retained spec to stop-then-relaunch. The replaced record is marked
+        // closed first so it stops counting as live however its tab goes.
+        //
+        // A missing record IS reachable: `McpSessionRecords::retain_bounded`
+        // evicts the oldest terminal records across the whole shared map on
+        // every MCP launch/restart, so a keyboard-launched record can be
+        // evicted while an MCP agent is active (the keyboard face of
+        // LIMITATIONS `tui-mcp-sessions-tab-uncapped`). A launch-error record
+        // (an ad-hoc failure tab) is already screened by `update()`'s target
+        // guard. Either way there is nothing to relaunch, and the tab may
+        // already be gone, so the user is told with a toast — stderr is
+        // invisible under the raw-mode TUI.
+        //
+        // A watched session's flag survives the relaunch here, in the runner
+        // (the pure core has no id for the relaunch until it registers): the
+        // replaced session's watcher is stopped and, if it had one, the new
+        // session is sent `EnableWatch` right after its `RegisterSession` —
+        // same channel, so the engine always sees the registration first —
+        // which flips its flag and asks for a fresh watcher (`WatchSet`).
+        Some(Effect::RestartSession(id)) => {
+            let watched = watchers.contains(id);
+            spawn_teardown(watchers.stop(id));
+            match records.get(id) {
+                Some(record) if record.launch_error.is_none() => {
+                    let spec = record.spec.clone();
+                    records.mark_closed(id);
+                    supervisor.stop(id);
+                    let started = launch_sessions(vec![spec], supervisor, tx, records);
+                    if watched {
+                        enable_watch_on(&started, tx);
+                    }
+                }
+                _ => {
+                    let _ = tx.send(Message::Notify {
+                        level: ToastKind::Warn,
+                        text: "no launch record for this session — relaunch it with r".to_string(),
+                    });
+                }
+            }
+        }
+        Some(Effect::Copy(text)) => match clipboard::write(*clipboard_backend, &text) {
+            Ok(clipboard::CopyOutcome::Complete) => {}
+            Ok(clipboard::CopyOutcome::Truncated { kept_bytes }) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Info,
+                    text: format!("Copied (shortened to {} KB)", kept_bytes / 1024),
+                });
+            }
+            Err(reason) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: format!("Copy failed: {reason}"),
+                });
+            }
+        },
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
-        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
+        Some(Effect::LaunchSessions(specs)) => {
+            launch_sessions(specs, supervisor, tx, records);
+        }
+        Some(Effect::LaunchWatchedSessions(specs)) => {
+            let started = launch_sessions(specs, supervisor, tx, records);
+            enable_watch_on(&started, tx);
+        }
+        Some(Effect::WatchSet { id, on: true }) => {
+            // The launch record's root is the spec the session runs; the
+            // tab's own root is the fallback for a record since evicted.
+            let root = records
+                .get(id)
+                .map(|record| record.spec.project_root.clone())
+                .or_else(|| {
+                    engine
+                        .state
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.project_root.clone())
+                });
+            match root {
+                Some(root) => {
+                    let (started, replaced) = watchers.start(id, &root);
+                    spawn_teardown(replaced);
+                    if let Err(reason) = started {
+                        let _ = tx.send(Message::WatchFailed {
+                            session: id,
+                            reason,
+                        });
+                    }
+                }
+                None => {
+                    let _ = tx.send(Message::WatchFailed {
+                        session: id,
+                        reason: "the session is gone".to_string(),
+                    });
+                }
+            }
+        }
+        Some(Effect::WatchSet { id, on: false }) => spawn_teardown(watchers.stop(id)),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         Some(Effect::ProbeCleanSignals) => {
             // Neither the create wizard's arch cards nor the Add Plugin
-            // dialog's registry cards are sibling-gated any longer —
-            // clean-signals moved to a git+rev pin (`docs/DEVELOPMENT.md`'s
-            // Version-Pin Policy), so there is no `../clean-signals-rs`
-            // checkout left to probe for. Reply immediately rather than
+            // dialog's registry cards are sibling-gated —
+            // clean-signals is a crates.io dependency, so there is no
+            // `../clean-signals-rs` checkout to probe for. Reply immediately rather than
             // touching disk for a check nothing acts on.
             let _ = tx.send(Message::CleanSignalsProbed(true));
         }
@@ -536,7 +730,9 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                         tx,
                         next_adhoc_id,
                         records,
+                        watchers,
                         backend,
+                        clipboard: *clipboard_backend,
                     },
                 );
             }
@@ -545,6 +741,27 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
     }
+    // Reconcile the watchers with the model *after* the effect: a watched tab
+    // can leave without an effect naming it (a terminal tab closed on the
+    // spot), and its watcher must not outlive it. Running after the match
+    // (not before, like `observe`) lets the restart arm above read a
+    // just-removed tab's watcher to carry its flag over first.
+    let watched = |id: SessionId| engine.state.sessions.iter().any(|s| s.id == id && s.watch);
+    for teardown in watchers.retain(watched) {
+        spawn_teardown(Some(teardown));
+    }
+}
+
+/// Post [`Message::EnableWatch`] for every desktop session in `started` — the
+/// carry-over of "Watch: restart on save" onto a relaunch, and the run-config
+/// modal's watch checkbox. Sent after `launch_sessions` has already sent each
+/// session's `RegisterSession`, so the engine always has the tab first.
+fn enable_watch_on(started: &[(SessionId, bool)], tx: &UnboundedSender<Message>) {
+    for &(session, desktop) in started {
+        if desktop {
+            let _ = tx.send(Message::EnableWatch { session });
+        }
+    }
 }
 
 /// Write (or refresh) an IDE's DAP client config off the UI thread, posting
@@ -552,30 +769,87 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
 ///
 /// `generate_ide_config` merges into whatever the editor already has on disk,
 /// so it reads, parses, creates directories and writes — none of which belongs
-/// on the event loop. Every ending is reported: a written/updated/skipped
-/// file, the IDE that has no DAP config format at all (`Ok(None)`, which only
-/// the JetBrains pair reaches here — the pure core refuses the others before
-/// asking for this effect), and a failure, which is retained and shown rather
-/// than dropped.
+/// on the event loop. `request.mode` decides what an existing file gets (see
+/// `frust_dap::ide_config::WriteMode`). Every ending the request
+/// [`reports`](crate::engine::IdeConfigRequest::reports) is posted back: a
+/// written/updated/skipped file, the IDE that has no DAP config format at all
+/// (`Ok(None)`, which only the JetBrains pair reaches here — the pure core
+/// refuses the others before asking for this effect), and a failure, which is
+/// retained and shown rather than dropped. The one ending not posted is an
+/// automatic (`IfAbsent`) write's plain skip — the ordinary "already
+/// configured" case on every launch. An automatic write's report is posted
+/// tagged with its project and IDE
+/// ([`posted`](crate::engine::IdeConfigRequest::posted)), so the pure core can
+/// limit a repeating stale-port or failure toast to once per run.
+///
+/// **Serialized per root.** Two triggers (a fresh bind and an app launch, or
+/// an explicit `g` racing either) can ask for the same files at once, and each
+/// generation is a read-merge-write. Every generation therefore holds
+/// [`with_ide_config_lock`] for its whole run, so two never interleave on the
+/// same files; requests wait their turn and none is dropped — an explicit
+/// refresh queued behind an automatic write still runs, after it.
 fn spawn_ide_config_generation(
     request: crate::engine::IdeConfigRequest,
     tx: UnboundedSender<Message>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let report = match frust_dap::ide_config::generate_ide_config(
-            Some(request.ide),
-            request.port,
-            &request.project_root,
-        ) {
-            Ok(Some(result)) => crate::engine::DapIdeReport::Written {
-                ide: request.ide,
-                result,
-            },
-            Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
-            Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
-        };
-        let _ = tx.send(Message::DapIdeConfig(report));
+        let key = ide_config_lock_key(&request.project_root);
+        let report =
+            with_ide_config_lock(key, || {
+                match frust_dap::ide_config::generate_ide_config(
+                    Some(request.ide),
+                    request.port,
+                    &request.project_root,
+                    request.mode,
+                ) {
+                    Ok(Some(result)) => crate::engine::DapIdeReport::Written {
+                        ide: request.ide,
+                        result,
+                    },
+                    Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
+                    Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
+                }
+            });
+        if let Some(report) = request.posted(report) {
+            let _ = tx.send(Message::DapIdeConfig(report));
+        }
     });
+}
+
+/// The key IDE-config generations for `project_root` serialize on: the
+/// detected workspace root (canonical), not the project root itself — VS
+/// Code's `launch.json` and Neovim's `.nvim-dap.lua` live at the workspace
+/// root, which two projects of one monorepo share, and every other generated
+/// file lives under the project, hence under that same key. Falls back to the
+/// project root as given when it cannot be resolved.
+fn ide_config_lock_key(project_root: &Path) -> PathBuf {
+    let workspace = frust_dap::ide_config::vscode::detect_workspace_root(project_root);
+    workspace.canonicalize().unwrap_or(workspace)
+}
+
+/// Run `generate` while holding the IDE-config lock for `key`, blocking until
+/// any other generation holding it finishes.
+///
+/// One mutex per key, handed out from a process-wide map (a handful of
+/// entries: one per distinct workspace a run configures). Nothing is ever
+/// skipped or coalesced — every caller runs `generate`, in turn. A panicked
+/// holder poisons nothing here: the lock guards no data, only exclusion.
+fn with_ide_config_lock<T>(key: PathBuf, generate: impl FnOnce() -> T) -> T {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    type Locks = Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Locks::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(locks.entry(key).or_default())
+    };
+    let _held = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    generate()
 }
 
 /// Wait out a stopped DevTools bridge thread off the event loop.
@@ -702,6 +976,9 @@ fn launch_bootstrap_fix_session(
         // A toolchain fix runs `rustup`/`cargo`, not the app — there is no
         // devtools service to reach.
         devtools: DevtoolsLaunch::unavailable(),
+        // …and it occupies no run target, so it neither blocks nor is
+        // blocked by a launch.
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -744,8 +1021,10 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
         id,
         project_root: spec.project_root.clone(),
         target_label: format!("build {}", build_target_label(&spec.target)),
-        // A build session produces an artifact; nothing is running to inspect.
+        // A build session produces an artifact; nothing is running to inspect,
+        // and nothing occupies a run target.
         devtools: DevtoolsLaunch::unavailable(),
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -880,19 +1159,6 @@ fn build_target_label(target: &BuildTargetSpec) -> &'static str {
     }
 }
 
-/// Build-output directories a clean session removes beyond `cargo clean`'s
-/// own `target/` — the same set `frust-cli`'s `commands/clean.rs::REMOVED_DIRS`
-/// removes; duplicated by value here since `clean` has no `frust-drive`
-/// surface to call into (see `docs/ARCHITECTURE.md`'s Module Structure —
-/// `clean` lives entirely in `frust-cli`, unlike `doctor`/`build`).
-const CLEAN_REMOVED_DIRS: &[&str] = &[
-    "android/app/build",
-    "android/build",
-    "android/.gradle",
-    "build",
-    "dist",
-];
-
 /// Run `cargo clean` + remove the generated Android/iOS build directories for
 /// `project_root` off the UI thread, reporting progress the same way
 /// [`launch_build_session`] does.
@@ -901,8 +1167,10 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
         id,
         project_root: project_root.clone(),
         target_label: "clean".to_string(),
-        // A clean session removes build output; nothing is running to inspect.
+        // A clean session removes build output; nothing is running to inspect,
+        // and nothing occupies a run target.
         devtools: DevtoolsLaunch::unavailable(),
+        target: None,
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -917,63 +1185,39 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
     });
 }
 
-/// The blocking clean call: `cargo clean` via the injected [`ProcessRunner`],
-/// then remove [`CLEAN_REMOVED_DIRS`], reporting each step as a session line.
+/// The blocking clean call: delegates to [`frust_drive::clean::run`] via the
+/// injected [`ProcessRunner`], reporting each step as a session line.
 ///
-/// Runs `cargo clean` through [`ProcessRunner::run_streaming`] with `cwd` set
-/// to `project_dir` — `run` has no `cwd` argument and would run against the
-/// TUI process's own working directory instead of the (possibly different)
-/// project the session was opened for. The streaming path's `on_line` sink is
-/// forwarded straight into the session's log tab, a side benefit of the fix:
-/// `cargo clean`'s own stdout now streams live instead of being discarded.
+/// See [`frust_drive::build_dirs`] for the directory list. The streaming
+/// path's `on_line` sink is forwarded straight into the session's log tab:
+/// `cargo clean`'s own stdout now streams live into the log.
+///
+/// `CleanReport` contract: [`launch_clean_session`] maps `Ok`/`Err` from this
+/// function straight onto `SessionState::Exited(true)`/`Exited(false)`, so a
+/// [`frust_drive::clean::CleanReport::Cleaned`]`{ cargo_clean_succeeded:
+/// false }` must come back as an `Err` here — a bare `let _ =` discarding the
+/// report would silently land a failed `cargo clean` at `Exited(true)`. The
+/// failure line itself (`` `cargo clean` failed:\n... ``) is already pushed
+/// into the log by `frust_drive::clean::run`'s own `on_line` sink above,
+/// before this function ever returns, so nothing here re-prints it — the
+/// `Err` this returns exists purely to drive the session-state mapping.
+/// [`frust_drive::clean::CleanReport::NotAFrustProject`] and a successful
+/// clean both stay `Ok(())`.
 fn run_clean(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     tx: &UnboundedSender<Message>,
     id: SessionId,
 ) -> Result<()> {
-    if !project_dir.join("frust.toml").exists() {
-        let _ = tx.send(session_line(
-            id,
-            format!(
-                "no `frust.toml` found in `{}` — nothing to clean.",
-                project_dir.display()
-            ),
-        ));
-        return Ok(());
+    let report = frust_drive::clean::run(runner, project_dir, &mut |line: &str| {
+        let _ = tx.send(session_line(id, line.to_string()));
+    })?;
+    if let frust_drive::clean::CleanReport::Cleaned {
+        cargo_clean_succeeded: false,
+    } = report
+    {
+        anyhow::bail!("`cargo clean` failed");
     }
-
-    let out = {
-        let mut on_line = |line: &str| {
-            let _ = tx.send(session_line(id, line.to_string()));
-        };
-        runner
-            .run_streaming("cargo", &["clean"], Some(project_dir), &[], &mut on_line)
-            .context("failed to run `cargo clean`")?
-    };
-    if out.success {
-        let _ = tx.send(session_line(
-            id,
-            "Removed cargo build artifacts (`cargo clean`).".to_string(),
-        ));
-    } else {
-        let _ = tx.send(session_line(
-            id,
-            format!("`cargo clean` failed:\n{}", out.stderr.trim()),
-        ));
-    }
-
-    for rel in CLEAN_REMOVED_DIRS {
-        let path = project_dir.join(rel);
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => {
-                let _ = tx.send(session_line(id, format!("Removed `{}`.", path.display())));
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("removing `{}`", path.display())),
-        }
-    }
-
     Ok(())
 }
 
@@ -1052,7 +1296,11 @@ fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Resul
     };
     scaffold::generate(&dest, &ctx, None, false, arch)
         .with_context(|| format!("scaffolding into `{}`", dest.display()))?;
-    Ok(dest.canonicalize().unwrap_or(dest))
+    // `canonicalize` alone returns a Windows verbatim (`\\?\C:\...`) path on
+    // that host; `canonicalize_simplified` strips it back to the plain
+    // drive form so the toast/sidebar (and whatever persists this root next)
+    // never carry it forward.
+    Ok(frust_drive::host_path::canonicalize_simplified(&dest).unwrap_or(dest))
 }
 
 /// Resolve the wizard's directory string against the process cwd (an absolute
@@ -1070,12 +1318,17 @@ fn resolve_dest(directory: &str) -> Result<PathBuf> {
 /// The dev-time path to the `frust` facade crate (`<repo>/crates/frust`),
 /// mirroring `frust create`'s default (a temporary `frust_path`
 /// mechanism until the crates are published).
+///
+/// Rendered through [`frust_drive::host_path::to_portable_string`] rather
+/// than a bare `to_string_lossy()`: on Windows, `canonicalize()` returns a
+/// verbatim `\\?\C:\...` path, which is both an invalid escape once
+/// substituted into `Cargo.toml`'s `frust = { path = "..." }` and
+/// unresolvable by a template's `..`-relative sibling joins. Identity on
+/// every other host.
 fn resolve_frust_path() -> String {
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    raw.canonicalize()
-        .unwrap_or(raw)
-        .to_string_lossy()
-        .into_owned()
+    let canonical = raw.canonicalize().unwrap_or(raw);
+    frust_drive::host_path::to_portable_string(&canonical)
 }
 
 /// Discover devices off the UI thread (the `frust-drive` discoverer set is
@@ -1093,22 +1346,31 @@ fn spawn_device_discovery(tx: UnboundedSender<Message>) {
 /// Launch one supervised session per spec (the run-config modal's checked
 /// targets), registering each successfully-started session back into the model
 /// so its events have a home. A spec that fails to start (e.g. a desktop
-/// `cargo run` that can't spawn) is skipped — a device pipeline that fails
-/// mid-build instead surfaces the error as a line in its own session tab.
+/// `cargo run` that can't spawn) is skipped and reported as a warn toast —
+/// stderr is invisible under the raw-mode TUI, and on the restart path the
+/// tab being replaced is already gone, so a silent skip would leave the user
+/// with no tab and no explanation. A device pipeline that fails mid-build
+/// instead surfaces the error as a line in its own session tab.
 fn launch_sessions(
     specs: Vec<SessionSpec>,
     supervisor: &mut Supervisor,
     tx: &UnboundedSender<Message>,
     records: &mut McpSessionRecords,
-) {
+) -> Vec<(SessionId, bool)> {
+    let mut started = Vec::with_capacity(specs.len());
     for spec in specs {
         match supervisor.start(&spec) {
             Ok(id) => {
+                started.push((id, matches!(spec.target, DeviceTarget::Desktop)));
                 let _ = tx.send(Message::RegisterSession {
                     id,
                     project_root: spec.project_root.clone(),
                     target_label: target_label(&spec.target),
                     devtools: devtools_launch(&spec),
+                    // An app launch owns its target until it goes terminal —
+                    // what `AppState::live_session_for` reads to refuse a
+                    // second launch of this project onto the same place.
+                    target: Some(SessionTarget::of(&spec.target)),
                 });
                 // Record the launch even with no MCP server running: an agent
                 // that connects later must see the sessions the *user*
@@ -1116,9 +1378,18 @@ fn launch_sessions(
                 // can reconstruct a spec after the fact.
                 records.insert(id, spec);
             }
-            Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
+            Err(err) => {
+                let _ = tx.send(Message::Notify {
+                    level: ToastKind::Warn,
+                    text: format!(
+                        "failed to start {}: {err:#} — relaunch it with r",
+                        target_label(&spec.target)
+                    ),
+                });
+            }
         }
     }
+    started
 }
 
 /// What a launched app session's own config says about reaching its devtools
@@ -1141,41 +1412,6 @@ fn target_label(target: &DeviceTarget) -> String {
         DeviceTarget::Desktop => "desktop".to_string(),
         DeviceTarget::Device(device) => device.name.clone(),
     }
-}
-
-/// Copy `text` to the terminal's clipboard via an OSC 52 escape (broadly
-/// supported, no clipboard-crate dependency). Best-effort: a terminal that
-/// ignores OSC 52 simply drops it.
-fn copy_to_clipboard(text: &str) {
-    let payload = base64_encode(text.as_bytes());
-    let seq = format!("\u{1b}]52;c;{payload}\u{07}");
-    let mut out = stdout();
-    let _ = out.write_all(seq.as_bytes());
-    let _ = out.flush();
-}
-
-/// Minimal standard base64 (no dependency) for the OSC 52 clipboard payload.
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = *chunk.get(1).unwrap_or(&0);
-        let b2 = *chunk.get(2).unwrap_or(&0);
-        out.push(TABLE[(b0 >> 2) as usize] as char);
-        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(b2 & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// Translate one crossterm event into zero or more engine messages, using the
@@ -1255,7 +1491,6 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
 /// keyboard-parity policy).
 fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Message> {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
-    let shift = mods.contains(KeyModifiers::SHIFT);
     let alt = mods.contains(KeyModifiers::ALT);
 
     // Ctrl+Q always quits, even while typing a search or in a modal.
@@ -1300,6 +1535,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             ActiveModal::DapSettings(settings) => translate_dap_settings_key(code, settings.focus),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
+            ActiveModal::QuitConfirm => translate_quit_confirm_key(code),
             ActiveModal::HelpOverlay => translate_help_key(code),
         };
     }
@@ -1315,6 +1551,15 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         };
     }
 
+    // Line-selection mode owns the whole key namespace for the active
+    // session while it is engaged (see `translate_select_key`) — checked
+    // after the blocks above, which are the surfaces that sit *over* the log
+    // pane (an open context menu, a modal, the search overlay), and before
+    // every other key below.
+    if state.active_session().is_some_and(|s| s.select_mode) {
+        return translate_select_key(code);
+    }
+
     // `?` opens the keyboard/help overlay from either top-level screen —
     // checked here, after the modal/search-capture blocks above (so it
     // never fires while typing `?` into a text field) and before every other
@@ -1324,16 +1569,20 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     }
 
     let has_active_session = state.active_session().is_some();
+    // An active tab with a launch target — the only kind `R` can restart.
+    let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
     let active_running = state
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
 
-    // Ctrl+C stops the active running session, else falls through to quit.
+    // Ctrl+C stops the active running session, else asks to quit (like `q`,
+    // not the `Ctrl+Q` bypass — no running session here doesn't mean no live
+    // session elsewhere, e.g. a background build tab).
     if ctrl && matches!(code, KeyCode::Char('c')) {
         return if active_running {
             vec![Message::StopSession]
         } else {
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         };
     }
 
@@ -1374,12 +1623,17 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     let devices_focused = workbench && !has_active_session;
 
     match code {
-        // Global quit.
-        KeyCode::Char('q') => vec![Message::Quit],
+        // Global quit — asks first with a live session (see `RequestQuit`);
+        // `Ctrl+Q` above is the only unconditional bypass.
+        KeyCode::Char('q') => vec![Message::RequestQuit],
 
-        // `i` opens the toolchain bootstrap wizard from either screen (mouse
-        // parity: the titlebar toolchain chip) — the fresh-machine flow.
-        KeyCode::Char('i') => vec![Message::OpenBootstrapWizard],
+        // `i` opens the Doctor panel from either screen (mouse parity: the
+        // sidebar "Doctor" action). Doctor has its own unconditional `i` key;
+        // `d` is DevTools-only (active sessions only); toolchain setup (the
+        // old `i` destination) is reachable from inside the panel (`t` / its
+        // "Toolchain setup" button) or straight from the titlebar toolchain
+        // chip.
+        KeyCode::Char('i') => vec![Message::OpenDoctorPanel],
 
         // `a` opens the Add Plugin dialog from either screen (mouse parity: the
         // sidebar "Add plugin" action / the palette). Gated on an open project
@@ -1421,25 +1675,38 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // sidebar ACTIONS "New project" row).
         KeyCode::Char('n') if workbench => vec![Message::OpenCreateWizard],
         // `r`/`Enter` open the run-config modal primed with the panel
-        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance).
+        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance) —
+        // except with an *app* session active, where `R` restarts it instead
+        // (the keyboard twin of MCP `restart_app` / DAP `frustRestart`). An
+        // ad-hoc build/clean tab has nothing to relaunch, so there `R` keeps
+        // its discovery job rather than claiming a key that only refuses.
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
+        KeyCode::Char('R') if has_app_session => vec![Message::RestartSession],
         KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
+        // `W` toggles "Watch: restart on save" on the active session (mouse
+        // parity: the palette row). Free in every session context; the pure
+        // core refuses it (with the `frust run --watch` wording) on anything
+        // but a desktop app session.
+        KeyCode::Char('W') if has_active_session => vec![Message::ToggleWatch],
         KeyCode::Enter if devices_focused => vec![Message::OpenRunConfig],
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
         KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
-        // `d` opens DevTools for the active session tab (workbook §B12) and,
-        // with no session open, the doctor panel — the two contexts never
-        // collide, and the doctor panel additionally stays on the sidebar
-        // ACTIONS row and in the palette. `b` opens the build launcher
-        // (mouse parity: the sidebar "Build" row).
+        // `d` opens DevTools for the active session tab (workbook §B12) and
+        // does nothing without a session (Doctor moved to its own `i` key to
+        // avoid this collision — see above, sidebar ACTIONS row, and palette).
+        // `b` opens the build launcher (mouse parity: the sidebar "Build" row).
         KeyCode::Char('d') if has_active_session => vec![Message::DevtoolsToggle],
-        KeyCode::Char('d') if workbench => vec![Message::OpenDoctorPanel],
         KeyCode::Char('b') if workbench => vec![Message::OpenBuildLauncher],
         // `c` copies a build session's artifact path(s) when one is active
         // (mirroring the welcome screen's own `c` for Create, a different
-        // screen/context); otherwise it opens the clean-confirm dialog (mouse
-        // parity: the sidebar ACTIONS "Clean" row).
+        // screen/context) — this binding exists *only* while a session is
+        // active: the sidebar ACTIONS "Clean" row still opens the
+        // clean-confirm dialog on click then, it just drops its own `c`
+        // keyhint (see `views::workbench::render_sidebar`) since the key
+        // means something else in that context. Without a session, `c` opens
+        // the clean-confirm dialog directly (mouse parity: the sidebar
+        // ACTIONS "Clean" row).
         KeyCode::Char('c') if has_active_session => vec![Message::CopyBuiltArtifacts],
         KeyCode::Char('c') if workbench => vec![Message::OpenCleanConfirm],
 
@@ -1453,6 +1720,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
 
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
+        // `X` closes the active tab (`Message::CloseActiveTab`): a live
+        // session is stopped and removed once it lands terminal, an already
+        // terminal one is removed on the spot (mouse parity: the session
+        // tab's context-menu "Close tab" / "Stop & close" entry).
+        KeyCode::Char('X') if has_active_session => vec![Message::CloseActiveTab],
         // `t` toggles the active session's perf sparkline panel.
         KeyCode::Char('t') if has_active_session => vec![Message::TogglePerfPanel],
         KeyCode::Tab if has_active_session => vec![Message::NextTab],
@@ -1471,23 +1743,56 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('l') if has_active_session => vec![Message::CycleLevelFilter(1)],
         KeyCode::Char('L') if has_active_session => vec![Message::CycleLevelFilter(-1)],
         KeyCode::Char('z') if has_active_session => vec![Message::ToggleNearestFold],
-        KeyCode::Char('v') if has_active_session => vec![Message::SelectionBegin],
+        // `v` enters line-selection mode (`translate_select_key` owns every
+        // key from there until it is left); `y` copies whatever is selected.
+        KeyCode::Char('v') if has_active_session => vec![Message::SelectEnter],
         KeyCode::Char('y') if has_active_session => vec![Message::CopySelection],
-        KeyCode::Up if has_active_session && shift => vec![Message::SelectionExtendUp(1)],
-        KeyCode::Down if has_active_session && shift => vec![Message::SelectionExtendDown(1)],
         KeyCode::Up if has_active_session => vec![Message::LogScrollUp(1)],
         KeyCode::Down if has_active_session => vec![Message::LogScrollDown(1)],
         KeyCode::PageUp if has_active_session => vec![Message::LogScrollUp(PAGE_LINES)],
         KeyCode::PageDown if has_active_session => vec![Message::LogScrollDown(PAGE_LINES)],
         KeyCode::Home if has_active_session => vec![Message::LogScrollToTop],
         KeyCode::End if has_active_session => vec![Message::LogScrollToBottom],
-        KeyCode::Esc
-            if state
-                .active_session()
-                .is_some_and(|s| s.selection.is_some()) =>
-        {
-            vec![Message::SelectionClear]
-        }
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the active session's log view is in
+/// **line-selection mode** (`v`): the cursor keys move the selection's end
+/// instead of scrolling the pane, `y` copies the range (and leaves the mode),
+/// and `Esc` — or `v` again — leaves it.
+///
+/// | Key | Message |
+/// |-----|---------|
+/// | `↑` / `k` / `Shift+↑` | [`Message::SelectMove`]`(-1)` |
+/// | `↓` / `j` / `Shift+↓` | [`Message::SelectMove`]`(1)` |
+/// | `PageUp` / `PageDown` | [`Message::SelectPage`]`(∓1)` |
+/// | `Home` / `End` | [`Message::SelectHome`] / [`Message::SelectEnd`] |
+/// | `y` | [`Message::CopySelection`] |
+/// | `Esc` / `v` | [`Message::SelectExit`] |
+///
+/// **Every other key is swallowed** (an empty `Vec`), the same full-namespace
+/// takeover [`translate_devtools_key`] performs for the DevTools pane: a
+/// modal-opening or session-mutating key pressed by reflex mid-selection must
+/// not fire behind the highlight. The exceptions are the global chords
+/// matched above this table — `Ctrl+Q` (quit) and `Alt+m` (mouse capture) —
+/// plus an already-open context menu / modal / search overlay, all of which
+/// `translate_key` routes before it reaches here.
+///
+/// `Shift+↑`/`Shift+↓` need no arm of their own: the modifier is not part of
+/// the match, so they land on the plain arrow arms as aliases (the shifted
+/// pair is what extended a selection before the mode existed, so the muscle
+/// memory keeps working).
+fn translate_select_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => vec![Message::SelectMove(-1)],
+        KeyCode::Down | KeyCode::Char('j') => vec![Message::SelectMove(1)],
+        KeyCode::PageUp => vec![Message::SelectPage(-1)],
+        KeyCode::PageDown => vec![Message::SelectPage(1)],
+        KeyCode::Home => vec![Message::SelectHome],
+        KeyCode::End => vec![Message::SelectEnd],
+        KeyCode::Char('y') => vec![Message::CopySelection],
+        KeyCode::Esc | KeyCode::Char('v') => vec![Message::SelectExit],
         _ => vec![],
     }
 }
@@ -1536,7 +1841,7 @@ fn translate_devtools_key(
     let connected = matches!(devtools.phase(), DevtoolsPhase::Connected);
 
     match code {
-        KeyCode::Char('q') => return vec![Message::Quit],
+        KeyCode::Char('q') => return vec![Message::RequestQuit],
         KeyCode::Char('d') => return vec![Message::DevtoolsClose],
         KeyCode::Esc => {
             if on_performance && devtools.performance.has_selection() {
@@ -1683,11 +1988,14 @@ fn translate_switcher_key(code: KeyCode, state: &AppState) -> Vec<Message> {
 
 /// Translate one key press while the doctor panel is open. `Esc` closes it,
 /// `r` re-runs the validator set (mouse parity: the panel's Re-run button /
-/// the titlebar chip).
+/// the titlebar chip), and `t` closes the panel and opens the bootstrap
+/// wizard (mouse parity: the panel's "Toolchain setup" button) — the
+/// toolchain-setup route via the panel now that `i` opens the panel.
 fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseDoctorPanel],
         KeyCode::Char('r') => vec![Message::RunDoctor],
+        KeyCode::Char('t') => vec![Message::OpenToolchainFromDoctor],
         _ => vec![],
     }
 }
@@ -1851,6 +2159,19 @@ fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
     }
 }
 
+/// Translate one key press while the quit-confirm dialog is open. `Esc`/`n`
+/// cancels, `Enter`/`y` confirms (mouse parity: the dialog's Quit/Cancel
+/// buttons); everything else is swallowed. `Ctrl+Q` still wins over this —
+/// it is matched at the very top of `translate_key`, before modal routing —
+/// so the deliberate bypass works even with this dialog already open.
+fn translate_quit_confirm_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('n') => vec![Message::CloseQuitConfirm],
+        KeyCode::Enter | KeyCode::Char('y') => vec![Message::ConfirmQuit],
+        _ => vec![],
+    }
+}
+
 /// Translate one key press while the keyboard/help overlay is open —
 /// read-only reference content, so `Esc` or `?` again are its only
 /// bindings.
@@ -1927,6 +2248,110 @@ mod tests {
     use frust_drive::desktop_build::DesktopBundleTarget;
     use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
 
+    /// A fresh scratch directory for one watch test, under the OS temp dir —
+    /// never the checkout. Removed first in case a previous run of the same
+    /// test left it behind; the caller removes it again once done.
+    fn watch_scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "frust-tui-watch-runner-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A minimal desktop-target [`SessionSpec`] rooted at `root`, matching
+    /// `crate::supervise::supervisor`'s own `desktop_spec` test helper —
+    /// its `launch_plan()` is the fixed `cargo run --features
+    /// frust/perf-trace --features frust/devtools` invocation a
+    /// `FakeProcessRunner` script below matches on.
+    fn watch_desktop_spec(root: &Path) -> SessionSpec {
+        use std::collections::HashMap;
+        SessionSpec {
+            project_root: root.to_path_buf(),
+            target: DeviceTarget::Desktop,
+            build: BuildInfo {
+                mode: BuildMode::Debug,
+                flavor: None,
+                defines: HashMap::new(),
+                build_name: None,
+                build_number: None,
+            },
+        }
+    }
+
+    /// Generations on one key never overlap, and none is dropped: every
+    /// caller runs, strictly one after another. Each holder records
+    /// enter/exit around a sleep wide enough that an unserialized pair would
+    /// interleave; with the lock, the log is enter/exit pairs back to back.
+    #[test]
+    fn ide_config_generations_on_one_key_are_serialized_and_none_is_dropped() {
+        use std::sync::Mutex;
+
+        const CALLERS: usize = 6;
+        let key = std::env::temp_dir().join(format!(
+            "frust-tui-ide-lock-serialized-{}",
+            std::process::id()
+        ));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let handles: Vec<_> = (0..CALLERS)
+            .map(|i| {
+                let (key, log) = (key.clone(), Arc::clone(&log));
+                std::thread::spawn(move || {
+                    with_ide_config_lock(key, || {
+                        log.lock().unwrap().push(("enter", i));
+                        std::thread::sleep(Duration::from_millis(15));
+                        log.lock().unwrap().push(("exit", i));
+                        i
+                    })
+                })
+            })
+            .collect();
+        let mut ran: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        ran.sort_unstable();
+        assert_eq!(ran, (0..CALLERS).collect::<Vec<_>>(), "no caller dropped");
+
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), CALLERS * 2);
+        for pair in log.chunks(2) {
+            assert_eq!(pair[0].0, "enter", "{log:?}");
+            assert_eq!(pair[1], ("exit", pair[0].1), "interleaved: {log:?}");
+        }
+    }
+
+    /// Distinct keys do not wait on each other: a holder of one key can take
+    /// another key's lock (were it one global lock, this would deadlock).
+    #[test]
+    fn ide_config_locks_on_distinct_keys_are_independent() {
+        let base = std::env::temp_dir();
+        let a = base.join(format!("frust-tui-ide-lock-a-{}", std::process::id()));
+        let b = base.join(format!("frust-tui-ide-lock-b-{}", std::process::id()));
+        let got = with_ide_config_lock(a, || with_ide_config_lock(b, || 7));
+        assert_eq!(got, 7);
+    }
+
+    /// Two projects sharing a workspace (a monorepo) share the lock key,
+    /// since both write the workspace's `.vscode/launch.json`.
+    #[test]
+    fn ide_config_lock_key_is_the_shared_workspace_root() {
+        let workspace =
+            std::env::temp_dir().join(format!("frust-tui-ide-lock-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(workspace.join(".vscode")).unwrap();
+        std::fs::create_dir_all(workspace.join("app-a")).unwrap();
+        std::fs::create_dir_all(workspace.join("app-b")).unwrap();
+        assert_eq!(
+            ide_config_lock_key(&workspace.join("app-a")),
+            ide_config_lock_key(&workspace.join("app-b"))
+        );
+        assert_eq!(
+            ide_config_lock_key(&workspace.join("app-a")),
+            workspace.canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     /// The runner's own half of the session-event feed: `dispatch` is what
     /// turns an applied `Message::Session` into the lines and the ending a
     /// subscriber is owed. Driving it here rather than only through
@@ -1945,6 +2370,7 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp/frust-tui-dispatch"),
             target_label: "desktop".to_string(),
             devtools: DevtoolsLaunch::unavailable(),
+            target: Some(SessionTarget::Desktop),
         });
         let view = engine
             .state
@@ -2013,21 +2439,78 @@ mod tests {
     }
 
     #[test]
-    fn q_quits() {
+    fn q_requests_quit() {
         let state = AppState::default();
         let regions = MouseRegions::new();
         assert_eq!(
             translate_event(key(KeyCode::Char('q')), &state, &regions),
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         );
     }
 
     #[test]
-    fn ctrl_q_quits() {
+    fn ctrl_q_quits_unconditionally() {
         let state = AppState::default();
         let regions = MouseRegions::new();
         let ev = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert_eq!(translate_event(ev, &state, &regions), vec![Message::Quit]);
+    }
+
+    /// `Ctrl+Q` is the deliberate bypass: it still quits unconditionally even
+    /// with the quit-confirm dialog already open, where every other key is
+    /// routed to `translate_quit_confirm_key` instead.
+    #[test]
+    fn ctrl_q_bypasses_the_quit_confirm_dialog() {
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(translate_event(ev, &state, &regions), vec![Message::Quit]);
+    }
+
+    #[test]
+    fn quit_confirm_dialog_keys() {
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Enter), &state, &regions),
+            vec![Message::ConfirmQuit]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('y')), &state, &regions),
+            vec![Message::ConfirmQuit]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::CloseQuitConfirm]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('n')), &state, &regions),
+            vec![Message::CloseQuitConfirm]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('z')), &state, &regions),
+            Vec::<Message>::new(),
+            "everything else is swallowed"
+        );
+    }
+
+    /// `Ctrl+C` with no running session asks to quit exactly like `q`,
+    /// rather than the old unconditional `Quit`.
+    #[test]
+    fn ctrl_c_with_no_running_session_requests_quit() {
+        let state = AppState::default();
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::RequestQuit]
+        );
     }
 
     #[test]
@@ -2202,7 +2685,7 @@ mod tests {
             context_menu: Some(ContextMenu {
                 x: 0,
                 y: 0,
-                target: ContextTarget::LogView,
+                target: ContextTarget::LogView { row: None },
                 entries: vec![MenuEntry {
                     label: "Search logs…",
                     hint: "/",
@@ -2254,47 +2737,6 @@ mod tests {
             translate_event(up, &state, &regions),
             vec![Message::CreateCancel]
         );
-    }
-
-    /// Regression for the clean-runs-in-the-wrong-directory bug: `run_clean`
-    /// must route `cargo clean` through `project_dir`, not the TUI process's
-    /// own `cwd` — asserted by scripting a [`FakeProcessRunner`] and checking
-    /// its recorded `cwd` matches `project_dir` even though it differs from
-    /// `std::env::current_dir()`.
-    #[test]
-    fn run_clean_runs_cargo_clean_in_the_project_dir_not_the_process_cwd() {
-        use frust_drive::process::{FakeProcessRunner, Output};
-
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let project_dir = std::env::temp_dir().join(format!(
-            "frust-tui-run-clean-test-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&project_dir);
-        std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(
-            project_dir.join("frust.toml"),
-            "[app]\nname = \"x\"\norg = \"y\"\n",
-        )
-        .unwrap();
-        // Sanity: the fixture directory is not the process's own cwd — proves
-        // a bare (cwd-agnostic) `run` couldn't have hit this directory.
-        assert_ne!(project_dir, std::env::current_dir().unwrap());
-
-        let runner = FakeProcessRunner::new().with(
-            "cargo clean",
-            Output {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        run_clean(&runner, &project_dir, &tx, SessionId(1)).unwrap();
-
-        assert_eq!(runner.recorded_cwd(), Some(project_dir.clone()));
-        let _ = std::fs::remove_dir_all(&project_dir);
     }
 
     // ── Desktop bundle builds ─────────────────────────────────────────────────
@@ -2426,6 +2868,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── Clean session ──────────────────────────────────────────────────────────
+
+    /// `run_clean` forwards `project_dir` to `frust_drive::clean::run` (not
+    /// the process's own `cwd`) and relays at least one session line onto
+    /// the channel — the CLI's own
+    /// `runs_cargo_clean_in_the_project_dir_not_the_process_cwd`-shaped
+    /// regression test, at this call site.
+    #[test]
+    fn run_clean_forwards_project_dir_and_lines_to_the_session() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+
+        let dir =
+            std::env::temp_dir().join(format!("frust-tui-run-clean-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
+        assert_ne!(dir, std::env::current_dir().unwrap());
+
+        let runner = FakeProcessRunner::new().with(
+            "cargo clean",
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        run_clean(&runner, &dir, &tx, SessionId(0)).unwrap();
+
+        assert_eq!(runner.recorded_cwd(), Some(dir.clone()));
+        assert!(
+            rx.try_recv().is_ok(),
+            "at least one session line reaches the channel"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed `cargo clean` — [`frust_drive::clean::CleanReport::Cleaned`]
+    /// `{ cargo_clean_succeeded: false }` — must come back from `run_clean`
+    /// as an `Err`, the documented contract `launch_clean_session` relies on
+    /// to land the session at `SessionState::Exited(false)`.
+    #[test]
+    fn run_clean_errors_when_cargo_clean_fails() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+
+        let dir = std::env::temp_dir().join(format!(
+            "frust-tui-run-clean-failed-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
+
+        let runner = FakeProcessRunner::new().with(
+            "cargo clean",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "boom".to_string(),
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(run_clean(&runner, &dir, &tx, SessionId(0)).is_err());
+        // The failure line from `frust_drive::clean::run`'s own `on_line`
+        // sink still reached the channel before `run_clean` returned `Err`.
+        assert!(
+            rx.try_recv().is_ok(),
+            "the `cargo clean` failure line still reaches the channel"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── Help overlay ──────────────────────────────────────────────────────────
 
     #[test]
@@ -2534,6 +3048,202 @@ mod tests {
         );
     }
 
+    // ── Line-selection mode key routing ───────────────────────────────────────
+
+    /// A workbench with one running desktop session holding `n` seeded lines.
+    fn log_state(n: u64) -> AppState {
+        use crate::engine::SessionView;
+        let mut session = SessionView::new(SessionId(0), PathBuf::from("/tmp/huddle"), "desktop");
+        session.state = SessionState::Running;
+        for i in 0..n {
+            session.push_line_at(format!("line {i}"), "12:00:00");
+        }
+        AppState {
+            screen: Screen::Workbench,
+            project_root: Some(PathBuf::from("/tmp/huddle")),
+            projects: vec![PathBuf::from("/tmp/huddle")],
+            sessions: vec![session],
+            active_session: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// `v` enters the mode through the real translate → `update` path, after
+    /// which the cursor keys move the selection instead of scrolling.
+    #[test]
+    fn v_enters_the_mode_and_the_cursor_keys_then_move_the_selection() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(20);
+
+        let msgs = translate_event(key(KeyCode::Char('v')), &state, &regions);
+        assert_eq!(msgs, vec![Message::SelectEnter]);
+        update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().select_mode);
+
+        for (code, expected) in [
+            (KeyCode::Up, Message::SelectMove(-1)),
+            (KeyCode::Char('k'), Message::SelectMove(-1)),
+            (KeyCode::Down, Message::SelectMove(1)),
+            (KeyCode::Char('j'), Message::SelectMove(1)),
+            (KeyCode::PageUp, Message::SelectPage(-1)),
+            (KeyCode::PageDown, Message::SelectPage(1)),
+            (KeyCode::Home, Message::SelectHome),
+            (KeyCode::End, Message::SelectEnd),
+            (KeyCode::Char('y'), Message::CopySelection),
+            (KeyCode::Esc, Message::SelectExit),
+            (KeyCode::Char('v'), Message::SelectExit),
+        ] {
+            assert_eq!(
+                translate_event(key(code), &state, &regions),
+                vec![expected],
+                "{code:?} in line-selection mode"
+            );
+        }
+
+        // Shift+Up/Down are aliases of the plain arrows (the pre-mode
+        // extend-selection chord keeps working).
+        for (code, expected) in [
+            (KeyCode::Up, Message::SelectMove(-1)),
+            (KeyCode::Down, Message::SelectMove(1)),
+        ] {
+            let ev = Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT));
+            assert_eq!(translate_event(ev, &state, &regions), vec![expected]);
+        }
+    }
+
+    /// The mode owns the whole namespace: every other key is swallowed rather
+    /// than firing a workbench command behind the highlight. Only the global
+    /// chords still get through.
+    #[test]
+    fn the_mode_swallows_every_other_key_but_the_global_chords() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(20);
+        update(&mut state, Message::SelectEnter);
+
+        for swallowed in [
+            'q', 'r', 'b', 'd', 'x', 'X', 'f', 'w', 'z', 'l', '/', '?', 'i', '1',
+        ] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char(swallowed)), &state, &regions),
+                Vec::<Message>::new(),
+                "`{swallowed}` belongs to the log view, not the selection mode"
+            );
+        }
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            Vec::<Message>::new(),
+            "even tab switching waits until the selection is done"
+        );
+
+        let ctrl_q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate_event(ctrl_q, &state, &regions),
+            vec![Message::Quit],
+            "Ctrl+Q keeps its global precedence"
+        );
+        let alt_m = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            translate_event(alt_m, &state, &regions),
+            vec![Message::ToggleMouseCapture],
+            "⌥m keeps its global precedence"
+        );
+
+        // Leaving the mode hands the namespace straight back.
+        update(&mut state, Message::SelectExit);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('f')), &state, &regions),
+            vec![Message::ToggleFollow]
+        );
+    }
+
+    /// `v` itself never reaches `Message::SelectEnter` while DevTools is
+    /// open — `translate_key` returns out of the DevTools branch before its
+    /// `v` arm — but the palette's "Select lines…" row re-dispatches the same
+    /// message through `Ctrl+P`, which stays reachable as a global chord even
+    /// with DevTools open. That round trip must not put the session in the
+    /// mode either: `update`'s `SelectEnter` arm is the single choke point.
+    #[test]
+    fn palette_select_lines_is_refused_while_devtools_owns_the_pane() {
+        use crate::engine::update;
+        let regions = MouseRegions::new();
+        let mut state = log_state(5);
+        state.active_session_mut().unwrap().devtools.open = true;
+
+        let ctrl_p = Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let msgs = translate_event(ctrl_p, &state, &regions);
+        assert_eq!(
+            msgs,
+            vec![Message::OpenPalette],
+            "the palette is a global chord, reachable over DevTools"
+        );
+        update(&mut state, msgs[0].clone());
+
+        for c in "select lines".chars() {
+            update(&mut state, Message::PaletteInput(c));
+        }
+        update(&mut state, Message::PaletteExecute);
+
+        assert!(
+            !state.active_session().unwrap().select_mode,
+            "DevTools owns the key namespace; the palette entry must not enter the mode"
+        );
+    }
+
+    /// Every drawn log row registers a click region carrying the absolute
+    /// line it draws — re-registered each frame, so a *scrolled* viewport
+    /// maps rows to the lines actually under them rather than to the tail.
+    #[test]
+    fn a_log_row_click_carries_the_absolute_line_under_a_scrolled_viewport() {
+        use crate::engine::{ContextTarget, Scroll};
+        use crate::ui::mouse::MouseCtx;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = log_state(80);
+        // Freeze the view with line 39 on the bottom row.
+        state.sessions[0].scroll = Scroll::Anchored(39);
+
+        let mut regions = MouseRegions::new();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::frust_dark();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                crate::ui::render(frame, &state, &theme, &mut ctx);
+            })
+            .expect("draw");
+
+        // Hit-test straight down the log pane and collect what each row says
+        // it draws.
+        let hits: Vec<u64> = (0..30)
+            .filter_map(|y| match regions.click_at(40, y) {
+                Some(Message::LogRowClicked(abs)) => Some(abs),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!hits.is_empty(), "the log pane registered row regions");
+        assert_eq!(
+            *hits.last().unwrap(),
+            39,
+            "the bottom row is the anchored line, not the tail"
+        );
+        let expected: Vec<u64> = (40 - hits.len() as u64..=39).collect();
+        assert_eq!(hits, expected, "rows map to consecutive absolute lines");
+
+        // And a right-click on the same row targets that line's context menu.
+        let row_y = (0..30)
+            .find(|y| matches!(regions.click_at(40, *y), Some(Message::LogRowClicked(_))))
+            .expect("a log row");
+        assert_eq!(
+            regions.context_at(40, row_y),
+            Some(ContextTarget::LogView { row: Some(hits[0]) })
+        );
+    }
+
     // ── DevTools mode key routing (workbook §B12) ─────────────────────────────
 
     /// A workbench with one running, devtools-capable desktop session that
@@ -2545,6 +3255,7 @@ mod tests {
             PathBuf::from("/tmp/huddle"),
             "desktop",
             DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+            Some(SessionTarget::Desktop),
         );
         session.state = SessionState::Running;
         session.push_line_at(
@@ -2627,7 +3338,7 @@ mod tests {
         );
         assert_eq!(
             translate_event(key(KeyCode::Char('q')), &state, &regions),
-            vec![Message::Quit]
+            vec![Message::RequestQuit]
         );
 
         let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
@@ -2916,8 +3627,28 @@ mod tests {
         );
     }
 
+    /// Doctor panel is unconditionally opened by `i` from either top-level
+    /// screen (the panel's dedicated key, since `d` is DevTools-only).
     #[test]
-    fn d_still_opens_the_doctor_panel_with_no_session_open() {
+    fn i_opens_the_doctor_panel_from_either_screen() {
+        let regions = MouseRegions::new();
+        for screen in [Screen::Welcome, Screen::Workbench] {
+            let state = AppState {
+                screen,
+                ..Default::default()
+            };
+            assert_eq!(
+                translate_event(key(KeyCode::Char('i')), &state, &regions),
+                vec![Message::OpenDoctorPanel],
+                "{screen:?}"
+            );
+        }
+    }
+
+    /// With no session active, `d` means DevTools or nothing, never Doctor
+    /// (Doctor is unconditionally on `i`).
+    #[test]
+    fn d_does_nothing_with_no_session_open() {
         let regions = MouseRegions::new();
         let workbench = AppState {
             screen: Screen::Workbench,
@@ -2925,8 +3656,450 @@ mod tests {
         };
         assert_eq!(
             translate_event(key(KeyCode::Char('d')), &workbench, &regions),
-            vec![Message::OpenDoctorPanel],
-            "the doctor panel keeps `d` in the context DevTools cannot claim"
+            Vec::<Message>::new(),
+            "`d` is unclaimed with no active session"
+        );
+    }
+
+    /// `R` restarts only an *app* session (one with a launch target); on an
+    /// ad-hoc build/clean tab, or with no session at all, it keeps its other
+    /// job, re-running device discovery.
+    #[test]
+    fn shift_r_restarts_an_app_session_and_refreshes_devices_otherwise() {
+        use crate::engine::SessionView;
+
+        let regions = MouseRegions::new();
+        let mut app_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &app_session, &regions),
+            vec![Message::RestartSession]
+        );
+
+        let mut ad_hoc = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build apk",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &ad_hoc, &regions),
+            vec![Message::RefreshDevices],
+            "an ad-hoc tab has nothing to restart"
+        );
+
+        let no_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('R')), &no_session, &regions),
+            vec![Message::RefreshDevices]
+        );
+    }
+
+    /// A restart whose launch record is gone (evicted by the MCP path's
+    /// bounded retention) must reach the user as a toast, not vanish into
+    /// stderr under the raw-mode TUI.
+    #[test]
+    fn restart_session_effect_on_an_evicted_record_toasts_instead_of_dropping_silently() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(7))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut SourceWatchers::new(tx.clone()),
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::Notify { level, text }) => {
+                assert_eq!(level, ToastKind::Warn);
+                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+            }
+            other => panic!("expected a warn toast, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "nothing was relaunched");
+    }
+
+    /// A process runner whose every spawn is refused — the shape of a restart
+    /// whose relaunch cannot start (binary gone after a failed rebuild, a
+    /// spawn error). Everything else delegates to the fake runner.
+    struct FailingSpawnRunner(frust_drive::process::FakeProcessRunner);
+
+    impl ProcessRunner for FailingSpawnRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<frust_drive::process::Output> {
+            self.0.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<frust_drive::process::Output> {
+            self.0.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+        ) -> anyhow::Result<frust_drive::process::StreamHandle> {
+            Err(anyhow::anyhow!("spawn refused by the test runner"))
+        }
+    }
+
+    /// A restart whose relaunch fails to spawn must reach the user as a toast:
+    /// the tab being replaced is already gone by then, so a silent skip would
+    /// leave nothing on screen and nothing to explain it.
+    #[test]
+    fn a_restart_whose_relaunch_fails_to_spawn_toasts_instead_of_dropping_silently() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) =
+            Supervisor::new(Arc::new(FailingSpawnRunner(FakeProcessRunner::new())));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(
+            SessionId(7),
+            watch_desktop_spec(Path::new("/tmp/frust-restart-spawn-failure")),
+        );
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(7))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut SourceWatchers::new(tx.clone()),
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::Notify { level, text }) => {
+                assert_eq!(level, ToastKind::Warn);
+                assert!(text.contains("failed to start"), "toast text: {text}");
+                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+            }
+            other => panic!("expected a warn toast, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no RegisterSession: nothing was launched"
+        );
+    }
+
+    // ── Watch reconciliation (`Effect::WatchSet`, `Effect::RestartSession`,
+    // the post-effect `SourceWatchers::retain` sweep) ───────────────────────
+
+    /// `Effect::WatchSet { on: true }` on a session with a live launch record
+    /// starts a real filesystem watcher for it (the runner's enactment of
+    /// [`Message::ToggleWatch`] / [`Message::EnableWatch`]).
+    #[test]
+    fn watch_set_on_starts_a_watcher_for_a_recorded_session() {
+        use crate::engine::SessionView;
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("starts");
+        let mut engine = Engine::new(AppState::default());
+        // A tab with `watch` already on — what `toggle_watch`/`enable_watch`
+        // set in the model before this effect is ever enacted — so the
+        // post-effect reconciliation sweep (which reads the model, not the
+        // watcher map) does not immediately tear the fresh watcher back down.
+        engine.state.sessions.push(SessionView::with_devtools(
+            SessionId(1),
+            root.clone(),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        engine.state.sessions[0].watch = true;
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(1), watch_desktop_spec(&root));
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::WatchSet {
+                id: SessionId(1),
+                on: true,
+            }),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            watchers.contains(SessionId(1)),
+            "a watcher was started for the recorded session"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a resolvable root never reports WatchFailed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Effect::WatchSet { on: true }` on a session with no launch record and
+    /// no tab (evicted, or racing its own removal) can resolve no root, so it
+    /// reports [`Message::WatchFailed`] rather than silently doing nothing —
+    /// [`Message::WatchFailed`]'s own handler is what turns the flag back off
+    /// and toasts the user.
+    #[test]
+    fn watch_set_on_an_unknown_session_reports_watch_failed() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        apply_effect(
+            Some(Effect::WatchSet {
+                id: SessionId(99),
+                on: true,
+            }),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(Message::WatchFailed { session, reason }) => {
+                assert_eq!(session, SessionId(99));
+                assert_eq!(reason, "the session is gone");
+            }
+            other => panic!("expected WatchFailed, got {other:?}"),
+        }
+        assert!(!watchers.contains(SessionId(99)));
+    }
+
+    /// [`Effect::RestartSession`] on a watched session carries the flag over
+    /// the relaunch: the replaced session's watcher stops, and once the new
+    /// session has registered (so the engine always sees the tab before
+    /// anything acts on it) [`Message::EnableWatch`] follows for its id —
+    /// never the other way around.
+    // `#[tokio::test]`: the replaced session's watcher teardown goes through
+    // `spawn_teardown` (`tokio::task::spawn_blocking`), which needs a runtime
+    // in scope even though this test awaits nothing itself.
+    #[tokio::test]
+    async fn restarting_a_watched_session_reenables_watch_after_registration() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("restart-reenable");
+        let mut engine = Engine::new(AppState::default());
+        let runner = Arc::new(FakeProcessRunner::new().with_stream(
+            "cargo run --features frust/perf-trace --features frust/devtools",
+            ["   Compiling app", "     Running `app`"],
+            true,
+        ));
+        let (mut supervisor, _events) = Supervisor::new(runner.clone());
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, mut rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        records.insert(SessionId(5), watch_desktop_spec(&root));
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let (started, _replaced) = watchers.start(SessionId(5), &root);
+        started.expect("a real fs watcher starts for the session being restarted");
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(tx.clone(), runner));
+
+        apply_effect(
+            Some(Effect::RestartSession(SessionId(5))),
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            !watchers.contains(SessionId(5)),
+            "the replaced session's watcher is stopped"
+        );
+        let registered = match rx.try_recv() {
+            Ok(Message::RegisterSession { id, .. }) => id,
+            other => panic!("expected RegisterSession first, got {other:?}"),
+        };
+        match rx.try_recv() {
+            Ok(Message::EnableWatch { session }) => {
+                assert_eq!(
+                    session, registered,
+                    "EnableWatch names the relaunch's own id"
+                );
+            }
+            other => panic!("expected EnableWatch after RegisterSession, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The post-effect reconciliation sweep stops a watcher whose tab left
+    /// without an effect naming it (a terminal tab closed on the spot) —
+    /// `apply_effect`'s own module doc names this as the "after, not before"
+    /// step that keeps a watcher from outliving its session.
+    // `#[tokio::test]`: the dropped watcher's teardown goes through
+    // `spawn_teardown` (`tokio::task::spawn_blocking`), which needs a runtime
+    // in scope even though this test awaits nothing itself.
+    #[tokio::test]
+    async fn the_sweep_drops_a_watcher_whose_tab_is_gone() {
+        use frust_drive::process::FakeProcessRunner;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let root = watch_scratch_dir("sweep");
+        let mut engine = Engine::new(AppState::default());
+        let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let (tx, _rx) = unbounded_channel();
+        let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+        let mut records = McpSessionRecords::new();
+        let mut watchers = SourceWatchers::new(tx.clone());
+        let (started, _replaced) = watchers.start(SessionId(3), &root);
+        started.expect("a real fs watcher starts");
+        let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+            tx.clone(),
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        // `engine.state.sessions` has no tab for `SessionId(3)` at all — the
+        // exact shape a terminal tab closed on the spot leaves behind.
+        apply_effect(
+            None,
+            &mut EffectCtx {
+                engine: &mut engine,
+                supervisor: &mut supervisor,
+                devtools: &mut devtools,
+                metrics: &mut metrics,
+                tx: &tx,
+                next_adhoc_id: &mut next_adhoc_id,
+                records: &mut records,
+                watchers: &mut watchers,
+                backend: &backend,
+                clipboard: ClipboardBackend::Disabled { reason: "test" },
+            },
+        );
+
+        assert!(
+            !watchers.contains(SessionId(3)),
+            "the sweep drops a watcher whose tab is gone"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The doctor panel's `t` key (mouse parity: its "Toolchain setup"
+    /// button) closes the panel and opens the bootstrap wizard.
+    #[test]
+    fn t_in_the_doctor_panel_opens_the_toolchain_wizard() {
+        let regions = MouseRegions::new();
+        let state = AppState {
+            screen: Screen::Workbench,
+            doctor_panel_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('t')), &state, &regions),
+            vec![Message::OpenToolchainFromDoctor]
         );
     }
 
@@ -3056,5 +4229,329 @@ mod tests {
             translate_event(key(KeyCode::Esc), &state, &regions),
             vec![Message::CloseDapSettings]
         );
+    }
+
+    // ── Palette-vs-runner hint drift tripwire ─────────────────────────────────
+
+    /// One fixture per palette gate shape (`has_project`, `has_devices`,
+    /// `has_session`, `running`, `has_projects`, `inspector_live` —
+    /// `crate::engine::palette::commands`'s own local predicate names): builds
+    /// the minimal `AppState` satisfying exactly the requested combination.
+    /// Always `Screen::Workbench`, so a workbench-scoped unconditional command
+    /// (`n`, `R`, `m`, …) still routes the way the real workbench would.
+    fn gate_state(
+        has_project: bool,
+        has_devices: bool,
+        has_session: bool,
+        running: bool,
+        has_projects: bool,
+        inspector_live: bool,
+    ) -> AppState {
+        use crate::engine::{ConnState, DeviceRow, DevtoolsTab, SessionView};
+
+        let root = PathBuf::from("/tmp/huddle");
+        let mut state = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        if has_project {
+            state.project_root = Some(root.clone());
+        }
+        if has_projects {
+            state.projects.push(root.clone());
+        }
+        if has_devices {
+            state.devices.push(DeviceRow {
+                device: frust_drive::devices::Device {
+                    id: "d".into(),
+                    name: "Pixel".into(),
+                    platform: Platform::Android,
+                    kind: frust_drive::devices::Kind::Emulator,
+                    os_version: None,
+                    connection_state: None,
+                },
+                selected: false,
+            });
+        }
+        if has_session || running || inspector_live {
+            let mut session = if inspector_live {
+                SessionView::with_devtools(
+                    SessionId(0),
+                    root.clone(),
+                    "desktop",
+                    DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+                    Some(SessionTarget::Desktop),
+                )
+            } else {
+                SessionView::new(SessionId(0), root.clone(), "desktop")
+            };
+            session.state = if running {
+                SessionState::Running
+            } else {
+                SessionState::Configuring
+            };
+            if inspector_live {
+                session.devtools.open = true;
+                session.devtools.active_tab = DevtoolsTab::Inspector;
+                session.devtools.conn = ConnState::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                };
+            }
+            state.sessions.push(session);
+            state.active_session = Some(0);
+        }
+        state
+    }
+
+    /// Every single-key palette hint really produces the message the registry
+    /// claims: for each `commands(&state)` entry whose hint is exactly one
+    /// printable character (letter, digit, `/`, `:`), build a state
+    /// satisfying that entry's own gate via [`gate_state`], translate the
+    /// matching key event (uppercase hints get `SHIFT`) and assert the result
+    /// is exactly `vec![entry.message]`. A mismatch means the registry's hint
+    /// drifted from the binding it advertises — fix the hint, never the key.
+    ///
+    /// Deliberately excluded (not every single-char hint enters this sweep):
+    /// - multi-key hints (`^O`, `⌥m`) — filtered out by the one-char check
+    ///   itself, not a hand-picked skip.
+    /// - `d` ("DevTools") — gated on `has_active_session`, exactly one of
+    ///   this sweep's six shapes, but `d` claims nothing without a session
+    ///   (Doctor is unconditionally on `i`), so a naive assertion here can't
+    ///   cover that case; asserted instead in
+    ///   `d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log`
+    ///   and `d_does_nothing_with_no_session_open`.
+    /// - `y` ("Copy selection") — gated on `has_selection`, not one of the
+    ///   six shapes above; asserted inside the selection mode's own key table
+    ///   in `v_enters_the_mode_and_the_cursor_keys_then_move_the_selection`.
+    #[test]
+    fn every_single_key_palette_hint_matches_its_runner_binding() {
+        use crate::engine::palette;
+
+        let regions = MouseRegions::new();
+        let excluded_hints = ["d", "y"];
+
+        for cmd in palette::commands(&AppState::default()) {
+            let mut chars = cmd.hint.chars();
+            let Some(c) = chars.next() else { continue };
+            if chars.next().is_some() || !c.is_ascii_graphic() {
+                continue; // multi-char hint (e.g. `^O`, `⌥m`) — not a candidate.
+            }
+            if excluded_hints.contains(&cmd.hint) {
+                continue;
+            }
+
+            let state = match cmd.title {
+                "Run on device(s)…" | "Build…" | "Clean…" | "Add plugin…" => {
+                    gate_state(true, false, false, false, false, false)
+                }
+                "Stop session" => gate_state(false, false, false, true, false, false),
+                // Needs an *app* session (`target = Some`), which none of
+                // `gate_state`'s existing shapes give without also opening
+                // DevTools (`inspector_live`, which would hijack `R` into
+                // `translate_devtools_key` instead) — built directly instead.
+                // "Watch: restart on save" needs the same desktop app session.
+                "Restart session" | "Watch: restart on save" => {
+                    use crate::engine::SessionView;
+                    let mut state = AppState {
+                        screen: Screen::Workbench,
+                        ..Default::default()
+                    };
+                    let mut session = SessionView::with_devtools(
+                        SessionId(0),
+                        PathBuf::from("/tmp/huddle"),
+                        "desktop",
+                        DevtoolsLaunch::unavailable(),
+                        Some(SessionTarget::Desktop),
+                    );
+                    session.state = SessionState::Running;
+                    state.sessions.push(session);
+                    state.active_session = Some(0);
+                    state
+                }
+                "Close tab"
+                | "Toggle follow-tail"
+                | "Toggle line wrap"
+                | "Search logs…"
+                | "Select lines…"
+                | "Cycle log level filter"
+                | "Toggle nearest backtrace fold" => {
+                    gate_state(false, false, true, false, false, false)
+                }
+                "Refresh widget tree" => gate_state(false, false, false, false, false, true),
+                // "always enabled" commands: no gate flag needed, just the
+                // workbench screen `gate_state`'s all-false shape provides.
+                // "Toolchain setup…" is deliberately absent here (its old `i`
+                // binding now opens the Doctor panel, so it has no top-level
+                // keyhint), so its empty hint already exits this sweep at the
+                // `chars.next()` check above.
+                "Doctor"
+                | "New project…"
+                | "Refresh devices"
+                | "MCP server…"
+                | "Start/stop MCP server"
+                | "DAP server…"
+                | "Quit" => gate_state(false, false, false, false, false, false),
+                other => panic!(
+                    "single-char hint `{}` on {other:?} has no fixture wired in this tripwire — \
+                     add one rather than skipping it",
+                    cmd.hint
+                ),
+            };
+
+            let mods = if c.is_ascii_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            let ev = Event::Key(KeyEvent::new(KeyCode::Char(c), mods));
+            assert_eq!(
+                translate_event(ev, &state, &regions),
+                vec![cmd.message.clone()],
+                "palette hint `{}` (\"{}\") does not match its runner binding",
+                cmd.hint,
+                cmd.title
+            );
+        }
+    }
+
+    /// Whether `source` — `run_loop`'s own text, or a mutated copy for the
+    /// negative control below — still keeps the ordering guarantee its
+    /// `tokio::select!` depends on: `biased;` present, with the `rx` branch
+    /// (where a launch's `RegisterSession` lands) written before the
+    /// `session_rx` branch (where that same session's drain-thread events
+    /// land). Losing either one reopens the race the long comment atop
+    /// `run_loop`'s `select!` exists to prevent: an event for a session not
+    /// yet registered is silently dropped by `update`, leaving the tab stuck
+    /// in `Configuring` forever. Factored out of the test so both the real
+    /// source and a deliberately broken copy can be checked against it.
+    fn run_loop_registers_sessions_before_their_events(source: &str) -> bool {
+        let Some(fn_start) = source.find("async fn run_loop(") else {
+            return false;
+        };
+        let Some(select_kw) = source[fn_start..].find("tokio::select!") else {
+            return false;
+        };
+        let select_kw = fn_start + select_kw;
+        let Some(open_rel) = source[select_kw..].find('{') else {
+            return false;
+        };
+        let open = select_kw + open_rel;
+
+        // Bound the search to the macro's own `{ … }`, tracked by a plain
+        // brace count from the opening brace. This file is `include_str!`-ed
+        // whole (see the test below), so an *unbounded* search from `open`
+        // to end-of-file would happily match text far past `run_loop` —
+        // including this very test module's own `"biased;"` / `"rx.recv()"`
+        // / `"session_rx.recv()"` string literals a few hundred lines down,
+        // which would mask a real mutation instead of catching it. Every
+        // brace inside `run_loop`'s select arms is either structural or (as
+        // in a `format!("... {e}")` interpolation) already balanced within
+        // its own literal, so a naive count still lands on the true close.
+        let bytes = source.as_bytes();
+        let mut depth: i32 = 0;
+        let mut close = None;
+        for (i, &b) in bytes[open..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            return false;
+        };
+        let select_body = &source[open..=close];
+
+        if !select_body.contains("biased;") {
+            return false;
+        }
+
+        // `"rx.recv()"` is itself a substring of `"session_rx.recv()"`, so a
+        // plain `find` for it still resolves correctly either way: when the
+        // bare `rx` branch truly comes first, that occurrence is the
+        // earliest match; when the branches are swapped, the earliest match
+        // is the one embedded inside `session_rx.recv()` — at an offset
+        // *after* `session_rx.recv()`'s own start — so the comparison below
+        // still comes out false, as it should.
+        let (Some(rx_idx), Some(session_rx_idx)) = (
+            select_body.find("rx.recv()"),
+            select_body.find("session_rx.recv()"),
+        ) else {
+            return false;
+        };
+        rx_idx < session_rx_idx
+    }
+
+    /// The regression this guards: a future edit to `run_loop` that drops
+    /// `biased` or reorders its branches would compile fine and pass every
+    /// other test, yet reopen the exact silent-drop race
+    /// `a_launchs_registration_is_applied_before_its_already_queued_events`
+    /// (`tests/mcp_embedded.rs`) exercises only for the *test harness's* copy
+    /// of this loop. This tripwire reads `run_loop`'s real source instead, so
+    /// the production loop is covered too.
+    #[test]
+    fn run_loop_select_polls_registration_before_session_events() {
+        assert!(
+            run_loop_registers_sessions_before_their_events(include_str!("runner.rs")),
+            "run_loop's `tokio::select!` must be `biased` with its `rx` branch \
+             (RegisterSession) written before its `session_rx` branch (session events), \
+             or a launch's own events can be dropped before it is registered"
+        );
+    }
+
+    /// Negative control for the tripwire above: it must actually be able to
+    /// fail. Mutated copies of a minimal `run_loop` shape are checked instead
+    /// of the real file so this test is not sensitive to unrelated edits
+    /// elsewhere in `run_loop`.
+    #[test]
+    fn run_loop_select_check_fails_on_a_broken_copy() {
+        let biased_rx_first = "async fn run_loop() { tokio::select! { \
+             biased; \
+             Some(msg) = rx.recv() => {} \
+             Some(ev) = session_rx.recv() => {} \
+         } }";
+        assert!(run_loop_registers_sessions_before_their_events(
+            biased_rx_first
+        ));
+
+        let missing_biased = "async fn run_loop() { tokio::select! { \
+             Some(msg) = rx.recv() => {} \
+             Some(ev) = session_rx.recv() => {} \
+         } }";
+        assert!(!run_loop_registers_sessions_before_their_events(
+            missing_biased
+        ));
+
+        let swapped_branches = "async fn run_loop() { tokio::select! { \
+             biased; \
+             Some(ev) = session_rx.recv() => {} \
+             Some(msg) = rx.recv() => {} \
+         } }";
+        assert!(!run_loop_registers_sessions_before_their_events(
+            swapped_branches
+        ));
+
+        // The shape that actually bit an earlier, unbounded version of the
+        // checker: `run_loop.rs` is read whole via `include_str!`, so a
+        // mutated-but-missing-`biased;` select block followed by *other*
+        // code that happens to mention `biased;`/`rx.recv()`/
+        // `session_rx.recv()` (exactly what this very test module's string
+        // literals do) must not let the checker wander past the select
+        // block's closing `}` and pass on those unrelated matches instead.
+        let biased_missing_but_words_appear_later = "async fn run_loop() { tokio::select! { \
+             Some(msg) = rx.recv() => {} \
+             Some(ev) = session_rx.recv() => {} \
+         } } \
+         fn unrelated() { /* biased; rx.recv() session_rx.recv() */ }";
+        assert!(!run_loop_registers_sessions_before_their_events(
+            biased_missing_but_words_appear_later
+        ));
     }
 }

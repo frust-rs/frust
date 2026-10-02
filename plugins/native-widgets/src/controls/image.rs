@@ -147,6 +147,39 @@ impl Fit {
             Self::Center => UIViewContentMode::Center,
         }
     }
+
+    /// The `NSImageScaling` this fit selects — the AppKit counterpart of
+    /// [`Self::content_mode`], but **not** a one-to-one mapping the way the
+    /// iOS one is:
+    ///
+    /// | [`Fit`] | `NSImageScaling` | Notes |
+    /// |---|---|---|
+    /// | [`Self::Contain`] | `ScaleProportionallyUpOrDown` | Aspect kept, fits inside the box, scales up or down as needed — AppKit's closest primitive to `FIT_CENTER`/`ScaleAspectFit`. |
+    /// | [`Self::Fill`] | `ScaleAxesIndependently` | Aspect ignored, fills the box on both axes — matches `FIT_XY`/`ScaleToFill` exactly. |
+    /// | [`Self::Center`] | `ScaleNone` | No scaling at all, centred by `NSImageView`'s own default `imageAlignment` — matches `CENTER`/`Center` exactly. |
+    /// | [`Self::Cover`] | `ScaleProportionallyUpOrDown` (same as [`Self::Contain`]) | **Degraded, not equivalent** — see below. |
+    ///
+    /// `NSImageScaling` has no "fill the box, keep aspect, crop the
+    /// overflow" case at all — `CENTER_CROP`/`ScaleAspectFill`'s exact
+    /// behaviour needs custom drawing this control does not do. [`Self::Cover`]
+    /// therefore degrades to the same letterboxed constant as
+    /// [`Self::Contain`] rather than silently stretching
+    /// (`ScaleAxesIndependently`) or leaving the image unscaled
+    /// (`ScaleNone`), both worse approximations of "fill" than a letterbox.
+    /// A real, accepted per-platform capability gap
+    /// (`docs/PLUGINS_CODE_STANDARDS.md`'s "a platform capability gap is
+    /// recorded per-platform, never corrected onto the platform that
+    /// doesn't have it" rule) — worth a `docs/LIMITATIONS.md` entry, not a
+    /// custom-drawing workaround here.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn image_scaling(self) -> objc2_app_kit::NSImageScaling {
+        use objc2_app_kit::NSImageScaling;
+        match self {
+            Self::Contain | Self::Cover => NSImageScaling::ScaleProportionallyUpOrDown,
+            Self::Fill => NSImageScaling::ScaleAxesIndependently,
+            Self::Center => NSImageScaling::ScaleNone,
+        }
+    }
 }
 
 /// The encoded bytes a slot should show, compared by **identity** (module
@@ -698,6 +731,441 @@ pub(crate) mod platform {
                 platform::set_accessibility_label(&state.view, label, mtm);
             }
             ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! The macOS half: build an `NSImageView` and apply the same planned
+    //! setters the Android and iOS halves do.
+    //!
+    //! # Two construction-time normalizations, one fewer than iOS
+    //!
+    //! 1. **`imageScaling`.** [`ImageProps::platform_default`] describes the
+    //!    fresh Android `ImageView` — `FIT_CENTER`, i.e. [`Fit::Contain`] —
+    //!    and the create plan diffs against that default, so a slot asking
+    //!    for the platform default plans **no** [`Setter::ScaleType`] at all.
+    //!    A fresh `NSImageView` scales differently
+    //!    (`NSImageScaling::ScaleProportionallyDown`, which never scales
+    //!    *up*), so `create` sets [`Fit::image_scaling`]'s value for the
+    //!    shared default explicitly, the same shape `image.rs`'s iOS module
+    //!    doc names (`slider.rs`'s "normalize in `create`, then diff against
+    //!    the shared default" shape).
+    //! 2. **`imageFrameStyle`.** A programmatically constructed
+    //!    `NSImageView` already frames nothing
+    //!    (`NSImageFrameStyle::None`), matching Android's borderless
+    //!    `ImageView` and iOS's borderless `UIImageView` — but pinned
+    //!    explicitly at `create` rather than left to whatever the
+    //!    constructor happens to default to, since no `Setter` names it (no
+    //!    `Props` field does either) and nothing else would re-assert it if
+    //!    a future AppKit release changed the constructor's own default.
+    //!
+    //! No `clipsToBounds` equivalent here: that iOS normalization exists to
+    //! stop [`Fit::Cover`]'s crop from spilling onto siblings, and this arm's
+    //! [`Fit::Cover`] degrades to a letterbox instead of a crop
+    //! ([`Fit::image_scaling`]'s doc) — there is no overflow to clip in the
+    //! first place.
+    //!
+    //! # The tint needs a template image, like iOS — but no re-derived copy
+    //!
+    //! `NSImageView.contentTintColor` (theme ladder L2) is documented by
+    //! AppKit's header as "a tint color to be used when rendering
+    //! **template** image content" (`objc2-app-kit` 0.3.2's generated
+    //! `NSImageView.rs:221`) — set it on an ordinary, non-template image and
+    //! it has no visible effect at all, exactly the pitfall this file's iOS
+    //! `platform` module doc names (*The tint needs the image to be a
+    //! template*). An earlier version of this doc claimed AppKit needed no
+    //! such indirection; that was wrong, and the false claim is why a
+    //! monochrome icon tinted for a dark theme stayed black on macOS while
+    //! Android and iOS both rendered the tint correctly.
+    //!
+    //! Unlike `UIImage.imageWithRenderingMode:`, though,
+    //! `NSImage.isTemplate`/`setTemplate:` is a **mutable property of the
+    //! same `NSImage` object**, not a rendering-mode wrapper around a second,
+    //! separately-allocated backing store — so this arm never needs iOS's
+    //! decoded-original/re-derived-copy pair. [`ImageState`] instead keeps
+    //! the decoded [`NSImage`] and a `tinted` flag: applying a tint calls
+    //! `setTemplate(true)` on the installed image before `contentTintColor`
+    //! is set (`platform::set_tint`, `controls/mod.rs`); clearing it calls
+    //! `setTemplate(false)` and clears `contentTintColor`, restoring the
+    //! image's original, untinted rendering — the same restore Android's
+    //! `setImageTintList(null)` and iOS's `imageWithRenderingMode:
+    //! .automatic` give back. A bytes change re-applies the *current*
+    //! `tinted` flag to the freshly decoded image ([`next_tinted`]) rather
+    //! than leaving it at AppKit's own default, so a tint set before a bytes
+    //! swap is not silently lost when the new image installs.
+    //!
+    //! # `DYLD_LIBRARY_PATH` can take ImageIO's codecs away
+    //!
+    //! ImageIO links its PNG/JPEG/TIFF/GIF/JPEG-2000/Radiance codecs as
+    //! private dylibs (`ImageIO.framework/Versions/A/Resources/libPng.dylib`
+    //! and five siblings, [`IMAGEIO_CODEC_LEAVES`]). dyld resolves every
+    //! install name by **leaf name** through `DYLD_LIBRARY_PATH` first, and
+    //! APFS compares names case-insensitively, so a directory holding
+    //! Homebrew's `libpng.dylib`/`libjpeg.dylib`/`libtiff.dylib`/
+    //! `libgif.dylib` (e.g. `/opt/homebrew/lib`) silently replaces ImageIO's
+    //! copies at launch. Every export of ImageIO's codec dylibs is
+    //! `__cg_`-prefixed (`__cg_png_create_read_struct`, …), which no
+    //! third-party build provides, so dyld binds those imports to its
+    //! missing-symbol sentinel `0xbad4007`. The process then runs normally
+    //! until the first decode: `-[NSImage initWithData:]` →
+    //! `CGImageSourceCopyPropertiesAtIndex` →
+    //! `PNGReadPlugin::InitializePluginData` branches to `0xbad4007`, and the
+    //! host dies with `SIGBUS` (`EXC_ARM_DA_ALIGN`, `pc = x16 = 0xbad4007`).
+    //! No ImageIO entry point avoids this: `NSBitmapImageRep` and a bare
+    //! `CGImageSource` crash the same way, with or without a running
+    //! `NSApplication`. `DYLD_FALLBACK_LIBRARY_PATH` is harmless, because it
+    //! is only consulted when the real path is missing, and ImageIO's codecs
+    //! are always in the shared cache.
+    //!
+    //! This happened for real: a `~/.zshenv` exporting
+    //! `DYLD_LIBRARY_PATH="/opt/homebrew/lib:…"` crashed every playground
+    //! `cargo run` launched straight from zsh as soon as its Image slot was
+    //! created. Launches through a SIP-protected binary (`nohup`, `env`)
+    //! never crashed, because dyld prunes `DYLD_*` for those, so the child
+    //! never inherits it. That is why the crash looked intermittent.
+    //!
+    //! A process in that state has no system image decoder at all, so
+    //! [`decode`] checks first ([`shadowed_codec`], once per process). It
+    //! mirrors dyld's own lookup: each `DYLD_LIBRARY_PATH` entry joined with
+    //! each codec leaf, then an existence check. On a hit it refuses the
+    //! ImageIO call and warns once, naming the shadowing file, instead of
+    //! letting the host crash. The view is left empty, which is the same
+    //! degrade an undecodable payload gets. An environment that still
+    //! *shows* `DYLD_*` belongs to a process dyld honoured it for: for a
+    //! restricted process (SIP platform binary, hardened runtime without the
+    //! `allow-dyld-environment-variables` entitlement) dyld prunes those
+    //! variables before `main`, so the check does not false-positive on a
+    //! hardened app.
+
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    use objc2::AnyThread;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSImage, NSImageFrameStyle, NSImageView};
+    use objc2_foundation::NSData;
+
+    use super::{Image, ImageProps, KIND, claim_bytes, release_bytes};
+    use crate::NativeWidgetError;
+    use crate::appkit::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::registry::SlotId;
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live image's retained state.
+    pub(crate) struct ImageState {
+        view: Retained<NSImageView>,
+        /// Which slot's publish-table hold this instance took in `create`
+        /// ([`claim_bytes`]) and gives back in `dispose` ([`release_bytes`]),
+        /// the same accounting the Android and iOS arms keep.
+        slot: SlotId,
+        /// The decoded image currently installed on [`Self::view`], kept so a
+        /// tint change can re-apply `setTemplate` to it without re-decoding
+        /// (module doc's *The tint needs a template image*).
+        image: Option<Retained<NSImage>>,
+        /// Whether a tint colour is currently set — the value [`apply`]
+        /// passes to `setTemplate` for both the currently installed image
+        /// and any freshly decoded one.
+        tinted: bool,
+    }
+
+    impl NativeWidget for Image {
+        type Props = ImageProps;
+        type State = ImageState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            ImageProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = NSImageView::new(mtm);
+            let default = ImageProps::platform_default(props.slot);
+            // Module doc's *Two construction-time normalizations*. The fit is
+            // read off the shared default rather than named again here, so a
+            // change to `ImageProps::platform_default` cannot leave the
+            // normalization and the diff baseline disagreeing.
+            view.setImageScaling(default.fit.image_scaling());
+            view.setImageFrameStyle(NSImageFrameStyle::None);
+            let mut state = ImageState {
+                view,
+                slot: props.slot,
+                image: None,
+                tinted: false,
+            };
+            let plan = ImageProps::plan(&default, props);
+            apply_all(&mut state, &plan);
+            let handle =
+                NativeView::new(Retained::clone(&state.view).into_super().into_super(), mtm);
+            // Claimed last, mirroring the other two arms: an earlier failure
+            // would return before taking a hold nothing would ever release.
+            claim_bytes(props.slot);
+            Ok((handle, state))
+        }
+
+        fn update(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(state, &ImageProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Give back this instance's hold on the slot's bytes; the payload
+            // is dropped only when the last holder is gone (the runtime
+            // creates a replacement *before* disposing what it replaced).
+            // Dropping the state then releases its retain.
+            release_bytes(state.slot);
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — the same order contract the
+    /// other two arms keep.
+    fn apply_all(state: &mut ImageState, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(state, setter);
+        }
+    }
+
+    /// Execute one planned property write against `state`'s view.
+    ///
+    /// Takes the whole state, not just the view, because a bytes change
+    /// needs the *existing* tint state to mark the freshly decoded image
+    /// template (module doc's *The tint needs a template image*), and a tint
+    /// change needs the currently installed image to mark — the same shape
+    /// the iOS arm's `apply` uses for the same reason.
+    fn apply(state: &mut ImageState, setter: &Setter<'_>) {
+        // `Setter::ImageTint` is the only setter that changes `tinted`;
+        // every other setter (crucially `Setter::ImageBytes`) leaves it
+        // exactly as it was, so a bytes change never silently clears an
+        // active tint (see `next_tinted`'s tests).
+        state.tinted = next_tinted(state.tinted, setter);
+        match *setter {
+            Setter::ImageBytes(bytes) => {
+                let image = bytes.as_slice().and_then(decode);
+                if let Some(image) = &image {
+                    // Re-apply the current tint state to the freshly decoded
+                    // image: AppKit's template flag lives on the `NSImage`
+                    // object itself, so a new decode starts over and would
+                    // otherwise revert to an untinted rendering even while a
+                    // tint is still active (module doc).
+                    image.setTemplate(state.tinted);
+                }
+                state.view.setImage(image.as_deref());
+                state.image = image;
+            }
+            Setter::ScaleType(fit) => state.view.setImageScaling(fit.image_scaling()),
+            Setter::ImageTint(argb) => {
+                if let Some(image) = &state.image {
+                    image.setTemplate(state.tinted);
+                }
+                platform::set_tint(&state.view, "ImageTint", argb);
+            }
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(&state.view, label);
+            }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+
+    /// The next value of [`ImageState::tinted`] after applying `setter` —
+    /// [`Setter::ImageTint`] recomputes it from the new tint value; every
+    /// other setter, in particular [`Setter::ImageBytes`], leaves it
+    /// untouched. Pulled out as a pure function — no `NSImage`/`NSImageView`
+    /// involved — so the state transition Deliverable 1 fixes (a bytes
+    /// change while a tint is active must not clear it) is host-testable
+    /// without AppKit; see the tests below.
+    fn next_tinted(current: bool, setter: &Setter<'_>) -> bool {
+        match *setter {
+            Setter::ImageTint(argb) => argb.is_some(),
+            _ => current,
+        }
+    }
+
+    /// Decode `raw` into an `NSImage`, or `None` (with a warning) when there
+    /// is nothing to show. Never calls into ImageIO in a process whose codecs
+    /// `DYLD_LIBRARY_PATH` replaced (module doc), because there it would crash.
+    fn decode(raw: &[u8]) -> Option<Retained<NSImage>> {
+        if shadowed_codec().is_some() {
+            // Already warned, once, with the shadowing path.
+            return None;
+        }
+        let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(raw));
+        if image.is_none() {
+            // `initWithData:` returning `None` is its own documented
+            // contract for a payload it cannot read — a bad image
+            // clears the view, it never kills the slot (the same
+            // degrade `BitmapFactory.decodeByteArray`/
+            // `UIImage.imageWithData:` get on the other two arms).
+            log::warn!(
+                "frust-native-widgets: macOS NSImage could not decode {} image byte(s) — \
+                 clearing the view",
+                raw.len()
+            );
+        }
+        image
+    }
+
+    /// The leaf names of ImageIO's private codec dylibs
+    /// (`ImageIO.framework/Versions/A/Resources/*`, per `dyld_info
+    /// -dependents` on macOS 26). Every symbol they export is
+    /// `__cg_`-prefixed, so no same-named third-party dylib can stand in for
+    /// one (module doc).
+    const IMAGEIO_CODEC_LEAVES: [&str; 6] = [
+        "libPng.dylib",
+        "libJPEG.dylib",
+        "libTIFF.dylib",
+        "libGIF.dylib",
+        "libJP2.dylib",
+        "libRadiance.dylib",
+    ];
+
+    /// The file through which `DYLD_LIBRARY_PATH` replaced one of ImageIO's
+    /// codecs in this process, if any. dyld fixed the answer at launch, when
+    /// it bound ImageIO, so it is computed once, on the first decode, and
+    /// that is also when the warning is logged: once per process.
+    fn shadowed_codec() -> Option<&'static Path> {
+        static SHADOW: OnceLock<Option<PathBuf>> = OnceLock::new();
+        SHADOW
+            .get_or_init(|| {
+                let search = std::env::var_os("DYLD_LIBRARY_PATH")?;
+                let shadow = shadowing_file(&search, |candidate| candidate.is_file())?;
+                log::warn!(
+                    "frust-native-widgets: macOS Image slots stay empty — DYLD_LIBRARY_PATH \
+                     replaced ImageIO's private codec with {} (dyld matches library leaf names, \
+                     case-insensitively on APFS), leaving ImageIO's `__cg_*` imports unbound, so \
+                     any NSImage decode would crash the process (SIGBUS at 0xbad4007). Relaunch \
+                     without DYLD_LIBRARY_PATH to show images",
+                    shadow.display()
+                );
+                Some(shadow)
+            })
+            .as_deref()
+    }
+
+    /// dyld's `DYLD_LIBRARY_PATH` leaf-name lookup, restricted to
+    /// [`IMAGEIO_CODEC_LEAVES`]: the first `<entry>/<leaf>` that `exists`,
+    /// in search-path order. Empty entries are skipped. `exists` is injected
+    /// so the lookup can be tested without a filesystem; in production it is
+    /// `Path::is_file`, which on APFS matches case-insensitively, just as
+    /// dyld's own lookup does.
+    fn shadowing_file(search: &OsStr, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+        std::env::split_paths(search)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .flat_map(|dir| IMAGEIO_CODEC_LEAVES.iter().map(move |leaf| dir.join(leaf)))
+            .find(|candidate| exists(candidate))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::ffi::OsStr;
+        use std::path::Path;
+
+        use super::super::ImageBytes;
+        use super::{IMAGEIO_CODEC_LEAVES, next_tinted, shadowing_file};
+        use crate::controls::Setter;
+
+        // --- `next_tinted` — the macOS ImageTint-renders-through-a-template
+        // -- fix's state transition (Deliverable 4), host-testable without
+        // -- an `NSImageView`. ---------------------------------------------
+
+        #[test]
+        fn an_image_tint_setter_recomputes_tinted_from_the_new_colour() {
+            assert!(next_tinted(false, &Setter::ImageTint(Some(128))));
+            assert!(!next_tinted(true, &Setter::ImageTint(None)));
+        }
+
+        #[test]
+        fn an_image_bytes_setter_never_changes_the_tinted_flag() {
+            let empty = ImageBytes::empty();
+            assert!(
+                !next_tinted(false, &Setter::ImageBytes(&empty)),
+                "untinted stays untinted across a bytes change"
+            );
+            assert!(
+                next_tinted(true, &Setter::ImageBytes(&empty)),
+                "a bytes change alone must not clear an active tint"
+            );
+        }
+
+        #[test]
+        fn a_tint_survives_a_bytes_change_that_follows_it() {
+            // The exact review finding this task fixes: tint, then swap the
+            // bytes — the tint must still be active so the freshly decoded
+            // image is marked template.
+            let empty = ImageBytes::empty();
+            let tinted = next_tinted(false, &Setter::ImageTint(Some(128)));
+            assert!(tinted);
+            let after_bytes = next_tinted(tinted, &Setter::ImageBytes(&empty));
+            assert!(after_bytes, "the tint must persist across the bytes swap");
+        }
+
+        #[test]
+        fn clearing_the_tint_after_a_bytes_change_still_untints() {
+            let empty = ImageBytes::empty();
+            let tinted = next_tinted(false, &Setter::ImageTint(Some(128)));
+            let after_bytes = next_tinted(tinted, &Setter::ImageBytes(&empty));
+            let cleared = next_tinted(after_bytes, &Setter::ImageTint(None));
+            assert!(!cleared);
+        }
+
+        #[test]
+        fn a_search_path_without_a_codec_leaf_shadows_nothing() {
+            let search = OsStr::new("/opt/homebrew/lib:/usr/local/lib");
+            assert_eq!(shadowing_file(search, |_| false), None);
+        }
+
+        #[test]
+        fn the_first_entry_holding_a_codec_leaf_is_the_shadow() {
+            // `/opt/homebrew/lib/libpng.dylib` answers dyld's (and APFS's)
+            // case-insensitive lookup for `libPng.dylib`; the injected
+            // `exists` stands in for that filesystem behaviour.
+            let search = OsStr::new("/nothing/here::/opt/homebrew/lib:/usr/local/lib");
+            let found = shadowing_file(search, |candidate| {
+                candidate.parent() != Some(Path::new("/nothing/here"))
+                    && candidate
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|leaf| leaf.eq_ignore_ascii_case("libpng.dylib"))
+            });
+            assert_eq!(
+                found.as_deref(),
+                Some(Path::new("/opt/homebrew/lib/libPng.dylib"))
+            );
+        }
+
+        #[test]
+        fn an_empty_search_path_entry_is_skipped_not_read_as_the_working_directory() {
+            let found = shadowing_file(OsStr::new("::"), |candidate| {
+                candidate
+                    .parent()
+                    .is_none_or(|dir| dir.as_os_str().is_empty())
+            });
+            assert_eq!(found, None);
+        }
+
+        #[test]
+        fn every_codec_leaf_is_looked_up() {
+            for leaf in IMAGEIO_CODEC_LEAVES {
+                let found = shadowing_file(OsStr::new("/x"), |candidate| {
+                    candidate.file_name() == Some(OsStr::new(leaf))
+                });
+                assert_eq!(found, Some(Path::new("/x").join(leaf)));
+            }
         }
     }
 }

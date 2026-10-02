@@ -5,8 +5,8 @@
 //! the frame pipeline, input/IME/theme translation, accessibility — and knows
 //! nothing about menu bars, Dock reopen semantics, taskbar identity, or
 //! `WM_CLASS`. [`DesktopExtensions`] is where that native half attaches: a
-//! trait of six hooks, each with a no-op default, invoked at the six points in
-//! the loop where a platform integration has something to say. [`NoExtensions`]
+//! trait of eight hooks, each with a no-op default, invoked at the points in the
+//! loop where a platform integration has something to say. [`NoExtensions`]
 //! is the whole-set no-op, and is what [`run_desktop`](crate::run_desktop) —
 //! the zero-config dev preview — installs, so the preview path pays nothing for
 //! a seam it doesn't use.
@@ -21,17 +21,23 @@
 //! there, and there is exactly one extension per binary anyway (chosen by
 //! `cfg(target_os)` at the facade), so a vtable would buy nothing.
 //!
-//! # The window reaches an extension exactly once
+//! # Which hooks receive the window
 //!
-//! Only [`DesktopExtensions::on_window_created`] receives the window, as an
+//! Two do. [`DesktopExtensions::on_window_created`] hands it over as an
 //! `&Arc<Window>` an extension is expected to **clone and retain** if it needs
-//! one later. Every other hook is window-free. That is deliberate: the hooks
-//! that need a window (hide-on-close, titlebar theming) need it at a moment
-//! this core cannot always guarantee one exists, and threading an
-//! `Option<&Window>` through five signatures would make every implementation
-//! handle a case its own retained handle already answers. It also keeps five of
-//! the six hooks unit-testable without a live event loop — a `winit::Window`
-//! cannot be constructed without one.
+//! one later, and [`DesktopExtensions::on_platform_view_commands`] hands over
+//! the same handle again because it fires from inside the frame path, where this
+//! core is already holding a live window and a hosted native view must be
+//! parented into that exact one.
+//!
+//! Every other hook is window-free, deliberately: the hooks that need a window
+//! (hide-on-close, titlebar theming) need it at a moment this core cannot always
+//! guarantee one exists, and threading an `Option<&Window>` through the rest
+//! would make every implementation handle a case its own retained handle already
+//! answers. It also keeps those hooks unit-testable without a live event loop —
+//! a `winit::Window` cannot be constructed without one, which is why the two
+//! window-taking hooks have no spy coverage here (the command hook's *payload*
+//! is covered instead, in `crate::platform_view`'s own tests).
 
 use std::sync::Arc;
 
@@ -73,7 +79,7 @@ pub enum CloseAction {
 /// shared winit core.
 ///
 /// Every method has a no-op default, so an implementation writes only the hooks
-/// it uses; [`NoExtensions`] implements none at all. The six hooks, in the
+/// it uses; [`NoExtensions`] implements none at all. The eight hooks, in the
 /// order a running app meets them:
 ///
 /// 1. [`on_event_loop_builder`](Self::on_event_loop_builder) — before the loop
@@ -85,7 +91,12 @@ pub enum CloseAction {
 /// 4. [`pump`](Self::pump) — once per frame, at the top.
 /// 5. [`on_theme_brightness_changed`](Self::on_theme_brightness_changed) —
 ///    whenever the resolved theme brightness changes.
-/// 6. [`on_close_requested`](Self::on_close_requested) — on a close request.
+/// 6. [`on_platform_view_commands`](Self::on_platform_view_commands) — once per
+///    frame, after the frame is submitted, when a hosted native view needs
+///    creating, placing or tearing down.
+/// 7. [`on_platform_views_suspended`](Self::on_platform_views_suspended) — when
+///    the window or its surface goes away and every hosted view must go with it.
+/// 8. [`on_close_requested`](Self::on_close_requested) — on a close request.
 pub trait DesktopExtensions {
     /// Called with the winit event-loop builder, before `build()`.
     ///
@@ -159,6 +170,53 @@ pub trait DesktopExtensions {
         let _ = brightness;
     }
 
+    /// Called on the UI thread right after a frame is submitted, with the
+    /// platform-view differ's pending command batch in generation order — the
+    /// per-OS half of the desktop platform-view host (this crate owns the
+    /// OS-neutral half; see `crate::platform_view`).
+    ///
+    /// A host creates, places, shows/hides, re-parameterizes and disposes its
+    /// native sibling views from this batch, parented into `window`. Contract:
+    ///
+    /// - Rects and clips are **logical points** (winit logical units, absolute
+    ///   window coordinates) — deliberately *not* converted to physical px the
+    ///   way the mobile shells convert at their FFI boundary, because AppKit (the
+    ///   first consumer) places `NSView`s in logical points. `scale` is the
+    ///   window's current `scale_factor()`, for a host that does need physical px
+    ///   — it scales at its own boundary.
+    /// - Apply the batch **idempotently, per `ViewCommand` semantics**: the whole
+    ///   not-yet-applied backlog is re-served if a batch is ever missed, so an
+    ///   already-applied prefix may arrive twice, an `Update` for an unknown slot
+    ///   must be ignored rather than treated as a create, and a `Dispose` for a
+    ///   slot already gone must be a no-op.
+    /// - **Do not block.** This runs between submitting a frame and the next
+    ///   event-loop turn on the thread that owns the window; a blocking call here
+    ///   stalls the frame loop directly.
+    ///
+    /// Called only when there is something to apply — an unchanged frame (the
+    /// common case: nothing hosted, or a static hosted view) never reaches the
+    /// hook at all.
+    fn on_platform_view_commands(
+        &mut self,
+        window: &Arc<Window>,
+        scale: f64,
+        commands: &[frust_shell_common::platform_view::ViewCommand],
+    ) {
+        let _ = (window, scale, commands);
+    }
+
+    /// Called when the window is destroyed or its surface lost: remove **every**
+    /// hosted native view.
+    ///
+    /// Not a hide — the view hierarchy this core was placing views into is
+    /// going away, so a host that merely hides them leaks them. The commands
+    /// queued at this moment are discarded rather than delivered (they describe
+    /// views that no longer exist); on the way back in, the next
+    /// [`on_platform_view_commands`](Self::on_platform_view_commands) batch is a
+    /// full `Create` + `Update` replay of every live slot, so a host rebuilds
+    /// from that batch alone and needs to retain nothing across the gap.
+    fn on_platform_views_suspended(&mut self) {}
+
     /// Called on `WindowEvent::CloseRequested`, deciding whether the loop exits.
     ///
     /// The default is [`CloseAction::Exit`] — this shell's historical
@@ -188,9 +246,9 @@ mod tests {
     use super::*;
 
     /// A spy over every hook that can be driven without a live event loop
-    /// (i.e. all but `on_window_created`, which needs a real `winit::Window` —
-    /// see the module docs). Records the call order so a caller can assert both
-    /// *that* a hook ran and *when*.
+    /// (i.e. all but the two that take a `&Arc<Window>`, which needs a real
+    /// `winit::Window` — see the module docs). Records the call order so a caller
+    /// can assert both *that* a hook ran and *when*.
     #[derive(Debug, Default)]
     struct SpyExtensions {
         calls: Vec<String>,
@@ -209,6 +267,10 @@ mod tests {
 
         fn on_theme_brightness_changed(&mut self, brightness: Brightness) {
             self.calls.push(format!("brightness:{brightness:?}"));
+        }
+
+        fn on_platform_views_suspended(&mut self) {
+            self.calls.push("on_platform_views_suspended".to_string());
         }
 
         fn on_close_requested(&mut self) -> CloseAction {
@@ -239,6 +301,17 @@ mod tests {
         let mut ext = NoExtensions;
         ext.pump();
         ext.on_theme_brightness_changed(Brightness::Dark);
+        ext.on_platform_views_suspended();
+    }
+
+    #[test]
+    fn a_suspend_notification_is_observable_beside_the_other_hooks() {
+        // The platform-view seam's window-free half: a host that tracks nothing
+        // else still has to hear about the hierarchy going away.
+        let mut spy = SpyExtensions::default();
+        spy.pump();
+        spy.on_platform_views_suspended();
+        assert_eq!(spy.calls, vec!["pump", "on_platform_views_suspended"]);
     }
 
     #[test]

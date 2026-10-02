@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use frust_drive::host_path;
+
 use super::add_plugin::AddPluginDialog;
 use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
@@ -14,7 +16,7 @@ use super::doctor::DoctorState;
 use super::message::{DragKind, RegionId};
 use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::SessionView;
+use super::session_view::{SessionTarget, SessionView};
 use super::toast::Toasts;
 use crate::supervise::{
     DapServerHandle, DapStatus, McpServerHandle, McpStatus, SessionId, SessionState,
@@ -97,15 +99,51 @@ pub struct AppState {
     /// project — the full switcher (`project_switcher_open`) lets the user
     /// change which one is active.
     pub project_root: Option<PathBuf>,
-    /// Every project root the bounded [`detect`] walk found, in a
-    /// deterministic (name-sorted) order; `projects[0]` is `project_root`.
-    /// Empty on the welcome screen.
+    /// Every project the sidebar/switcher lists, ordered `[local...,
+    /// previous...]` — see [`Self::local_project_count`] for the boundary.
+    /// "Local" is every project the bounded [`detect`] walk
+    /// found under `cwd` (plus a still-existing recent under `cwd` the walk
+    /// missed); "previous" is every other still-existing persisted recent.
+    /// Every index-based path (`Message::SwitchProject`,
+    /// `ContextTarget::ProjectRow`, `project_switcher_cursor`, the digit
+    /// shortcuts) indexes this one vec — the split only changes how the
+    /// sidebar/switcher render it, never what an index means. Empty on the
+    /// welcome screen.
     pub projects: Vec<PathBuf>,
+    /// The working directory `detect` walked, recorded once so a later
+    /// `state.projects` insertion (e.g. a freshly scaffolded project — see
+    /// [`Self::insert_project`]) can classify the new root the same way
+    /// [`super::persist::split_local_and_previous`] classified everything
+    /// else at startup. Never re-read from the process environment after
+    /// [`Self::new`]/[`Self::detect`] set it.
+    pub cwd: PathBuf,
+    /// The `projects` boundary: `projects[..local_project_count]` is
+    /// "local", `projects[local_project_count..]` is "previous" — read
+    /// through [`Self::local_count`], which clamps to
+    /// `projects.len()`, rather than this raw field directly. Defaults to
+    /// `usize::MAX` ([`Default`]/most hand-built test fixtures never set
+    /// this new field explicitly), which clamps to "every project is
+    /// local" — the pre-split, single-PROJECTS-section behavior — rather
+    /// than silently reclassifying an untouched fixture's projects as
+    /// "previous".
+    pub local_project_count: usize,
     /// Every supervised session's view-model, in start (id) order. The tab bar
     /// renders these grouped by project; `active_session` indexes this vec.
     pub sessions: Vec<SessionView>,
     /// The index into `sessions` of the tab whose log view is shown, if any.
     pub active_session: Option<usize>,
+    /// Set by a keyboard restart (`R` / the palette's "Restart session") to
+    /// the (project, target) it is relaunching, so the relaunch's tab becomes
+    /// active when it registers — see [`Self::take_restart_focus`].
+    ///
+    /// Consumed by the very next `RegisterSession`, whatever it registers:
+    /// the runner reports a relaunch that never starts (no launch record, a
+    /// spawn failure) with a toast or not at all, never with a registration,
+    /// so a flag left waiting for "its" tab could otherwise steal focus for
+    /// some unrelated later launch. Only a registration naming the same
+    /// (project, target) is focused, so an interleaved foreign registration
+    /// clears the flag without being focused itself.
+    pub focus_next_registered: Option<(PathBuf, SessionTarget)>,
     /// Whether the log view soft-wraps long lines (`w` toggles).
     pub wrap: bool,
     /// The log search/filter overlay state.
@@ -137,9 +175,9 @@ pub struct AppState {
     /// Populated by a startup preflight and refreshed on demand;
     /// present regardless of whether the panel itself is open.
     pub doctor: DoctorState,
-    /// Whether the doctor panel is open (`d` from the workbench, or the
-    /// titlebar chip / sidebar "Doctor" action). While `true`, it captures
-    /// input and suppresses background mouse regions like the other modals.
+    /// Whether the doctor panel is open (`i` from either screen, or the
+    /// sidebar "Doctor" action). While `true`, it captures input and
+    /// suppresses background mouse regions like the other modals.
     pub doctor_panel_open: bool,
     /// The build-launcher modal, when open (`b` from the workbench, or the
     /// sidebar "Build" action). While `Some`, it captures input and
@@ -150,13 +188,21 @@ pub struct AppState {
     /// runs against. While `Some`, it captures input and suppresses
     /// background mouse regions like the other modals.
     pub clean_confirm: Option<PathBuf>,
+    /// The quit-confirm dialog's open flag (`q` / the palette Quit entry,
+    /// with a live session). A bool is enough — the running-session count it
+    /// warns about is read live at render via
+    /// [`Self::live_session_count`], never cached here. While `true`, it
+    /// captures input and suppresses background mouse regions like the other
+    /// modals.
+    pub quit_confirm: bool,
     /// The cached component-level toolchain report + titlebar-chip rollup
     /// source. Populated by a startup preflight and re-run after a
     /// guided-fix session; present regardless of whether the wizard is open.
     pub bootstrap: BootstrapState,
-    /// The bootstrap wizard, when open (the `i` key, or a titlebar
-    /// toolchain-chip click). While `Some`, it captures input and suppresses
-    /// background mouse regions like the other modals.
+    /// The bootstrap wizard, when open (a titlebar toolchain-chip click, or
+    /// the doctor panel's `t` key / "Toolchain setup" button). While `Some`,
+    /// it captures input and suppresses background mouse regions like the
+    /// other modals.
     pub bootstrap_wizard: Option<BootstrapWizard>,
     /// The Add Plugin dialog, when open (`a`, the sidebar "Add plugin" action,
     /// or the palette — `frust-secure-storage`). While `Some`, it
@@ -238,23 +284,27 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build the initial model from the current working directory, merged
-    /// with the persisted recent-projects list: a bounded walk
-    /// (see [`Self::detect`]) finds every `frust.toml` marker under the cwd,
-    /// then [`super::persist::merge_recent_and_detected`] prepends any
-    /// still-existing recently-opened project not already found, deduped —
-    /// "recent first, deduped". A cwd-detected project stays the active one
+    /// Build the initial model from the current working directory, split
+    /// into local and persisted recent projects: a bounded walk
+    /// (see [`Self::detect`]) finds every `frust.toml` marker under the
+    /// cwd, then [`super::persist::split_local_and_previous`] appends every
+    /// still-existing recent not already counted as local — "local first,
+    /// previous after, deduped". A cwd-detected project stays the active one
     /// (unsurprising `cd`-into-a-project-then-run behavior); with none
     /// detected, the most-recently-opened project opens instead of the
     /// welcome screen — "from any directory". Only the
     /// welcome screen (no active project either way) skips persistence
     /// entirely.
     pub fn new() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd =
+            host_path::simplify(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let mut state = Self::detect(&cwd);
         let detected_active = state.project_root.clone();
         let recent = super::persist::load_recent_projects();
-        state.projects = super::persist::merge_recent_and_detected(&recent, &state.projects);
+        let (projects, local_project_count) =
+            super::persist::split_local_and_previous(&cwd, &recent, &state.projects);
+        state.projects = projects;
+        state.local_project_count = local_project_count;
         state.project_root = detected_active.or_else(|| state.projects.first().cloned());
         if state.project_root.is_some() {
             state.screen = Screen::Workbench;
@@ -277,9 +327,13 @@ impl AppState {
     /// Detection core (testable without touching the process cwd/reading a
     /// real project tree): [`find_projects`] walks `dir` for `frust.toml`
     /// markers; the first found (if any) becomes the active `project_root`.
+    /// Every root it finds is "local" — `local_project_count` is set to the
+    /// whole list's length — since a bounded walk never reaches outside
+    /// `dir` in the first place.
     pub fn detect(dir: &Path) -> Self {
         let projects = find_projects(dir);
         let project_root = projects.first().cloned();
+        let local_project_count = projects.len();
         let screen = if projects.is_empty() {
             Screen::Welcome
         } else {
@@ -294,8 +348,11 @@ impl AppState {
             palette: None,
             project_root,
             projects,
+            cwd: dir.to_path_buf(),
+            local_project_count,
             sessions: Vec::new(),
             active_session: None,
+            focus_next_registered: None,
             wrap: false,
             search: SearchState::default(),
             devices: Vec::new(),
@@ -309,6 +366,7 @@ impl AppState {
             doctor_panel_open: false,
             build_launcher: None,
             clean_confirm: None,
+            quit_confirm: false,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
             add_plugin: None,
@@ -425,6 +483,100 @@ impl AppState {
         self.sessions.iter().any(|s| !s.state.is_terminal())
     }
 
+    /// The number of tracked sessions still in a live (non-terminal) state —
+    /// what the quit-confirm dialog warns about before every one of them is
+    /// force-stopped (see `crate::engine::update`'s `RequestQuit` arm and
+    /// `crate::ui::views::quit_confirm`), read live at render rather than
+    /// cached on the dialog itself.
+    pub fn live_session_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| !s.state.is_terminal())
+            .count()
+    }
+
+    /// The live session already running `project_root` on `target`, if there
+    /// is one — the one-live-session-per-(project, target) guard every launch
+    /// path consults before starting anything (the run-config modal,
+    /// run-on-all-devices, and MCP/DAP's `run_app`).
+    ///
+    /// "Live" means non-terminal: a session that has `Exited` or been
+    /// `Killed` never blocks a relaunch. Targets compare by
+    /// [`SessionTarget::is_same_place_as`] (devices by id), and a session
+    /// with no target at all — an ad-hoc build/clean/toolchain-fix tab —
+    /// is never a match, so building a project does not stop it being run.
+    /// The same project on a different device, or a different project on the
+    /// same device, are both allowed: only the pair is exclusive.
+    pub fn live_session_for(
+        &self,
+        project_root: &Path,
+        target: &SessionTarget,
+    ) -> Option<SessionId> {
+        self.live_session_for_excluding(project_root, target, None)
+    }
+
+    /// [`Self::live_session_for`], ignoring one session id.
+    ///
+    /// The exclusion is what a restart needs: `restart_app` stops the session
+    /// it is restarting before launching its spec again, so a 1-for-1 swap
+    /// must not be refused by the very session it replaces — while any
+    /// *other* live session on that target still refuses it (mirroring how
+    /// `McpSessionRecords::live_count` excludes the restarted session from
+    /// its own cap check).
+    ///
+    /// **Invariant:** `project_root` is compared here by lexical
+    /// normalisation only ([`same_project_root`]) — no filesystem I/O. This
+    /// method is reached from `update()` on the `RunConfigLaunch`,
+    /// `run_on_all_devices`, and MCP `run_app` paths, and the engine's
+    /// `update` must stay free of filesystem I/O, so canonicalisation is not
+    /// an option here.
+    ///
+    /// `project_root` is **not** canonicalised at its entry points today:
+    /// opening a project, the project switcher, and MCP's `run_app` all
+    /// produce a raw, uncanonicalised `PathBuf`. So two paths that name the
+    /// same directory on disk but differ in representation — a symlink and
+    /// its target, or a `..`-relative path that resolves to the same place —
+    /// still compare unequal here and can each spawn their own "live"
+    /// session on the same project. Canonicalising at those entry points
+    /// (where filesystem I/O is already expected) is a follow-up, not done
+    /// by this method.
+    pub fn live_session_for_excluding(
+        &self,
+        project_root: &Path,
+        target: &SessionTarget,
+        except: Option<SessionId>,
+    ) -> Option<SessionId> {
+        self.sessions
+            .iter()
+            .filter(|s| Some(s.id) != except)
+            .filter(|s| !s.state.is_terminal() && same_project_root(&s.project_root, project_root))
+            .find(|s| {
+                s.target
+                    .as_ref()
+                    .is_some_and(|t| t.is_same_place_as(target))
+            })
+            .map(|s| s.id)
+    }
+
+    /// Consume [`Self::focus_next_registered`] for a session registering on
+    /// `project_root`/`target`, answering whether that registration is the
+    /// awaited restart relaunch and should become the active tab.
+    ///
+    /// Always clears the flag — see the field doc for why a pending focus
+    /// only ever applies to the very next registration.
+    pub fn take_restart_focus(
+        &mut self,
+        project_root: &Path,
+        target: Option<&SessionTarget>,
+    ) -> bool {
+        let Some((want_root, want_target)) = self.focus_next_registered.take() else {
+            return false;
+        };
+        target.is_some_and(|t| {
+            t.is_same_place_as(&want_target) && same_project_root(&want_root, project_root)
+        })
+    }
+
     /// Clamp `device_cursor` into range after the device list changes (an
     /// empty list parks it at 0).
     pub fn clamp_device_cursor(&mut self) {
@@ -452,12 +604,58 @@ impl AppState {
 
     /// The index of the active project in `projects` (defaults to 0 when the
     /// active root isn't found there, e.g. the welcome screen) — seeds the
-    /// switcher's cursor when it opens.
+    /// switcher's cursor when it opens. Compares through
+    /// [`host_path::same_path`] rather than raw equality, the same
+    /// project-identity rule [`Self::insert_project`] and
+    /// `persist::split_local_and_previous` use.
     pub fn active_project_index(&self) -> usize {
         self.project_root
             .as_deref()
-            .and_then(|root| self.projects.iter().position(|p| p == root))
+            .and_then(|root| {
+                self.projects
+                    .iter()
+                    .position(|p| host_path::same_path(p, root))
+            })
             .unwrap_or(0)
+    }
+
+    /// The effective `projects` local/previous boundary:
+    /// `local_project_count` clamped to `projects.len()`. Every render/
+    /// insert site reads through this rather than the raw field, so a value
+    /// left at its `usize::MAX` default (or merely stale after `projects`
+    /// shrinks) degrades to "everything is local" — the one section, no
+    /// "PREVIOUS PROJECTS" heading, single sidebar list a fixture that never
+    /// set this field expects — rather than panicking or under-counting into
+    /// the previous section.
+    pub fn local_count(&self) -> usize {
+        self.local_project_count.min(self.projects.len())
+    }
+
+    /// Insert `root` into `projects`, keeping the local/previous boundary
+    /// invariant — the one seam every `state.projects` mutation
+    /// site (today, `engine::update::open_project`, for a freshly scaffolded
+    /// or newly opened project) goes through, so the boundary never drifts
+    /// out of sync with a scattered set of `insert`/`push` calls. A root
+    /// already present is left exactly where it is (no reorder, no
+    /// duplicate) — this only handles a genuinely new one. A new root under
+    /// `self.cwd` ([`super::persist::path_is_within`], the same test
+    /// [`super::persist::split_local_and_previous`] uses) lands at the end
+    /// of the local section, bumping the count; anything else lands at the
+    /// head of the previous section — both are the same absolute index
+    /// (`local_count()`, right where the previous section begins), so only
+    /// whether the count is bumped differs.
+    pub fn insert_project(&mut self, root: PathBuf) {
+        if self.projects.iter().any(|p| host_path::same_path(p, &root)) {
+            return;
+        }
+        let local_count = self.local_count();
+        let becomes_local = super::persist::path_is_within(&root, &self.cwd);
+        self.projects.insert(local_count, root);
+        self.local_project_count = if becomes_local {
+            local_count + 1
+        } else {
+            local_count
+        };
     }
 
     /// The sessions grouped by project, preserving first-seen project order and
@@ -491,8 +689,16 @@ impl Default for AppState {
             palette: None,
             project_root: None,
             projects: Vec::new(),
+            cwd: PathBuf::new(),
+            // See the field doc: `usize::MAX` clamps (via `local_count`) to
+            // "every project is local" for a fixture built via
+            // `..Default::default()` that sets `projects` without also
+            // setting this new field — most hand-rolled `AppState` literals
+            // across the crate's own test suites.
+            local_project_count: usize::MAX,
             sessions: Vec::new(),
             active_session: None,
+            focus_next_registered: None,
             wrap: false,
             search: SearchState::default(),
             devices: Vec::new(),
@@ -506,6 +712,7 @@ impl Default for AppState {
             doctor_panel_open: false,
             build_launcher: None,
             clean_confirm: None,
+            quit_confirm: false,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
             add_plugin: None,
@@ -538,6 +745,23 @@ pub(crate) fn is_transient(state: &SessionState) -> bool {
         state,
         SessionState::Configuring | SessionState::Building | SessionState::Installing
     )
+}
+
+/// Whether `a` and `b` name the same project root — [`host_path::same_path`],
+/// the same platform-aware comparison `AppState::insert_project` uses:
+/// component-wise, case-folded on Windows (so `C:\Dev\x`/`c:/dev/x` match, a
+/// case-differing root can no longer defeat this guard on a case-insensitive
+/// filesystem), exact component equality elsewhere. Still purely lexical —
+/// no filesystem I/O, so this stays safe to call from the engine's `update`.
+/// [`Path::components`] (which the non-Windows arm reduces to) already
+/// normalises away trailing separators and `.` (current-dir) segments, so
+/// `/tmp/huddle`, `/tmp/huddle/`, and `/tmp/huddle/.` all compare equal here.
+/// This is deliberately not canonicalisation: two paths that are equal on
+/// disk but differ in representation (a symlink and its target, `..`
+/// segments that resolve to the same place) still compare unequal. See
+/// [`AppState::live_session_for_excluding`] for why that gap is accepted.
+fn same_project_root(a: &Path, b: &Path) -> bool {
+    host_path::same_path(a, b)
 }
 
 /// Bounded depth-2 walk from `root` for `frust.toml` project markers: `root`
@@ -687,6 +911,115 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn detect_counts_every_found_root_as_local() {
+        let root = unique_temp_dir("detect-local-count");
+        touch_project(&root);
+        let child = root.join("examples");
+        fs::create_dir_all(&child).unwrap();
+        touch_project(&child);
+        let state = AppState::detect(&root);
+        assert_eq!(state.local_count(), state.projects.len());
+        assert_eq!(state.cwd, root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── local_count() / insert_project() (local/previous boundary) ────────
+
+    #[test]
+    fn local_count_clamps_the_default_sentinel_to_every_project() {
+        let state = AppState {
+            projects: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            ..AppState::default()
+        };
+        assert_eq!(
+            state.local_count(),
+            2,
+            "a fixture that never set local_project_count treats every \
+             project as local"
+        );
+    }
+
+    #[test]
+    fn insert_project_under_the_cwd_lands_at_the_end_of_the_local_section() {
+        let mut state = AppState {
+            cwd: PathBuf::from("/tmp/cwd"),
+            projects: vec![PathBuf::from("/tmp/cwd/a"), PathBuf::from("/tmp/other/r1")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from("/tmp/cwd/b"));
+        assert_eq!(
+            state.projects,
+            vec![
+                PathBuf::from("/tmp/cwd/a"),
+                PathBuf::from("/tmp/cwd/b"),
+                PathBuf::from("/tmp/other/r1"),
+            ]
+        );
+        assert_eq!(state.local_count(), 2);
+    }
+
+    #[test]
+    fn insert_project_outside_the_cwd_lands_at_the_head_of_previous() {
+        let mut state = AppState {
+            cwd: PathBuf::from("/tmp/cwd"),
+            projects: vec![PathBuf::from("/tmp/cwd/a"), PathBuf::from("/tmp/other/r1")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from("/tmp/other/r2"));
+        assert_eq!(
+            state.projects,
+            vec![
+                PathBuf::from("/tmp/cwd/a"),
+                PathBuf::from("/tmp/other/r2"),
+                PathBuf::from("/tmp/other/r1"),
+            ]
+        );
+        assert_eq!(state.local_count(), 1, "the local section is unchanged");
+    }
+
+    #[test]
+    fn insert_project_already_present_is_a_noop() {
+        let mut state = AppState {
+            cwd: PathBuf::from("/tmp/cwd"),
+            projects: vec![PathBuf::from("/tmp/cwd/a")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from("/tmp/cwd/a"));
+        assert_eq!(state.projects, vec![PathBuf::from("/tmp/cwd/a")]);
+        assert_eq!(state.local_count(), 1);
+    }
+
+    /// Windows paths are case-insensitive: a differently-cased spelling of an
+    /// already-present project is the same project, not a new one.
+    #[cfg(windows)]
+    #[test]
+    fn insert_project_treats_a_differently_cased_windows_duplicate_as_present() {
+        let mut state = AppState {
+            cwd: PathBuf::from(r"C:\work"),
+            projects: vec![PathBuf::from(r"C:\work\a")],
+            local_project_count: 1,
+            ..AppState::default()
+        };
+        state.insert_project(PathBuf::from(r"c:\WORK\A"));
+        assert_eq!(state.projects, vec![PathBuf::from(r"C:\work\a")]);
+        assert_eq!(state.local_count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_project_index_matches_a_differently_cased_windows_root() {
+        let state = AppState {
+            project_root: Some(PathBuf::from(r"c:\WORK\A")),
+            projects: vec![PathBuf::from(r"C:\other"), PathBuf::from(r"C:\work\a")],
+            ..AppState::default()
+        };
+        assert_eq!(state.active_project_index(), 1);
+    }
+
     // ── animating() ─────────────────────────────────────────────────────────
 
     fn session_with_state(state: SessionState) -> SessionView {
@@ -758,5 +1091,170 @@ mod tests {
             .sessions
             .push(session_with_state(SessionState::Building));
         assert!(state.animating(), "one transient session is enough");
+    }
+
+    // ── live_session_for ────────────────────────────────────────────────────
+
+    fn pixel_7() -> SessionTarget {
+        SessionTarget::Device {
+            id: "emulator-5554".to_string(),
+            name: "Pixel 7".to_string(),
+            platform: frust_drive::devices::Platform::Android,
+        }
+    }
+
+    /// A live session on `root`/`target`, id `id`.
+    fn running_on(id: u64, root: &str, target: Option<SessionTarget>) -> SessionView {
+        let label = target
+            .as_ref()
+            .map_or_else(|| "build".to_string(), SessionTarget::label);
+        let mut view = crate::engine::SessionView::with_devtools(
+            SessionId(id),
+            PathBuf::from(root),
+            label,
+            crate::engine::DevtoolsLaunch::unavailable(),
+            target,
+        );
+        view.state = SessionState::Running;
+        view
+    }
+
+    fn state_with(sessions: Vec<SessionView>) -> AppState {
+        AppState {
+            sessions,
+            ..AppState::default()
+        }
+    }
+
+    #[test]
+    fn a_live_session_on_the_same_project_and_target_is_found() {
+        let state = state_with(vec![running_on(3, "/tmp/huddle", Some(pixel_7()))]);
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &pixel_7()),
+            Some(SessionId(3))
+        );
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &SessionTarget::Desktop),
+            None,
+            "desktop and a device are different places"
+        );
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/other"), &pixel_7()),
+            None,
+            "the pair is exclusive, not the device"
+        );
+    }
+
+    #[test]
+    fn a_device_matches_by_id_alone() {
+        let state = state_with(vec![running_on(0, "/tmp/huddle", Some(pixel_7()))]);
+        let renamed = SessionTarget::Device {
+            id: "emulator-5554".to_string(),
+            name: "Ed's Pixel".to_string(),
+            platform: frust_drive::devices::Platform::Android,
+        };
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &renamed),
+            Some(SessionId(0)),
+            "a rediscovered device with a new display name is the same phone"
+        );
+    }
+
+    #[test]
+    fn terminal_and_targetless_sessions_never_occupy_a_target() {
+        let mut exited = running_on(0, "/tmp/huddle", Some(SessionTarget::Desktop));
+        exited.state = SessionState::Exited(true);
+        let mut killed = running_on(1, "/tmp/huddle", Some(SessionTarget::Desktop));
+        killed.state = SessionState::Killed;
+        // A live ad-hoc build of the same project: no target at all.
+        let ad_hoc = running_on(2, "/tmp/huddle", None);
+        let state = state_with(vec![exited, killed, ad_hoc]);
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle"), &SessionTarget::Desktop),
+            None
+        );
+    }
+
+    #[test]
+    fn the_excluded_session_does_not_block_its_own_relaunch() {
+        let state = state_with(vec![
+            running_on(0, "/tmp/huddle", Some(SessionTarget::Desktop)),
+            running_on(1, "/tmp/huddle", Some(SessionTarget::Desktop)),
+        ]);
+        assert_eq!(
+            state.live_session_for_excluding(
+                Path::new("/tmp/huddle"),
+                &SessionTarget::Desktop,
+                Some(SessionId(0)),
+            ),
+            Some(SessionId(1)),
+            "excluding one session must not hide another on the same target"
+        );
+        assert_eq!(
+            state.live_session_for_excluding(
+                Path::new("/tmp/huddle"),
+                &SessionTarget::Desktop,
+                Some(SessionId(1)),
+            ),
+            Some(SessionId(0))
+        );
+    }
+
+    #[test]
+    fn project_root_comparison_is_lexical_not_canonical() {
+        // A trailing separator and a redundant `.` segment name the same
+        // directory and must still match, purely from Path::components().
+        assert!(same_project_root(
+            Path::new("/tmp/huddle"),
+            Path::new("/tmp/huddle/")
+        ));
+        assert!(same_project_root(
+            Path::new("/tmp/huddle"),
+            Path::new("/tmp/huddle/.")
+        ));
+        // A different directory never matches, lexically identical prefix or not.
+        assert!(!same_project_root(
+            Path::new("/tmp/huddle"),
+            Path::new("/tmp/huddle2")
+        ));
+
+        // The same rule is what live_session_for_excluding relies on: a
+        // trailing-slash variant of a live session's project_root still
+        // finds it, with no filesystem access.
+        let state = state_with(vec![running_on(
+            0,
+            "/tmp/huddle",
+            Some(SessionTarget::Desktop),
+        )]);
+        assert_eq!(
+            state.live_session_for(Path::new("/tmp/huddle/"), &SessionTarget::Desktop),
+            Some(SessionId(0)),
+            "a trailing separator names the same project root"
+        );
+    }
+
+    /// Windows' case-insensitive filesystem: a project root that differs only
+    /// in case from a live session's must still be caught by the
+    /// one-session-per-(project, target) launch guard — `same_project_root`'s
+    /// delegation to [`host_path::same_path`] case-folds on Windows, so this
+    /// no longer requires an exact-case match there.
+    #[cfg(windows)]
+    #[test]
+    fn same_project_root_case_folds_on_windows() {
+        assert!(same_project_root(
+            Path::new(r"C:\Dev\huddle"),
+            Path::new(r"c:\dev\huddle"),
+        ));
+
+        let state = state_with(vec![running_on(
+            0,
+            r"C:\Dev\huddle",
+            Some(SessionTarget::Desktop),
+        )]);
+        assert_eq!(
+            state.live_session_for(Path::new(r"c:\dev\huddle"), &SessionTarget::Desktop),
+            Some(SessionId(0)),
+            "a differently-cased root must still find the live session"
+        );
     }
 }

@@ -9,16 +9,26 @@
 //! Context)` pair. On Apple the ObjC runtime is globally reachable via `objc2`
 //! with nothing to publish, so this crate has no Apple surface.
 //!
-//! # Charter: a leaf crate, shell writes / plugins read
+//! # Charter: a leaf crate, two meeting points, opposite write/read direction
 //!
 //! `frust-plugin` is a **leaf** (like `frust-reactive`): it has **no
-//! `frust-*` dependencies**, and its only platform dep (`jni` +
-//! `ndk-context`) is Android-target-gated. The Android **shell** *writes* the
-//! handles into `ndk-context`'s process-wide slot (it owns the
-//! JNI boundary — see `frust-shell-android`'s `nativeInitPlatform` export);
-//! plugins *read* them back through [`android`]. Using `ndk-context` as the
-//! storage slot (rather than a private static) also makes any third-party
-//! crate that reads `ndk-context` work inside a Frust app for free.
+//! `frust-*` dependencies** and no `objc2`. It publishes two independent
+//! substrate halves:
+//!
+//! - [`android`] — the Android **platform-handle slot**: the shell *writes*
+//!   the `(JavaVM, application Context)` pair into `ndk-context`'s
+//!   process-wide slot (it owns the JNI boundary — see
+//!   `frust-shell-android`'s `nativeInitPlatform` export); plugins *read*
+//!   them back. Its only platform dep (`jni` + `ndk-context`) is
+//!   Android-target-gated. Using `ndk-context` as the storage slot (rather
+//!   than a private static) also makes any third-party crate that reads
+//!   `ndk-context` work inside a Frust app for free.
+//! - [`desktop`] — the desktop **view-factory registry**: a plugin *writes* a
+//!   [`desktop::DesktopViewFactory`] into a process-global table keyed by
+//!   `view_type`; a desktop shell *reads* it back to create/update/dispose
+//!   the native view a slot names. std-only, no `cfg` gate — compiled on
+//!   every target — even though only a desktop shell (today: macOS) ever
+//!   calls [`desktop::lookup_view_factory`].
 //!
 //! A **platform plugin** (e.g. `frust-shared-preferences`) may depend on this
 //! crate plus `frust-paths` and FFI crates, and must NOT depend on any
@@ -26,6 +36,7 @@
 //! cycles.
 
 pub mod android;
+pub mod desktop;
 
 /// Failure to obtain a platform handle from the host shell.
 ///

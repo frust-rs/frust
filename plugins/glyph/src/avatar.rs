@@ -14,6 +14,11 @@
 //! `primary`. With no theme threaded, every value falls back to the literal
 //! Glyph **dark** accent constants — never a panic.
 //!
+//! The initials' family is read at layout from the live theme's `labelLarge`
+//! type-scale role (IBM Plex Mono under Glyph's own scale), falling back to
+//! Glyph's IBM Plex Mono stack unthemed; the size stays a fraction of the box.
+//! A theme swap reshapes the run (see [`super::badge`]'s Typeface section).
+//!
 //! The [`AvatarView::accent`] builder recolors the whole box to a caller
 //! hue (background becomes that hue's faint wash, border + text become the hue
 //! itself); [`AvatarView::background`]/[`AvatarView::foreground`]/
@@ -275,9 +280,16 @@ impl<State: 'static> View<State> for AvatarView {
     }
 }
 
-fn initials_style(size: f64, color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the initials' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The initials' style for a `size`-px box; family from the theme's
+/// `labelLarge` role.
+fn initials_style(theme: Option<&Theme>, size: f64, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new((size as f32 * AVATAR_FONT_FRACTION).max(1.0), color)
     }
@@ -319,7 +331,7 @@ impl Widget for AvatarWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let (_, fg, _) = self.resolve_colors(theme);
-        let style = initials_style(self.size, fg);
+        let style = initials_style(theme, self.size, fg);
         self.initials_size = self.initials.layout(ctx, &style, None);
         bc.constrain(Size::new(self.size, self.size))
     }
@@ -559,5 +571,29 @@ mod tests {
                 .map(|(_, n)| n.role())
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ---- Typeface: the initials' family follows its type-scale role -------
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_initials_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(
+            |_: &mut ()| avatar("EK"),
+            crate::baseline(),
+            Size::new(100.0, 100.0),
+        );
+        assert_eq!(faces, [Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_initials_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) =
+            faces_across_a_live_swap(|_: &mut ()| avatar("EK"), Size::new(100.0, 100.0));
+        assert_eq!(before, [Face::PlexMono]);
+        assert_eq!(after, [Face::SpaceMono]);
     }
 }

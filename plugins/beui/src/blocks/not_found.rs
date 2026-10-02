@@ -62,7 +62,7 @@ use crate::components::popover::{paint_panel_hairline, resolve_panel};
 use crate::motion::{PointerTracker, Ramp};
 use crate::press::{Lane, inside, is_activation_key, press_scale, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL, SPRING_PRESS};
 
 // ---- Defaults and metrics --------------------------------------------------
@@ -714,25 +714,19 @@ impl<State: 'static> View<State> for NotFoundView<State> {
     fn teardown(&self, _element: &mut NotFoundWidget, _ctx: &mut BuildCtx<'_>) {}
 }
 
-/// The label family: the theme's own scale, with the catalog's sans stack as
-/// the unthemed fallback.
-fn family_of(theme: Option<&Theme>) -> frust::authoring::text::FontFamily {
-    theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    })
-}
-
-/// One label style at `size`.
+/// One label style at `size`, in the theme's `label_large` family.
 fn page_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    TextStyle {
-        family: family_of(theme),
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 /// The mono style the terminal and the glitch both set.
 fn mono_style(size: f64) -> TextStyle {
     TextStyle {
+        // Explicit: `TypeScale` has no monospace role to take this from.
         family: crate::tokens::mono_family(),
         ..crate::text::label_style(size)
     }
@@ -2014,6 +2008,73 @@ mod tests {
                 !later_needs_layout,
                 "{style:?}: reduced motion requested a relayout later"
             );
+        }
+    }
+
+    // ---- Typeface: the page text follows the theme; the mono code does not --
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+        mono_role_theme,
+    };
+
+    /// The page in `style`.
+    fn probe_logic(style: NotFoundStyle) -> impl FnMut(&mut ()) -> NotFoundView<()> {
+        move |_: &mut ()| not_found::<()>().style(style)
+    }
+
+    /// The three styles whose code row is shaped in the page's own family.
+    const SANS_STYLES: [NotFoundStyle; 3] = [
+        NotFoundStyle::Magnetic,
+        NotFoundStyle::Spotlight,
+        NotFoundStyle::Stacked,
+    ];
+
+    #[test]
+    fn page_text_paints_in_geist_under_the_beui_theme() {
+        for style in SANS_STYLES {
+            assert_paints_only_in_geist(&format!("{style:?}"), probe_logic(style), WINDOW);
+        }
+        let magnetic =
+            Probe::new(probe_logic(NotFoundStyle::Magnetic), WINDOW, crate::theme()).frame();
+        assert_eq!(
+            magnetic.len(),
+            7,
+            "the three code cells, the title, the description and two action labels"
+        );
+    }
+
+    #[test]
+    fn page_text_follows_a_live_theme_family_swap() {
+        for style in SANS_STYLES {
+            assert_follows_a_live_family_swap(&format!("{style:?}"), probe_logic(style), WINDOW);
+        }
+    }
+
+    #[test]
+    fn the_mono_code_keeps_geist_mono_while_the_page_text_follows_the_theme() {
+        for style in [NotFoundStyle::Glitch, NotFoundStyle::Terminal] {
+            let mut probe = Probe::new(probe_logic(style), WINDOW, crate::theme());
+            // One frame to start the type-on, so the terminal has typed text.
+            probe.frame();
+            let faces = probe.frame();
+            let mono = faces.iter().filter(|f| **f == Face::GeistMono).count();
+            let geist = faces.iter().filter(|f| **f == Face::Geist).count();
+            assert_eq!(geist, 4, "{style:?}: the page text is Geist ({faces:?})");
+            assert!(mono > 0, "{style:?}: the code keeps Geist Mono ({faces:?})");
+            assert_eq!(mono + geist, faces.len(), "{style:?}: {faces:?}");
+
+            probe.swap_theme(mono_role_theme());
+            assert_all(
+                &format!("{style:?}"),
+                "after a swap to Geist Mono roles",
+                &probe.frame(),
+                Face::GeistMono,
+            );
+            probe.swap_theme(crate::theme());
+            let back = probe.frame();
+            let geist = back.iter().filter(|f| **f == Face::Geist).count();
+            assert_eq!(geist, 4, "{style:?}: swapped back to Geist ({back:?})");
         }
     }
 }

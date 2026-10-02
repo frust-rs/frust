@@ -11,6 +11,7 @@
 		ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */; };
 		ABCDABCDABCDABCDABCD0032 /* DemoStreamFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */; };
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
+		ABCDABCDABCDABCDABCD0041 /* frust-video-sample.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0040 /* frust-video-sample.mp4 */; };
 		ABCDABCDABCDABCDABCD0036 /* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0035 /* FrustEmbedding */; };
 		ABCDABCDABCDABCDABCD0039 /* FrustCamera in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0038 /* FrustCamera */; };
 /* End PBXBuildFile section */
@@ -22,6 +23,7 @@
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStreamFactory.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0040 /* frust-video-sample.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "frust-video-sample.mp4"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -42,6 +44,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */,
+				ABCDABCDABCDABCDABCD0041 /* frust-video-sample.mp4 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -72,6 +75,7 @@
 				ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
 				ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */,
+				ABCDABCDABCDABCDABCD0040 /* frust-video-sample.mp4 */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -151,7 +155,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nCARGO_FEATURES=\"\"\nif [ -n \"${FRUST_FEATURES:-}\" ]; then\nCARGO_FEATURES=\"--features $(echo \"$FRUST_FEATURES\" | base64 -d)\"\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS $CARGO_FEATURES\ncp \"target/$TRIPLE/$PROFILE_DIR/libplayground.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
+			shellScript = "set -e\n# Xcode runs script phases with its own PATH, which lacks rustup's bin dir.\nexport PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\"\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nCARGO_FEATURES=\"\"\nif [ -n \"${FRUST_FEATURES:-}\" ]; then\nCARGO_FEATURES=\"--features $(echo \"$FRUST_FEATURES\" | base64 -d)\"\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS $CARGO_FEATURES\nTARGET_DIR=\"${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*\"target_directory\":\"\\([^\"]*\\)\".*/\\1/p')}\"\nif [ -z \"$TARGET_DIR\" ]; then\necho \"error: could not resolve cargo target directory\" >&2\nexit 1\nfi\ncp \"$TARGET_DIR/$TRIPLE/$PROFILE_DIR/libplayground.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -266,6 +270,8 @@
 					CoreFoundation,
 					"-framework",
 					UIKit,
+					"-framework",
+					AuthenticationServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -304,6 +310,8 @@
 					CoreFoundation,
 					"-framework",
 					UIKit,
+					"-framework",
+					AuthenticationServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -343,6 +351,8 @@
 					CoreFoundation,
 					"-framework",
 					UIKit,
+					"-framework",
+					AuthenticationServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";

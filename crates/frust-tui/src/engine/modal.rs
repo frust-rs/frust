@@ -64,6 +64,12 @@ pub enum ActiveModal<'a> {
     DapSettings(&'a DapSettings),
     /// The build-launcher modal (`state.build_launcher`).
     BuildLauncher(&'a BuildLauncher),
+    /// The quit-confirm dialog (`state.quit_confirm`, `q`/palette Quit with a
+    /// live session) — the same priority tier as [`Self::CleanConfirm`],
+    /// checked just above it (the two dialogs are opened by disjoint paths
+    /// and should never both be set, but this ordering makes quit win the
+    /// tie if it ever happened).
+    QuitConfirm,
     /// The clean-confirm dialog (`state.clean_confirm`), carrying the target
     /// project root.
     CleanConfirm(&'a Path),
@@ -98,6 +104,8 @@ impl AppState {
             Some(ActiveModal::DapSettings(&self.dap_settings))
         } else if let Some(launcher) = &self.build_launcher {
             Some(ActiveModal::BuildLauncher(launcher))
+        } else if self.quit_confirm {
+            Some(ActiveModal::QuitConfirm)
         } else {
             self.clean_confirm.as_deref().map(ActiveModal::CleanConfirm)
         }
@@ -143,6 +151,15 @@ mod tests {
             state.active_modal(),
             Some(ActiveModal::CleanConfirm(_))
         ));
+
+        let state = AppState {
+            quit_confirm: true,
+            ..AppState::default()
+        };
+        assert!(matches!(
+            state.active_modal(),
+            Some(ActiveModal::QuitConfirm)
+        ));
     }
 
     /// Priority order matches the prior duplicated if/else chains: create
@@ -153,6 +170,7 @@ mod tests {
             create_wizard: Some(CreateWizard::new()),
             project_switcher_open: true,
             doctor_panel_open: true,
+            quit_confirm: true,
             clean_confirm: Some(std::path::PathBuf::from("/tmp/proj")),
             ..AppState::default()
         };
@@ -185,6 +203,31 @@ mod tests {
         assert!(matches!(
             state.active_modal(),
             Some(ActiveModal::DoctorPanel)
+        ));
+    }
+
+    /// Quit-confirm sits at clean-confirm's tier, checked just above it: with
+    /// both set (should never happen in practice — see the variant doc),
+    /// quit wins the tie; with only clean-confirm set, that one still shows.
+    #[test]
+    fn quit_confirm_wins_the_tie_with_clean_confirm() {
+        let state = AppState {
+            quit_confirm: true,
+            clean_confirm: Some(std::path::PathBuf::from("/tmp/proj")),
+            ..AppState::default()
+        };
+        assert!(matches!(
+            state.active_modal(),
+            Some(ActiveModal::QuitConfirm)
+        ));
+
+        let state = AppState {
+            clean_confirm: Some(std::path::PathBuf::from("/tmp/proj")),
+            ..AppState::default()
+        };
+        assert!(matches!(
+            state.active_modal(),
+            Some(ActiveModal::CleanConfirm(_))
         ));
     }
 }

@@ -8,6 +8,8 @@ Keychain, Android Keystore (AES-256-GCM), Linux/Windows via the `keyring` stack
 but every value is encrypted at rest and a store may require the user to
 authenticate before it can be read or written.
 
+**Platform support:** Android (Keystore), iOS and macOS (Keychain), Linux and Windows (`keyring`). The biometric gate is available on Apple targets and Android only. There is no web backend.
+
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
@@ -30,7 +32,7 @@ dependency line:
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-secure-storage = { path = "<frust>/plugins/secure-storage" }  # crates.io later
+frust-secure-storage = { path = "<frust>/plugins/secure-storage" }  # or the crates.io release, e.g. version = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -212,3 +214,13 @@ Gradle include plus its app-module dependency, and the plist key — is applied 
 you, idempotently, by the frust TUI's **Add Plugin** dialog (select
 `secure-storage`, tick the *biometric gate* option). This README is the manual
 contract that dialog encodes.
+
+## Links and license
+
+Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## License
+
+Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`)
+or the MIT license (`LICENSE-MIT`) at your option (SPDX: `MIT OR Apache-2.0`).
+Both license files are included beside this README.

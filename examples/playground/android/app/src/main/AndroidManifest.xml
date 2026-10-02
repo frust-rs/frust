@@ -6,7 +6,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="Playground"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:theme="@android:style/Theme.NoTitleBar">
+        android:theme="@android:style/Theme.Material.NoActionBar">
 
         <!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->
         <meta-data android:name="dev.frust.nativeLibrary" android:value="playground" />
@@ -14,12 +14,19 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@android:style/Theme.NoTitleBar">
+            android:theme="@android:style/Theme.Material.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="frustplay" />
             </intent-filter>
         </activity>
     </application>

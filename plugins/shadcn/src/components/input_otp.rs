@@ -54,12 +54,25 @@
 //! the next `rebuild` feeds the confirmed string back down
 //! (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
 //!
+//! # Paste support
+//!
+//! A pasted string is walked character by character, with `self.mode.accepts`
+//! filtering each one. Accepted chars fill the slots in order from the active
+//! slot forward through the same insertion path a typed key uses, firing
+//! `on_change` once with the final code and `on_complete` once if the code
+//! becomes complete. An OTP field does not copy out: `Copy`, `Cut`, and
+//! `SelectAll` are consumed (Handled) with no effect.
+//!
+//! The paste itself can start two ways: a platform clipboard manager or
+//! autofill system routes it straight in, or this widget decodes the paste
+//! chord itself at the key layer — ctrl-or-meta+V, the dedicated
+//! `NamedKey::Paste`, and the legacy Shift+Insert — and *asks* the shell for
+//! the clipboard (`EventCtx::request_paste`), since only the shell can touch
+//! the host clipboard. Either way the text lands through the same
+//! `EditCommand::Paste` above.
+//!
 //! # What the port deliberately does not carry
 //!
-//! - **No paste.** Upstream's `<input>` gets the platform's paste for free;
-//!   frust delivers no clipboard event a widget can read, so a multi-character
-//!   fill has no route in. Typing, deleting and caret motion are the whole
-//!   keyboard surface.
 //! - **No `pattern` regex.** The source's `REGEXP_ONLY_DIGITS` /
 //!   `REGEXP_ONLY_DIGITS_AND_CHARS` presets are the only two anyone passes, so
 //!   they are an [`InputOtpMode`] enum rather than a regex engine.
@@ -70,16 +83,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EventCtx,
-    EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase,
-    Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, erase_callback_arg,
-    text::TextStyle,
+    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EditCommand,
+    EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
+    erase_callback_arg, text::TextStyle,
 };
 use frust::{FrameTime, Theme};
 
 use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, themed_family};
 use crate::tokens::ShadcnTokens;
 
 /// Slot edge, in logical px (`h-9 w-9`).
@@ -273,16 +286,18 @@ fn resolve_colors(theme: Option<&Theme>) -> OtpColors {
     }
 }
 
-/// The style each slot's single glyph is shaped in (`text-sm`, the theme's own
-/// sans stack), shaped with [`SHAPING_INK`] and re-brushed at paint.
+/// The style each slot's single glyph is shaped in: `text-sm` in the live
+/// theme's `BodyMedium` family (unthemed, the catalog's own sans stack), shaped
+/// with [`SHAPING_INK`] and re-brushed at paint.
 fn slot_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.body_medium.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-    }
+    themed_family(
+        TextStyle {
+            family: crate::tokens::sans_family(),
+            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+        },
+        theme,
+        ThemeTextType::BodyMedium,
+    )
 }
 
 /// Lucide's `MinusIcon` (`M5 12h14`), scaled to a `size`-square box at
@@ -521,6 +536,35 @@ impl InputOtpWidget {
         self.caret = at.min(self.value.chars().count());
     }
 
+    /// Paste `text` by filtering accepted characters and filling slots from the
+    /// active slot forward, the same way individual keystrokes would. Reports
+    /// once with the final value.
+    fn paste(&mut self, ctx: &mut EventCtx, text: &str) -> bool {
+        let mut chars: Vec<char> = self.value.chars().collect();
+        let mut at = self.caret.min(chars.len());
+        let mut changed = false;
+
+        for c in text.chars() {
+            if !self.mode.accepts(c) {
+                continue;
+            }
+            if chars.len() >= self.length {
+                break;
+            }
+            chars.insert(at, c);
+            at += 1;
+            changed = true;
+        }
+
+        if changed {
+            self.caret = at;
+            self.report(ctx, chars.into_iter().collect());
+            true
+        } else {
+            false
+        }
+    }
+
     /// The cursor this control asks for in its current state.
     fn cursor(&self) -> CursorIcon {
         if self.disabled {
@@ -684,6 +728,37 @@ impl Widget for InputOtpWidget {
                 if self.disabled {
                     return EventResult::Ignored;
                 }
+                // The paste chords are decoded here, exactly the shape
+                // `TextInput::handle_key` uses
+                // (`crates/frust-widgets/src/textinput.rs`): ctrl-or-meta +
+                // `v` (ASCII case-insensitive), the dedicated
+                // `NamedKey::Paste`, and the legacy Shift+Insert. `alt` is
+                // never a chord modifier — it composes characters. Only the
+                // shell can read the host clipboard, so this only *asks*
+                // (`EventCtx::request_paste`) and the answer arrives on a
+                // later pass as `EditCommand::Paste`, handled below. Every
+                // other chord — Ctrl/Cmd+C/X/A included — falls through to
+                // the character/named matches beneath exactly as before: an
+                // OTP field has no copy semantics, and there is no other
+                // chord to decode here.
+                let modifiers = key.modifiers;
+                match &key.key {
+                    Key::Character(text)
+                        if (modifiers.ctrl || modifiers.meta) && text.eq_ignore_ascii_case("v") =>
+                    {
+                        ctx.request_paste();
+                        return EventResult::Handled;
+                    }
+                    Key::Named(NamedKey::Paste) => {
+                        ctx.request_paste();
+                        return EventResult::Handled;
+                    }
+                    Key::Named(NamedKey::Insert) if modifiers.shift => {
+                        ctx.request_paste();
+                        return EventResult::Handled;
+                    }
+                    _ => {}
+                }
                 let handled = match &key.key {
                     Key::Character(text) => {
                         let Some(c) = text.chars().next().filter(|c| self.mode.accepts(*c)) else {
@@ -772,6 +847,25 @@ impl Widget for InputOtpWidget {
                         // A Cancel arm clears internal flags only — never the
                         // value, never a callback.
                         self.captured = false;
+                        EventResult::Handled
+                    }
+                }
+            }
+            InputEvent::EditCommand(cmd) => {
+                if self.disabled {
+                    return EventResult::Ignored;
+                }
+                match cmd {
+                    EditCommand::Paste(text) => {
+                        if self.paste(ctx, text) {
+                            self.reset_blink();
+                            ctx.request_redraw();
+                        }
+                        EventResult::Handled
+                    }
+                    EditCommand::Copy | EditCommand::Cut | EditCommand::SelectAll => {
+                        // An OTP field does not copy out; these commands are
+                        // consumed with no effect.
                         EventResult::Handled
                     }
                 }
@@ -925,6 +1019,35 @@ mod tests {
 
     fn typed(c: char) -> InputEvent {
         key(Key::Character(c.to_string()))
+    }
+
+    fn chorded(k: Key, modifiers: Modifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: k,
+            modifiers,
+            repeat: false,
+        })
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn meta() -> Modifiers {
+        Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
     }
 
     fn pointer(phase: PointerPhase, x: f64) -> InputEvent {
@@ -1266,6 +1389,91 @@ mod tests {
         assert_eq!(w.caret, 1, "a rejected edit takes the caret with it");
     }
 
+    #[test]
+    fn paste_fills_slots_skipping_rejected_characters() {
+        let (mut w, size) = laid_out(&view(""));
+        let mut state = Codes::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("12 34-56".into())),
+        );
+        assert_eq!(state.changes.last().unwrap(), "123456");
+        assert_eq!(state.completed, vec!["123456".to_string()]);
+        // Confirm the value through rebuild to complete the cycle
+        let prev = view("");
+        confirm(&mut w, &prev, "123456");
+        assert_eq!(w.value, "123456");
+    }
+
+    #[test]
+    fn paste_stops_when_slots_are_full() {
+        let (mut w, size) = laid_out(&view(""));
+        let mut state = Codes::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("1234567".into())),
+        );
+        assert_eq!(state.changes.last().unwrap(), "123456");
+        // The app owns the value: confirm it through rebuild
+        let prev = view("");
+        confirm(&mut w, &prev, "123456");
+        assert_eq!(w.value, "123456");
+    }
+
+    #[test]
+    fn paste_into_partial_code_fills_from_the_active_slot() {
+        let (mut w, size) = laid_out(&view("12"));
+        let mut state = Codes::default();
+        w.caret = 2; // After the "12"
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("34 56".into())),
+        );
+        assert_eq!(state.changes.last().unwrap(), "123456");
+        assert_eq!(state.completed, vec!["123456".to_string()]);
+        // Confirm the value through rebuild
+        let prev = view("12");
+        confirm(&mut w, &prev, "123456");
+        assert_eq!(w.value, "123456");
+    }
+
+    #[test]
+    fn copy_cut_selectall_are_consumed_with_no_effect() {
+        let (mut w, size) = laid_out(&view("123"));
+        let mut state = Codes::default();
+        let cmds = [
+            ("Copy", EditCommand::Copy),
+            ("Cut", EditCommand::Cut),
+            ("SelectAll", EditCommand::SelectAll),
+        ];
+        for (name, cmd) in cmds {
+            let before = state.changes.len();
+            let result = dispatch(&mut w, &mut state, size, &InputEvent::EditCommand(cmd));
+            assert_eq!(result, EventResult::Handled);
+            assert_eq!(state.changes.len(), before, "no effect from {}", name);
+        }
+    }
+
+    #[test]
+    fn paste_with_disabled_field_is_ignored() {
+        let (mut w, size) = laid_out(&view("").disabled(true));
+        let mut state = Codes::default();
+        let result = dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &InputEvent::EditCommand(EditCommand::Paste("123456".into())),
+        );
+        assert_eq!(result, EventResult::Ignored);
+        assert!(state.changes.is_empty());
+    }
+
     // ---- Root-driven: cursor, focus, semantics ------------------------------
 
     /// The only harness that can exercise focus: `PaintCtx` seeds `has_focus`
@@ -1376,6 +1584,94 @@ mod tests {
         h.dispatch(&pointer(PointerPhase::Up, 10.0));
         h.dispatch(&typed('7'));
         assert_eq!(h.state.value, "7");
+    }
+
+    // ---- Paste chord (the desktop trigger) ----------------------------------
+    //
+    // `EventCtx::request_paste`'s flag is only observable through a real
+    // `RenderRoot` (`RenderRoot::take_paste_request`), which is why these live
+    // in the root-driven section rather than beside the bare-`dispatch`
+    // editing tests above.
+
+    #[test]
+    fn ctrl_v_asks_the_shell_to_paste_and_types_nothing() {
+        let mut h = Harness::new(false);
+        h.focus();
+        h.dispatch(&chorded(Key::Character("v".to_string()), ctrl()));
+        assert!(
+            h.root.take_paste_request(),
+            "ctrl+V must ask the shell for the clipboard"
+        );
+        assert!(h.state.changes.is_empty(), "no character was typed");
+        assert!(h.state.completed.is_empty());
+    }
+
+    #[test]
+    fn meta_v_asks_the_shell_to_paste_and_types_nothing() {
+        let mut h = Harness::new(false);
+        h.focus();
+        // Uppercase, the way a Shift+Cmd+V chord would arrive — the decode is
+        // ASCII case-insensitive.
+        h.dispatch(&chorded(Key::Character("V".to_string()), meta()));
+        assert!(
+            h.root.take_paste_request(),
+            "meta+V must ask the shell for the clipboard"
+        );
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn named_paste_key_asks_the_shell_to_paste() {
+        let mut h = Harness::new(false);
+        h.focus();
+        h.dispatch(&key(Key::Named(NamedKey::Paste)));
+        assert!(h.root.take_paste_request());
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn shift_insert_asks_the_shell_to_paste() {
+        let mut h = Harness::new(false);
+        h.focus();
+        h.dispatch(&chorded(Key::Named(NamedKey::Insert), shift()));
+        assert!(
+            h.root.take_paste_request(),
+            "Shift+Insert is the legacy paste chord"
+        );
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_ctrl_x_and_ctrl_a_ask_for_nothing_and_change_nothing() {
+        let mut h = Harness::new(false);
+        h.focus();
+        h.dispatch(&typed('1'));
+        for c in ["c", "x", "a"] {
+            h.dispatch(&chorded(Key::Character(c.to_string()), ctrl()));
+            assert!(
+                !h.root.take_paste_request(),
+                "ctrl+{c} must never ask for a paste"
+            );
+        }
+        assert_eq!(h.state.value, "1", "copy/cut/select-all changed nothing");
+        assert_eq!(
+            h.state.changes,
+            vec!["1".to_string()],
+            "no extra callback fired"
+        );
+        assert!(h.state.completed.is_empty());
+    }
+
+    #[test]
+    fn a_plain_digit_still_types_once_the_paste_chords_are_decoded() {
+        let mut h = Harness::new(false);
+        h.focus();
+        h.dispatch(&typed('7'));
+        assert_eq!(h.state.value, "7");
+        assert!(
+            !h.root.take_paste_request(),
+            "a plain digit never asks for a paste"
+        );
     }
 
     #[test]
@@ -1508,6 +1804,31 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|(_, n)| n.role() == Role::PasswordInput)
+        );
+    }
+
+    // ---- Typeface: the slot glyphs follow the live theme -----------------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn partly_filled(_: &mut ()) -> InputOtpView<()> {
+        input_otp::<(), _>("1234", 6, |_: &mut (), _| {})
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_slot_glyphs_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a one-time-code field's slot glyphs",
+            partly_filled,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_slot_glyphs_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a one-time-code field's slot glyphs",
+            partly_filled,
         );
     }
 }

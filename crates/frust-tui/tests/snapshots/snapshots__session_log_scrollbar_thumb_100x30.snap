@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │   12:00:45 [app]    line 45                                              
    New project · n       │   12:00:46 [app]    line 46                                              
    Add plugin · a        │   12:00:47 [app]    line 47                                              
-   Doctor · d            │   12:00:48 [app]    line 48                                              
+   Doctor · i            │   12:00:48 [app]    line 48                                              
    Build · b             │   12:00:49 [app]    line 49                                              
-   Clean · c             │   12:00:50 [app]    line 50                                              
+   Clean                 │   12:00:50 [app]    line 50                                              
    MCP off · M           │   12:00:51 [app]    line 51                                              
    DAP off · D           │   12:00:52 [app]    line 52                                              
                          │   12:00:53 [app]    line 53                                              
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │   12:00:58 [app]    line 58                                              
                          │   12:00:59 [app]    line 59                                             █
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

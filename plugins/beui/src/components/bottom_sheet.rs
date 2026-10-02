@@ -90,7 +90,7 @@ use crate::overlay::{
 };
 use crate::press::{inside, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_DRAWER;
 
 /// `snapPoints` — the sheet's own two resting heights, as fractions of the host
@@ -532,27 +532,20 @@ impl SheetPanelWidget {
     }
 }
 
-/// The title's style (`text-base font-semibold`).
+/// The title's style (`text-base font-semibold`), in the theme's
+/// `title_medium` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.title_medium.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::SEMI_BOLD,
         ..TextStyle::new(style::TEXT_BASE as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::TitleMedium, theme)
 }
 
-/// The description's style (`text-sm`).
+/// The description's style (`text-sm`), in the theme's `body_medium` family.
 fn description_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.body_medium.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::BodyMedium, theme)
 }
 
 impl<State: 'static> SheetPanelView<State> {
@@ -1091,5 +1084,29 @@ mod tests {
         assert!(!dismissable(
             &bottom_sheet::<App, _>(SizedBox(None, None)).dismissable(false)
         ));
+    }
+
+    // ---- Typeface: title and description follow the live theme -------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// An open sheet with both header runs over glyph-free content.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        frust::Stack(vec![any(bottom_sheet::<(), _>(SizedBox(None, None))
+            .title("Share")
+            .description("Pick a destination")
+            .open(true))])
+    }
+
+    #[test]
+    fn the_header_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the sheet's header", probe_view, WINDOW);
+    }
+
+    #[test]
+    fn the_header_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the sheet's header", probe_view, WINDOW);
     }
 }

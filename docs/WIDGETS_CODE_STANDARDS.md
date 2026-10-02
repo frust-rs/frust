@@ -12,12 +12,32 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   the `set_theme` → `ChangeFlags` contract.** Most themed widgets resolve tokens from
   `PaintCtx` every paint pass and self-refresh on a live theme swap for free.
   `Text`/`TextInput` instead bake resolved glyph color into the shaped layout at LAYOUT
-  time; a widget adding layout-time-baked resolution depends on relayout actually happening,
+  time, and `Text` also bakes its font family there when opted in with `.themed_family(..)`;
+  a widget adding layout-time-baked resolution depends on relayout actually happening,
   so treat a theme change as forcing `ChangeFlags::LAYOUT`, not just `PAINT`.
 - **Resolve theme tokens with an unthemed-fallback constant per resolved value.** A themed
   widget looks up `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a
   local constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is threaded. Precedence is
-  **explicit builder value > theme > fallback** (see `Text`'s `color_explicit` flag).
+  **explicit builder value > theme > fallback**, decided per value: `Text`'s
+  `color_explicit`/`family_explicit` flags are independent (`.color(..)` sets one,
+  `.family(..)` the other, `.style(..)` both), so an explicit color never blocks a themed family.
+- **A component that takes its text family from the theme resolves it at layout.** Text built
+  with `text(..)` opts in via `.themed_family(ThemeTextType::..)` naming its role — only the
+  family resolves; size, weight, line height and tracking stay the view's own. A widget shaping
+  its own text runs reads `Theme::from_layout_ctx(ctx)` in `layout` and keys its shaped-run
+  cache on the resolved style, so a theme swap reshapes it (`frust-material`'s `dialog` and
+  `badge` show one of each; shadcn's `crate::text::themed_family(style, theme, role)` and beUI's
+  `crate::text::{themed_style, role_family}`, consumed through
+  `Label`/`LabelRun`/`WrappedRun::layout_themed`, are the same opt-in for a catalog's
+  self-shaped runs, each resolving the role's slot with
+  `ThemeTextType::style_in(&theme.type_scale)` — the same lookup `.themed_family(..)` makes —
+  instead of keeping its own copy of the role-to-slot table). A build-time `.family(..)` or a
+  hardcoded font stack is a legitimate choice too — `TypeScale` has no monospace slot, so mono
+  text has no role to name — but neither a live theme swap nor
+  `frust_testing::frame::pin_type_scale` can redirect it. A baseline `TextInput` has no
+  themed-family seam at all — its `effective_style` resolves only color from the theme, never
+  family — so a field keeps whatever explicit or system family it was built with
+  (`textinput-no-themed-family` in [LIMITATIONS.md](LIMITATIONS.md)).
 - **Token-not-hardcode: a widget authors against a `Theme` field first; a bare local
   constant is the documented fallback, not the default.** A hardcoded metric/color is a
   defect once a matching `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme`
@@ -104,8 +124,8 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
 - **A design system installs itself via `set_default_theme` + (if it bundles fonts)
   `register_app_fonts` from an `app!` `setup` block — never `Component::init` (no kept ordering
   contract) or `set_app_theme` (pins brightness, breaking platform dark/light following).**
-  `frust_glyph::install()`/`frust_material::install()`/`frust_cupertino::install()` are the
-  built-in callers; only Glyph's also registers fonts.
+  Each built-in design-system crate's `install()` is a caller; which of them also register fonts
+  is recorded once, in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s Design-System Plugins.
 
 ## See Also
 

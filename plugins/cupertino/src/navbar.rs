@@ -8,8 +8,10 @@
 //! through [`ChildPod`]s (tint is the caller's own responsibility — this widget
 //! has no icon primitive to tint), while the **title** is the one child this
 //! widget fully owns: a child [`frust::text`] styled at the iOS *Headline*
-//! type-role (17pt Semibold) and themed `on_surface` (iOS `label`), so it
-//! participates in a live theme swap through `Text`'s own layout-time color
+//! type-role (17pt Semibold) and themed `on_surface` (iOS `label`), with its
+//! FAMILY opted into the theme's `titleLarge` role
+//! ([`frust::authoring::ThemeTextType::TitleLarge`]), so it participates in
+//! a live theme swap through `Text`'s own layout-time color *and* family
 //! resolution.
 //!
 //! Unlike a Material `appbar`'s left-aligned title, the iOS title is
@@ -48,7 +50,7 @@ use frust::authoring::Role;
 use frust::authoring::text::{FontWeight, LineHeight};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextType, View, Widget,
 };
 use frust::{Brightness, GlassFill, GlassMaterial, Theme, text};
 use kurbo::{Point, Size};
@@ -64,10 +66,13 @@ const PAD_X: f64 = 16.0;
 
 /// The title's iOS *Headline* type-role: 17pt Semibold (source:
 /// `crate::tokens::type_scale` — Headline maps to SF 17pt Semibold).
-/// Hardcoded here rather than read from a live
+/// Size/weight stay hardcoded here rather than read from a live
 /// `Theme::type_scale` for the same reason a Material `appbar`'s title
-/// tokens are: `Text` defers only *color* resolution past `View::build`, never
-/// size/weight.
+/// tokens are: `Text` defers *color* resolution, and an opt-in family
+/// resolution, past `View::build`, never size/weight — [`title_view`] opts
+/// the FAMILY into `ThemeTextType::TitleLarge` (`titleLarge` matches this
+/// slot's own 17pt/Semibold exactly), so only the family, not these two
+/// constants, follows a live theme.
 const TITLE_SIZE: f32 = 17.0;
 const TITLE_LINE_HEIGHT: f32 = 22.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::SEMI_BOLD;
@@ -149,13 +154,15 @@ fn specular(alpha: f32) -> Color {
 }
 
 /// Build the title's type-erased child view: Headline-styled text, defaulting
-/// to the `Text` widget's own `OnSurface` themed role (iOS `label`).
+/// to the `Text` widget's own `OnSurface` themed role (iOS `label`), family
+/// opted into the theme's `titleLarge` role.
 fn title_view<State: 'static>(title: String) -> AnyView<State> {
     frust::authoring::any::<State, _>(
         text(title)
             .size(TITLE_SIZE)
             .weight(TITLE_WEIGHT)
-            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT))
+            .themed_family(ThemeTextType::TitleLarge),
     )
 }
 
@@ -618,5 +625,57 @@ mod tests {
             .find(|(_, n)| n.role() == Role::TitleBar)
             .expect("a TitleBar node is contributed");
         assert_eq!(node.label(), Some("Inbox"));
+    }
+
+    // --- Render-time typeface identity: the title's family follows the theme ---
+
+    #[test]
+    fn the_title_paints_in_the_themes_title_large_family() {
+        use crate::tokens::typeface_probe::{TUFFY, assert_paints_only_in, baseline_with_family};
+        let theme =
+            baseline_with_family(|scale, family| scale.title_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the nav bar title",
+            |_: &mut ()| cupertino_nav_bar::<()>("Hello"),
+            theme,
+            &[TUFFY],
+            Size::new(300.0, HEIGHT),
+            TUFFY,
+        );
+    }
+
+    #[test]
+    fn the_title_follows_a_live_theme_family_change() {
+        // A font picker rewriting the theme's `titleLarge` family must be
+        // followed on the next layout, not stay pinned to whichever face
+        // happened to register first.
+        use crate::tokens::typeface_probe::{
+            TUFFY, TUFFY_AS_HELVETICA, assert_paints_only_in, baseline_with_family,
+        };
+        let faces = [TUFFY, TUFFY_AS_HELVETICA];
+
+        let tuffy_theme =
+            baseline_with_family(|scale, family| scale.title_large.family = family, "Tuffy");
+        assert_paints_only_in(
+            "the nav bar title",
+            |_: &mut ()| cupertino_nav_bar::<()>("Hello"),
+            tuffy_theme,
+            &faces,
+            Size::new(300.0, HEIGHT),
+            TUFFY,
+        );
+
+        let helvetica_theme = baseline_with_family(
+            |scale, family| scale.title_large.family = family,
+            "Helvetica",
+        );
+        assert_paints_only_in(
+            "the nav bar title",
+            |_: &mut ()| cupertino_nav_bar::<()>("Hello"),
+            helvetica_theme,
+            &faces,
+            Size::new(300.0, HEIGHT),
+            TUFFY_AS_HELVETICA,
+        );
     }
 }

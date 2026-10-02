@@ -27,17 +27,23 @@
 //!   only callers that join `app_stem()` onto the returned base (see
 //!   *Per-binary namespacing* and *Legacy bases* below); it never
 //!   migrates/copies/deletes anything, and XDG vars only feed the fallback
-//!   probe — they do **not** override the new base on macOS. Other Unix
-//!   (excluding iOS and macOS) resolves `$XDG_DATA_HOME` if set *and
-//!   absolute*, else `$HOME/.local/share`. Windows resolves `%APPDATA%`.
-//!   Any other target, or an unresolvable environment (no `HOME`/`APPDATA`),
-//!   returns `None` — this crate never guesses a fallback that could
-//!   silently write into the process's current directory.
+//!   probe — they do **not** override the new base on macOS. Android
+//!   resolves the `Context.getFilesDir()` path the host shell installed via
+//!   [`install_android_dirs`]; `HOME`/`XDG_*` are never consulted there, and
+//!   the result is `None` until the shell has installed the directories.
+//!   Other Unix (excluding iOS, macOS and Android) resolves `$XDG_DATA_HOME`
+//!   if set *and absolute*, else `$HOME/.local/share`. Windows resolves
+//!   `%APPDATA%`. Any other target, or an unresolvable environment (no
+//!   `HOME`/`APPDATA`, or an Android process before install), returns `None`
+//!   — this crate never guesses a fallback that could silently write into
+//!   the process's current directory.
 //! - **Cache directory** ([`cache_dir`]): iOS resolves `$HOME/Library/Caches`;
 //!   macOS resolves `$HOME/Library/Caches` too, with the same
 //!   read-through legacy-XDG fallback as `data_dir` (legacy base:
-//!   `$XDG_CACHE_HOME` if absolute, else `$HOME/.cache`). Other Unix
-//!   (excluding iOS and macOS) resolves `$XDG_CACHE_HOME` if set and
+//!   `$XDG_CACHE_HOME` if absolute, else `$HOME/.cache`). Android resolves
+//!   the `Context.getCacheDir()` path installed via [`install_android_dirs`]
+//!   (same not-yet-installed `None`, same ignored env vars). Other Unix
+//!   (excluding iOS, macOS and Android) resolves `$XDG_CACHE_HOME` if set and
 //!   absolute, else `$HOME/.cache`. Windows resolves `%LOCALAPPDATA%`. Same
 //!   `None`-on-unresolvable contract as `data_dir`.
 //! - **Absolute-validation debug log**: a set-but-relative `XDG_DATA_HOME`/
@@ -115,11 +121,16 @@ use std::path::{Path, PathBuf};
 ///   read through at its own file level via [`legacy_data_dir`].
 /// - Other Unix (excluding iOS and macOS): `$XDG_DATA_HOME` if set and
 ///   absolute, else `$HOME/.local/share`.
+/// - Android: the directory the host shell installed via
+///   [`install_android_dirs`] (`Context.getFilesDir()`); `None` until
+///   `FrustSurfaceView.surfaceCreated` → `nativeInitPlatform` has run.
+///   `HOME`/`XDG_*` are ignored — only the installed slot is consulted.
 /// - Windows: `%APPDATA%`.
 /// - Any other target: `None`.
 ///
-/// `None` when unresolvable (`HOME`/`APPDATA` unset) — never guesses a
-/// fallback that could write into the current directory.
+/// `None` when unresolvable (`HOME`/`APPDATA` unset, or — on Android — the
+/// directories not yet installed) — never guesses a fallback that could
+/// write into the current directory.
 pub fn data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "ios")]
     {
@@ -137,7 +148,16 @@ pub fn data_dir() -> Option<PathBuf> {
             &|p: &Path| p.exists(),
         )
     }
-    #[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        android_data_dir_from(android_dirs())
+    }
+    #[cfg(all(
+        unix,
+        not(target_os = "ios"),
+        not(target_os = "macos"),
+        not(target_os = "android")
+    ))]
     {
         data_dir_from(
             std::env::var("XDG_DATA_HOME").ok().as_deref(),
@@ -166,11 +186,16 @@ pub fn data_dir() -> Option<PathBuf> {
 ///   own file level via [`legacy_cache_dir`].
 /// - Other Unix (excluding iOS and macOS): `$XDG_CACHE_HOME` if set and
 ///   absolute, else `$HOME/.cache`.
+/// - Android: the directory the host shell installed via
+///   [`install_android_dirs`] (`Context.getCacheDir()`); `None` until
+///   `FrustSurfaceView.surfaceCreated` → `nativeInitPlatform` has run.
+///   `HOME`/`XDG_*` are ignored — only the installed slot is consulted.
 /// - Windows: `%LOCALAPPDATA%`.
 /// - Any other target: `None`.
 ///
-/// `None` when unresolvable. Logs at `debug` (via the `log` crate) when a
-/// set-but-relative XDG var is ignored per the XDG Base Directory spec.
+/// `None` when unresolvable, or — on Android — the directories not yet
+/// installed. Logs at `debug` (via the `log` crate) when a set-but-relative
+/// XDG var is ignored per the XDG Base Directory spec.
 pub fn cache_dir() -> Option<PathBuf> {
     #[cfg(target_os = "ios")]
     {
@@ -188,7 +213,16 @@ pub fn cache_dir() -> Option<PathBuf> {
             &|p: &Path| p.exists(),
         )
     }
-    #[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        android_cache_dir_from(android_dirs())
+    }
+    #[cfg(all(
+        unix,
+        not(target_os = "ios"),
+        not(target_os = "macos"),
+        not(target_os = "android")
+    ))]
     {
         cache_dir_from(
             std::env::var("XDG_CACHE_HOME").ok().as_deref(),
@@ -316,6 +350,98 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     rename_result
 }
 
+/// The absolute paths of `Context.getFilesDir()` and `Context.getCacheDir()`
+/// the Android host shell installs once per process at `nativeInitPlatform`.
+///
+/// See [`install_android_dirs`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AndroidDirs {
+    /// `Context.getFilesDir()` — the Android arm of [`data_dir`].
+    pub data_dir: PathBuf,
+    /// `Context.getCacheDir()` — the Android arm of [`cache_dir`].
+    pub cache_dir: PathBuf,
+}
+
+/// [`install_android_dirs`]'s failure modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallAndroidDirsError {
+    /// [`install_android_dirs`] already succeeded once in this process —
+    /// first-wins; the slot keeps the first-installed pair.
+    AlreadyInstalled,
+    /// The named field was not an absolute Unix-style path.
+    NotAbsolute {
+        /// `"data_dir"` or `"cache_dir"`.
+        field: &'static str,
+        /// The rejected path.
+        path: PathBuf,
+    },
+}
+
+impl std::fmt::Display for InstallAndroidDirsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InstallAndroidDirsError::AlreadyInstalled => {
+                write!(f, "frust-paths: Android directories already installed")
+            }
+            InstallAndroidDirsError::NotAbsolute { field, path } => {
+                write!(
+                    f,
+                    "frust-paths: Android {field} is not an absolute path: {}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for InstallAndroidDirsError {}
+
+/// The Android host shell's installed data/cache directories, set exactly
+/// once by [`install_android_dirs`]. Empty (`None` from [`android_dirs`])
+/// until the shell's `nativeInitPlatform` has run.
+static ANDROID_DIRS: std::sync::OnceLock<AndroidDirs> = std::sync::OnceLock::new();
+
+/// Pure validation body of [`install_android_dirs`]: both paths must be
+/// absolute in the **Unix** sense.
+///
+/// Checked via `to_str().is_some_and(|s| s.starts_with('/'))`, not
+/// `Path::is_absolute()` — like [`legacy_xdg_or_home`]'s equivalent check,
+/// this models Android/Unix path semantics unconditionally so the logic is
+/// exercisable from a non-Unix test host, where `Path::is_absolute()`
+/// answers for the *compiling* host and would reject a genuine
+/// `/data/user/0/...` value.
+fn validate_android_dirs(dirs: &AndroidDirs) -> Result<(), InstallAndroidDirsError> {
+    for (field, path) in [("data_dir", &dirs.data_dir), ("cache_dir", &dirs.cache_dir)] {
+        if !path.to_str().is_some_and(|s| s.starts_with('/')) {
+            return Err(InstallAndroidDirsError::NotAbsolute {
+                field,
+                path: path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Install the Android host shell's data/cache directories for this
+/// process — **first-wins**: the first successful call populates the slot;
+/// every later call, even with a different valid pair, returns
+/// [`InstallAndroidDirsError::AlreadyInstalled`] and leaves the original
+/// pair untouched. `dirs` is validated first via [`validate_android_dirs`];
+/// an invalid pair is rejected and never reaches the slot — it stays empty,
+/// so a subsequent valid call can still succeed.
+pub fn install_android_dirs(dirs: AndroidDirs) -> Result<(), InstallAndroidDirsError> {
+    validate_android_dirs(&dirs)?;
+    ANDROID_DIRS
+        .set(dirs)
+        .map_err(|_| InstallAndroidDirsError::AlreadyInstalled)
+}
+
+/// The Android host shell's installed directories, or `None` before
+/// [`install_android_dirs`] has run.
+pub fn android_dirs() -> Option<&'static AndroidDirs> {
+    ANDROID_DIRS.get()
+}
+
 /// Env-parameterized body of [`data_dir`]'s iOS branch: `home` joined with
 /// `Library/Application Support`, `None` without a `HOME` — same
 /// no-guessing contract as every other arm.
@@ -339,13 +465,50 @@ fn ios_cache_dir_from(home: Option<&str>) -> Option<PathBuf> {
     })
 }
 
+/// Slot-parameterized body of [`data_dir`]'s Android branch: the installed
+/// [`AndroidDirs::data_dir`], cloned, or `None` (logging one `debug` line)
+/// when the host shell has not installed the directories yet — env vars are
+/// never consulted on Android (D2), so this takes only the slot contents.
+#[cfg(any(target_os = "android", test))]
+fn android_data_dir_from(installed: Option<&AndroidDirs>) -> Option<PathBuf> {
+    match installed {
+        Some(dirs) => Some(dirs.data_dir.clone()),
+        None => {
+            log::debug!(
+                "frust-paths: Android directories not installed yet — nativeInitPlatform has not run"
+            );
+            None
+        }
+    }
+}
+
+/// Slot-parameterized body of [`cache_dir`]'s Android branch — see
+/// [`android_data_dir_from`].
+#[cfg(any(target_os = "android", test))]
+fn android_cache_dir_from(installed: Option<&AndroidDirs>) -> Option<PathBuf> {
+    match installed {
+        Some(dirs) => Some(dirs.cache_dir.clone()),
+        None => {
+            log::debug!(
+                "frust-paths: Android directories not installed yet — nativeInitPlatform has not run"
+            );
+            None
+        }
+    }
+}
+
 /// Absolute-validated `xdg` (logged-and-ignored at `debug` if set but
 /// relative), else `home` joined with `suffix` — the shared shape behind
 /// both [`data_dir_from`]/[`cache_dir_from`] on non-iOS, non-macOS Unix
 /// (iOS resolves inside its sandbox container instead, and macOS resolves
 /// its own new base with this same shape only feeding a legacy-fallback
 /// probe — see [`data_dir`] and [`legacy_xdg_or_home`]).
-#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
+#[cfg(all(
+    unix,
+    not(target_os = "ios"),
+    not(target_os = "macos"),
+    not(target_os = "android")
+))]
 fn xdg_or_home(
     xdg: Option<&str>,
     xdg_var_name: &str,
@@ -369,13 +532,23 @@ fn xdg_or_home(
 /// Env-parameterized body of [`data_dir`]'s Unix branch — lets tests
 /// exercise the resolution logic against injected values without ever
 /// touching the real `HOME`/`XDG_DATA_HOME`.
-#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
+#[cfg(all(
+    unix,
+    not(target_os = "ios"),
+    not(target_os = "macos"),
+    not(target_os = "android")
+))]
 fn data_dir_from(xdg_data_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     xdg_or_home(xdg_data_home, "XDG_DATA_HOME", home, &[".local", "share"])
 }
 
 /// Env-parameterized body of [`cache_dir`]'s Unix branch.
-#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
+#[cfg(all(
+    unix,
+    not(target_os = "ios"),
+    not(target_os = "macos"),
+    not(target_os = "android")
+))]
 fn cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     xdg_or_home(xdg_cache_home, "XDG_CACHE_HOME", home, &[".cache"])
 }
@@ -397,9 +570,17 @@ fn legacy_xdg_or_home(
     suffix: &[&str],
 ) -> Option<PathBuf> {
     if let Some(xdg) = xdg {
-        let path = PathBuf::from(xdg);
-        if path.is_absolute() {
-            return Some(path);
+        // This models macOS/Unix path semantics unconditionally — the
+        // function is compiled under `cfg(any(target_os = "macos", test))`
+        // precisely so its logic can be exercised from a non-macOS test
+        // host — so absoluteness is checked the way a real (Unix) macOS
+        // `XDG_DATA_HOME`/`XDG_CACHE_HOME` value is always shaped, not via
+        // `Path::is_absolute()`, which answers for the *compiling* host: on
+        // Windows a forward-slash value like `/custom/data` is not
+        // `is_absolute()` (no drive letter), even though it is exactly what
+        // every real macOS value looks like.
+        if xdg.starts_with('/') {
+            return Some(PathBuf::from(xdg));
         }
         log::debug!("frust-paths: ignoring non-absolute {xdg_var_name} ({xdg})");
     }
@@ -518,10 +699,143 @@ mod tests {
         assert_eq!(ios_cache_dir_from(None), None);
     }
 
+    // --- android_data_dir_from / android_cache_dir_from ------------------
+
+    #[test]
+    fn android_data_dir_from_installed_slot_returns_its_path() {
+        let dirs = AndroidDirs {
+            data_dir: PathBuf::from("/data/user/0/app/files"),
+            cache_dir: PathBuf::from("/data/user/0/app/cache"),
+        };
+        assert_eq!(
+            android_data_dir_from(Some(&dirs)),
+            Some(PathBuf::from("/data/user/0/app/files"))
+        );
+    }
+
+    #[test]
+    fn android_data_dir_from_uninstalled_is_none() {
+        assert_eq!(android_data_dir_from(None), None);
+    }
+
+    #[test]
+    fn android_cache_dir_from_installed_slot_returns_its_path() {
+        let dirs = AndroidDirs {
+            data_dir: PathBuf::from("/data/user/0/app/files"),
+            cache_dir: PathBuf::from("/data/user/0/app/cache"),
+        };
+        assert_eq!(
+            android_cache_dir_from(Some(&dirs)),
+            Some(PathBuf::from("/data/user/0/app/cache"))
+        );
+    }
+
+    #[test]
+    fn android_cache_dir_from_uninstalled_is_none() {
+        assert_eq!(android_cache_dir_from(None), None);
+    }
+
+    // --- validate_android_dirs / install_android_dirs --------------------
+
+    #[test]
+    fn validate_android_dirs_rejects_relative_data_dir() {
+        let dirs = AndroidDirs {
+            data_dir: PathBuf::from("relative/files"),
+            cache_dir: PathBuf::from("/data/user/0/app/cache"),
+        };
+        assert_eq!(
+            validate_android_dirs(&dirs),
+            Err(InstallAndroidDirsError::NotAbsolute {
+                field: "data_dir",
+                path: PathBuf::from("relative/files"),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_android_dirs_rejects_relative_cache_dir() {
+        let dirs = AndroidDirs {
+            data_dir: PathBuf::from("/data/user/0/app/files"),
+            cache_dir: PathBuf::from("relative/cache"),
+        };
+        assert_eq!(
+            validate_android_dirs(&dirs),
+            Err(InstallAndroidDirsError::NotAbsolute {
+                field: "cache_dir",
+                path: PathBuf::from("relative/cache"),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_android_dirs_accepts_absolute_pair() {
+        let dirs = AndroidDirs {
+            data_dir: PathBuf::from("/data/user/0/app/files"),
+            cache_dir: PathBuf::from("/data/user/0/app/cache"),
+        };
+        assert_eq!(validate_android_dirs(&dirs), Ok(()));
+    }
+
+    /// The only test allowed to call [`install_android_dirs`] — the
+    /// [`ANDROID_DIRS`] `OnceLock` is a single process-wide slot shared by
+    /// every test in this binary, so exercising install/first-wins/reject
+    /// semantics from more than one test would race. Every case lives here,
+    /// in one deterministic sequence.
+    #[test]
+    fn install_android_dirs_is_first_wins_and_rejects_relative() {
+        // An invalid (relative) pair is rejected and leaves the slot empty.
+        let invalid = AndroidDirs {
+            data_dir: PathBuf::from("relative/files"),
+            cache_dir: PathBuf::from("/data/user/0/app/cache"),
+        };
+        assert_eq!(
+            install_android_dirs(invalid),
+            Err(InstallAndroidDirsError::NotAbsolute {
+                field: "data_dir",
+                path: PathBuf::from("relative/files"),
+            })
+        );
+        assert_eq!(android_dirs(), None);
+
+        // The first valid install wins.
+        let first = AndroidDirs {
+            data_dir: PathBuf::from("/data/user/0/app/files"),
+            cache_dir: PathBuf::from("/data/user/0/app/cache"),
+        };
+        assert_eq!(install_android_dirs(first.clone()), Ok(()));
+        assert_eq!(android_dirs(), Some(&first));
+
+        // A second, different, valid pair is rejected — first-wins.
+        let second = AndroidDirs {
+            data_dir: PathBuf::from("/data/user/0/other/files"),
+            cache_dir: PathBuf::from("/data/user/0/other/cache"),
+        };
+        assert_eq!(
+            install_android_dirs(second),
+            Err(InstallAndroidDirsError::AlreadyInstalled)
+        );
+        assert_eq!(android_dirs(), Some(&first));
+    }
+
+    #[test]
+    fn install_android_dirs_error_display_names_field_and_path() {
+        let not_absolute = InstallAndroidDirsError::NotAbsolute {
+            field: "data_dir",
+            path: PathBuf::from("relative/files"),
+        };
+        let message = not_absolute.to_string();
+        assert!(!message.is_empty());
+        assert!(message.contains("data_dir"));
+        assert!(message.contains("relative/files"));
+
+        let already = InstallAndroidDirsError::AlreadyInstalled;
+        assert!(!already.to_string().is_empty());
+    }
+
     // --- data_dir_from / cache_dir_from (Unix) ---------------------------
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn data_dir_from_absolute_xdg_wins() {
         assert_eq!(
             data_dir_from(Some("/custom/data"), Some("/home/user")),
@@ -530,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn data_dir_from_relative_xdg_is_ignored_falls_back_to_home() {
         assert_eq!(
             data_dir_from(Some("relative/data"), Some("/home/user")),
@@ -539,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn data_dir_from_no_xdg_falls_back_to_home() {
         assert_eq!(
             data_dir_from(None, Some("/home/user")),
@@ -548,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn data_dir_from_unresolvable_is_none() {
         assert_eq!(data_dir_from(None, None), None);
         // A relative XDG var with no HOME to fall back to is also None.
@@ -556,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn cache_dir_from_absolute_xdg_wins() {
         assert_eq!(
             cache_dir_from(Some("/custom/cache"), Some("/home/user")),
@@ -565,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn cache_dir_from_relative_xdg_is_ignored_falls_back_to_home() {
         assert_eq!(
             cache_dir_from(Some("relative/cache"), Some("/home/user")),
@@ -574,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn cache_dir_from_no_xdg_falls_back_to_home() {
         assert_eq!(
             cache_dir_from(None, Some("/home/user")),
@@ -583,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     fn cache_dir_from_unresolvable_is_none() {
         assert_eq!(cache_dir_from(None, None), None);
     }

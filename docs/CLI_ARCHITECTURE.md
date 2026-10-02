@@ -43,15 +43,20 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::icons` | PNG → `.icns`/`.ico`/hicolor-tree pipeline for `[desktop] icon`; a rejected or missing source degrades to a typed note, never a build failure (`desktop_build` consumes it) |
 | `frust-drive::desktop_build` | macOS/Windows/Linux bundle assembly (`DesktopBundleTarget`, host-locked) via `cargo build` + `ProcessRunner`, and its `installer` submodule (`cargo-packager` shell-out for `.dmg`/NSIS/WiX/`.deb`/`.AppImage`; `.rpm` is a typed refusal, not a supported format) |
 | `frust-drive::desktop_build::contributions` | Merges installed plugins' desktop-lane `Contribution`s into the just-assembled bundle (`Info.plist`, `<identifier>.desktop`, a generated entitlements file), between assembly and codesign — see Data Flow below |
-| `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree — an app from `templates/app/` (`TemplateContext`), or, under `--design-system`, a design-system crate from `templates/design-system/` (`DesignSystemContext`, a strict field subset) |
-| `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report; `CargoPackagerValidator` checks the pinned `cargo-packager` version and is non-fatal (`Partial` at worst — only `frust build --installer` needs it) |
+| `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree; the template tree lives in-crate and is embedded into the published crate with `include_dir!` — an app from `crates/frust-drive/templates/app/` (`TemplateContext`), or, under `--design-system`, a design-system crate from `crates/frust-drive/templates/design-system/` (`DesignSystemContext`, a strict field subset). `frust_path` is rendered as a portable forward-slash path (`host_path::to_portable_string`), so a Windows checkout's `Cargo.toml`/`gradle.properties`/`project.pbxproj` all stay parseable rather than embedding a raw verbatim or backslashed path |
+| `frust-drive::host_path` | Windows verbatim-path (`\\?\`) simplification and portable (forward-slash) path rendering, shared by the scaffold pipeline above and, for `same_path`/`is_under`, the TUI's recent-projects and launch-guard identity checks (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)). `home_dir_from` is the single pure `HOME` → `USERPROFILE` → `HOMEDRIVE`+`HOMEPATH` resolver, delegated to by `frust-tui`'s persisted-config path, `frust-dap`'s VS Code workspace detection, and this crate's own Android Gradle-home note, so the three no longer hand-roll the same fallback chain |
+| `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report; `CargoPackagerValidator` checks the pinned `cargo-packager` version and is non-fatal (`Partial` at worst — only `frust build --installer` needs it). `WasmTargetValidator` ("wasm32 target"), `WasmBindgenCliValidator` ("wasm-bindgen CLI"), and `WasmOptValidator` ("wasm-opt") check the browser toolchain the same non-fatal way — never worse than `Partial`, since a host that will never build for the browser is not a broken host. `default_validators_for_host` registers `XcodeValidator` only on a macOS host, matching `build_report`'s own iOS-area gate, so the flat validator list carries no permanent `Xcode` row on Linux/Windows. The component-level `build_report` groups these into a non-core "Web" area alongside Prerequisites/Android/iOS/Desktop, with runnable fixes for the target (`rustup target add`) and the CLI (`cargo install -f wasm-bindgen-cli`) and install guidance for `wasm-opt` (binaryen ships as a platform package, not one invocation) |
 | `frust-drive::devices` | Pluggable per-platform device discovery, aggregated non-fatally |
 | `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build; `BuildMode::cargo_features()` also selects the `frust/perf-trace`+`frust/devtools` cargo-feature pair for Debug/Profile (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) |
 | `frust-drive::devtools_client` | Blocking NDJSON client for the devtools wire protocol (`widget_tree`/`widget_props`/`metrics_snapshot`/`screenshot`/`tap`/`scroll`/`text`/frame-stats subscription) plus `adb forward` helpers for Android — the tool-side half of [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-drive::metrics` | Pure `/proc`/`/sys`/`adb` parsers plus a `MetricsSampler` background-thread stream, feeding `frust-tui`'s DevTools System/Network tabs and `frust-mcp`'s `metrics` tool (Linux desktop + Android only in v1, no build-feature gate). Honest about scope: network counters are namespace-wide (desktop) or device-wide (Android), never per-process — see [LIMITATIONS.md](LIMITATIONS.md) |
-| `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream; `android_run::spawn_session` and the iOS pipelines' `spawn_session`/`spawn_physical_session` return the launched app's identity (`AndroidLaunch{stream, package}` / `IosLaunch`) so a caller can address that exact app later without re-deriving it — `frust-tui`'s `Supervisor` uses both to best-effort terminate the app on stop (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), and `frust-mcp`'s iOS-Simulator teardown uses `IosLaunch` the same way |
+| `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream; `android_run::spawn_session` and the iOS pipelines' `spawn_session`/`spawn_physical_session` return the launched app's identity (`AndroidLaunch{stream, package}` / `IosLaunch`) so a caller can address that exact app later without re-deriving it — `frust-tui`'s `Supervisor` uses both to best-effort terminate the app on stop (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), and `frust-mcp`'s iOS-Simulator teardown uses `IosLaunch` the same way. Both `android_build` and `android_run` invoke `./gradlew` with a leading absolute `--project-cache-dir <project>/build/android/.gradle` (`BuildLayout::android_gradle_cache`) so a hand-run `./gradlew` from `android/` never shares state with the CLI's own build |
 | `frust-drive::desktop_run` | The workspace's single desktop-preview launch-plan construction site: `DesktopPlan` (program, argv, cwd, and child env together, since a `--profile` preview needs both `--features frust/perf-trace` and `FRUST_TRACE=1`). Consumed by `frust-cli run`'s desktop fallback, `frust-tui`'s supervisor (reshaped into its own `LaunchPlan`), and `frust-mcp`'s `spawn_desktop_session` — no front-end resolves its own invocation |
+| `frust-drive::web_build` | The browser tier's counterpart to `desktop_build`, requiring no app manifest: resolves and verifies the host page (the project's own `[web] host-dir` or the framework's `platform/web`, reached through the project's `frust` path dependency) and guards the artifact directory against overlapping it, `src/`, or the resolved page *before* compiling; `cargo build --target wasm32-unknown-unknown` → `wasm-bindgen --target web` into `<out-dir>/pkg/` → an optional `wasm-opt` pass strictly after `wasm-bindgen` (release-default, `[web] wasm-opt` overrides either way) → stages `index.html`/`frust_web.js`. `preflight`'s target and `wasm-opt` checks delegate to the same probes the `doctor` validators of the same name run, so a flat `frust doctor` row and a preflight row can never describe one host differently — only the severity differs, since a preflight row answers "can the build that was just asked for run" rather than "is this host set up for the browser"; `bindgen_check` keeps the project-pin equality rule (a project's own `wasm-bindgen` pin, not the framework's `web_build::WASM_BINDGEN_PINNED`, is what a build is checked against once one is declared). `preflight` reports the same environment/manifest/host-page checks `frust doctor`'s Web heading renders |
+| `frust-drive::web_build::serve` | The static dev server `frust run -d web` starts after a build: loopback-only (`127.0.0.1`), Host-header validated (`localhost`/`127.0.0.1`/`[::1]`), segment-by-segment path containment (refuses `..`, drive prefixes, `:`, post-checked), `application/wasm` + no-store + `X-Content-Type-Options: nosniff`, and a control-character-scrubbed request log — `std::net::TcpListener` plus a request parser, no HTTP crate, matching `frust-drive`'s zero-framework-dependency charter. The host page's own `?module=` override is validated separately, in `platform/web/index.html` (same-origin, relative, under `./pkg/`, no `..`) |
 | `frust-drive::plugin` | Static plugin registry plus the idempotent project-mutation engine that applies it |
+| `frust-drive::build_dirs` | `BuildLayout` — the single source of truth for every platform's project-relative output path under `build/` (Android/iOS/web/desktop); `CLEAN_DIRS`/`LEGACY_CLEAN_DIRS`, the directory lists `clean` removes. Never resolves cargo's actual `target` dir itself — see [DEVELOPMENT.md](DEVELOPMENT.md)'s Build Output Layout for the `CARGO_TARGET_DIR` precedence every pipeline resolves through `cargo metadata` instead |
+| `frust-drive::clean` | `run` — `cargo clean` then removes `CLEAN_DIRS` then `LEGACY_CLEAN_DIRS`, reporting a symlinked entry as unlinked (never followed) and an entry resolving outside the project as skipped; `CleanReport` carries whether `cargo clean` itself succeeded, which `frust-cli`/`frust-tui` map onto their own exit code/session outcome |
 | `frust-drive::interrupt` | The process-wide SIGINT/SIGTERM/SIGHUP + panic-hook owner; scrubs registered secret files before the process dies |
 | `frust-mcp::config` | `McpConfig` — port (`DEFAULT_MCP_PORT` 4848; `0` lets the OS assign an ephemeral one); bind address is hard-coded to `127.0.0.1`, never configurable |
 | `frust-mcp::backend` | `SessionBackend` — the sync trait (fourteen methods) the tool layer drives via `Arc<dyn SessionBackend>` (`SharedBackend`). Sync by charter: no `async-trait`, so the async/blocking bridge (`spawn_blocking`) lives in the tool layer, not the trait. `SessionEngine` is this crate's own implementation; an embedder (`frust-tui`) supplies its own instead. `stop_app`/`restart_app`'s "Blocking" describes how long the *call* takes to return, not what has finished when it does — an implementer may treat a stop as a request, with the best-effort OS-level app termination still in flight. The last three methods carry default implementations that refuse honestly rather than forcing every embedder to implement them: `subscribe_session_events` (`None`; a push feed of log lines plus the session's end, `frust-dap`'s log-pump consumer), `fetch_widget_tree` (a typed not-supported error; one widget-tree dump for a backend whose devtools connection it does not expose), and `project_root` (`None`; the directory the *next* `run_app` would build from, read live rather than cached or injected — `frust-dap`'s launch path calls it per launch and refuses in-band on `None`). `SessionEventFeed::channel()` and the paired `SessionEventSink` are the public sending half an embedder builds its own feed from |
@@ -65,7 +70,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-dap::clients` | `DapClientRegistry`/`DapClientEntry`/`DapClientGuard` — an RAII-tracked, `frust_mcp::ClientRegistry`-shaped record of connected editors. A guard is minted at accept (before a client has said who it is) and named once `initialize` arrives; `Drop` is the only disconnect signal, matching `frust-mcp`'s own guard discipline |
 | `frust-dap::sanitize` | `console_safe` — replaces every control character (`char::is_control`) with U+FFFD before a client-supplied string reaches a rendered console: the ignored-`projectRoot` note and the client name/id the registry records, both destined for a raw-mode terminal an ANSI escape could otherwise repaint |
 | `frust-dap::adapter` | `OrchestrationAdapter`, implementing the server's `DapAdapter` seam over the **host's own** `frust_mcp::SharedBackend` — one app per connection, launched from whatever directory `SessionBackend::project_root()` answers **at launch time** (no injected/cached root; a `None` answer refuses the launch in-band); a client's `launchArguments.projectRoot` is never honored (an ignored value is echoed back, sanitized, as a Debug Console note — see [LIMITATIONS.md](LIMITATIONS.md) `dap-tcp-unauthenticated-v1`). `on_initialize` (sync) names the connection in the registry; a log-subscription pump forwards lines as `output` events, an exit watch turns a terminal session into `exited` then `terminated`; teardown stops only the app *this connection* launched, never the backend itself; also answers the `frustRestart`/`frustWidgetTree` custom requests |
-| `frust-dap::ide_config` | Generates/merges the client-side DAP launch config an editor needs to attach: `detect_parent_ide` (nine `ParentIde` variants — VS Code family, Cursor, Zed, IntelliJ/Android Studio, Neovim, Emacs, Helix — sniffed from seven environment variables) plus one generator per IDE (`vscode`'s `launch.json`, shared by Neovim; `zed`'s `.zed/debug.json` naming a best-effort/**unverified** `"CodeLLDB"` adapter; `emacs`'s `.frust/dap-emacs.el`; `helix`, which always reports `Skipped` — Helix has no spawnable-adapter transport this server can satisfy). `run_generator` owns all file I/O so each generator stays a pure string-in/string-out function |
+| `frust-dap::ide_config` | Generates/merges the client-side DAP launch config an editor needs to attach: `detect_parent_ide` (nine `ParentIde` variants — VS Code family, Cursor, Zed, IntelliJ/Android Studio, Neovim, Emacs, Helix — sniffed from seven environment variables) plus one generator per IDE (`vscode`'s `launch.json`, shared by Neovim; `zed`'s `.zed/debug.json` naming a best-effort/**unverified** `"Delve"` adapter, mirroring fdemon; `emacs`'s `.frust/dap-emacs.el`; `helix`, which always reports `Skipped` — Helix has no spawnable-adapter transport this server can satisfy). `WriteMode` (`Refresh`, the dialog's explicit generate, which replaces an existing frust entry; `IfAbsent`, the automatic path, which leaves one already present untouched) decides how a generator treats an existing file; `run_generator` owns all file I/O so each generator stays a pure string-in/string-out function |
 
 ## Layer Dependencies
 
@@ -114,7 +119,7 @@ stdout of its own at all to fall back on (see [REVIEW_FOCUS.md](REVIEW_FOCUS.md)
 Within `frust-drive`, `anyhow` sits at the CLI/pipeline-core boundary while library-contract errors
 use `thiserror` enums; `serde`/`serde_json`/`toml`/`toml_edit` handle manifest and build-report
 serialization plus format-preserving `Cargo.toml` edits; `minijinja` and `include_dir` embed and
-render the `templates/app/` tree at compile time. `notify` is `frust-cli`-only — `run --watch`'s
+render the `crates/frust-drive/templates/app/` tree at compile time. `notify` is `frust-cli`-only — `run --watch`'s
 filesystem watcher has no reason to live in the shared library. `ctrlc` is a `frust-drive`
 dependency (`frust-cli` also links it directly for its own `--watch` group-kill handler);
 `frust-drive::interrupt` is the process's single SIGINT/SIGTERM/SIGHUP owner (see Data Flow below),
@@ -143,17 +148,21 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `dispatch` then builds the one `RealProcessRunner` and injects it into every handler — no handler
   ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
-  `templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
+  `crates/frust-drive/templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
   involved. The rendered app depends on `frust-glyph` and calls `frust_glyph::install()` from
   `app!(setup = { .. })`, so a freshly scaffolded app is Glyph-themed by default — swapping to
   Material/Cupertino, or dropping a built-in design system entirely, is a manifest+setup-call edit
   the template's own comments walk through (see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
   Design-System Plugins). `create --design-system` takes a separate path (`generate_design_system` /
-  `DesignSystemContext`) rendering `templates/design-system/` instead — a plain library crate with
+  `DesignSystemContext`) rendering `crates/frust-drive/templates/design-system/` instead — a plain library crate with
   no platform manifest, so `--deeplink-scheme`/`--deeplink-host`/`--arch` are rejected outright
   rather than silently ignored; its README documents that the three built-ins are sibling plugin
   crates, not `frust` cargo features, so there is no "never re-enable a catalog feature" rule left
-  to state — a design-system crate cannot turn one on by existing.
+  to state — a design-system crate cannot turn one on by existing. The rendered app also ships a
+  `.cargo/config.toml` (a verbatim `template_manifest.json` entry) holding the Android link flags,
+  byte-identical to the repository root's copy and kept so by `profile_sync` — the scaffold leaves
+  the checkout, and with it the reach of the root file Cargo would otherwise have merged in (see
+  [DEVELOPMENT.md](DEVELOPMENT.md) § Build).
 - `doctor`/`devices`: `dispatch` runs `frust-drive`'s independent, non-fatal `Validator`/
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
@@ -191,7 +200,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   codesign, `desktop_build::contributions` merges every installed plugin's desktop-lane
   `Contribution` (`MacosPlistEntry`/`MacosEntitlement` on macOS, `LinuxDesktopEntry` on Linux; no
   Windows variant exists in v1) into the bundle's `Info.plist`/`<identifier>.desktop`, and a
-  generated `dist/macos/<binary>.entitlements` file when an entitlement is contributed on a
+  generated `build/desktop/macos/<binary>.entitlements` file when an entitlement is contributed on a
   **signed** build — an unsigned build skips entitlements entirely with a
   `BundleNote::EntitlementsSkippedUnsigned`, since an entitlement without a signature does nothing.
   A key already present in the target file always wins (`BundleNote::PluginEntryPresent`); a
@@ -232,6 +241,21 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   (CI, a Gradle signing plugin) and warns on every release build instead of promising a signature it
   can't verify. `key.properties` + the four `ANDROID_*` variables remain as a fallback for a hand-run
   `./gradlew` (e.g. from Android Studio) — that path carries no Frust promise.
+- `build web`/`run -d web`: `frust build web [--release]` drives `web_build::build` through the
+  injected `ProcessRunner`. `frust run -d web [--no-open]` — `web` is a reserved device id matched
+  case-insensitively before ordinary device discovery — runs that same build, serves the resulting
+  directory (`web_build::serve`), best-effort opens it in the host's default browser through the
+  same `ProcessRunner` seam (spawned, never waited on), then blocks until Ctrl-C; `--features` is
+  refused outright, mirroring `build macos|windows|linux`'s `reject_unplumbed_features` above. `frust
+  create --platforms web` renders `crates/frust-drive/templates/app/web.tmpl`, opt-in and absent from the default
+  platform set. `frust doctor`'s Web heading now prints only `WebPreflight::project_rows()` — the
+  project-dependent checks (manifest, host page, host-page module name, and the blocking artifact-
+  directory-safety row), plus the `wasm-bindgen CLI` row when it survives that filter — since the
+  wasm32-target and wasm-opt host-tool rows always appear once, in the validator list above, while
+  the CLI row rejoins them only when the project's own pin disagrees with the installed CLI, or the
+  CLI is absent on `PATH` while the project declares a pin of its own (the row's fix then names that
+  pin, which the host-tool validator has no project in hand to know); the heading's rows stay purely
+  informational and never affect `doctor`'s exit code.
 - `tui` (explicit subcommand, or the bare-`frust` default above): `Command::Tui` hands off entirely
   to `frust-tui`'s own async runtime (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), which may in
   turn start `frust_mcp::serve_embedded` and/or `frust_dap::serve_embedded` over its own
@@ -240,8 +264,11 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes). The
-  registry holds 14 top-level entries, including the four design-system plugins (`glyph`/
-  `material`/`cupertino`/`shadcn`) — the TUI's Add Plugin dialog lists all 14; each design-system entry's
+  registry holds eighteen top-level entries, including the four design-system plugins (`glyph`/
+  `material`/`cupertino`/`shadcn` — `beui` is still absent by design) — the TUI's Add Plugin dialog
+  lists all eighteen. The newest, `oauth-native`, is a pure-Rust, `CargoDep`-only OAuth 2.0
+  native-app helper sitting beside `auth-session` (PKCE S256, `state`, authorization URL, and
+  callback/token-response parsing; no HTTP client, no `frust-*` dependency). Each design-system entry's
   base contribution is a single `CargoDep` (installing it is still a manual `<crate>::install()`
   call in `app!`, since a plugin add cannot know where an app wants theme setup to run).
   `Contribution::ScaffoldFile` is the registry's first file-*creating* contribution, rather than
@@ -250,7 +277,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   never a content comparison), and refuses an absolute or `..`-containing `rel_path`. `i18n`'s
   entry is the first to use it — seeding a starter locale file — and its registry ordering puts
   that `ScaffoldFile` before the plugin's `AppCrateMacro` invocation, since the macro's generated
-  code depends on the file it creates. A plugin's three desktop-lane `Contribution`s
+  code depends on the file it creates. `Contribution::IosFramework` (first used by `auth-session`)
+  appends `-framework <name>` to every `OTHER_LDFLAGS` list of the Runner's pbxproj: a pure-`objc2`
+  Apple arm's own `#[link(kind = "framework")]` never reaches Xcode's link of the iOS staticlib, so
+  a framework symbol it references must be linked by the app. A plugin's three desktop-lane `Contribution`s
   (`MacosPlistEntry`/`MacosEntitlement`/`LinuxDesktopEntry`) are the one family `add_plugin` never
   writes into a project file at all — `macos/Info.plist`, `macos/app.entitlements`, and
   `linux/app.desktop` are user-owned, hand-editable files a pre-desktop-shells project may not even
@@ -264,7 +294,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 | `ProcessRunner` / `RealProcessRunner` / `FakeProcessRunner` | The seam every external tool invocation goes through, real or faked |
 | `BuildInfo` / `BuildMode` | The debug/profile/release + flavor funnel shared by run and build |
 | `BuildFlags` | Wraps `BuildArgs` plus the `--features` cargo-feature passthrough (`extra_features()`), deliberately outside the `BuildInfo` funnel — see Data Flow |
-| `Validator` / `DoctorReport` | The doctor subsystem's pluggable checks and its structured report |
+| `Validator` / `DoctorReport` | The doctor subsystem's pluggable checks and its structured report, grouped into areas (Prerequisites, Android, iOS on macOS hosts, Desktop, Web) the TUI bootstrap wizard and titlebar toolchain chip render |
 | `DeviceDiscovery` / `Device` | Device discovery abstraction and its result shape |
 | `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold |
 | `PluginSpec` / `Contribution` / `AddOutcome` | A plugin registry entry, the idempotent project edits it applies (three of which — the desktop lane — are never written to a project file, only recorded as `AddOutcome::AppliedAtBuild`), and the per-edit applied/already-present/applied-at-build outcome |

@@ -1,0 +1,207 @@
+<!doctype html>
+<!--
+  frust-gallery web demo — the web shell's browser milestone gate vehicle,
+  and (as of this task) an embeddable one: `?case=`/`?theme=` routing plus
+  the iframe height-report contract a sibling preview host reads.
+
+  This page carries no `<canvas>` of its own: `frust::web_app!` drives the
+  app through `frust_shell_web::run_app`, and that shell creates and appends
+  its own canvas to `<body>` (see `crates/frust-shell-web/src/
+  app_handler.rs`'s `DEFAULT_CANVAS_SIZE` doc comment). Canvas-host binding,
+  live resize/DPR sync, and the `postMessage({type:"frust:height",...})`
+  contract are no longer this page's own script — they are
+  `platform/web/frust_web.js`'s `mount()`, the framework's own host-page glue
+  (see that file's doc). This page imports it directly by its real relative
+  path rather than carrying a second copy: `mount()` is read-only evidence
+  here, outside this task's write scope, and duplicating it would drift the
+  moment the framework's contract changes. This is one of the two embedding
+  routes the task named (`mount()` here, vs. letting `frust build web` stage
+  the framework's own `platform/web/index.html` verbatim) — see README.md's
+  "Embedding" section for why both routes are documented and which one this
+  task's own binary-size record was measured against.
+
+  Query parameters this app reads (see `src/main.rs`):
+
+    ?case=<slug>     Render exactly one `frust-gallery` case (e.g.
+                     `?case=button`, `?case=material/button`). Omit it for
+                     the index page (search box + scrollable case list + the
+                     zero-input-event ticking-counter demo).
+    ?theme=<variant> `light` or `dark`: force that appearance end-to-end
+                     (`frust::set_app_theme`), overriding the host's own
+                     light/dark appearance. Omitted (or any other value):
+                     unchanged behaviour — the shell keeps following the
+                     host's reported appearance, exactly as before this
+                     query parameter existed.
+    ?embed=1         Exact string `1`: strip this app's own chrome down to
+                     the hosted case alone — no "‹ Index" header, no debug
+                     title, no outer scroll/padding — so a documentation
+                     iframe shows the widget and nothing else. Any other
+                     value (including absent) leaves the chromed `?case=`
+                     page unchanged. A slug the registry does not carry
+                     still falls back to the index page.
+    ?log=<level>     Raise the browser console's log ceiling above the
+                     facade's `Warn` default (`off`/`error`/`warn`/`info`/
+                     `debug`/`trace` — `frust_shell_web::logging::
+                     level_from_query`).
+    ?arm=webgl       Force the WebGL2 backend arm — see the classic
+                     `<script>` below `#log` for the exact mechanism and why
+                     it lives in this page rather than in Rust.
+
+  Build and serve: see README.md's "Build" section for the primary
+  `frust build web --release` recipe (which stages the framework's own host
+  page, not this file — README.md explains why) and the manual
+  cargo/wasm-bindgen/wasm-opt recipe this file's own `--out-name
+  web_gallery` matches, plus the exact static-server invocation this page's
+  `../../platform/web/frust_web.js` import requires (the server root must be
+  the repository root, not this directory, so that relative path resolves).
+
+  `pkg/`, `build/` and `target/` are generated and MUST NOT be committed —
+  see README.md's "Serve" section; this standalone workspace's own
+  `.gitignore` covers all three.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>frust-gallery web demo</title>
+    <style>
+      /* `height: 100%` down the chain (`html`/`body`/`#frust-host`) is what
+         lets `#frust-host` resolve a real box for `frust_web.js`'s
+         `ResizeObserver` to read — an element with no ancestor chain of
+         resolved heights collapses to its content box (a bare 0x0 `<div>`)
+         instead of filling the viewport. No fixed page background: the
+         app's own root paints the active theme's `surface` colour (or
+         nothing, over the shell's transparent clear, for an index/case
+         screen that never fills) — see the "no hard-coded page chrome" note
+         in README.md. A neutral dark fallback here only avoids a
+         flash-of-white before the first frame lands, and is deliberately
+         close to `Theme::neutral()`'s own dark surface so a page that never
+         finishes loading is still legible. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #101418;
+        color: #cfe3f5;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      /* The host element `frust_web.js`'s `mount()` reparents winit's canvas
+         into, and keeps in sync with live via its own `ResizeObserver` — see
+         that file's "canvas <-> host binding" section for why a stylesheet
+         rule alone cannot size the canvas itself (winit pins an inline
+         `style.width`/`style.height` at creation, which always outranks a
+         stylesheet rule regardless of specificity; verified empirically
+         while building this very page, before `frust_web.js` existed to fix
+         it generally — see README.md's Milestone 6). `line-height: 0`
+         mirrors `platform/web/index.html`'s own identical rule, avoiding a
+         few stray pixels of inline-box descender space under the canvas. */
+      #frust-host {
+        display: block;
+        width: 100%;
+        height: 100%;
+        line-height: 0;
+      }
+      /* Cosmetic only — `frust_web.js` sets the load-bearing size/border/
+         padding rules itself once it adopts the canvas. */
+      canvas {
+        display: block;
+      }
+      /* Load-failure mirror only (see the header comment) — hidden unless
+         something is written into it, so a successful load shows nothing but
+         the shell's own canvas. */
+      #log:empty {
+        display: none;
+      }
+      #log {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        margin: 0;
+        padding: 6px 8px;
+        background: #3a0d0d;
+        color: #ffd7d7;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="frust-host"></div>
+    <pre id="log"></pre>
+    <script>
+      // `?arm=webgl`: forces wgpu's browser bring-up onto its WebGL2 backend
+      // instead of WebGPU — the honest seam available AT THIS TASK'S WRITE
+      // SCOPE. `RenderContext::new()` (`crates/frust-gpu/src/context.rs`)
+      // takes `wgpu::Backends::from_env().unwrap_or_default()`; `from_env`
+      // reads the `WGPU_BACKEND` process environment variable, which does
+      // not exist on `wasm32-unknown-unknown` (no process, no env — the
+      // comment on that exact line says so), so it always falls through to
+      // wgpu's own compiled-in default mask, `BROWSER_WEBGPU | GL`. Neither
+      // `crates/frust-shell-web` (`src/render.rs`'s `RenderContext::new()`
+      // call is unconditional — no `ContextOptions`/`?arm=` seam exists
+      // there) nor this app's own `write_files` (`Cargo.toml`,
+      // `src/main.rs`, this file) can select a `wgpu::Backends` value
+      // without editing `crates/frust-gpu`/`crates/frust-shell-web`, which
+      // is out of scope (see `src/main.rs`'s module doc and the card's own
+      // "no render-tier switch" instruction — this is a wgpu BACKEND choice,
+      // not a second renderer). A host PAGE has exactly one honest lever
+      // instead: wgpu's own WebGPU probe checks `navigator.gpu` before ever
+      // asking it for an adapter, so removing that property before the wasm
+      // module loads makes the probe find nothing and fall through to the
+      // `GL` bit already in the default mask — no Rust changed, no backend
+      // invented, the identical default-mask fallback `RenderContext::new()`
+      // already had, just steered by what the browser reports having.
+      // `Object.defineProperty` (not `delete`): `navigator.gpu` is an
+      // inherited accessor on `Navigator.prototype`, so `delete
+      // navigator.gpu` deletes nothing (own-property delete only); defining
+      // an own `undefined` property on the instance shadows the inherited
+      // getter instead, which is what `navigator.gpu` reads as `undefined`
+      // requires. Verified empirically against this exact build — see
+      // README.md's WebGL2 section for the resulting console trace and
+      // screenshots, and the honest caveat about what this technique does
+      // NOT prove (a real deployment's WebGPU-unsupported visitors reach the
+      // GL arm through the browser's own absent `navigator.gpu`, never
+      // through this override).
+      if (new URLSearchParams(location.search).get("arm") === "webgl") {
+        try {
+          Object.defineProperty(navigator, "gpu", {
+            value: undefined,
+            configurable: true,
+          });
+        } catch (err) {
+          console.error("frust-gallery: could not force ?arm=webgl:", err);
+        }
+      }
+    </script>
+    <script type="module">
+      // `frust_web.js` is the framework's host-page glue (`platform/web/
+      // frust_web.js` — read-only evidence for this task, see the header
+      // comment for why it is imported rather than copied). `mount()`
+      // replaces this page's own former hand-rolled canvas-binding/resize
+      // script (the "Milestone 6" fix README.md records) with the general
+      // version of the identical technique, and additionally posts this
+      // page's content height to `window.parent` — the iframe embedding
+      // contract this task adds — on canvas-ready, after `init()` settles,
+      // and on every `resize` event; see `frust_web.js`'s own
+      // `postHeightToParent` doc. It also reports a load failure the same
+      // way a Rust-side panic already is (`reportFailure`, into
+      // `document.title` and `options.log`), so this page no longer needs
+      // its own `init().catch(...)` mirror either.
+      import { mount } from "../../platform/web/frust_web.js";
+
+      // wasm-bindgen `--target web` glue. `--out-name web_gallery` is passed
+      // explicitly at build time (see README.md's manual recipe) so this
+      // import path does not depend on how cargo happened to spell the
+      // artifact (`web-gallery.wasm`, with a hyphen, from the package name)
+      // — `examples/web-spike/index.html`'s identical `--out-name`
+      // precedent. Not reached at all by the `frust build web --release`
+      // recipe (README.md's primary one), which stages the framework's own
+      // page over a `pkg/app.js` instead — this page and that recipe are two
+      // independent ways to serve the same compiled app, never combined.
+      import init from "./pkg/web_gallery.js";
+
+      mount(init, { host: "#frust-host", log: "#log" });
+    </script>
+  </body>
+</html>

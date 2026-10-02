@@ -24,6 +24,8 @@ cold.
 | Build, run, test, environment | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | Test tiers and gates | [docs/TESTING.md](docs/TESTING.md) |
 | Accepted limitations register | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) |
+| Contributing (branching, PR rules) | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Release procedure | [docs/RELEASING.md](docs/RELEASING.md) |
 | Review priorities and hot spots | [docs/REVIEW_FOCUS.md](docs/REVIEW_FOCUS.md) |
 | Doc structure/budget record | [docs/DOC_POLICY.md](docs/DOC_POLICY.md) |
 
@@ -44,15 +46,15 @@ it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frus
   bump one independently. `wgpu` is frust-owned (no `vello` constraint above it); still bump it only
   with the engine gate suite (RENDER_DEVELOPMENT.md), never casually.
 - `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`, `examples/playground`,
-  `examples/design-system-sample`, `examples/material3-demo`, and `plugins/clean-signals-frust`
-  are standalone workspaces excluded from the root graph — run their gates from their own
-  directories.
+  `examples/design-system-sample`, `examples/material3-demo`, `examples/native-widgets-demo`, and
+  `plugins/clean-signals-frust` are standalone workspaces excluded from the root graph — run their
+  gates from their own directories.
 - `workflow/` is a separate nested repo — never commit it.
 - Doc edits must respect the budgets recorded in [docs/DOC_POLICY.md](docs/DOC_POLICY.md).
-- `clean-signals` is git+rev-pinned (`910f626` on `master`) to its public repo —
-  `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals
-  scaffold variant must all resolve the identical git+rev spec (two resolution routes
-  would give Cargo two crate identities) — do not change one without the others.
+- `clean-signals` has one shared version requirement across three sites — see
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Version-Pin Policy before changing any of them.
 - `frust-engine` (on `frust-gpu`) is the only renderer `frust-render` contains — not a cargo
   feature, not an override. Do not reintroduce a render-tier choice (env var, CLI flag, or
   feature) without an explicit new plan.
+- Pull requests target `main`, and commits carry no assistant attribution or agent identity
+  (`scripts/ci/commit-hygiene.sh` enforces it).

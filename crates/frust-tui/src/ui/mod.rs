@@ -192,9 +192,17 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::project_switcher::render(frame, area, state, theme, mouse);
         }
+        // The doctor panel reaches over either top-level screen now that `i` opens
+        // it unconditionally, like the wizards/dialogs above — rather than the
+        // workbench-only surface it used to be reachable from through `d`.
         ActiveModal::DoctorPanel => {
             let mut suppressed = MouseCtx::suppressed();
-            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
             views::doctor::render(frame, area, &state.doctor, theme, mouse);
         }
         // The MCP panel reaches over either top-level screen (its `m` key and
@@ -254,6 +262,19 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::clean_confirm::render(frame, area, project_root, theme, mouse);
         }
+        // Quit is reachable from either top-level screen (`q` on the welcome
+        // splash included), like the wizards/panels above — unlike them it
+        // needs no open project.
+        ActiveModal::QuitConfirm => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::quit_confirm::render(frame, area, state.live_session_count(), theme, mouse);
+        }
         // The help overlay can appear over either top-level screen, like the
         // wizards above (both status bars carry the `? help` hint).
         ActiveModal::HelpOverlay => {
@@ -291,8 +312,9 @@ fn render_welcome(
 }
 
 fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let palette_hint = theme.palette_open_hint();
     let left = Line::from(Span::styled(
-        "? help · ⌘ palette · a add plugin · q quit",
+        format!("? help · {palette_hint} · a add plugin · q quit"),
         Style::default().fg(theme.muted()),
     ));
     frame.render_widget(
@@ -301,7 +323,7 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            mouse_indicator(state),
+            mouse_indicator(state, theme),
             Style::default().fg(theme.muted()),
         ))
         .alignment(Alignment::Right)
@@ -311,13 +333,16 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
 }
 
 /// The status-bar mouse-capture indicator: a check while capture is
-/// on, an "off" hint (with the `⌥m` toggle key) while it's off so users know
-/// the terminal's own text selection is available. Shared by the welcome and
-/// workbench status bars.
-pub(crate) fn mouse_indicator(state: &AppState) -> &'static str {
-    if state.mouse_capture {
-        "[mouse ✓]"
-    } else {
-        "[mouse off · ⌥m]"
+/// on, an "off" hint (with the host's mouse-toggle key, see
+/// [`Theme::mouse_toggle_hint`]) while it's off so users know the terminal's
+/// own text selection is available. Shared by the welcome and workbench
+/// status bars. Selects among a handful of static strings keyed on
+/// `(capture on/off, glyph set)` rather than allocating a `String` on every
+/// redraw.
+pub(crate) fn mouse_indicator(state: &AppState, theme: &Theme) -> &'static str {
+    match (state.mouse_capture, theme.macos_glyphs()) {
+        (true, _) => "[mouse ✓]",
+        (false, true) => "[mouse off · ⌥m]",
+        (false, false) => "[mouse off · Alt+m]",
     }
 }

@@ -80,8 +80,9 @@ use frust::authoring::{
     AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, ScrollDelta, SemanticsCtx,
-    Size, ThemeTextColor, View, Widget, any, build_child, erase_callback_arg, rebuild_child,
-    rebuild_children, route_event_single, teardown_child, text::FontWeight, visit_children,
+    Size, ThemeTextColor, ThemeTextType, View, Widget, any, build_child, erase_callback_arg,
+    rebuild_child, rebuild_children, route_event_single, teardown_child, text::FontWeight,
+    visit_children,
 };
 use frust::input::WHEEL_LINE_PX;
 use frust::{
@@ -265,6 +266,9 @@ impl<State: 'static> CommandView<State> {
 
     /// The wrapped baseline search field, with its own chrome suppressed (this
     /// widget paints the row's rule and icon).
+    ///
+    /// Its query text keeps the system UI family: `text_input` takes a style
+    /// only at build and has no theme-resolved family to opt into.
     fn input(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(
@@ -323,6 +327,7 @@ fn heading_view<State: 'static>(name: &str) -> AnyView<State> {
         text(name.to_string())
             .size(style::TEXT_XS as f32)
             .weight(FontWeight::MEDIUM)
+            .themed_family(ThemeTextType::LabelMedium)
             .themed_role(ThemeTextColor::OnSurfaceVariant),
     ))
 }
@@ -338,6 +343,7 @@ fn empty_view<State: 'static>(label: &str) -> AnyView<State> {
         EdgeInsets::symmetric(ROW_PAD_X, EMPTY_PAD_Y),
         text(label.to_string())
             .size(style::TEXT_SM as f32)
+            .themed_family(ThemeTextType::BodyMedium)
             .themed_role(ThemeTextColor::OnSurfaceVariant),
     ))
 }
@@ -349,7 +355,9 @@ fn empty_view<State: 'static>(label: &str) -> AnyView<State> {
 /// the authoring seam's themed text roles carry no alpha, and the muted role is
 /// the catalog's dimmed ink.
 fn item_view<State: 'static>(item: &CommandItem) -> AnyView<State> {
-    let label = text(item.label.clone()).size(style::TEXT_SM as f32);
+    let label = text(item.label.clone())
+        .size(style::TEXT_SM as f32)
+        .themed_family(ThemeTextType::BodyMedium);
     let label = if item.disabled {
         label.themed_role(ThemeTextColor::OnSurfaceVariant)
     } else {
@@ -360,6 +368,7 @@ fn item_view<State: 'static>(item: &CommandItem) -> AnyView<State> {
         children.push(inflexible(
             text(shortcut.clone())
                 .size(style::TEXT_XS as f32)
+                .themed_family(ThemeTextType::BodySmall)
                 .themed_role(ThemeTextColor::OnSurfaceVariant),
         ));
     }
@@ -836,9 +845,13 @@ impl Widget for CommandWidget {
         if let InputEvent::Key(key) = event {
             return self.handle_key(ctx, event, key);
         }
-        // Everything else the field owns goes to the field (IME, and pointer
-        // events inside the input row).
-        if matches!(event, InputEvent::Ime(_)) {
+        // Every other focus-routed event — IME composition, and the clipboard
+        // verbs an `EditCommand` carries — belongs to the field outright (`Key`
+        // is handled above, since the palette's own navigation keys intercept
+        // before falling through to `handle_key`'s own field forward). Branch
+        // on the shared predicate rather than enumerating `Ime`/`EditCommand`
+        // separately.
+        if event.is_focus_routed() {
             return route_event_single(&mut self.pods[0], ctx, event);
         }
         let size = ctx.size();
@@ -968,7 +981,9 @@ pub fn show_command_dialog<State, B, R>(
 mod tests {
     use super::*;
     use crate::overlay::modal::tests::{Recorder, WINDOW, escape, pointer};
-    use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent, text::TextContext};
+    use frust::authoring::{
+        EditCommand, KeyEvent, Modifiers, PointerButton, PointerEvent, text::TextContext,
+    };
     use frust::{Brightness, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1221,6 +1236,75 @@ mod tests {
         );
     }
 
+    /// `EditCommand::Paste` is focus-routed exactly like `Key`/`Ime`: a
+    /// clipboard paste dispatched at the widget while the field holds focus
+    /// must reach it, closing the gap where a `Ctrl+V` chord's
+    /// `ctx.request_paste()` succeeds but the shell's separate top-level
+    /// `EditCommand::Paste(text)` dispatch it triggers is then swallowed here.
+    #[test]
+    fn a_paste_edit_command_reaches_the_focused_field() {
+        let mut w = build(&view(""));
+        layout(&mut w);
+        let mut state = AppState::default();
+        // Tap the input row so the field holds the recorded focus path.
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        assert!(w.pods[0].is_focused(), "the tap focused the field");
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::EditCommand(EditCommand::Paste("bi".to_string())),
+        );
+        assert_eq!(
+            state.query, "bi",
+            "the pasted text must reach the focused field"
+        );
+    }
+
+    /// Guard against over-forwarding: the palette's own navigation keys must
+    /// still be intercepted before anything reaches the field, even while the
+    /// field holds focus — `is_focus_routed()` only widens the catch-all arm
+    /// *after* `handle_key`'s own interception, it must never bypass it.
+    #[test]
+    fn arrow_keys_move_the_highlight_not_the_field_while_the_field_is_focused() {
+        let mut w = build(&view(""));
+        layout(&mut w);
+        let mut state = AppState::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, 100.0, INPUT_HEIGHT / 2.0),
+        );
+        assert!(w.pods[0].is_focused(), "the tap focused the field");
+        let highlight_before = w.highlight;
+        dispatch(
+            &mut w,
+            &mut state,
+            &key_event(Key::Named(NamedKey::ArrowDown)),
+        );
+        assert_ne!(
+            w.highlight, highlight_before,
+            "ArrowDown must still move the palette's own highlight"
+        );
+        assert_eq!(
+            state.query, "",
+            "ArrowDown must not reach the focused field as a caret move"
+        );
+    }
+
     #[test]
     fn a_click_on_a_row_selects_it_and_a_disabled_row_is_inert() {
         let mut w = build(&view(""));
@@ -1423,5 +1507,39 @@ mod tests {
         let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
         w.event(&mut ctx, &escape());
         assert_eq!(state.dismissed, 1);
+    }
+
+    // ---- Typeface: the rows follow the live theme -------------------------
+
+    /// Every text row the palette builds: a heading, an item with a shortcut, a
+    /// disabled item, and the empty row. The palette's search field is not
+    /// here: it is the baseline `text_input`, which has no theme-resolved
+    /// family to opt into (see `CommandView::input`).
+    #[cfg(feature = "bundled-fonts")]
+    fn palette_rows(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            heading_view("Suggestions"),
+            item_view(&command_item("Calendar").shortcut("Ctrl+K")),
+            item_view(&command_item("Search emoji").disabled(true)),
+            empty_view("No results found."),
+        ])
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_rows_paint_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the palette's rows",
+            palette_rows,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_rows_follow_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the palette's rows",
+            palette_rows,
+        );
     }
 }

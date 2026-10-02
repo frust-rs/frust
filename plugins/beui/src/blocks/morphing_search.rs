@@ -125,7 +125,7 @@ use crate::overlay::{
 };
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -986,6 +986,7 @@ impl<State: 'static> SearchPanelView<State> {
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(
+            // Not themed: the baseline `text_input` has no themed-family opt-in.
             text_input(self.query.clone(), move |state: &mut State, text| {
                 on_change(state, text)
             })
@@ -1078,27 +1079,21 @@ impl<State: 'static> View<State> for SearchPanelView<State> {
 
 // ---- Shared chrome ---------------------------------------------------------
 
-/// A row title's / placeholder's style (`text-sm font-medium`).
+/// A row title's / placeholder's style (`text-sm font-medium`), in the
+/// theme's `label_large` family.
 fn row_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// A description's / key cap's style (`text-xs`).
+/// A description's / key cap's style (`text-xs`), in the theme's
+/// `label_small` family.
 fn small_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_small.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_XS as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(style::TEXT_XS as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// The key cap's box at the trailing edge of a `size`-shaped row.
@@ -1313,9 +1308,18 @@ impl Widget for MorphingSearchWidget {
         if !self.config.open {
             return EventResult::Ignored;
         }
+        if let InputEvent::Key(key) = event {
+            return self.handle_key(ctx, event, key);
+        }
+        // The IME session and the clipboard verbs an `EditCommand` carries both
+        // belong to the field outright — `Key` is handled above, since the
+        // widget's own navigation keys intercept before falling through to
+        // `handle_key`'s own field forward. Branch on the shared predicate
+        // rather than enumerating `Ime`/`EditCommand` separately.
+        if event.is_focus_routed() {
+            return route_event_single(&mut self.field, ctx, event);
+        }
         match event {
-            InputEvent::Key(key) => self.handle_key(ctx, event, key),
-            InputEvent::Ime(_) => route_event_single(&mut self.field, ctx, event),
             InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p),
             _ => EventResult::Ignored,
         }
@@ -1523,7 +1527,7 @@ mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, escape, ft_ms, light, pointer, reduced};
     use frust::authoring::text::TextContext;
-    use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey};
+    use frust::authoring::{EditCommand, Key, KeyEvent, Modifiers, NamedKey};
     use frust_core::RenderRoot;
     use std::any::Any;
 
@@ -1951,6 +1955,42 @@ mod tests {
         assert!(!h.state.open, "a selection closes the panel");
     }
 
+    /// `EditCommand::Paste` is focus-routed exactly like `Key`/`Ime`: a
+    /// clipboard paste dispatched at the panel while the field holds focus
+    /// must reach it, closing the gap where a `Ctrl+V` chord's
+    /// `ctx.request_paste()` succeeds but the shell's separate top-level
+    /// `EditCommand::Paste(text)` dispatch it triggers is then swallowed here.
+    #[test]
+    fn a_paste_edit_command_reaches_the_focused_field() {
+        let mut h = Harness::new();
+        h.open();
+        h.focus_panel();
+        h.event(InputEvent::EditCommand(EditCommand::Paste(
+            "billing".to_string(),
+        )));
+        h.settle();
+        assert_eq!(
+            h.state.query, "billing",
+            "the pasted text must reach the focused field"
+        );
+    }
+
+    /// Guard against over-forwarding: the panel's own navigation keys must
+    /// still be intercepted before anything reaches the field, even while the
+    /// field holds focus — `is_focus_routed()` only widens the catch-all arm
+    /// *after* `handle_key`'s own interception, it must never bypass it.
+    #[test]
+    fn arrow_down_moves_the_highlight_not_the_field_while_focused() {
+        let mut h = Harness::new();
+        h.open();
+        h.focus_panel();
+        h.key(NamedKey::ArrowDown);
+        assert_eq!(
+            h.state.query, "",
+            "ArrowDown must not reach the focused field as typed text"
+        );
+    }
+
     #[test]
     fn a_click_on_a_result_selects_it_and_a_release_off_it_does_not() {
         let mut h = Harness::new();
@@ -2011,5 +2051,55 @@ mod tests {
             "every run was shaped and painted: {}",
             rec.inks.len()
         );
+    }
+
+    // ---- Typeface: the trigger and the panel's runs follow the theme --------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The trigger over the panel, both `open`. The panel's query and
+    /// placeholder are empty: the wrapped baseline field has no themed-family
+    /// opt-in, so its own text would paint the system face and is not what
+    /// these tests pin.
+    fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
+        let anchor = OverlayAnchor::new();
+        move |_: &mut ()| {
+            frust::Stack(vec![
+                any(frust::Padding(
+                    frust::EdgeInsets::all(INSET),
+                    morphing_search_trigger::<()>(&anchor).open(open),
+                )),
+                any(morphing_search::<(), _, _>(
+                    vec![
+                        morphing_search_item("Overview").description("Dashboard and metrics"),
+                        morphing_search_item("Members"),
+                    ],
+                    "",
+                    |_: &mut (), _| {},
+                    |_: &mut (), _| {},
+                )
+                .anchor(&anchor)
+                .open(open)
+                .placeholder("")),
+            ])
+        }
+    }
+
+    #[test]
+    fn search_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the trigger's text", probe_logic(false), WINDOW);
+        let closed = Probe::new(probe_logic(false), WINDOW, crate::theme()).frame();
+        assert_eq!(closed.len(), 2, "the trigger's placeholder and shortcut");
+        assert_paints_only_in_geist("the panel's text", probe_logic(true), WINDOW);
+        let open = Probe::new(probe_logic(true), WINDOW, crate::theme()).frame();
+        assert_eq!(open.len(), 4, "two titles, a description and the key cap");
+    }
+
+    #[test]
+    fn search_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the trigger's text", probe_logic(false), WINDOW);
+        assert_follows_a_live_family_swap("the panel's text", probe_logic(true), WINDOW);
     }
 }

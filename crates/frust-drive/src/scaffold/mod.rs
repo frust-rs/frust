@@ -19,19 +19,79 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, include_dir};
 
-/// The `templates/app/` tree, embedded into the `frust` binary at
-/// compile time so `frust create` works standalone without a repo
+/// The `crates/frust-drive/templates/app/` tree, embedded into the `frust`
+/// binary at compile time so `frust create` works standalone without a repo
 /// checkout at runtime.
-static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../templates/app");
+static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates/app");
 
-/// The `templates/design-system/` tree — the second template root
-/// [`generate_design_system`] selects, alongside [`EMBEDDED_APP_TEMPLATE`]
-/// above (the root [`generate`] renders). A design-system crate is a plain
-/// library with no platform project, so it ships as its own tree rather than
-/// an `--arch` variant of the app template (which the [`KNOWN_ARCHES`]
-/// convention below is scoped to).
+/// The `crates/frust-drive/templates/design-system/` tree — the second
+/// template root [`generate_design_system`] selects, alongside
+/// [`EMBEDDED_APP_TEMPLATE`] above (the root [`generate`] renders). A
+/// design-system crate is a plain library with no platform project, so it
+/// ships as its own tree rather than an `--arch` variant of the app template
+/// (which the [`KNOWN_ARCHES`] convention below is scoped to).
 static EMBEDDED_DESIGN_SYSTEM_TEMPLATE: Dir<'_> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../templates/design-system");
+    include_dir!("$CARGO_MANIFEST_DIR/templates/design-system");
+
+/// Every file path embedded across [`EMBEDDED_APP_TEMPLATE`] and
+/// [`EMBEDDED_DESIGN_SYSTEM_TEMPLATE`], each prefixed `app/` or
+/// `design-system/` to match what `git ls-files templates` reports relative
+/// to this crate's manifest directory. `crates/frust-drive/tests/templates_packaged.rs`
+/// diffs this set against the git-tracked set to catch the packaging
+/// hazard: a template file `include_dir!` embeds from the working tree that
+/// `cargo package` would silently drop because it is untracked or
+/// git-ignored (so a published `frust-drive` would embed a file the
+/// tarball never shipped).
+///
+/// Test support only, reached through the `test-util` feature —
+/// `crates/frust-drive/tests/templates_packaged.rs` links against the plain
+/// library build `cargo test` produces (the same build every downstream
+/// binary/test crate links), which carries neither `cfg(test)` (compiled
+/// only into the separate unit-test harness build) nor a non-default Cargo
+/// feature on its own; this crate's own `Cargo.toml` opts its `tests/`
+/// directory in with a self-referencing `frust-drive = { path = ".",
+/// features = ["test-util"] }` dev-dependency, the same idiom `frust-cli`'s
+/// `Cargo.toml` uses to reach `process::FakeProcessRunner`. Gated
+/// `#[cfg(any(test, feature = "test-util"))]` to match that same
+/// `FakeProcessRunner` precedent (`crate::process`) — never compiled into a
+/// release build, since nothing outside a test binary calls it.
+///
+/// Note this reflects the directory listing `include_dir!` saw the last
+/// time this module was actually recompiled: without the crate's
+/// nightly-only `track_path` feature, a file added to `templates/`
+/// afterward is invisible to Cargo's freshness check (and thus to this
+/// function) until something forces this module to rebuild. That makes
+/// this the *fresh-build* guard in `templates_packaged.rs` (the one a
+/// clean build, `cargo package --verify`, or CI catches drift with); the
+/// test's always-on guard instead walks `templates/` on disk at test time,
+/// which needs no recompile to see a newly added file.
+#[cfg(any(test, feature = "test-util"))]
+pub fn embedded_template_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_embedded_paths(&EMBEDDED_APP_TEMPLATE, "app", &mut paths);
+    collect_embedded_paths(
+        &EMBEDDED_DESIGN_SYSTEM_TEMPLATE,
+        "design-system",
+        &mut paths,
+    );
+    paths
+}
+
+/// Recursively collects every file path under `dir` into `out`, each
+/// prefixed `prefix/`. [`Dir::files`] only yields the current level's
+/// files, so this walks [`Dir::dirs`] itself; [`include_dir::File::path`]
+/// is already the full path relative to the embedded root (forward-slash
+/// normalized regardless of host OS), so no manual join is needed beyond
+/// the `app`/`design-system` root prefix.
+#[cfg(any(test, feature = "test-util"))]
+fn collect_embedded_paths(dir: &Dir<'_>, prefix: &str, out: &mut Vec<String>) {
+    for file in dir.files() {
+        out.push(format!("{prefix}/{}", file.path().to_string_lossy()));
+    }
+    for sub in dir.dirs() {
+        collect_embedded_paths(sub, prefix, out);
+    }
+}
 
 /// Name of the manifest file (relative to the template root) that
 /// whitelists every file the template ships. Never itself copied into a
@@ -64,6 +124,122 @@ pub fn split_arch_tag(logical: &str) -> Option<(&str, &str)> {
             .strip_suffix(&format!(".{tag}"))
             .map(|base| (base, *tag))
     })
+}
+
+/// A platform project tree the app template can emit — the scaffold's
+/// **platform-inclusion axis**, orthogonal to the [`KNOWN_ARCHES`] variant
+/// axis above.
+///
+/// The two axes are genuinely different things, and conflating them is the
+/// mistake this type exists to prevent: `--arch` selects *which content*
+/// renders at an un-tagged logical path (one app source tree, authored two
+/// ways), while a platform selects *whether a whole subtree renders at all*.
+/// A platform is never a `.<tag>`-suffixed filename variant; it is the
+/// `<platform>.tmpl/` root directory a manifest entry lives under
+/// ([`ScaffoldPlatform::template_dir`]), which
+/// [`renderer::strip_tmpl_dir_suffixes`] already renders to `<platform>/`.
+///
+/// Before this axis existed every platform tree was unconditional, which is
+/// exactly [`ScaffoldPlatform::DEFAULT`] — see [`generate`], which is
+/// defined as [`generate_with_platforms`] against that set precisely so the
+/// pre-existing behaviour has a name rather than being reproduced by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScaffoldPlatform {
+    Android,
+    Ios,
+    Macos,
+    Windows,
+    Linux,
+    /// The browser target: `web.tmpl/` → `web/`, the host-page pair
+    /// (`index.html` + `frust_web.js`) a `wasm-bindgen` build is assembled
+    /// around. The first platform this template ever emitted conditionally.
+    Web,
+}
+
+impl ScaffoldPlatform {
+    /// Every platform the template can emit.
+    pub const ALL: &'static [ScaffoldPlatform] = &[
+        ScaffoldPlatform::Android,
+        ScaffoldPlatform::Ios,
+        ScaffoldPlatform::Macos,
+        ScaffoldPlatform::Windows,
+        ScaffoldPlatform::Linux,
+        ScaffoldPlatform::Web,
+    ];
+
+    /// The platforms [`generate`] emits: the five that were unconditional
+    /// before the axis existed, and **not** [`ScaffoldPlatform::Web`].
+    ///
+    /// Web is opt-in rather than default because a browser build needs a
+    /// wasm toolchain (`wasm32-unknown-unknown` + `wasm-bindgen`) that a
+    /// project scaffolded for phones and desktops has no reason to install;
+    /// a caller that wants everything asks for [`ScaffoldPlatform::ALL`].
+    /// Keeping this set exactly the pre-axis five is also what makes a
+    /// default scaffold byte-identical to the pre-axis output.
+    pub const DEFAULT: &'static [ScaffoldPlatform] = &[
+        ScaffoldPlatform::Android,
+        ScaffoldPlatform::Ios,
+        ScaffoldPlatform::Macos,
+        ScaffoldPlatform::Windows,
+        ScaffoldPlatform::Linux,
+    ];
+
+    /// The lowercase tag naming this platform on a command line and in the
+    /// generated project's own directory layout (`android`, …, `web`).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            ScaffoldPlatform::Android => "android",
+            ScaffoldPlatform::Ios => "ios",
+            ScaffoldPlatform::Macos => "macos",
+            ScaffoldPlatform::Windows => "windows",
+            ScaffoldPlatform::Linux => "linux",
+            ScaffoldPlatform::Web => "web",
+        }
+    }
+
+    /// Parses a [`ScaffoldPlatform::tag`] back, for a front-end turning a
+    /// user-supplied platform list into this enum. `None` for anything else
+    /// — the caller reports the error, since only it knows which flag the
+    /// value came from.
+    pub fn from_tag(tag: &str) -> Option<ScaffoldPlatform> {
+        ScaffoldPlatform::ALL
+            .iter()
+            .copied()
+            .find(|platform| platform.tag() == tag)
+    }
+
+    /// The template-root directory this platform's manifest entries live
+    /// under (`<tag>.tmpl`).
+    pub fn template_dir(&self) -> String {
+        format!("{}.tmpl", self.tag())
+    }
+}
+
+/// Every [`ScaffoldPlatform::tag`], in [`ScaffoldPlatform::ALL`] order.
+///
+/// Public for the same reason [`KNOWN_ARCHES`] is: a front-end (the
+/// `frust-cli` `--platforms` flag, the `frust-tui` create wizard) enumerates
+/// the choices from here instead of hardcoding them, so a new platform
+/// appears in the UI with no front-end change.
+pub fn known_platform_tags() -> Vec<&'static str> {
+    ScaffoldPlatform::ALL
+        .iter()
+        .map(ScaffoldPlatform::tag)
+        .collect()
+}
+
+/// Splits a manifest entry's logical path into `(platform, remainder)` if
+/// its FIRST path component is a `<platform>.tmpl` root directory. `None`
+/// for a platform-agnostic entry (`Cargo.toml.tmpl`, `src/lib.rs.tmpl`, the
+/// assets) — which is why the check is anchored at the first component and
+/// not a substring search.
+pub fn split_platform_dir(logical: &str) -> Option<(ScaffoldPlatform, &str)> {
+    let (head, rest) = logical.split_once('/')?;
+    let platform = ScaffoldPlatform::ALL
+        .iter()
+        .copied()
+        .find(|platform| head == platform.template_dir())?;
+    Some((platform, rest))
 }
 
 /// How a manifest entry's content should be handled.
@@ -125,9 +301,10 @@ impl Source<'_> {
     }
 }
 
-/// Generates a new app at `dest` from the embedded `templates/app` tree (or
-/// `template_dir_override`, for development). Returns the relative paths
-/// written, in manifest order. Refuses a non-empty `dest` unless
+/// Generates a new app at `dest` from the embedded `crates/frust-drive/templates/app` tree (or
+/// `template_dir_override`, for development), emitting
+/// [`ScaffoldPlatform::DEFAULT`]'s platform trees. Returns the relative
+/// paths written, in manifest order. Refuses a non-empty `dest` unless
 /// `overwrite` is set.
 ///
 /// `arch` selects an opt-in template variant (`None` for the default
@@ -135,12 +312,48 @@ impl Source<'_> {
 /// [`KNOWN_ARCHES`]'s doc for the manifest convention an arch-scoped entry
 /// follows). `Some` value not in [`KNOWN_ARCHES`] is rejected before any
 /// file is written.
+///
+/// The platform-selecting form is [`generate_with_platforms`]; this one is
+/// literally that call against [`ScaffoldPlatform::DEFAULT`], so the
+/// long-standing "every platform tree is unconditional" behaviour every
+/// existing caller depends on is preserved by construction rather than by a
+/// parallel code path that could drift from it.
 pub fn generate(
     dest: &Path,
     ctx: &TemplateContext,
     template_dir_override: Option<&Path>,
     overwrite: bool,
     arch: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    generate_with_platforms(
+        dest,
+        ctx,
+        template_dir_override,
+        overwrite,
+        arch,
+        ScaffoldPlatform::DEFAULT,
+    )
+}
+
+/// [`generate`], with the platform trees to emit chosen explicitly.
+///
+/// `platforms` filters the manifest's `<platform>.tmpl/` subtrees (see
+/// [`ScaffoldPlatform`]); every platform-agnostic entry — the Cargo
+/// manifest, `frust.toml`, `src/`, the assets — is emitted regardless, so an
+/// empty `platforms` slice yields a valid app crate with no platform project
+/// at all rather than an error. The `arch` axis is applied independently and
+/// unchanged: the two selectors never interact, because no platform subtree
+/// carries an arch-tagged entry.
+///
+/// Order is unaffected: entries are still written in manifest order, with
+/// the excluded ones simply skipped.
+pub fn generate_with_platforms(
+    dest: &Path,
+    ctx: &TemplateContext,
+    template_dir_override: Option<&Path>,
+    overwrite: bool,
+    arch: Option<&str>,
+    platforms: &[ScaffoldPlatform],
 ) -> Result<Vec<PathBuf>> {
     check_destination(dest, overwrite)?;
 
@@ -165,12 +378,31 @@ pub fn generate(
         None => Source::Embedded(&EMBEDDED_APP_TEMPLATE),
     };
     let manifest = source.manifest()?;
-    let render_vars = ctx.render_vars();
+    // Platform-inclusion axis, threaded into the render context too: a
+    // platform-agnostic file that is ALWAYS emitted (`Cargo.toml`) can still
+    // carry content — the `windows/build.rs` wiring — that only makes sense
+    // when a particular platform subtree exists, so every `.tmpl` file gets
+    // one `{{ platform_<tag> }}` boolean-shaped var per
+    // `ScaffoldPlatform::ALL` entry, not just the coarser whole-subtree
+    // skip below. See `context::platform_render_vars`'s doc.
+    let mut render_vars = ctx.render_vars();
+    render_vars.extend(context::platform_render_vars(platforms));
     let path_vars = ctx.path_vars();
 
     let mut written = Vec::with_capacity(manifest.len());
     for entry in &manifest {
         let (mode, logical) = classify(entry);
+
+        // Platform-inclusion axis: an entry under a `<platform>.tmpl/` root
+        // is emitted only when that platform is selected. Checked before
+        // arch resolution because the two axes are independent — no platform
+        // subtree carries an arch-tagged entry — and a de-selected platform's
+        // entries need no further consideration at all.
+        if let Some((platform, _)) = split_platform_dir(logical)
+            && !platforms.contains(&platform)
+        {
+            continue;
+        }
 
         // Arch-tag resolution: an entry whose logical path carries a
         // recognized `.{arch}` suffix only renders when that tag is the
@@ -212,7 +444,7 @@ pub fn generate(
 }
 
 /// Generates a new out-of-tree **design-system** crate at `dest` from the
-/// embedded `templates/design-system` tree (or `template_dir_override`, for
+/// embedded `crates/frust-drive/templates/design-system` tree (or `template_dir_override`, for
 /// development). Returns the relative paths written, in manifest order.
 /// Refuses a non-empty `dest` unless `overwrite` is set — the same contract
 /// [`generate`] carries for an app scaffold.
@@ -308,6 +540,7 @@ fn write_entry(
 /// filename allowlist instead. Currently only the Gradle wrapper script
 /// (`android.tmpl/gradlew`); its Windows counterpart (`gradlew.bat`)
 /// doesn't need a Unix exec bit.
+#[cfg(unix)]
 const EXECUTABLE_FILENAMES: &[&str] = &["gradlew"];
 
 /// Sets the Unix executable bit (`0o755`) on `path` if its file name is in
@@ -359,6 +592,7 @@ fn check_destination(dest: &Path, overwrite: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_dirs::BuildLayout;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
@@ -472,7 +706,8 @@ mod tests {
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
         let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();
-        // Verify build-output patterns are present (kept in sync with clean.rs REMOVED_DIRS).
+        // Verify build-output patterns are present (kept in sync with
+        // `build_dirs::{CLEAN_DIRS, LEGACY_CLEAN_DIRS}`).
         assert!(gitignore.contains("android/app/build/"), "{gitignore}");
         // The `:frust-embedding` module's redirected Gradle output.
         assert!(gitignore.contains("android/build/"), "{gitignore}");
@@ -482,7 +717,29 @@ mod tests {
             gitignore.contains("android/local.properties"),
             "{gitignore}"
         );
+        // Xcode's per-user state, written whenever the project is opened.
+        assert!(gitignore.contains("xcuserdata/"), "{gitignore}");
         assert!(dest.join("assets/.gitkeep").exists());
+        // The Android link-flags file: a dot-directory manifest entry
+        // (`.cargo/config.toml`), carried verbatim so a scaffolded app
+        // inherits `--pack-dyn-relocs=android`/`--icf=all` unchanged from the
+        // embedded template this crate owns. Structural agreement between
+        // the template and this checkout's own root `.cargo/config.toml` is
+        // a separate concern this crate has no reach into — it is
+        // `crates/frust-cli/tests/profile_sync.rs`'s
+        // `android_cargo_config_identical_between_root_and_template`.
+        assert!(dest.join(".cargo/config.toml").exists());
+        let cargo_config = fs::read_to_string(dest.join(".cargo/config.toml")).unwrap();
+        let embedded_cargo_config = EMBEDDED_APP_TEMPLATE
+            .get_file(".cargo/config.toml")
+            .expect("embedded template must carry .cargo/config.toml")
+            .contents_utf8()
+            .expect(".cargo/config.toml must be valid UTF-8");
+        assert_eq!(
+            cargo_config, embedded_cargo_config,
+            "the scaffolded .cargo/config.toml must be byte-identical to the \
+             embedded `crates/frust-drive/templates/app/.cargo/config.toml`"
+        );
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());
 
@@ -609,7 +866,8 @@ mod tests {
             "project(\":frust-embedding\").projectDir =",
             "file(providers.gradleProperty(\"frust.embedding.dir\").get())",
             "gradle.lifecycle.beforeProject {",
-            "layout.buildDirectory.set(rootDir.resolve(\"build/frust-embedding\"))",
+            "layout.buildDirectory.set(rootDir.resolve(\"../build/android/app\"))",
+            "layout.buildDirectory.set(rootDir.resolve(\"../build/android/frust-embedding\"))",
         ] {
             assert!(
                 settings.contains(needle),
@@ -1058,7 +1316,7 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20android:icon=\"@mipmap/ic_launcher\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.Material.NoActionBar\">\n\
              \n\
              \x20\x20\x20\x20\x20\x20\x20\x20<!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->\n\
              \x20\x20\x20\x20\x20\x20\x20\x20<meta-data android:name=\"dev.frust.nativeLibrary\" android:value=\"{project}\" />\n\
@@ -1068,7 +1326,7 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:exported=\"true\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:configChanges=\"orientation|screenSize|keyboardHidden|uiMode\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:windowSoftInputMode=\"adjustResize\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.Material.NoActionBar\">\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<intent-filter>\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<action android:name=\"android.intent.action.MAIN\" />\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<category android:name=\"android.intent.category.LAUNCHER\" />\n\
@@ -1308,14 +1566,16 @@ mod tests {
 
         generate(&dest, &ctx, None, false, None).unwrap();
 
-        let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/app");
+        let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/app");
+        let mut render_vars = ctx.render_vars();
+        render_vars.extend(context::platform_render_vars(ScaffoldPlatform::DEFAULT));
         for (raw_name, out_name) in [
             ("Cargo.toml.tmpl", "Cargo.toml"),
             ("src/lib.rs.tmpl", "src/lib.rs"),
         ] {
             let raw = fs::read_to_string(repo_templates.join(raw_name))
                 .unwrap_or_else(|e| panic!("reading {raw_name}: {e}"));
-            let expected = renderer::render(&raw, &ctx.render_vars()).unwrap();
+            let expected = renderer::render(&raw, &render_vars).unwrap();
             let actual = fs::read_to_string(dest.join(out_name))
                 .unwrap_or_else(|e| panic!("reading generated {out_name}: {e}"));
             assert_eq!(
@@ -1377,9 +1637,7 @@ mod tests {
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains(
-                "clean-signals = { git = \"https://github.com/f0x-it-llc/clean-signals-rs\", rev = \"910f626\" }"
-            ),
+            cargo_toml.contains("clean-signals = \"0.1\""),
             "{cargo_toml}"
         );
         // The notes-app demo's plugin dependency doesn't apply to this
@@ -1626,7 +1884,24 @@ mod tests {
             build_rs.contains("winresource::WindowsResource::new()"),
             "{build_rs}"
         );
-        assert!(build_rs.contains("windows/icon.ico"), "{build_rs}");
+        // Pinned to the full BuildLayout-derived path — a bare
+        // `.contains("windows/icon.ico")` would also match a stale
+        // pre-migration literal (e.g. a wrongly reintroduced root-level
+        // `windows/icon.ico`), silently passing on the wrong path.
+        // The generated `windows/build.rs` embeds this path as a portable,
+        // forward-slash literal (it is a plain Rust string in the template,
+        // not rendered from `BuildLayout` at scaffold time) — so the pin
+        // below must compare the same portable form rather than
+        // `BuildLayout::windows_icon()`'s own `PathBuf`, which renders with
+        // the host's native separator (backslash on Windows).
+        let icon_path = crate::host_path::to_portable_string(&BuildLayout::windows_icon());
+        let icon_path = icon_path.as_str();
+        assert_eq!(icon_path, "build/desktop/windows/icon.ico");
+        assert!(
+            build_rs.contains(icon_path),
+            "windows/build.rs must reference `{icon_path}` \
+             (BuildLayout::windows_icon()):\n{build_rs}"
+        );
         assert!(build_rs.contains(&ctx.title_case_name), "{build_rs}");
         assert!(!build_rs.contains("{{"), "{build_rs}");
 
@@ -1681,6 +1956,103 @@ mod tests {
 
         let _ = fs::remove_dir_all(&default_dest);
         let _ = fs::remove_dir_all(&clean_signals_dest);
+    }
+
+    /// The browser target's one dependency row, in BOTH `Cargo.toml`
+    /// variants: `frust::app!` expands to `frust::web_app!` on `wasm32`, and
+    /// that expansion carries a `#[wasm_bindgen(start)]` attribute whose own
+    /// generated glue names `wasm_bindgen::` paths inside the app crate — so
+    /// the app crate needs the dependency edge itself (without it the
+    /// scaffold fails `E0433: cannot find module or crate `wasm_bindgen``).
+    ///
+    /// The pin is asserted EXACT, not merely present: `wasm-bindgen`'s crate
+    /// and CLI share a schema version, so `=0.2.128` is a contract with the
+    /// host toolchain rather than a semver floor (Version-Pin Policy).
+    #[test]
+    fn both_cargo_toml_variants_carry_the_exact_wasm32_wasm_bindgen_pin() {
+        let ctx = test_context();
+
+        let default_dest = unique_temp_dir("wasm-row-default");
+        generate(&default_dest, &ctx, None, false, None).unwrap();
+        let clean_signals_dest = unique_temp_dir("wasm-row-clean-signals");
+        generate(
+            &clean_signals_dest,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+        )
+        .unwrap();
+
+        for dest in [&default_dest, &clean_signals_dest] {
+            let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+            assert!(
+                cargo_toml.contains("[target.'cfg(target_arch = \"wasm32\")'.dependencies]"),
+                "{cargo_toml}"
+            );
+            assert!(
+                cargo_toml.contains("wasm-bindgen = \"=0.2.128\""),
+                "{cargo_toml}"
+            );
+            // Target-gated, never an unconditional row: a native build must
+            // not resolve it.
+            assert!(
+                !cargo_toml.contains("\nwasm-bindgen = \"=0.2.128\"\n\n[dependencies]"),
+                "{cargo_toml}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&default_dest);
+        let _ = fs::remove_dir_all(&clean_signals_dest);
+    }
+
+    /// `src/main.rs`'s target gating, which is what makes a scaffold
+    /// buildable for the browser at all.
+    ///
+    /// Two independent facts, both load-bearing:
+    ///
+    /// 1. The desktop `main` is gated off `wasm32` as well as Android —
+    ///    `frust::app!` emits no `__frust_main` on either, so calling it
+    ///    there is `E0425`.
+    /// 2. The `wasm32` `main` is NOT empty. On that target this crate's
+    ///    `cdylib` and its bin compile to the same
+    ///    `<profile>/<name>.wasm` — cargo reports an "output filename
+    ///    collision" and writes one of them, in an order nothing downstream
+    ///    can choose. Binding the library's browser entry keeps the whole
+    ///    library in the bin's link graph, so BOTH candidates are complete,
+    ///    startable modules; an empty `main` there ships a few-kilobyte stub
+    ///    that instantiates and silently mounts nothing.
+    #[test]
+    fn generate_main_rs_gates_the_desktop_entry_off_wasm32_and_keeps_the_lib_linked() {
+        let dest = unique_temp_dir("main-rs-wasm-gate");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let main_rs = fs::read_to_string(dest.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("#[cfg(not(any(target_os = \"android\", target_arch = \"wasm32\")))]"),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains(&format!("{}::__frust_main();", ctx.project_name)),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains("#[cfg(target_arch = \"wasm32\")]"),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains(&format!(
+                "let _entry: fn() = {}::__frust_web_start;",
+                ctx.project_name
+            )),
+            "the wasm32 `main` must keep the library's browser entry in the \
+             binary's link graph:\n{main_rs}"
+        );
+        assert!(!main_rs.contains("{{"), "{main_rs}");
+
+        let _ = fs::remove_dir_all(&dest);
     }
 
     #[test]
@@ -1742,7 +2114,34 @@ mod tests {
         assert!(toml.contains("# [macos]"), "{toml}");
         assert!(toml.contains("# [windows]"), "{toml}");
         assert!(toml.contains("# [linux]"), "{toml}");
+        // The browser stub is the fourth platform's, and documents every
+        // `manifest::WebSection` key at its own default.
+        assert!(toml.contains("# [web]"), "{toml}");
+        for key in [
+            "# host-dir = \"web\"",
+            "# out-dir = \"build/web\"",
+            "# wasm-opt = true",
+            "# port = 8000",
+        ] {
+            assert!(toml.contains(key), "missing `{key}` in:\n{toml}");
+        }
+        assert!(
+            toml.contains(&format!("# out-name = \"{}\"", ctx.project_name)),
+            "{toml}"
+        );
         assert!(!toml.contains("{{"), "{toml}");
+
+        // Commented out means *inert*: the scaffolded manifest still parses
+        // and still carries no `[web]` section, so a browser build runs on
+        // the documented defaults rather than on whatever the stub spells.
+        let parsed = crate::manifest::load_optional(&dest)
+            .unwrap()
+            .expect("the scaffolded frust.toml must parse");
+        assert!(
+            parsed.web.is_none(),
+            "the `[web]` stub must stay commented out: {:?}",
+            parsed.web
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }
@@ -1780,6 +2179,532 @@ mod tests {
                 path.display()
             );
         }
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    // ---- platform-inclusion axis -------------------------------------
+
+    /// The repository root, resolved `CARGO_MANIFEST_DIR`-relative — used by
+    /// the drift tests below to read the `platform/web` embedder these
+    /// templates are derived from.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// A verbatim source file as `renderer::render` would emit it: minijinja
+    /// keeps Jinja2's `keep_trailing_newline = false` default and drops one
+    /// trailing newline from every rendered template, so a `.tmpl` copied
+    /// byte-for-byte from a source file still loses that byte on the way
+    /// out. Every rendered file in a scaffolded project already shows this
+    /// (`linux/app.desktop`, `macos/Info.plist`, …); the drift tests below
+    /// model it rather than treating it as drift.
+    fn as_rendered(raw: &str) -> &str {
+        raw.strip_suffix('\n').unwrap_or(raw)
+    }
+
+    /// Every file under `root`, as `(relative path, bytes)`, sorted by path.
+    fn tree_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            let mut entries: Vec<_> = fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("walked path is under root")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((relative, fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[test]
+    fn platform_tags_round_trip_and_cover_every_variant() {
+        for platform in ScaffoldPlatform::ALL {
+            assert_eq!(ScaffoldPlatform::from_tag(platform.tag()), Some(*platform));
+            assert_eq!(platform.template_dir(), format!("{}.tmpl", platform.tag()));
+        }
+        assert_eq!(ScaffoldPlatform::from_tag("solaris"), None);
+        assert_eq!(
+            known_platform_tags(),
+            vec!["android", "ios", "macos", "windows", "linux", "web"]
+        );
+        // The default set is exactly the pre-axis five: every platform
+        // except the browser target.
+        assert_eq!(
+            ScaffoldPlatform::DEFAULT.len(),
+            ScaffoldPlatform::ALL.len() - 1
+        );
+        assert!(!ScaffoldPlatform::DEFAULT.contains(&ScaffoldPlatform::Web));
+        for platform in ScaffoldPlatform::DEFAULT {
+            assert!(ScaffoldPlatform::ALL.contains(platform));
+        }
+    }
+
+    /// The platform check is anchored at the entry's FIRST path component:
+    /// a platform-agnostic entry is never captured, and neither is a nested
+    /// directory that happens to share a platform's name.
+    #[test]
+    fn split_platform_dir_matches_only_a_leading_platform_marker_directory() {
+        assert_eq!(
+            split_platform_dir("web.tmpl/index.html"),
+            Some((ScaffoldPlatform::Web, "index.html"))
+        );
+        assert_eq!(
+            split_platform_dir("android.tmpl/app/build.gradle.kts"),
+            Some((ScaffoldPlatform::Android, "app/build.gradle.kts"))
+        );
+        for agnostic in [
+            "Cargo.toml",
+            "src/lib.rs",
+            "assets/logo.png",
+            "web/index.html",
+            "src/web.tmpl/thing.rs",
+        ] {
+            assert_eq!(split_platform_dir(agnostic), None, "{agnostic}");
+        }
+    }
+
+    /// The golden test the axis is judged on: excluding the browser target
+    /// must leave today's scaffold **byte-identical**, and including it must
+    /// add the web tree and NOTHING else — not a changed byte anywhere in
+    /// the other 63 files, not a reordering, not an extra directory.
+    #[test]
+    fn including_web_adds_exactly_the_web_tree_and_changes_no_other_file() {
+        let without = unique_temp_dir("platforms-without-web");
+        let with = unique_temp_dir("platforms-with-web");
+        let ctx = test_context();
+
+        let default_written = generate(&without, &ctx, None, false, None).unwrap();
+        let all_written =
+            generate_with_platforms(&with, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
+
+        let before = tree_snapshot(&without);
+        let after = tree_snapshot(&with);
+
+        // Path sets differ by exactly the two web files.
+        let before_paths: Vec<&str> = before.iter().map(|(p, _)| p.as_str()).collect();
+        let after_paths: Vec<&str> = after.iter().map(|(p, _)| p.as_str()).collect();
+        let added: Vec<&str> = after_paths
+            .iter()
+            .copied()
+            .filter(|p| !before_paths.contains(p))
+            .collect();
+        let removed: Vec<&str> = before_paths
+            .iter()
+            .copied()
+            .filter(|p| !after_paths.contains(p))
+            .collect();
+        assert_eq!(added, vec!["web/frust_web.js", "web/index.html"]);
+        assert!(removed.is_empty(), "excluding web removed {removed:?}");
+
+        // Every shared file is byte-identical.
+        for (path, bytes) in &before {
+            let (_, other) = after
+                .iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("`{path}` missing from the with-web scaffold"));
+            assert_eq!(
+                bytes, other,
+                "`{path}` differs between the two platform sets"
+            );
+        }
+
+        // And the returned path lists agree the same way (manifest order,
+        // web appended where its manifest rows sit).
+        assert_eq!(all_written.len(), default_written.len() + 2);
+        for written in &default_written {
+            assert!(
+                all_written.contains(written),
+                "`{}` dropped from the with-web run",
+                written.display()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&without);
+        let _ = fs::remove_dir_all(&with);
+    }
+
+    /// `generate` is defined as `generate_with_platforms(.., DEFAULT)`;
+    /// this pins that the two really do produce the same tree, so the
+    /// wrapper can never drift from the set it claims to pass.
+    #[test]
+    fn generate_equals_generate_with_platforms_over_the_default_set() {
+        let via_wrapper = unique_temp_dir("platforms-wrapper");
+        let via_explicit = unique_temp_dir("platforms-explicit");
+        let ctx = test_context();
+
+        generate(&via_wrapper, &ctx, None, false, None).unwrap();
+        generate_with_platforms(
+            &via_explicit,
+            &ctx,
+            None,
+            false,
+            None,
+            ScaffoldPlatform::DEFAULT,
+        )
+        .unwrap();
+
+        assert_eq!(tree_snapshot(&via_wrapper), tree_snapshot(&via_explicit));
+
+        let _ = fs::remove_dir_all(&via_wrapper);
+        let _ = fs::remove_dir_all(&via_explicit);
+    }
+
+    /// A de-selected platform's whole subtree disappears; the
+    /// platform-agnostic files (crate manifest, `frust.toml`, `src/`,
+    /// assets) are never affected by the axis.
+    #[test]
+    fn generate_with_platforms_emits_only_the_selected_platform_trees() {
+        let dest = unique_temp_dir("platforms-web-only");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[ScaffoldPlatform::Web]).unwrap();
+
+        assert!(dest.join("web/index.html").is_file());
+        assert!(dest.join("web/frust_web.js").is_file());
+        for absent in ["android", "ios", "macos", "windows", "linux"] {
+            assert!(
+                !dest.join(absent).exists(),
+                "`{absent}/` must not be emitted"
+            );
+        }
+        // Platform-agnostic entries are untouched by the axis.
+        for present in ["Cargo.toml", "frust.toml", "src/lib.rs", "assets/logo.png"] {
+            assert!(
+                dest.join(present).exists(),
+                "`{present}` must still be emitted"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// An empty platform set is a valid request, not an error: a plain app
+    /// crate with no platform project at all.
+    #[test]
+    fn generate_with_no_platforms_still_emits_the_app_crate() {
+        let dest = unique_temp_dir("platforms-none");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[]).unwrap();
+
+        assert!(dest.join("Cargo.toml").is_file());
+        assert!(dest.join("src/lib.rs").is_file());
+        for absent in ["android", "ios", "macos", "windows", "linux", "web"] {
+            assert!(
+                !dest.join(absent).exists(),
+                "`{absent}/` must not be emitted"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// `windows/build.rs` is only ever a valid `build` script when the
+    /// `windows.tmpl/` subtree is actually emitted — a selection that
+    /// excludes it must not still
+    /// wire the manifest's `build =` key or the `cfg(windows)`
+    /// build-dependency table, or `cargo build` fails immediately trying to
+    /// read a file that was never written.
+    #[test]
+    fn generate_with_platforms_web_only_omits_windows_build_wiring() {
+        let dest = unique_temp_dir("platforms-web-only-no-windows-wiring");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[ScaffoldPlatform::Web]).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            !cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            !cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+        assert!(!cargo_toml.contains("winresource"), "{cargo_toml}");
+        assert!(!cargo_toml.contains("{{"), "{cargo_toml}");
+        assert!(!dest.join("windows").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// The counterpart of the test above: selecting every platform (not
+    /// just the pre-axis [`ScaffoldPlatform::DEFAULT`] set the byte-identity
+    /// golden already covers) still wires both pieces.
+    #[test]
+    fn generate_with_platforms_all_still_wires_windows_build() {
+        let dest = unique_temp_dir("platforms-all-windows-wiring");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+        assert!(cargo_toml.contains("winresource = \"0.1\""), "{cargo_toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// An empty platform selection — [`generate_with_no_platforms_still_emits_the_app_crate`]'s
+    /// case — must not leave the windows wiring behind either: the manifest
+    /// this produces is the one [`generate_with_platforms`]'s own doc
+    /// promises is "a valid app crate", which a stray `build =
+    /// "windows/build.rs"` key would silently break for every host.
+    #[test]
+    fn generate_with_no_platforms_cargo_toml_carries_neither_windows_wiring_key() {
+        let dest = unique_temp_dir("platforms-none-no-windows-wiring");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[]).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            !cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            !cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Both `Cargo.toml.tmpl` variants must obey the platform axis
+    /// identically — the same clean-signals-guardrail precedent
+    /// [`generate_wires_windows_build_script_identically_in_both_cargo_toml_variants`]
+    /// pins for the always-on case, applied to a windows-less selection.
+    #[test]
+    fn generate_with_platforms_web_only_omits_windows_wiring_in_both_cargo_toml_variants() {
+        let ctx = test_context();
+
+        let default_dest = unique_temp_dir("platforms-web-only-default");
+        generate_with_platforms(
+            &default_dest,
+            &ctx,
+            None,
+            false,
+            None,
+            &[ScaffoldPlatform::Web],
+        )
+        .unwrap();
+        let clean_signals_dest = unique_temp_dir("platforms-web-only-clean-signals");
+        generate_with_platforms(
+            &clean_signals_dest,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+            &[ScaffoldPlatform::Web],
+        )
+        .unwrap();
+
+        for dest in [&default_dest, &clean_signals_dest] {
+            let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+            assert!(
+                !cargo_toml.contains("build = \"windows/build.rs\""),
+                "{cargo_toml}"
+            );
+            assert!(
+                !cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+                "{cargo_toml}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&default_dest);
+        let _ = fs::remove_dir_all(&clean_signals_dest);
+    }
+
+    /// Acceptance criterion (2): a windows-less manifest must actually
+    /// RESOLVE, not merely fail two substring checks. `scaffold` is a pure
+    /// file-write module with no `ProcessRunner` seam of its own (see
+    /// `docs/CLI_ARCHITECTURE.md`'s scaffold row) and this crate's own real
+    /// Cargo invocations are `frust-cli`'s ignored build gates, out of this
+    /// task's declared write scope — so this resolves the manifest text with
+    /// the `toml` crate (already a dependency, used by
+    /// `context::manifest_names_package`) instead of shelling out to `cargo
+    /// metadata`. LIMITATION: this proves the emitted manifest is
+    /// well-formed TOML with no dangling `package.build` / `cfg(windows)`
+    /// build-dependency table; it does not resolve the crate's dependency
+    /// graph the way `cargo metadata`/`cargo build` would — that end-to-end
+    /// proof is acceptance criterion (3)'s scratch build.
+    #[test]
+    fn generate_with_platforms_web_only_manifest_parses_with_no_windows_build_key() {
+        let dest = unique_temp_dir("platforms-web-only-manifest-resolves");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[ScaffoldPlatform::Web]).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        // `toml::Table` (a keyed document), not `toml::Value::from_str`
+        // (which parses a single bare value expression, not a whole
+        // multi-table document, on this crate's pinned `1.1.4+spec-1.1.0`
+        // line) — mirrors `context::manifest_names_package`'s existing
+        // typed-deserialize precedent.
+        let manifest: toml::Table =
+            toml::from_str(&cargo_toml).expect("generated Cargo.toml must be valid TOML");
+
+        let package = manifest
+            .get("package")
+            .and_then(|p| p.as_table())
+            .expect("generated Cargo.toml must have a [package] table");
+        assert!(
+            !package.contains_key("build"),
+            "a web-only selection must emit no `package.build` key: {package:?}"
+        );
+
+        let has_windows_build_deps = manifest
+            .get("target")
+            .and_then(|t| t.as_table())
+            .and_then(|t| t.get("cfg(windows)"))
+            .and_then(|t| t.as_table())
+            .is_some_and(|t| t.contains_key("build-dependencies"));
+        assert!(
+            !has_windows_build_deps,
+            "a web-only selection must emit no `[target.'cfg(windows)'.build-dependencies]` \
+             table: {manifest:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// The two axes are independent: selecting an arch does not resurrect a
+    /// de-selected platform, and selecting a platform does not disturb arch
+    /// resolution.
+    #[test]
+    fn the_platform_axis_and_the_arch_axis_do_not_interact() {
+        let dest = unique_temp_dir("platforms-with-arch");
+        let ctx = test_context();
+
+        generate_with_platforms(
+            &dest,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+            &[ScaffoldPlatform::Web],
+        )
+        .unwrap();
+
+        // Arch resolution still happened...
+        assert!(dest.join("src/features/greeting/domain/mod.rs").is_file());
+        // ...and the platform selection still holds.
+        assert!(dest.join("web/index.html").is_file());
+        assert!(!dest.join("android").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    // ---- web host page ------------------------------------------------
+
+    #[test]
+    fn generate_web_host_page_substitutes_the_title_and_module_name() {
+        let dest = unique_temp_dir("web-host-page");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
+
+        let index = fs::read_to_string(dest.join("web/index.html")).unwrap();
+        assert!(index.contains("<title>My App</title>"), "{index}");
+        // The `?module=` default names this project's own wasm-bindgen
+        // output, which is what `manifest::WebSection::out_name_or` falls
+        // back to (`[app] name`) — the page and the build config agree
+        // without either reading the other.
+        assert!(index.contains("\"./pkg/my_app.js\""), "{index}");
+        assert!(!index.contains("./pkg/app.js"), "{index}");
+        // Strict-undefined rendering already guarantees this, but a
+        // placeholder surviving into a generated page is the exact failure
+        // an app author would hit first.
+        assert!(!index.contains("{{"), "{index}");
+        // The `.tmpl` marker never leaks into the emitted names.
+        assert!(!dest.join("web.tmpl").exists());
+        assert!(!dest.join("web/index.html.tmpl").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Drift guard #1: the scaffolded `frust_web.js` is a byte-identical
+    /// copy of `platform/web/frust_web.js`. That embedder is the source of
+    /// truth for the host-page contract; two copies of 300+ lines of glue
+    /// silently diverging is the whole risk this duplication carries, and
+    /// the glue is entirely app-agnostic so there is nothing to substitute.
+    #[test]
+    fn scaffolded_frust_web_js_is_byte_identical_to_the_platform_web_embedder() {
+        let dest = unique_temp_dir("web-drift-js");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
+
+        let embedder = fs::read_to_string(repo_root().join("platform/web/frust_web.js"))
+            .expect("reading platform/web/frust_web.js");
+        let scaffolded = fs::read_to_string(dest.join("web/frust_web.js")).unwrap();
+        assert_eq!(
+            scaffolded,
+            as_rendered(&embedder),
+            "crates/frust-drive/templates/app/web.tmpl/frust_web.js.tmpl has drifted from \
+             platform/web/frust_web.js — re-copy it verbatim rather than \
+             editing either copy alone"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Drift guard #2: the scaffolded `index.html` differs from
+    /// `platform/web/index.html` in exactly three documented ways — its
+    /// leading HTML comment (which addresses an app author rather than a
+    /// framework reader), its `<title>`, and its `?module=` default. Every
+    /// other byte — the whole `<style>` block that defines the canvas-host
+    /// contract, and the module script that calls `mount()` — must match.
+    #[test]
+    fn scaffolded_index_html_differs_from_the_embedder_only_in_title_and_module_default() {
+        /// Everything after the leading `<!-- ... -->` header comment.
+        fn body(page: &str) -> &str {
+            let end = page.find("-->").expect("host page opens with a comment");
+            &page[end + "-->".len()..]
+        }
+
+        let dest = unique_temp_dir("web-drift-html");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
+
+        let embedder = fs::read_to_string(repo_root().join("platform/web/index.html"))
+            .expect("reading platform/web/index.html");
+        let expected = body(&embedder)
+            .replace(
+                "<title>frust app</title>",
+                &format!("<title>{}</title>", ctx.title_case_name),
+            )
+            .replace("./pkg/app.js", &format!("./pkg/{}.js", ctx.project_name));
+        let scaffolded = fs::read_to_string(dest.join("web/index.html")).unwrap();
+        assert_eq!(
+            body(&scaffolded),
+            as_rendered(&expected),
+            "crates/frust-drive/templates/app/web.tmpl/index.html.tmpl has drifted from \
+             platform/web/index.html beyond its title and `?module=` default"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }

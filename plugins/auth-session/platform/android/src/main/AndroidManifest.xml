@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This module carries no `<uses-permission>` of its own: `CustomTabsIntent`'s
+  `launchUrl` is a plain `startActivity` under the hood — no permission is
+  needed to launch another app's Activity — and this module never binds to a
+  Custom Tabs service directly.
+
+  The `<queries>` block below is on `FrustAuthSessionHost`'s launch path, not
+  an optional optimization: every `start()` call probes for a Custom Tabs
+  provider — the resolved default `VIEW` handler first, then the installed
+  `http`/`https` handlers intersected with a well-known-browser allow-list —
+  before pinning the Custom Tab `Intent` (see `FrustAuthSessionHost.kt`'s
+  `pinCustomTabsProvider`). Android 11+'s package-visibility filtering hides
+  both that resolution and that enumeration without the `<queries>`
+  declarations below, so without them every launch would silently fall back
+  to an unpinned `Intent`, never reaching an installed Custom Tabs provider
+  even when one exists.
+
+  The provider below is how `FrustAuthSessionHost` obtains an application
+  `Context` BEFORE any Activity exists, mirroring `plugins/iap/platform/android`'s
+  `FrustIapInitProvider` (itself mirroring `plugins/camera/platform/android`'s
+  `FrustCameraInitProvider`). The host needs the application `Context` to
+  register its process-wide `Application.ActivityLifecycleCallbacks` as early
+  as possible — the first Activity is otherwise the only `Context` a plugin
+  would see, and that is too late to observe that very first resume. A no-op
+  `ContentProvider` whose `onCreate` runs at process start is the standard
+  library-self-initialization mechanism for exactly this (`androidx.startup`'s
+  `InitializationProvider`, Firebase's `FirebaseInitProvider`).
+
+  `${applicationId}` is substituted by AGP at manifest-merge time, so the
+  authority is unique per consuming app (two apps on one device cannot
+  collide). `exported="false"`: nothing outside the app may reach it — it
+  exposes no data and every ContentProvider operation throws/returns null.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.authsession`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+        <!-- `pinCustomTabsProvider` resolves the default no-host `http://` VIEW
+             handler and enumerates every installed https handler as
+             full-browser candidates; under Android 11+ package visibility
+             both resolutions are empty without these two queries, so no
+             provider is ever found and every launch falls back to an
+             unpinned Intent (observed on the gate device, whose default
+             browser has no Custom Tabs support). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
+    </queries>
+
+    <application>
+        <provider
+            android:name="dev.frust.authsession.FrustAuthSessionInitProvider"
+            android:authorities="${applicationId}.frustauthsessioninit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>

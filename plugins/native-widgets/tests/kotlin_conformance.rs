@@ -34,12 +34,22 @@
 //! together" comments; nothing previously failed if they drifted, and drift
 //! misroutes events silently (e.g. a slider drag decoding as a click).
 //!
-//! [`kind_constants_match_between_kotlin_and_rust`] pins the five `KIND_*`/
-//! `EVENT_KIND_*` pairs. [`value_changed_bit_packing_matches_between_kotlin_and_rust`]
+//! [`kind_constants_match_between_kotlin_and_rust`] pins every `KIND_*`/
+//! `EVENT_KIND_*` pair, whatever the table's length — including `SELECTION`
+//! (6), which is appended on BOTH sides even though only the Apple arms emit
+//! it (a Rust-only kind would fail the name-set comparison), `DATE` (7),
+//! appended after it and emitted by all three arms, and `RESELECTED` (8),
+//! appended after that and emitted only by the iOS tab bar; all three are
+//! pinned by value in [`the_appended_kinds_keep_their_codes_on_both_sides`].
+//! [`value_changed_bit_packing_matches_between_kotlin_and_rust`]
 //! pins the packing contract's mask/shift **values** (not their literal
 //! text — Kotlin's `0xFFFFFFFFL`/`shl 32` and Rust's `0xFFFF_FFFF`/`<< 32`
 //! are never textually identical, so the two sides are compared as parsed
-//! numbers instead).
+//! numbers instead). [`date_bit_packing_matches_between_kotlin_and_rust`]
+//! does the same for `onDateChanged` vs `pack_date` — every mask and every
+//! shift, in field order — and additionally pins the Kotlin side's `+ 1`
+//! month offset (`DatePicker` reports a 0-based month; the wire carries a
+//! 1-based one).
 //!
 //! # The byte-identity check is gone, and that is the point
 //!
@@ -204,6 +214,36 @@ fn kind_constants_match_between_kotlin_and_rust() {
     }
 }
 
+#[test]
+fn the_appended_kinds_keep_their_codes_on_both_sides() {
+    let kotlin_kinds = parse_kotlin_kind_constants(&read(KOTLIN_LISTENER_PATH));
+    let rust_kinds = parse_rust_event_kind_constants(&read(RUST_EVENTS_PATH));
+    // Append-only: the five shipped kinds keep 1-5, SELECTION took the next
+    // free code (6), DATE the one after it (7) and RESELECTED the one after
+    // that (8), on both sides.
+    for (name, value) in [
+        ("CLICK", 1),
+        ("TOGGLED", 2),
+        ("VALUE_CHANGED", 3),
+        ("DRAG_START", 4),
+        ("DRAG_END", 5),
+        ("SELECTION", 6),
+        ("DATE", 7),
+        ("RESELECTED", 8),
+    ] {
+        assert_eq!(
+            kotlin_kinds.get(name),
+            Some(&value),
+            "KIND_{name} in {KOTLIN_LISTENER_PATH} must stay {value} (append-only table)"
+        );
+        assert_eq!(
+            rust_kinds.get(name),
+            Some(&value),
+            "EVENT_KIND_{name} in {RUST_EVENTS_PATH} must stay {value} (append-only table)"
+        );
+    }
+}
+
 /// The body of `fn_name` in `contents`, from the line containing `<fn_kind>
 /// <fn_name>(` to the next line whose trimmed text is exactly `}` — good
 /// enough for this file's flat, single-block helper functions (mirrors
@@ -325,6 +365,104 @@ fn value_changed_bit_packing_matches_between_kotlin_and_rust() {
             u64::from(rust_unpack_shift),
         );
     }
+}
+
+/// Every hex literal in `text`, in order, as numeric values — the
+/// many-literal sibling of [`hex_literal_value`] (same `L`-suffix/`_`
+/// tolerance), for a packing expression with one mask per field.
+fn all_hex_literal_values(text: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(idx) = rest.find("0x") {
+        let after = &rest[idx + 2..];
+        let raw: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || *c == '_')
+            .collect();
+        let cleaned: String = raw.chars().filter(|c| *c != '_').collect();
+        if let Ok(value) = u64::from_str_radix(&cleaned, 16) {
+            out.push(value);
+        }
+        rest = &after[raw.len()..];
+    }
+    out
+}
+
+/// Every integer following an occurrence of `keyword` in `text`, in order —
+/// the many-shift sibling of [`int_after`].
+fn all_ints_after(text: &str, keyword: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(idx) = rest.find(keyword) {
+        let after = rest[idx + keyword.len()..].trim_start();
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(value) = digits.parse() {
+            out.push(value);
+        }
+        rest = &rest[idx + keyword.len()..];
+    }
+    out
+}
+
+#[test]
+fn date_bit_packing_matches_between_kotlin_and_rust() {
+    let kotlin_contents = read(KOTLIN_LISTENER_PATH);
+    let rust_contents = read(RUST_EVENTS_PATH);
+
+    // Kotlin: `onDateChanged`'s body, bounded by its own `nativeOnEvent`
+    // call rather than by [`extract_fn_body`]'s top-level `}` (a Kotlin
+    // method's closing brace is indented, so that helper would run on to the
+    // end of the class and sweep in every later literal).
+    let needle = "fun onDateChanged(";
+    let start = kotlin_contents
+        .find(needle)
+        .unwrap_or_else(|| panic!("no `{needle}` found in {KOTLIN_LISTENER_PATH}"));
+    let after = &kotlin_contents[start..];
+    let end = after
+        .find("nativeOnEvent(slotId, KIND_DATE")
+        .unwrap_or_else(|| {
+            panic!(
+                "`onDateChanged` in {KOTLIN_LISTENER_PATH} never calls \
+                 `nativeOnEvent(slotId, KIND_DATE, …)`"
+            )
+        });
+    let kotlin_body = &after[..end];
+    let kotlin_masks = all_hex_literal_values(kotlin_body);
+    let kotlin_shifts = all_ints_after(kotlin_body, "shl");
+
+    // Rust: `pack_date` — the one packing function every Apple arm and the
+    // Android decode path share.
+    let rust_body = extract_fn_body(&rust_contents, "fn", "pack_date", RUST_EVENTS_PATH);
+    let rust_masks = all_hex_literal_values(rust_body);
+    let rust_shifts = all_ints_after(rust_body, "<<");
+
+    assert_eq!(
+        rust_masks,
+        vec![0xFFFF, 0xFF, 0xFF],
+        "{RUST_EVENTS_PATH}'s pack_date no longer masks year/month/day as 16/8/8 bits — the \
+         scan's expectation and the documented layout must move together"
+    );
+    assert_eq!(
+        rust_shifts,
+        vec![16, 8],
+        "{RUST_EVENTS_PATH}'s pack_date no longer shifts year/month by 16/8"
+    );
+    assert_eq!(
+        kotlin_masks, rust_masks,
+        "{KOTLIN_LISTENER_PATH}'s onDateChanged masks {kotlin_masks:?} but {RUST_EVENTS_PATH}'s \
+         pack_date masks {rust_masks:?} — edit both together, or a picked date silently decodes \
+         as a different (or no) date"
+    );
+    assert_eq!(
+        kotlin_shifts, rust_shifts,
+        "{KOTLIN_LISTENER_PATH}'s onDateChanged shifts {kotlin_shifts:?} but \
+         {RUST_EVENTS_PATH}'s pack_date shifts {rust_shifts:?} — edit both together"
+    );
+    assert!(
+        kotlin_body.contains("monthOfYear + 1"),
+        "{KOTLIN_LISTENER_PATH}'s onDateChanged must add 1 to DatePicker's 0-based `monthOfYear` \
+         before packing — the wire month is 1-based (`pack_date`'s layout table)"
+    );
 }
 
 /// The dotted package `contents` declares, from its `package <name>` line —

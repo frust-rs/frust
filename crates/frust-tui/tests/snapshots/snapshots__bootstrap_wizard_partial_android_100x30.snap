@@ -17,7 +17,7 @@ expression: "render_to_string(100, 30, &bootstrap_state(partial_report(), 2))"
  ACTIONS     │     ✓ Desktop           FIX IT — one command per confirm               │▓▓           
    New projec│   ! Doctor rollup       ▶ cargo install cargo-ndk                      │▓▓           
    Add plugin│                           Install a JDK 17+                            │▓▓           
-   Doctor · d│                                                                        │▓▓           
+   Doctor · i│                                                                        │▓▓           
    Build · b │                          ▶ Run in session    c copy                    │▓▓           
    Clean · c │                                                                        │▓▓           
    MCP off · │                                                                        │▓▓           
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &bootstrap_state(partial_report(), 2))"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

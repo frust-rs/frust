@@ -116,8 +116,21 @@ mod tests {
 
     const APP: &str = "/tmp/myapp/build/ios/Build/Products/Debug-Develop-iphoneos/Runner.app";
 
+    /// Mirrors [`resolve`]'s own `Path::new(app_path).join(INFO_PLIST)` +
+    /// `to_string_lossy()` exactly, rather than a hand-formatted
+    /// `"{app_path}/{INFO_PLIST}"`. `APP` is a `/`-only literal, but
+    /// `PathBuf::push` always inserts the *host's* separator (a backslash on
+    /// Windows) regardless of the separator style already in the base
+    /// string, so a hand-formatted key with a literal `/` before
+    /// `Info.plist` silently drifts from the real invocation key there —
+    /// building it the same way `resolve` does keeps the two identical on
+    /// every host.
     fn plutil_key(app_path: &str) -> String {
-        format!("{PLUTIL} -extract CFBundleIdentifier raw {app_path}/{INFO_PLIST}")
+        let plist = Path::new(app_path).join(INFO_PLIST);
+        format!(
+            "{PLUTIL} -extract CFBundleIdentifier raw {}",
+            plist.display()
+        )
     }
 
     fn ok(stdout: &str) -> Output {

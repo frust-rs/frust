@@ -186,6 +186,24 @@ echo
 # --- Locate built binaries -------------------------------------------------
 
 # Cargo's convention: package name with '-' replaced by '_' becomes the binary/lib name.
+# app_target_dir <app-dir> — cargo's real target directory for an app,
+# honouring the same precedence every frust pipeline uses: CARGO_TARGET_DIR
+# wins, else the app's own `.cargo/config.toml` `[build] target-dir`
+# (`build/rust` for a scaffolded app), else cargo's default — read back via
+# `cargo metadata` so this script never hard-codes `target/`.
+app_target_dir() {
+  local app="$1"
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    case "${CARGO_TARGET_DIR}" in
+      /*) echo "${CARGO_TARGET_DIR}" ;;
+      *) echo "${app}/${CARGO_TARGET_DIR}" ;;
+    esac
+    return 0
+  fi
+  (cd "${app}" && cargo metadata --format-version 1 --no-deps 2>/dev/null) \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'
+}
+
 PKG_NAME="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "${APP_DIR}/Cargo.toml" | head -n1)"
 if [ -z "${PKG_NAME}" ]; then
   echo "error: could not read [package] name from ${APP_DIR}/Cargo.toml" >&2
@@ -193,9 +211,17 @@ if [ -z "${PKG_NAME}" ]; then
 fi
 BIN_STEM="$(printf '%s' "${PKG_NAME}" | tr '-' '_')"
 
-# For cdylib (Android) or a binary: check both paths.
-RELEASE_BIN="${APP_DIR}/target/release/${BIN_STEM}"
-PROFILE_BIN="${APP_DIR}/target/profile/${BIN_STEM}"
+# For cdylib (Android) or a binary: check both paths, under cargo's real
+# target directory (CARGO_TARGET_DIR, else the app's own `[build]
+# target-dir` — `build/rust` for a scaffolded app — read back via
+# `cargo metadata`).
+TARGET_DIR="$(app_target_dir "${APP_DIR}")"
+if [ -z "${TARGET_DIR}" ]; then
+  echo "error: could not resolve cargo's target directory for ${APP_DIR} (cargo metadata failed)" >&2
+  exit 2
+fi
+RELEASE_BIN="${TARGET_DIR}/release/${BIN_STEM}"
+PROFILE_BIN="${TARGET_DIR}/profile/${BIN_STEM}"
 
 # On macOS, executables have no extension; on other platforms they might.
 # cargo build places binaries in target/(profile_name)/
@@ -285,11 +311,13 @@ if [ "${CHECK_ANDROID}" -eq 1 ]; then
     echo "Android release build OK."
 
     # Locate the .so.
-    SO_PATH="${APP_DIR}/target/aarch64-linux-android/release/lib${BIN_STEM}.so"
+    SO_PATH="${TARGET_DIR}/aarch64-linux-android/release/lib${BIN_STEM}.so"
 
     if [ ! -f "${SO_PATH}" ]; then
-      echo "SKIP Android .so checks: expected .so not found at ${SO_PATH}"
-      SKIP_COUNT=$((SKIP_COUNT + 1))
+      # The Android build just succeeded, so a missing .so is this script's
+      # path being wrong, not an environment gap — count it as a failure.
+      echo "FAIL Android .so checks: release .so not found at ${SO_PATH} after a successful build"
+      RELEASE_FAIL=1
     else
       # Same string checks for the .so.
       if ! check_strings_absent "${SO_PATH}" "frust-perf" "Android .so frust-perf strings"; then

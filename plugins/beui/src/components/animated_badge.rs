@@ -65,7 +65,7 @@ use crate::style::{
     BORDER_WIDTH, PATH_TOLERANCE, RADIUS_CONTROL, TEXT_XS, resolve_radius, scale_alpha, spacing,
     with_alpha,
 };
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::SPRING_SWAP;
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -308,18 +308,16 @@ impl AnimatedBadgeWidget {
             .unwrap_or_else(|| self.status.pulses_by_default())
     }
 
-    /// The style the label is shaped with — `font-medium` at the size rung.
+    /// The style the label is shaped with — `font-medium` at the size rung,
+    /// in the theme's `label_small` family.
     fn label_style(&self, theme: Option<&Theme>) -> TextStyle {
-        let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-            t.type_scale.label_small.family.clone()
-        });
-        TextStyle {
-            family,
+        let style = TextStyle {
             weight: FontWeight::MEDIUM,
             // Shaped with an ink the paint pass overrides; keeping it constant
             // keeps the shape cache off the colour.
             ..TextStyle::new(self.size.text_size() as f32, Color::BLACK)
-        }
+        };
+        themed_style(style, ThemeTextType::LabelSmall, theme)
     }
 
     /// The fill, border and ink `status` paints with.
@@ -1075,5 +1073,27 @@ mod tests {
         assert!((ping_pong(0.25) - ping_pong(0.75)).abs() < 1e-9);
         assert_eq!(cycle(PULSE_PERIOD, PULSE_PERIOD), 0.0, "the loop wraps");
         assert_eq!(cycle(Duration::from_millis(1), Duration::ZERO), 0.0);
+    }
+
+    // ---- Typeface: the label's family follows the live theme ---------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(200.0, 60.0);
+
+    fn probe_view(_: &mut ()) -> AnimatedBadgeView<()> {
+        animated_badge::<()>("Shipped")
+    }
+
+    #[test]
+    fn the_label_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the badge label", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn the_label_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the badge label", probe_view, PROBE_WINDOW);
     }
 }

@@ -84,7 +84,7 @@ use crate::motion::stagger::StaggerDirection;
 use crate::motion::{Ramp, Stagger};
 use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -591,15 +591,13 @@ fn sync_entries(slots: &mut Vec<Entry>, items: &[OverflowActionItem], base: usiz
     changed
 }
 
-/// An action label's style at `size`.
+/// An action label's style at `size`, in the theme's `label_large` family.
 fn action_style(theme: Option<&Theme>, size: f64) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
-        ..crate::text::label_style(size)
-    }
+    themed_style(
+        crate::text::label_style(size),
+        ThemeTextType::LabelLarge,
+        theme,
+    )
 }
 
 /// Paint lucide's `more-horizontal` mark — three dots — centred on `centre`.
@@ -1387,5 +1385,47 @@ mod tests {
             rec.rrects.len()
         );
         assert_eq!(rec.inks.len(), 3, "one run per visible action label");
+    }
+
+    // ---- Typeface: the action labels follow the live theme ------------------
+
+    use crate::text::typeface_probe::{
+        Face, Probe, assert_all, assert_control, assert_follows_a_live_family_swap,
+    };
+
+    /// Two primary actions with the overflow group expanded onto the rail.
+    fn probe_view(_: &mut ()) -> frust::StackView<()> {
+        frust::Stack(vec![any(overflow_actions::<(), _>(
+            vec![overflow_action("Edit"), overflow_action("Share")],
+            vec![overflow_action("Archive")],
+            |_: &mut (), _| {},
+        )
+        .expanded(true))])
+    }
+
+    #[test]
+    fn action_labels_paint_in_geist_under_the_beui_theme() {
+        assert_control("the action labels", WINDOW);
+        let mut probe = Probe::new(probe_view, WINDOW, crate::theme());
+        // The reveal reaches the overflow action's box on the layout after the
+        // paint that settles it, so the second frame is the settled rail.
+        probe.frame();
+        let runs = probe.frame();
+        assert_all(
+            "the action labels",
+            "under the beUI theme",
+            &runs,
+            Face::Geist,
+        );
+        assert_eq!(
+            runs.len(),
+            3,
+            "two primary labels and the revealed overflow one"
+        );
+    }
+
+    #[test]
+    fn action_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the action labels", probe_view, WINDOW);
     }
 }

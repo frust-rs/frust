@@ -1,11 +1,11 @@
 //! Source-scan conformance test locking the `frust::authoring` escape hatch
 //! shut for every migrated production consumer: no `benchmarks/frust_bench`,
-//! `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`, or
-//! `examples/playground` production source file may name `frust_core`,
-//! `frust_scene`, `frust_text`, `accesskit`, `kurbo`, or `peniko` as a crate
-//! path (the last three only outside their sanctioned `frust::`-prefixed
-//! valve — see below). Those
-//! five app-tier consumers were migrated onto `frust::authoring`; this test
+//! `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`,
+//! `examples/playground`, or `examples/native-widgets-demo` production source
+//! file may name `frust_core`, `frust_scene`, `frust_text`, `accesskit`,
+//! `kurbo`, or `peniko` as a crate path (the last three only outside their
+//! sanctioned `frust::`-prefixed valve — see below). Those
+//! six app-tier consumers were migrated onto `frust::authoring`; this test
 //! is what makes reopening that escape hatch a build failure instead of a
 //! silent regression the next PR review has to catch by eye.
 //!
@@ -23,7 +23,7 @@
 //!
 //! # What this checks
 //!
-//! Every `.rs` file under each of the five consumers' `src/` trees (see
+//! Every `.rs` file under each of the six consumers' `src/` trees (see
 //! [`CONSUMER_SRC_DIRS`]) is scanned for:
 //!
 //! 1. Any bare reference to `frust_core::`, `frust_scene::`, or
@@ -144,10 +144,10 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The five migrated production consumers this scan locks the authoring seam
+/// The six migrated production consumers this scan locks the authoring seam
 /// against, each a `src/` directory relative to the workspace root.
 /// `benchmarks/frust_bench` sits inside the root workspace graph;
-/// the four `examples/*` entries are standalone workspaces (their own
+/// the five `examples/*` entries are standalone workspaces (their own
 /// `[workspace]`, own `Cargo.lock` — root `Cargo.toml`'s `exclude` list)
 /// reached here purely by relative path from `CARGO_MANIFEST_DIR`, the same
 /// way any other source-scan conformance test in this repo reaches outside
@@ -158,6 +158,7 @@ const CONSUMER_SRC_DIRS: &[&str] = &[
     "examples/shadertoy/src",
     "examples/glyph-catalog/src",
     "examples/playground/src",
+    "examples/native-widgets-demo/src",
 ];
 
 /// True if `name` (a single path component) is a directory this scan must
@@ -190,11 +191,11 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every `.rs` file across the five consumers' `src/` trees, sorted for a
+/// Every `.rs` file across the six consumers' `src/` trees, sorted for a
 /// stable failure order. Panics loudly — rather than silently scanning zero
 /// files — if a scanned directory is missing (moved/renamed/not-yet-migrated
 /// consumer removed from the list) or if the total looks implausibly small
-/// for five real app-tier consumers; this is the failure mode that matters
+/// for six real app-tier consumers; this is the failure mode that matters
 /// most (a green test proving nothing).
 fn consumer_source_files() -> Vec<PathBuf> {
     let root = workspace_root();
@@ -221,7 +222,7 @@ fn consumer_source_files() -> Vec<PathBuf> {
     out.sort();
     assert!(
         out.len() > 100,
-        "expected well over 100 production source files across the five migrated consumers, \
+        "expected well over 100 production source files across the six migrated consumers, \
          found {} — the scan is probably looking in the wrong place",
         out.len()
     );

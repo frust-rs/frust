@@ -48,14 +48,24 @@
 //! not flatten a hole, while an app that *rejects* or transforms an edit still
 //! wins on the next rebuild (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
 //!
-//! # Typed entry only — no paste, no autofill
+//! # Typed entry and clipboard paste — no autofill
 //!
 //! Upstream has three insertion paths: keystrokes, `onPaste`, and the SMS
-//! one-time-code autofill that arrives as a whole `onChange` value. **Only the
-//! first exists here.** frust delivers no clipboard event a widget can read and
-//! no one-time-code autofill signal, so the multi-digit `insert` arm has nothing
-//! to feed it. This is the same limitation the sibling catalog's `input_otp`
-//! port records, inherited unchanged; an app that needs a code pasted sets
+//! one-time-code autofill that arrives as a whole `onChange` value. **Keystrokes
+//! and paste exist here; autofill does not.** A paste can start two ways: a
+//! platform clipboard manager or autofill system routes it in directly, or this
+//! widget decodes the paste chord itself at the key layer — ctrl-or-meta+V, the
+//! dedicated `NamedKey::Paste`, and the legacy Shift+Insert (see
+//! `handle_key`) — and *asks* the shell for the clipboard
+//! (`EventCtx::request_paste`), since only the shell can touch the host
+//! clipboard. Either way the text lands through
+//! `InputEvent::EditCommand(Paste(...))`, and this widget extracts ASCII
+//! digits and fills slots from the active position forward, stopping when
+//! full, firing callbacks as the final digit would. Copy, Cut, and SelectAll
+//! commands are consumed with no effect — the OTP field has no copy semantics
+//! (no selection, no clipboard write) and reveals nothing of its content
+//! to assistive tech beyond what `aria_label` records.
+//! The autofill signal still has no route; an app that needs an SMS code set
 //! `value` itself.
 //!
 //! # Degradations
@@ -79,10 +89,10 @@ use std::time::Duration;
 
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
-    Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, ErasedArgCallback,
-    EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene,
-    Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget,
-    erase_callback_arg,
+    Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EditCommand,
+    ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
+    PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
+    View, Widget, erase_callback_arg,
 };
 use frust::{Curve, FrameTime, SpringDescription, Theme};
 
@@ -91,7 +101,7 @@ use crate::components::switch;
 use crate::motion::Ramp;
 use crate::press::{Lane, inside_inclusive, keyframes_at, lerp_color, presses};
 use crate::style;
-use crate::text::{Label, LabelRun, SHAPING_INK};
+use crate::text::{Label, LabelRun, SHAPING_INK, ThemeTextType};
 use crate::tokens::motion::EASE_OUT;
 use crate::tokens::{BeuiTokens, sans_family};
 
@@ -726,8 +736,18 @@ fn slot_x(index: usize) -> f64 {
     index as f64 * (OTP_SLOT_WIDTH + OTP_SLOT_GAP)
 }
 
+/// The type-scale role a slot's digit takes its family from at layout.
+const DIGIT_ROLE: ThemeTextType = ThemeTextType::TitleLarge;
+
+/// The type-scale role the label takes its family from at layout.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the message takes its family from at layout.
+const MESSAGE_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
 /// The digit style: `text-xl font-semibold`, shaped with [`SHAPING_INK`] and
-/// re-brushed at paint so a status recolor costs no reshape.
+/// re-brushed at paint so a status recolor costs no reshape. The family here
+/// is the unthemed base; `layout` shapes in [`DIGIT_ROLE`]'s family.
 fn digit_style() -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -736,7 +756,8 @@ fn digit_style() -> TextStyle {
     }
 }
 
-/// The label style: `text-sm font-medium text-foreground`.
+/// The label style: `text-sm font-medium text-foreground`. The family here is
+/// the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s family.
 fn label_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -747,7 +768,8 @@ fn label_style(color: Color) -> TextStyle {
     }
 }
 
-/// The message style: `text-sm` in the status's own ink.
+/// The message style: `text-sm` in the status's own ink. The family here is
+/// the unthemed base; `layout` shapes in [`MESSAGE_ROLE`]'s family.
 fn message_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -819,17 +841,17 @@ impl Widget for OtpInputWidget {
         let digit = digit_style();
         for cell in &mut self.cells {
             if !cell.run.content().is_empty() {
-                cell.run.layout(ctx, &digit);
+                cell.run.layout_themed(ctx, &digit, DIGIT_ROLE);
             }
         }
 
         let label_size = match &mut self.label {
-            Some(label) => label.layout(ctx, &label_style(tint(colors.ink))),
+            Some(label) => label.layout_themed(ctx, &label_style(tint(colors.ink)), LABEL_ROLE),
             None => Size::ZERO,
         };
         let message_ink = tint(colors.status_hue(self.status));
         let message_size = match &mut self.message {
-            Some(message) => message.layout(ctx, &message_style(message_ink)),
+            Some(message) => message.layout_themed(ctx, &message_style(message_ink), MESSAGE_ROLE),
             None => Size::ZERO,
         };
 
@@ -1038,6 +1060,12 @@ impl Widget for OtpInputWidget {
                     EventResult::Ignored
                 }
             }
+            InputEvent::EditCommand(cmd) => {
+                if self.disabled {
+                    return EventResult::Ignored;
+                }
+                self.handle_command(ctx, cmd)
+            }
             InputEvent::Pointer(p) => {
                 let local = p.position - self.row.origin().to_vec2();
                 let over_row = inside_inclusive(local, self.row.size());
@@ -1113,12 +1141,49 @@ impl Widget for OtpInputWidget {
 }
 
 impl OtpInputWidget {
-    /// The keyboard surface — upstream's `onKeyDown` less its clipboard arms.
+    /// The keyboard surface — upstream's `onKeyDown`, with one deliberate
+    /// exception to its chord bail.
+    ///
+    /// Upstream's blanket `if (e.metaKey || e.ctrlKey || e.altKey) return`
+    /// costs it nothing on a browser's own Ctrl/Cmd+V: a DOM paste event
+    /// fires from the OS independently of `keydown`, so bailing there still
+    /// lets the paste land. Desktop has no such second channel — the shell
+    /// only reads its clipboard when a widget asks
+    /// (`EventCtx::request_paste`) — so the bail is faithful for every other
+    /// chord and wrong for this one. The paste chords are decoded first, in
+    /// exactly the shape `TextInput::handle_key` uses
+    /// (`crates/frust-widgets/src/textinput.rs`): ctrl-or-meta + `v` (ASCII
+    /// case-insensitive), the dedicated `NamedKey::Paste`, and the legacy
+    /// Shift+Insert. `alt` is never a chord modifier, matching TextInput — it
+    /// composes characters. Every other chord — Ctrl/Cmd+C/X/A included —
+    /// still falls through to the bail below and does nothing, which is
+    /// `handle_command`'s refusal for the same three verbs restated at the
+    /// key layer.
+    ///
     /// Returns whether the key belonged to this control.
     fn handle_key(&mut self, ctx: &mut EventCtx, key: &KeyEvent) -> bool {
-        // `if (e.metaKey || e.ctrlKey || e.altKey) return`: a shortcut chord is
-        // not an edit.
         let modifiers = &key.modifiers;
+        match &key.key {
+            Key::Character(text)
+                if (modifiers.ctrl || modifiers.meta) && text.eq_ignore_ascii_case("v") =>
+            {
+                ctx.request_paste();
+                return true;
+            }
+            Key::Named(NamedKey::Paste) => {
+                ctx.request_paste();
+                return true;
+            }
+            Key::Named(NamedKey::Insert) if modifiers.shift => {
+                ctx.request_paste();
+                return true;
+            }
+            _ => {}
+        }
+
+        // `if (e.metaKey || e.ctrlKey || e.altKey) return`: a shortcut chord is
+        // not an edit. The three paste chords above are the one exception,
+        // decoded before this bail so they are not swallowed here.
         if modifiers.ctrl || modifiers.alt || modifiers.meta {
             return false;
         }
@@ -1155,6 +1220,41 @@ impl OtpInputWidget {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// The clipboard command surface — upstream's `onPaste` and friends.
+    fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &EditCommand) -> EventResult {
+        match cmd {
+            EditCommand::Paste(text) => {
+                let was_complete = self.is_complete();
+                let digits = text.chars().filter(char::is_ascii_digit);
+                let mut changed = false;
+                for digit in digits {
+                    self.slots[self.active] = Some(digit);
+                    changed = true;
+                    // `active` always names the next slot to write, clamped at
+                    // the last slot — the same invariant `insert()` maintains
+                    // for a typed digit. A paste that fills the last slot
+                    // parks `active` there too, matching the typed path, and
+                    // stops rather than overwriting it with the next digit.
+                    if self.active < self.length - 1 {
+                        self.active += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if changed {
+                    self.commit(ctx, was_complete);
+                    self.blink_reset_pending = true;
+                    ctx.request_redraw();
+                }
+                EventResult::Handled
+            }
+            EditCommand::Copy | EditCommand::Cut | EditCommand::SelectAll => {
+                // Copy, Cut, and SelectAll are consumed with no effect for OTP fields.
+                EventResult::Handled
+            }
         }
     }
 }
@@ -1269,6 +1369,51 @@ mod tests {
 
     fn named(k: NamedKey) -> InputEvent {
         key(Key::Named(k))
+    }
+
+    fn chorded(k: Key, modifiers: Modifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: k,
+            modifiers,
+            repeat: false,
+        })
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn meta() -> Modifiers {
+        Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn paste(text: &str) -> InputEvent {
+        InputEvent::EditCommand(EditCommand::Paste(text.to_string()))
+    }
+
+    fn copy() -> InputEvent {
+        InputEvent::EditCommand(EditCommand::Copy)
+    }
+
+    fn cut() -> InputEvent {
+        InputEvent::EditCommand(EditCommand::Cut)
+    }
+
+    fn select_all() -> InputEvent {
+        InputEvent::EditCommand(EditCommand::SelectAll)
     }
 
     // ---- The bare-widget harness -------------------------------------------
@@ -1550,6 +1695,135 @@ mod tests {
         bare.press_key(NamedKey::Backspace);
         bare.type_digit('7');
         assert_eq!(bare.state.completes.len(), 2);
+    }
+
+    #[test]
+    fn paste_extracts_digits_from_pasted_text() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.dispatch(&paste("12-34 56"));
+        assert_eq!(bare.state.value, "123456");
+        assert_eq!(bare.state.changes, vec!["123456".to_string()]);
+        assert_eq!(bare.widget.active, 5, "clamped at the last slot");
+    }
+
+    #[test]
+    fn paste_fires_change_once_and_complete_once() {
+        let mut bare = Bare::new(3);
+        assert_eq!(bare.dispatch(&paste("123")), EventResult::Handled);
+        bare.round_trip();
+        assert_eq!(bare.state.changes, vec!["123".to_string()]);
+        assert_eq!(bare.state.completes, vec!["123".to_string()]);
+    }
+
+    #[test]
+    fn paste_stops_when_slots_are_full() {
+        let mut bare = Bare::new(3);
+        bare.dispatch(&paste("123456789"));
+        bare.round_trip();
+        assert_eq!(bare.state.value, "123");
+        assert_eq!(bare.widget.active, 2, "clamped at the last slot");
+    }
+
+    #[test]
+    fn paste_continues_from_the_active_position() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.type_digit('1');
+        bare.type_digit('2');
+        assert_eq!(bare.widget.active, 2);
+        bare.dispatch(&paste("345"));
+        bare.round_trip();
+        assert_eq!(bare.state.value, "12345");
+        assert_eq!(
+            bare.widget.active, 5,
+            "parked on the next empty slot, not the last pasted one"
+        );
+    }
+
+    #[test]
+    fn typing_after_a_partial_paste_fills_the_next_empty_slot_not_the_last_pasted_one() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.dispatch(&paste("123"));
+        bare.round_trip();
+        assert_eq!(bare.widget.active, 3);
+        // Regression for the caret invariant: a typed digit must land in the
+        // next empty slot, not overwrite the last slot the paste just filled.
+        bare.type_digit('4');
+        assert_eq!(bare.state.value, "1234");
+    }
+
+    #[test]
+    fn paste_ignores_non_digits() {
+        let mut bare = Bare::new(3);
+        bare.dispatch(&paste("a1b2c3"));
+        bare.round_trip();
+        assert_eq!(bare.state.value, "123");
+    }
+
+    #[test]
+    fn paste_with_no_digits_reports_no_change() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        assert_eq!(bare.dispatch(&paste("")), EventResult::Handled);
+        bare.round_trip();
+        assert!(
+            bare.state.changes.is_empty(),
+            "an empty paste is not an edit"
+        );
+        assert_eq!(bare.state.value, "");
+    }
+
+    #[test]
+    fn paste_with_only_non_digits_reports_no_change() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        assert_eq!(bare.dispatch(&paste("abc")), EventResult::Handled);
+        bare.round_trip();
+        assert!(
+            bare.state.changes.is_empty(),
+            "a paste with nothing to write is not an edit"
+        );
+        assert_eq!(bare.state.value, "");
+    }
+
+    #[test]
+    fn copy_is_a_no_op() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.type_digit('1');
+        assert_eq!(bare.dispatch(&copy()), EventResult::Handled);
+        bare.round_trip();
+        assert_eq!(bare.state.value, "1");
+        assert_eq!(bare.state.changes.len(), 1, "no change from copy");
+    }
+
+    #[test]
+    fn cut_is_a_no_op() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.type_digit('1');
+        assert_eq!(bare.dispatch(&cut()), EventResult::Handled);
+        bare.round_trip();
+        assert_eq!(bare.state.value, "1");
+        assert_eq!(bare.state.changes.len(), 1, "no change from cut");
+    }
+
+    #[test]
+    fn select_all_is_a_no_op() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        bare.type_digit('1');
+        assert_eq!(bare.dispatch(&select_all()), EventResult::Handled);
+        bare.round_trip();
+        assert_eq!(bare.state.value, "1");
+        assert_eq!(bare.state.changes.len(), 1, "no change from select_all");
+    }
+
+    #[test]
+    fn paste_is_ignored_when_disabled() {
+        let mut bare = Bare::new(OTP_DEFAULT_LENGTH);
+        let disabled =
+            Bare::view(String::new(), OTP_DEFAULT_LENGTH, OtpStatus::Idle).disabled(true);
+        let mut ctx = BuildCtx::new(&mut bare.counter);
+        View::<App>::rebuild(&disabled, &bare.view, &mut bare.widget, &mut ctx);
+        bare.view = disabled;
+
+        assert_eq!(bare.dispatch(&paste("123")), EventResult::Ignored);
+        assert!(bare.state.changes.is_empty());
     }
 
     #[test]
@@ -2015,6 +2289,94 @@ mod tests {
         );
     }
 
+    // ---- Paste chord (the desktop trigger) -----------------------------------
+    //
+    // `Bare`'s raw `EventCtx` (used for the editing model above) is never
+    // bracketed by a `RequestPass`, so `EventCtx::request_paste`'s flag is
+    // only observable through a real `RenderRoot` — the same reason focus and
+    // semantics live in this root-driven section rather than the one above.
+
+    #[test]
+    fn ctrl_v_asks_the_shell_to_paste_and_types_nothing() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.dispatch(&chorded(Key::Character("v".to_string()), ctrl()));
+        assert!(
+            h.root.take_paste_request(),
+            "ctrl+V must ask the shell for the clipboard"
+        );
+        assert!(h.state.changes.is_empty(), "no digit was typed");
+        assert!(h.state.completes.is_empty());
+    }
+
+    #[test]
+    fn meta_v_asks_the_shell_to_paste_and_types_nothing() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        // Uppercase, the way a Shift+Cmd+V chord would arrive — the decode is
+        // ASCII case-insensitive.
+        h.dispatch(&chorded(Key::Character("V".to_string()), meta()));
+        assert!(
+            h.root.take_paste_request(),
+            "meta+V must ask the shell for the clipboard"
+        );
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn named_paste_key_asks_the_shell_to_paste() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.dispatch(&named(NamedKey::Paste));
+        assert!(h.root.take_paste_request());
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn shift_insert_asks_the_shell_to_paste() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.dispatch(&chorded(Key::Named(NamedKey::Insert), shift()));
+        assert!(
+            h.root.take_paste_request(),
+            "Shift+Insert is the legacy paste chord"
+        );
+        assert!(h.state.changes.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_ctrl_x_and_ctrl_a_ask_for_nothing_and_change_nothing() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.type_digit('1');
+        for c in ["c", "x", "a"] {
+            h.dispatch(&chorded(Key::Character(c.to_string()), ctrl()));
+            assert!(
+                !h.root.take_paste_request(),
+                "ctrl+{c} must never ask for a paste"
+            );
+        }
+        assert_eq!(h.state.value, "1", "copy/cut/select-all changed nothing");
+        assert_eq!(
+            h.state.changes,
+            vec!["1".to_string()],
+            "no extra callback fired"
+        );
+        assert!(h.state.completes.is_empty());
+    }
+
+    #[test]
+    fn a_plain_digit_still_types_once_the_paste_chords_are_decoded() {
+        let mut h = Harness::new(Props::default());
+        h.press_slot(0);
+        h.type_digit('7');
+        assert_eq!(h.state.value, "7");
+        assert!(
+            !h.root.take_paste_request(),
+            "a plain digit never asks for a paste"
+        );
+    }
+
     // ---- Semantics ----------------------------------------------------------
 
     #[test]
@@ -2071,5 +2433,45 @@ mod tests {
             .find(|(_, n)| n.role() == Role::PasswordInput)
             .expect("a Role::PasswordInput node");
         assert_eq!(node.value(), Some(OTP_MASK_CHAR.to_string().as_str()));
+    }
+
+    // ---- Typeface: digits, label and message follow the live theme ---------
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(480.0, 240.0);
+
+    /// A labelled field holding four digits, idle with a hint or rejected with
+    /// an error message.
+    fn probe_logic(status: OtpStatus) -> impl FnMut(&mut ()) -> OtpInputView<()> {
+        move |_: &mut ()| {
+            otp_input::<(), _>("1234", |_: &mut (), _| {})
+                .label("Verification code")
+                .hint("Enter the code we sent")
+                .error_message("That code is wrong")
+                .status(status)
+        }
+    }
+
+    #[test]
+    fn otp_text_paints_in_geist_under_the_beui_theme() {
+        for status in [OtpStatus::Idle, OtpStatus::Error] {
+            assert_paints_only_in_geist(&format!("{status:?}"), probe_logic(status), PROBE_WINDOW);
+        }
+        let runs = Probe::new(probe_logic(OtpStatus::Idle), PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(runs.len(), 6, "the label, four digits and the hint");
+    }
+
+    #[test]
+    fn otp_text_follows_a_live_theme_family_swap() {
+        for status in [OtpStatus::Idle, OtpStatus::Error] {
+            assert_follows_a_live_family_swap(
+                &format!("{status:?}"),
+                probe_logic(status),
+                PROBE_WINDOW,
+            );
+        }
     }
 }

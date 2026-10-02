@@ -69,6 +69,17 @@
 //!
 //! At most one palette/overlay at a time is the app's/navigator's concern, not
 //! this widget's (mirrors [`crate::dialog`]).
+//!
+//! # Typeface
+//!
+//! The palette's own runs read their family at layout from the live type
+//! scale: the prompt glyph from `headlineSmall` (Space Mono under Glyph's own
+//! scale), the row labels from `bodyLarge` and the hints from `bodySmall`
+//! (both IBM Plex Mono), so a theme swap reshapes them (see [`crate::badge`]'s
+//! Typeface section); unthemed, each falls back to the matching Glyph stack.
+//! The query field is the exception: [`frust::TextInput`] takes its style at
+//! build and has no themed-family seam, so the field keeps an explicit IBM
+//! Plex Mono stack and does not follow a theme swap.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -258,9 +269,22 @@ fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }
 
-fn mono(family: &str, size: f32, weight: FontWeight, color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): the row labels' and hints' unthemed
+/// family, and the query field's fixed one.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// Glyph's display face stack (Space Mono): the prompt glyph's unthemed
+/// family.
+fn display_face() -> FontFamily {
+    FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
+}
+
+/// A palette text style in `family`.
+fn palette_style(family: FontFamily, size: f32, weight: FontWeight, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic([family], GenericSlot::Monospace),
+        family,
         weight,
         line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
         ..TextStyle::new(size, color)
@@ -396,8 +420,10 @@ fn input_view<State: 'static>(
     any::<State, _>(
         text_input(query.to_string(), move |s: &mut State, t: String| oq(s, t))
             .placeholder(placeholder.to_string())
-            .text_style(mono(
-                "IBM Plex Mono",
+            // Kept explicit: `TextInput` takes its style at build and has no
+            // themed-family seam, so no type-scale role can reach the field.
+            .text_style(palette_style(
+                ui_face(),
                 LABEL_SIZE,
                 FontWeight::REGULAR,
                 LABEL_INK,
@@ -710,14 +736,36 @@ impl CommandPaletteWidget {
 
 impl Widget for CommandPaletteWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        // Resolve owned token colors up front so the immutable theme borrow of
-        // `ctx` ends before the mutable text-layout calls below.
-        let (ring_c, label_c, muted_c) = {
+        // Resolve owned styles up front so the immutable theme borrow of `ctx`
+        // ends before the mutable text-layout calls below. Each family is its
+        // type-scale role's (see the module docs' Typeface section).
+        let (prompt_style, label_style, hint_style) = {
             let theme = Theme::from_layout_ctx(ctx);
+            let prompt_family =
+                theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone());
+            let label_family =
+                theme.map_or_else(ui_face, |t| t.type_scale.body_large.family.clone());
+            let hint_family =
+                theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone());
             (
-                resolve_ring(theme),
-                resolve_label(theme),
-                resolve_muted(theme),
+                palette_style(
+                    prompt_family,
+                    PROMPT_SIZE,
+                    FontWeight::BOLD,
+                    resolve_ring(theme),
+                ),
+                palette_style(
+                    label_family,
+                    LABEL_SIZE,
+                    FontWeight::REGULAR,
+                    resolve_label(theme),
+                ),
+                palette_style(
+                    hint_family,
+                    HINT_SIZE,
+                    FontWeight::REGULAR,
+                    resolve_muted(theme),
+                ),
             )
         };
         let area_w = finite_or_zero(bc.max().width);
@@ -726,10 +774,7 @@ impl Widget for CommandPaletteWidget {
         let panel_w = area_w.clamp(0.0, MAX_WIDTH).max(MIN_WIDTH.min(area_w));
 
         // Prompt glyph.
-        self.prompt_size = self.prompt.layout(
-            ctx,
-            &mono("Space Mono", PROMPT_SIZE, FontWeight::BOLD, ring_c),
-        );
+        self.prompt_size = self.prompt.layout(ctx, &prompt_style);
 
         // Input field: fills the row minus the prompt + paddings.
         let input_x = ROW_PAD_X + self.prompt_size.width + PROMPT_GAP;
@@ -738,8 +783,6 @@ impl Widget for CommandPaletteWidget {
             .layout_child(ctx, &BoxConstraints::tight(Size::new(input_w, INPUT_ROW_H)));
 
         // Result rows.
-        let label_style = mono("IBM Plex Mono", LABEL_SIZE, FontWeight::REGULAR, label_c);
-        let hint_style = mono("IBM Plex Mono", HINT_SIZE, FontWeight::REGULAR, muted_c);
         for row in &mut self.rows {
             row.label_size = row.label.layout(ctx, &label_style);
             row.hint_size = row
@@ -1657,5 +1700,60 @@ mod tests {
             .expect("a Role::Dialog node is contributed");
         assert!(node.is_modal());
         assert_eq!(node.label(), Some("Command palette"));
+    }
+
+    // -- Typeface: the palette's own runs follow their type-scale roles ---
+
+    #[cfg(feature = "bundled-fonts")]
+    fn one_hinted_row(_: &mut ()) -> CommandPaletteView<()> {
+        command_palette(
+            vec![PaletteItem::new("deploy").hint("ctrl d")],
+            |_s: &mut (), _q| {},
+            |_s: &mut (), _i: usize| {},
+        )
+        .placeholder("Search")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(one_hinted_row, crate::baseline(), Size::new(800.0, 600.0));
+        // Prompt, query-field placeholder, row label, row hint.
+        assert_eq!(
+            faces,
+            [
+                Face::SpaceMono,
+                Face::PlexMono,
+                Face::PlexMono,
+                Face::PlexMono
+            ]
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap_except_the_query_field() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(one_hinted_row, Size::new(800.0, 600.0));
+        assert_eq!(
+            before,
+            [
+                Face::SpaceMono,
+                Face::PlexMono,
+                Face::PlexMono,
+                Face::PlexMono
+            ]
+        );
+        // The query field keeps its explicit family (no `TextInput` seam).
+        assert_eq!(
+            after,
+            [
+                Face::PlexMono,
+                Face::PlexMono,
+                Face::SpaceMono,
+                Face::SpaceMono
+            ]
+        );
     }
 }

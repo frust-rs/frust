@@ -90,7 +90,7 @@ use crate::press::{
     Lane, SpringScalar, draw_focus_ring, inside, is_activation_key, press_scale, presses,
 };
 use crate::style::{self, with_alpha};
-use crate::text::{LabelRun, SHAPING_INK};
+use crate::text::{LabelRun, SHAPING_INK, ThemeTextType};
 use crate::tokens::motion::{SPRING_PANEL, SPRING_PRESS};
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -344,13 +344,20 @@ pub fn code_palette(theme: Option<&Theme>) -> CodePalette {
 /// shape cache never keys on the color a span is re-brushed to.
 pub fn code_style(size: f64) -> TextStyle {
     TextStyle {
+        // Explicit: `TypeScale` has no monospace role to take this from.
         family: crate::tokens::mono_family(),
         ..TextStyle::new(size as f32, SHAPING_INK)
     }
 }
 
+/// The type-scale role the chrome labels (language tag, status) take their
+/// family from at layout.
+const CHROME_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
 /// The style a panel's small chrome labels are shaped with — the sans family at
-/// `size`, medium weight (`text-[10px] font-medium`).
+/// `size`, medium weight (`text-[10px] font-medium`). The family is the
+/// unthemed base: the code block shapes its own chrome in the live theme's
+/// `label_small` family instead.
 pub fn chrome_style(size: f64) -> TextStyle {
     TextStyle {
         family: crate::tokens::sans_family(),
@@ -921,6 +928,8 @@ pub(crate) fn draw_chevron(
 impl Widget for CodeBlockWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         self.width = bc.max().width;
+        // The code, its line numbers and the filename keep the mono family
+        // `code_style` names; only the chrome labels follow the theme.
         let code = code_style(CODE_TEXT_SIZE);
         for line in &mut self.lines {
             for span in &mut line.spans {
@@ -930,9 +939,9 @@ impl Widget for CodeBlockWidget {
                 line.number.layout(ctx, &code);
             }
         }
-        self.language.layout(ctx, &chrome_style(CODE_LANGUAGE_SIZE));
-        self.status_label
-            .layout(ctx, &chrome_style(CODE_LANGUAGE_SIZE));
+        let chrome = chrome_style(CODE_LANGUAGE_SIZE);
+        self.language.layout_themed(ctx, &chrome, CHROME_ROLE);
+        self.status_label.layout_themed(ctx, &chrome, CHROME_ROLE);
         if let Some(filename) = &mut self.filename {
             filename.layout(ctx, &code);
         }
@@ -1273,6 +1282,116 @@ impl Widget for CodeBlockWidget {
                 node.add_action(Action::Click);
             });
         }
+    }
+}
+
+/// A typeface probe for a panel that paints themed sans runs beside the mono
+/// runs [`code_style`] names explicitly: the code block, and every agent card
+/// showing a tool name, a parameter value or a file name.
+///
+/// [`crate::text::typeface_probe`]'s assertions want every run in one face,
+/// which a mixed panel never paints. This one counts runs per face instead.
+/// Under beUI's theme no run is in the platform face, the Geist Mono runs are
+/// exactly the explicit ones, and the rest are Geist. After a swap to a theme
+/// whose every role is Geist Mono, every run is Geist Mono: each Geist run
+/// followed its role. Swapping back restores the first count.
+#[cfg(test)]
+pub(crate) mod mixed_face_probe {
+    use frust::authoring::{Size, View};
+
+    use crate::text::typeface_probe::{Face, Probe, assert_control, mono_role_theme};
+
+    /// How many painted glyph runs were in each face.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Census {
+        pub(crate) geist: usize,
+        pub(crate) mono: usize,
+        pub(crate) other: usize,
+    }
+
+    /// Count `faces` by face.
+    pub(crate) fn census(faces: &[Face]) -> Census {
+        let count = |face: Face| faces.iter().filter(|f| **f == face).count();
+        Census {
+            geist: count(Face::Geist),
+            mono: count(Face::GeistMono),
+            other: count(Face::Other),
+        }
+    }
+
+    /// Asserts a paint under beUI's theme: no run in the platform face,
+    /// exactly `mono` Geist Mono runs (the explicit ones), and at least one
+    /// Geist run. Returns the census.
+    #[track_caller]
+    pub(crate) fn assert_geist_beside_mono(what: &str, faces: &[Face], mono: usize) -> Census {
+        let seen = census(faces);
+        assert_eq!(
+            seen.other, 0,
+            "{what} painted {} run(s) in the platform face ({faces:?}) — the text is not \
+             taking its family from the theme's type scale",
+            seen.other
+        );
+        assert!(seen.geist > 0, "{what} painted no Geist run ({faces:?})");
+        assert_eq!(
+            seen.mono, mono,
+            "{what}: the Geist Mono runs are the explicit mono ones ({faces:?})"
+        );
+        seen
+    }
+
+    /// The font-bytes check for a mixed panel: the plain-text control, then
+    /// [`assert_geist_beside_mono`] on `logic`'s view under beUI's theme.
+    #[track_caller]
+    pub(crate) fn assert_paints_geist_beside_mono<V: View<()> + 'static>(
+        what: &str,
+        logic: impl FnMut(&mut ()) -> V,
+        window: Size,
+        mono: usize,
+    ) {
+        assert_control(what, window);
+        let faces = Probe::new(logic, window, crate::theme()).frame();
+        assert_geist_beside_mono(what, &faces, mono);
+    }
+
+    /// [`assert_mixed_follows_a_live_family_swap_on`] a fresh probe of
+    /// `logic`'s view under beUI's theme.
+    #[track_caller]
+    pub(crate) fn assert_mixed_follows_a_live_family_swap<V: View<()> + 'static>(
+        what: &str,
+        logic: impl FnMut(&mut ()) -> V,
+        window: Size,
+        mono: usize,
+    ) {
+        let mut probe = Probe::new(logic, window, crate::theme());
+        assert_mixed_follows_a_live_family_swap_on(what, &mut probe, mono);
+    }
+
+    /// On `probe`'s retained tree, currently under beUI's theme: Geist beside
+    /// exactly `mono` Geist Mono runs, then every run Geist Mono after a swap
+    /// to [`mono_role_theme`], then the first census again after swapping
+    /// back.
+    #[track_caller]
+    pub(crate) fn assert_mixed_follows_a_live_family_swap_on<
+        V: View<()> + 'static,
+        F: FnMut(&mut ()) -> V,
+    >(
+        what: &str,
+        probe: &mut Probe<V, F>,
+        mono: usize,
+    ) {
+        let first = assert_geist_beside_mono(what, &probe.frame(), mono);
+        probe.swap_theme(mono_role_theme());
+        assert_eq!(
+            census(&probe.frame()),
+            Census {
+                geist: 0,
+                mono: first.geist + first.mono,
+                other: 0,
+            },
+            "{what} after a swap to Geist Mono roles: every Geist run must follow its role"
+        );
+        probe.swap_theme(crate::theme());
+        assert_eq!(census(&probe.frame()), first, "{what} after swapping back");
     }
 }
 
@@ -1716,5 +1835,45 @@ mod tests {
         dispatch(&mut w, size, &key(NamedKey::Enter), &mut state);
         assert_eq!(state.copies, 0);
         assert_eq!(state.collapse_calls, 0);
+    }
+
+    // ---- Typeface: the chrome follows the live theme, the code stays mono ----
+
+    use super::mixed_face_probe::{
+        assert_mixed_follows_a_live_family_swap, assert_paints_geist_beside_mono,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(420.0, 200.0);
+
+    /// The explicit mono runs [`probe_view`] paints: its one line, that line's
+    /// number, and the file name.
+    const PROBE_MONO_RUNS: usize = 3;
+
+    /// One line of code with a file name, beside the language tag and the
+    /// status label.
+    fn probe_view(_: &mut ()) -> CodeBlockView<()> {
+        code_block::<()>("let x = 1;")
+            .language("rust")
+            .filename("main.rs")
+    }
+
+    #[test]
+    fn the_chrome_paints_in_geist_beside_mono_code() {
+        assert_paints_geist_beside_mono(
+            "the code block",
+            probe_view,
+            PROBE_WINDOW,
+            PROBE_MONO_RUNS,
+        );
+    }
+
+    #[test]
+    fn the_chrome_follows_a_live_theme_family_swap() {
+        assert_mixed_follows_a_live_family_swap(
+            "the code block",
+            probe_view,
+            PROBE_WINDOW,
+            PROBE_MONO_RUNS,
+        );
     }
 }

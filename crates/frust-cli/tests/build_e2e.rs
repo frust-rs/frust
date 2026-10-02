@@ -4,9 +4,8 @@
 //!
 //! **Every case asserts on the ARTIFACT** (`apksigner verify --print-certs`),
 //! never on the gate's verdict alone. A green gate riding on a debug-signed
-//! APK is the exact failure mode these tests exist to catch, and two review
-//! rounds passed while shipping it precisely because the assertions stopped at
-//! the verdict.
+//! APK is the exact failure mode these tests exist to catch, and one shipped
+//! precisely because the assertions stopped at the verdict.
 //!
 //! `[signing]` has three independent axes — properties **path**, key
 //! **prefix**, env-var **names** — and each is a way for the CLI's resolution
@@ -49,6 +48,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use frust_drive::build_dirs::BuildLayout;
 
 /// Fixed path Android Studio installs its bundled JBR at on macOS — the same
 /// fallback the CLI's Android preflight uses to find a JDK 17+. We reuse it
@@ -280,7 +281,7 @@ fn assert_stub_key_properties_is_rejected(project: &Path, ndk_home: &str) {
     );
     // The gate runs before `./gradlew`, so no build directory appeared.
     assert!(
-        !project.join("android/app/build/outputs").exists(),
+        !project.join(gradle_outputs_dir()).exists(),
         "Gradle ran despite the signing gate rejecting the stub"
     );
     assert_no_generated_signing_file(project);
@@ -291,7 +292,7 @@ fn assert_stub_key_properties_is_rejected(project: &Path, ndk_home: &str) {
 /// Reads the signer certificates `apksigner verify --print-certs` reports for
 /// the release APK, or `None` when no `apksigner` is installed.
 fn release_apk_certs(project: &Path) -> Option<String> {
-    let apk = project.join("android/app/build/outputs/apk/release/app-release.apk");
+    let apk = project.join(release_apk_path());
     assert!(apk.exists(), "expected a release APK at {}", apk.display());
     let size = std::fs::metadata(&apk).expect("APK metadata").len();
     assert!(
@@ -397,6 +398,37 @@ fn find_apksigner() -> Option<PathBuf> {
             .collect();
     versions.sort();
     versions.pop().map(|p| p.join("apksigner"))
+}
+
+/// Derives the release APK output path from the new build layout.
+/// The production resolver (frust-drive) is: `project_dir.join(BuildLayout::android_app()).join("outputs")`,
+/// so the release APK is at `BuildLayout::android_app()/outputs/apk/release/app-release.apk`.
+fn release_apk_path() -> PathBuf {
+    BuildLayout::android_app().join("outputs/apk/release/app-release.apk")
+}
+
+/// Derives the Gradle outputs directory path from the new build layout.
+/// This is the location where Gradle writes its build outputs, derived from BuildLayout::android_app().
+/// The production resolver (frust-drive) is: `project_dir.join(BuildLayout::android_app()).join("outputs")`.
+fn gradle_outputs_dir() -> PathBuf {
+    BuildLayout::android_app().join("outputs")
+}
+
+/// Pins the contract between the test helpers and the production resolver.
+/// The production resolver builds the path as: `project_dir.join(BuildLayout::android_app()).join("outputs")`.
+/// These test helpers must match that shape exactly.
+#[test]
+fn build_layout_paths_match_the_drive_resolver() {
+    assert_eq!(
+        release_apk_path(),
+        Path::new("build/android/app/outputs/apk/release/app-release.apk"),
+        "release_apk_path() must match the production resolver's path"
+    );
+    assert_eq!(
+        gradle_outputs_dir(),
+        Path::new("build/android/app/outputs"),
+        "gradle_outputs_dir() must match the production resolver's outputs directory"
+    );
 }
 
 #[test]

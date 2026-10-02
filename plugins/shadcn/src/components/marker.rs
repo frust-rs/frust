@@ -19,8 +19,8 @@
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor, View, Widget,
-    any,
+    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor,
+    ThemeTextType, View, Widget, any,
 };
 use frust::text;
 use peniko::Color;
@@ -87,6 +87,7 @@ impl<State: 'static> MarkerView<State> {
     fn content_view(&self) -> AnyView<State> {
         any(text(self.content.clone())
             .size(style::TEXT_SM as f32)
+            .themed_family(ThemeTextType::BodyMedium)
             .themed_role(ThemeTextColor::OnSurfaceVariant))
     }
 }
@@ -397,5 +398,28 @@ mod tests {
         assert_eq!(w.children.len(), 2);
         assert_eq!(w.children[0].origin().x, 0.0);
         assert!(w.children[1].origin().x > w.children[0].origin().x);
+    }
+
+    // ---- Typeface: the content follows the live theme ---------------------
+
+    /// A separator marker: two hairlines (paths, no glyphs) around the content.
+    #[cfg(feature = "bundled-fonts")]
+    fn divider(_: &mut ()) -> MarkerView<()> {
+        marker("Or continue with").variant(MarkerVariant::Separator)
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_content_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face("a marker's content", divider);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_content_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a marker's content",
+            divider,
+        );
     }
 }

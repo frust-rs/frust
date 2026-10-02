@@ -95,7 +95,7 @@ use peniko::{Brush, Color, ColorStop, Gradient};
 use crate::motion::Ramp;
 use crate::press::{SpringScalar, inside, presses};
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType};
 use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT, SPRING_PANEL, SPRING_SWAP};
 use crate::tokens::{BEUI_LIGHT, sans_family};
 
@@ -559,7 +559,12 @@ fn resolve_colors(theme: Option<&Theme>) -> RefreshColors {
     }
 }
 
+/// The type-scale role the status label's family resolves from at layout.
+const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
+
 /// The status label's style — `text-[11px] font-medium text-muted-foreground`.
+/// The family here is the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s
+/// family.
 fn label_style(color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -681,7 +686,7 @@ impl Widget for PullToRefreshWidget {
         let colors = resolve_colors(theme);
         let style = label_style(colors.muted);
         for label in &mut self.labels {
-            label.layout(ctx, &style);
+            label.layout_themed(ctx, &style, LABEL_ROLE);
         }
         // The indicator is an overlay and the pull is a paint offset, so the
         // container is exactly as big as its content — a pull must not re-flow
@@ -1440,5 +1445,28 @@ mod tests {
         assert!(PullToRefreshStatus::Refreshing.is_refreshing());
         assert!(!PullToRefreshStatus::Pulling.is_ready());
         assert_eq!(PullToRefreshStatus::default(), PullToRefreshStatus::Idle);
+    }
+
+    // ---- Typeface: the status label follows the live theme -----------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// A container held refreshing over glyph-free content, so the indicator
+    /// is up and its status label is the one text run.
+    fn probe_view(_: &mut ()) -> PullToRefreshView<()> {
+        pull_to_refresh::<(), _, _>(SizedBox::<()>(Some(BOX.width), Some(BOX.height)), |_| {})
+            .refreshing(true)
+    }
+
+    #[test]
+    fn the_status_label_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the status label", probe_view, BOX);
+    }
+
+    #[test]
+    fn the_status_label_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the status label", probe_view, BOX);
     }
 }

@@ -26,6 +26,12 @@
 //! when selected, muted otherwise) that isn't one of `TextView`'s four fixed
 //! roles, so this widget shapes/paints them directly via `frust_text` — see
 //! [`crate::badge`]'s module docs for the full rationale.
+//!
+//! Both runs read their family at layout from the live type scale — a glyph
+//! char from `titleMedium`, the label from `labelSmall`, both IBM Plex Mono
+//! under Glyph's own scale — falling back to Glyph's IBM Plex Mono stack
+//! unthemed, so a theme swap reshapes them (see [`crate::badge`]'s Typeface
+//! section).
 
 use std::rc::Rc;
 
@@ -234,9 +240,9 @@ enum NavSlot {
 }
 
 impl NavSlot {
-    fn layout(&mut self, ctx: &mut LayoutCtx, tint: Color) -> Size {
+    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         match self {
-            NavSlot::Char(label) => label.layout(ctx, &glyph_style(tint), None),
+            NavSlot::Char(label) => label.layout(ctx, style, None),
             // A vector icon occupies the same square box a glyph char's face
             // size defines — no text shaping involved.
             NavSlot::Icon(_) => Size::new(NAV_GLYPH_SIZE as f64, NAV_GLYPH_SIZE as f64),
@@ -273,19 +279,25 @@ struct NavEntry {
     slot_w: f64,
 }
 
-/// The glyph face style (larger, `.bottom-nav-glyph`).
-fn glyph_style(color: Color) -> TextStyle {
+/// Glyph's UI face stack (IBM Plex Mono): both runs' unthemed family.
+fn ui_face() -> FontFamily {
+    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The glyph face style (larger, `.bottom-nav-glyph`); family from the
+/// theme's `titleMedium` role.
+fn glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.title_medium.family.clone()),
         weight: FontWeight::REGULAR,
         ..TextStyle::new(NAV_GLYPH_SIZE, color)
     }
 }
 
-/// The micro-label style.
-fn label_style(color: Color) -> TextStyle {
+/// The micro-label style; family from the theme's `labelSmall` role.
+fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
     TextStyle {
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        family: theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()),
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(NAV_LABEL_SIZE, color)
     }
@@ -374,8 +386,12 @@ impl GlyphNavBarWidget {
 
 impl Widget for GlyphNavBarWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve every style up front so the immutable theme borrow ends
+        // before the `&mut ctx` shaping calls below.
         let theme = Theme::from_layout_ctx(ctx);
         let (_, _, active, inactive) = resolve_nav_colors(theme);
+        let active_styles = (glyph_style(theme, active), label_style(theme, active));
+        let inactive_styles = (glyph_style(theme, inactive), label_style(theme, inactive));
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -387,9 +403,13 @@ impl Widget for GlyphNavBarWidget {
 
         let mut content_height = 0.0_f64;
         for (i, entry) in self.items.iter_mut().enumerate() {
-            let tint = if i == self.selected { active } else { inactive };
-            let glyph_size = entry.glyph.layout(ctx, tint);
-            let label_size = entry.label.layout(ctx, &label_style(tint), None);
+            let (glyph_style, label_style) = if i == self.selected {
+                &active_styles
+            } else {
+                &inactive_styles
+            };
+            let glyph_size = entry.glyph.layout(ctx, glyph_style);
+            let label_size = entry.label.layout(ctx, label_style, None);
             entry.glyph_size = glyph_size;
             entry.label_size = label_size;
             entry.slot_x = i as f64 * slot_w;
@@ -786,5 +806,34 @@ mod tests {
             flags.contains(ChangeFlags::LAYOUT),
             "fresh Arc => structural rebuild"
         );
+    }
+
+    // ---- Typeface: glyph chars and labels follow their type-scale roles ---
+
+    #[cfg(feature = "bundled-fonts")]
+    fn two_items(_: &mut ()) -> GlyphNavBarView<()> {
+        glyph_nav_bar(
+            vec![glyph_nav_item("$", "shell"), glyph_nav_item("#", "logs")],
+            0,
+            |_s: &mut (), _i| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_paint_in_their_role_face_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(two_items, crate::baseline(), Size::new(360.0, 80.0));
+        // Glyph char then label, per item.
+        assert_eq!(faces, [Face::PlexMono; 4]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn runs_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(two_items, Size::new(360.0, 80.0));
+        assert_eq!(before, [Face::PlexMono; 4]);
+        assert_eq!(after, [Face::SpaceMono; 4]);
     }
 }

@@ -126,7 +126,7 @@ use frust::{ChildKey, FrameTime, ListView, Theme};
 use crate::motion::{Presence, Ramp};
 use crate::press::{Lane, presses};
 use crate::style::{self, with_alpha};
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 use crate::tokens::motion::EASE_OUT;
 
 // ---- Metrics ---------------------------------------------------------------
@@ -595,27 +595,21 @@ fn resolve_colors(theme: Option<&Theme>) -> TableColors {
     }
 }
 
-/// The head-label style (`font-medium`), shared with the empty placeholder.
+/// The head-label style (`font-medium`), shared with the empty placeholder, in
+/// the theme's `label_large` family.
 fn head_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
-/// The body-cell style (`text-sm`, regular weight).
+/// The body-cell style (`text-sm`, regular weight), in the theme's
+/// `body_medium` family.
 fn cell_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.body_medium.family.clone()
-    });
-    TextStyle {
-        family,
-        ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    }
+    let style = TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK);
+    themed_style(style, ThemeTextType::BodyMedium, theme)
 }
 
 /// Paint a chevron pointing up, turned `angle` radians about `centre`.
@@ -1833,5 +1827,86 @@ mod tests {
             .filter(|(_, node)| node.role() == Role::Row)
             .count();
         assert!(rows > 0 && rows < 40, "only the materialized rows: {rows}");
+    }
+
+    // ---- Typeface: headers, cells and the placeholder follow the theme -----
+
+    use crate::text::typeface_probe::{
+        Face, FaceRecorder, assert_all, assert_control, mono_role_theme, text_context,
+    };
+
+    /// A `rows`-row table under a real `RenderRoot`, painted through the
+    /// typeface probe's face recorder. The shared probe builds once; the body
+    /// needs a second build to window its rows against a measured viewport.
+    struct FaceHarness {
+        root: frust_core::RenderRoot<(), TableView<()>>,
+        tcx: TextContext,
+        clock_ms: f64,
+    }
+
+    impl FaceHarness {
+        fn new(rows: usize) -> Self {
+            let mut h = FaceHarness {
+                root: frust_core::RenderRoot::new(),
+                tcx: text_context(),
+                clock_ms: 0.0,
+            };
+            h.root.set_theme(Box::new(crate::theme()));
+            let mut logic = move |_: &mut ()| {
+                table::<(), _>(columns(), rows, |row, column| format!("r{row}c{column}"))
+            };
+            h.root.rebuild(&mut logic, &mut ());
+            h.root.layout_with_text(WINDOW, &mut h.tcx as &mut dyn Any);
+            h.root.rebuild(&mut logic, &mut ());
+            h
+        }
+
+        /// Lay out and paint twice, the second five seconds on once every
+        /// entrance has settled, and return the settled paint's faces.
+        fn frame(&mut self) -> Vec<Face> {
+            let mut faces = Vec::new();
+            for _ in 0..2 {
+                self.root
+                    .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
+                let mut rec = FaceRecorder::default();
+                self.root.paint(&mut rec, ft_ms(self.clock_ms));
+                self.clock_ms += 5_000.0;
+                faces = rec.faces;
+            }
+            faces
+        }
+    }
+
+    /// An empty table paints its headers and the placeholder; a populated one
+    /// its headers and one run per cell.
+    const PROBE_CASES: [(usize, usize); 2] = [(0, 4), (3, 3 + 3 * 3)];
+
+    #[test]
+    fn table_text_paints_in_geist_under_the_beui_theme() {
+        assert_control("the table's text", WINDOW);
+        for (rows, runs) in PROBE_CASES {
+            let what = format!("the {rows}-row table's text");
+            let faces = FaceHarness::new(rows).frame();
+            assert_eq!(faces.len(), runs, "{what}: {faces:?}");
+            assert_all(&what, "under the beUI theme", &faces, Face::Geist);
+        }
+    }
+
+    #[test]
+    fn table_text_follows_a_live_theme_family_swap() {
+        for (rows, _) in PROBE_CASES {
+            let what = format!("the {rows}-row table's text");
+            let mut h = FaceHarness::new(rows);
+            assert_all(&what, "under the beUI theme", &h.frame(), Face::Geist);
+            h.root.set_theme(Box::new(mono_role_theme()));
+            assert_all(
+                &what,
+                "after a swap to Geist Mono roles",
+                &h.frame(),
+                Face::GeistMono,
+            );
+            h.root.set_theme(Box::new(crate::theme()));
+            assert_all(&what, "after swapping back", &h.frame(), Face::Geist);
+        }
     }
 }

@@ -460,7 +460,7 @@ impl AppState {
 }
 ```
 
-This is the same "degrade to unavailable rather than panic" shape `templates/app/src/lib.rs`'s
+This is the same "degrade to unavailable rather than panic" shape `crates/frust-drive/templates/app/src/lib.rs`'s
 own notes/draft persistence uses — a `None` preferences handle (an old scaffold, or a backend
 that hasn't landed on this target yet) just means the choice doesn't survive this run, never a
 crash. `SharedPreferences`'s calls are plain synchronous reads/writes (no `spawn_blocking`
@@ -723,3 +723,14 @@ The messages and full binaries were rebuilt in the same session to confirm the d
 drifted 3–4% vs. the prior rebuild, within expected variance from build-system cache effects and
 no cause for re-re-measuring. The prior table's evidence against the old figures (stdout checks,
 data-crate rlib presence, Mach-O section splits) all hold under the new baseline.
+
+---
+
+## Links
+
+- Documentation: <https://frust.dev>
+- Source: <https://github.com/frust-rs/frust>
+
+## License
+
+Licensed under either of Apache License, Version 2.0 or MIT license at your option. See the [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) files for details.

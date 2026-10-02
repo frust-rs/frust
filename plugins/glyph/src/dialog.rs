@@ -112,6 +112,15 @@
 //! [`begin_exit`](GlyphDialogWidget::begin_exit) — the same staged exit a
 //! scrim/Escape cancel drives, never an immediate raw pop.
 //!
+//! # Typeface
+//!
+//! The title and body are plain `text(..)` children opted into
+//! `.themed_family(..)`: the title takes the live theme's `headlineSmall`
+//! family and the body its `bodyMedium` family — Space Mono and IBM Plex Mono
+//! under Glyph's own scale, the faces they always painted — resolved at
+//! layout, so a theme swap repaints them in the new family. With no theme
+//! threaded they fall back to `Text`'s own system family.
+//!
 //! # Semantics
 //!
 //! The dialog contributes one [`Role::Dialog`] container node with the accesskit
@@ -127,7 +136,7 @@ use std::time::Duration;
 
 use frust::Theme;
 use frust::authoring::Role;
-use frust::authoring::text::{FontFamily, FontWeight, GenericSlot, LineHeight};
+use frust::authoring::text::{FontWeight, LineHeight};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EditingState, EventCtx, EventResult,
     ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
@@ -138,7 +147,7 @@ use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use frust::Timing;
-use frust::authoring::ThemeTextColor;
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 use frust::text;
 use frust::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use frust::{TransitionDriver, TransitionSpec, make_driver};
@@ -192,11 +201,13 @@ const SHADOW_Y: f64 = 12.0;
 const SHADOW_BLUR: f64 = 32.0;
 const SHADOW_ALPHA: f32 = 0.45;
 
-/// Title type role: Glyph `display` family (Space Mono) at 15/700.
+/// Title type: 15/700. Its family is the live theme's `headlineSmall` role
+/// (Glyph's `display` family, Space Mono, under Glyph's own scale).
 const TITLE_SIZE: f32 = 15.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::BOLD;
 const TITLE_LINE_HEIGHT: f32 = 20.0;
-/// Body type role: Glyph `body` family (IBM Plex Mono) at 12.5, `fg-muted`.
+/// Body type: 12.5, `fg-muted`. Its family is the live theme's `bodyMedium`
+/// role (Glyph's `body` family, IBM Plex Mono, under Glyph's own scale).
 const BODY_SIZE: f32 = 12.5;
 const BODY_LINE_HEIGHT: f32 = 18.0;
 
@@ -236,6 +247,7 @@ fn cleared_ime_state() -> ImeState {
         },
         caret: None,
         content_type: Default::default(),
+        suppress_soft_keyboard: false,
     }
 }
 
@@ -320,31 +332,27 @@ fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }
 
-/// The title child view (Glyph display family, 15/700, `onSurface`).
+/// The title child view (15/700, `onSurface`, family from the theme's
+/// `headlineSmall` role at layout — unthemed, `Text`'s own system family).
 fn title_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
-            .family(FontFamily::stack_with_generic(
-                ["Space Mono"],
-                GenericSlot::Monospace,
-            ))
             .size(TITLE_SIZE)
             .weight(TITLE_WEIGHT)
-            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT)),
+            .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT))
+            .themed_family(ThemeTextType::HeadlineSmall),
     )
 }
 
-/// The body child view (Glyph body family, 12.5, `onSurfaceVariant`).
+/// The body child view (12.5, `onSurfaceVariant`, family from the theme's
+/// `bodyMedium` role at layout — unthemed, `Text`'s own system family).
 fn body_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
-            .family(FontFamily::stack_with_generic(
-                ["IBM Plex Mono"],
-                GenericSlot::Monospace,
-            ))
             .size(BODY_SIZE)
             .line_height(LineHeight::Absolute(BODY_LINE_HEIGHT))
-            .themed_role(ThemeTextColor::OnSurfaceVariant),
+            .themed_role(ThemeTextColor::OnSurfaceVariant)
+            .themed_family(ThemeTextType::BodyMedium),
     )
 }
 
@@ -422,13 +430,15 @@ pub fn GlyphDialog<State: 'static>() -> GlyphDialogView<State> {
 }
 
 impl<State: 'static> GlyphDialogView<State> {
-    /// Set the dialog title (Glyph display family, `onSurface`).
+    /// Set the dialog title (`onSurface`; family from the theme's
+    /// `headlineSmall` role — Glyph's display family, Space Mono).
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
     }
 
-    /// Set the dialog supporting text (Glyph body family, `onSurfaceVariant`).
+    /// Set the dialog supporting text (`onSurfaceVariant`; family from the
+    /// theme's `bodyMedium` role — Glyph's body family, IBM Plex Mono).
     ///
     /// Shares its slot with [`content`](Self::content) — **`content` wins if
     /// both are set** (see the [module docs](self)'s "Body/content slot"
@@ -2687,6 +2697,7 @@ mod tests {
                     },
                     caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
                     content_type: Default::default(),
+                    suppress_soft_keyboard: false,
                 });
             }
             EventResult::Handled
@@ -2697,5 +2708,30 @@ mod tests {
             size: Size::new(w, h),
             _state: std::marker::PhantomData,
         })
+    }
+
+    // -- Typeface: title and body follow their type-scale roles -----------
+
+    #[cfg(feature = "bundled-fonts")]
+    fn confirm(_: &mut ()) -> GlyphDialogView<()> {
+        glyph_dialog().title("Confirm").body("Sure?")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn title_and_body_paint_in_their_role_faces_under_the_glyph_theme() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        let faces = painted_faces(confirm, crate::baseline(), Size::new(400.0, 600.0));
+        // Title, body.
+        assert_eq!(faces, [Face::SpaceMono, Face::PlexMono]);
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn title_and_body_follow_a_live_theme_family_swap() {
+        use crate::badge::typeface_probe::{Face, faces_across_a_live_swap};
+        let (before, after) = faces_across_a_live_swap(confirm, Size::new(400.0, 600.0));
+        assert_eq!(before, [Face::SpaceMono, Face::PlexMono]);
+        assert_eq!(after, [Face::PlexMono, Face::SpaceMono]);
     }
 }

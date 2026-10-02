@@ -1,7 +1,8 @@
-//! `frust build apk|appbundle|ios|ipa`: validates the
+//! `frust build apk|appbundle|ios|ipa|macos|windows|linux|web`: validates the
 //! full `BuildTarget` flag surface into a [`BuildInfo`] + platform artifact
 //! enum, resolves the project root (mirrors `run`'s `frust.toml`
-//! detection), and dispatches to the `android_build`/`ios_build` pipelines.
+//! detection), and dispatches to the `android_build`/`ios_build`/
+//! `desktop_build`/`web_build` pipelines.
 
 use std::path::Path;
 
@@ -15,9 +16,11 @@ use frust_drive::cargo_manifest;
 use frust_drive::desktop_build::{
     self, BundleReport, DesktopBundleTarget, InstallerFormat, InstallerReport,
 };
+use frust_drive::doctor::{EnvLookup, RealEnv};
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::ios_run;
 use frust_drive::process::ProcessRunner;
+use frust_drive::web_build::{self, WebBuildReport};
 
 /// `--target-platform` value -> Gradle ABI name.
 const TARGET_PLATFORMS: &[(&str, &str)] = &[
@@ -41,6 +44,21 @@ const EXPORT_METHODS: &[&str] = &[
 /// current directory and calls this (the CLI's one `Real` construction
 /// site).
 pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarget) -> Result<u8> {
+    run_in_with_env(runner, &RealEnv, project_dir, target)
+}
+
+/// [`run_in`], with an injected [`EnvLookup`] so the desktop lane's
+/// `CARGO_TARGET_DIR` resolution (`frust_drive::desktop_build::build_with_env`)
+/// can be exercised hermetically in this module's own tests, without the
+/// assertion depending on whether the process running the test happens to
+/// export `CARGO_TARGET_DIR`. Threaded only as far as `build_desktop` needs
+/// it — the Android/iOS/web lanes take no `env` parameter and are unaffected.
+fn run_in_with_env(
+    runner: &dyn ProcessRunner,
+    env: &dyn EnvLookup,
+    project_dir: &Path,
+    target: BuildTarget,
+) -> Result<u8> {
     match target {
         BuildTarget::Apk {
             build,
@@ -132,6 +150,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_desktop(
                 runner,
+                env,
                 project_dir,
                 &info,
                 DesktopBundleTarget::Macos,
@@ -144,6 +163,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_desktop(
                 runner,
+                env,
                 project_dir,
                 &info,
                 DesktopBundleTarget::Windows,
@@ -156,11 +176,18 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_desktop(
                 runner,
+                env,
                 project_dir,
                 &info,
                 DesktopBundleTarget::Linux,
                 installer,
             )
+        }
+        BuildTarget::Web { build } => {
+            reject_unplumbed_features("build web", &build)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            build_web(runner, project_dir, &info)
         }
     }
 }
@@ -313,16 +340,20 @@ fn build_ios(
     Ok(0)
 }
 
-/// Drives [`desktop_build::build`] (plus [`desktop_build::build_installer`]
-/// once per format for `target`, when `installer` is set) and renders the
-/// result. The host-lock check happens inside `desktop_build::build` itself,
-/// as the very first thing it does — before `frust.toml` is even read — so
-/// a foreign-host invocation is refused before any work, with the typed
+/// Drives [`desktop_build::build_with_env`] (plus
+/// [`desktop_build::build_installer`] once per format for `target`, when
+/// `installer` is set) and renders the result. `env` is injected only here —
+/// `run_in`'s production path always passes [`RealEnv`], and only this
+/// module's own tests drive it otherwise (see [`run_in_with_env`]). The
+/// host-lock check happens inside `desktop_build::build_with_env` itself, as
+/// the very first thing it does — before `frust.toml` is even read — so a
+/// foreign-host invocation is refused before any work, with the typed
 /// [`frust_drive::desktop_build::DesktopBuildError::HostMismatch`] message
 /// naming the required OS (the desktop mirror of `build ios`'s "macOS host
 /// only" refusal).
 fn build_desktop(
     runner: &dyn ProcessRunner,
+    env: &dyn EnvLookup,
     project_dir: &Path,
     info: &BuildInfo,
     target: DesktopBundleTarget,
@@ -330,9 +361,10 @@ fn build_desktop(
 ) -> Result<u8> {
     // Print-free drive core (see `build_android`/`build_ios` above); the CLI
     // `println!`s each streamed line to keep its stdout verbatim.
-    let report = desktop_build::build(runner, project_dir, info, target, &mut |line| {
-        println!("{line}")
-    })?;
+    let report =
+        desktop_build::build_with_env(runner, env, project_dir, info, target, &mut |line| {
+            println!("{line}")
+        })?;
     print_bundle_report(&report);
 
     if installer {
@@ -350,6 +382,27 @@ fn build_desktop(
     }
 
     Ok(0)
+}
+
+/// Drives [`web_build::build`] and renders the resulting artifact
+/// directory. No host lock (unlike `build_desktop`) — every desktop OS can
+/// cross-compile to `wasm32-unknown-unknown`. Print-free drive core (see
+/// `build_android`/`build_ios`/`build_desktop` above); the CLI `println!`s
+/// each streamed line to keep its stdout verbatim.
+fn build_web(runner: &dyn ProcessRunner, project_dir: &Path, info: &BuildInfo) -> Result<u8> {
+    let report = web_build::build(runner, project_dir, info, &mut |line| println!("{line}"))?;
+    print_web_report(&report);
+    Ok(0)
+}
+
+fn print_web_report(report: &WebBuildReport) {
+    println!("Bundle: {}", report.root.display());
+    for artifact in &report.artifacts {
+        println!("Built: {}", artifact.display());
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
 }
 
 fn print_artifacts(paths: &[std::path::PathBuf]) {
@@ -431,6 +484,18 @@ mod tests {
     use frust_drive::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// An env lookup that knows no variable at all — no `CARGO_TARGET_DIR` —
+    /// so a desktop-lane test's fixture binary path is never shadowed by
+    /// whatever the process actually running the test happens to export.
+    /// Follows `commands::doctor`'s own test-module idiom.
+    struct EmptyEnv;
+
+    impl EnvLookup for EmptyEnv {
+        fn get(&self, _key: &str) -> Option<String> {
+            None
+        }
+    }
 
     fn unique_project_dir(tag: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -702,7 +767,7 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let err = run_in(&runner, &dir, desktop_target_for(host)).unwrap_err();
+        let err = run_in_with_env(&runner, &EmptyEnv, &dir, desktop_target_for(host)).unwrap_err();
         // A green compile with nothing at the expected binary path is
         // `DesktopBuildError::BinaryNotFound` — proof the release
         // invocation above was the one actually run.
@@ -742,7 +807,7 @@ mod tests {
                 installer: false,
             },
         };
-        let err = run_in(&runner, &dir, target).unwrap_err();
+        let err = run_in_with_env(&runner, &EmptyEnv, &dir, target).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("--features"), "{message}");
         assert!(message.contains("perf-trace"), "{message}");
@@ -942,9 +1007,47 @@ mod tests {
                 installer: true,
             },
         };
-        let err = run_in(&runner, &dir, target).unwrap_err();
+        let err = run_in_with_env(&runner, &EmptyEnv, &dir, target).unwrap_err();
         assert!(
             err.to_string().contains("cargo install cargo-packager"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `web_build::build` is real, not a stub — the fixture project carries a
+    /// `frust.toml` (from `unique_project_dir`) but no `Cargo.toml`, so
+    /// dispatch reaches (and fails at) the pipeline's own package-name read,
+    /// proving `run_in` dispatches into it rather than stopping earlier.
+    #[test]
+    fn build_web_reaches_the_web_build_pipeline() {
+        let dir = unique_project_dir("web-stub");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Web {
+            build: BuildFlags::default(),
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--features` is refused outright before anything is read from disk —
+    /// `web_build::build`'s entry point carries no parameter for it, the same
+    /// reason `build macos|windows|linux` refuse it
+    /// ([`reject_unplumbed_features`]'s own doc comment).
+    #[test]
+    fn build_web_rejects_features_passthrough() {
+        let dir = unique_project_dir("web-features-rejected");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Web {
+            build: BuildFlags {
+                features: vec!["devtools".to_string()],
+                ..Default::default()
+            },
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(
+            err.to_string().contains("does not support --features"),
             "{err}"
         );
         let _ = fs::remove_dir_all(&dir);

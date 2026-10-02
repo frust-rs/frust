@@ -2,12 +2,17 @@ package dev.frust
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -36,10 +41,18 @@ import androidx.core.view.WindowInsetsControllerCompat
  * [getOnBackPressedDispatcher] — see the back-press callback below; nothing
  * else about the activity's lifecycle behavior changes.
  *
- * Edge-to-edge: `WindowCompat.setDecorFitsSystemWindows(window, false)` draws
- * content under the system bars, which stay **visible**
- * (`SystemUiMode.edgeToEdge` semantics — this is not a bar-hiding fullscreen
- * mode, hence the manifest's `Theme.NoTitleBar`, not `.Fullscreen`).
+ * Edge-to-edge: this activity owns it, not the manifest theme. [onCreate]
+ * calls `androidx.activity.enableEdgeToEdge` right after `super.onCreate`,
+ * then — on API < 35, where the platform does not yet force edge-to-edge —
+ * adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and clears the API 29+
+ * status/nav-bar contrast scrim, so transparent bars and real window insets
+ * arrive regardless of which theme the manifest names. The generated
+ * manifest theme should be `@android:style/Theme.Material.NoActionBar`; a
+ * still-legacy theme (missing `windowDrawsSystemBarBackgrounds`) keeps
+ * working — the flag above covers it — but [onCreate] logs a warning naming
+ * the manifest attribute to change. Either way the system bars stay
+ * **visible** (`SystemUiMode.edgeToEdge` semantics — this is not a
+ * bar-hiding fullscreen mode; [applySystemUiMode]'s arms are unchanged).
  * `FrustSurfaceView`'s `OnApplyWindowInsetsListener` reports the
  * resulting system-bar/cutout/IME occlusion back into the framework via
  * `nativeOnInsetsChanged`. `windowSoftInputMode="adjustResize"` (manifest)
@@ -105,6 +118,32 @@ open class FrustActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // This activity owns edge-to-edge rather than leaning on the
+        // manifest theme: transparent status/nav-bar styles, matching the
+        // opaque-by-default look every existing app already has.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
+        )
+        if (Build.VERSION.SDK_INT < 35) {
+            // This is exactly what a theme's windowDrawsSystemBarBackgrounds=true
+            // does inside PhoneWindow — a no-op on API 35+, where edge-to-edge is
+            // platform-enforced and the flag no longer exists to opt out of.
+            @Suppress("DEPRECATION")
+            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            // No translucent scrim behind 3-button navigation or the status bar —
+            // the app paints under the bar itself.
+            window.isNavigationBarContrastEnforced = false
+            // Deprecated in API 35: the platform forces a transparent status bar
+            // unconditionally there, so enforcing contrast on it stopped meaning
+            // anything. Still needed pre-35, where this call is what removes the
+            // scrim.
+            @Suppress("DEPRECATION")
+            window.isStatusBarContrastEnforced = false
+        }
+        warnIfLegacyTheme()
         // Perf instrumentation: a single fixed
         // marker at activity-create entry, under the same "frust" logcat
         // tag the Rust side's `frust-perf startup ...`/`frust-perf
@@ -112,7 +151,6 @@ open class FrustActivity : ComponentActivity() {
         // surfaceCreated -> native init) is measurable from the same
         // logcat stream. No other behavior change.
         Log.i("frust", "frust-perf activity-create")
-        WindowCompat.setDecorFitsSystemWindows(window, false)
         // The embedding is app-name-agnostic, so the native library is loaded
         // here (Flutter's `FlutterJNI.loadLibrary(context)` shape) instead of
         // from a static initializer inside FrustSurfaceView — strictly before
@@ -169,6 +207,30 @@ open class FrustActivity : ComponentActivity() {
                 "override FrustActivity.nativeLibraryName."
         }
         return name
+    }
+
+    /**
+     * Legacy-theme tripwire, called once per activity creation from
+     * [onCreate]. `windowDrawsSystemBarBackgrounds` is what a theme sets to
+     * get transparent system bars pre-API-35; [onCreate]'s
+     * `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` already covers a manifest that
+     * still lacks it, so this never changes behavior — it only names the fix
+     * so a still-scaffolded app can drop the workaround.
+     */
+    private fun warnIfLegacyTheme() {
+        val attrs = theme.obtainStyledAttributes(intArrayOf(android.R.attr.windowDrawsSystemBarBackgrounds))
+        val drawsSystemBarBackgrounds = attrs.getBoolean(0, false)
+        attrs.recycle()
+        if (!drawsSystemBarBackgrounds) {
+            Log.w(
+                "frust",
+                "Frust: AndroidManifest.xml still names a legacy theme (missing " +
+                    "windowDrawsSystemBarBackgrounds) — change the android:theme attribute on " +
+                    "both the <application> and <activity> elements to " +
+                    "\"@android:style/Theme.Material.NoActionBar\". Edge-to-edge already " +
+                    "works either way; see $EDGE_TO_EDGE_MIGRATION_DOC.",
+            )
+        }
     }
 
     /**
@@ -249,5 +311,15 @@ open class FrustActivity : ComponentActivity() {
          * it back. Do not rename on one side only.
          */
         const val NATIVE_LIBRARY_META_DATA = "dev.frust.nativeLibrary"
+
+        /**
+         * Where the migration recipe for a legacy-theme app lives. Named in
+         * [warnIfLegacyTheme]'s log message; keep it in step with the heading
+         * that recipe actually carries — mirrors frust-drive's
+         * `MIGRATION_RECIPE_DOC` pattern
+         * (`crates/frust-drive/src/android_build/artifacts.rs`).
+         */
+        const val EDGE_TO_EDGE_MIGRATION_DOC =
+            "docs/SHELLS_DEVELOPMENT.md, \"Migrating an already-scaffolded app to edge-to-edge\""
     }
 }

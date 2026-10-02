@@ -78,7 +78,7 @@ use crate::components::switch::switch;
 use crate::motion::{Presence, Ramp};
 use crate::press::{Lane, press_scale, presses};
 use crate::style;
-use crate::text::Label;
+use crate::text::{Label, ThemeTextType};
 use crate::tokens::motion::{SPRING_LAYOUT, SPRING_PRESS};
 use crate::tokens::sans_family;
 
@@ -1149,7 +1149,15 @@ fn resolve_colors(theme: Option<&Theme>) -> SchedulerColors {
     }
 }
 
-/// `font-medium` at `size`.
+/// The type-scale role a day's name takes its family from at layout.
+const DAY_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
+
+/// The type-scale role the time ranges and the "Unavailable" line take their
+/// family from at layout.
+const BODY_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
+/// `font-medium` at `size`. The family here is the unthemed base; `layout`
+/// shapes in [`DAY_ROLE`]'s family.
 fn medium(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1160,7 +1168,8 @@ fn medium(size: f64, color: Color) -> TextStyle {
     }
 }
 
-/// A plain run at `size`.
+/// A plain run at `size`. The family here is the unthemed base; `layout`
+/// shapes in [`BODY_ROLE`]'s family.
 fn plain(size: f64, color: Color) -> TextStyle {
     TextStyle {
         family: sans_family(),
@@ -1188,12 +1197,14 @@ impl Widget for AvailabilitySchedulerWidget {
             let switch = self.switches[index].layout_child(ctx, &switch_bc);
             {
                 let row = &mut self.rows[index];
-                row.label.layout(ctx, &medium(style::TEXT_SM, colors.ink));
+                row.label
+                    .layout_themed(ctx, &medium(style::TEXT_SM, colors.ink), DAY_ROLE);
                 row.unavailable
-                    .layout(ctx, &plain(style::TEXT_SM, colors.muted));
+                    .layout_themed(ctx, &plain(style::TEXT_SM, colors.muted), BODY_ROLE);
+                let range_style = plain(style::TEXT_SM, colors.ink);
                 for range in &mut row.ranges {
-                    range.start.layout(ctx, &plain(style::TEXT_SM, colors.ink));
-                    range.end.layout(ctx, &plain(style::TEXT_SM, colors.ink));
+                    range.start.layout_themed(ctx, &range_style, BODY_ROLE);
+                    range.end.layout_themed(ctx, &range_style, BODY_ROLE);
                 }
             }
 
@@ -2396,5 +2407,34 @@ mod tests {
                 .is_visible(),
             "the removed range is gone on the frame it left"
         );
+    }
+
+    // ---- Typeface: day names, ranges and "Unavailable" follow the theme -----
+
+    use crate::text::typeface_probe::{
+        Probe, assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(600.0, 900.0);
+
+    /// The default week: five days with a range each, and two unavailable.
+    fn probe_view(_: &mut ()) -> AvailabilitySchedulerView<()> {
+        availability_scheduler::<(), _>(default_week(), |_: &mut (), _| {})
+    }
+
+    #[test]
+    fn the_schedule_text_paints_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the schedule's text", probe_view, PROBE_WINDOW);
+        let runs = Probe::new(probe_view, PROBE_WINDOW, crate::theme()).frame();
+        assert_eq!(
+            runs.len(),
+            19,
+            "seven day names, five ranges' two ends and two \"Unavailable\" lines"
+        );
+    }
+
+    #[test]
+    fn the_schedule_text_follows_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the schedule's text", probe_view, PROBE_WINDOW);
     }
 }

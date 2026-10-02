@@ -100,7 +100,7 @@ use crate::overlay::anchored::{
 };
 use crate::press::{Lane, inside_inclusive, presses};
 use crate::style;
-use crate::text::{LabelRun, label_style};
+use crate::text::{LabelRun, ThemeTextType, label_style};
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_SWAP};
 
 // ---- Metrics ---------------------------------------------------------------
@@ -170,6 +170,11 @@ const DISABLED_OPACITY: f32 = style::DISABLED_OPACITY_INPUT;
 
 /// Opacity of a disabled row in the panel: `disabled:opacity-45`.
 const ROW_DISABLED_OPACITY: f32 = 0.45;
+
+/// The type-scale role a chip's label takes its family from at layout — a
+/// small token label. The panel's rows are [`select::LABEL_ROLE`] and its
+/// empty state [`combobox::EMPTY_ROLE`], as on the combobox.
+const CHIP_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 
 // ---- Options ---------------------------------------------------------------
 
@@ -333,6 +338,8 @@ impl<State: 'static> MultiSelectTriggerView<State> {
         } else {
             String::new()
         };
+        // The query and placeholder keep the baseline `text_input`'s own
+        // family: that field has no themed-family seam.
         any(
             text_input(self.query.clone(), move |state: &mut State, text| {
                 on_change(state, text);
@@ -550,7 +557,7 @@ impl Widget for MultiSelectTriggerWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let style = label_style(style::TEXT_XS);
         for chip in &mut self.chips {
-            chip.text.layout(ctx, &style);
+            chip.text.layout_themed(ctx, &style, CHIP_ROLE);
         }
 
         let width = if bc.max().width.is_finite() {
@@ -1151,9 +1158,17 @@ impl Widget for MultiSelectPanelWidget {
         let style = label_style(style::TEXT_SM);
         let mut widest: f64 = 0.0;
         for row in &mut self.rows {
-            widest = widest.max(row.text.layout(ctx, &style).width);
+            widest = widest.max(
+                row.text
+                    .layout_themed(ctx, &style, select::LABEL_ROLE)
+                    .width,
+            );
         }
-        widest = widest.max(self.empty.layout(ctx, &style).width);
+        widest = widest.max(
+            self.empty
+                .layout_themed(ctx, &style, combobox::EMPTY_ROLE)
+                .width,
+        );
 
         let anchor_width = self
             .config
@@ -1844,5 +1859,56 @@ mod tests {
         );
         assert_eq!(app.opens, vec![false]);
         let _ = app.selected;
+    }
+
+    // ---- Typeface: chips, rows and the empty state follow the live theme ---
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// An open panel filtered by `query`, mounted directly.
+    fn probe_panel(query: &str) -> MultiSelectPanelView<()> {
+        MultiSelectPanelView {
+            options: options(),
+            selected: vec![0],
+            query: query.to_string(),
+            config: Rc::new(RefCell::new(PanelConfig {
+                open: true,
+                anchor: None,
+            })),
+            on_toggle: Rc::new(|_: &mut (), _| {}),
+        }
+    }
+
+    /// A token field holding two chips, over an unfiltered panel (its rows)
+    /// and one whose query keeps nothing (its empty state). The token field's
+    /// search slot is empty and, with a selection, shows no placeholder: its
+    /// baseline field has no themed-family opt-in, so its text would paint the
+    /// system face and is not what these tests pin.
+    fn probe_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::Column(vec![
+            frust::any(multi_select_trigger::<(), _>(
+                &OverlayAnchor::new(),
+                options(),
+                vec![0, 1],
+                "",
+                |_: &mut (), _| {},
+            )),
+            frust::any(probe_panel("")),
+            frust::any(probe_panel("zzz")),
+        ])
+    }
+
+    #[test]
+    fn chips_and_panel_text_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the multi-select's text", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn chips_and_panel_text_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the multi-select's text", probe_view, PROBE_WINDOW);
     }
 }

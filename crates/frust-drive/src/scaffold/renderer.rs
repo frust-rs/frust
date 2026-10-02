@@ -52,11 +52,16 @@ pub fn expand_path(relative: &Path, vars: &BTreeMap<&str, String>) -> PathBuf {
 /// handled by [`crate::scaffold::classify`] before this runs).
 ///
 /// This lets an entire template source tree carry a `.tmpl` suffix on its
-/// root directory as a purely organizational marker in `templates/app/`
-/// (`android.tmpl/` — mirrored by `templates/app/` itself not needing the
-/// suffix since it's the manifest root, and future `ios.tmpl/`) without
-/// that suffix leaking into the generated project's directory name
-/// (`android.tmpl/` → `android/`).
+/// root directory as a purely organizational marker in
+/// `crates/frust-drive/templates/app/`
+/// (`android.tmpl/`, `ios.tmpl/`, `macos.tmpl/`, `windows.tmpl/`,
+/// `linux.tmpl/`, `web.tmpl/` — mirrored by `crates/frust-drive/templates/app/` itself not
+/// needing the suffix since it's the manifest root) without that suffix
+/// leaking into the generated project's directory name (`android.tmpl/` →
+/// `android/`). Those marker directories are also exactly what
+/// [`crate::scaffold::ScaffoldPlatform::template_dir`] names, so the
+/// platform-inclusion axis and this stripping stay one convention rather
+/// than two.
 pub fn strip_tmpl_dir_suffixes(relative: &Path) -> PathBuf {
     let mut components: Vec<Component> = relative.components().collect();
     let Some(file_component) = components.pop() else {
@@ -152,6 +157,27 @@ mod tests {
             out,
             Path::new("android/gradle/wrapper/gradle-wrapper.properties")
         );
+    }
+
+    #[test]
+    fn strip_tmpl_dir_suffixes_strips_every_platform_marker_directory() {
+        // Every `ScaffoldPlatform::template_dir()` value, including the
+        // browser target's `web.tmpl/` — the marker convention is uniform
+        // across the platform axis, not special-cased per platform.
+        for (marker, rendered) in [
+            ("android.tmpl/build.gradle.kts", "android/build.gradle.kts"),
+            ("ios.tmpl/Runner/Info.plist", "ios/Runner/Info.plist"),
+            ("macos.tmpl/Info.plist", "macos/Info.plist"),
+            ("windows.tmpl/build.rs", "windows/build.rs"),
+            ("linux.tmpl/app.desktop", "linux/app.desktop"),
+            ("web.tmpl/index.html", "web/index.html"),
+            ("web.tmpl/frust_web.js", "web/frust_web.js"),
+        ] {
+            assert_eq!(
+                strip_tmpl_dir_suffixes(Path::new(marker)),
+                Path::new(rendered)
+            );
+        }
     }
 
     #[test]

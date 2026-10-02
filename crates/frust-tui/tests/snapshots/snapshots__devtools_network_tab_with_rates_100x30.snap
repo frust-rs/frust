@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │ totals since start   rx 19.5 KB   tx 4.9 KB                              
    New project · n       │ ⚠ Namespace-wide counters (/proc/net/dev) — every process sharing this   
    Add plugin · a        │   network namespace, not just this session. Process-level, not           
-   Doctor · d            │   request-level: request-level logging requires app-side                 
+   Doctor · i            │   request-level: request-level logging requires app-side                 
    Build · b             │   instrumentation.                                                       
-   Clean · c             │                                                                          
+   Clean                 │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
                          │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: network │ [1234][ ] tabs · Esc back to log            [mouse ✓]
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

@@ -79,9 +79,15 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (Makepad `app_main!` precedent).
 ///
-/// Stamps out the twenty `frust_*` symbols the generated Swift app declares
+/// Stamps out the twenty-four `frust_*` symbols the generated Swift app
+/// declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `frust_ime_apply`, `frust_ime_state_json`, `frust_string_free` —
+/// the four clipboard/system-edit-menu exports — `frust_edit_command`,
+/// `frust_take_clipboard_write`, `frust_take_paste_request` and
+/// `frust_selection_toolbar_json`, the route that keeps every paste exempt
+/// from iOS's paste-permission alert by going through the platform's own
+/// menu (see `ffi_glue::edit_command`) —
 /// `frust_set_appearance` (the dark-mode export),
 /// `frust_set_reduce_motion` (the reduced-motion accessibility export — the
 /// same transport over a different sensor: `UIAccessibility`, not
@@ -203,17 +209,21 @@ macro_rules! ios_app {
         /// `frust_dispatch_touch`: deliver one touch contact.
         ///
         /// `phase` is the fixed code (`0`=began, `1`=moved, `2`=ended,
-        /// `3`=cancelled — an ABI shared with the Swift `FrustView`); `x`/`y`
-        /// are logical points (passed through, no scale division).
+        /// `3`=cancelled — an ABI shared with the Swift `FrustView`);
+        /// `pointer_id` is the per-sequence contact slot (first contact of a
+        /// sequence is 0; later contacts 1..; see FrustView.swift's slot map and
+        /// the 'Multi-contact contract' rustdoc in crates/frust-core/src/event.rs);
+        /// `x`/`y` are logical points (passed through, no scale division).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_dispatch_touch(
             handle: *mut ::core::ffi::c_void,
             phase: u32,
+            pointer_id: u32,
             x: f32,
             y: f32,
         ) {
-            $crate::ffi_glue::dispatch_touch(handle, phase, x, y)
+            $crate::ffi_glue::dispatch_touch(handle, phase, pointer_id, x, y)
         }
 
         /// `frust_ime_apply`: push a whole editing state from the Swift
@@ -246,11 +256,70 @@ macro_rules! ios_app {
         }
 
         /// `frust_string_free`: release a C string returned by
-        /// `frust_ime_state_json`.
+        /// `frust_ime_state_json`, `frust_take_clipboard_write`,
+        /// `frust_selection_toolbar_json` or
+        /// `frust_platform_view_commands_json`.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_string_free(s: *mut ::core::ffi::c_char) {
             $crate::ffi_glue::string_free(s)
+        }
+
+        /// `frust_edit_command`: deliver one clipboard/selection verb from the
+        /// system edit menu or a hardware-keyboard chord.
+        ///
+        /// `cmd` is a fixed numeric ABI shared with the Swift `FrustView` edit
+        /// actions — `0`=copy, `1`=cut, `2`=paste, `3`=select-all, **do not
+        /// renumber**; an unrecognized code is dropped rather than guessed at.
+        /// `text` is the pasted UTF-8 payload, read for `2` only (null
+        /// otherwise) — see `ffi_glue::edit_command`.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_edit_command(
+            handle: *mut ::core::ffi::c_void,
+            cmd: u8,
+            text: *const ::core::ffi::c_char,
+        ) {
+            $crate::ffi_glue::edit_command(handle, cmd, text)
+        }
+
+        /// `frust_take_clipboard_write`: take (and clear) the text a widget
+        /// asked to put on the host pasteboard — a heap-allocated C string the
+        /// caller must release with `frust_string_free`, or null when nothing
+        /// was copied. Destructive: draining and dropping the result loses the
+        /// write (see `ffi_glue::take_clipboard_write`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_take_clipboard_write(
+            handle: *mut ::core::ffi::c_void,
+        ) -> *mut ::core::ffi::c_char {
+            $crate::ffi_glue::take_clipboard_write(handle)
+        }
+
+        /// `frust_take_paste_request`: take (and clear) whether a widget asked
+        /// the shell to read the host pasteboard back to it. `1` = asked,
+        /// `0` = not (a plain `u8`, mirroring `frust_set_appearance`'s `dark`).
+        /// Effectively unused on iOS, and deliberately so — see
+        /// `ffi_glue::take_paste_request` for why this is the one paste route
+        /// the platform does *not* exempt from its permission alert.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_take_paste_request(handle: *mut ::core::ffi::c_void) -> u8 {
+            $crate::ffi_glue::take_paste_request(handle)
+        }
+
+        /// `frust_selection_toolbar_json`: where the system edit menu should be
+        /// anchored and which verbs it may offer, as a heap-allocated JSON C
+        /// string the caller must release with `frust_string_free` — or null
+        /// when no field has a selection worth a menu. The anchor is in logical
+        /// points, the same space as the IME JSON's caret rect (see
+        /// `ffi_glue::selection_toolbar_json`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_selection_toolbar_json(
+            handle: *mut ::core::ffi::c_void,
+        ) -> *mut ::core::ffi::c_char {
+            $crate::ffi_glue::selection_toolbar_json(handle)
         }
 
         /// `frust_pause`: app backgrounded — stop submitting frames.
@@ -313,6 +382,33 @@ macro_rules! ios_app {
             vi_b: f32,
         ) {
             $crate::ffi_glue::set_insets(handle, vp_l, vp_t, vp_r, vp_b, vi_l, vi_t, vi_r, vi_b)
+        }
+
+        /// `frust_set_corner_insets`: deliver the iPadOS 26+ window
+        /// control's footprint as `WindowInsets.corner_insets`. The eight
+        /// `f32`s are its protrusion beyond the safe area per **physical**
+        /// corner — top-left, top-right, bottom-left, bottom-right — each
+        /// width then height, in **logical points** (no scale division, like
+        /// `frust_set_insets`). Swift calls this from `pushInsets` and
+        /// `viewDidLayoutSubviews` on iOS 26+ only; the corners are never
+        /// consumed on the Rust side.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn frust_set_corner_insets(
+            handle: *mut ::core::ffi::c_void,
+            tl_w: f32,
+            tl_h: f32,
+            tr_w: f32,
+            tr_h: f32,
+            bl_w: f32,
+            bl_h: f32,
+            br_w: f32,
+            br_h: f32,
+        ) {
+            $crate::ffi_glue::set_corner_insets(
+                handle, tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h,
+            )
         }
 
         /// `frust_on_deep_link`: deliver a platform deep link (cold-start

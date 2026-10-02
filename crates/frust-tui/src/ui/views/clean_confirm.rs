@@ -16,6 +16,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Shadow};
 
+use frust_drive::build_dirs::{CLEAN_DIRS, LEGACY_CLEAN_DIRS};
+
 use crate::engine::{Message, RegionId};
 use crate::ui::layout::centered;
 use crate::ui::mouse::MouseCtx;
@@ -68,7 +70,7 @@ pub fn render(
     y += 1;
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "cargo clean · android/app/build · android/.gradle · build/",
+            consent_dirs_text(),
             Style::default().fg(theme.muted()),
         )),
         row_rect(y),
@@ -112,5 +114,44 @@ pub fn render(
             )),
             row_rect(y),
         );
+    }
+}
+
+/// Builds the consent line's directory list from
+/// [`frust_drive::build_dirs::CLEAN_DIRS`]/[`LEGACY_CLEAN_DIRS`] so the text
+/// shown here cannot drift from what `clean` actually removes. `CLEAN_DIRS`
+/// entries (directories only, today) render with a trailing `/`; the legacy
+/// entries render bare, since one of them is a file, not a directory.
+fn consent_dirs_text() -> String {
+    let mut parts: Vec<String> = vec!["cargo clean".to_string()];
+    parts.extend(CLEAN_DIRS.iter().map(|dir| format!("{dir}/")));
+    if !LEGACY_CLEAN_DIRS.is_empty() {
+        parts.push(format!("legacy: {}", LEGACY_CLEAN_DIRS.join(" · ")));
+    }
+    parts.join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every entry `clean` actually removes must be named in the consent
+    /// text — the source of truth this derives from, not a hand-maintained
+    /// copy that can drift from it.
+    #[test]
+    fn consent_text_lists_every_clean_and_legacy_entry() {
+        let text = consent_dirs_text();
+        for dir in CLEAN_DIRS {
+            assert!(
+                text.contains(dir),
+                "consent text `{text}` is missing CLEAN_DIRS entry `{dir}`"
+            );
+        }
+        for dir in LEGACY_CLEAN_DIRS {
+            assert!(
+                text.contains(dir),
+                "consent text `{text}` is missing LEGACY_CLEAN_DIRS entry `{dir}`"
+            );
+        }
     }
 }

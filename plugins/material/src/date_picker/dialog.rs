@@ -80,7 +80,7 @@
 
 use std::rc::Rc;
 
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontFamily, FontWeight, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, build_child, rebuild_child,
@@ -574,11 +574,14 @@ struct DatePickerPanel<State: 'static> {
 }
 
 /// A lazily shaped, paint-time re-brushed header run — the idiom
-/// [`crate::badge`]'s `LabelRun` establishes.
+/// [`crate::badge`]'s `LabelRun` establishes. Size and weight are the role's
+/// token literals; the family is the live theme's, resolved at layout.
 struct HeaderRun {
     content: String,
     size: f32,
     weight: FontWeight,
+    /// The family the cached layout was shaped in.
+    family: FontFamily,
     layout: Option<TextLayout>,
 }
 
@@ -588,7 +591,17 @@ impl HeaderRun {
             content: String::new(),
             size,
             weight,
+            family: FontFamily::default(),
             layout: None,
+        }
+    }
+
+    /// The style the run shapes with.
+    fn style(&self) -> TextStyle {
+        TextStyle {
+            family: self.family.clone(),
+            weight: self.weight,
+            ..TextStyle::new(self.size, SHAPING_INK)
         }
     }
 
@@ -599,22 +612,25 @@ impl HeaderRun {
         }
     }
 
-    /// Shape (or reuse) the run, returning its measured size.
+    /// Shape (or reuse) the run in `family`, returning its measured size.
     ///
-    /// The cache is keyed on the **content only**, not on `max_width`: both
-    /// header lines are short single lines that never wrap at either panel
-    /// width ([`DIALOG_PORTRAIT_INPUT_WIDTH`]/[`DIALOG_PORTRAIT_CALENDAR_WIDTH`]),
-    /// so a width change alone cannot change the shaping. A caller that
-    /// narrowed the panel far enough to force a wrap would need to invalidate
-    /// through [`Self::set_content`].
-    fn shape(&mut self, ctx: &mut LayoutCtx, max_width: f64) -> Size {
+    /// The cache is keyed on the **content and the family**, not on
+    /// `max_width`. The family is part of the key so a theme swap (or a font
+    /// picker) reshapes the run instead of serving the old face. The width is
+    /// not: both header lines are short single lines that never wrap at either
+    /// panel width ([`DIALOG_PORTRAIT_INPUT_WIDTH`]/
+    /// [`DIALOG_PORTRAIT_CALENDAR_WIDTH`]), so a width change alone cannot
+    /// change the shaping. A caller that narrowed the panel far enough to force
+    /// a wrap would need to invalidate through [`Self::set_content`].
+    fn shape(&mut self, ctx: &mut LayoutCtx, family: &FontFamily, max_width: f64) -> Size {
+        if self.family != *family {
+            self.family = family.clone();
+            self.layout = None;
+        }
         if let Some(layout) = &self.layout {
             return layout.size();
         }
-        let style = TextStyle {
-            weight: self.weight,
-            ..TextStyle::new(self.size, SHAPING_INK)
-        };
+        let style = self.style();
         let laid = ctx.text_context::<TextContext>().layout(
             &self.content,
             &style,
@@ -792,8 +808,17 @@ impl Widget for DatePickerPanelWidget {
                 0.0
             })
         .max(0.0);
-        let help_size = self.help.shape(ctx, help_w);
-        let headline_size = self.headline.shape(ctx, inner_w);
+        // The header runs' families: the live theme's `labelLarge`/
+        // `headlineLarge`, or the system UI family unthemed.
+        let (help_family, headline_family) = match Theme::from_layout_ctx(ctx) {
+            Some(theme) => (
+                theme.type_scale.label_large.family.clone(),
+                theme.type_scale.headline_large.family.clone(),
+            ),
+            None => (FontFamily::default(), FontFamily::default()),
+        };
+        let help_size = self.help.shape(ctx, &help_family, help_w);
+        let headline_size = self.headline.shape(ctx, &headline_family, inner_w);
 
         let help_row_h = help_size.height.max(toggle_size.height);
         let natural =
@@ -922,6 +947,7 @@ mod tests {
 
     use frust::FrameTime;
     use frust::authoring::{PointerButton, PointerEvent, PointerPhase};
+    use frust_widgets::test_support::leaf_any;
 
     use super::super::{DatePickerEntryMode, DatePickerMode};
     use super::*;
@@ -1255,6 +1281,177 @@ mod tests {
             &mut BuildCtx::new(&mut counter),
         );
         View::<App>::teardown(&locked, &mut element, &mut BuildCtx::new(&mut counter));
+    }
+
+    // ---- header typeface: the runs' families follow the live theme ---------
+
+    /// A bare panel — leaf children, no mode affordance — so a test reaches the
+    /// two header runs without a modal host around them.
+    fn header_panel() -> DatePickerPanel<()> {
+        DatePickerPanel {
+            help: DatePickerStrings::ENGLISH.help_text.to_string(),
+            headline: "Thu, Aug 20".to_string(),
+            toggle: None,
+            body: leaf_any(10.0, 10.0),
+            body_inset: 0.0,
+            cancel: leaf_any(10.0, 10.0),
+            confirm: leaf_any(10.0, 10.0),
+        }
+    }
+
+    fn build_header_panel() -> DatePickerPanelWidget {
+        let mut counter = 0u64;
+        View::<()>::build(&header_panel(), &mut BuildCtx::new(&mut counter))
+    }
+
+    /// A baseline theme whose `labelLarge`/`headlineLarge` roles name `help`/
+    /// `headline`.
+    fn theme_with_header(help: FontFamily, headline: FontFamily) -> Theme {
+        let mut theme = crate::baseline();
+        theme.type_scale.label_large.family = help;
+        theme.type_scale.headline_large.family = headline;
+        theme
+    }
+
+    /// Lay the panel out against `tcx`, threading `theme` the way the render
+    /// root does.
+    fn layout_header(w: &mut DatePickerPanelWidget, tcx: &mut TextContext, theme: Option<&Theme>) {
+        let mut ctx =
+            LayoutCtx::with_resources(Some(tcx as &mut dyn Any), theme.map(|t| t as &dyn Any));
+        w.layout(
+            &mut ctx,
+            &BoxConstraints::tight(Size::new(DIALOG_PORTRAIT_CALENDAR_WIDTH, 600.0)),
+        );
+    }
+
+    #[test]
+    fn layout_takes_the_header_families_from_their_roles() {
+        let mut w = build_header_panel();
+        let mut tcx = TextContext::new();
+        let (help, headline) = (
+            FontFamily::named("Help Role Probe"),
+            FontFamily::named("Headline Role Probe"),
+        );
+        layout_header(
+            &mut w,
+            &mut tcx,
+            Some(&theme_with_header(help.clone(), headline.clone())),
+        );
+        assert_eq!(w.help.style().family, help, "the help line is labelLarge");
+        assert_eq!(
+            w.headline.style().family,
+            headline,
+            "the headline is headlineLarge"
+        );
+        // Only the family is themed: the roles' own size/weight literals stay.
+        assert_eq!(w.help.style().size, HELP_TEXT_SIZE);
+        assert_eq!(w.headline.style().size, HEADLINE_TEXT_SIZE);
+    }
+
+    #[test]
+    fn without_a_theme_the_header_keeps_the_unthemed_styles() {
+        let mut w = build_header_panel();
+        let mut tcx = TextContext::new();
+        layout_header(&mut w, &mut tcx, None);
+        assert_eq!(
+            w.help.style(),
+            TextStyle {
+                weight: FontWeight::MEDIUM,
+                ..TextStyle::new(HELP_TEXT_SIZE, SHAPING_INK)
+            }
+        );
+        assert_eq!(
+            w.headline.style(),
+            TextStyle {
+                weight: FontWeight::REGULAR,
+                ..TextStyle::new(HEADLINE_TEXT_SIZE, SHAPING_INK)
+            }
+        );
+    }
+
+    #[test]
+    fn a_theme_swap_reshapes_the_cached_header_runs() {
+        let mut w = build_header_panel();
+        let mut tcx = TextContext::new();
+        let first = theme_with_header(
+            FontFamily::named("Header Swap Probe A"),
+            FontFamily::named("Header Swap Probe A"),
+        );
+        layout_header(&mut w, &mut tcx, Some(&first));
+
+        // Control: the same theme again reuses both cached runs outright.
+        let settled = tcx.shape_cache_stats();
+        layout_header(&mut w, &mut tcx, Some(&first));
+        assert_eq!(
+            tcx.shape_cache_stats(),
+            settled,
+            "an unchanged theme reshapes nothing"
+        );
+
+        let second = theme_with_header(
+            FontFamily::named("Header Swap Probe B"),
+            FontFamily::named("Header Swap Probe B"),
+        );
+        layout_header(&mut w, &mut tcx, Some(&second));
+        assert_eq!(
+            tcx.shape_cache_stats().shapes,
+            settled.shapes + 2,
+            "a family swap must reshape both header runs, not serve the old face"
+        );
+    }
+
+    /// The first glyph run's font bytes — the face `run` actually shaped in.
+    #[cfg(feature = "bundled-fonts")]
+    fn shaped_font(run: &HeaderRun) -> Vec<u8> {
+        let layout = run.layout.as_ref().expect("the run was shaped");
+        let runs = layout.to_scene_runs(Point::ZERO);
+        let first = runs
+            .first()
+            .expect("the run shaped to at least one glyph run");
+        first.font.font().data.as_ref().to_vec()
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn a_theme_swap_between_registered_families_changes_the_header_face() {
+        // `font_data()`'s documented order: Roboto Flex, then Roboto Mono.
+        let (flex, mono) = (crate::tokens::font_data()[0], crate::tokens::font_data()[1]);
+        let mut tcx = TextContext::new();
+        for bytes in [flex, mono] {
+            tcx.register_fonts(bytes.to_vec())
+                .expect("the bundled faces must register");
+        }
+        let flex_family = || FontFamily::named(crate::tokens::ROBOTO_FLEX_FAMILY);
+        let mono_family = || FontFamily::named(crate::tokens::ROBOTO_MONO_FAMILY);
+        let mut w = build_header_panel();
+
+        layout_header(
+            &mut w,
+            &mut tcx,
+            Some(&theme_with_header(flex_family(), flex_family())),
+        );
+        assert!(
+            shaped_font(&w.help) == flex,
+            "labelLarge shapes the help line"
+        );
+        assert!(
+            shaped_font(&w.headline) == flex,
+            "headlineLarge shapes the headline"
+        );
+
+        layout_header(
+            &mut w,
+            &mut tcx,
+            Some(&theme_with_header(mono_family(), mono_family())),
+        );
+        assert!(
+            shaped_font(&w.help) == mono,
+            "after a theme swap the help line must shape in the new family"
+        );
+        assert!(
+            shaped_font(&w.headline) == mono,
+            "after a theme swap the headline must shape in the new family"
+        );
     }
 
     #[test]

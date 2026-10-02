@@ -1,0 +1,91 @@
+[package]
+name = "frust-url-launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "URL launcher plugin for Frust apps: opens an http or https URL in the default external handler on Android, iOS, macOS, Linux and Windows."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# UrlLauncherError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The Android platform-handle substrate this crate's Android backend calls
+# through (`frust_plugin::android::with_jni_env`); the only `frust-*`
+# dependency this crate is allowed (platform-plugin charter — see
+# `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
+# Plugin Conventions). Unconditional like `frust-haptics`'s own copy: the
+# crate is inert off Android, so declaring it target-gated would buy nothing.
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
+
+# Android: `Intent`/`Uri`/`startActivity` via plain JNI (no Kotlin/Gradle
+# module — see `src/android.rs`'s module doc for why one isn't needed).
+# Matches `frust-haptics`'s Android arm: its own JNI signature calls don't go
+# through `frust-plugin`'s re-export alone, so this crate depends on `jni`
+# directly too.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# iOS only — **not** `target_vendor = "apple"`. `UIApplication` is UIKit,
+# which doesn't exist on macOS (no AppKit URL-opener backend here either —
+# macOS instead shares the `desktop` `open` backend below, see
+# `src/desktop.rs`'s module doc). Matches `frust-haptics`'s own
+# `target_os = "ios"` rationale.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+# `NSURL`/`NSString`/`NSDictionary`: `objc2-ui-kit`'s own `UIApplication`
+# feature (below) already turns on the matching `objc2-foundation` sub-features
+# it needs (`objc2-foundation/NSURL`, `/NSDictionary`, `/NSString`, plus a few
+# more — see that crate's `Cargo.toml` feature-unification table), so there is
+# nothing left to gain from `default-features = false` here the way
+# `frust-shared-preferences`/`frust-secure-storage`/`frust-camera` narrow
+# their own `objc2-foundation` edge — `{ workspace = true }`'s full default
+# set costs nothing extra `objc2-ui-kit` wasn't already going to pull in.
+objc2-foundation = { workspace = true }
+# `UIApplication`/`sharedApplication`/`openURL:options:completionHandler:`.
+# `default-features = false` (not inherited — see `plugins/clipboard/Cargo.toml`'s
+# comment for why a plain version string like this crate's workspace pin
+# can't set `default-features` on a member without repeating the version
+# literal) drops every other UIKit class this crate never touches.
+# `UIResponder` is `UIApplication`'s declared superclass
+# (`#[unsafe(super(UIResponder, NSObject))]`) and is required to name the
+# type at all; `block2` gates `openURL:options:completionHandler:` itself
+# (the plain, deprecated `openURL:` needs neither — see `src/apple.rs`'s
+# module doc for why the completion-handler selector is used anyway).
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIResponder",
+    "UIApplication",
+    "block2",
+] }
+# `DispatchQueue::main()`/`exec_async`: the async main-queue bounce
+# `openURL:options:completionHandler:` is dispatched through (`src/apple.rs`'s
+# module doc's *Main-thread dispatch*) — the same three features
+# `frust-haptics` already enables for its own generator dispatch, repeated
+# here rather than inherited for the same `default-features` reason as
+# `objc2-ui-kit` above.
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2",
+] }
+
+# Windows: `ShellExecuteW` (`shell32.dll`) — see `src/desktop.rs`'s module
+# doc for why this, not `cmd /C start`, is used. `Win32_Foundation` supplies
+# `HWND`; `Win32_UI_Shell` supplies `ShellExecuteW` itself plus the
+# `SE_ERR_*` result codes; `Win32_UI_WindowsAndMessaging` supplies
+# `SW_SHOWNORMAL`. No default features (this workspace's other `windows-sys`
+# consumers — `frust-shell-windows`, `muda` — follow the same pattern).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Desktop (macOS, Linux): no dependency needed — `std::process::Command`
+# spawns `open`/`xdg-open` directly (see `src/desktop.rs`'s module doc).

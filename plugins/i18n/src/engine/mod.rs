@@ -327,7 +327,7 @@ pub trait Resolve {
 }
 
 /// An [`Engine`] borrowed together with a resolved locale chain — the
-/// featureless [`Resolve`] implementor for callers without the `frust-api`
+/// featureless [`Resolve`] implementation for callers without the `frust-api`
 /// reactive handle (headless services, tests).
 pub struct ChainResolver<'a> {
     engine: &'a Engine,
@@ -336,7 +336,7 @@ pub struct ChainResolver<'a> {
 
 impl Engine {
     /// Pairs this engine with a resolved `chain` as a [`Resolve`]
-    /// implementor.
+    /// implementation.
     pub fn with_chain<'a>(&'a self, chain: &'a [Locale]) -> ChainResolver<'a> {
         ChainResolver {
             engine: self,

@@ -42,6 +42,13 @@
 //! internally — so a test can drive them with an explicit, controllable
 //! clock (mirroring `frust-shell-common/tests/pacing_integration.rs`'s
 //! tick-driven style).
+//!
+//! [`PacedDecision`]: crate::paced_wake::PacedDecision
+//! [`ControlFlowIntent`]: crate::paced_wake::ControlFlowIntent
+//! [`ControlFlowIntent::Unchanged`]: crate::paced_wake::ControlFlowIntent::Unchanged
+//! [`ControlFlowIntent::Wait`]: crate::paced_wake::ControlFlowIntent::Wait
+//! [`next_paced_wake`]: crate::paced_wake::next_paced_wake
+//! [`paced_wake_action`]: crate::paced_wake::paced_wake_action
 
 use std::time::{Duration, Instant};
 

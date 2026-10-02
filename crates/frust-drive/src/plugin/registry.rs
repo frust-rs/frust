@@ -1,9 +1,9 @@
-//! The static plugin registry (v1) — fourteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — eighteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
-//! `clean-signals-frust` (dependency; `clean-signals` itself is git+rev-pinned
-//! to its public repo, so no sibling checkout is required), `camera`
+//! `clean-signals-frust` (dependency; `clean-signals` itself is a crates.io
+//! dependency, so no sibling checkout is required), `camera`
 //! (dependency, an app-side plist key, the plugin's
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
@@ -18,8 +18,29 @@
 //! registry entry to use [`Contribution::ManifestPermission`] rather than a
 //! Gradle module for its Android addition, since the plugin's Android
 //! backend is plain JNI with no Kotlin helper class to carry the permission
-//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `iap`
-//! (dependency, the plugin's own Android library module, and its own iOS
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `url-launcher`
+//! (dependency only — the launch half of an RFC 8252 OAuth round trip over a
+//! platform's external browser; the second registry entry, after `haptics`,
+//! whose Android side needs no `<uses-permission>` at all — `startActivity`
+//! with `ACTION_VIEW` needs none on API 30+, and no `<queries>` element
+//! either, since it targets an implicit intent the OS itself resolves — see
+//! `URL_LAUNCHER_BASE`'s doc comment), `auth-session`
+//! (dependency, the plugin's own Android library module, and the
+//! `AuthenticationServices` framework link — OAuth round trip completion
+//! half, mirroring `url-launcher`'s launch half; Chrome Custom Tabs on
+//! Android / ASWebAuthenticationSession on iOS — the first registry entry to
+//! use [`Contribution::IosFramework`], since its Apple arm is pure `objc2`
+//! and references a framework symbol the scaffold's Runner never links; no
+//! manifest permission or plist key, since Custom Tabs carry no permission,
+//! the `<queries>` element comes from the module's own manifest via the
+//! manifest merger, and ASWebAuthenticationSession needs no plist key;
+//! desktop uses the RFC 8252 loopback backend (`LoopbackSession`) on Linux, Windows and
+//! macOS, and custom-scheme start on Linux/Windows still reports NoHandler — see
+//! `AUTH_SESSION_BASE`'s doc comment),
+//! `oauth-native` (dependency only — OAuth 2.0 native-app helper with PKCE,
+//! state, authorization URL, and callback/token-response parsing; pure Rust,
+//! no HTTP client or async; the app owns the token endpoint's transport),
+//! `iap` (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
 //! comment for why), `database` (dependency only — pure-Rust plugin, no
 //! OS-side integration), and `i18n` (dependency, a seeded starter
@@ -34,7 +55,13 @@
 //! app's active theme is left to the app, the same way `frust create`'s own
 //! scaffold does it), and `shadcn` (dependency only, the same shape as the
 //! three built-ins above — the tier's first *external-origin* catalog,
-//! ported from shadcn/ui rather than authored in this repo).
+//! ported from shadcn/ui rather than authored in this repo), and
+//! `video-player` (dependency plus the plugin's own Android library
+//! module — the exact `native-widgets` two-contribution shape; no plist
+//! key, no manifest permission, no Swift package, no app-crate macro, and
+//! no contribution at all on macOS, whose factory self-registers into
+//! `frust_plugin::desktop` at first use — see `VIDEO_PLAYER_BASE`'s doc
+//! comment for the full accounting).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -135,9 +162,12 @@ const CAMERA_BASE: &[Contribution] = &[
     // multi-package shape without building it — see
     // `plugins/camera/platform/ios`'s own `Package.swift` doc comment).
     // `rel_path` points at the package
-    // directory itself (no nested `FrustCamera/` subdirectory — that is
-    // just the package/product *name*), mirroring `GradleModule`'s
-    // `rel_path` convention above.
+    // directory itself (camera's has no nested `FrustCamera/` subdirectory),
+    // mirroring `GradleModule`'s `rel_path` convention above. Its last path
+    // component is the package's SwiftPM identity (`ios` here), which must be
+    // unique across every SwiftPackageRef — see
+    // `swift_package_refs_have_unique_spm_identities`; later plugin packages
+    // therefore nest in a directory named for their product (iap's `FrustIap/`).
     Contribution::SwiftPackageRef {
         package_name: "FrustCamera",
         rel_path: "plugins/camera/platform/ios",
@@ -267,6 +297,103 @@ const HAPTICS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `url-launcher`'s single base contribution — a Cargo dependency and
+/// nothing else, the first platform plugin (one with real Android/iOS/desktop
+/// backends, unlike the pure-Rust `database`/`i18n`/design-system entries) to
+/// need a **bare** `CargoDep` with no accompanying permission, plist key,
+/// Gradle module, or Swift package.
+///
+/// Opening an absolute `http`/`https` URL in the platform's external browser
+/// needs none of those: Android's `startActivity` with an implicit
+/// `ACTION_VIEW` intent needs no `<uses-permission>` (unlike `haptics`'
+/// `VIBRATE`, itself a *normal*, install-time-granted permission) and no
+/// `<queries>` element either, because targeting an implicit intent the OS
+/// itself resolves is exempt from the package-visibility filter added in API
+/// 30 — see `plugins/url-launcher/src/android.rs`'s module doc. iOS's
+/// `UIApplication.shared.open(_:)` needs no `Info.plist` key for an
+/// `http`/`https` URL (only `LSApplicationQueriesSchemes` gates
+/// `canOpenURL:` on a *custom* scheme, and this plugin never calls that).
+/// Desktop's `xdg-open`/`open`/`ShellExecuteW` shell out to the OS URL
+/// handler directly, no linked library or bundle entry required. Like
+/// `haptics`, there is no Kotlin helper class or Swift package: both mobile
+/// backends are plain JNI/objc2 against framework APIs.
+const URL_LAUNCHER_BASE: &[Contribution] = &[Contribution::CargoDep {
+    name: "frust-url-launcher",
+}];
+
+const URL_LAUNCHER: PluginSpec = PluginSpec {
+    id: "url-launcher",
+    summary: "Open an absolute http/https URL in the platform's default external browser \
+              (Android ACTION_VIEW, iOS openURL:, desktop xdg-open/open/ShellExecuteW) — \
+              the launch half of an RFC 8252 OAuth round trip; completion returns through \
+              deep links.",
+    crate_dir: "url-launcher",
+    base: URL_LAUNCHER_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `auth-session`'s base contributions — a Cargo dependency, the plugin's own
+/// Android library module, and the `AuthenticationServices` framework link
+/// for the Runner target.
+///
+/// No [`Contribution::ManifestPermission`]: Chrome Custom Tabs carries no permission —
+/// the Android `startActivity` implied by the API needs none (unlike `haptics`'
+/// `VIBRATE`, itself a *normal* permission). No [`Contribution::PlistEntry`]: Apple's
+/// `ASWebAuthenticationSession` needs no plist key for `http`/`https` callbacks
+/// (unlike `camera`'s usage-description string, which the app's `Info.plist` must
+/// carry). No [`Contribution::SwiftPackageRef`] and no [`Contribution::AppCrateMacro`]:
+/// the iOS factory is a Rust `objc2` `define_class!` type (like `native-widgets` and
+/// `video-player`'s Apple arms), so there is nothing to link from Swift and nothing
+/// for release LTO to strip — but *not* nothing to link at all: the Rust code reads
+/// `ASWebAuthenticationSessionErrorDomain`, an `extern static` of
+/// `AuthenticationServices.framework`, and the binding's own
+/// `#[link(kind = "framework")]` never reaches Xcode's link of the iOS staticlib
+/// (see [`Contribution::IosFramework`]); the a3-03 device gate's very first Xcode
+/// link of this plugin failed on that symbol. The `<queries>` element for the
+/// CustomTabsService comes from the module's own manifest via the manifest merger
+/// — the app's manifest is never touched. Desktop (Linux/Windows/macOS) uses the
+/// RFC 8252 loopback backend (`LoopbackSession`); on Linux and Windows a
+/// custom-scheme `AuthSession::start` still reports `NoHandler` (macOS answers
+/// it with ASWebAuthenticationSession).
+const AUTH_SESSION_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-auth-session",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-auth-session",
+        rel_path: "plugins/auth-session/platform/android",
+    },
+    Contribution::IosFramework {
+        name: "AuthenticationServices",
+    },
+];
+
+const AUTH_SESSION: PluginSpec = PluginSpec {
+    id: "auth-session",
+    summary: "OAuth round trip in the platform auth user agent — ASWebAuthenticationSession \
+              (iOS/macOS, in-process callback) or Chrome Custom Tabs (Android, Gradle module) — \
+              resolving Callback(url)/Cancelled with an ephemeral mode; desktop (Linux/Windows/macOS) \
+              uses the RFC 8252 loopback backend (`LoopbackSession`); on Linux/Windows a \
+              custom-scheme start still reports NoHandler.",
+    crate_dir: "auth-session",
+    base: AUTH_SESSION_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+const OAUTH_NATIVE: PluginSpec = PluginSpec {
+    id: "oauth-native",
+    summary: "OAuth 2.0 native-app helper: PKCE (S256), state, authorization URL, callback + \
+              token-response parsing (pure Rust, no HTTP).",
+    crate_dir: "oauth-native",
+    base: &[Contribution::CargoDep {
+        name: "frust-oauth-native",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// `iap`'s base contributions — a Cargo dependency plus its own Android
 /// library module and its own iOS Swift package, the `camera`/`native-widgets`
 /// shape (a plugin's Kotlin/Swift never copied into the app).
@@ -286,9 +413,11 @@ const IAP_BASE: &[Contribution] = &[
         gradle_name: ":frust-iap",
         rel_path: "plugins/iap/platform/android",
     },
+    // Nested in `FrustIap/`: at `plugins/iap/platform/ios` its SwiftPM identity
+    // would be `ios`, camera's, and Xcode silently drops one of the two.
     Contribution::SwiftPackageRef {
         package_name: "FrustIap",
-        rel_path: "plugins/iap/platform/ios",
+        rel_path: "plugins/iap/platform/ios/FrustIap",
     },
 ];
 
@@ -298,6 +427,46 @@ const IAP: PluginSpec = PluginSpec {
               speaking the OpenIAP wire protocol.",
     crate_dir: "iap",
     base: IAP_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `video-player`'s base contributions — the exact two-contribution shape
+/// [`NATIVE_WIDGETS_BASE`] uses: a Cargo dependency plus the plugin's own
+/// Android library module, and nothing else.
+///
+/// No [`Contribution::PlistEntry`]: video playback needs no usage-description
+/// string in the app's own Info.plist, unlike camera's
+/// `NSCameraUsageDescription`. No [`Contribution::ManifestPermission`]:
+/// `android.permission.INTERNET` rides the plugin's own Android library
+/// module manifest, folded in by the manifest merger exactly like
+/// secure-storage's `USE_BIOMETRIC` above — the app's own manifest is never
+/// touched. No [`Contribution::SwiftPackageRef`] and no
+/// [`Contribution::AppCrateMacro`]: the Apple factories (iOS and macOS) are
+/// pure-Rust `objc2` `define_class!` classes — native-widgets' iOS precedent,
+/// widened to macOS — so there is nothing to link from Swift and nothing for
+/// release LTO to strip (unlike camera's Swift-called C export; see
+/// `CAMERA_BASE`'s doc comment). And macOS needs **no contribution at all**:
+/// its view factory registers itself into `frust_plugin::desktop` the first
+/// time a video view is opened, the same lazy-registration shape the iOS
+/// factory uses.
+const VIDEO_PLAYER_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-video-player",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-video-player",
+        rel_path: "plugins/video-player/platform/android",
+    },
+];
+
+const VIDEO_PLAYER: PluginSpec = PluginSpec {
+    id: "video-player",
+    summary: "Video playback (Media3 ExoPlayer / AVPlayer) with the video \
+              surface as a platform view; local, asset, http(s) and HLS \
+              sources; Android, iOS, macOS.",
+    crate_dir: "video-player",
+    base: VIDEO_PLAYER_BASE,
     optional_features: &[],
     requires_sibling: None,
 };
@@ -458,7 +627,11 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         NATIVE_WIDGETS,
         CLIPBOARD,
         HAPTICS,
+        URL_LAUNCHER,
+        AUTH_SESSION,
+        OAUTH_NATIVE,
         IAP,
+        VIDEO_PLAYER,
         DATABASE,
         I18N,
         GLYPH,
@@ -484,7 +657,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_fourteen_v1_plugins() {
+    fn registry_lists_the_eighteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -496,7 +669,11 @@ mod tests {
                 "native-widgets",
                 "clipboard",
                 "haptics",
+                "url-launcher",
+                "auth-session",
+                "oauth-native",
                 "iap",
+                "video-player",
                 "database",
                 "i18n",
                 "glyph",
@@ -513,13 +690,21 @@ mod tests {
     /// systems built on `frust::authoring` alone (see `GLYPH`'s doc
     /// comment) — `shadcn` included, despite being the tier's first
     /// external-origin catalog: its registry shape is identical.
+    ///
+    /// `url-launcher` joins the same assertion despite being a real platform
+    /// plugin, not a design system: it is the first such plugin whose base
+    /// is a bare `CargoDep` with no permission, plist key, Gradle module, or
+    /// Swift package at all (see `URL_LAUNCHER_BASE`'s doc comment) — the
+    /// same single-contribution shape this test already checks, so it is
+    /// grouped here rather than duplicated into its own test.
     #[test]
-    fn design_system_plugins_are_each_a_cargo_dep_and_nothing_else() {
+    fn design_systems_and_url_launcher_are_each_a_cargo_dep_and_nothing_else() {
         for (id, crate_name) in [
             ("glyph", "frust-glyph"),
             ("material", "frust-material"),
             ("cupertino", "frust-cupertino"),
             ("shadcn", "frust-shadcn"),
+            ("url-launcher", "frust-url-launcher"),
         ] {
             let spec = find_plugin(id).unwrap();
             assert_eq!(spec.crate_dir, id);
@@ -671,6 +856,45 @@ mod tests {
         );
     }
 
+    /// The `video-player` entry mirrors `native-widgets`' exact
+    /// two-contribution shape (see `VIDEO_PLAYER_BASE`'s doc): a Cargo
+    /// dependency plus the plugin's own Android library module, and the
+    /// same absences matter here too — no `SwiftPackageRef` (the Apple
+    /// factories are pure-Rust `define_class!` types), no
+    /// `PlistEntry`/`ManifestPermission` (no usage-description string is
+    /// needed, and `INTERNET` rides the plugin's own Android manifest), and
+    /// no `AppCrateMacro` (nothing here needs an LTO-survival shim).
+    #[test]
+    fn video_player_is_a_cargo_dep_plus_one_gradle_module_and_nothing_else() {
+        let spec = find_plugin("video-player").unwrap();
+        assert_eq!(spec.crate_dir, "video-player");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 2, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-video-player"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-video-player",
+                rel_path: "plugins/video-player/platform/android",
+            }
+        ));
+        assert!(
+            !spec
+                .base
+                .iter()
+                .any(|c| matches!(c, Contribution::SwiftPackageRef { .. })),
+            "video-player ships no Swift — its iOS and macOS factories are \
+             Rust define_class! types"
+        );
+    }
+
     /// The `camera` entry's base contributions, exactly [`CAMERA_BASE`]'s own
     /// list — no more, no fewer, in application order, and no optional
     /// features / sibling requirement.
@@ -750,7 +974,7 @@ mod tests {
             spec.base[2],
             Contribution::SwiftPackageRef {
                 package_name: "FrustIap",
-                rel_path: "plugins/iap/platform/ios",
+                rel_path: "plugins/iap/platform/ios/FrustIap",
             }
         ));
         assert!(
@@ -790,6 +1014,50 @@ mod tests {
             }
         }
         assert!(found, "expected at least one SwiftPackageRef contribution");
+    }
+
+    /// SwiftPM names a local package by its directory's last path component,
+    /// lowercased, and keeps only the first of two packages sharing a name —
+    /// with no error at resolution, only a later `Missing package product`.
+    /// iap's package once sat at `plugins/iap/platform/ios`, camera's identity
+    /// `ios`, so an app adding both plugins lost `FrustIap`. Every
+    /// SwiftPackageRef, plus the embedding package every app template
+    /// references, must therefore end in a distinct directory name.
+    #[test]
+    fn swift_package_refs_have_unique_spm_identities() {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        seen.insert(
+            "frustembedding".to_string(),
+            "platform/ios/FrustEmbedding".to_string(),
+        );
+        for plugin in known_plugins() {
+            for contribution in plugin.base.iter().chain(
+                plugin
+                    .optional_features
+                    .iter()
+                    .flat_map(|f| f.contributions.iter()),
+            ) {
+                if let Contribution::SwiftPackageRef { rel_path, .. } = contribution {
+                    let identity = Path::new(rel_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .expect("rel_path ends in a directory name")
+                        .to_lowercase();
+                    if let Some(previous) = seen.get(&identity) {
+                        // The same package contributed twice (e.g. by a
+                        // feature and a base list) is not a collision.
+                        assert_eq!(
+                            previous, rel_path,
+                            "`{rel_path}` and `{previous}` share the SwiftPM \
+                             identity `{identity}`; nest one in a directory \
+                             named for its product"
+                        );
+                    } else {
+                        seen.insert(identity, rel_path.to_string());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -843,8 +1111,8 @@ mod tests {
 
     #[test]
     fn clean_signals_frust_declares_no_sibling_requirement() {
-        // clean-signals is git+rev-pinned to its public repo; the
-        // plugin no longer needs a `../clean-signals-rs` sibling checkout.
+        // clean-signals is a crates.io dependency; the plugin needs no
+        // `../clean-signals-rs` sibling checkout.
         let spec = find_plugin("clean-signals-frust").unwrap();
         assert_eq!(spec.requires_sibling, None);
     }
@@ -1012,6 +1280,75 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// `auth-session` end to end: the first [`Contribution::IosFramework`]
+    /// entry must land `-framework AuthenticationServices` in **every**
+    /// `OTHER_LDFLAGS` list of the scaffold's pbxproj (one per build
+    /// configuration), leave the file well-formed, and be idempotent.
+    #[test]
+    fn auth_session_add_plugin_links_authentication_services_in_every_configuration() {
+        let root = scaffold_project("auth-session-framework");
+
+        let first = add_plugin(&root, "auth-session", &[]).unwrap();
+        assert_eq!(first.plugin_id, "auth-session");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let pbxproj_path = root.join("ios/Runner.xcodeproj/project.pbxproj");
+        let pbxproj = fs::read_to_string(&pbxproj_path).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(
+            lists >= 2,
+            "scaffold has {lists} OTHER_LDFLAGS lists:\n{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tAuthenticationServices,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "auth-session", &[]).unwrap();
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        // Half-applied: strip the flag from one configuration (a hand edit
+        // or an older add) — a re-add completes that list and reports
+        // `Applied`, never `AlreadyPresent`.
+        let stripped = pbxproj.replacen(
+            "\t\t\t\t\t\"-framework\",\n\t\t\t\t\tAuthenticationServices,\n",
+            "",
+            1,
+        );
+        assert_ne!(stripped, pbxproj);
+        fs::write(&pbxproj_path, &stripped).unwrap();
+        let third = add_plugin(&root, "auth-session", &[]).unwrap();
+        let framework_item = third
+            .items
+            .iter()
+            .find(|i| i.description.contains("AuthenticationServices"))
+            .unwrap();
+        assert_eq!(framework_item.outcome, AddOutcome::Applied, "{third:?}");
+        assert_eq!(fs::read_to_string(&pbxproj_path).unwrap(), pbxproj);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// The `native-widgets` counterpart of the camera end-to-end case above:
     /// a fresh scaffold, `add_plugin(.., "native-widgets", ..)` applied
     /// twice. The second apply must report `AlreadyPresent` for both
@@ -1038,7 +1375,7 @@ mod tests {
             "{settings}"
         );
         assert!(
-            settings.contains("rootDir.resolve(\"build/frust-native-widgets\")"),
+            settings.contains("rootDir.resolve(\"../build/android/frust-native-widgets\")"),
             "{settings}"
         );
         let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
@@ -1171,7 +1508,7 @@ mod tests {
         let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
         assert!(settings.contains("include(\":frust-iap\")"), "{settings}");
         assert!(
-            settings.contains("rootDir.resolve(\"build/frust-iap\")"),
+            settings.contains("rootDir.resolve(\"../build/android/frust-iap\")"),
             "{settings}"
         );
         let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();

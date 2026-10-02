@@ -19,16 +19,16 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
  ACTIONS           │                                                            │▓▓                 
    New project · n │  Mode     ‹ release ›                                      │▓▓                 
    Add plugin · a  │  Flavor   paid                                             │▓▓                 
-   Doctor · d      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
-   Build · b       │                                                            │▓▓                 
-   Clean · c       │   Launch (1)     Cancel                                    │▓▓                 
-   MCP off · M     │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
-   DAP off · D     ╰────────────────────────────────────────────────────────────╯▓▓                 
+   Doctor · i      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
+   Build · b       │    [ ] Watch src/ and restart on change (desktop only)     │▓▓                 
+   Clean · c       │                                                            │▓▓                 
+   MCP off · M     │   Launch (1)     Cancel                                    │▓▓                 
+   DAP off · D     │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
+                   ╰────────────────────────────────────────────────────────────╯▓▓                 
                      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                 
                          │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

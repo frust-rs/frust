@@ -58,6 +58,88 @@ pub(crate) fn touch_phase_from_action(action: i32) -> TouchPhase {
     }
 }
 
+/// The largest number of simultaneous touch contacts one gesture tracks.
+///
+/// Android's `MotionEvent` publishes no hard contact-count limit, but every
+/// shipped touchscreen driver reports at most this many simultaneous pointers
+/// in practice. **Community-approximate**: chosen generously (well above any
+/// observed device) rather than measured from a published spec, so
+/// [`TouchSlotMap::assign`] never has to refuse a contact on real hardware.
+const MAX_TOUCH_SLOTS: usize = 10;
+
+/// Maps Android's own `MotionEvent.getPointerId` values — stable for a
+/// contact's lifetime but platform-chosen and not small/contiguous — onto the
+/// small, gesture-local slot numbers [`frust_core::event::PointerId::touch`]
+/// takes (`0` for the gesture's first contact, `1` for the second, …).
+///
+/// A slot is assigned on a contact's `Down` and freed on its `Up`/`Cancel`;
+/// freeing one slot never renumbers another that is still live — a second
+/// finger holding slot `1` stays at `1` after the first (slot `0`) lifts, so
+/// the primary-sequence latch (`frust_core::event::PointerId`'s multi-contact
+/// contract: a slot-`0` contact is the one a capture can latch onto) never
+/// retargets mid-gesture. A new contact takes the **lowest currently-free**
+/// slot, so the map "resets" to handing out `0` again once every contact has
+/// lifted — there is no separate reset operation, it falls out of the search.
+///
+/// Kept in `frust-shell-android`'s host-testable `ffi_support` module (not
+/// `app::input`, which is `#[cfg(target_os = "android")]` via its `frust-core`
+/// dependency) so the slot-assignment rule itself is exercised by `cargo test
+/// -p frust-shell-android` on every host, mirroring [`touch_phase_from_action`]
+/// and [`appearance_from_dark`] above.
+#[derive(Debug)]
+pub(crate) struct TouchSlotMap {
+    /// Index = frust slot; value = the Android `pointerId` currently occupying
+    /// it, or `None` when the slot is free.
+    slots: [Option<i32>; MAX_TOUCH_SLOTS],
+}
+
+impl TouchSlotMap {
+    /// A fresh map with every slot free (no gesture in progress).
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: [None; MAX_TOUCH_SLOTS],
+        }
+    }
+
+    /// The slot `android_pointer_id` currently occupies, if its `Down` has
+    /// already been assigned one.
+    pub(crate) fn slot_for(&self, android_pointer_id: i32) -> Option<u32> {
+        self.slots
+            .iter()
+            .position(|slot| *slot == Some(android_pointer_id))
+            .map(|i| i as u32)
+    }
+
+    /// Assign `android_pointer_id` the lowest currently-free slot (its
+    /// `Down`). A duplicate assignment for an id already tracked returns its
+    /// existing slot rather than taking a second one. When every slot is
+    /// already occupied (see [`MAX_TOUCH_SLOTS`]) the last slot is reused
+    /// rather than refusing the contact — a saturating fallback, not a panic.
+    pub(crate) fn assign(&mut self, android_pointer_id: i32) -> u32 {
+        if let Some(slot) = self.slot_for(android_pointer_id) {
+            return slot;
+        }
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(android_pointer_id);
+                return i as u32;
+            }
+        }
+        let last = MAX_TOUCH_SLOTS - 1;
+        self.slots[last] = Some(android_pointer_id);
+        last as u32
+    }
+
+    /// Free the slot `android_pointer_id` occupies (its `Up`/`Cancel`), so a
+    /// later `Down` may reuse it. A release for an id this map never assigned
+    /// is a harmless no-op.
+    pub(crate) fn release(&mut self, android_pointer_id: i32) {
+        if let Some(slot) = self.slot_for(android_pointer_id) {
+            self.slots[slot as usize] = None;
+        }
+    }
+}
+
 /// Convert Kotlin's `Choreographer.FrameCallback` `frameTimeNanos` (a JNI
 /// `jlong`, signed 64-bit) into the unsigned nanosecond count
 /// [`frust_core::FrameTime::from_nanos`] takes.
@@ -147,6 +229,54 @@ pub(crate) fn normalize_ime_indices(
     )
 }
 
+/// A semantic clipboard / selection verb crossing the `nativeEditCommand` JNI
+/// boundary, decoupled from `frust_core::event::EditCommand` so this module
+/// stays host-testable (the core crate is Android-gated — see the crate's
+/// `Cargo.toml`). [`crate::jni_glue`] maps this onto the core command at the
+/// one Android-only call site, exactly as [`TouchPhase`] and [`Appearance`]
+/// are mapped.
+///
+/// Carries no payload on purpose: only a paste has one, and it crosses as its
+/// own `jstring` argument beside the code rather than being modelled here — so
+/// this stays a `Copy` discriminant and the pasted text never needs a second
+/// owner on the way through the mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditCommandWire {
+    /// Copy the selection to the host clipboard (wire code `0`).
+    Copy,
+    /// Copy the selection and delete it (wire code `1`).
+    Cut,
+    /// Replace the selection with the text accompanying the command (wire code `2`).
+    Paste,
+    /// Select the focused field's whole content (wire code `3`).
+    SelectAll,
+}
+
+/// Map the command code the Kotlin `FrustSurfaceView.nativeEditCommand` sends
+/// into an [`EditCommandWire`].
+///
+/// The numeric ABI is fixed and shared with the Kotlin side — DO NOT renumber
+/// without changing both sides:
+///   `0` = copy, `1` = cut, `2` = paste (text in the accompanying `jstring`),
+///   `3` = select all.
+///
+/// An unrecognised code answers `None` — *ignored*, never defaulted. That is
+/// the deliberate opposite of [`touch_phase_from_action`]'s cancel fallback: a
+/// stray touch code is safest resolved to "release the gesture", but every verb
+/// in this vocabulary edits a document (a paste replaces the selection, a cut
+/// deletes it), so picking one for a code this side could not decode would
+/// mutate the user's text on an undecodable value.
+#[inline]
+pub(crate) fn edit_command_from_code(cmd: i32) -> Option<EditCommandWire> {
+    match cmd {
+        0 => Some(EditCommandWire::Copy),
+        1 => Some(EditCommandWire::Cut),
+        2 => Some(EditCommandWire::Paste),
+        3 => Some(EditCommandWire::SelectAll),
+        _ => None,
+    }
+}
+
 /// A plain, `jni`/`frust-core`-free view of the IME surface, ready to be
 /// serialised into the `nativeImeState` JSON the Kotlin side parses.
 ///
@@ -169,6 +299,12 @@ pub(crate) fn normalize_ime_indices(
 /// crate's `Cargo.toml`, so this host-testable type cannot name the enum
 /// directly). This is the same wire shape the iOS bridge's `ime_state_json`
 /// emits under `"contentType"`.
+///
+/// `suppress_soft_keyboard` mirrors [`frust_core::event::ImeState::suppress_soft_keyboard`]
+/// unchanged (a plain `bool`, no wire-string translation needed) into the
+/// `"suppressSoftKeyboard"` JSON field [`build_ime_state_json`] emits — the
+/// hint `FrustSurfaceView`'s `pollImeAfterDispatch` reads to keep a read-only
+/// field's `InputConnection` alive without raising the on-screen keyboard.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ImeJsonState {
     pub active: bool,
@@ -179,11 +315,13 @@ pub(crate) struct ImeJsonState {
     pub comp_ext: i32,
     pub caret: Option<(f32, f32, f32, f32)>,
     pub content_type: &'static str,
+    pub suppress_soft_keyboard: bool,
 }
 
 impl Default for ImeJsonState {
     /// The "no focused editable" surface: inactive, empty, no selection/composing,
-    /// `"normal"` content type (no hint).
+    /// `"normal"` content type (no hint), keyboard not suppressed (nothing to
+    /// suppress with no field focused).
     fn default() -> Self {
         Self {
             active: false,
@@ -194,6 +332,7 @@ impl Default for ImeJsonState {
             comp_ext: -1,
             caret: None,
             content_type: "normal",
+            suppress_soft_keyboard: false,
         }
     }
 }
@@ -237,9 +376,11 @@ fn json_number(v: f32) -> String {
 /// Serialise an [`ImeJsonState`] into the exact JSON wire form the Kotlin
 /// `FrustSurfaceView` parses from `nativeImeState`.
 ///
-/// Shape (indices UTF-16, caret logical px; absent caret ⇒ `null` components):
+/// Shape (indices UTF-16, caret logical px; absent caret ⇒ `null` components;
+/// `suppressSoftKeyboard` a real JSON boolean, not a string):
 /// `{"active":bool,"text":"...","selBase":n,"selExt":n,"compBase":n,`
-/// `"compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"..."}`.
+/// `"compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"...",`
+/// `"suppressSoftKeyboard":bool}`.
 pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
     let (caret_x, caret_y, caret_w, caret_h) = match state.caret {
         Some((x, y, w, h)) => (
@@ -256,7 +397,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
         ),
     };
     format!(
-        "{{\"active\":{},\"text\":\"{}\",\"selBase\":{},\"selExt\":{},\"compBase\":{},\"compExt\":{},\"caretX\":{},\"caretY\":{},\"caretW\":{},\"caretH\":{},\"contentType\":\"{}\"}}",
+        "{{\"active\":{},\"text\":\"{}\",\"selBase\":{},\"selExt\":{},\"compBase\":{},\"compExt\":{},\"caretX\":{},\"caretY\":{},\"caretW\":{},\"caretH\":{},\"contentType\":\"{}\",\"suppressSoftKeyboard\":{}}}",
         state.active,
         json_escape(&state.text),
         state.sel_base,
@@ -268,6 +409,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
         caret_w,
         caret_h,
         json_escape(state.content_type),
+        state.suppress_soft_keyboard,
     )
 }
 
@@ -639,6 +781,93 @@ mod tests {
     }
 
     #[test]
+    fn touch_slot_map_first_finger_gets_slot_zero() {
+        let mut map = TouchSlotMap::new();
+        assert_eq!(map.assign(/* android pointerId */ 7), 0);
+        assert_eq!(map.slot_for(7), Some(0));
+    }
+
+    #[test]
+    fn touch_slot_map_second_finger_gets_slot_one() {
+        let mut map = TouchSlotMap::new();
+        assert_eq!(map.assign(7), 0);
+        assert_eq!(
+            map.assign(3),
+            1,
+            "a second simultaneous contact takes slot 1"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_release_of_first_keeps_second_at_its_slot() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7); // slot 0
+        map.assign(3); // slot 1
+        map.release(7); // first finger lifts
+        assert_eq!(
+            map.slot_for(3),
+            Some(1),
+            "the surviving contact must not be renumbered down to slot 0"
+        );
+        assert_eq!(map.slot_for(7), None);
+    }
+
+    #[test]
+    fn touch_slot_map_all_up_resets_the_next_down_to_zero() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7);
+        map.assign(3);
+        map.release(7);
+        map.release(3);
+        assert_eq!(
+            map.assign(42),
+            0,
+            "once every contact has lifted, the next Down starts over at slot 0"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_a_freed_slot_is_reused_by_a_later_contact() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7); // slot 0
+        map.assign(3); // slot 1
+        map.release(7); // slot 0 now free, slot 1 still held
+        assert_eq!(
+            map.assign(9),
+            0,
+            "a new contact takes the lowest free slot, not the next unused number"
+        );
+        assert_eq!(
+            map.slot_for(3),
+            Some(1),
+            "the untouched contact is unaffected"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_duplicate_assign_returns_the_existing_slot() {
+        let mut map = TouchSlotMap::new();
+        assert_eq!(map.assign(7), 0);
+        assert_eq!(
+            map.assign(7),
+            0,
+            "re-assigning an already-tracked id must not take a second slot"
+        );
+    }
+
+    #[test]
+    fn touch_slot_map_release_of_an_unknown_id_is_a_no_op() {
+        let mut map = TouchSlotMap::new();
+        map.assign(7);
+        map.release(999); // never assigned
+        assert_eq!(
+            map.slot_for(7),
+            Some(0),
+            "an untracked release must not disturb slot 0"
+        );
+    }
+
+    #[test]
     fn touch_action_codes_map_to_phases() {
         assert_eq!(touch_phase_from_action(0), TouchPhase::Down);
         assert_eq!(touch_phase_from_action(1), TouchPhase::Move);
@@ -688,6 +917,25 @@ mod tests {
             !should_consume_back_press(false),
             "handles_back=false -> return JNI_FALSE (activity finishes)"
         );
+    }
+
+    #[test]
+    fn edit_command_codes_map_to_verbs() {
+        assert_eq!(edit_command_from_code(0), Some(EditCommandWire::Copy));
+        assert_eq!(edit_command_from_code(1), Some(EditCommandWire::Cut));
+        assert_eq!(edit_command_from_code(2), Some(EditCommandWire::Paste));
+        assert_eq!(edit_command_from_code(3), Some(EditCommandWire::SelectAll));
+    }
+
+    #[test]
+    fn an_unknown_edit_command_code_is_ignored_not_defaulted() {
+        // A code this side cannot decode must reach no widget: every verb in
+        // this vocabulary edits a document, so a fallback verb would mutate the
+        // user's text on a value that was never understood.
+        assert_eq!(edit_command_from_code(4), None);
+        assert_eq!(edit_command_from_code(-1), None);
+        assert_eq!(edit_command_from_code(i32::MAX), None);
+        assert_eq!(edit_command_from_code(i32::MIN), None);
     }
 
     #[test]
@@ -743,10 +991,11 @@ mod tests {
             comp_ext: -1,
             caret: Some((1.5, 2.0, 0.0, 10.0)),
             content_type: "normal",
+            suppress_soft_keyboard: false,
         };
         assert_eq!(
             build_ime_state_json(&state),
-            "{\"active\":true,\"text\":\"hi\",\"selBase\":2,\"selExt\":2,\"compBase\":-1,\"compExt\":-1,\"caretX\":1.5,\"caretY\":2,\"caretW\":0,\"caretH\":10,\"contentType\":\"normal\"}"
+            "{\"active\":true,\"text\":\"hi\",\"selBase\":2,\"selExt\":2,\"compBase\":-1,\"compExt\":-1,\"caretX\":1.5,\"caretY\":2,\"caretW\":0,\"caretH\":10,\"contentType\":\"normal\",\"suppressSoftKeyboard\":false}"
         );
     }
 
@@ -761,10 +1010,11 @@ mod tests {
             comp_ext: -1,
             caret: None,
             content_type: "normal",
+            suppress_soft_keyboard: false,
         };
         assert_eq!(
             build_ime_state_json(&state),
-            "{\"active\":false,\"text\":\"a\\\"b\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\"}"
+            "{\"active\":false,\"text\":\"a\\\"b\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\",\"suppressSoftKeyboard\":false}"
         );
     }
 
@@ -772,8 +1022,28 @@ mod tests {
     fn build_ime_state_json_default_is_inactive_empty() {
         assert_eq!(
             build_ime_state_json(&ImeJsonState::default()),
-            "{\"active\":false,\"text\":\"\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\"}"
+            "{\"active\":false,\"text\":\"\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\",\"suppressSoftKeyboard\":false}"
         );
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_suppress_soft_keyboard_true() {
+        // The flag rides as a real JSON boolean (not a quoted string) so
+        // `JSONObject.optBoolean` on the Kotlin side parses it directly.
+        let state = ImeJsonState {
+            suppress_soft_keyboard: true,
+            ..ImeJsonState::default()
+        };
+        assert!(build_ime_state_json(&state).contains("\"suppressSoftKeyboard\":true"));
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_suppress_soft_keyboard_false() {
+        let state = ImeJsonState {
+            suppress_soft_keyboard: false,
+            ..ImeJsonState::default()
+        };
+        assert!(build_ime_state_json(&state).contains("\"suppressSoftKeyboard\":false"));
     }
 
     #[test]

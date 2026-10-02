@@ -31,12 +31,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use frust_drive::build_info::BuildMode;
 use frust_drive::process::{FakeProcessRunner, ProcessRunner};
+use frust_mcp::engine::RunTarget;
 use frust_mcp::{ClientRegistry, SharedBackend};
-use frust_tui::engine::{AppState, Effect, Engine, Message, Screen};
+use frust_tui::engine::{AppState, DevtoolsLaunch, Effect, Engine, Message, Screen, SessionTarget};
 use frust_tui::supervise::{
-    DevtoolsBridge, McpServeCtx, McpSessionRecords, McpStatus, PendingWidgetTrees, SessionState,
-    SessionSubscribers, Supervisor, TuiSessionBackend, mcp_backend::MAX_ADHOC_SESSION_ID,
+    DevtoolsBridge, McpServeCtx, McpSessionRecords, McpStatus, PendingWidgetTrees, SessionId,
+    SessionState, SessionSubscribers, Supervisor, TuiSessionBackend,
+    mcp_backend::{MAX_ADHOC_SESSION_ID, UNRESOLVED_SESSION},
     serve_command,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -91,6 +94,30 @@ impl Workbench {
         projects: Vec<PathBuf>,
         runner: Arc<dyn ProcessRunner + Send + Sync>,
     ) -> Self {
+        Self::spawn(projects, runner, false)
+    }
+
+    /// A workbench whose loop, after serving a command that started a
+    /// session, holds this thread until that session's own events
+    /// (`Configuring`, its line, `Running` — the drain thread pushes all
+    /// three immediately) are already queued on the session channel. That is
+    /// the ordering a loaded machine can produce by chance: both the
+    /// launch's `RegisterSession` *and* its session's events ready for the
+    /// loop's next `select!` at once, rather than the events trickling in
+    /// one `select!` at a time behind it. See
+    /// `a_launchs_registration_is_applied_before_its_already_queued_events`.
+    fn start_holding_launches(
+        project_root: PathBuf,
+        runner: Arc<dyn ProcessRunner + Send + Sync>,
+    ) -> Self {
+        Self::spawn(vec![project_root], runner, true)
+    }
+
+    fn spawn(
+        projects: Vec<PathBuf>,
+        runner: Arc<dyn ProcessRunner + Send + Sync>,
+        hold_launches: bool,
+    ) -> Self {
         let state = AppState {
             screen: Screen::Workbench,
             project_root: projects.first().cloned(),
@@ -112,7 +139,7 @@ impl Workbench {
                         .enable_all()
                         .build()
                         .expect("building the workbench test runtime");
-                    rt.block_on(run_workbench(engine, runner, sessions));
+                    rt.block_on(run_workbench(engine, runner, sessions, hold_launches));
                 })
                 .expect("spawning the workbench test thread")
         };
@@ -174,6 +201,7 @@ async fn run_workbench(
     mut engine: Engine,
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     mirror: Arc<Mutex<Vec<MirroredSession>>>,
+    hold_launches: bool,
 ) {
     let mut rx = engine.take_receiver();
     let bridge_runner = Arc::clone(&runner);
@@ -186,8 +214,15 @@ async fn run_workbench(
 
     while !engine.state.should_quit {
         tokio::select! {
+            // As in `crate::runner::run_loop` (see the comment atop its
+            // `tokio::select!`): `biased`, with `rx` — where a launch posts
+            // its `RegisterSession` — polled before `session_rx` — where
+            // that session's own events land — so registration always wins
+            // a race between the two, never just on average.
+            biased;
             Some(msg) = rx.recv() => {
                 if let Message::Mcp(command) = msg {
+                    let sessions_before = supervisor.session_ids().count();
                     serve_command(command, &mut McpServeCtx {
                         state: &engine.state,
                         supervisor: &mut supervisor,
@@ -198,6 +233,18 @@ async fn run_workbench(
                         devtools: &mut devtools,
                         pending_trees: &mut pending_trees,
                     });
+                    if hold_launches && supervisor.session_ids().count() > sessions_before {
+                        // The point is to block this thread: the session's
+                        // drain thread runs on its own OS thread and fills
+                        // `session_rx` while this one waits, so the next
+                        // `select!` finds the registration on `rx` *and* the
+                        // session's events on `session_rx` both ready — the
+                        // ordering this test exists to pin down.
+                        let until = std::time::Instant::now() + DEADLINE;
+                        while session_rx.len() < 3 && std::time::Instant::now() < until {
+                            std::thread::yield_now();
+                        }
+                    }
                 } else {
                     engine.handle(msg);
                 }
@@ -731,6 +778,204 @@ async fn wait_for_clients(engine: &Engine, expected: usize) {
             engine.mcp_status()
         );
         tokio::task::yield_now().await;
+    }
+}
+
+/// One live session per (project, target), whichever front end asks: a second
+/// `run_app` onto a target the workbench is already running is refused, and
+/// the refusal registers **nothing** — while `restart_app` on the live
+/// session is the way through, exactly as the refusal's own message says.
+///
+/// This is the end-to-end half of the guard: the refusal is decided against
+/// the workbench's own `AppState`, so it holds for a session an agent
+/// launched *and* for one the user started by hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_run_app_onto_a_running_target_is_refused_and_registers_nothing() {
+    let project_root = PathBuf::from("/tmp/frust-tui-mcp-embedded-duplicate-test");
+    let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
+        FakeProcessRunner::new()
+            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+    );
+    let workbench = Workbench::start(project_root, runner);
+    let backend = workbench.backend();
+
+    let launching = Arc::clone(&backend);
+    let first = tokio::task::spawn_blocking(move || {
+        launching.run_app(RunTarget::Desktop, BuildMode::Debug)
+    })
+    .await
+    .expect("the launch task panicked");
+    assert_ne!(
+        first, UNRESOLVED_SESSION,
+        "the first launch starts a session"
+    );
+    workbench
+        .wait_for("the first session reaches Running", |sessions| {
+            sessions.len() == 1 && sessions[0].state == SessionState::Running
+        })
+        .await;
+
+    // The same target, a second time.
+    let launching = Arc::clone(&backend);
+    let second = tokio::task::spawn_blocking(move || {
+        launching.run_app(RunTarget::Desktop, BuildMode::Debug)
+    })
+    .await
+    .expect("the second launch task panicked");
+    assert_eq!(
+        second, UNRESOLVED_SESSION,
+        "a refused launch reports an id that names no session, never the \
+         running one's"
+    );
+
+    // The refusal grew nothing. This read is a round trip through the very
+    // event loop the refusal ran on, so it is ordered *behind* any
+    // `RegisterSession` a leaky refusal would have posted — no sleep needed
+    // to know none is in flight.
+    let reader = Arc::clone(&backend);
+    let sessions = tokio::task::spawn_blocking(move || reader.sessions())
+        .await
+        .expect("the sessions read panicked");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "the refusal registered no second session"
+    );
+    assert_eq!(
+        workbench.sessions().len(),
+        1,
+        "and grew no tab in the workbench's own model"
+    );
+
+    // Restarting is what the refusal tells an agent to do — and it works,
+    // because the session being replaced never blocks its own relaunch.
+    let restarting = Arc::clone(&backend);
+    let restarted = tokio::task::spawn_blocking(move || restarting.restart_app(first))
+        .await
+        .expect("the restart task panicked")
+        .expect("restarting the live session is allowed");
+    workbench
+        .wait_for("the restarted session is running", |sessions| {
+            sessions
+                .iter()
+                .any(|s| s.id == restarted.0 && s.state == SessionState::Running)
+        })
+        .await;
+}
+
+/// The guard reads the *workbench's* sessions, not only MCP-launched ones: a
+/// session the user started by hand refuses an agent's `restart_app` onto the
+/// same target, with the typed `AlreadyRunning` message naming it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_started_session_on_the_target_refuses_an_agents_restart() {
+    let project_root = PathBuf::from("/tmp/frust-tui-mcp-embedded-user-session-test");
+    let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
+        FakeProcessRunner::new()
+            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+    );
+    let workbench = Workbench::start(project_root.clone(), runner);
+    let backend = workbench.backend();
+
+    let launching = Arc::clone(&backend);
+    let agents = tokio::task::spawn_blocking(move || {
+        launching.run_app(RunTarget::Desktop, BuildMode::Debug)
+    })
+    .await
+    .expect("the launch task panicked");
+    workbench
+        .wait_for("the agent's session is running", |sessions| {
+            sessions.len() == 1 && sessions[0].state == SessionState::Running
+        })
+        .await;
+
+    // The user launches the same project on the same target from the
+    // terminal — the registration `crate::runner::launch_sessions` posts.
+    workbench
+        .tx
+        .send(Message::RegisterSession {
+            id: SessionId(4242),
+            project_root,
+            target_label: "desktop".to_string(),
+            devtools: DevtoolsLaunch::unavailable(),
+            target: Some(SessionTarget::Desktop),
+        })
+        .expect("the workbench loop is alive");
+    workbench
+        .wait_for("the user's session is registered", |sessions| {
+            sessions.iter().any(|s| s.id == 4242)
+        })
+        .await;
+
+    let restarting = Arc::clone(&backend);
+    let error = tokio::task::spawn_blocking(move || restarting.restart_app(agents))
+        .await
+        .expect("the restart task panicked")
+        .expect_err("another live session holds the target");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("session 4242 is already running desktop"),
+        "the refusal must name the session holding the target: {error}"
+    );
+    assert!(
+        error.contains("stop it (stop_app)"),
+        "…and what to do about it: {error}"
+    );
+}
+
+/// A launch's registration and its first events travel two channels: the
+/// `RegisterSession` on the engine channel, the events on the supervisor's.
+/// When both are already queued as the loop next selects, the registration
+/// must still be applied first; otherwise the events are dropped for an
+/// unknown id and the session never leaves `Configuring`. Each round has a
+/// 1-in-2 chance of losing the race if the loop picks a channel at random
+/// (an unbiased `select!` over the two ready branches), so 40 rounds fail on
+/// at least one round with overwhelming probability — this is the harness
+/// half of the guard; `frust_tui::runner`'s own source-reading tripwire
+/// covers the production loop `run_workbench` mirrors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launchs_registration_is_applied_before_its_already_queued_events() {
+    let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
+        FakeProcessRunner::new()
+            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+    );
+    let workbench = Workbench::start_holding_launches(
+        PathBuf::from("/tmp/frust-tui-mcp-embedded-ordering-test"),
+        runner,
+    );
+    let backend = workbench.backend();
+
+    for _ in 0..40 {
+        let launching = Arc::clone(&backend);
+        let id = tokio::task::spawn_blocking(move || {
+            launching.run_app(RunTarget::Desktop, BuildMode::Debug)
+        })
+        .await
+        .expect("the launch task panicked");
+        assert_ne!(
+            id, UNRESOLVED_SESSION,
+            "each round's launch starts a session"
+        );
+        workbench
+            .wait_for("the launched session is running", |sessions| {
+                sessions
+                    .iter()
+                    .any(|s| s.id == id.0 && s.state == SessionState::Running)
+            })
+            .await;
+
+        // Free the target for the next round.
+        let stopping = Arc::clone(&backend);
+        tokio::task::spawn_blocking(move || stopping.stop_app(id))
+            .await
+            .expect("the stop task panicked")
+            .expect("stopping the running session");
+        workbench
+            .wait_for("the session is killed", |sessions| {
+                sessions
+                    .iter()
+                    .any(|s| s.id == id.0 && s.state == SessionState::Killed)
+            })
+            .await;
     }
 }
 

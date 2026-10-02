@@ -77,7 +77,7 @@ use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 use crate::motion::Ramp;
 use crate::press::presses;
 use crate::style;
-use crate::text::LabelRun;
+use crate::text::{LabelRun, ThemeTextType, themed_style};
 
 /// The travelling dot's diameter, in logical px (`DOT_SIZE` / `h-1.5 w-1.5`).
 pub const BOUNCE_DOT_SIZE: f64 = 6.0;
@@ -245,16 +245,14 @@ fn resolve_colors(theme: Option<&Theme>) -> BounceColors {
     }
 }
 
-/// The row label style (`text-sm font-medium`).
+/// The row label style (`text-sm font-medium`), in the theme's `label_large`
+/// family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-        t.type_scale.label_large.family.clone()
-    });
-    TextStyle {
-        family,
+    let style = TextStyle {
         weight: FontWeight::MEDIUM,
         ..TextStyle::new(style::TEXT_SM as f32, Color::BLACK)
-    }
+    };
+    themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
 /// One retained row.
@@ -930,5 +928,36 @@ mod tests {
             style::disabled_tint(p.muted_foreground, true, BOUNCE_DISABLED_OPACITY),
             "the disabled row is dimmed to upstream's own 40%"
         );
+    }
+
+    // ---- Typeface: the row labels follow the live theme ---------------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
+
+    /// Two rows with glyph-free icons, so every painted run is a label.
+    fn probe_view(_: &mut ()) -> BounceSidebarView<()> {
+        let icon = || frust::SizedBox::<()>(Some(16.0), Some(16.0));
+        bounce_sidebar::<(), _>(
+            0,
+            vec![
+                bounce_sidebar_item(icon(), "Overview"),
+                bounce_sidebar_item(icon(), "Reports"),
+            ],
+            |_: &mut (), _| {},
+        )
+    }
+
+    #[test]
+    fn row_labels_paint_in_geist_under_the_beui_theme() {
+        assert_paints_only_in_geist("the sidebar's rows", probe_view, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn row_labels_follow_a_live_theme_family_swap() {
+        assert_follows_a_live_family_swap("the sidebar's rows", probe_view, PROBE_WINDOW);
     }
 }

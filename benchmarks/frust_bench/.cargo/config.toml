@@ -1,0 +1,21 @@
+# Rust build-output location for this in-tree standalone package — mirrors
+# `crates/frust-drive/templates/app/.cargo/config.toml`'s `[build]` table (a `frust create`
+# scaffold's own copy), which names `build/rust` as the location
+# `crates/frust-drive::build_dirs::BuildLayout::rust_dir()` expects a bare
+# `cargo build`/`cargo run` from this directory to write to. Resolved
+# relative to THIS file's directory, per Cargo's own `[build] target-dir`
+# semantics — like any nested `.cargo/config.toml`, it only takes effect when
+# cargo is invoked with a working directory inside `benchmarks/frust_bench`
+# (or one of its descendants); Cargo's config-file discovery walks ancestor
+# directories of the invocation *cwd*, not of a package manifest, so a build
+# driven from elsewhere against this crate would not pick it up. A
+# `CARGO_TARGET_DIR` env var or `--target-dir` flag still takes precedence and
+# overrides it entirely either way.
+#
+# The Android link `rustflags` the scaffold template's own copy also carries
+# are deliberately NOT duplicated here: Cargo's ancestor-directory config-merge
+# already applies the repository root's `.cargo/config.toml` rustflags to any
+# build run with a cwd inside this checkout, this directory included — see
+# that file's own comment for the full rationale.
+[build]
+target-dir = "build/rust"

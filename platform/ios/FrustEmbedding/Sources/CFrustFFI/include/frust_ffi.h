@@ -46,9 +46,12 @@ uint8_t frust_render_frame(void *handle, uint64_t timestamp_ns);
 // Touch delivery. `phase` is a fixed numeric ABI shared with the Rust
 // `frust_dispatch_touch` glue — DO NOT renumber without changing both sides:
 //   0 = began, 1 = moved, 2 = ended, 3 = cancelled.
+// `pointer_id` is the per-sequence contact slot (first contact of a sequence is
+// 0; later contacts 1..; see FrustView.swift's slot map and the 'Multi-contact
+// contract' rustdoc in crates/frust-core/src/event.rs).
 // `x`/`y` are logical points (`touch.location(in:)`) — already density-scaled,
 // so the Rust side passes them through without dividing by the display scale.
-void  frust_dispatch_touch(void *handle, uint32_t phase, float x, float y);
+void  frust_dispatch_touch(void *handle, uint32_t phase, uint32_t pointer_id, float x, float y);
 void  frust_pause(void *handle);
 void  frust_resume(void *handle);
 void  frust_destroy(void *handle);
@@ -66,7 +69,83 @@ void  frust_destroy(void *handle);
 // "no editing state" sentinel. frust_string_free is a no-op on null.
 void  frust_ime_apply(void *handle, const char *text, int32_t sel_base, int32_t sel_ext, int32_t comp_base, int32_t comp_ext);
 char *frust_ime_state_json(void *handle);
+// Also frees the strings frust_take_clipboard_write,
+// frust_selection_toolbar_json and frust_platform_view_commands_json return —
+// one ownership contract for every heap-allocated string that crosses this
+// boundary. A no-op on null.
 void  frust_string_free(char *s);
+
+// Clipboard + the SYSTEM edit menu. iOS exempts a paste from its "pasted from"
+// banner (14+) and its per-app paste-permission alert (16+) ONLY when the paste
+// is system-initiated — a tap in UIKit's own edit menu, or a hardware Cmd+V
+// through the responder chain. So on this platform the framework does NOT draw
+// the selection toolbar: the Rust side declares the Native selection-toolbar
+// policy at frust_init, a focused field then publishes its request and floats
+// nothing, and FrustView/FrustViewController present UIKit's own menu at the
+// published anchor. The pasteboard and the menu are Swift-side throughout; the
+// Rust half never links UIKit.
+//
+// frust_edit_command delivers one verb from that menu (or from a hardware
+// Cmd+C/X/V/A UIKit resolved). `cmd` is a fixed numeric ABI shared with the
+// Rust glue — DO NOT renumber without changing both sides:
+//   0 = copy, 1 = cut, 2 = paste, 3 = select all.
+// An unrecognised code is dropped rather than guessed at (unlike
+// frust_dispatch_touch's phase, every verb here mutates or discloses the
+// document, so there is no safe default). `text` is the pasted UTF-8 payload
+// and is read for cmd == 2 ONLY; pass NULL for the other three. Copy and cut
+// carry nothing because the widget owns the selection and answers by filling
+// the slot frust_take_clipboard_write drains.
+void  frust_edit_command(void *handle, uint8_t cmd, const char *text);
+// frust_take_clipboard_write takes (and clears) the text a widget asked to put
+// on the pasteboard — the answer to a copy/cut. Returns a heap-allocated
+// string the CALLER MUST FREE with frust_string_free, or NULL when nothing was
+// copied. DESTRUCTIVE: the slot is an edge, so a caller that drains and drops
+// the result loses that write. FrustViewController drains it once per
+// CADisplayLink tick into UIPasteboard.general.string.
+char *frust_take_clipboard_write(void *handle);
+// frust_take_paste_request takes (and clears) whether a widget asked the shell
+// to read the pasteboard back to it. 1 = asked, 0 = not (plain uint8_t, the
+// same no-<stdbool.h> convention as frust_set_appearance's `dark`).
+// DESTRUCTIVE, like the drain above.
+//
+// This is the one paste route iOS does NOT exempt: answering it means reading
+// UIPasteboard.general.string from a display-link tick, which is not a
+// system-initiated action and so raises the notice/alert. Only a
+// FRAMEWORK-drawn selection toolbar's Paste button reaches it, and iOS never
+// draws the framework toolbar (see the Native policy above) — so in practice
+// it stays unused. Wired anyway so the shell implements the whole clipboard
+// channel rather than half of it.
+uint8_t frust_take_paste_request(void *handle);
+// frust_selection_toolbar_json reports the focused field's clipboard verbs,
+// where a system edit menu should be anchored, and whether one should be
+// presented right now — as a heap-allocated JSON string the CALLER MUST FREE
+// with frust_string_free, or NULL when NO FIELD IS FOCUSED (the "dismiss
+// whatever stands and forget the generation" sentinel):
+//   {"generation":n,"presentMenu":bool,"x":f,"y":f,"w":f,"h":f,
+//    "copy":bool,"cut":bool,"paste":bool,"selectAll":bool}
+// x/y/w/h are LOGICAL POINTS, the same space as the caret rect the IME JSON
+// above reports and as frust_dispatch_touch's coordinates — no scale
+// conversion on either side. The rect is absolute in the window, and FrustView
+// fills the window, so it is already in the view's own coordinates.
+//
+// A FOCUSED FIELD ANSWERS EVERY TICK, selection or not. The verbs are a LEVEL,
+// not an edge: read them on every poll and keep the responder's answer to
+// canPerformAction: up to date from them, because a hardware Cmd+C/X/V/A is
+// asked for with no menu on screen at all. With no selection the anchor is the
+// caret rect, which is the right place for a paste-only menu.
+//
+// `presentMenu` is the EDGE half: true means the field wants a menu presented
+// now (the user long-pressed or tapped inside a selection), false means it
+// does not. Present when the generation moves and presentMenu is true; dismiss
+// when the generation moves and it is false.
+//
+// `generation` moves only when presentMenu or the verb set actually changes —
+// NOT when the anchor alone moves. That exclusion is deliberate: the anchor is
+// recomputed every painted frame and tracks a dragging selection, so moving
+// the generation with it would ask the host to re-present its menu on every
+// touch sample. Re-read the anchor as a level for the menu's target rect; do
+// not treat it as a reason to present.
+char *frust_selection_toolbar_json(void *handle);
 
 // Appearance: flip the app's theme brightness between
 // light and dark. `dark` is 0/1 (no existing bool-ish precedent to match in
@@ -106,6 +185,21 @@ void  frust_set_insets(
     void *handle,
     float vp_l, float vp_t, float vp_r, float vp_b,
     float vi_l, float vi_t, float vi_r, float vi_b
+);
+
+// Corner insets (iPadOS 26+ window control). The eight floats are the
+// control's protrusion beyond the safe area per PHYSICAL corner — top-left,
+// top-right, bottom-left, bottom-right — each width then height, in logical
+// points (no scale multiplication, like frust_set_insets). A corner with
+// either dimension 0 is pushed as 0x0. The Rust side merges these into
+// WindowInsets.corner_insets (keeping the frust_set_insets edges) and never
+// consumes them. iOS 26+ only: FrustViewController pushes from both
+// pushInsets and viewDidLayoutSubviews; below iOS 26 nothing is pushed and
+// the corners stay zero.
+void  frust_set_corner_insets(
+    void *handle,
+    float tl_w, float tl_h, float tr_w, float tr_h,
+    float bl_w, float bl_h, float br_w, float br_h
 );
 
 // System UI / SystemChrome: peek the process-wide `frust::set_system_ui_mode`

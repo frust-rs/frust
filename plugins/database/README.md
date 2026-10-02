@@ -14,6 +14,10 @@ Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
 
+**Platform support:** every target the SQLite engine builds for; the data directory is resolved per platform, including Android once the host shell has installed its directories.
+
+More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
+
 ---
 
 ## 1. Add the dependency (the only step)
@@ -292,6 +296,13 @@ To use it, just open a database the normal way:
 let db = Database::open("app")?;
 ```
 
+**Android platform note:** On Android, `Database::open` stores databases in
+`<Context.getFilesDir()>/databases/<name>.db`. This directory is installed by
+the platform shell's `nativeInitPlatform` during app initialization. `Database::open`
+must run *after* this initialization completes — typically from application code,
+not from static initializers. No `HOME` or XDG environment variable is consulted
+on Android; the directories are set up through platform-specific calls.
+
 ### 5.2 Turso (optional, `engine-turso`)
 
 The `engine-turso` feature compiles the [`turso`](https://crates.io/crates/turso)
@@ -418,7 +429,7 @@ measures if it differs):
    zero out the very delta being measured.
 2. Match this crate's `[profile.release]` shape (`lto = "fat"`,
    `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"` — the same
-   profile `templates/app`'s generated `Cargo.toml` ships) in the probe app's
+   profile `crates/frust-drive/templates/app`'s generated `Cargo.toml` ships) in the probe app's
    own manifest, so the measurement reflects the ship floor rather than an
    unoptimized default release build.
 3. `export CARGO_TARGET_DIR=<probe-app-dir>/target` before building, so the
@@ -445,9 +456,7 @@ measures if it differs):
 | `engine-sqlite` + `engine-turso` | 22.80 MB | 23,904,912 |
 | **Delta** | **+9.83 MB** | **+10,303,352** |
 
-The probe app was never committed and its temp `target/` directory was never
-written under this repo's own `target/`, per the wave's shared-target-dir
-build note.
+The probe app was never committed.
 
 ---
 
@@ -504,3 +513,8 @@ Run the turso backend's own tests too:
 ```bash
 cargo test -p frust-database --features engine-turso
 ```
+
+## License
+
+Licensed under either of MIT or Apache-2.0 (SPDX: `MIT OR Apache-2.0`), at your
+option. See `LICENSE-MIT` and `LICENSE-APACHE` beside this README.

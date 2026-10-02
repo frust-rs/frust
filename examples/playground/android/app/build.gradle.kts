@@ -153,6 +153,22 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // Native libraries are packaged from this app's `build/android/jniLibs`,
+    // where `cargoNdkBuild` below stages them (`-o`) — nothing is written
+    // under `src/main/jniLibs` any more, so the source tree stays free of
+    // build output and `frust clean` can remove the `.so`s with everything
+    // else. Paths in this file resolve against the module directory
+    // (`android/app/`), so `../../` is the app root.
+    //
+    // `setSrcDirs` REPLACES AGP's default `src/main/jniLibs` with our build
+    // directory exclusively — the source tree is never a packaging input. A
+    // project migrated from the old layout may have stale `.so`s in
+    // `src/main/jniLibs` left over; those are not packaged (only our build
+    // directory is), but they linger until `frust clean` removes them. The ABI
+    // split/versionCode block below is unaffected — it reads the variant's ABI
+    // filters and the staged `.so` files, not the source set.
+    sourceSets.getByName("main").jniLibs.setSrcDirs(listOf("../../build/android/jniLibs"))
+
     // Example flavor scaffold — uncomment and mirror frust.toml's [flavors].
     // flavorDimensions += "env"
     // productFlavors {
@@ -175,10 +191,10 @@ dependencies {
     implementation(project(":frust-embedding"))
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
     implementation(project(":frust-camera"))
-    // frust-native-widgets' one factory + one listener class
-    // (`dev.frust.nativewidgets`), supplied by the plugin's own library module
-    // — this app carries no per-control Kotlin of its own.
-    implementation(project(":frust-native-widgets"))
+    // frust-video-player: the session host (`FrustVideoPlayerHost`) + the
+    // SurfaceView-backed picture factory (`VideoPlayerViewFactory`) —
+    // `src/pages/video_player.rs`'s "Video" section.
+    implementation(project(":frust-video-player"))
     // frust-iap: the R8 keep-rule tripwire vehicle for the openiap-google pin
     // (docs/PLUGINS_DEVELOPMENT.md). This module is included so playground's
     // merged manifest exercises the module's transitive permissions and compiled
@@ -186,6 +202,10 @@ dependencies {
     // Playground has no Rust-side IAP page or feature yet; this is the tripwire
     // only — removing this line orphans the version pin.
     implementation(project(":frust-iap"))
+    // frust-auth-session: the Chrome Custom Tabs host (`FrustAuthSessionHost`)
+    // + its process-start init provider — `src/pages/auth_session.rs`'s
+    // "Auth" section.
+    implementation(project(":frust-auth-session"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
@@ -216,9 +236,12 @@ androidComponents {
 
 // Builds the Rust `.so`(s) via `cargo ndk` before every Gradle build.
 // `workingDir` is the Rust app root (two levels up from `android/app/`); `-o`
-// points at this module's `jniLibs` so the resulting
-// `<abi>/libplayground.so` lands where Gradle packages native
-// libraries from automatically.
+// points at that same app root's `build/android/jniLibs`, the app-owned build
+// directory registered as a `jniLibs` source directory in the `android` block
+// above — so the resulting `<abi>/libplayground.so` is packaged by
+// Gradle without any of it landing in `src/main/`. Keep the two paths in step:
+// staging somewhere Gradle does not read produces an APK that installs and
+// then crashes on `System.loadLibrary`, not a build failure.
 //
 // The cargo profile is chosen from the invoked task names (debug → `build`,
 // profile → `build --profile profile`, release → `build --release`) so the
@@ -256,7 +279,7 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
             add("ndk")
             addAll(cargoTargetArgs)
             add("-o")
-            add(file("src/main/jniLibs").absolutePath)
+            add(file("../../build/android/jniLibs").absolutePath)
             addAll(cargoProfileArgs)
             addAll(cargoFeatureArgs)
         },

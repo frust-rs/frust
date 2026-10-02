@@ -108,6 +108,29 @@ pub fn resolve_pid(
     bail!("`{package}` did not report a pid within the retry window (adb shell pidof empty)");
 }
 
+/// Is `package`'s process still alive on the device? One
+/// `adb -s <id> shell pidof <package>` call, no retries: `Ok(true)` while the
+/// app reports a pid, `Ok(false)` once it reports none — an empty stdout, or a
+/// non-zero exit, which is how `pidof` reports matching nothing.
+///
+/// The polled counterpart of [`resolve_pid`]'s launch-time wait, for a
+/// supervisor that has to notice an app dying on the device: `adb logcat
+/// --pid <pid>` does **not** exit when that pid does, so a streaming
+/// supervisor gets no EOF to learn from and must ask instead.
+///
+/// `Err` is reserved for "the question could not be asked" — `adb` missing or
+/// unspawnable — so a caller can tell a dead app from a broken toolchain and
+/// choose a policy for each; an app that is merely gone is never an error.
+///
+/// Same validated-at-source invariant as [`launch`] and [`resolve_pid`]:
+/// `package` is interpolated into a device-shell command line and must
+/// already be grammar-validated by whichever source resolved it, and must be
+/// the *installed* package or the probe never finds the running app.
+pub fn process_alive(runner: &dyn ProcessRunner, device_id: &str, package: &str) -> Result<bool> {
+    let out = runner.run("adb", &["-s", device_id, "shell", "pidof", package])?;
+    Ok(out.success && !out.stdout.trim().is_empty())
+}
+
 /// Streams `adb -s <id> logcat --pid <pid>` to `on_line` until the child
 /// exits — normally via Ctrl-C killing it, see `commands::run`.
 pub fn stream_logcat(
@@ -142,13 +165,13 @@ mod tests {
     #[test]
     fn install_builds_expected_command() {
         let runner = FakeProcessRunner::new().with(
-            "adb -s emulator-5554 install -r android/app/build/outputs/apk/debug/app-debug.apk",
+            "adb -s emulator-5554 install -r build/android/app/outputs/apk/debug/app-debug.apk",
             ok(""),
         );
         let out = install(
             &runner,
             "emulator-5554",
-            "android/app/build/outputs/apk/debug/app-debug.apk",
+            "build/android/app/outputs/apk/debug/app-debug.apk",
         )
         .unwrap();
         assert!(out.success);
@@ -321,6 +344,44 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("did not report a pid"), "{err}");
         assert_eq!(sleeps, 2); // sleeps between attempts, not after the last
+    }
+
+    #[test]
+    fn process_alive_reports_a_running_app() {
+        let runner = FakeProcessRunner::new().with(
+            "adb -s emulator-5554 shell pidof dev.f0x.myapp",
+            ok("4242\n"),
+        );
+        assert!(process_alive(&runner, "emulator-5554", "dev.f0x.myapp").unwrap());
+    }
+
+    /// The case the whole probe exists for: the app is gone (force-stopped on
+    /// the phone, crashed, OOM-killed), so `pidof` prints nothing. That is an
+    /// answer, not a failure.
+    #[test]
+    fn process_alive_reports_a_gone_app_without_erroring() {
+        let runner = FakeProcessRunner::new()
+            .with("adb -s emulator-5554 shell pidof dev.f0x.myapp", ok(""))
+            .with(
+                "adb -s emulator-5554 shell pidof dev.f0x.other",
+                Output {
+                    // `pidof` exits non-zero when it matches no process.
+                    success: false,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+        assert!(!process_alive(&runner, "emulator-5554", "dev.f0x.myapp").unwrap());
+        assert!(!process_alive(&runner, "emulator-5554", "dev.f0x.other").unwrap());
+    }
+
+    /// A toolchain that can't answer is an `Err`, distinct from a `false`
+    /// answer — the caller decides what an unanswerable probe means.
+    #[test]
+    fn process_alive_errors_when_adb_cannot_be_run() {
+        let runner =
+            FakeProcessRunner::new().missing("adb -s emulator-5554 shell pidof dev.f0x.myapp");
+        assert!(process_alive(&runner, "emulator-5554", "dev.f0x.myapp").is_err());
     }
 
     #[test]

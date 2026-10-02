@@ -1,6 +1,7 @@
 //! The doctor panel: a shadowed, centered popup listing every
-//! validator's status + actionable hints, with a re-run action. The base
-//! workbench layer is rendered with a *suppressed* `MouseCtx` (see
+//! validator's status + actionable hints, with a re-run action and a route
+//! into the toolchain bootstrap wizard (via the Doctor panel's `t` keybind). The
+//! base workbench layer is rendered with a *suppressed* `MouseCtx` (see
 //! `crate::ui::render`), so only this panel's regions are live while it is
 //! open — the base-layer suppression.
 //!
@@ -108,19 +109,23 @@ pub fn render(
 
     advance(&mut y); // blank
 
-    // ── Rerun / Close buttons ────────────────────────────────────────────
+    // ── Rerun / Close / Toolchain setup buttons ─────────────────────────
     if y < inner.bottom() {
         let rerun_label = " Re-run ";
         let close_label = " Close ";
+        let toolchain_label = " Toolchain setup ";
         let rerun_style = Style::default()
             .fg(theme.bg())
             .bg(theme.accent())
             .add_modifier(Modifier::BOLD);
         let close_style = Style::default().fg(theme.fg()).bg(theme.overlay());
+        let toolchain_style = Style::default().fg(theme.fg()).bg(theme.overlay());
         let buttons = Line::from(vec![
             Span::styled(rerun_label, rerun_style),
             Span::raw("   "),
             Span::styled(close_label, close_style),
+            Span::raw("   "),
+            Span::styled(toolchain_label, toolchain_style),
         ]);
         frame.render_widget(Paragraph::new(buttons), row_rect(y));
         let rerun_w = rerun_label.chars().count() as u16;
@@ -130,10 +135,17 @@ pub fn render(
             Message::RunDoctor,
         );
         let close_x = inner.x + rerun_w + 3;
+        let close_w = close_label.chars().count() as u16;
         mouse.click(
-            Rect::new(close_x, y, close_label.chars().count() as u16, 1),
+            Rect::new(close_x, y, close_w, 1),
             RegionId::DoctorClose,
             Message::CloseDoctorPanel,
+        );
+        let toolchain_x = close_x + close_w + 3;
+        mouse.click(
+            Rect::new(toolchain_x, y, toolchain_label.chars().count() as u16, 1),
+            RegionId::DoctorToolchainSetup,
+            Message::OpenToolchainFromDoctor,
         );
         advance(&mut y);
     }
@@ -141,7 +153,7 @@ pub fn render(
     if y < inner.bottom() {
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "r re-run · Esc close",
+                "r re-run · t toolchain · Esc close",
                 Style::default().fg(theme.muted()),
             ))
             .alignment(Alignment::Left),

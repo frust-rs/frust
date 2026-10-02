@@ -375,6 +375,7 @@ checksum = "1384d3fe1eecb464229fcf6eebb72306591c56bf27b373561489458a7c73027d"
 dependencies = [
  "futures",
  "thiserror 2.0.20",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -743,7 +744,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beui-demo"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-beui",
@@ -1233,6 +1234,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
+ "serde",
+ "termcolor",
  "unicode-width 0.2.2",
 ]
 
@@ -1293,6 +1296,26 @@ dependencies = [
  "encode_unicode",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "console_log"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86919cef3e37b9356ccf54d4421208c17ecfda01beae61393e7ffd72916c0ef1"
+dependencies = [
+ "log",
+ "web-sys",
 ]
 
 [[package]]
@@ -1769,7 +1792,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bf3c259d255ca70051b30e2e95b5446cdb8949ac4cd22c0d7fd634d89f568e2"
 dependencies = [
  "log",
- "regex",
 ]
 
 [[package]]
@@ -2015,9 +2037,9 @@ dependencies = [
 
 [[package]]
 name = "fontique"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e04c4750a17111ebd77c3e0aea00476ce33f59235bc4d9e7f0aded5033ad3fc"
+checksum = "6688bc1294fe7117d788937b6c53480169b29c566954af490830d4c09da9516a"
 dependencies = [
  "hashbrown 0.17.1",
  "linebender_resource_handle",
@@ -2027,7 +2049,7 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "parlance",
- "read-fonts 0.40.2",
+ "read-fonts",
  "roxmltree",
  "smallvec",
  "windows",
@@ -2073,10 +2095,12 @@ dependencies = [
 
 [[package]]
 name = "frust"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "any_spawner",
  "anyhow",
+ "console_error_panic_hook",
+ "console_log",
  "frust-core",
  "frust-gpu",
  "frust-reactive",
@@ -2088,20 +2112,40 @@ dependencies = [
  "frust-shell-ios",
  "frust-shell-linux",
  "frust-shell-macos",
+ "frust-shell-web",
  "frust-shell-windows",
  "frust-text",
  "frust-theme",
  "frust-widgets",
  "image",
  "kurbo",
+ "log",
  "peniko",
  "reactive_graph",
+ "wasm-bindgen",
  "wgpu",
 ]
 
 [[package]]
+name = "frust-auth-session"
+version = "0.5.0"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "frust-plugin",
+ "frust-url-launcher",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-authentication-services",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-beui"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2112,7 +2156,7 @@ dependencies = [
 
 [[package]]
 name = "frust-camera"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -2132,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "frust-cli"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2141,11 +2185,12 @@ dependencies = [
  "frust-tui",
  "notify",
  "tokio",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]
 name = "frust-clipboard"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "arboard",
  "frust-plugin",
@@ -2158,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "frust-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "frust-scene",
@@ -2170,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "frust-cupertino"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2181,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "frust-dap"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-drive",
  "frust-mcp",
@@ -2195,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "frust-database"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-paths",
  "log",
@@ -2207,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "frust-devtools"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-devtools-protocol",
  "log",
@@ -2216,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "frust-devtools-protocol"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2224,11 +2269,12 @@ dependencies = [
 
 [[package]]
 name = "frust-drive"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ctrlc",
  "frust-devtools-protocol",
+ "frust-drive",
  "icns",
  "image",
  "include_dir",
@@ -2242,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "frust-engine"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -2259,8 +2305,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-gallery"
+version = "0.5.0"
+dependencies = [
+ "frust-beui",
+ "frust-core",
+ "frust-cupertino",
+ "frust-glyph",
+ "frust-material",
+ "frust-shadcn",
+ "frust-text",
+ "frust-theme",
+ "frust-widgets",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-glyph"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2271,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2286,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "frust-haptics"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -2298,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "frust-i18n"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "fluent-bundle",
  "fluent-langneg",
@@ -2325,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "frust-i18n-macros"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "fluent-syntax",
  "proc-macro2",
@@ -2336,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "frust-iap"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "frust-plugin",
@@ -2351,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "frust-material"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2362,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "frust-mcp"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2379,8 +2442,10 @@ dependencies = [
 
 [[package]]
 name = "frust-native-widgets"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
  "frust",
  "frust-core",
  "frust-plugin",
@@ -2391,7 +2456,9 @@ dependencies = [
  "kurbo",
  "log",
  "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
@@ -2401,15 +2468,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-oauth-native"
+version = "0.5.0"
+dependencies = [
+ "base64",
+ "getrandom 0.3.4",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-paths"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "frust-plugin"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "jni 0.22.4",
  "ndk-context",
@@ -2418,17 +2499,18 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "any_spawner",
  "futures",
  "reactive_graph",
  "tokio",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
 name = "frust-render"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2444,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "frust-scene"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "kurbo",
  "peniko",
@@ -2453,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "frust-secure-storage"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-plugin",
  "jni 0.22.4",
@@ -2471,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shadcn"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-core",
@@ -2482,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shared-preferences"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-paths",
  "frust-plugin",
@@ -2495,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-android"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit_android",
  "android_logger",
@@ -2522,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-common"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-devtools",
@@ -2538,10 +2620,11 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-desktop"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit_winit",
  "anyhow",
+ "arboard",
  "frust-core",
  "frust-paths",
  "frust-reactive",
@@ -2560,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-ios"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "accesskit_ios",
@@ -2583,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-linux"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-shell-desktop",
  "log",
@@ -2592,10 +2675,13 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-macos"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
+ "frust-plugin",
  "frust-reactive",
+ "frust-shell-common",
  "frust-shell-desktop",
+ "kurbo",
  "log",
  "muda",
  "objc2 0.6.4",
@@ -2605,8 +2691,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-shell-web"
+version = "0.5.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
+ "js-sys",
+ "kurbo",
+ "log",
+ "peniko",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "winit",
+]
+
+[[package]]
 name = "frust-shell-windows"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
@@ -2619,12 +2729,14 @@ dependencies = [
 
 [[package]]
 name = "frust-testing"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "clap",
  "frust-core",
  "frust-cupertino",
  "frust-engine",
+ "frust-gallery",
  "frust-glyph",
  "frust-gpu",
  "frust-material",
@@ -2642,15 +2754,20 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "toml 1.1.4+spec-1.1.0",
  "vello_common",
  "vello_cpu",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
  "wgpu",
 ]
 
 [[package]]
 name = "frust-text"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-scene",
  "kurbo",
@@ -2661,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "frust-theme"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-text",
@@ -2670,10 +2787,11 @@ dependencies = [
 
 [[package]]
 name = "frust-tui"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
+ "arboard",
  "crossterm",
  "frust-dap",
  "frust-devtools-protocol",
@@ -2681,6 +2799,7 @@ dependencies = [
  "frust-mcp",
  "futures-util",
  "insta",
+ "notify",
  "ratatui",
  "thiserror 2.0.20",
  "tokio",
@@ -2689,8 +2808,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-url-launcher"
+version = "0.5.0"
+dependencies = [
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "frust-video-player"
+version = "0.5.0"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "frust",
+ "frust-plugin",
+ "jni 0.22.4",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-av-foundation",
+ "objc2-avf-audio",
+ "objc2-core-media",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-widgets"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -3031,6 +3185,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gl_generator"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a95dfc23a2b4a9a2f5ab41d194f8bfda3cabec42af4e39f08c339eb2a0c124d"
+dependencies = [
+ "khronos_api",
+ "log",
+ "xml-rs",
+]
+
+[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3088,7 +3253,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "log",
  "peniko",
- "skrifa 0.44.0",
+ "skrifa",
  "smallvec",
  "vello_common",
 ]
@@ -3098,6 +3263,27 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "glow"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29038e1c483364cc6bb3cf78feee1816002e127c331a1eec55a4d202b9e1adb5"
+dependencies = [
+ "js-sys",
+ "slotmap",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "glutin_wgl_sys"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c4ee00b289aba7a9e5306d57c2d05499b2e5dc427f84ac708bd2c090212cf3e"
+dependencies = [
+ "gl_generator",
+]
 
 [[package]]
 name = "gobject-sys"
@@ -3205,13 +3391,13 @@ dependencies = [
 
 [[package]]
 name = "harfrust"
-version = "0.10.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0589ddd0d2935dd2845827ac606b4081c266225d613b268ed2910f832889cab"
+checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
- "read-fonts 0.40.2",
+ "read-fonts",
  "smallvec",
 ]
 
@@ -4057,9 +4243,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.104"
+version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e0c1080212aad755ea003d18543e8768dd432c48819efd73a7bf1e39b7a5a3a"
+checksum = "ce57d20d1ea864ce2ac172ab472d409214f4fd359f0b2a2775abdf522e2af99e"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -4096,6 +4282,23 @@ checksum = "fb1e621458ca9c51aa110bd0339d4751a056b9576bf1253aee1aa560dda0fc9d"
 dependencies = [
  "log",
 ]
+
+[[package]]
+name = "khronos-egl"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aae1df220ece3c0ada96b8153459b67eebe9ae9212258bb0134ae60416fdf76"
+dependencies = [
+ "libc",
+ "libloading",
+ "pkg-config",
+]
+
+[[package]]
+name = "khronos_api"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kqueue"
@@ -4404,6 +4607,16 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minicov"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
+dependencies = [
+ "cc",
+ "walkdir",
+]
 
 [[package]]
 name = "minijinja"
@@ -4791,9 +5004,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-text",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+]
+
+[[package]]
+name = "objc2-authentication-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee6d6f7dab884a28adaec1012eb3889257a49cc145724e35f93ece2d209f8b25"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
 ]
 
@@ -4812,6 +5040,17 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+]
+
+[[package]]
+name = "objc2-avf-audio"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -5124,6 +5363,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-text",
@@ -5352,9 +5592,9 @@ checksum = "4b6937eda350acc1a5d05872c3cbf99fe78619c269096e2be3d4a350058639d5"
 
 [[package]]
 name = "parley"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0478b47dd9885a5e0a4f1c0782ffc42bf6ee8c41dea0917d7a9bcee3e6585fc"
+checksum = "22d2ff88bd3f7d68d1d9b09c7e6209f9a8e8c05088295140a2bcf2e9b17038c5"
 dependencies = [
  "fontique",
  "harfrust",
@@ -5365,14 +5605,14 @@ dependencies = [
  "linebender_resource_handle",
  "parlance",
  "parley_data",
- "skrifa 0.43.2",
+ "skrifa",
 ]
 
 [[package]]
 name = "parley_data"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a649e01a1acc917247ee147b56b8a1fa91824acf7117bd003b4204306d601255"
+checksum = "1567535334d6ba2d3cde19221ba9a7bd0fabb3cbd99046ddfb10ae061cfcc889"
 dependencies = [
  "icu_properties",
 ]
@@ -6161,17 +6401,6 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.40.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "487889119a5f19ff7c0a20637196bdc76b9f54ebec17e3588b5d75e4999f8773"
-dependencies = [
- "bytemuck",
- "font-types",
- "once_cell",
-]
-
-[[package]]
-name = "read-fonts"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
@@ -6642,7 +6871,7 @@ dependencies = [
 
 [[package]]
 name = "shadcn-demo"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "frust-shadcn",
@@ -6765,22 +6994,12 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skrifa"
-version = "0.43.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cbe997d0f2480442d727488fbe2150779114cbe480ecdbadef58b33e0318ffb"
-dependencies = [
- "bytemuck",
- "read-fonts 0.40.2",
-]
-
-[[package]]
-name = "skrifa"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
 dependencies = [
  "bytemuck",
- "read-fonts 0.41.0",
+ "read-fonts",
 ]
 
 [[package]]
@@ -7981,9 +8200,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b70935747edd64d89de3efa29d73789b806c15798f8e7dca4d8ac356b50ce70"
+checksum = "aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -7994,9 +8213,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.77"
+version = "0.4.78"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b7777d5cc23d0e91404e53ce2d5e8ec7acae3026b16233dba62cd3246457950"
+checksum = "6ef4c5d3d2cdf5c54f4231181768f5510842e350db025faf1f7163b1030ed928"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -8004,9 +8223,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77775f8f3f7217702089053b94958f8f54061a3f663417df76e19cbdcca29bc1"
+checksum = "a690d511e3c1a8b3a55e33511e3c2c00c78415cd23650f32b808627f5696b9ed"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -8014,25 +8233,64 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11d33f857dc2fb11b8bc75aee111aa9cbeb12cd9f25efd3d4c2a3dd4e235284"
+checksum = "411e4887f0071ef2d2164a9d5fdf2d20efbef78fccd3a78b0c10a1dc5295e48a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
  "wasm-bindgen-shared",
 ]
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
+checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "wasm-bindgen-test"
+version = "0.3.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45863ef0bef521c12124eb39d9a38513c47db75f22e503c06beacd40afeb35db"
+dependencies = [
+ "async-trait",
+ "cast",
+ "js-sys",
+ "libm",
+ "minicov",
+ "nu-ansi-term",
+ "num-traits",
+ "oorandom",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test-macro",
+ "wasm-bindgen-test-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-test-macro"
+version = "0.3.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c89dcab8b516b6b603baca9d550b7282d68fcc7f367e3956cff7ebf406a3f12"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "wasm-bindgen-test-shared"
+version = "0.2.128"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f37b4f992cebe528ef34964ae69681ac0fe7080071e7298e46008f9d380302af"
 
 [[package]]
 name = "wayland-backend"
@@ -8145,9 +8403,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.104"
+version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c435338968042f4f59a557f690a253676d47ce13ceb55d70100e7facf6620a30"
+checksum = "9fbddc4a036f00ec4f18c83445bd3115cb306a91da554919a099d9222fe4a7f8"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -8250,6 +8508,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "log",
+ "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
@@ -8291,6 +8550,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.20",
  "wgpu-core-deps-apple",
+ "wgpu-core-deps-wasm",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal",
  "wgpu-naga-bridge",
@@ -8302,6 +8562,15 @@ name = "wgpu-core-deps-apple"
 version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "061f3d319a40d39d00b1ecc2c33b89fe21d4e6fe01859df3500a3a8ecccd6b68"
+dependencies = [
+ "wgpu-hal",
+]
+
+[[package]]
+name = "wgpu-core-deps-wasm"
+version = "30.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d260ca2ca8adc654f513a869bf3cac0b47f5b8d3f87803d6942015f8de597aae"
 dependencies = [
  "wgpu-hal",
 ]
@@ -8330,13 +8599,18 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
+ "glow",
+ "glutin_wgl_sys",
  "gpu-allocator",
  "hashbrown 0.17.1",
+ "js-sys",
+ "khronos-egl",
  "libc",
  "libloading",
  "log",
  "naga",
  "naga-types",
+ "ndk-sys",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -8356,10 +8630,14 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "thiserror 2.0.20",
+ "wasm-bindgen",
+ "wayland-sys",
+ "web-sys",
  "wgpu-naga-bridge",
  "wgpu-types",
  "windows",
  "windows-core",
+ "windows-result",
 ]
 
 [[package]]
@@ -8951,6 +9229,12 @@ name = "xkeysym"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
+
+[[package]]
+name = "xml-rs"
+version = "0.8.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "yeslogic-fontconfig-sys"

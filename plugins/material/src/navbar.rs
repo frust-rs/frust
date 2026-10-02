@@ -62,20 +62,26 @@
 //!   own note): selection feedback is the pill, so an item runs no
 //!   [`super::state_layer`]/[`crate::interaction`] overlay and repaints on
 //!   selection, never on press.
-//! * **Default size is [`NavBarSize::Small`]** (64dp), where the reference
-//!   defaults to `medium` (80dp). 64dp is androidx `NavigationBarTokens`'
+//! * **Default size is [`NavBarSize::Medium`]** (80dp), matching the reference
+//!   default. [`NavBarSize::Small`] (64dp) — androidx `NavigationBarTokens`'
 //!   current Expressive container height and the height this widget has
-//!   shipped; both are reachable, only the default differs.
+//!   shipped — is still reachable via `.size(NavBarSize::Small)`.
 //! * **A selected label keeps the `on_surface` themed role.** The reference
 //!   paints selected content `onSecondaryContainer`; [`ThemeTextColor`] has no
 //!   such role, and a themed text color resolves from a *role* after `build`
 //!   (there is no `Theme` to read at build time), so the closest shipped role
 //!   stays. Unselected labels are `on_surface_variant` as upstream.
 //! * **Unported upstream props**: `density`, `shapeFamily`, `elevation`,
-//!   `padding`, `safeArea`, and `selectedIcon`. Safe-area insets are a shell
-//!   concern here (a bar wraps itself in `safe_area(..)`, see
-//!   `docs/CODE_STANDARDS.md`'s self-sizing chrome rule) and the rest are
-//!   container/decoration knobs with no axis in this port's scope.
+//!   `padding`, and `selectedIcon` — container/decoration knobs with no axis
+//!   in this port's scope. `safeArea` **is** ported: the bar consumes the
+//!   bottom window inset itself by default, in its own `layout`
+//!   (`docs/CODE_STANDARDS.md`'s self-sizing-chrome rule), and paints its
+//!   `surface_container` fill through the consumed band; `.safe_area(false)`
+//!   opts out for a bar that isn't docked to the window's bottom edge. Do not
+//!   additionally wrap the bar in `frust::safe_area(..)` for the bottom edge:
+//!   a `SafeArea` removes what it consumes from its subtree, so this never
+//!   double-insets, but the safe area's own padding sits outside the bar's
+//!   box and is left unpainted instead of matching the bar's container color.
 //!
 //! # Semantics
 //!
@@ -101,7 +107,7 @@ use frust::{AnimationController, FrameTime, Spring, SpringDesc, Theme, text};
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 use peniko::Color;
 
-use frust::authoring::ThemeTextColor;
+use frust::authoring::{ThemeTextColor, ThemeTextType};
 
 use super::press::presses;
 use crate::tokens::MaterialSpring;
@@ -130,8 +136,8 @@ const LABEL_GAP: f64 = 4.0;
 
 /// The label's M3 `labelMediumEmphasized` type-scale token (see
 /// [`super::appbar`]'s `TITLE_SIZE` doc comment for why this is a hardcoded
-/// constant rather than a live `Theme::type_scale` read — `Text` only defers
-/// *color* resolution past `View::build`, never size/weight). Matches
+/// constant rather than a live `Theme::type_scale` read — `Text` defers *color*
+/// and an opt-in family past `View::build`, never size/weight). Matches
 /// `frust-theme::typography`'s `LABEL_MEDIUM_EMPHASIZED` token: same
 /// size/line-height/letter-spacing as the baseline `LABEL_MEDIUM`, weight
 /// stepped up from Medium to Bold.
@@ -489,11 +495,11 @@ fn launched_pop() -> AnimationController {
 /// The bar's container height variant (`M3ENavBarSize`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavBarSize {
-    /// [`HEIGHT_SMALL`] (64dp) — this port's default; see the [module
-    /// docs](self)' porting decisions.
-    #[default]
+    /// [`HEIGHT_SMALL`] (64dp) — androidx `NavigationBarTokens`' Expressive container height,
+    /// reachable via `.size(NavBarSize::Small)`; see the [module docs](self)' porting decisions.
     Small,
-    /// [`HEIGHT_MEDIUM`] (80dp), the reference's own default.
+    /// [`HEIGHT_MEDIUM`] (80dp), the reference's own default — this port's default.
+    #[default]
     Medium,
 }
 
@@ -561,7 +567,8 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 }
 
 /// Build a label's type-erased child view at `labelMediumEmphasized`, tagged
-/// with the themed color `role` selection determines.
+/// with the themed color `role` selection determines, its font family
+/// following the live theme's `labelMediumEmphasized` role.
 fn label_view<State: 'static>(label: String, role: ThemeTextColor) -> AnyView<State> {
     frust::authoring::any::<State, _>(
         text(label)
@@ -569,7 +576,8 @@ fn label_view<State: 'static>(label: String, role: ThemeTextColor) -> AnyView<St
             .weight(LABEL_WEIGHT)
             .letter_spacing(LABEL_LETTER_SPACING)
             .line_height(LineHeight::Absolute(LABEL_LINE_HEIGHT))
-            .themed_role(role),
+            .themed_role(role)
+            .themed_family(ThemeTextType::LabelMediumEmphasized),
     )
 }
 
@@ -678,6 +686,7 @@ pub struct NavigationBarView<State: 'static> {
     size: NavBarSize,
     label_behavior: NavBarLabelBehavior,
     indicator_style: NavBarIndicatorStyle,
+    safe_area: bool,
 }
 
 /// Create a navigation bar over `items`, with `selected` the current
@@ -700,6 +709,7 @@ pub fn navigation_bar<State: 'static, F: Fn(&mut State, usize) + 'static>(
         size: NavBarSize::default(),
         label_behavior: NavBarLabelBehavior::default(),
         indicator_style: NavBarIndicatorStyle::default(),
+        safe_area: true,
     }
 }
 
@@ -731,6 +741,26 @@ impl<State: 'static> NavigationBarView<State> {
     /// Selection indicator style (`M3ENavigationBar.indicatorStyle`).
     pub fn indicator_style(mut self, style: NavBarIndicatorStyle) -> Self {
         self.indicator_style = style;
+        self
+    }
+
+    /// Whether the bar consumes the bottom window inset itself, self-sizing
+    /// around it and painting its container fill through it — matching Flutter's
+    /// Material 3 NavigationBar (which reads `MediaQuery.padding.bottom` only;
+    /// horizontals belong to the Scaffold). Default `true`. The bar consumes the
+    /// **bottom** inset **only**; left/right display-cutout insets are the
+    /// caller's responsibility.
+    ///
+    /// For a bottom-docked bar respecting horizontal safe areas / landscape
+    /// cutouts, wrap the bar in `safe_area(bar).top(false).bottom(false)`
+    /// — the bottom-false leaves the bar's self-inset unconsumed by the safe
+    /// area, so the bar still paints under its gesture area and self-paints
+    /// the cutout band. For a bar embedded mid-screen (e.g. in a preview or
+    /// gallery), use `.safe_area(false)`.
+    ///
+    /// (`M3ENavigationBar.safeArea`)
+    pub fn safe_area(mut self, enabled: bool) -> Self {
+        self.safe_area = enabled;
         self
     }
 }
@@ -817,11 +847,11 @@ impl Widget for NavItemWidget {
             0.0
         };
         // The bar always constrains an item tightly to its own height; an
-        // unbounded parent falls back to the compact container height.
+        // unbounded parent falls back to the default container height.
         let height = if bc.max().height.is_finite() {
             bc.max().height
         } else {
-            HEIGHT_SMALL
+            NavBarSize::default().height()
         };
 
         let label_size = self.label.as_mut().map(|label| {
@@ -976,6 +1006,12 @@ pub struct NavigationBarWidget {
     /// contract).
     selected: usize,
     size: NavBarSize,
+    safe_area: bool,
+    /// The bottom window inset consumed on the last `layout` pass — `0.0`
+    /// when `safe_area` is disabled or no shell pushed a nonzero inset. Kept
+    /// so `paint`/tests can read what `layout` consumed without recomputing
+    /// it against a live `LayoutCtx`.
+    bottom_inset: f64,
     indicator_style: NavBarIndicatorStyle,
     indicator: LiquidIndicator,
     /// Raised by `rebuild` when the selection moved, consumed by the next
@@ -1003,6 +1039,8 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
             items,
             selected: self.selected,
             size: self.size,
+            safe_area: self.safe_area,
+            bottom_inset: 0.0,
             indicator_style: self.indicator_style,
             indicator: LiquidIndicator::new(),
             selection_moved: false,
@@ -1139,6 +1177,10 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
             element.size = self.size;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        if prev.safe_area != self.safe_area {
+            element.safe_area = self.safe_area;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         if prev.label_behavior != self.label_behavior {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
@@ -1185,7 +1227,14 @@ impl Widget for NavigationBarWidget {
         } else {
             0.0
         };
-        let height = self.size.height();
+        let band = self.size.height();
+        let inset = if self.safe_area {
+            ctx.window_insets().padding().bottom
+        } else {
+            0.0
+        };
+        self.bottom_inset = inset;
+        let height = band + inset;
         // Reduced motion turns the travel into the same jump every non-selection
         // geometry change takes.
         let reduce_motion = Theme::from_layout_ctx(ctx).is_some_and(|t| t.motion.reduce_motion);
@@ -1199,7 +1248,7 @@ impl Widget for NavigationBarWidget {
         }
         let slot_w = width / n as f64;
         for (i, pod) in self.items.iter_mut().enumerate() {
-            pod.layout_child(ctx, &BoxConstraints::tight(Size::new(slot_w, height)));
+            pod.layout_child(ctx, &BoxConstraints::tight(Size::new(slot_w, band)));
             pod.set_origin(Point::new(i as f64 * slot_w, 0.0));
         }
         if let Some(rest) = self.selected_indicator_rect() {
@@ -1273,7 +1322,7 @@ impl Widget for NavigationBarWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
-    use frust::authoring::{BuildCtx, PointerButton, PointerEvent};
+    use frust::authoring::{BuildCtx, PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets};
     use frust_widgets::test_support::{RecordingScene, leaf_any};
     use std::any::Any;
     use std::cell::Cell;
@@ -1298,6 +1347,23 @@ mod tests {
         let mut lctx =
             LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(theme as &dyn Any));
         w.layout(&mut lctx, bc)
+    }
+
+    /// Lay out under a window carrying `bottom` px of bottom system-bar inset
+    /// and nothing else, the shape a shell pushes for a home-indicator/nav-bar
+    /// occlusion.
+    fn layout_with_bottom_inset(
+        w: &mut NavigationBarWidget,
+        bc: &BoxConstraints,
+        bottom: f64,
+    ) -> Size {
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, bottom),
+            WindowEdgeInsets::ZERO,
+        );
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(insets, |ctx| w.layout(ctx, bc))
     }
 
     fn three_items() -> Vec<NavItem<()>> {
@@ -1362,11 +1428,14 @@ mod tests {
         let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
         let mut w = build(&view);
         let size = layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 200.0)));
-        assert_eq!(size, Size::new(300.0, HEIGHT_SMALL));
+        assert_eq!(size, Size::new(300.0, NavBarSize::default().height()));
         assert_eq!(w.items[0].origin().x, 0.0);
         assert_eq!(w.items[1].origin().x, 100.0);
         assert_eq!(w.items[2].origin().x, 200.0);
-        assert_eq!(w.items[0].size(), Size::new(100.0, HEIGHT_SMALL));
+        assert_eq!(
+            w.items[0].size(),
+            Size::new(100.0, NavBarSize::default().height())
+        );
     }
 
     #[test]
@@ -1384,6 +1453,137 @@ mod tests {
             assert_eq!(laid.height, expected, "{size:?}");
             assert_eq!(w.items[0].size().height, expected, "{size:?}");
         }
+    }
+
+    #[test]
+    fn default_size_is_medium() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        let size = layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 200.0)));
+        assert_eq!(size, Size::new(300.0, HEIGHT_MEDIUM));
+        assert_eq!(w.items[0].size().height, HEIGHT_MEDIUM);
+    }
+
+    // ---- Self-inset (`safe_area`) ------------------------------------------
+
+    #[test]
+    fn safe_area_grows_the_bar_by_the_consumed_bottom_inset() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        let size = layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        assert_eq!(
+            size,
+            Size::new(300.0, NavBarSize::default().height() + 34.0)
+        );
+        assert_eq!(w.bottom_inset, 34.0);
+    }
+
+    #[test]
+    fn items_stay_at_the_bare_band_height_under_a_self_consumed_inset() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        for item in &w.items {
+            assert_eq!(
+                item.origin().y,
+                0.0,
+                "items sit at the top of the taller bar"
+            );
+            assert_eq!(
+                item.size().height,
+                NavBarSize::default().height(),
+                "items stay the bare band tall"
+            );
+        }
+    }
+
+    #[test]
+    fn indicator_geometry_is_unchanged_by_a_self_consumed_inset() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 1, |_s: &mut (), _i| {});
+        let bc = BoxConstraints::loose(Size::new(300.0, 200.0));
+
+        let mut zero = build(&view);
+        layout(&mut zero, &bc);
+        let (zero_scene, _) = paint_at(
+            &mut zero,
+            Size::new(300.0, NavBarSize::default().height()),
+            ft(0.0),
+        );
+
+        let mut inset = build(&view);
+        layout_with_bottom_inset(&mut inset, &bc, 34.0);
+        let (inset_scene, _) = paint_at(
+            &mut inset,
+            Size::new(300.0, NavBarSize::default().height() + 34.0),
+            ft(0.0),
+        );
+
+        assert_eq!(
+            zero_scene.rounded, inset_scene.rounded,
+            "the pill's geometry is item-local and byte-identical for a nonzero inset"
+        );
+    }
+
+    #[test]
+    fn safe_area_false_ignores_the_window_inset() {
+        let view: NavigationBarView<()> =
+            navigation_bar(three_items(), 0, |_s: &mut (), _i| {}).safe_area(false);
+        let mut w = build(&view);
+        let size = layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        assert_eq!(size, Size::new(300.0, NavBarSize::default().height()));
+        assert_eq!(w.bottom_inset, 0.0, "an opted-out bar consumes nothing");
+    }
+
+    #[test]
+    fn container_fill_covers_the_full_band_plus_inset_size() {
+        let view: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = build(&view);
+        layout_with_bottom_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            34.0,
+        );
+        let (scene, _) = paint_at(
+            &mut w,
+            Size::new(300.0, NavBarSize::default().height() + 34.0),
+            ft(0.0),
+        );
+        assert_eq!(
+            scene.rects[0],
+            (
+                Point::ZERO,
+                Size::new(300.0, NavBarSize::default().height() + 34.0)
+            ),
+            "the container fill covers the band plus the consumed inset"
+        );
+    }
+
+    #[test]
+    fn rebuild_flipping_safe_area_returns_layout() {
+        let mut counter = 0u64;
+        let prev: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = View::<()>::build(&prev, &mut ctx(&mut counter));
+
+        let next: NavigationBarView<()> =
+            navigation_bar(three_items(), 0, |_s: &mut (), _i| {}).safe_area(false);
+        let flags = View::<()>::rebuild(&next, &prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            flags.needs_layout(),
+            "safe_area toggles the self-inset, a layout change"
+        );
+        assert!(!w.safe_area);
     }
 
     #[test]
@@ -1420,7 +1620,7 @@ mod tests {
             .widget_mut()
             .downcast_mut::<NavItemWidget>()
             .unwrap();
-        let expected_top = (HEIGHT_SMALL - INDICATOR_H) / 2.0;
+        let expected_top = (NavBarSize::default().height() - INDICATOR_H) / 2.0;
         assert!((item.indicator_rect.y0 - expected_top).abs() < 1e-9);
         assert_eq!(item.indicator_rect.width(), INDICATOR_W);
     }
@@ -1732,7 +1932,7 @@ mod tests {
 
     #[test]
     fn a_badge_wraps_the_icon_without_moving_the_hit_target() {
-        let bar = Size::new(300.0, HEIGHT_SMALL);
+        let bar = Size::new(300.0, NavBarSize::default().height());
         let bare: NavigationBarView<()> = navigation_bar(
             vec![nav_item("Home").icon(leaf_any(24.0, 24.0))],
             0,
@@ -1773,11 +1973,18 @@ mod tests {
         );
         assert!(badged_icon.height <= INDICATOR_H, "still inside the box");
         // The item's own slot — and therefore its hit target — is untouched.
-        assert_eq!(w.items[1].size(), Size::new(150.0, HEIGHT_SMALL));
+        assert_eq!(
+            w.items[1].size(),
+            Size::new(150.0, NavBarSize::default().height())
+        );
 
         let mut unit = ();
         let unit_any: &mut dyn Any = &mut unit;
-        let mut ectx = EventCtx::new(unit_any, Point::ZERO, Size::new(300.0, HEIGHT_SMALL));
+        let mut ectx = EventCtx::new(
+            unit_any,
+            Point::ZERO,
+            Size::new(300.0, NavBarSize::default().height()),
+        );
         w.event(&mut ectx, &ev(PointerPhase::Down, 200.0, 20.0));
         w.event(&mut ectx, &ev(PointerPhase::Up, 200.0, 20.0));
         assert_eq!(
@@ -2031,6 +2238,30 @@ mod tests {
         assert_eq!(
             labelled, 3,
             "every tab keeps its label with no text painted"
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn every_label_paints_in_roboto_flex_under_the_material_theme() {
+        // Selected and unselected labels alike (they differ only in color
+        // role) — see `crate::appbar::top::typeface_probe`.
+        use crate::appbar::top::typeface_probe::{Face, assert_paints_only_in};
+        let flex = crate::tokens::font_data()[0];
+        let runs = assert_paints_only_in(
+            "the navigation bar's labels",
+            |_: &mut ()| navigation_bar(three_items(), 1, |_s: &mut (), _i| {}),
+            crate::baseline(),
+            &[flex],
+            Size::new(300.0, HEIGHT_SMALL),
+            Face {
+                bytes: flex,
+                name: "Roboto Flex",
+            },
+        );
+        assert!(
+            runs >= 3,
+            "fixture sanity: expected a run per label, got {runs}"
         );
     }
 }

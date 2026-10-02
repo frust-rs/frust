@@ -1,5 +1,9 @@
-//! The six v1 controls — `Button`, `Label`, `Switch`, `Slider`, `ProgressBar`,
-//! `Image` — each an internal [`NativeWidget`](crate::runtime::NativeWidget)
+//! The v1 controls — eight shared (`Button`, `Label`, `Switch`, `Slider`,
+//! `ProgressBar`, `Image`, `Spinner`, `DatePicker`), the two
+//! Apple-arm-only controls
+//! `Segmented` and `Stepper` ([`APPLE_KINDS`]), and the iOS-only `TabBar`
+//! ([`IOS_ONLY_KINDS`]) — each an internal
+//! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
 //! setter on the main thread.
 //!
@@ -18,7 +22,13 @@
 //!    arm builds the `android.widget.*` view, hands each planned [`Setter`] to
 //!    `platform::apply` and retains/releases the global refs; the iOS arm builds
 //!    the UIKit view, applies the **same plan** through typed `objc2-ui-kit`
-//!    setters, and lets ARC own the references.
+//!    setters, and lets ARC own the references; the macOS arm registers every
+//!    shared control plus the Apple-only pair (`Segmented`, `Stepper` — see
+//!    `src/appkit/mod.rs`'s `register_controls` and [`APPLE_KINDS`] / [`IOS_ONLY_KINDS`]),
+//!    while the tab bar (`IOS_ONLY_KINDS`) and the native sheet
+//!    (`present::apple_sheet`) remain iOS-only. All apply the same plan over
+//!    their respective Apple frameworks (`objc2-app-kit` on macOS,
+//!    `objc2-ui-kit` on iOS).
 //!
 //! Half 1 is shared verbatim — one `Props`, one `decode`, one `plan`, two arms —
 //! which is the point of the split: diff behaviour is asserted once, on a host,
@@ -37,8 +47,8 @@
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
-//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], the four tint setters |
-//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`] |
+//! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`] (`Slider`/`Stepper`), [`Setter::Max`] (`Slider`/`Stepper`), [`Setter::Indeterminate`], [`Setter::Animating`] (`View.setVisibility`, not `GONE` — invalidate-only, same class as `setEnabled`), the five tint setters; Apple-only (no Android measurement exists — tiered by the same shape): [`Setter::SelectedSegment`], [`Setter::Momentary`], [`Setter::SegmentTint`], [`Setter::Step`], [`Setter::Wraps`], [`Setter::StepperTint`]; not independently measured, tiered by shape: [`Setter::Date`] (`DatePicker.updateDate`, the controlled value write — `Progress`'s class), [`Setter::DatePickerTint`], [`Setter::DatePickerTextColor`]; iOS-only, tiered by shape: [`Setter::SelectedTab`], [`Setter::TabBarTint`], [`Setter::TabBarUnselectedTint`], [`Setter::TabBarBackground`] |
+//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`], [`Setter::SizeClass`] (not independently measured — grouped here because a style/size swap re-measures the view, the same reasoning [`Setter::ThemedBackground`] itself is grouped by), [`Setter::Segments`] (Apple-only — a segment-list replace re-measures every segment), [`Setter::MinDate`]/[`Setter::MaxDate`] (not independently measured — a range change repopulates a calendar's month pages/year list), [`Setter::DatePickerStyle`] (a presentation swap rebuilds the picker's layout; Apple-only in effect — Android warns and ignores), [`Setter::TabItems`] (iOS-only — an item-array replace re-lays-out every item and decodes any byte icon) |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
 //! **Per-frame guidance:** ~500 [`Tier::Cheap`] setters per frame ≈ 0.4 ms and
@@ -104,11 +114,16 @@
 //! there is nothing to reinstate.
 
 pub(crate) mod button;
+pub(crate) mod date_picker;
 pub(crate) mod image;
 pub(crate) mod label;
 pub(crate) mod progress;
+pub(crate) mod segmented;
 pub(crate) mod slider;
+pub(crate) mod spinner;
+pub(crate) mod stepper;
 pub(crate) mod switch;
+pub(crate) mod tab_bar;
 pub(crate) mod typeface;
 
 use std::borrow::Cow;
@@ -117,8 +132,57 @@ use crate::NativeWidgetError;
 use crate::registry::SlotId;
 use crate::runtime::Params;
 
+use self::date_picker::{CivilDate, DatePickerStyle};
 use self::image::{Fit, ImageBytes};
+use self::spinner::SizeClass;
+use self::tab_bar::TabItemProps;
 use self::typeface::Typeface;
+
+// --- the kind tables ----------------------------------------------------------
+//
+// Which control kinds each platform arm registers, as three tables — one per
+// arm-membership shape, because membership is per ARM, not per vendor:
+//
+// | table | Android | iOS | macOS |
+// |---|---|---|---|
+// | `SHARED_KINDS` | yes | yes | yes |
+// | `APPLE_KINDS` | — | yes | yes |
+// | `IOS_ONLY_KINDS` | — | yes | — |
+//
+// A kind outside an arm's tables has no `NativeWidget` impl there, and its
+// builder renders a refusal banner on that target at compile time
+// (`crate::api::builders`). Every arm's `register_controls` registers exactly
+// its tables, in this order (shared, then Apple, then iOS-only) — pinned
+// host-side by
+// `tests::every_register_controls_registers_exactly_its_kind_tables`, and on
+// the two Apple arms additionally checked at runtime (a `debug_assert!` loop
+// over their tables in their `register_controls`). The tables are
+// append-only, like the event kinds.
+
+/// The kinds all three platform arms (Android, iOS, macOS) register.
+pub(crate) const SHARED_KINDS: [&str; 8] = [
+    button::KIND,
+    label::KIND,
+    switch::KIND,
+    slider::KIND,
+    progress::KIND,
+    image::KIND,
+    spinner::KIND,
+    date_picker::KIND,
+];
+
+/// The kinds only the two Apple arms (iOS, macOS) register — Android has no
+/// `NativeWidget` impl for these yet, and its builder path renders the
+/// refusal banner instead of a slot.
+pub(crate) const APPLE_KINDS: [&str; 2] = [segmented::KIND, stepper::KIND];
+
+/// The kinds only the iOS arm registers — the macOS arm has no counterpart
+/// (`TabBar`: macOS has no bottom-tab-bar idiom) and Android has none either
+/// (`BottomNavigationView` is Material, decision D2); both builders render the
+/// refusal banner. The first asymmetric kind between the two Apple arms, which
+/// is why this is its own table rather than a row in [`APPLE_KINDS`]
+/// (`tab_bar.rs`'s module doc).
+pub(crate) const IOS_ONLY_KINDS: [&str; 1] = [tab_bar::KIND];
 
 // --- the params wire keys ---------------------------------------------------
 //
@@ -129,7 +193,9 @@ use self::typeface::Typeface;
 pub(crate) const TEXT: &str = "text";
 /// `"enabled"` — `View.setEnabled`; defaults to `true` when absent.
 pub(crate) const ENABLED: &str = "enabled";
-/// `"textColor"` — packed ARGB (see [`color`]).
+/// `"textColor"` — packed ARGB (see [`color`]). `DatePicker` decodes it
+/// into its own [`Setter::DatePickerTextColor`] rather than
+/// [`Setter::TextColor`], whose Android arm assumes a `TextView`.
 pub(crate) const TEXT_COLOR: &str = "textColor";
 /// `"textSizeSp"` — text size in scale-independent pixels.
 pub(crate) const TEXT_SIZE_SP: &str = "textSizeSp";
@@ -146,6 +212,12 @@ pub(crate) const VALUE: &str = "value";
 pub(crate) const MIN: &str = "min";
 /// `"max"` — the app-space range ceiling.
 pub(crate) const MAX: &str = "max";
+/// `"step"` — `Stepper`'s increment ([`Setter::Step`]); a plain delta, never
+/// offset by [`MIN`] (unlike [`VALUE`]/[`MAX`]) since a step size is
+/// invariant to where the range starts.
+pub(crate) const STEP: &str = "step";
+/// `"wraps"` — `Stepper`'s wrap-at-the-bounds flag ([`Setter::Wraps`]).
+pub(crate) const WRAPS: &str = "wraps";
 /// `"indeterminate"` — `ProgressBar`'s spinner mode.
 pub(crate) const INDETERMINATE: &str = "indeterminate";
 /// `"progressTint"` — packed ARGB, `null`-able (see [`Setter::ProgressTint`]).
@@ -154,7 +226,12 @@ pub(crate) const PROGRESS_TINT: &str = "progressTint";
 pub(crate) const THUMB_TINT: &str = "thumbTint";
 /// `"trackTint"` — packed ARGB, `null`-able.
 pub(crate) const TRACK_TINT: &str = "trackTint";
-/// `"tint"` — `Image`'s packed ARGB tint, `null`-able.
+/// `"tint"` — packed ARGB, `null`-able: `Image`'s tint, `Segmented`'s
+/// selected-segment tint ([`Setter::SegmentTint`]), `Stepper`'s tint
+/// ([`Setter::StepperTint`]) and `DatePicker`'s tint
+/// ([`Setter::DatePickerTint`]) all ride this one wire key — each decodes it
+/// into its own typed `Setter`, so the shared key never implies a shared
+/// apply.
 pub(crate) const TINT: &str = "tint";
 /// `"fit"` — `Image`'s scale-type hint (see [`Fit`]).
 pub(crate) const FIT: &str = "fit";
@@ -255,17 +332,25 @@ pub(crate) enum Setter<'a> {
     /// re-entrancy tolerance exists to drop (module doc).
     Checked(bool),
 
-    /// `ProgressBar.setProgress(int)` — **[`Tier::Cheap`]**. Platform-space:
-    /// already offset by the app's `min` (see [`slider`]).
+    /// `ProgressBar.setProgress(int)` / `UIStepper.setValue:` /
+    /// `NSStepper.setDoubleValue:` — **[`Tier::Cheap`]**. Platform-space:
+    /// already offset by the app's `min` (see [`slider`]). `Stepper` reuses
+    /// this exact variant rather than a control-specific one: its own
+    /// `[0, span]` mapping is [`slider`]'s, verbatim (`stepper`'s module
+    /// doc), and both Apple arms' setter selectors are the same ones
+    /// [`slider`]'s own `apply` already calls (`setValue:`/`setDoubleValue:`)
+    /// — a new variant would only rename an identical write.
     ///
     /// Must be planned *after* [`Self::Max`] in the same plan — the platform
     /// clamps progress to the current max, so raising both in the other order
     /// silently truncates the value.
     Progress(i32),
 
-    /// `ProgressBar.setMax(int)` — **[`Tier::Cheap`]**. Platform-space span
+    /// `ProgressBar.setMax(int)` / `UIStepper.setMaximumValue:` /
+    /// `NSStepper.setMaxValue:` — **[`Tier::Cheap`]**. Platform-space span
     /// (`max - min`), since `SeekBar.setMin` needs API 26 and this crate's
-    /// floor is 24.
+    /// floor is 24. Reused by `Stepper` for the same reason [`Self::Progress`]
+    /// documents.
     Max(i32),
 
     /// `ProgressBar.setIndeterminate(boolean)` — **[`Tier::Cheap`]**: swaps
@@ -290,6 +375,15 @@ pub(crate) enum Setter<'a> {
     /// `ImageView.setImageTintList(ColorStateList)` — **[`Tier::Cheap`]**,
     /// same shape as [`Self::ProgressTint`].
     ImageTint(Option<i32>),
+
+    /// `ProgressBar.setIndeterminateTintList(ColorStateList)` /
+    /// `UIActivityIndicatorView.color` / `NSProgressIndicator` (no AppKit
+    /// tint property at all, logged and no-op'd — `spinner.rs`'s module
+    /// doc) — **[`Tier::Cheap`]**, same nullable-clearable shape as
+    /// [`Self::ProgressTint`]. Named separately from the other four tints
+    /// rather than reusing one of them: `Spinner` is its own control with
+    /// its own wire key and its own Android setter name.
+    SpinnerTint(Option<i32>),
 
     /// `ImageView.setScaleType(ImageView.ScaleType)` —
     /// **[`Tier::Relayout`]**: the platform requests a layout on every change.
@@ -334,6 +428,140 @@ pub(crate) enum Setter<'a> {
     /// explicit choice and the registration-failure degrade path
     /// (`crate::android::fonts`'s module doc) land on the exact same call.
     Typeface(Typeface),
+
+    /// `UIActivityIndicatorView.style` / `NSProgressIndicator.controlSize` —
+    /// **[`Tier::Relayout`]**: a style/size swap re-measures the view.
+    /// `Spinner`-only. `android.widget.ProgressBar` has no live equivalent
+    /// at all — the size is baked in at construction, so this setter reaches
+    /// that arm only on a genuine post-create change and is
+    /// warned-and-ignored there (`spinner.rs`'s module doc's *`size_class`*
+    /// section).
+    SizeClass(SizeClass),
+
+    /// `View.setVisibility(int)` / `UIActivityIndicatorView.startAnimating`/
+    /// `stopAnimating` / `NSProgressIndicator.startAnimation:`/
+    /// `stopAnimation:` — **[`Tier::Cheap`]**. `Spinner`-only; see
+    /// `spinner.rs`'s module doc's *`animating`* section for why the
+    /// Android mapping is a visibility toggle rather than a start/stop call.
+    Animating(bool),
+
+    /// Replace a segmented control's whole segment list —
+    /// `UISegmentedControl.removeAllSegments` + one
+    /// `insertSegmentWithTitle:atIndex:animated:` per label /
+    /// `NSSegmentedControl.segmentCount` + one `setLabel:forSegment:` per
+    /// label — **[`Tier::Relayout`]**: the segment widths are re-measured.
+    /// `Segmented`-only and Apple-only (no Android arm — `segmented.rs`'s
+    /// module doc). Wholesale, never per-segment: a label list changes at
+    /// interaction rate, and one replace keeps the plan trivially correct
+    /// across inserts/removals. Always followed by
+    /// [`Self::SelectedSegment`] in the same plan, because replacing the
+    /// segments resets the platform's selection.
+    Segments(&'a [String]),
+
+    /// `UISegmentedControl.selectedSegmentIndex` /
+    /// `NSSegmentedControl.selectedSegment` — **[`Tier::Cheap`]**. `None`
+    /// writes the platforms' shared "no segment" sentinel (`-1`). The
+    /// controlled-component write-back setter of `Segmented`, the
+    /// [`Self::Checked`] of this control.
+    SelectedSegment(Option<usize>),
+
+    /// `UISegmentedControl.momentary` / `NSSegmentedControl.trackingMode`
+    /// (`Momentary` vs `SelectOne`) — **[`Tier::Cheap`]**. `Segmented`-only.
+    Momentary(bool),
+
+    /// `UISegmentedControl.selectedSegmentTintColor` /
+    /// `NSSegmentedControl.selectedSegmentBezelColor` — **[`Tier::Cheap`]**,
+    /// the same nullable-clearable shape as [`Self::ProgressTint`] (nil
+    /// restores the platform's own selected-segment colour). `Segmented`-only.
+    SegmentTint(Option<i32>),
+
+    /// `UIStepper.setStepValue:` / `NSStepper.setIncrement:` —
+    /// **[`Tier::Cheap`]**. `Stepper`-only and Apple-only (no Android arm —
+    /// `stepper.rs`'s module doc). A plain delta, never offset by the app's
+    /// `min` — see [`super::STEP`].
+    Step(i32),
+
+    /// `UIStepper.setWraps:` / `NSStepper.setValueWraps:` —
+    /// **[`Tier::Cheap`]**. `Stepper`-only and Apple-only.
+    Wraps(bool),
+
+    /// `UIStepper.tintColor` — **[`Tier::Cheap`]**, the same
+    /// nullable-clearable shape as [`Self::ProgressTint`]. `Stepper`-only and
+    /// Apple-only; named separately from the other tint setters rather than
+    /// reusing one, the same reason [`Self::SpinnerTint`] gives: `Stepper` has
+    /// its own wire key reader (via the shared [`super::TINT`] key) and its
+    /// own Apple setter name, shared with no other control's apply.
+    /// `NSStepper` exposes no tint property at all — logged and no-op'd
+    /// (`crate::controls::platform::set_tint`'s generic "this view has no
+    /// tint property" branch), the same documented-gap shape as
+    /// [`Self::ThumbTint`] on `NSSlider`.
+    StepperTint(Option<i32>),
+
+    /// `DatePicker.updateDate` / `UIDatePicker.setDate:` /
+    /// `NSDatePicker.setDateValue:` — **[`Tier::Cheap`]**: the controlled
+    /// value write of `DatePicker`, the [`Self::Progress`] of that control.
+    /// Must be planned *after* [`Self::MinDate`]/[`Self::MaxDate`] in the
+    /// same plan — every platform clamps the date to the current range.
+    Date(CivilDate),
+
+    /// `DatePicker.setMinDate` / `UIDatePicker.minimumDate` /
+    /// `NSDatePicker.minDate` — **[`Tier::Relayout`]**. `None` restores the
+    /// platform's own floor (Android's 1900-01-01, nil on Apple).
+    MinDate(Option<CivilDate>),
+
+    /// `DatePicker.setMaxDate` / `UIDatePicker.maximumDate` /
+    /// `NSDatePicker.maxDate` — **[`Tier::Relayout`]**, the ceiling twin of
+    /// [`Self::MinDate`] (Android's own default: 2100-12-31).
+    MaxDate(Option<CivilDate>),
+
+    /// `UIDatePicker.preferredDatePickerStyle` /
+    /// `NSDatePicker.datePickerStyle` (+ `presentsCalendarOverlay`) —
+    /// **[`Tier::Relayout`]**. Android bakes the mode into the constructor
+    /// style, so there this setter reaches `apply` only on a genuine
+    /// post-create change and is warned-and-ignored (`date_picker.rs`'s
+    /// module doc — [`Self::SizeClass`]'s exact shape).
+    DatePickerStyle(DatePickerStyle),
+
+    /// `UIDatePicker.tintColor` — **[`Tier::Cheap`]**, the same
+    /// nullable-clearable shape as [`Self::ProgressTint`]. `NSDatePicker` and
+    /// Android's `DatePicker` expose no tint at all — logged and no-op'd.
+    DatePickerTint(Option<i32>),
+
+    /// `NSDatePicker.textColor` — **[`Tier::Cheap`]**; `None` restores
+    /// `NSColor.controlTextColor`. Its own variant rather than
+    /// [`Self::TextColor`], whose Android arm is a cached
+    /// `TextView.setTextColor` a `DatePicker` does not have; UIKit and
+    /// Android expose no public picker text colour — logged and no-op'd.
+    DatePickerTextColor(Option<i32>),
+
+    /// Replace a tab bar's whole item array — one `UITabBarItem` per item
+    /// (`initWithTitle:image:tag:`, `selectedImage`, `badgeValue`, `enabled`)
+    /// then `UITabBar.setItems:animated:` — **[`Tier::Relayout`]**: the bar
+    /// re-lays-out every item, and a byte icon is decoded here. `TabBar`-only
+    /// and iOS-only (`tab_bar.rs`'s module doc). Planned only when the items
+    /// changed, and always followed by [`Self::SelectedTab`], because the new
+    /// array holds new item objects.
+    TabItems(&'a [TabItemProps]),
+
+    /// `UITabBar.selectedItem` — **[`Tier::Cheap`]**. `None` (or an index
+    /// past the items) clears the selection. The controlled-component
+    /// write-back setter of `TabBar`, the [`Self::SelectedSegment`] of that
+    /// control.
+    SelectedTab(Option<usize>),
+
+    /// `UITabBar.tintColor` (the selected item) — **[`Tier::Cheap`]**, the
+    /// nullable-clearable shape of [`Self::ProgressTint`]. `TabBar`-only.
+    TabBarTint(Option<i32>),
+
+    /// `UITabBar.unselectedItemTintColor` — **[`Tier::Cheap`]**, nullable.
+    /// `TabBar`-only.
+    TabBarUnselectedTint(Option<i32>),
+
+    /// The bar background through a `UITabBarAppearance` installed as both
+    /// `standardAppearance` and `scrollEdgeAppearance` (opaque with the
+    /// colour; `None` the default blurred material) — **[`Tier::Cheap`]**: a
+    /// redisplay, no item relayout. `TabBar`-only.
+    TabBarBackground(Option<i32>),
 }
 
 impl Setter<'_> {
@@ -345,7 +573,13 @@ impl Setter<'_> {
             | Self::BackgroundColor(_)
             | Self::ScaleType(_)
             | Self::ThemedBackground { .. }
-            | Self::Typeface(_) => Tier::Relayout,
+            | Self::Typeface(_)
+            | Self::SizeClass(_)
+            | Self::Segments(_)
+            | Self::TabItems(_)
+            | Self::MinDate(_)
+            | Self::MaxDate(_)
+            | Self::DatePickerStyle(_) => Tier::Relayout,
             Self::ImageBytes(_) => Tier::Decode,
             Self::Enabled(_)
             | Self::TextColor(_)
@@ -357,7 +591,22 @@ impl Setter<'_> {
             | Self::ProgressTint(_)
             | Self::ThumbTint(_)
             | Self::TrackTint(_)
-            | Self::ImageTint(_) => Tier::Cheap,
+            | Self::ImageTint(_)
+            | Self::SpinnerTint(_)
+            | Self::Animating(_)
+            | Self::SelectedSegment(_)
+            | Self::Momentary(_)
+            | Self::SegmentTint(_)
+            | Self::Step(_)
+            | Self::Wraps(_)
+            | Self::StepperTint(_)
+            | Self::Date(_)
+            | Self::DatePickerTint(_)
+            | Self::DatePickerTextColor(_)
+            | Self::SelectedTab(_)
+            | Self::TabBarTint(_)
+            | Self::TabBarUnselectedTint(_)
+            | Self::TabBarBackground(_) => Tier::Cheap,
         }
     }
 }
@@ -425,7 +674,8 @@ pub(crate) fn plan_color<'a>(
 /// `(red, green, blue, alpha)` order every Apple colour constructor takes.
 ///
 /// Platform-neutral and host-tested on purpose, even though only the Apple
-/// arm calls it ([`platform::ui_color`] on iOS): the packing convention is
+/// arms call it (`platform::ui_color` on iOS, `platform::ns_color` and the
+/// layer's `CGColor` on macOS): the packing convention is
 /// *this crate's wire format*, not UIKit's, so it is worth pinning where a
 /// plain `cargo test` can see it. The Android arm needs no counterpart —
 /// its colour setters take the packed int verbatim.
@@ -462,7 +712,7 @@ pub(crate) mod platform {
     //! signature is compile-time checked by `jni_sig!` rather than asserted
     //! in a `# Safety` comment.
 
-    use std::sync::OnceLock;
+    use std::sync::{Once, OnceLock};
 
     use jni::objects::{JClass, JMethodID, JObject, JValue};
     use jni::signature::{MethodSignature, Primitive, ReturnType};
@@ -470,7 +720,7 @@ pub(crate) mod platform {
     use jni::sys::jvalue;
     use jni::{jni_sig, jni_str};
 
-    use super::{Plan, Setter};
+    use super::{Plan, Setter, SizeClass};
     use crate::NativeWidgetError;
     use crate::android::NativeCtx;
 
@@ -507,9 +757,12 @@ pub(crate) mod platform {
     /// (`NativeCtx`'s local-frame discipline).
     pub(crate) const FRAME_CAPACITY: usize = 16;
 
-    /// The hot setters' cached method ids (module doc). One table for all six
-    /// controls: it is seeded on the first control creation of any kind and
-    /// costs five class loads plus six `GetMethodID`s, once per process.
+    /// The hot setters' cached method ids (module doc). One table for all
+    /// eight Android controls (`Spinner` and `DatePicker` reach it only
+    /// through the shared `Setter::Enabled` arm every control already rode —
+    /// neither adds a hot class or method of its own): it is seeded on the first control
+    /// creation of any kind and costs five class loads plus six
+    /// `GetMethodID`s, once per process.
     struct HotMethods {
         /// `android.view.View.setEnabled(boolean)`.
         set_enabled: JMethodID,
@@ -875,6 +1128,83 @@ pub(crate) mod platform {
                     ),
                 }
             }
+            Setter::SpinnerTint(argb) => {
+                tint_list(ctx, view, jni_str!("setIndeterminateTintList"), argb)
+            }
+            Setter::Animating(animating) => ctx.call_void(
+                view,
+                jni_str!("setVisibility"),
+                jni_sig!("(I)V"),
+                &[JValue::Int(if animating { 0 } else { 4 })],
+            ),
+            Setter::SizeClass(size_class) => {
+                // `spinner.rs`'s module doc's *`size_class`* section: a
+                // `ProgressBar`'s spinner size is baked in at construction on
+                // this arm alone — a Setter this control's own `create`
+                // already avoided emitting for the size it was just built
+                // with, so reaching here means a genuine post-create change,
+                // which this arm cannot honour.
+                warn_size_class_unsupported(size_class);
+                Ok(())
+            }
+            // `Segmented`'s four setters: that control has no Android arm
+            // (`crate::controls::APPLE_KINDS`; `segmented.rs`'s module doc),
+            // so no control this arm registers ever plans one. Reaching here
+            // is a plan/apply drift bug — warned, never a dead slot.
+            Setter::Segments(_)
+            | Setter::SelectedSegment(_)
+            | Setter::Momentary(_)
+            | Setter::SegmentTint(_) => {
+                log::warn!(
+                    "frust-native-widgets: an Android control planned a segmented-control \
+                     setter ({setter:?}), which this arm does not implement — ignored"
+                );
+                Ok(())
+            }
+            // `Stepper`'s own three setters — the same shape as the segmented
+            // group above: `Stepper` has no Android arm either
+            // (`crate::controls::APPLE_KINDS`; `stepper.rs`'s module doc), so
+            // no control this arm registers ever plans one. Its shared
+            // `Setter::Max`/`Setter::Progress` reuse is handled by those
+            // variants' own arms above and never reaches here.
+            Setter::Step(_) | Setter::Wraps(_) | Setter::StepperTint(_) => {
+                log::warn!(
+                    "frust-native-widgets: an Android control planned a stepper-control setter \
+                     ({setter:?}), which this arm does not implement — ignored"
+                );
+                Ok(())
+            }
+            // `DatePicker`'s own six setters are applied by that control's
+            // own Android `apply` (`date_picker.rs`), which forwards only the
+            // shared `Enabled`/`ContentDescription` here — so reaching this
+            // arm is a plan/apply drift bug, warned like the groups above.
+            Setter::Date(_)
+            | Setter::MinDate(_)
+            | Setter::MaxDate(_)
+            | Setter::DatePickerStyle(_)
+            | Setter::DatePickerTint(_)
+            | Setter::DatePickerTextColor(_) => {
+                log::warn!(
+                    "frust-native-widgets: a date-picker setter ({setter:?}) reached the shared \
+                     Android apply instead of date_picker.rs's own — ignored"
+                );
+                Ok(())
+            }
+            // `TabBar`'s five setters: that control is iOS-only
+            // (`crate::controls::IOS_ONLY_KINDS`; `tab_bar.rs`'s module doc),
+            // so no control this arm registers ever plans one — the
+            // segmented group's shape.
+            Setter::TabItems(_)
+            | Setter::SelectedTab(_)
+            | Setter::TabBarTint(_)
+            | Setter::TabBarUnselectedTint(_)
+            | Setter::TabBarBackground(_) => {
+                log::warn!(
+                    "frust-native-widgets: an Android control planned a tab-bar setter \
+                     ({setter:?}), which this arm does not implement — ignored"
+                );
+                Ok(())
+            }
         }
     }
 
@@ -911,6 +1241,23 @@ pub(crate) mod platform {
             jni_sig!("(Landroid/content/res/ColorStateList;)V"),
             &[JValue::Object(&list)],
         )
+    }
+
+    /// One-time warning that [`Setter::SizeClass`] has no live Android
+    /// equivalent — see `crate::controls::spinner`'s module doc's
+    /// *`size_class`* section for why an indeterminate `ProgressBar`'s
+    /// spinner size is baked into the style it was constructed with and
+    /// cannot be swapped without rebuilding the view.
+    fn warn_size_class_unsupported(size_class: SizeClass) {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            log::warn!(
+                "frust-native-widgets: Android's indeterminate ProgressBar bakes its spinner \
+                 size into the style it was constructed with (progressBarStyleSmall/-Normal/\
+                 -Large), so a later sizeClass change to {size_class:?} is not applied — the \
+                 spinner keeps showing the size it was created at"
+            );
+        });
     }
 
     /// `BitmapFactory.decodeByteArray(bytes, 0, bytes.len())`.
@@ -1278,6 +1625,416 @@ pub(crate) mod platform {
     }
 }
 
+// --- the macOS half ---------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+pub(crate) mod platform {
+    //! Turning a [`Setter`] into a real AppKit call — the macOS mirror of the
+    //! iOS half above, and the only place in this crate's macOS arm that
+    //! reaches for a shared `objc2-app-kit` helper.
+    //!
+    //! # Per-control apply, like iOS
+    //!
+    //! AppKit has more of a spine than UIKit — every v1 control is an
+    //! `NSControl`, which owns `enabled` and `font` — but the caption still
+    //! differs by class (`NSButton.title` vs `NSTextField.stringValue`), so
+    //! each control applies its own plan against its own typed view (its
+    //! `#[cfg(target_os = "macos")] mod platform`), and this module holds only
+    //! the genuinely shared setters: `NSControl`'s enabled/font, `NSView`'s
+    //! accessibility label, the theme ladder's L2/L3 setters, and the
+    //! warnings. Theme ladder L1 (`NSAppearance`) is not a [`Setter`] at all —
+    //! it rides the raw wire, applied per view by `crate::appkit::theme`.
+    //!
+    //! # The theme ladder's AppKit mapping (L2/L3)
+    //!
+    //! The shared setters take the superclass a control arm hands them
+    //! (`&NSControl`/`&NSView`), so the ones whose AppKit property lives on a
+    //! specific class resolve it with an `isKindOfClass:` downcast. What each
+    //! planned [`Setter`] becomes here, per `crate::api::theme`'s fold:
+    //!
+    //! | Setter | Class | AppKit call |
+    //! |---|---|---|
+    //! | [`Setter::TextColor`] | `NSTextField` (`Label`'s `body_text`) | `textColor` |
+    //! | [`Setter::TextColor`] | `NSButton` (`Button`'s `on_accent_fill`) | `contentTintColor` |
+    //! | [`Setter::BackgroundColor`] / fill of [`Setter::ThemedBackground`] | any `NSView` | `wantsLayer` + `layer.backgroundColor` (an sRGB `CGColor`) |
+    //! | the same, additionally | `NSButton` (`Button`'s `accent_fill`) | `bezelColor` |
+    //! | radius of [`Setter::ThemedBackground`] | any `NSView` | `layer.cornerRadius` + `masksToBounds` |
+    //! | [`Setter::ProgressTint`] | `NSSlider` (`accent_fill`) | `trackFillColor` |
+    //! | [`Setter::ImageTint`] | `NSImageView` | `contentTintColor` on a template image — clearing restores the original, untinted image (`controls::image`'s macOS module doc) |
+    //! | [`Setter::TextSizeSp`] / [`Setter::Typeface`] | `NSControl` | `font` (one immutable `NSFont`, see *Size and face* below) |
+    //!
+    //! **No AppKit API, so no call** (logged at debug, never a failure):
+    //! `NSSwitch` exposes neither a thumb nor a track colour
+    //! ([`Setter::ThumbTint`]/[`Setter::TrackTint`]) — it draws its "on" track
+    //! in the system accent colour; `NSSlider` has no thumb colour
+    //! ([`Setter::ThumbTint`]); `NSProgressIndicator` has no tint property at
+    //! all ([`Setter::ProgressTint`]) — AppKit draws its fill in the system
+    //! accent colour, and the one historical knob, `controlTint`, is
+    //! deprecated and deliberately never called. All three still follow the
+    //! app's brightness through L1. This is the plugin's documented
+    //! "representative subset" policy (`docs/PLUGINS_CODE_STANDARDS.md`),
+    //! recorded per platform rather than papered over.
+    //!
+    //! `contentTintColor` is documented by AppKit's header as applying to
+    //! *borderless* buttons, while `Button`'s arm builds a push-bezel button;
+    //! the button's accent therefore rides `bezelColor` (the push bezel's own
+    //! fill) plus the layer fill, and the title colour is best-effort.
+    //!
+    //! `radius_dp` applies to `CALayer.cornerRadius` directly as points:
+    //! AppKit's coordinate space is already density-independent, the same
+    //! reasoning as the iOS half's `set_corner_radius`.
+    //!
+    //! # Size and face: one `NSFont`, derived from the control's own font
+    //!
+    //! `NSFont`, like `UIFont`, bakes family and point size into one immutable
+    //! object, so [`Setter::TextSizeSp`] and [`Setter::Typeface`] cannot be two
+    //! independent property writes. Where the iOS half keeps a `FontState` in
+    //! each control's `State`, this half reads the missing half back off the
+    //! control's CURRENT font — the one object that always reflects the last
+    //! write of either setter: [`set_text_size`] keeps the current face (a
+    //! registered Glyph face is re-sized with `CTFontCreateCopyWithAttributes`,
+    //! which copies the in-memory font rather than looking it up by name) and
+    //! [`set_typeface`] keeps the current point size. So either setter alone
+    //! leaves the other's last value intact, in either order, with no state
+    //! beside the view.
+    //!
+    //! # Nothing here can fail
+    //!
+    //! Every function returns `()`, for the same reason as the iOS half: a
+    //! message send to a linked AppKit class has no exception channel and no
+    //! classloader to fail.
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::{
+        NSAccessibility, NSButton, NSColor, NSControl, NSFont, NSImageView, NSProgressIndicator,
+        NSSlider, NSSwitch, NSTextField, NSView,
+    };
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_graphics::CGColor;
+    use objc2_core_text::CTFont;
+    use objc2_foundation::NSString;
+
+    use super::{Setter, argb_channels};
+    use crate::controls::typeface::Typeface;
+
+    /// A packed ARGB colour as an sRGB [`NSColor`] (see
+    /// [`super::argb_channels`]) — the channels are `CGFloat`s, `f64` on every
+    /// 64-bit Mac this arm builds for.
+    pub(crate) fn ns_color(argb: i32) -> Retained<NSColor> {
+        let (red, green, blue, alpha) = argb_channels(argb);
+        NSColor::colorWithSRGBRed_green_blue_alpha(red, green, blue, alpha)
+    }
+
+    /// The same colour as an sRGB [`CGColor`], for `CALayer.backgroundColor`.
+    fn cg_color(argb: i32) -> CFRetained<CGColor> {
+        let (red, green, blue, alpha) = argb_channels(argb);
+        CGColor::new_srgb(red, green, blue, alpha)
+    }
+
+    /// `NSControl.enabled` — [`Setter::Enabled`]. Every v1 control is an
+    /// `NSControl`, so this takes the superclass and lets deref coercion do
+    /// the rest.
+    pub(crate) fn set_enabled(control: &NSControl, enabled: bool) {
+        control.setEnabled(enabled);
+    }
+
+    /// `NSView.accessibilityLabel` (the `NSAccessibility` protocol every
+    /// `NSView` conforms to) — [`Setter::ContentDescription`]'s AppKit
+    /// counterpart, read by VoiceOver exactly as TalkBack reads Android's
+    /// `contentDescription`. `None` clears it, so a control falls back to what
+    /// AppKit derives from its own content (a button's title).
+    ///
+    /// Reachable only with `objc2-app-kit`'s `NSAccessibilityProtocols`
+    /// feature, which `Cargo.toml` enables for exactly this member. Native
+    /// controls are exposed to VoiceOver by the platform itself, never through
+    /// frust's semantics pass (`crate`'s event-bypass note).
+    pub(crate) fn set_accessibility_label(view: &NSView, label: Option<&str>) {
+        let text = label.map(NSString::from_str);
+        view.setAccessibilityLabel(text.as_deref());
+    }
+
+    /// The system font at `size_sp` points. `sp` is read as points, unscaled,
+    /// for the same reason as the iOS half's `system_font` (the value the
+    /// theme asked for, not a platform scaling of it).
+    pub(crate) fn system_font(size_sp: f32) -> Retained<NSFont> {
+        NSFont::systemFontOfSize(f64::from(size_sp))
+    }
+
+    /// `NSControl.font` at a new size — [`Setter::TextSizeSp`]'s apply for any
+    /// control whose text is its own cell's (`NSButton`, `NSTextField`). Keeps
+    /// the control's current face (module doc's *Size and face*).
+    pub(crate) fn set_text_size(control: &NSControl, size_sp: f32) {
+        let font = font_at_size(control.font().as_deref(), size_sp);
+        control.setFont(Some(font.as_ns_font()));
+    }
+
+    /// `NSControl.font` in a new face — [`Setter::Typeface`] (theme ladder
+    /// L3). Keeps the control's current point size (module doc's *Size and
+    /// face*); a control with no font yet starts from AppKit's own
+    /// `systemFontSize`, the size a fresh control's cell already renders at.
+    pub(crate) fn set_typeface(control: &NSControl, typeface: Typeface) {
+        let size_sp = control
+            .font()
+            .map_or_else(NSFont::systemFontSize, |font| font.pointSize())
+            as f32;
+        let font = resolve_font(typeface, size_sp);
+        log::debug!(
+            "frust-native-widgets: macOS L3 typeface {typeface:?} at {size_sp}pt -> {}",
+            font.as_ns_font().fontName()
+        );
+        control.setFont(Some(font.as_ns_font()));
+    }
+
+    /// [`Setter::TextColor`] (theme ladder L2): `NSTextField.textColor`, or
+    /// `NSButton.contentTintColor` (module doc's table and its
+    /// borderless-only caveat). Any other class has no text colour of its own.
+    pub(crate) fn set_text_color(control: &NSControl, argb: i32) {
+        let color = ns_color(argb);
+        if let Some(field) = control.downcast_ref::<NSTextField>() {
+            field.setTextColor(Some(&color));
+        } else if let Some(button) = control.downcast_ref::<NSButton>() {
+            button.setContentTintColor(Some(&color));
+        } else {
+            no_appkit_api("TextColor", "this control has no text colour of its own");
+            return;
+        }
+        log::debug!("frust-native-widgets: macOS L2 text colour {argb:#010x}");
+    }
+
+    /// [`Setter::BackgroundColor`] and the fill half of
+    /// [`Setter::ThemedBackground`] (theme ladder L2): the view's backing
+    /// layer's `backgroundColor`, making the view layer-backed first; on an
+    /// `NSButton` also its push bezel's `bezelColor` (module doc's table).
+    pub(crate) fn set_background_color(view: &NSView, argb: i32) {
+        view.setWantsLayer(true);
+        match view.layer() {
+            Some(layer) => layer.setBackgroundColor(Some(&cg_color(argb))),
+            None => no_appkit_api("BackgroundColor", "the view has no backing layer"),
+        }
+        if let Some(button) = view.downcast_ref::<NSButton>() {
+            button.setBezelColor(Some(&ns_color(argb)));
+        }
+        log::debug!("frust-native-widgets: macOS L2 background {argb:#010x}");
+    }
+
+    /// The corner-radius half of [`Setter::ThemedBackground`] (theme ladder
+    /// L2): `layer.cornerRadius` + `masksToBounds`, in points (module doc).
+    pub(crate) fn set_corner_radius(view: &NSView, radius_dp: f32) {
+        view.setWantsLayer(true);
+        match view.layer() {
+            Some(layer) => {
+                layer.setCornerRadius(f64::from(radius_dp));
+                layer.setMasksToBounds(radius_dp > 0.0);
+            }
+            None => no_appkit_api("CornerRadius", "the view has no backing layer"),
+        }
+    }
+
+    /// The four tint setters ([`Setter::ProgressTint`]/[`Setter::ThumbTint`]/
+    /// [`Setter::TrackTint`]/[`Setter::ImageTint`], named by `which`) — the
+    /// module doc's table: `NSSlider`'s progress tint is `trackFillColor`,
+    /// `NSImageView`'s tint is `contentTintColor`, and every other pairing has
+    /// no AppKit API. `None` passes `nil`, restoring AppKit's own colour — the
+    /// clearable contract [`Setter::ProgressTint`] documents.
+    ///
+    /// For `ImageTint`, `contentTintColor` only renders when the installed
+    /// image is a template (`NSImageView.rs:221`'s doc,
+    /// `controls::image`'s macOS module doc) — the caller (`controls::image`)
+    /// marks the image template *before* calling here, so this function reads
+    /// that state back rather than assuming the colour landed, and logs
+    /// accordingly instead of always claiming "applied".
+    pub(crate) fn set_tint(view: &NSView, which: &'static str, argb: Option<i32>) {
+        let color = argb.map(ns_color);
+        if let Some(slider) = view.downcast_ref::<NSSlider>() {
+            if which != "ProgressTint" {
+                return no_appkit_api(which, "NSSlider has no thumb colour");
+            }
+            slider.setTrackFillColor(color.as_deref());
+        } else if let Some(image_view) = view.downcast_ref::<NSImageView>() {
+            if which != "ImageTint" {
+                return no_appkit_api(which, "NSImageView has only a content tint");
+            }
+            image_view.setContentTintColor(color.as_deref());
+            let applied =
+                argb.is_some() && image_view.image().is_some_and(|image| image.isTemplate());
+            log::debug!(
+                "frust-native-widgets: macOS L2 ImageTint({argb:?}) {}",
+                if argb.is_none() {
+                    "cleared — restored the original, untinted image"
+                } else if applied {
+                    "applied (template image)"
+                } else {
+                    "contentTintColor set, but no template image is installed — no visible tint"
+                }
+            );
+            return;
+        } else if view.downcast_ref::<NSSwitch>().is_some() {
+            return no_appkit_api(
+                which,
+                "NSSwitch has no thumb or track colour (it draws in the system accent colour)",
+            );
+        } else if view.downcast_ref::<NSProgressIndicator>().is_some() {
+            return no_appkit_api(
+                which,
+                "NSProgressIndicator has no tint (the system accent colour; controlTint is \
+                 deprecated and not used)",
+            );
+        } else {
+            return no_appkit_api(which, "this view has no tint property");
+        }
+        log::debug!("frust-native-widgets: macOS L2 {which}({argb:?})");
+    }
+
+    /// A planned setter AppKit has no property for on this class — module
+    /// doc's *No AppKit API* list. Debug level: it is a documented platform
+    /// gap, not a defect, and a theme flip would otherwise warn per control.
+    fn no_appkit_api(what: &str, why: &str) {
+        log::debug!("frust-native-widgets: macOS {what} not applied — {why}");
+    }
+
+    /// A resolved [`NSFont`], from either the system font or a registered
+    /// Glyph face — the macOS twin of the iOS half's `ResolvedFont`, unified
+    /// behind [`Self::as_ns_font`] so a caller never branches on which arm it
+    /// got (theme ladder L3).
+    ///
+    /// [`Self::Glyph`] holds a **sized** `CTFont`, bridged to `NSFont` via
+    /// `objc2-app-kit`'s `AsRef<NSFont> for CTFont` — a toll-free bridge (the
+    /// same underlying object, not a cast), gated by this crate's
+    /// `objc2-core-text` feature on `objc2-app-kit` (`Cargo.toml`).
+    pub(crate) enum ResolvedFont {
+        /// [`system_font`] — [`Typeface::System`], or the degrade target of a
+        /// Glyph resolution failure.
+        System(Retained<NSFont>),
+        /// A registered Glyph face, sized for this call.
+        Glyph(CFRetained<CTFont>),
+    }
+
+    impl ResolvedFont {
+        /// Borrow this as a `&NSFont`, whichever arm it is — every AppKit
+        /// setter this crate calls (`NSControl.setFont:`) takes exactly this.
+        pub(crate) fn as_ns_font(&self) -> &NSFont {
+            match self {
+                Self::System(font) => font,
+                Self::Glyph(font) => font.as_ref(),
+            }
+        }
+    }
+
+    /// Resolve `typeface` to a real [`NSFont`] at `size_sp` points — the
+    /// macOS half of theme ladder L3, the iOS half's `resolve_font` over the
+    /// same shared `crate::coretext` descriptor cache: [`Typeface::System`] is
+    /// the system font; a Glyph face resolves through its cached
+    /// `CTFontDescriptor`, degrading to the system font (with that module's
+    /// one-time warning) on any failure.
+    pub(crate) fn resolve_font(typeface: Typeface, size_sp: f32) -> ResolvedFont {
+        match crate::coretext::descriptor_for(typeface) {
+            Some(descriptor) => {
+                // SAFETY: `descriptor` is a live `CTFontDescriptor` owned for
+                // this call (`descriptor_for` hands back a fresh `CFRetained`
+                // clone); `size_sp` is a finite point size and the null matrix
+                // is `CTFontCreateWithFontDescriptor`'s documented "identity
+                // matrix" default.
+                let font = unsafe {
+                    CTFont::with_font_descriptor(&descriptor, f64::from(size_sp), std::ptr::null())
+                };
+                ResolvedFont::Glyph(font)
+            }
+            None => ResolvedFont::System(system_font(size_sp)),
+        }
+    }
+
+    /// `current` re-sized to `size_sp` points, keeping its face — module
+    /// doc's *Size and face*. The system font (or no font at all) resolves
+    /// through [`system_font`], exactly as before the ladder existed; any
+    /// other face — in practice a registered Glyph face — is copied at the new
+    /// size with `CTFontCreateCopyWithAttributes`, which works from the font
+    /// object itself, so an in-memory face that was never registered by name
+    /// survives the resize.
+    fn font_at_size(current: Option<&NSFont>, size_sp: f32) -> ResolvedFont {
+        match current {
+            Some(font) if !is_system_face(font) => {
+                let face: &CTFont = font.as_ref();
+                // SAFETY: `face` is the live `CTFont` behind `font` (toll-free
+                // bridged) for this call; the null matrix and `None`
+                // attributes are `CTFontCreateCopyWithAttributes`'s documented
+                // "keep the original's" defaults, and the point size is finite.
+                let sized = unsafe {
+                    face.copy_with_attributes(f64::from(size_sp), std::ptr::null(), None)
+                };
+                ResolvedFont::Glyph(sized)
+            }
+            _ => ResolvedFont::System(system_font(size_sp)),
+        }
+    }
+
+    /// Whether `font` is AppKit's system face (family compared with the
+    /// system font's own), the only non-Glyph face this arm ever installs.
+    fn is_system_face(font: &NSFont) -> bool {
+        font.familyName() == system_font(0.0).familyName()
+    }
+
+    /// A [`Setter`] a control's own `plan` never emits reached its macOS
+    /// `apply` — the iOS half's warning, for this arm.
+    pub(crate) fn warn_unexpected_setter(kind: &str, setter: &Setter<'_>) {
+        log::warn!(
+            "frust-native-widgets: control '{kind}' planned a setter its macOS arm does not \
+             implement ({setter:?}) — ignored"
+        );
+    }
+
+    // `NSFont`/`CTFont`/`NSColor` are not main-thread-only, so the L2 colour
+    // and L3 size/face logic runs on a plain `cargo test` worker; everything
+    // that needs a live `NSView` is exercised by the playground gate instead.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// ONE test, on purpose: AppKit's font system initializes lazily, and
+        /// two `cargo test` workers touching it concurrently off the main
+        /// thread were observed to get `Helvetica` back from
+        /// `systemFontOfSize:` on one of them (roughly 1 run in 4 with these
+        /// cases split across tests). Production only ever calls this on the
+        /// main thread; keeping every `NSFont` call here on one worker makes
+        /// the test deterministic without claiming otherwise.
+        #[test]
+        fn l3_resizes_keep_the_face_and_faces_keep_the_size() {
+            // The system face re-sizes as the system font.
+            let resized = font_at_size(Some(&system_font(13.0)), 21.0);
+            assert!(matches!(resized, ResolvedFont::System(_)));
+            assert_eq!(resized.as_ns_font().pointSize(), 21.0);
+            assert!(is_system_face(resized.as_ns_font()));
+
+            // No font yet: the system font at the requested size.
+            let fresh = font_at_size(None, 15.0);
+            assert!(matches!(fresh, ResolvedFont::System(_)));
+            assert_eq!(fresh.as_ns_font().pointSize(), 15.0);
+
+            // `Typeface::System` is the system font at the given size.
+            let system = resolve_font(Typeface::System, 17.0);
+            assert!(matches!(system, ResolvedFont::System(_)));
+            assert_eq!(system.as_ns_font().pointSize(), 17.0);
+
+            // A fixed-pitch face stands in for a registered Glyph face: both
+            // are "not the system face", so both take the CTFont-copy path,
+            // keeping their family across the resize.
+            if let Some(mono) = NSFont::userFixedPitchFontOfSize(11.0) {
+                let resized = font_at_size(Some(&mono), 24.0);
+                assert!(matches!(resized, ResolvedFont::Glyph(_)));
+                assert_eq!(resized.as_ns_font().pointSize(), 24.0);
+                assert_eq!(resized.as_ns_font().familyName(), mono.familyName());
+                assert!(!is_system_face(resized.as_ns_font()));
+            }
+        }
+
+        #[test]
+        fn argb_becomes_the_matching_srgb_colour() {
+            let color = ns_color(0x80FF_0000_u32 as i32);
+            assert!((color.alphaComponent() - 128.0 / 255.0).abs() < 1e-6);
+            assert!((color.redComponent() - 1.0).abs() < 1e-6);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,6 +2054,19 @@ mod tests {
             Setter::ThumbTint(None),
             Setter::TrackTint(None),
             Setter::ImageTint(None),
+            Setter::SelectedSegment(Some(1)),
+            Setter::Momentary(true),
+            Setter::SegmentTint(None),
+            Setter::Step(1),
+            Setter::Wraps(true),
+            Setter::StepperTint(None),
+            Setter::Date(CivilDate::MIN),
+            Setter::DatePickerTint(None),
+            Setter::DatePickerTextColor(Some(1)),
+            Setter::SelectedTab(Some(0)),
+            Setter::TabBarTint(None),
+            Setter::TabBarUnselectedTint(Some(1)),
+            Setter::TabBarBackground(None),
         ];
         for setter in cheap {
             assert_eq!(setter.tier(), Tier::Cheap, "{setter:?}");
@@ -1312,6 +2082,11 @@ mod tests {
                 radius_dp: 6.0,
             },
             Setter::Typeface(Typeface::GlyphMono),
+            Setter::Segments(&[]),
+            Setter::MinDate(None),
+            Setter::MaxDate(Some(CivilDate::MAX)),
+            Setter::DatePickerStyle(DatePickerStyle::Inline),
+            Setter::TabItems(&[]),
         ];
         for setter in relayout {
             assert_eq!(setter.tier(), Tier::Relayout, "{setter:?}");
@@ -1376,41 +2151,127 @@ mod tests {
         }
     }
 
-    // --- shared-Props parity: one kind table, two platform arms ------------
+    // --- shared-Props parity: three kind tables, three platform arms -------
 
     #[test]
-    fn the_six_control_kinds_are_the_same_strings_both_platform_arms_register() {
-        // `crate::android::register_controls` and
-        // `crate::apple::register_controls` are each `#[cfg(target_os = ...)]`
-        // -gated, so no host test can call either. What a host CAN pin is the
-        // thing they both register *by*: these six `KIND` consts. Neither arm
-        // spells a kind literally (`crate::android`'s own registration note),
-        // so a drift in the wire vocabulary has to pass through here.
+    fn the_kind_tables_are_the_shipped_wire_strings() {
+        // What every arm registers *by*: [`SHARED_KINDS`] (all three arms),
+        // [`APPLE_KINDS`] (iOS + macOS only) and [`IOS_ONLY_KINDS`] (iOS
+        // only). No arm spells a kind literally
+        // (`crate::android`'s own registration note), so a drift in the wire
+        // vocabulary has to pass through here.
         //
         // The other half of "shared-Props parity" needs no assertion at all:
         // there is exactly ONE `Props` type per control, in this same module
-        // tree, used verbatim by both arms — same fields by construction, not
-        // by agreement. A second, per-platform Props definition is the thing
-        // this file's layout exists to prevent.
-        let kinds = [
-            button::KIND,
-            label::KIND,
-            switch::KIND,
-            slider::KIND,
-            progress::KIND,
-            image::KIND,
-        ];
+        // tree, used verbatim by every arm that registers it — same fields by
+        // construction, not by agreement. A second, per-platform Props
+        // definition is the thing this file's layout exists to prevent.
         assert_eq!(
-            kinds,
-            ["button", "label", "switch", "slider", "progress", "image"],
+            SHARED_KINDS,
+            [
+                "button",
+                "label",
+                "switch",
+                "slider",
+                "progress",
+                "image",
+                "spinner",
+                "date_picker"
+            ],
             "the control kind strings are a shipped wire contract — the api \
-             layer's builders inject them and both platform arms register \
-             against them"
+             layer's builders inject them and all three platform arms \
+             register against them"
         );
-        let mut unique = kinds.to_vec();
+        assert_eq!(
+            APPLE_KINDS,
+            ["segmented", "stepper"],
+            "the Apple-arm-only kinds are a shipped wire contract too"
+        );
+        assert_eq!(
+            IOS_ONLY_KINDS,
+            ["tab_bar"],
+            "the iOS-only kinds are a shipped wire contract too"
+        );
+        let mut unique: Vec<&str> = SHARED_KINDS
+            .iter()
+            .chain(&APPLE_KINDS)
+            .chain(&IOS_ONLY_KINDS)
+            .copied()
+            .collect();
+        let total = unique.len();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), kinds.len(), "two controls share a kind");
+        assert_eq!(
+            unique.len(),
+            total,
+            "two controls share a kind (or a kind sits in two tables)"
+        );
+    }
+
+    /// The kind every `runtime.register::<…>(<module>::KIND)` line in `source`
+    /// names, in file order — resolved through the same `KIND` consts the
+    /// tables hold, never a literal.
+    fn registered_kinds(source: &str, file: &str) -> Vec<&'static str> {
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("runtime.register::<"))
+            .map(|line| {
+                let module = line
+                    .split_once(">(")
+                    .and_then(|(_, arg)| arg.strip_suffix("::KIND);"))
+                    .unwrap_or_else(|| panic!("{file}: unparsed registration line {line:?}"));
+                match module {
+                    "button" => button::KIND,
+                    "label" => label::KIND,
+                    "switch" => switch::KIND,
+                    "slider" => slider::KIND,
+                    "progress" => progress::KIND,
+                    "image" => image::KIND,
+                    "spinner" => spinner::KIND,
+                    "date_picker" => date_picker::KIND,
+                    "segmented" => segmented::KIND,
+                    "stepper" => stepper::KIND,
+                    "tab_bar" => tab_bar::KIND,
+                    other => panic!(
+                        "{file}: registers `{other}::KIND`, a module this test does not know"
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_register_controls_registers_exactly_its_kind_tables() {
+        // `crate::android::register_controls`, `crate::apple::register_controls`
+        // and `crate::appkit::register_controls` are each
+        // `#[cfg(target_os = ...)]`-gated, so no single host test can CALL all
+        // three — but every host can READ all three. Each arm must register
+        // exactly its tables, in table order, line for line: Android the
+        // shared kinds only (an Apple-only kind registered there would be a
+        // control with no Android `NativeWidget` impl — it would not even
+        // compile), macOS the shared kinds then the Apple ones, and iOS the
+        // shared kinds, the Apple ones, then the iOS-only ones — per-arm
+        // membership, the kind-table matrix above `SHARED_KINDS`.
+        let shared: Vec<&str> = SHARED_KINDS.to_vec();
+        let macos: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
+        let ios: Vec<&str> = SHARED_KINDS
+            .iter()
+            .chain(&APPLE_KINDS)
+            .chain(&IOS_ONLY_KINDS)
+            .copied()
+            .collect();
+        for (file, source, expected) in [
+            ("android/mod.rs", include_str!("../android/mod.rs"), &shared),
+            ("apple/mod.rs", include_str!("../apple/mod.rs"), &ios),
+            ("appkit/mod.rs", include_str!("../appkit/mod.rs"), &macos),
+        ] {
+            assert_eq!(
+                &registered_kinds(source, file),
+                expected,
+                "{file}'s register_controls drifted from SHARED_KINDS/APPLE_KINDS/IOS_ONLY_KINDS"
+            );
+        }
     }
 
     #[test]

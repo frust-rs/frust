@@ -1,6 +1,8 @@
 package dev.frust
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.res.Configuration
 import android.database.ContentObserver
@@ -8,11 +10,13 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
 import android.text.SpannableStringBuilder
+import android.util.Log
 import android.view.Choreographer
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -28,6 +32,9 @@ import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -48,6 +55,21 @@ import org.json.JSONObject
  * composition mechanics against a mirror [Editable], pushes the whole editing
  * state into Rust via `nativeImeApply`, then pulls the reconciled state back via
  * `nativeImeState` to keep the `InputMethodManager` synchronised.
+ *
+ * Clipboard access is this side's job (`ClipboardManager` is a system service
+ * with no Rust-reachable counterpart): the framework publishes copy/paste
+ * intent, [syncClipboard] drains it once per frame, and every inbound verb —
+ * the IME's own actions ([FrustInputConnection.performContextMenuAction]), a
+ * hardware `Ctrl` chord ([onKeyDown]), and the answer to a paste request —
+ * arrives through the one `nativeEditCommand` seam.
+ *
+ * **The selection toolbar is the framework's, not the platform's.** Frust draws
+ * its own bar over a selection
+ * (`frust_core::SelectionToolbarPolicy::Framework`, the default), so this view
+ * deliberately installs **no `ActionMode.Callback` and no `GestureDetector`**.
+ * Adding either would raise a second, competing toolbar over the framework's
+ * own and take the long-press that summons it — the same choice Flutter makes
+ * on this platform.
  *
  * `androidx.core` backs the inset listener
  * ([dispatchInsets]) and status/nav-bar icon contrast
@@ -108,6 +130,26 @@ class FrustSurfaceView(
         private var libraryLoaded = false
 
         /**
+         * How long a URI-backed clipboard resolution's answer stays wanted,
+         * in milliseconds of `SystemClock.uptimeMillis` (which does not
+         * advance in deep sleep, so a device suspended mid-read does not
+         * burn the budget).
+         *
+         * `ClipData.Item.coerceToText` reaches into the CLIP OWNER's process,
+         * so how long it takes — or whether it returns at all — is that app's
+         * decision, not this one's. Two seconds is well past any healthy
+         * `ContentProvider` round-trip and well short of the user having
+         * moved on and forgotten they asked. An answer arriving later is
+         * dropped rather than pasted: see [readClipboardTextAsync].
+         *
+         * Measured from the ask being answered, which is the most recent one:
+         * a paste asked for while a resolution is outstanding folds into it
+         * and re-stamps this budget from its own press, so the window always
+         * belongs to the press still waiting on it.
+         */
+        private const val CLIPBOARD_RESOLUTION_TIMEOUT_MS = 2_000L
+
+        /**
          * Load the app's Rust native library (the `.so` carrying the
          * `Java_dev_frust_FrustSurfaceView_native*` exports) by `name` — the
          * `System.loadLibrary` base name, i.e. `libfoo.so` is `"foo"`.
@@ -150,6 +192,21 @@ class FrustSurfaceView(
         private const val CONTENT_TYPE_NORMAL = "normal"
         private const val CONTENT_TYPE_NO_SUGGESTIONS = "noSuggestions"
         private const val CONTENT_TYPE_TERMINAL = "terminal"
+
+        /**
+         * `nativeEditCommand`'s fixed command ABI, decoded on the Rust side by
+         * `frust_shell_android::ffi_support::edit_command_from_code` — DO NOT
+         * renumber without changing both sides. An unrecognised code is
+         * dropped there rather than defaulted to a verb, since every verb here
+         * edits the focused field's document.
+         */
+        private const val EDIT_COMMAND_COPY = 0
+        private const val EDIT_COMMAND_CUT = 1
+        private const val EDIT_COMMAND_PASTE = 2
+        private const val EDIT_COMMAND_SELECT_ALL = 3
+
+        /** logcat tag for this view's best-effort clipboard diagnostics. */
+        private const val TAG = "frust"
 
         /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
@@ -229,9 +286,12 @@ class FrustSurfaceView(
     //   1 = move (ACTION_MOVE)
     //   2 = up   (ACTION_UP / ACTION_POINTER_UP)
     //   3 = cancel (ACTION_CANCEL)
-    // `x`/`y` are physical, view-local pixels (`MotionEvent.x`/`.y`); the Rust
-    // side divides by the display density to get logical coordinates.
-    private external fun nativeOnTouch(handle: Long, action: Int, x: Float, y: Float)
+    // `pointerId` is that contact's own `MotionEvent.getPointerId(index)` —
+    // one call per active contact, never just the primary one (see
+    // [onTouchEvent]). `x`/`y` are physical, view-local pixels
+    // (`MotionEvent.getX/getY(index)`); the Rust side divides by the display
+    // density to get logical coordinates.
+    private external fun nativeOnTouch(handle: Long, action: Int, pointerId: Int, x: Float, y: Float)
 
     private external fun nativeOnResume(handle: Long)
 
@@ -255,6 +315,34 @@ class FrustSurfaceView(
     private external fun nativeImeState(handle: Long): String?
 
     private external fun nativeImeAction(handle: Long, action: Int)
+
+    // Clipboard exports. The host clipboard is the JVM's
+    // (`ClipboardManager` is a system service with no Rust-reachable
+    // counterpart), so the framework publishes intent and this side performs
+    // the actual read/write — see [syncClipboard].
+
+    // Drains (and clears) the text a focused editable asked to put on the
+    // system clipboard, or null when nothing was copied / there is no live
+    // handle. A one-shot edge: a drained value that is dropped here is lost.
+    private external fun nativeTakeClipboardWrite(handle: Long): String?
+
+    // Drains (and clears) whether a focused editable asked this side to read
+    // the system clipboard back to it. The answer is delivered as a separate
+    // [nativeEditCommand] paste call rather than a return value, because the
+    // read happens here and may legitimately yield nothing.
+    private external fun nativeTakePasteRequest(handle: Long): Boolean
+
+    // One decoded clipboard/selection verb for the focused editable. `cmd` is a
+    // fixed numeric ABI shared with the Rust `nativeEditCommand` glue — DO NOT
+    // renumber without changing both sides:
+    //   0 = copy
+    //   1 = cut
+    //   2 = paste (`text` carries the clipboard content)
+    //   3 = select all
+    // `text` is read only for a paste and is null for every other verb. An
+    // unrecognised code is dropped on the Rust side, never defaulted to a verb.
+    // See [EDIT_COMMAND_COPY] and friends for the constants to pass.
+    private external fun nativeEditCommand(handle: Long, cmd: Int, text: String?)
 
     // Appearance: flip the app's theme brightness between
     // light and dark. `dark` mirrors Configuration.UI_MODE_NIGHT_YES — see
@@ -325,6 +413,25 @@ class FrustSurfaceView(
     // (`frust_shell_common::system_ui::encoded_state()`'s doc comment has the
     // exact bit layout) for [pollSystemUiState] to decode.
     private external fun nativeSystemUiState(handle: Long): Long
+
+    /**
+     * The identity of the framework's live focus session, used to bind an
+     * async URI-backed clipboard resolution to the session that asked for it
+     * ([readClipboardTextAsync]). A cheap `jlong` read, the same shape
+     * [nativeSystemUiState] above uses.
+     *
+     * It advances once per focus claim the framework honours and once per
+     * session release, and on nothing else — so it moves when focus crosses to
+     * another field (whether or not that field publishes an IME surface of its
+     * own) and stands still while the user edits, moves the caret, or has the
+     * field moved under them inside one session.
+     *
+     * `0` means no live native handle, and nothing else: no live session ever
+     * reports `0`, because the counter behind it starts at `1` and steps past
+     * `0` if it ever wraps. It is unrelated to [clipboardResolutionEpoch],
+     * which is this view's own teardown counter.
+     */
+    private external fun nativeFocusEpoch(handle: Long): Long
 
     // Plugin platform initialization: deliver the
     // application Context to the native side so `frust-plugin`'s handles
@@ -482,6 +589,80 @@ class FrustSurfaceView(
 
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
+    /**
+     * The system clipboard, resolved per access like [imm] rather than cached:
+     * both are system services whose instance is not this view's to own across
+     * a configuration change, and both are only touched on user-driven paths
+     * (never per frame — [syncClipboard]'s per-frame poll is a JNI call, and it
+     * only reaches this property when the framework actually asked for a copy
+     * or a paste).
+     */
+    private val clipboard: ClipboardManager
+        get() = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+    /**
+     * Main-thread handle used to hop a URI-backed clipboard resolution's
+     * answer back onto the UI thread — see [readClipboardTextAsync]. A
+     * dedicated field (rather than an inline `Handler(Looper.getMainLooper())`
+     * per call, the way [reduceMotionObserver] constructs its own) since this
+     * one is posted to repeatedly over the view's lifetime.
+     */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * The single background thread a URI-backed clipboard item's
+     * [ClipData.Item.coerceToText] round-trip runs on — never one thread per
+     * paste. Lazily created by [clipboardWorker] on first use and torn down by
+     * [shutdownClipboardExecutor] at every point a live handle stops being
+     * trustworthy ([surfaceDestroyed], [onPause], [onDestroy]), so no thread
+     * outlives this view. `null` until the first URI-backed paste is asked
+     * for; most apps that never copy a URI-backed clip never create it.
+     */
+    private var clipboardExecutor: ExecutorService? = null
+
+    /**
+     * Bumped by [shutdownClipboardExecutor] every time it runs. A resolution
+     * captures the epoch it started under ([readClipboardTextAsync]); if the
+     * epoch has moved by the time the answer reaches [mainHandler], the view
+     * tore down while the read was in flight and the answer is dropped
+     * instead of dispatched, even though [shutdownClipboardExecutor]'s
+     * `shutdownNow()` cannot guarantee the underlying `ContentProvider` call
+     * actually honours the interrupt.
+     */
+    private var clipboardResolutionEpoch = 0L
+
+    /**
+     * Who a URI-backed clipboard resolution is being run for: the framework
+     * focus session that asked for it ([nativeFocusEpoch]) and the
+     * `SystemClock.uptimeMillis` point past which that session no longer wants
+     * the answer. One record rather than two fields, so re-pointing a
+     * resolution at a later ask cannot move the session and leave the deadline
+     * behind it.
+     */
+    private data class PendingPaste(val session: Long, val deadlineUptimeMillis: Long)
+
+    /**
+     * The one URI-backed resolution [readClipboardTextAsync] has outstanding,
+     * or `null` when the resolver is free.
+     *
+     * Non-null is also the gate that keeps a second paste from being submitted
+     * while the first is still resolving. [clipboardWorker] runs ONE thread, so
+     * a second submit would wait in that executor's queue behind a
+     * `coerceToText` parked in the clip owner's process — a wait nothing on
+     * this side can interrupt — and would therefore be past its own deadline
+     * before it ever started. A request raised while this is non-null replaces
+     * it instead of submitting, so the single outstanding read answers
+     * whoever asked last (`crates/frust-shell-desktop/src/app_handler.rs`'s
+     * `read_in_flight`/`paste_session` pair is the same shape on that tier).
+     *
+     * Written and read on the UI thread, alongside [clipboardExecutor] and
+     * [clipboardResolutionEpoch] and by the same methods: every caller of
+     * [readClipboardText] runs there (see its doc), the answer clears it from
+     * a [mainHandler] post, and [shutdownClipboardExecutor] runs from
+     * [surfaceDestroyed]/[onPause]/[onDestroy].
+     */
+    private var pendingPaste: PendingPaste? = null
 
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
@@ -648,6 +829,11 @@ class FrustSurfaceView(
      * light-on-light or dark-on-dark icons whenever they did). Called from
      * [surfaceCreated], [onConfigurationChanged], and every frame via
      * [pollAppBrightness] (change-gated by [lastAppliedDark] there).
+     *
+     * The [surfaceCreated] call must stay ungated (no early-return, no
+     * "only if changed" guard): `FrustActivity.enableEdgeToEdge` seeds a
+     * device-derived icon appearance first, at activity-create, and this is
+     * what makes the app's own resolved brightness win over that guess.
      */
     private fun updateSystemBarsAppearance(dark: Boolean) {
         lastAppliedDark = dark
@@ -809,6 +995,10 @@ class FrustSurfaceView(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        // Stop (and forget) any in-flight URI-backed clipboard resolution
+        // before anything else here: the render surface going away is one of
+        // the points nothing should still land a late paste into.
+        shutdownClipboardExecutor()
         if (handle != 0L) {
             nativeOnSurfaceDestroyed(handle)
         }
@@ -843,16 +1033,34 @@ class FrustSurfaceView(
             }
             return true
         }
-        // Map Android's masked action to our fixed 0..3 ABI (see `nativeOnTouch`).
-        // Single-pointer in v1: we forward the primary pointer's location only.
-        val action = when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> 0
-            MotionEvent.ACTION_MOVE -> 1
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> 2
-            MotionEvent.ACTION_CANCEL -> 3
+        // Map Android's masked action to our fixed 0..3 ABI (see `nativeOnTouch`)
+        // and forward every active contact, not just the primary one:
+        // ACTION_DOWN/ACTION_POINTER_DOWN and ACTION_UP/ACTION_POINTER_UP each
+        // carry exactly one changed pointer (`event.actionIndex`); ACTION_MOVE
+        // reports every currently-down pointer in the one `MotionEvent`, so it
+        // is forwarded as one `nativeOnTouch` call per pointer; ACTION_CANCEL
+        // ends every pointer still down, forwarded the same way.
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val index = event.actionIndex
+                nativeOnTouch(handle, 0, event.getPointerId(index), event.getX(index), event.getY(index))
+            }
+            MotionEvent.ACTION_MOVE -> {
+                for (i in 0 until event.pointerCount) {
+                    nativeOnTouch(handle, 1, event.getPointerId(i), event.getX(i), event.getY(i))
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                val index = event.actionIndex
+                nativeOnTouch(handle, 2, event.getPointerId(index), event.getX(index), event.getY(index))
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                for (i in 0 until event.pointerCount) {
+                    nativeOnTouch(handle, 3, event.getPointerId(i), event.getX(i), event.getY(i))
+                }
+            }
             else -> return false
         }
-        nativeOnTouch(handle, action, event.x, event.y)
         // The tree may have taken/dropped focus in response to this contact; poll
         // the IME surface and show/hide the keyboard accordingly. Polling after
         // the dispatch keeps the JNI ABI one-directional (no native up-calls).
@@ -871,8 +1079,22 @@ class FrustSurfaceView(
      * an `InputConnection`-only editor would otherwise drop. Single-line v1
      * fields treat Enter as submit (`imeOptions = IME_ACTION_DONE`), so route it
      * to the existing `nativeImeAction` seam rather than inserting a newline.
-     * Only Enter is intercepted while a field is focused; every other key falls
-     * through to the default handling (soft-keyboard input stays the IME's job).
+     *
+     * The hardware **clipboard chords** (`Ctrl+C`/`X`/`V`/`A`) are intercepted
+     * on the same terms and decoded here into [nativeEditCommand] verbs, so the
+     * framework never has to know which chord means copy on which host. A
+     * *soft* keyboard never sends these — Gboard drives copy/paste through
+     * [FrustInputConnection.performContextMenuAction] (or plain `commitText`)
+     * instead — so this path exists exclusively for a physical keyboard and for
+     * injected `adb shell input keyevent` presses.
+     *
+     * Only Enter and those four chords are intercepted while a field is
+     * focused; every other key falls through to the default handling
+     * (soft-keyboard input stays the IME's job). The `imeActive` gate is what
+     * keeps a chord from being swallowed when no editable is focused: the
+     * framework routes an edit command to the focus path, so with nothing
+     * focused there would be nobody to answer it, and consuming the press would
+     * take it away from the host activity for nothing.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (handle != 0L && imeActive &&
@@ -882,7 +1104,55 @@ class FrustSurfaceView(
             pollImeAfterDispatch()
             return true
         }
+        if (handle != 0L && imeActive && event.isCtrlPressed) {
+            val command = when (keyCode) {
+                KeyEvent.KEYCODE_C -> EDIT_COMMAND_COPY
+                KeyEvent.KEYCODE_X -> EDIT_COMMAND_CUT
+                KeyEvent.KEYCODE_V -> EDIT_COMMAND_PASTE
+                KeyEvent.KEYCODE_A -> EDIT_COMMAND_SELECT_ALL
+                else -> null
+            }
+            if (command != null) {
+                dispatchEditCommand(command)
+                return true
+            }
+        }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /**
+     * Send one decoded clipboard/selection verb to the focused editable and
+     * reconcile the IME mirror in the same pass — the shared body behind both
+     * host-driven routes ([onKeyDown]'s hardware chords and
+     * [FrustInputConnection.performContextMenuAction]'s IME menu actions).
+     *
+     * A paste reads the clipboard here, on the JVM side that owns it, and is
+     * simply not sent when the read yields nothing ([readClipboardText]
+     * documents when that happens) — including the case where the clip is
+     * URI-backed and [readClipboardText] has instead handed the item to
+     * [readClipboardTextAsync], which dispatches on its own once (and if) the
+     * text arrives. The press is still reported consumed by the callers in
+     * that case: the user asked a focused field to paste, and letting the
+     * chord fall through to the platform afterwards would be a second,
+     * unrelated interpretation of the same press.
+     *
+     * The synchronous [pollImeAfterDispatch] is the same two-step shape
+     * [FrustInputConnection.performEditorAction] uses: the verb changed the
+     * field's text or selection *during this event pass*, and without the poll
+     * the mirror [Editable] would keep the pre-edit state until some other IME
+     * callback happened to push it back to Rust.
+     */
+    private fun dispatchEditCommand(command: Int) {
+        if (command == EDIT_COMMAND_PASTE) {
+            val text = readClipboardText()
+            if (text.isNullOrEmpty()) {
+                return
+            }
+            nativeEditCommand(handle, command, text)
+        } else {
+            nativeEditCommand(handle, command, null)
+        }
+        pollImeAfterDispatch()
     }
 
     /** A custom editor view MUST return true here to be offered an InputConnection. */
@@ -972,9 +1242,9 @@ class FrustSurfaceView(
 
     /**
      * After every native dispatch, reconcile the soft keyboard with the focused
-     * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
-     * restart input so a fresh [FrustInputConnection] is seeded from the new
-     * state); newly-inactive ⇒ hide it.
+     * widget's IME surface: newly-active ⇒ take focus + restart input (and
+     * show the keyboard, unless [ImeWireState.suppressSoftKeyboard] says the
+     * field wants no on-screen keyboard); newly-inactive ⇒ hide it.
      *
      * A **steady-active** field whose [ImeWireState.contentType] changed since
      * the last poll (e.g. a field that starts `"normal"` and flips to
@@ -986,6 +1256,12 @@ class FrustSurfaceView(
      * leaking into the suggestion strip under the stale, non-secure
      * `EditorInfo` (the exact gap this task closes — see `onCreateInputConnection`'s
      * doc for how the fresh `EditorInfo` is derived).
+     *
+     * A **steady-active** field whose [ImeWireState.suppressSoftKeyboard]
+     * flipped on since the last poll (an editable field went read-only, or
+     * focus moved onto a suppressed field without an intervening inactive
+     * edge) hides a keyboard that is already up — the `InputConnection` itself
+     * is untouched, since nothing about which field is focused changed.
      */
     private fun pollImeAfterDispatch() {
         if (handle == 0L) return
@@ -993,12 +1269,22 @@ class FrustSurfaceView(
         val previous = lastKnownState
         lastKnownState = state
         val contentTypeChanged = previous != null && previous.contentType != state.contentType
+        val suppressSoftKeyboardChanged =
+            previous != null && previous.suppressSoftKeyboard != state.suppressSoftKeyboard
         if (state.active && !imeActive) {
             imeActive = true
             requestFocus()
-            // Rebuild the InputConnection so its mirror starts from `state`.
+            // Rebuild the InputConnection so its mirror starts from `state` —
+            // needed unconditionally: the connection is what carries copy
+            // (performContextMenuAction, hardware Ctrl+C), and a read-only
+            // field is still focusable and copyable even with no keyboard.
             imm.restartInput(this)
-            imm.showSoftInput(this, 0)
+            if (!state.suppressSoftKeyboard) {
+                imm.showSoftInput(this, 0)
+            }
+            // else: the field asked for the input surface without a keyboard
+            // — there is nothing to type into a read-only field, so leave the
+            // soft keyboard down while the connection above stays live.
         } else if (!state.active && imeActive) {
             imeActive = false
             imm.hideSoftInputFromWindow(windowToken, 0)
@@ -1010,15 +1296,404 @@ class FrustSurfaceView(
             // already-updated `lastKnownState`, so no separate `reconcileTo`
             // call is needed on this path.
             imm.restartInput(this)
+        } else if (state.active && suppressSoftKeyboardChanged && state.suppressSoftKeyboard) {
+            // The focused field itself didn't change (no show/hide edge, no
+            // content-type change) but it just became suppressed while the
+            // keyboard was already showing — e.g. an editable field went
+            // read-only under the same focus. The connection carries copy and
+            // stays exactly as it is; only the keyboard needs to go away.
+            imm.hideSoftInputFromWindow(windowToken, 0)
         } else if (state.active) {
-            // Steady active (no show/hide edge, same content type): reconcile
-            // the live mirror to the focused field's published state — a
-            // caret moved by a tap, or a whole-field text change from a field
-            // switch or a submit-clear. `reconcileTo` compares against the
-            // LIVE editable (not the racing `lastKnownState`), so a
-            // pre-advanced snapshot can't hide a change.
+            // Steady active (no show/hide edge, same content type, same
+            // suppression): reconcile the live mirror to the focused field's
+            // published state — a caret moved by a tap, or a whole-field text
+            // change from a field switch or a submit-clear. `reconcileTo`
+            // compares against the LIVE editable (not the racing
+            // `lastKnownState`), so a pre-advanced snapshot can't hide a
+            // change.
             activeConnection?.reconcileTo(state)
         }
+    }
+
+    /**
+     * Drain the framework's two clipboard slots and act on them — the JVM half
+     * of the clipboard channel, called once per frame from [doFrame] directly
+     * after the post-dispatch IME reconcile.
+     *
+     * Both drains are one-shot edges on the Rust side, so a frame that skips
+     * this would lose a copy outright; both are also plain JNI reads that
+     * answer null/false on an idle frame, the same cost bar
+     * [pollSystemUiState] already sets. `ClipboardManager` itself is only
+     * touched when a drain actually reports something.
+     *
+     * The paste direction is deliberately a *second* dispatch rather than a
+     * return value: the framework asks ([nativeTakePasteRequest]), this side
+     * reads the clipboard, and the text goes back in through
+     * [nativeEditCommand]. A read that yields nothing — an empty clipboard, or
+     * the Android 10+ focus gate in [readClipboardText] — simply dispatches
+     * nothing, which is why the request does not have to be remembered
+     * anywhere: it is answered or it is dropped, and the framework's own
+     * request slot is already clear either way.
+     *
+     * **No ActionMode and no GestureDetector anywhere in this view**: the
+     * selection toolbar over a selection is drawn by the framework
+     * (`frust_core::SelectionToolbarPolicy::Framework`, the default), which is
+     * what publishes the copy/paste intent this method drains. Do not add a
+     * native `ActionMode.Callback` or a `GestureDetector` long-press here —
+     * they would present a *second*, competing toolbar over the framework's own
+     * and steal the gesture that raises it.
+     */
+    private fun syncClipboard() {
+        nativeTakeClipboardWrite(handle)?.let { writeClipboardText(it) }
+        if (nativeTakePasteRequest(handle)) {
+            // The same body the hardware Ctrl+V and the IME's own paste action
+            // take: read here, dispatch only when there is something to insert,
+            // then reconcile the mirror in this pass.
+            dispatchEditCommand(EDIT_COMMAND_PASTE)
+        }
+    }
+
+    /**
+     * Put `text` on the system clipboard as a plain-text clip.
+     *
+     * Best-effort by design: `setPrimaryClip` is a binder call into another
+     * process, and a failing one (a clip too large for the transaction buffer,
+     * a clipboard service killed under memory pressure, an OEM policy refusing
+     * the write) must not take down the Choreographer callback this runs on.
+     * The failure is logged without the text — a copied password is exactly as
+     * sensitive as a pasted one.
+     *
+     * The clip is labelled `"text"` and written as plain text: this side never
+     * has styled content to preserve, since the framework hands over a plain
+     * `String`. On Android 13+ the system itself shows a "copied" confirmation
+     * for this write — nothing here suppresses or duplicates it.
+     */
+    private fun writeClipboardText(text: String) {
+        try {
+            clipboard.setPrimaryClip(ClipData.newPlainText("text", text))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "clipboard write failed", e)
+        }
+    }
+
+    /**
+     * Read the system clipboard's primary clip as plain text, or null when
+     * there is nothing usable to paste **this pass**.
+     *
+     * Three platform behaviours this deliberately lives with:
+     *
+     * * **The focus gate (Android 10+).** `getPrimaryClip` returns null unless
+     *   the calling app currently has input focus. A paste attempted while the
+     *   window is not focused legitimately yields nothing; it is not an error
+     *   state to report to the user, and a null return is indistinguishable
+     *   here from an empty clipboard on purpose.
+     * * **The read toast (Android 12+).** The system shows a
+     *   "<app> pasted from <app>" toast the first time an app reads *another*
+     *   app's clip through `getPrimaryClip`. That is by design and not worth
+     *   engineering around: this method is only ever reached from a
+     *   user-initiated paste. `hasPrimaryClip` (and `getPrimaryClipDescription`)
+     *   do NOT raise it, which is why the emptiness gate runs first: the cheap
+     *   check costs the user nothing, and only the real read — which happens
+     *   solely because a paste was asked for — ever crosses that line.
+     * * **A refused read.** A `SecurityException` (a device policy or profile
+     *   restriction) is caught rather than propagated: the paste simply does
+     *   not happen, and the frame loop survives.
+     *
+     * A URI-backed clip (a photo, file, or contact copied from another app)
+     * still pastes as its human-readable text rather than silently refusing —
+     * but resolving that text is `ClipData.Item.coerceToText`'s synchronous
+     * `ContentResolver` round-trip into the CLIP OWNER's own process, which can
+     * block for as long as that app's `ContentProvider` takes to answer, or
+     * hang outright against a frozen/ANRed source app. Every caller of this
+     * method runs on the UI thread (the hardware `Ctrl+V` chord, the IME's own
+     * paste action, and the per-frame paste-request drain), so this method
+     * itself must never be the one to make that call:
+     *
+     * * When the item already carries a `CharSequence` — `item.text`, the
+     *   overwhelmingly common case, including every clip this view itself
+     *   writes ([writeClipboardText] always uses `ClipData.newPlainText`) —
+     *   it is returned directly, synchronously, in this same pass. A paste
+     *   that can answer now has to land now: [dispatchEditCommand]'s
+     *   synchronous [pollImeAfterDispatch] afterwards is what keeps the mirror
+     *   `Editable` in step, and that only runs for a same-pass answer.
+     * * When the item has no text and no `Uri` either (HTML-only, or an
+     *   `Intent`-only clip), `coerceToText` degrades to `Html.fromHtml` or
+     *   `Intent.toUri` — no `ContentResolver` call — so it stays synchronous
+     *   here too.
+     * * Only when the item has no text and does have a `Uri` is the
+     *   potentially-blocking half reached, and it is handed off to
+     *   [readClipboardTextAsync] to run off this thread instead. This method
+     *   returns null for that pass; [readClipboardTextAsync] dispatches the
+     *   paste itself once (and if) the text arrives — see its doc.
+     */
+    private fun readClipboardText(): String? {
+        return try {
+            if (!clipboard.hasPrimaryClip()) {
+                return null
+            }
+            val clip = clipboard.primaryClip
+            if (clip == null || clip.itemCount == 0) {
+                return null
+            }
+            val item = clip.getItemAt(0) ?: return null
+            val text = item.text
+            if (text != null) {
+                return text.toString()
+            }
+            if (item.uri == null) {
+                // No direct text and nothing to resolve through a
+                // `ContentResolver`: whatever `coerceToText` produces (HTML,
+                // an `Intent`'s URI, or `""`) is cheap and synchronous.
+                return item.coerceToText(context)?.toString()
+            }
+            // URI-backed with no direct text: `coerceToText` may block on a
+            // `ContentResolver` round-trip into another app's process — never
+            // call it here. Hand the item to the background resolver and
+            // answer nothing for this pass.
+            readClipboardTextAsync(item)
+            null
+        } catch (e: SecurityException) {
+            Log.w(TAG, "clipboard read refused", e)
+            null
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "clipboard read failed", e)
+            null
+        }
+    }
+
+    /**
+     * Resolve a URI-backed clip item's text off the UI thread and dispatch
+     * the paste once (and if) it arrives — the half of [readClipboardText]
+     * that can block, moved off the thread every caller of this method runs
+     * on (see that doc comment for why).
+     *
+     * Runs `item.coerceToText(context)` on [clipboardWorker]'s single
+     * background thread — never one thread per paste — then hops back to the
+     * UI thread via [mainHandler] to actually dispatch.
+     *
+     * ONE RESOLUTION IS OUTSTANDING AT A TIME, and an ask raised while one is
+     * still running meets [pendingPaste], which is both the record of who is
+     * being answered and the gate on submitting. That thread is the reason:
+     * a second submit would sit in the executor's queue behind a
+     * `coerceToText` parked in the clip owner's process, so it could not
+     * start — and so could not answer inside its own deadline — until that
+     * provider returned. Such an ask instead re-points the outstanding read at
+     * itself, replacing the session to answer and re-stamping the deadline
+     * from its own press.
+     *
+     * Re-pointing, rather than keeping the first asker on record, is the only
+     * choice that can deliver anything when the two asks differ. They differ
+     * only by the focus session having moved between them — both read it from
+     * the same [nativeFocusEpoch] — and the arrival check below requires the
+     * recorded session to be the live one, so an answer still addressed to the
+     * earlier ask could no longer land anywhere, while the session that just
+     * asked would be left with nothing. When the two share a session,
+     * re-pointing moves only the deadline. It cannot misdeliver either: every
+     * value written is a session that asked for a paste, and the arrival check
+     * still has to find it live.
+     *
+     * What re-pointing does cost is that the later ask is answered with the
+     * item the outstanding read captured, so a clip replaced during the wait
+     * pastes the one that was on the clipboard when the first press asked.
+     *
+     * On arrival the answer must still belong where it was asked for, and
+     * FOUR things are checked, because the framework routes
+     * `EditCommand::Paste` down whatever focus path is live at dispatch time
+     * and the command itself carries no identity:
+     *
+     * * [clipboardResolutionEpoch] is unmoved — the view did not tear down
+     *   ([shutdownClipboardExecutor] is its only writer).
+     * * `handle` is still live.
+     * * The framework's focus session is still the one on record as having
+     *   asked ([nativeFocusEpoch]). This is the one that stops a resolved
+     *   paste landing in a DIFFERENT field: [imeActive] is a single view-wide
+     *   flag that only toggles on the active/inactive edge, so a move from one
+     *   field to another never clears it and cannot be used for this.
+     * * The text is non-empty.
+     *
+     * Any of those failing DROPS the paste silently: a paste landing in a
+     * field the user has since moved away from is worse than one that never
+     * lands. A paste dropped here can be asked for again — [pendingPaste] is
+     * released before these checks run, and the read it pointed at has
+     * returned by then, so the next ask submits a read of its own.
+     *
+     * The session check is an identity, not a proxy, and that decides what it
+     * does NOT drop. Editing, moving the caret, or having the field reflowed
+     * or resized under you while the provider is still answering all leave the
+     * session where it was, so the paste still lands — in the field that asked
+     * for it, at whatever the caret has since become, which is where a paste
+     * belongs. What moves the session is a focus claim the framework honoured
+     * or a session release: switching fields, dismissing the keyboard, tapping
+     * away — and a re-press inside the same field, which claims again and is
+     * therefore treated as a new session (conservative in the safe direction).
+     * A re-press that is itself another paste re-points this resolution at the
+     * session it just created, so what that conservatism actually discards is
+     * a pending paste overtaken by a re-claim that asks for nothing to replace
+     * it. A touch scroll is a press first, so it is judged as one: it
+     * re-claims if it started in a field and blurs if it started on nothing
+     * focusable.
+     *
+     * The wait is also BOUNDED. `coerceToText` returns when the clip's owning
+     * app decides to answer — or never — so a deadline is stamped at request
+     * time, re-stamped by a later ask folding in, and an answer arriving past
+     * the one then on record is dropped. `shutdownNow()` cannot interrupt a
+     * thread already blocked inside another process's `ContentProvider`, so
+     * the deadline and the epoch are what actually stop a late answer from
+     * being delivered, and the gate is what stops the next ask from queueing
+     * behind the thread still parked in that call.
+     *
+     * What none of that buys is a read that starts over while the first is
+     * still parked: there is one resolver thread, and it is unreachable until
+     * the provider returns or a teardown ([shutdownClipboardExecutor])
+     * discards it. Until then, asking again is answered by the read already
+     * out rather than by one of its own.
+     *
+     * When it does land, it calls the exact same
+     * `nativeEditCommand`/[pollImeAfterDispatch] pair the synchronous fast
+     * path in [dispatchEditCommand] uses.
+     */
+    private fun readClipboardTextAsync(item: ClipData.Item) {
+        val epoch = clipboardResolutionEpoch
+        // Snapshot the session this paste was asked for, and the point past
+        // which its answer is no longer wanted. Both are read here, on the UI
+        // thread, while the asking press is still the current truth.
+        val requestedInSession = if (handle != 0L) nativeFocusEpoch(handle) else 0L
+        val deadlineUptimeMillis = SystemClock.uptimeMillis() + CLIPBOARD_RESOLUTION_TIMEOUT_MS
+        // `0` means one thing only — no live native handle — because no live
+        // session is ever numbered `0` (see [nativeFocusEpoch]). So this is an
+        // ordinary "nothing to paste into" bail rather than a sentinel repair,
+        // and the arrival comparison below reads a dead handle's `0` as "not
+        // the session that asked" on its own terms, with nothing here to
+        // arrange it.
+        if (requestedInSession == 0L) {
+            return
+        }
+        // Record this ask BEFORE the gate is consulted: an ask that folds into
+        // a resolution already under way is still an ask, and still names the
+        // session to answer and the point past which it stops wanting one.
+        val outstanding = pendingPaste != null
+        pendingPaste = PendingPaste(requestedInSession, deadlineUptimeMillis)
+        if (outstanding) {
+            Log.d(
+                TAG,
+                "a clipboard resolution is already outstanding; folding this paste request " +
+                    "into it rather than queueing behind it",
+            )
+            return
+        }
+        try {
+            clipboardWorker().execute {
+                val text = try {
+                    item.coerceToText(context)?.toString()
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "clipboard read refused", e)
+                    null
+                } catch (e: RuntimeException) {
+                    Log.w(TAG, "clipboard read failed", e)
+                    null
+                }
+                mainHandler.post {
+                    // Checked before the record is touched: a moved epoch means
+                    // a teardown already discarded this resolver AND the record
+                    // it was working for, so anything in [pendingPaste] now
+                    // belongs to a later ask on a newer resolver — not this
+                    // answer's to read, and not this answer's to clear.
+                    if (epoch != clipboardResolutionEpoch) {
+                        return@post
+                    }
+                    // Taking the record frees the resolver for the next ask,
+                    // and is done before the checks below because those decide
+                    // whether the ANSWER is still wanted, not whether the read
+                    // is still running: `coerceToText` returned before this
+                    // post was made. A record already taken leaves nothing to
+                    // answer.
+                    val pending = pendingPaste ?: return@post
+                    pendingPaste = null
+                    if (handle == 0L || text.isNullOrEmpty()) {
+                        return@post
+                    }
+                    if (SystemClock.uptimeMillis() > pending.deadlineUptimeMillis) {
+                        Log.w(TAG, "clipboard read answered too late; dropping the paste")
+                        return@post
+                    }
+                    // The session must be the one that asked. `imeActive` cannot
+                    // answer this: it is view-wide and does not toggle when focus
+                    // moves from one field to another.
+                    if (nativeFocusEpoch(handle) != pending.session) {
+                        return@post
+                    }
+                    nativeEditCommand(handle, EDIT_COMMAND_PASTE, text)
+                    pollImeAfterDispatch()
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            // The executor was torn down between the epoch snapshot above and
+            // this submit (the view is tearing down right now) — the
+            // resolution simply does not happen. Release the record this call
+            // just wrote: no read is outstanding for it, and a record left
+            // behind would fold every later ask into a resolution that was
+            // never submitted.
+            pendingPaste = null
+            Log.w(TAG, "clipboard read dropped: view is tearing down", e)
+        }
+    }
+
+    /**
+     * Lazily create (or reuse) the single background thread [readClipboardTextAsync]
+     * runs on. Never spawned per paste: the same executor answers every
+     * URI-backed paste for as long as the view stays resumed, and
+     * [shutdownClipboardExecutor] tears it down (and this getter re-creates
+     * it on the next ask) at every point a live handle stops being
+     * trustworthy.
+     *
+     * One thread is enough because [pendingPaste] gates the submit: at most
+     * one resolution is handed to this executor at a time, so its queue holds
+     * a task only while the one before it is on its way out, never while one
+     * is parked inside `coerceToText`. Re-creating rather than reusing a
+     * shut-down executor is what keeps that true across a teardown — the
+     * thread parked in a provider call belongs to the executor
+     * [shutdownClipboardExecutor] dropped, and cannot be handed the next ask.
+     */
+    private fun clipboardWorker(): ExecutorService {
+        var executor = clipboardExecutor
+        if (executor == null || executor.isShutdown) {
+            executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "frust-clipboard").apply { isDaemon = true }
+            }
+            clipboardExecutor = executor
+        }
+        return executor
+    }
+
+    /**
+     * Stop the background clipboard-coercion thread (if one was ever created)
+     * and bump [clipboardResolutionEpoch] so a resolution that finished on
+     * that thread just as the view tore down is dropped on arrival instead of
+     * dispatching into a view nobody should still be pasting into. Idempotent
+     * — safe to call from every teardown path ([surfaceDestroyed], [onPause],
+     * [onDestroy]) whether or not a resolution was ever started.
+     *
+     * `shutdownNow()` rather than `shutdown()`: the one task this executor can
+     * be running is blocked inside another app's `ContentProvider` query
+     * ([readClipboardTextAsync]), which a graceful `shutdown()` would wait
+     * out — exactly the UI-thread stall this whole split exists to avoid,
+     * only now on a thread nothing is joining. `shutdownNow()` interrupts it
+     * and returns immediately; the epoch bump is what actually stops a late
+     * answer from being delivered even on a provider call that does not
+     * honour the interrupt.
+     *
+     * [pendingPaste] is released for the same reason and in the same breath:
+     * the resolution it records is no longer one this view is waiting for, and
+     * a record left behind would fold every later ask into a resolution whose
+     * answer the epoch bump has already condemned — a paste dead for the rest
+     * of this view's life, silently, since the answer that would otherwise
+     * release the record returns early on the epoch check.
+     */
+    private fun shutdownClipboardExecutor() {
+        clipboardResolutionEpoch++
+        pendingPaste = null
+        clipboardExecutor?.shutdownNow()
+        clipboardExecutor = null
     }
 
     /**
@@ -1052,6 +1727,7 @@ class FrustSurfaceView(
                 compBase = obj.optInt("compBase", -1),
                 compExt = obj.optInt("compExt", -1),
                 contentType = obj.optString("contentType", CONTENT_TYPE_NORMAL),
+                suppressSoftKeyboard = obj.optBoolean("suppressSoftKeyboard", false),
             )
         } catch (e: JSONException) {
             null
@@ -1074,6 +1750,15 @@ class FrustSurfaceView(
          * [pollImeAfterDispatch]'s content-type-change restart.
          */
         val contentType: String,
+        /**
+         * The wire `"suppressSoftKeyboard"` flag `nativeImeState` encodes from
+         * `frust_core::event::ImeState::suppress_soft_keyboard`. A read-only
+         * field that is still focusable and copyable sets this so
+         * [pollImeAfterDispatch] keeps the `InputConnection` alive (copy needs
+         * it) without ever calling `showSoftInput` — there is nothing for the
+         * user to type into such a field.
+         */
+        val suppressSoftKeyboard: Boolean,
     )
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -1108,6 +1793,14 @@ class FrustSurfaceView(
             // field's published state; a no-op when they already match, so normal
             // typing never triggers a spurious restart.
             pollImeAfterDispatch()
+            // Per-frame clipboard drain: the framework's copy/paste
+            // intent is a one-shot edge, so a frame that skipped this would
+            // drop a copy outright. Two cheap JNI reads on an idle frame (the
+            // `pollSystemUiState` cost bar below); `ClipboardManager` is
+            // touched only when a drain actually reports something. Placed
+            // after the IME reconcile so a paste dispatched here still sees the
+            // mirror the poll just settled.
+            syncClipboard()
             // Per-frame system-UI poll: cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
@@ -1189,6 +1882,10 @@ class FrustSurfaceView(
         // Hold no resolver registration while backgrounded; [onResume] re-arms
         // it and re-reads the value that may have changed in between.
         unregisterReduceMotionObserver()
+        // Same reasoning: hold no clipboard-coercion thread while backgrounded.
+        // A fresh one is created lazily ([clipboardWorker]) the next time a
+        // URI-backed paste is actually asked for after [onResume].
+        shutdownClipboardExecutor()
         if (handle != 0L) {
             nativeOnPause(handle)
         }
@@ -1200,6 +1897,9 @@ class FrustSurfaceView(
         // ContentObserver outliving its view would keep calling into a dead
         // handle.
         unregisterReduceMotionObserver()
+        // Same belt-and-suspenders reasoning: no clipboard-coercion thread may
+        // outlive this view.
+        shutdownClipboardExecutor()
         if (handle != 0L) {
             nativeOnDestroy(handle)
             handle = 0
@@ -1351,6 +2051,41 @@ class FrustSurfaceView(
             return handled
         }
 
+        /**
+         * Answer the IME's own clipboard affordances — the paste/copy/cut/
+         * select-all actions a soft keyboard raises (Gboard's clipboard chip,
+         * a keyboard's own edit strip, an accessibility service) — by decoding
+         * the `android.R.id.*` action into a framework edit command.
+         *
+         * This is the route that matters on Android: an IME sends
+         * `performContextMenuAction` rather than typing the clipboard's
+         * contents, and `BaseInputConnection`'s default implementation only
+         * knows how to act on a real `TextView`, so without this override the
+         * action would reach the mirror [Editable] and never the framework's
+         * field.
+         *
+         * `pasteAsPlainText` is answered identically to `paste`: this side
+         * coerces every clip to plain text on the way in
+         * ([readClipboardText]), so the framework has no styled paste to strip.
+         * Anything else (`startSelectingText`, `switchInputMethod`, a future
+         * action) falls through to `super`, which keeps the mirror's own
+         * behaviour rather than silently claiming an action we do not perform.
+         */
+        override fun performContextMenuAction(id: Int): Boolean {
+            if (handle == 0L) {
+                return super.performContextMenuAction(id)
+            }
+            val command = when (id) {
+                android.R.id.paste, android.R.id.pasteAsPlainText -> EDIT_COMMAND_PASTE
+                android.R.id.copy -> EDIT_COMMAND_COPY
+                android.R.id.cut -> EDIT_COMMAND_CUT
+                android.R.id.selectAll -> EDIT_COMMAND_SELECT_ALL
+                else -> return super.performContextMenuAction(id)
+            }
+            dispatchEditCommand(command)
+            return true
+        }
+
         override fun beginBatchEdit(): Boolean {
             batchDepth++
             return super.beginBatchEdit()
@@ -1409,17 +2144,43 @@ class FrustSurfaceView(
          */
         private fun sync() {
             if (batchDepth > 0 || handle == 0L) return
+            // A superseded connection must never push. `restartInput` (a field
+            // switch, a content-type change, a wholesale reseed) makes this
+            // instance stale the moment `onCreateInputConnection` installs its
+            // successor, but the input manager still delivers one last
+            // `finishComposingText()` to the PREVIOUS connection from inside
+            // that restart — its own bypass of the inactive-connection check.
+            // By then focus has already moved in Rust, and `nativeImeApply` is
+            // focus-routed with no session identity, so this mirror's text
+            // (the field the user just LEFT) would be written into the field
+            // that now holds focus. Observed on a Pixel 5 with Gboard: type into
+            // a password field, tap another field, re-tap the password field,
+            // tap the other field again — its content became the password.
+            // `super` has already applied the edit to this instance's own
+            // mirror above the callers, which is harmless; only the push is
+            // withheld. The live connection's own `sync()` is unaffected.
+            if (activeConnection !== this) return
 
             val text = editable.toString()
             val selStart = Selection.getSelectionStart(editable)
             val selEnd = Selection.getSelectionEnd(editable)
             val compStart = getComposingSpanStart(editable)
             val compEnd = getComposingSpanEnd(editable)
-            // `contentType` is irrelevant to this dedup snapshot — it never
-            // compares against `lastKnownState`, only against a prior call's
-            // own `snapshot` — so a fixed placeholder is correct here.
+            // `contentType`/`suppressSoftKeyboard` are irrelevant to this dedup
+            // snapshot — it never compares against `lastKnownState`, only
+            // against a prior call's own `snapshot` — so fixed placeholders
+            // are correct here.
             val snapshot =
-                ImeWireState(true, text, selStart, selEnd, compStart, compEnd, CONTENT_TYPE_NORMAL)
+                ImeWireState(
+                    true,
+                    text,
+                    selStart,
+                    selEnd,
+                    compStart,
+                    compEnd,
+                    CONTENT_TYPE_NORMAL,
+                    false,
+                )
             if (snapshot == lastPushed) return
             lastPushed = snapshot
 

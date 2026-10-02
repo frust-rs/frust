@@ -18,9 +18,9 @@ expression: "render_to_string(100, 30, &state)"
  ACTIONS                 │                                                                          
    New project · n       │                                                                          
    Add plugin · a        │                                                                          
-   Doctor · d            │                                                                          
+   Doctor · i            │                                                                          
    Build · b             │                                                                          
-   Clean · c             │                                                                          
+   Clean                 │                                                                          
    MCP off · M           │                                                                          
    DAP off · D           │                                                                          
                          │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off ⏷warn+ ·4      x stop · f follow · w wrap · / search
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

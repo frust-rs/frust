@@ -10,6 +10,23 @@
 //! recomputes the inset amount itself each pass instead of wrapping a
 //! `PaddingWidget`.
 //!
+//! # Consumption
+//!
+//! A safe area both **pads** its child and **removes the padding it consumed
+//! from its subtree** (Flutter's `SafeArea` does the same through
+//! `MediaQuery.removePadding`). The child is laid out and painted inside
+//! `LayoutCtx::with_window_insets` / `PaintCtx::with_window_insets` with
+//! [`WindowInsets::consuming`](frust_core::WindowInsets::consuming) applied to
+//! the enabled edges, so a descendant reading `ctx.window_insets().padding()`
+//! sees `0.0` on every edge this safe area already covered. That keeps a
+//! self-insetting descendant (a chrome bar that grows by its own edge's inset)
+//! from insetting a second time, and makes nested safe areas consume once: the
+//! inner one sees zero on the outer's consumed edges and pads there only by
+//! its own `.minimum`. `.minimum` is extra padding, not window inset — it never
+//! affects what is consumed. `view_insets` (the IME) always flows through
+//! unchanged, and a safe area with every edge disabled passes the insets
+//! through untouched.
+//!
 //! Flutter's `maintainBottomViewPadding` (an override that substitutes
 //! `viewPadding.bottom` for the derived `padding.bottom` while the keyboard is
 //! up, to avoid a layout jump) is intentionally **deferred** past v1: the
@@ -20,7 +37,7 @@
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    PaintCtx, PaintScene, SemanticsCtx, View, Widget, WindowInsets, any,
 };
 use kurbo::{Point, Size};
 
@@ -36,7 +53,9 @@ pub struct SafeAreaView<State: 'static> {
 
 /// Pad `child` by the window's resolved safe-area insets — all four edges
 /// enabled by default (opt an edge out with `.left`/`.top`/`.right`/`.bottom`),
-/// never less than `.minimum` (zero by default) on an enabled edge.
+/// never less than `.minimum` (zero by default) on an enabled edge. The
+/// enabled edges' insets are consumed: `child`'s subtree reads zero safe-area
+/// padding there (see the [module docs](self)).
 pub fn safe_area<State: 'static, V: View<State>>(child: V) -> SafeAreaView<State> {
     SafeAreaView {
         left: true,
@@ -138,6 +157,14 @@ impl<State: 'static> View<State> for SafeAreaView<State> {
     }
 }
 
+impl SafeAreaWidget {
+    /// `insets` with this safe area's enabled edges consumed — the value its
+    /// subtree reads during both layout and paint.
+    fn consumed_insets(&self, insets: WindowInsets) -> WindowInsets {
+        insets.consuming(self.left, self.top, self.right, self.bottom)
+    }
+}
+
 impl Widget for SafeAreaWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // Resolve per-edge padding dynamically: the window insets arrive via
@@ -163,13 +190,23 @@ impl Widget for SafeAreaWidget {
                 (bc.max().height - v).max(0.0),
             ),
         );
-        let child_size = self.child.layout_child(ctx, &child_bc);
+        // Remove what this safe area consumed from its subtree, so a
+        // self-insetting descendant (or a nested safe area) does not inset by
+        // the same edge again. `minimum` is extra padding, not window inset, so
+        // it plays no part in consumption.
+        let consumed = self.consumed_insets(ctx.window_insets());
+        let child = &mut self.child;
+        let child_size = ctx.with_window_insets(consumed, |ctx| child.layout_child(ctx, &child_bc));
         self.child.set_origin(Point::new(left, top));
         bc.constrain(Size::new(child_size.width + h, child_size.height + v))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.child.paint_child(ctx, scene);
+        // The same consumed value the child was laid out under, so a paint-time
+        // inset read agrees with the layout-time one.
+        let consumed = self.consumed_insets(ctx.window_insets());
+        let child = &mut self.child;
+        ctx.with_window_insets(consumed, |ctx| child.paint_child(ctx, scene));
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {

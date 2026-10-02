@@ -55,12 +55,14 @@ pub use modal::ActiveModal;
 pub use palette::{Palette, PaletteCommand};
 pub use perf::{FrameSummary, PerfLine, PerfPanel, RawFrame, StartupSummary, parse_perf_line};
 pub use persist::{
-    DapPrefs, Settings, load_dap_prefs, load_recent_projects, load_settings,
-    merge_recent_and_detected, record_recent_project, save_dap_enabled, save_dap_setting,
-    save_mouse_capture, save_sidebar_width,
+    DapPrefs, Settings, load_dap_prefs, load_recent_projects, load_settings, record_recent_project,
+    save_dap_enabled, save_dap_setting, save_mouse_capture, save_sidebar_width,
+    split_local_and_previous,
 };
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
-pub use session_view::{LineSelection, LogBuffer, Scroll, SessionView, line_matches, strip_ansi};
+pub use session_view::{
+    LineSelection, LogBuffer, Scroll, SessionTarget, SessionView, line_matches, strip_ansi,
+};
 pub use state::{
     AppState, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen, SearchState,
     clamp_sidebar_width,

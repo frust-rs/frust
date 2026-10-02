@@ -95,7 +95,7 @@ written by the UI thread running ahead of it, so a marker's *line position*
 in a captured log is not a reliable proxy for which frames it brackets.
 Before that emitter change the marker was logged by the UI thread outright
 and position-based slicing gave `s3-create1k` zero frames and shifted every
-other S3 op by one (action item `act_000001a070c818837NtGqevW`).
+other S3 op by one.
 
 When either of a window's markers carries no index (Flutter's markers,
 always; a Frust series captured before this change), `slice_scenario` falls

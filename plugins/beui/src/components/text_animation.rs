@@ -75,9 +75,11 @@ use frust::{Brightness, FrameTime, Theme};
 use kurbo::{Point, Size};
 use peniko::{Brush, Color, ColorStop, Gradient};
 
+use crate::motion::chars::CHAR_CELLS_ROLE;
 use crate::motion::{CellEffect, CharCells, CharCellsView, Ramp, Stagger, char_cascade};
 use crate::style::{TEXT_BASE, with_alpha};
 use crate::text::paint_glyph_run as paint_run;
+use crate::text::themed_style;
 use crate::tokens::motion::{EASE_IN_OUT, SPRING_LAYOUT};
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -402,15 +404,12 @@ impl TextAnimationWidget {
         })
     }
 
-    /// The style the whole-run variants shape with.
+    /// The style the whole-run variants shape with, in the theme's
+    /// `body_medium` family — [`CHAR_CELLS_ROLE`], the role the per-letter
+    /// cells resolve, so both routes paint one face. `layout` keys the shaped
+    /// run on it, so a theme swap that changes the family reshapes the run.
     fn run_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
-        let family = theme.map_or_else(crate::tokens::sans_family, |t| {
-            t.type_scale.body_medium.family.clone()
-        });
-        TextStyle {
-            family,
-            ..TextStyle::new(self.size, ink)
-        }
+        themed_style(TextStyle::new(self.size, ink), CHAR_CELLS_ROLE, theme)
     }
 
     /// The settled ink: the explicit override, else the theme's `on_surface`,
@@ -1284,5 +1283,55 @@ mod tests {
                 .duration(Duration::from_millis(100)),
         );
         assert_eq!(overridden.scramble_duration(), Duration::from_millis(100));
+    }
+
+    // ---- Typeface: both rendering routes follow the live theme -------------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// The window every typeface probe paints into.
+    const PROBE_WINDOW: Size = Size::new(240.0, 60.0);
+
+    /// `variant` over a short string, so the per-letter variants render cells
+    /// and the whole-run ones one shaped run.
+    fn probe_logic(variant: TextAnimationVariant) -> impl FnMut(&mut ()) -> TextAnimationView<()> {
+        move |_: &mut ()| text_animation::<()>("Ship").variant(variant)
+    }
+
+    /// A per-letter variant past the cell budget, which paints its plain-run
+    /// fallback.
+    fn over_budget_logic(_: &mut ()) -> TextAnimationView<()> {
+        text_animation::<()>("a".repeat(TEXT_ANIMATION_CELL_BUDGET + 1))
+            .variant(TextAnimationVariant::Reveal)
+    }
+
+    #[test]
+    fn every_variant_paints_in_geist_under_the_beui_theme() {
+        for variant in TextAnimationVariant::ALL {
+            assert_paints_only_in_geist(
+                &format!("{variant:?}"),
+                probe_logic(variant),
+                PROBE_WINDOW,
+            );
+        }
+        assert_paints_only_in_geist("the over-budget fallback", over_budget_logic, PROBE_WINDOW);
+    }
+
+    #[test]
+    fn every_variant_follows_a_live_theme_family_swap() {
+        for variant in TextAnimationVariant::ALL {
+            assert_follows_a_live_family_swap(
+                &format!("{variant:?}"),
+                probe_logic(variant),
+                PROBE_WINDOW,
+            );
+        }
+        assert_follows_a_live_family_swap(
+            "the over-budget fallback",
+            over_budget_logic,
+            PROBE_WINDOW,
+        );
     }
 }

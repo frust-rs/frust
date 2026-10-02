@@ -352,6 +352,7 @@ impl LoaderWidget {
     fn glyph_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
         let _ = theme;
         TextStyle {
+            // Explicit: `TypeScale` has no monospace role to take this from.
             family: crate::tokens::mono_family(),
             ..TextStyle::new(self.variant.glyph_size(self.size) as f32, ink)
         }

@@ -69,7 +69,7 @@
 //! the same on both platforms.
 
 // Mirrors `crate::android::ctx`'s own module-level allow: this is the helper
-// surface the six Apple controls and their target-action objects
+// surface the built-in Apple controls and their target-action objects
 // will build on, and this lands the type before its consumers
 // exist. The attribute goes away once those consumers land, rather than
 // growing per-item `allow`s in the meantime.

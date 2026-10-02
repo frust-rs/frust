@@ -55,7 +55,8 @@ use std::sync::{Arc, Mutex, Once};
 
 use anyhow::{Context, Result, bail};
 
-use frust_core::event::{EditingState, ImeContentType, ImeState};
+use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
+use frust_core::selection_toolbar::{SelectionToolbarPolicy, lock_selection_toolbar_policy};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
@@ -72,7 +73,9 @@ use crate::app::{
     FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, PresentHandoff, SplitExecutor,
     render_scene,
 };
-use crate::ffi_support::{CaretRect, publish_resolved_translucency};
+use crate::ffi_support::{
+    CaretRect, EditCommandKind, ToolbarActions, ToolbarAnchor, publish_resolved_translucency,
+};
 
 /// Startup-span name: the font-preload overlap window
 /// opens — the background thread [`create_handle`] spawned at the top of its own
@@ -884,6 +887,20 @@ fn create_handle(
     // regardless of a signal write, so the waker is a no-op (mirrors Android).
     let rt = ReactiveRuntime::init(no_op_waker());
 
+    // Selection toolbar: LOCK the policy to `Native` rather than merely
+    // setting it, so an app's own later call can never win here. This is the
+    // platform's requirement, not a preference: a paste is exempt from iOS's
+    // paste notice (the 14+ banner, the 16+ per-app permission alert) ONLY
+    // when it is system-initiated — a tap in the system menu, or a hardware
+    // `Cmd+V` through UIKit's responder chain — and a framework-drawn
+    // toolbar's Paste button would read `UIPasteboard.general.string` off a
+    // display-link tick instead, squarely the alerting path. Set BEFORE
+    // `make_app`/the initial rebuild below, so the very first `sync_toolbar` a
+    // field runs already sees the native route and never mounts a pod it
+    // would have to tear down; idempotent, so re-entering `frust_init` in the
+    // same process is benign.
+    lock_selection_toolbar_policy(SelectionToolbarPolicy::Native);
+
     // Construct the app AND its handle under the root `Owner`. `make_app` runs
     // `Component::init` (via `new_boxed_app_with`'s state factory), and
     // `IosAppHandle::new` runs the initial `rebuild()` — both must see an
@@ -1266,10 +1283,19 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
 ///
 /// `phase` is the fixed code the Swift `FrustView` touch overrides send
 /// (`0`=began, `1`=moved, `2`=ended, `3`=cancelled — see
-/// [`crate::ffi_support::touch_phase_from_code`]); `x`/`y` are logical points
+/// [`crate::ffi_support::touch_phase_from_code`]); `pointer_id` is the
+/// Swift-derived per-sequence slot (`0` for a gesture's first-down touch,
+/// reusing the lowest free slot for each additional live contact — matching
+/// Android's slot-assignment rule) that [`IosAppHandle::dispatch_touch`] stamps onto a
+/// [`frust_core::event::PointerId::touch`]; `x`/`y` are logical points
 /// (`touch.location(in:)`), passed straight through (no scale division — see the
-/// asymmetry note on [`IosAppHandle::dispatch_touch`]). First-touch only in v1.
-pub fn dispatch_touch(handle: *mut c_void, phase: u32, x: f32, y: f32) {
+/// asymmetry note on [`IosAppHandle::dispatch_touch`]).
+///
+/// **ABI note:** this internal helper, the `#[no_mangle] extern "C" fn frust_dispatch_touch`
+/// export stamped out by [`crate::ios_app!`] in `lib.rs`, and the C declaration in the
+/// generated app's hand-kept header (`platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`)
+/// must have matching signatures and must change together.
+pub fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x: f32, y: f32) {
     guard("frust_dispatch_touch", (), || {
         // Cheap; keeps controller-driven updates fresh between CADisplayLink
         // frames rather than waiting for the next `frust_render_frame`.
@@ -1277,7 +1303,7 @@ pub fn dispatch_touch(handle: *mut c_void, phase: u32, x: f32, y: f32) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let touch_phase = crate::ffi_support::touch_phase_from_code(phase);
-            app.dispatch_touch(touch_phase, x, y);
+            app.dispatch_touch(touch_phase, pointer_id, x, y);
         }
     });
 }
@@ -1353,15 +1379,212 @@ pub fn ime_state_json(handle: *mut c_void) -> *mut c_char {
     })
 }
 
+/// `frust_edit_command`: deliver one clipboard/selection verb the host's
+/// **system** edit menu (or a hardware-keyboard `Cmd+C`/`X`/`V`/`A` UIKit
+/// resolved through its responder chain) asked for.
+///
+/// `cmd` is the fixed numeric ABI [`crate::ffi_support::edit_command_from_code`]
+/// decodes — `0`=copy, `1`=cut, `2`=paste, `3`=select-all, **do not renumber**
+/// (the Swift `FrustView` edit actions compile the literals in). An
+/// unrecognised code is dropped with a warning rather than guessed at: every
+/// verb here either mutates the document or discloses it, so there is no safe
+/// default to fall back to (contrast [`dispatch_touch`]'s `Cancelled`).
+///
+/// `text` is the pasted UTF-8 payload and is read for `cmd == 2` only — the
+/// asymmetry [`EditCommand`] itself documents: the *shell* owns the host
+/// pasteboard, so by the time a paste reaches the tree the read has already
+/// happened, while a copy/cut carries nothing because the widget owns the
+/// selection and answers by writing into the pass's clipboard slot (drained by
+/// [`take_clipboard_write`]). Null/invalid UTF-8 decodes lossily to the empty
+/// string, the policy [`ime_apply`]'s text already uses.
+///
+/// **This is the paste path that escapes the iOS permission alert.** Swift's
+/// `paste(_:)` reads `UIPasteboard.general.string` from inside a
+/// system-initiated action — a menu tap or `Cmd+V` — which iOS exempts from
+/// both the 14+ banner and the 16+ per-app prompt; see [`take_paste_request`]
+/// for the direction that does *not* get that exemption.
+pub fn edit_command(handle: *mut c_void, cmd: u8, text: *const c_char) {
+    guard("frust_edit_command", (), || {
+        // Cheap; keeps controller-driven updates fresh between frames (mirrors
+        // `dispatch_touch`/`ime_apply`, the other input entry points).
+        pump_reactive();
+        let Some(kind) = crate::ffi_support::edit_command_from_code(cmd) else {
+            log::warn!(
+                "frust-shell-ios: frust_edit_command ignoring unrecognized command code {cmd}"
+            );
+            return;
+        };
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return;
+        };
+        let command = match kind {
+            EditCommandKind::Copy => EditCommand::Copy,
+            EditCommandKind::Cut => EditCommand::Cut,
+            // SAFETY: `text` is the Swift side's UTF-8 C string, valid and
+            // NUL-terminated for the duration of this call (or null → empty) —
+            // `ime_apply`'s contract for the same conversion.
+            EditCommandKind::Paste => EditCommand::Paste(unsafe { cstr_to_string(text) }),
+            EditCommandKind::SelectAll => EditCommand::SelectAll,
+        };
+        app.edit_command(command);
+    });
+}
+
+/// `frust_take_clipboard_write`: take (and clear) the text a widget asked to
+/// put on the host pasteboard — the answer to a `Copy`/`Cut` that
+/// [`edit_command`] just delivered.
+///
+/// Returns a fresh `CString` the caller **must** release via
+/// [`string_free`]/`frust_string_free` (the ownership contract
+/// [`ime_state_json`] establishes), or null when no widget copied. The Swift
+/// side drains this once per `CADisplayLink` tick and assigns any non-null
+/// result to `UIPasteboard.general.string`.
+///
+/// **Destructive**, unlike the level reads around it: a clipboard write is an
+/// edge, so a caller that drains and drops the result loses that write — which
+/// is why the Swift drain assigns unconditionally rather than filtering.
+///
+/// A text carrying an interior NUL cannot cross as a C string and degrades to
+/// null (mirroring [`ime_state_json`]); the copy is dropped rather than
+/// truncated at the NUL, which would hand the user a silently shortened
+/// clipboard.
+pub fn take_clipboard_write(handle: *mut c_void) -> *mut c_char {
+    guard("frust_take_clipboard_write", std::ptr::null_mut(), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        match app.take_clipboard_write() {
+            // Hand the caller ownership of the C string; reclaimed in `string_free`.
+            Some(text) => match CString::new(text) {
+                Ok(cstr) => cstr.into_raw(),
+                Err(_) => {
+                    log::warn!(
+                        "frust-shell-ios: dropping a clipboard write containing an interior NUL"
+                    );
+                    std::ptr::null_mut()
+                }
+            },
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// `frust_take_paste_request`: take (and clear) whether a widget asked the
+/// shell to read the host pasteboard back to it. `1` = a widget asked, `0` =
+/// nobody did (a plain `u8`, the no-`<stdbool.h>` convention
+/// [`set_appearance`]'s `dark` follows).
+///
+/// **Destructive**, for [`take_clipboard_write`]'s reason.
+///
+/// # Why this route is wired but effectively unused on iOS
+///
+/// This is the *only* paste path on this platform that is NOT exempt from
+/// iOS's paste notice: the Swift drain answers it by reading
+/// `UIPasteboard.general.string` from a `CADisplayLink` tick, which is not a
+/// system-initiated action, so iOS 14+ shows its "pasted from" banner and
+/// iOS 16+ raises the per-app paste-permission alert. That is exactly what the
+/// system-edit-menu route exists to avoid, and it is why this shell sets the
+/// `Native` selection-toolbar policy at start-up (see [`create_handle`]).
+///
+/// Nothing reaches it in practice: `EventCtx::request_paste` is called by the
+/// **framework-drawn** toolbar's Paste button, and under the `Native` policy a
+/// field floats no toolbar at all — the system menu's Paste arrives through
+/// `paste(_:)` → [`edit_command`] instead, already carrying its text. The
+/// drain is kept wired rather than stubbed so a widget that asks by some other
+/// route still gets a real answer instead of silence, and so the iOS shell
+/// implements the whole `AppTree` clipboard channel rather than half of it.
+pub fn take_paste_request(handle: *mut c_void) -> u8 {
+    guard("frust_take_paste_request", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        match unsafe { handle_mut(handle) } {
+            Some(app) => u8::from(app.take_paste_request()),
+            None => 0,
+        }
+    })
+}
+
+/// `frust_selection_toolbar_json`: the focused field's selection-toolbar
+/// request as a heap-allocated, caller-freed JSON C string — where the system
+/// edit menu should be anchored, which verbs it may offer, and whether the
+/// field is asking for it to be presented right now.
+///
+/// Returns null when **no field is focused** (the Swift side treats that as
+/// "dismiss and forget"), otherwise a fresh `CString` the caller **must**
+/// release via [`string_free`]/`frust_string_free` — the identical ownership
+/// contract to [`ime_state_json`]/[`platform_view_commands_json`]. Shape and
+/// field names: [`crate::ffi_support::selection_toolbar_json`].
+///
+/// A focused field therefore answers with a string on every tick, selection or
+/// not, and that is the point: `canPerformAction(_:with:)` is asked whenever
+/// UIKit likes — a hardware Cmd+V arrives with no menu on screen — and it can
+/// only answer from the verbs this call last carried across. The cost is one
+/// small JSON per display tick for as long as a text field holds focus, which
+/// buys back the hardware shortcuts and, with them, the paste route iOS exempts
+/// from its own per-app permission alert. `presentMenu` is what distinguishes
+/// "these verbs apply" from "put a menu up".
+///
+/// The anchor crosses in **logical points**, the same space as the caret rect
+/// the IME JSON already reports (and the space `touch.location(in:)` arrives
+/// in), so the Swift side anchors the menu without any scale conversion. The
+/// core publishes it in absolute logical window space and `FrustView` fills the
+/// window, so it is already in the view's own coordinates.
+///
+/// Deliberately does **not** `pump_reactive`: unlike [`ime_state_json`] this
+/// value is a product of the *paint* pass, not of a reactive effect, and the
+/// Swift poll runs immediately after the `frust_render_frame` that produced it
+/// — a pump here could only cost work, never freshen the answer.
+pub fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
+    guard("frust_selection_toolbar_json", std::ptr::null_mut(), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(request) = app.selection_toolbar() else {
+            // No focused field at all — the "dismiss whatever stands" sentinel.
+            return std::ptr::null_mut();
+        };
+        let json = crate::ffi_support::selection_toolbar_json(
+            app.selection_toolbar_generation(),
+            request.present_menu,
+            ToolbarAnchor {
+                x: request.anchor.x0 as f32,
+                y: request.anchor.y0 as f32,
+                w: request.anchor.width() as f32,
+                h: request.anchor.height() as f32,
+            },
+            ToolbarActions {
+                copy: request.actions.copy,
+                cut: request.actions.cut,
+                paste: request.actions.paste,
+                select_all: request.actions.select_all,
+            },
+        );
+        match CString::new(json) {
+            // Hand the caller ownership; reclaimed in `string_free`.
+            Ok(cstr) => cstr.into_raw(),
+            // Unreachable in practice (the builder emits no NUL), but a benign
+            // null beats corrupting — mirroring `ime_state_json`.
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
 /// `frust_string_free`: release a C string previously returned by
-/// [`ime_state_json`]/`frust_ime_state_json`. Idempotent on null.
+/// [`ime_state_json`]/`frust_ime_state_json`,
+/// [`take_clipboard_write`]/`frust_take_clipboard_write`,
+/// [`selection_toolbar_json`]/`frust_selection_toolbar_json` or
+/// [`platform_view_commands_json`]/`frust_platform_view_commands_json`.
+/// Idempotent on null.
 pub fn string_free(s: *mut c_char) {
     guard("frust_string_free", (), || {
         if s.is_null() {
             return;
         }
-        // SAFETY: `s` was produced by `CString::into_raw` in `ime_state_json` and
-        // is reclaimed exactly once here (the Swift side calls this exactly once
+        // SAFETY: `s` was produced by `CString::into_raw` in one of this
+        // module's string-returning exports (see this fn's doc) and is
+        // reclaimed exactly once here (the Swift side calls this exactly once
         // per non-null result, via `defer`).
         drop(unsafe { CString::from_raw(s) });
     });
@@ -1399,7 +1622,11 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
 /// mandate matching on for this reason: an unrecognized variant becomes the
 /// *strictest* wire string its own predicates justify, never the loosest.
 /// Mirrors `frust_shell_android::jni_glue::content_type_wire` byte-for-byte
-/// (same four wire strings, same fail-closed rule).
+/// (same four wire strings, same fail-closed rule). The neighbouring
+/// `"suppressSoftKeyboard"` flag — [`ImeState::suppress_soft_keyboard`],
+/// serialized last by [`crate::ffi_support::ime_state_json`] — is spelled
+/// identically on the Android side and sits in the same slot there, so that
+/// mirror covers the whole object rather than this field alone.
 fn content_type_wire(content_type: ImeContentType) -> &'static str {
     match content_type {
         ImeContentType::Normal => "normal",
@@ -1422,6 +1649,10 @@ fn content_type_wire(content_type: ImeContentType) -> &'static str {
 /// bridge JSON, mapping the logical-pixel caret rect into the flat
 /// caretX/Y/W/H the Swift side expects and [`ImeContentType`] into the
 /// `"contentType"` wire string (see [`content_type_wire`]).
+///
+/// [`ImeState::suppress_soft_keyboard`] rides across as
+/// `"suppressSoftKeyboard"`; the absent-state sentinel publishes `false`,
+/// since an inactive surface has no keyboard to suppress.
 fn ime_state_to_json(state: Option<ImeState>) -> String {
     match state {
         Some(s) => {
@@ -1440,6 +1671,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
                 s.editing.composing_extent,
                 caret,
                 content_type_wire(s.content_type),
+                s.suppress_soft_keyboard,
             )
         }
         // No focused field / no published surface: the inactive sentinel.
@@ -1452,6 +1684,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
             -1,
             None,
             content_type_wire(ImeContentType::Normal),
+            false,
         ),
     }
 }
@@ -1557,6 +1790,46 @@ pub fn set_insets(
                 vi_t as f64,
                 vi_r as f64,
                 vi_b as f64,
+            ]);
+        }
+    });
+}
+
+/// `frust_set_corner_insets`: deliver the iPadOS 26+ window control's corner
+/// footprint. The eight `f32`s are the control's protrusion beyond the safe
+/// area per **physical** corner, in the order
+/// [`logical_corner_insets`](frust_shell_common::logical_corner_insets)
+/// expects — `tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h`.
+///
+/// Values are **logical points** (the same no-scale-division contract as
+/// [`set_insets`]), merged into the stored composite `WindowInsets` by
+/// [`IosAppHandle::set_corner_insets`] — which keeps the edge half
+/// `frust_set_insets` delivered and no-op-guards an unchanged value, so Swift's
+/// per-layout push is free. A missing handle is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub fn set_corner_insets(
+    handle: *mut c_void,
+    tl_w: f32,
+    tl_h: f32,
+    tr_w: f32,
+    tr_h: f32,
+    bl_w: f32,
+    bl_h: f32,
+    br_w: f32,
+    br_h: f32,
+) {
+    guard("frust_set_corner_insets", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_corner_insets([
+                tl_w as f64,
+                tl_h as f64,
+                tr_w as f64,
+                tr_h as f64,
+                bl_w as f64,
+                bl_h as f64,
+                br_w as f64,
+                br_h as f64,
             ]);
         }
     });
@@ -1875,6 +2148,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::Password,
+            suppress_soft_keyboard: false,
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"password""#));
@@ -1898,9 +2172,42 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::NoSuggestions,
+            suppress_soft_keyboard: false,
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    #[test]
+    fn published_suppression_hint_carries_it_through_to_json() {
+        // A focused read-only field stays active on purpose — that is what
+        // keeps the Swift first responder, and with it `copy:` and the system
+        // edit menu, alive — and asks only for the keyboard to stay down.
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "read-only".to_string(),
+                selection_base: 0,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Normal,
+            suppress_soft_keyboard: true,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""suppressSoftKeyboard":true"#));
+        // The hint is orthogonal to the classification: a suppressed field is
+        // still whatever content type it published.
+        assert!(json.contains(r#""contentType":"normal""#));
+    }
+
+    #[test]
+    fn absent_state_suppresses_nothing() {
+        // No focused field: there is no keyboard up to suppress, and the flag
+        // must not read as `true` by accident of the sentinel's construction.
+        assert!(ime_state_to_json(None).contains(r#""suppressSoftKeyboard":false"#));
     }
 
     #[test]
@@ -1916,6 +2223,7 @@ mod ime_content_type_wire {
             },
             caret: None,
             content_type: ImeContentType::Terminal,
+            suppress_soft_keyboard: false,
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"terminal""#));
