@@ -187,3 +187,16 @@ Simulator app for Option-drag, and `idb` injects one contact only.
 
 On a phone-width viewport the Graph page opens at 1.0x over an empty corner of
 the 1400x1000 content, so press Fit first.
+
+f3-01 re-check (pinch survives the page scroll), iPhone SE, iOS 26.7,
+2026-10-02, build `f47a9828`, human-run. The Graph page overflows the SE screen,
+so the page body scrolls vertically. `pinch_detector` has no consumer in
+playground, so only `pan_zoom`'s half of the fix runs on a device here.
+
+| Leg | Result |
+|-----|--------|
+| A: pinch starting with one finger on a node, both fingers travelling vertically, zooms throughout and the page does not scroll | PASS |
+| B: the same pinch starting on empty canvas | PASS |
+| C: one finger on a node, vertical drag, scrolls the page | PASS |
+| D: right after a pinch ends, leg C scrolls the page again | PASS |
+| E: button tap, page scroll, Keys focus at this build | PASS |
