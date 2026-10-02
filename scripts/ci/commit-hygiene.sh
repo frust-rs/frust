@@ -13,7 +13,8 @@
 # A commit fails when a message line matches (case-insensitively) one of the
 # MESSAGE_RULES below, or when its author or committer e-mail matches one of the
 # IDENTITY_RULES. One line is printed per violation (short SHA, rule, offending
-# text) followed by a summary line; the exit status is 1 on any violation.
+# text) followed by a summary line; the exit status is 1 on any violation, and
+# 2 when the arguments are unusable or a revision does not resolve.
 #
 # Portable to macOS bash 3.2 and Linux: no associative arrays, no mapfile.
 
@@ -100,6 +101,13 @@ check_range() {
     cur_msg_bad=0
     cur_id_bad=0
   }
+  # The loop below cannot see `git log` fail (a process substitution's exit
+  # status is discarded), so resolve the arguments first: a range that cannot
+  # be listed is an error, never a clean result.
+  if ! git rev-list "$@" >/dev/null; then
+    echo "commit-hygiene: cannot list the requested commits: $*" >&2
+    exit 2
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" == $'\001'* ]]; then
       finish
@@ -161,6 +169,15 @@ self_test() {
   expect_id_dirty "conductor@example.invalid"
   expect_id_clean "person@example.com"
   expect_id_clean "localdev@example.com"
+
+  # Range mode must refuse a revision that does not resolve: status 2, no summary line.
+  local range_out range_status=0
+  range_out="$(check_range 'refs/commit-hygiene-self-test/does-not-exist' 2>/dev/null)" || range_status=$?
+  if [ "$range_status" -eq 2 ] && [ -z "$range_out" ]; then
+    echo "self-test ok:   unresolvable revision refused"
+  else
+    echo "self-test FAIL: unresolvable revision gave status $range_status: $range_out"; failures=$((failures + 1))
+  fi
 
   if [ "$failures" -ne 0 ]; then
     echo "self-test: $failures failure(s)"
