@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "URL launcher plugin for Frust apps: opens an http or https URL in the default external handler on Android, iOS, macOS, Linux and Windows."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # UrlLauncherError variants callers match on — thiserror per CODE_STANDARDS.
@@ -14,7 +20,7 @@ thiserror = { workspace = true }
 # `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
 # Plugin Conventions). Unconditional like `frust-haptics`'s own copy: the
 # crate is inert off Android, so declaring it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 
 # Android: `Intent`/`Uri`/`startActivity` via plain JNI (no Kotlin/Gradle
 # module — see `src/android.rs`'s module doc for why one isn't needed).

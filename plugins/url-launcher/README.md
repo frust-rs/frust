@@ -6,6 +6,8 @@ A minimal **external URL launcher** plugin for frust apps — Android
 desktop (macOS/Linux/Windows) the platform's own opener (`open`/`xdg-open`/
 `ShellExecuteW`).
 
+**Platform support:** Android, iOS, macOS, Linux and Windows. On any other target the call returns `UrlLauncherError::Platform`.
+
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
@@ -16,7 +18,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # crates.io later
+frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # or the crates.io release, e.g. version = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -455,3 +457,13 @@ arm's `SE_ERR_*` error mapping — file a LIMITATIONS entry for macOS if one
 does not already exist.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
+
+## Links and license
+
+Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## License
+
+Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`)
+or the MIT license (`LICENSE-MIT`) at your option (SPDX: `MIT OR Apache-2.0`).
+Both license files are included beside this README.

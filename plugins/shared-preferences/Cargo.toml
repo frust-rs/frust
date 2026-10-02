@@ -4,17 +4,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Synchronous typed key-value preferences for Frust apps: NSUserDefaults on Apple, SharedPreferences on Android, a JSON file on Linux and Windows."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # The Android platform-handle substrate this crate's Android backend
 # calls through; the only `frust-*` dependency this crate is
 # allowed (platform-plugin charter — see `frust-plugin`'s crate doc).
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 # Shared data-dir resolution + atomic write for the `file` backend — a
 # second `frust-*` dependency accepted per the amended platform-plugin
 # charter (leaf substrate, no `frust-*` deps of its own, like
 # `frust-plugin`; see `docs/ARCHITECTURE.md`).
-frust-paths = { path = "../../crates/frust-paths" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.5.0" }
 # PrefsError variants callers match on — thiserror per CODE_STANDARDS.
 thiserror = { workspace = true }
 # The file backend's on-disk JSON map encoding.
