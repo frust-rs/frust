@@ -726,6 +726,11 @@ data-crate rlib presence, Mach-O section splits) all hold under the new baseline
 
 ---
 
+## Links
+
+- Documentation: <https://frust.dev>
+- Source: <https://github.com/frust-rs/frust>
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license at your option. See the [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) files for details.
