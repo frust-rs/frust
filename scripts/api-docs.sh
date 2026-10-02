@@ -15,7 +15,7 @@
 #
 # Usage: scripts/api-docs.sh [--check]
 #   --check   Verify target/doc/frust/index.html exists and exit non-zero
-#             otherwise. Used by the conductor's verification gate.
+#             otherwise. Used as the API-reference build gate before publishing.
 #
 # Environment variables:
 #   OUT       Optional output directory (default: target/doc). When set,
