@@ -2174,6 +2174,18 @@ pub struct ChildPod {
     /// subsequent moves/releases straight to it (capture-by-recorded-path).
     /// Cleared by the container on `Up`/`Cancel` via [`ChildPod::set_active`].
     active: bool,
+    /// Whether the child widget itself called
+    /// [`EventCtx::capture_contacts`] on the capture that set `active` — the
+    /// pod a non-claimant contact's forward-only walk ends at (see
+    /// [`ChildPod::event_child`]). Meaningful only while `active`; reset when a
+    /// fresh capture is recorded and whenever the link is cleared.
+    contacts_captor: bool,
+    /// Whether the child or a widget below it called
+    /// [`EventCtx::capture_contacts`] on the capture that set `active` — what
+    /// [`EventCtx::release_captured_child`] asks to decide whether releasing
+    /// this pod ends the gesture's contact opt-in. Same lifetime as
+    /// `contacts_captor`.
+    contacts_path: bool,
     /// Set when the child holds the focus path, so the container can route
     /// keyboard/IME events straight to it with no hit test (focus is the
     /// second recorded path, a mirror of `active`). Maintained by
@@ -2397,6 +2409,8 @@ impl ChildPod {
             size: Size::ZERO,
             transform: None,
             active: false,
+            contacts_captor: false,
+            contacts_path: false,
             focused: false,
             focus_epoch: 0,
             focus_root: 0,
@@ -2566,11 +2580,27 @@ impl ChildPod {
     /// it would strand the claimant's own follow-ups. Outside such a pass — every
     /// single-pointer dispatch, a rebuild, a container's own teardown — a clear
     /// takes effect as always.
+    ///
+    /// A container that clears the link to take the gesture over from its
+    /// child (rather than because the gesture ended) should release it through
+    /// [`EventCtx::release_captured_child`] instead, which also ends the
+    /// gesture's contact opt-in when the released subtree held it.
     pub fn set_active(&mut self, active: bool) {
         if !active && crate::event::in_secondary_contact_pass() {
             return;
         }
         self.active = active;
+        if !active {
+            self.contacts_captor = false;
+            self.contacts_path = false;
+        }
+    }
+
+    /// Whether this pod's recorded active path leads to the widget that opted
+    /// into the gesture's other contacts ([`EventCtx::capture_contacts`]) —
+    /// the child itself, or a widget below it.
+    pub(crate) fn holds_contact_opt_in(&self) -> bool {
+        self.active && self.contacts_path
     }
 
     /// Whether this child has a recorded focus path at all — **not** whether
@@ -2945,8 +2975,62 @@ impl ChildPod {
     /// through the inverse of its local→container mapping instead
     /// ([`InputEvent::transformed`]); everything else about the dispatch —
     /// capture, contact and focus bookkeeping, hover — is identical.
+    ///
+    /// # Another contact walks the active path forward-only
+    ///
+    /// A non-claimant contact the root delivers down a live capture (rule (c) of
+    /// [`InputEvent::PointerContact`]'s contract) is meant for the widget that
+    /// opted in with [`EventCtx::capture_contacts`] — **the captor** — and for
+    /// nothing above it. The containers between the root and the captor must
+    /// not run their own pointer handling on it: a scroll view that saw a second
+    /// finger's `Down` as its own would re-arm its drag from the wrong finger and
+    /// take the gesture away from the captor on the claimant's next move.
+    ///
+    /// A pod cannot reach into its child widget's own pods, so the walk travels
+    /// on the one route every container already provides without running its
+    /// pointer machinery: the broadcast-first rule. While the root walks such a
+    /// contact, each container on the path is handed an inert carrier (an
+    /// [`InputEvent::Overlay`] addressed to a key no overlay owner holds, which
+    /// every widget ignores and every container forwards to its children before
+    /// anything else), and the real event rides beside it, re-based into each
+    /// pod's space on the way down. This method then decides, per pod:
+    ///
+    /// * **Off the recorded active path:** nothing — the child widget is not
+    ///   called at all.
+    /// * **The captor** (the child itself opted in on the capture that made
+    ///   this pod active): the child receives the real event, translated as
+    ///   usual, with the walk closed, so it — and whatever it routes below
+    ///   itself — handles the contact the ordinary way. The walk ends here: a
+    ///   widget below the captor that also opted in hears the contact only if
+    ///   the captor forwards it.
+    /// * **On the path, above the captor:** the child receives the carrier, so
+    ///   its own handler runs but none of its gesture, capture, focus, blur or
+    ///   hit-test logic does; the walk continues into its children. The result
+    ///   reported upward is the captor's, not the carrier's `Ignored`. If the
+    ///   carrier never reaches a pod on the path (a container whose captured
+    ///   child is not one of its broadcast targets — an overlay owner whose
+    ///   captured pod is a floated surface), this child alone is handed the
+    ///   real event the ordinary way instead.
+    ///
+    /// Everything this method folds back into `ctx` — redraw, capture, focus,
+    /// IME — still bubbles from the captor through every pod on the way back
+    /// up. No hover, cursor or blur bookkeeping moves: the root opens no hover
+    /// pass for a non-claimant contact, and no container above the captor runs
+    /// the blur sweep it would run on a `Down`. Every other dispatch, including
+    /// the claimant's own events, takes exactly the path described above this
+    /// section.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let local = match self.transform {
+        if let Some(real) = crate::event::secondary_walk_event(event) {
+            return self.walk_secondary(ctx, &real);
+        }
+        let local = self.localize(event);
+        self.dispatch_local(ctx, &local)
+    }
+
+    /// `event` (in the container's space) mapped into the child's local space —
+    /// translated by `-origin`, or through the inverse of a set transform.
+    fn localize(&self, event: &InputEvent) -> InputEvent {
+        match self.transform {
             None => event.translated(-self.origin.to_vec2()),
             Some(transform) => {
                 match crate::hit::checked_inverse(&self.local_to_container(transform)) {
@@ -2957,7 +3041,36 @@ impl ChildPod {
                     None => event.translated(-self.origin.to_vec2()),
                 }
             }
+        }
+    }
+
+    /// One step of a non-claimant contact's forward-only walk (see
+    /// [`ChildPod::event_child`]); `real` is the contact's event in the
+    /// container's space.
+    fn walk_secondary(&mut self, ctx: &mut EventCtx, real: &InputEvent) -> EventResult {
+        if !self.active {
+            return EventResult::Ignored;
+        }
+        let local = self.localize(real);
+        let result = if self.contacts_captor {
+            crate::event::without_secondary_walk(|| self.dispatch_local(ctx, &local))
+        } else {
+            let carrier = crate::event::secondary_walk_carrier();
+            let (_, delivered) = crate::event::run_secondary_walk(local.clone(), || {
+                self.dispatch_local(ctx, &carrier)
+            });
+            match delivered {
+                Some(result) => result,
+                None => crate::event::without_secondary_walk(|| self.dispatch_local(ctx, &local)),
+            }
         };
+        crate::event::note_secondary_delivered(result);
+        result
+    }
+
+    /// Dispatch `local` (already in the child's space) to the child widget and
+    /// fold everything it bubbled back into `ctx`.
+    fn dispatch_local(&mut self, ctx: &mut EventCtx, local: &InputEvent) -> EventResult {
         // The child's hover link, composed with the ancestor chain exactly like
         // `focused` (see `paint_child`).
         let hovered = self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered();
@@ -2975,7 +3088,18 @@ impl ChildPod {
         // The child context inherits `ctx.pointer_id()` unchanged (see
         // `EventCtx::child_ctx`), so every widget on the routed path reports the
         // same contact.
-        let (captured, contacts, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {
+        let (
+            (opted_in, opted_in_at_or_below),
+            captured,
+            contacts,
+            released,
+            hover_claimed,
+            focus_req,
+            focus_rel,
+            redraw,
+            ime,
+            result,
+        ) = {
             let mut child_ctx = ctx.child_ctx(
                 self.origin,
                 self.size,
@@ -2983,10 +3107,17 @@ impl ChildPod {
                 hovered,
                 hover_eligible,
             );
-            let result = self.widget.event(&mut child_ctx, &local);
+            // The frame attributes a `capture_contacts` call to this child (or
+            // to a widget below it) across a component boundary, and marks the
+            // dispatch as running under the live opt-in's holder.
+            let frame = crate::event::ContactFrame::enter(self.active && self.contacts_captor);
+            let result = self.widget.event(&mut child_ctx, local);
+            let (opted_in, opted_in_at_or_below) = frame.close();
             (
+                (opted_in, opted_in_at_or_below),
                 child_ctx.is_pointer_captured(),
                 child_ctx.is_contact_capture_requested(),
+                child_ctx.is_capture_released(),
                 child_ctx.is_hover_claimed(),
                 child_ctx.is_focus_requested(),
                 child_ctx.is_focus_released(),
@@ -2996,7 +3127,15 @@ impl ChildPod {
             )
         };
         if captured {
+            if !self.active {
+                // A fresh capture: whatever opt-in the last gesture recorded
+                // here is gone.
+                self.contacts_captor = false;
+                self.contacts_path = false;
+            }
             self.active = true;
+            self.contacts_captor |= opted_in;
+            self.contacts_path |= opted_in_at_or_below;
         }
         // Stamp the claim onto this pod so the whole path from the claimant up to
         // the root carries the epoch the next paint compares against. Never
@@ -3030,6 +3169,7 @@ impl ChildPod {
             redraw,
             captured,
             contacts,
+            released,
             hover_claimed,
             focus_req,
             focus_rel,
@@ -5561,5 +5701,128 @@ mod transform_tests {
             (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
             (10.0, 20.0, 110.0, 120.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod contact_release_tests {
+    use super::*;
+    use crate::event::{ContactPass, PointerButton, PointerEvent, PointerId, PointerPhase};
+
+    /// A leaf that captures on `Down`, opting into the gesture's other contacts
+    /// when `opt_in` is set.
+    struct Grab {
+        opt_in: bool,
+    }
+    impl Widget for Grab {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(20.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.capture_pointer();
+                if self.opt_in {
+                    ctx.capture_contacts();
+                }
+            }
+            EventResult::Handled
+        }
+    }
+
+    /// A single-child container that takes the gesture over from its captured
+    /// child on any `Move`.
+    struct Taker {
+        inner: ChildPod,
+    }
+    impl Widget for Taker {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner.layout_child(ctx, bc);
+            bc.constrain(Size::new(20.0, 20.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p)
+                    if p.phase == PointerPhase::Move && self.inner.is_active() =>
+                {
+                    ctx.release_captured_child(&mut self.inner);
+                    EventResult::Handled
+                }
+                _ => self.inner.event_child(ctx, event),
+            }
+        }
+    }
+
+    /// An outer pod around a [`Taker`] around a [`Grab`].
+    fn nested(opt_in: bool) -> ChildPod {
+        let mut pod = ChildPod::new(Box::new(Taker {
+            inner: ChildPod::new(Box::new(Grab { opt_in })),
+        }));
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(20.0, 20.0)),
+        );
+        pod
+    }
+
+    fn pointer(phase: PointerPhase) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Dispatch into `pod` from a fresh context; whether a capture release
+    /// bubbled out of it.
+    fn released(pod: &mut ChildPod, phase: PointerPhase) -> bool {
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(20.0, 20.0));
+        pod.event_child(&mut ctx, &pointer(phase));
+        ctx.is_capture_released()
+    }
+
+    fn inner_active(pod: &mut ChildPod) -> bool {
+        pod.widget_mut()
+            .downcast_mut::<Taker>()
+            .expect("a Taker")
+            .inner
+            .is_active()
+    }
+
+    #[test]
+    fn releasing_the_opted_in_child_signals_and_bubbles() {
+        let mut pod = nested(true);
+        assert!(!released(&mut pod, PointerPhase::Down));
+        assert!(pod.holds_contact_opt_in(), "the opt-in below is recorded");
+        assert!(
+            released(&mut pod, PointerPhase::Move),
+            "and its release bubbles"
+        );
+        assert!(!inner_active(&mut pod), "the child left the active path");
+        assert!(pod.is_active(), "the container that took over keeps it");
+    }
+
+    #[test]
+    fn releasing_a_child_without_the_opt_in_clears_the_link_silently() {
+        let mut pod = nested(false);
+        released(&mut pod, PointerPhase::Down);
+        assert!(!pod.holds_contact_opt_in());
+        assert!(!released(&mut pod, PointerPhase::Move));
+        assert!(!inner_active(&mut pod));
+    }
+
+    #[test]
+    fn a_non_claimant_contact_cannot_release_anything() {
+        let mut pod = nested(true);
+        released(&mut pod, PointerPhase::Down);
+        let _pass = ContactPass::enter(PointerId::touch(1), true);
+        assert!(!released(&mut pod, PointerPhase::Move));
+        assert!(inner_active(&mut pod), "the claimant's link stands");
     }
 }

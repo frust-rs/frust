@@ -22,9 +22,9 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    ContactPass, CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
-    OverlayEvent, OverlayEventKind, PointerButton, PointerEvent, PointerId, PointerPhase,
-    RequestPass,
+    ContactFrame, ContactPass, CursorIcon, EventCtx, EventOutcome, EventResult, ImeState,
+    InputEvent, OverlayEvent, OverlayEventKind, PointerButton, PointerEvent, PointerId,
+    PointerPhase, RequestPass,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -308,7 +308,15 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// Whether the live capture's captor opted into the gesture's other
     /// contacts ([`EventCtx::capture_contacts`]) on the `Down` it captured
     /// with. Meaningless — and kept `false` — while nothing is captured.
+    /// Cleared early when a container takes the gesture over from that captor
+    /// ([`EventCtx::release_captured_child`]).
     capture_contacts: bool,
+    /// Whether the live opt-in was made by the root widget itself rather than
+    /// by a pod below it — in which case a non-claimant contact is handed to the
+    /// root widget directly instead of walking the active path (see
+    /// [`crate::widget::ChildPod::event_child`]). Same lifetime as
+    /// `capture_contacts`.
+    contacts_captor_is_root: bool,
     /// Whether some widget in the tree currently holds focus. Root-level mirror of
     /// the per-container `focused` path bookkeeping (the focus analog of
     /// `capture_claimant`): set when a dispatch requested focus, cleared by a
@@ -613,6 +621,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             window_size: Size::ZERO,
             capture_claimant: None,
             capture_contacts: false,
+            contacts_captor_is_root: false,
             focus_active: false,
             focus_surface: None,
             // Past a fresh pod's `0` stamp, and past the `(0, 0)` a rootless
@@ -774,6 +783,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// whose `Up`/`Cancel` can end it — or `None` while nothing is captured.
     pub fn pointer_capture_claimant(&self) -> Option<PointerId> {
         self.capture_claimant
+    }
+
+    /// Whether the capture in flight routes the gesture's **other** contacts to
+    /// its captor — the captor opted in with [`EventCtx::capture_contacts`] on
+    /// the `Down` it captured with, and no container has since taken the
+    /// gesture over from it ([`EventCtx::release_captured_child`]). `false`
+    /// while nothing is captured.
+    pub fn pointer_capture_contacts(&self) -> bool {
+        self.capture_contacts
     }
 
     /// Whether some widget in the tree currently holds keyboard/IME focus.
@@ -2292,6 +2310,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // `EditCommand` that never moved a pointer. See `RequestPass`.
         let request_slot = RequestPass::enter();
 
+        // Whether the root widget itself holds the live opt-in (rather than a
+        // pod below it), and whether it opted in during this dispatch.
+        let contacts_captor_is_root = self.capture_claimant.is_some()
+            && self.capture_contacts
+            && self.contacts_captor_is_root;
+        let root_opted_in;
+
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
             let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
@@ -2308,7 +2333,32 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // destructor can tell this root's link from another root's
             // identically-numbered epoch (see `root_identity`).
             ctx.set_hover_root(root_identity);
-            let result = pod.widget_mut().event(&mut ctx, event);
+            // The root widget's own contact frame: attributes a
+            // `capture_contacts` made by the root widget itself (not by a pod
+            // below it) to the root, and marks the dispatch as running under the
+            // live opt-in's holder when the root widget is that holder.
+            let frame = ContactFrame::enter(contacts_captor_is_root);
+            let result = if secondary && !contacts_captor_is_root {
+                // A non-claimant contact walks the recorded active path
+                // forward-only (see `ChildPod::event_child`): the root widget is
+                // handed the inert carrier and the real event rides beside it,
+                // so only the captor that opted in runs its pointer handling. A
+                // walk that never reached a pod on the path (the root widget
+                // does not forward broadcasts to its captured child) falls back
+                // to the ordinary delivery.
+                let widget = pod.widget_mut();
+                let carrier = crate::event::secondary_walk_carrier();
+                let (_, delivered) = crate::event::run_secondary_walk(event.clone(), || {
+                    widget.event(&mut ctx, &carrier)
+                });
+                match delivered {
+                    Some(result) => result,
+                    None => crate::event::without_secondary_walk(|| widget.event(&mut ctx, event)),
+                }
+            } else {
+                pod.widget_mut().event(&mut ctx, event)
+            };
+            root_opted_in = frame.close().0;
             let handled = matches!(result, EventResult::Handled);
             (
                 handled,
@@ -2425,6 +2475,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                         // is still heard.
                         self.capture_claimant = Some(pointer_id);
                         self.capture_contacts = contact_pass.contacts_requested();
+                        self.contacts_captor_is_root = root_opted_in;
                     }
                     if focus_req {
                         focus_claim_honoured = true;
@@ -2448,6 +2499,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 PointerPhase::Up | PointerPhase::Cancel => {
                     self.capture_claimant = None;
                     self.capture_contacts = false;
+                    self.contacts_captor_is_root = false;
                 }
                 PointerPhase::Move => {}
             },
@@ -2570,6 +2622,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 if captured {
                     self.capture_claimant = Some(pointer_id);
                     self.capture_contacts = contact_pass.contacts_requested();
+                    self.contacts_captor_is_root = root_opted_in;
                 }
                 // ...and released on the phase that ends the gesture, in the
                 // same door it was claimed through. The claim is mirrored on any
@@ -2595,8 +2648,25 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 {
                     self.capture_claimant = None;
                     self.capture_contacts = false;
+                    self.contacts_captor_is_root = false;
                 }
             }
+        }
+
+        // A takeover during the claimant's own dispatch: a container cancelled
+        // the widget that opted into the gesture's other contacts and released
+        // it from the active path (`EventCtx::release_captured_child`). The
+        // opt-in goes with it — unless the container that took over opted in
+        // itself afterwards, which the pass records — so the other contacts are
+        // dropped from here on rather than routed to a captor that is gone. The
+        // claimant latch is deliberately kept: the gesture is still the
+        // claimant's, now held by the container that took it over (still on the
+        // active path, as the released child's ancestor), and only the
+        // claimant's own `Up`/`Cancel` ends it. Never on a non-claimant
+        // contact's dispatch, in which no container can clear a recorded link
+        // (`ChildPod::set_active`), so nothing could have left the path.
+        if !secondary && self.capture_claimant.is_some() && contact_pass.capture_released() {
+            self.capture_contacts = contact_pass.contacts_requested();
         }
 
         // Settle the session's identity — the one write that decides which
@@ -2699,9 +2769,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// `Some(false)` routes it as the gesture's own pointer (rule (a): slot `0`
     /// with nothing captured, hit-tested; or the claimant of a live capture,
     /// down the captured path). `Some(true)` routes it as a **non-claimant**
-    /// contact down a live capture's path, which happens only when the captor
-    /// opted in (rule (c)). `None` drops it: an additional contact with nothing
-    /// captured (rule (b)), or one the captor did not opt into (rule (c)).
+    /// contact down a live capture's path, which happens only while the captor's
+    /// opt-in stands (rule (c)): the dispatch then walks the recorded active
+    /// path forward-only, so only the captor's own handler sees it (see
+    /// [`crate::widget::ChildPod::event_child`]). `None` drops it: an additional
+    /// contact with nothing captured (rule (b)), or one the captor did not opt
+    /// into — or whose opt-in ended when a container took the gesture over from
+    /// the captor ([`EventCtx::release_captured_child`]) — (rule (c)).
     fn contact_route(&self, pointer_id: PointerId) -> Option<bool> {
         match self.capture_claimant {
             None if pointer_id.slot == 0 => Some(false),
@@ -9318,6 +9392,325 @@ mod contact_tests {
             "a second finger is not a tap outside"
         );
         assert_eq!(root.focus_ime_generation(), generation);
+    }
+
+    /// A container in front of [`Pair`] with pointer handling of its own that
+    /// another contact must never reach: it logs every pointer event it routes
+    /// (tag `'G'`) and treats a `Down` outside its child as a tap outside — an
+    /// explicit focus release. With `forwards_broadcasts` unset it drops every
+    /// broadcast instead of forwarding it (a container the forward-only walk
+    /// cannot pass).
+    struct Guard {
+        inner: crate::widget::ChildPod,
+        forwards_broadcasts: bool,
+    }
+    impl crate::widget::Widget for Guard {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner
+                .layout_child(ctx, &BoxConstraints::tight(Size::new(100.0, 60.0)));
+            self.inner.set_origin(Point::ZERO);
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                if self.forwards_broadcasts {
+                    self.inner.event_child(ctx, event);
+                }
+                return EventResult::Ignored;
+            }
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            let id = ctx.pointer_id();
+            ctx.state_mut::<Log>().seen.push(('G', id, p.phase));
+            let inside = self.inner.contains(p.position);
+            let result = if self.inner.is_active() || inside {
+                self.inner.event_child(ctx, event)
+            } else {
+                EventResult::Ignored
+            };
+            if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel) {
+                self.inner.set_active(false);
+            }
+            if p.phase == PointerPhase::Down && !inside {
+                ctx.release_focus();
+            }
+            result
+        }
+    }
+
+    struct GuardView {
+        forwards_broadcasts: bool,
+    }
+    impl View<Log> for GuardView {
+        type Element = Guard;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Guard {
+            Guard {
+                inner: crate::widget::ChildPod::new(Box::new(Pair {
+                    a: crate::widget::ChildPod::new(Box::new(Probe {
+                        tag: 'A',
+                        opt_in: true,
+                    })),
+                    b: crate::widget::ChildPod::new(Box::new(Probe {
+                        tag: 'B',
+                        opt_in: true,
+                    })),
+                })),
+                forwards_broadcasts: self.forwards_broadcasts,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut Guard, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn guarded_root(forwards_broadcasts: bool) -> (RenderRoot<Log, GuardView>, Log) {
+        let mut root: RenderRoot<Log, GuardView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(
+            &mut |_| GuardView {
+                forwards_broadcasts,
+            },
+            &mut log,
+        );
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    #[test]
+    fn another_contact_reaches_only_the_captor_and_moves_no_hover_or_focus() {
+        use PointerPhase::{Down, Move, Up};
+        let (mut root, mut log) = guarded_root(true);
+        let (t0, t1) = (PointerId::touch(0), PointerId::touch(1));
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert!(root.is_focus_active());
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts());
+        let (focus_generation, hover) = (root.focus_ime_generation(), root.is_hover_active());
+
+        // A second finger landing outside the guard's child: delivered to A down
+        // the captured path, while the guard — whose own `Down` handling would
+        // release focus on a tap outside — never runs on it.
+        assert!(
+            root.event(&mut log, &touch(1, Down, NOWHERE.0, NOWHERE.1))
+                .handled
+        );
+        root.event(&mut log, &touch(1, Move, B.0, B.1));
+        root.event(&mut log, &touch(1, Up, B.0, B.1));
+        assert_eq!(
+            log.seen,
+            [
+                ('G', t0, Down),
+                ('A', t0, Down),
+                ('A', t1, Down),
+                ('A', t1, Move),
+                ('A', t1, Up),
+            ],
+            "only the captor saw touch(1)"
+        );
+        assert!(root.is_focus_active(), "no tap outside was seen");
+        assert_eq!(root.focus_ime_generation(), focus_generation);
+        assert_eq!(root.is_hover_active(), hover);
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts());
+
+        // The claimant itself still takes the ordinary path through the guard.
+        root.event(&mut log, &touch(0, Move, NOWHERE.0, NOWHERE.1));
+        assert_eq!(
+            log.seen[5..],
+            [('G', t0, Move), ('A', t0, Move)],
+            "the claimant's own move runs every handler on the path"
+        );
+        root.event(&mut log, &touch(0, Up, NOWHERE.0, NOWHERE.1));
+        assert!(!root.is_pointer_captured());
+        assert!(!root.pointer_capture_contacts());
+    }
+
+    #[test]
+    fn a_walk_a_container_cannot_pass_falls_back_to_the_ordinary_delivery() {
+        use PointerPhase::Down;
+        let (mut root, mut log) = guarded_root(false);
+        let (t0, t1) = (PointerId::touch(0), PointerId::touch(1));
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        // The guard drops the carrier, so it is handed the real event instead —
+        // and the captor still receives it, down the captured path.
+        assert!(root.event(&mut log, &touch(1, Down, B.0, B.1)).handled);
+        assert_eq!(
+            log.seen,
+            [
+                ('G', t0, Down),
+                ('A', t0, Down),
+                ('G', t1, Down),
+                ('A', t1, Down),
+            ]
+        );
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+    }
+
+    /// A root container that takes a gesture over from its child once the
+    /// claimant moves more than 10 px: it cancels the child and releases it
+    /// through [`EventCtx::release_captured_child`]. Logs every pointer event it
+    /// sees (tag `'T'`); with `opt_in` it also opts into the gesture's other
+    /// contacts itself, ahead of its child, on the `Down`.
+    struct TakeOver {
+        inner: crate::widget::ChildPod,
+        opt_in: bool,
+        down_at: Option<Point>,
+        released_seen: bool,
+    }
+    impl crate::widget::Widget for TakeOver {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.inner.layout_child(ctx, bc);
+            self.inner.set_origin(Point::ZERO);
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.inner.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                self.inner.event_child(ctx, event);
+                return EventResult::Ignored;
+            }
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            let id = ctx.pointer_id();
+            ctx.state_mut::<Log>().seen.push(('T', id, p.phase));
+            match p.phase {
+                PointerPhase::Down if self.down_at.is_none() => {
+                    self.down_at = Some(p.position);
+                    ctx.capture_pointer();
+                    if self.opt_in {
+                        ctx.capture_contacts();
+                    }
+                    if self.inner.contains(p.position) {
+                        self.inner.event_child(ctx, event);
+                    }
+                }
+                PointerPhase::Move => {
+                    let moved = self.down_at.map(|at| (p.position - at).hypot());
+                    if self.inner.is_active() && moved.is_some_and(|d| d > 10.0) {
+                        let cancel = InputEvent::Pointer(PointerEvent {
+                            phase: PointerPhase::Cancel,
+                            ..*p
+                        });
+                        self.inner.event_child(ctx, &cancel);
+                        ctx.release_captured_child(&mut self.inner);
+                        self.released_seen = ctx.is_capture_released();
+                    } else if self.inner.is_active() {
+                        self.inner.event_child(ctx, event);
+                    }
+                }
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    if self.inner.is_active() {
+                        self.inner.event_child(ctx, event);
+                        self.inner.set_active(false);
+                    }
+                    self.down_at = None;
+                }
+                PointerPhase::Down => {}
+            }
+            EventResult::Handled
+        }
+    }
+
+    struct TakeOverView {
+        opt_in: bool,
+    }
+    impl View<Log> for TakeOverView {
+        type Element = TakeOver;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TakeOver {
+            TakeOver {
+                inner: crate::widget::ChildPod::new(Box::new(Probe {
+                    tag: 'A',
+                    opt_in: true,
+                })),
+                opt_in: self.opt_in,
+                down_at: None,
+                released_seen: false,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut TakeOver, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn take_over_root(opt_in: bool) -> (RenderRoot<Log, TakeOverView>, Log) {
+        let mut root: RenderRoot<Log, TakeOverView> = RenderRoot::new();
+        let mut log = Log::default();
+        root.rebuild(&mut |_| TakeOverView { opt_in }, &mut log);
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    fn take_over_widget(root: &mut RenderRoot<Log, TakeOverView>) -> &mut TakeOver {
+        let id = root.root_id().expect("root built");
+        root.tree
+            .pod_mut(id)
+            .expect("root pod")
+            .widget_mut()
+            .downcast_mut::<TakeOver>()
+            .expect("root is a TakeOver")
+    }
+
+    #[test]
+    fn a_takeover_ends_the_contact_opt_in_but_keeps_the_claimant() {
+        use PointerPhase::{Cancel, Down, Move, Up};
+        let (mut root, mut log) = take_over_root(false);
+        let t0 = PointerId::touch(0);
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
+        assert!(root.pointer_capture_contacts(), "A opted in");
+
+        // The claimant moves past the container's threshold: it cancels A and
+        // releases it, and the release reaches the root.
+        root.event(&mut log, &touch(0, Move, A.0, A.1 + 30.0));
+        assert!(take_over_widget(&mut root).released_seen);
+        assert_eq!(log.seen[3], ('A', t0, Cancel));
+        assert_eq!(
+            root.pointer_capture_claimant(),
+            Some(t0),
+            "the gesture is still the claimant's, now held by the container"
+        );
+        assert!(
+            !root.pointer_capture_contacts(),
+            "the widget that asked for the other contacts is gone"
+        );
+
+        // Another finger is dropped from here on — neither the container nor
+        // the cancelled captor hears it.
+        let before = log.seen.len();
+        let outcome = root.event(&mut log, &touch(1, Down, A.0, A.1));
+        assert_eq!(outcome, EventOutcome::default());
+        assert_eq!(log.seen.len(), before);
+
+        // The claimant keeps driving the container, and its release ends it.
+        root.event(&mut log, &touch(0, Move, A.0, A.1 + 60.0));
+        assert_eq!(log.seen.last(), Some(&('T', t0, Move)));
+        root.event(&mut log, &touch(0, Up, A.0, A.1 + 60.0));
+        assert!(!root.is_pointer_captured());
+    }
+
+    #[test]
+    fn a_takeover_by_the_widget_holding_the_opt_in_keeps_it() {
+        use PointerPhase::{Down, Move};
+        let (mut root, mut log) = take_over_root(true);
+        let (t0, t1) = (PointerId::touch(0), PointerId::touch(1));
+        root.event(&mut log, &touch(0, Down, A.0, A.1));
+        root.event(&mut log, &touch(0, Move, A.0, A.1 + 30.0));
+        assert!(
+            !take_over_widget(&mut root).released_seen,
+            "the container itself holds the opt-in, so releasing its child ends nothing"
+        );
+        assert!(root.pointer_capture_contacts());
+        // The container is the captor: another finger reaches it directly.
+        assert!(root.event(&mut log, &touch(1, Down, A.0, A.1)).handled);
+        assert_eq!(log.seen.last(), Some(&('T', t1, Down)));
+        assert_eq!(root.pointer_capture_claimant(), Some(t0));
     }
 }
 
