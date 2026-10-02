@@ -6258,9 +6258,9 @@ ship that and treat a `Decoder` error as a per-platform answer.
 **Evidence**: platform format-matrix survey (Media3's extractor set vs
 AVFoundation's); the crate's own `Backends`/format-asymmetry note. Not yet
 reproduced on hardware — the device gate for this plugin is still owed. See
-also `video-web-windows-linux-unavailable-v1` below, and
-act_000001a05c9fb5e4jvgzTl2W for the engine-owned aliased-chip finding the
-playground's overlay chrome works around.
+also `video-web-windows-linux-unavailable-v1` below. The playground's overlay
+chrome is square-cornered to work around an engine-side defect: a rounded fill
+composites incorrectly at a punched-hole edge.
 
 ---
 
@@ -6309,8 +6309,8 @@ podcast-style player wants exactly this), and the plugin has no way to tell
 that intent from an app that wants a hard pause. The API an app needs is
 already there and non-blocking: call `pause`/`play` from your own lifecycle
 handling. Whether the default should flip — and whether a background-audio
-mode belongs in `PlayerOptions` — is an open ruling
-(act_000001a092460caeP920M89C); until it is decided the behaviour stays
+mode belongs in `PlayerOptions` — is an open ruling;
+until it is decided the behaviour stays
 uniform across the three platforms rather than differing per host.
 
 **Evidence**: the Android host's own contract note and the absence of any

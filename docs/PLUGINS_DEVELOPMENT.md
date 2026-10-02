@@ -71,14 +71,13 @@ as the vehicle (three sources: an https MP4, an HLS playlist, and the bundled
   instead of reporting `Ended`.
 - **Fit:** `Contain` letterboxes; `Cover` fills. Confirm on Android whether `Cover` actually
   crops — a `SurfaceView`'s compositor layer was observed on device (camera plugin) to ignore an
-  ancestor's clip, in which case `Cover` spills over the surrounding chrome
-  (act_000001a092461e09gnxOMe0U).
+  ancestor's clip, in which case `Cover` spills over the surrounding chrome.
 - **Slot lifecycle:** scroll the slot off-screen and back, and rotate — the picture reattaches to
   the same session rather than reopening it; closing the session leaves the slot empty, not stale.
 - **Audio (iOS):** playback is audible with the ringer switch silenced, and `mix_with_others`
   ducks alongside another app's audio instead of interrupting it.
 - **Background:** playback deliberately continues when the app backgrounds — confirm it does, and
-  that an app pausing from its own lifecycle works (act_000001a092460caeP920M89C).
+  that an app pausing from its own lifecycle works.
 - **macOS (`cargo run` from the repo, plus a `frust build macos` bundle):** the `NSView` appears
   above the frust surface and tracks the slot as the window resizes and the page scrolls; controls
   below the slot keep working while the picture is opaque over anything drawn under it; a
@@ -88,7 +87,7 @@ as the vehicle (three sources: an https MP4, an HLS playlist, and the bundled
   file beside the executable — copy the sample clip there first.
 - **Overlay chrome (Android/iOS only):** the state chip over the slot is square-cornered on
   purpose — a rounded fill was found to composite incorrectly at a punched-hole edge
-  (act_000001a05c9fb5e4jvgzTl2W, engine-owned). Do not "fix" it to the design system's rounding
+  (an engine-side defect). Do not "fix" it to the design system's rounding
   as part of this gate.
 - **Add Plugin dialog:** clean scaffold builds with zero hand edits on both mobile platforms.
 
