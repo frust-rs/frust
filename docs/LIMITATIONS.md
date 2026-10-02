@@ -6758,20 +6758,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `pinch-under-scroll-view-claimant-takeover` — a pinch inside a `ScrollView`/`ListView` is taken over by the scroll surface once the claimant crosses touch slop
-
-**Observed**: `pinch_detector` and `pan_zoom`'s child-owned-press branch (the gesture left with the child when its `Down` was `Handled`) never register into the ambient nested-scroll claim (`InnerScrollState`, `scroll.rs`); when the first (claimant) contact of such a gesture then travels past `TOUCH_SLOP` along the enclosing scroll surface's axis, the surface takes the drag over from the claimant mid-pinch, cancelling it.
-
-**Applies to**: `pinch_detector` and `pan_zoom` nested inside `scroll_view`/`list_view` (e.g. the playground Graph page's `pan_zoom` world over a node, wrapped in the shell's page-body `scroll_view`).
-
-**Why accepted**: found by review after Phase A's fix budget for this plan was already spent; `pan_zoom`'s own pan path already joins the claim (unconditionally, on a `Down` the child ignores) — only the pinch-recognition paths were left out.
-
-**Trigger for removal**: `pinch_detector` and `pan_zoom`'s child-owned-press branch register into the nested-scroll claim once either tracks a second contact, the same way `pan_zoom`'s pan path already does.
-
-**Evidence**: `crates/frust-widgets/src/pinch.rs` (no `ambient_scroll_claim`/`InnerScrollState` reference) and `crates/frust-widgets/src/pan_zoom.rs`'s `begin_gesture` (claim published only on the pan branch).
-
----
-
 ### `secondary-contact-walk-overlay-fallback` — a captor inside a floated overlay surface is reached through the ordinary-delivery fallback, re-admitting ancestor visibility of the other contact
 
 **Observed**: `ChildPod::walk_secondary`'s forward-only walk hands each container between the root and the captor an inert `InputEvent::Overlay` broadcast instead of its own pointer handling; when a container on the path does not forward that broadcast to its children (an overlay owner whose captured pod is a floated surface, which does not route an arbitrary-key broadcast to an arbitrary descendant), the walk falls back to delivering the real event to that one child directly — re-admitting that ancestor's ordinary pointer-handling visibility of the other contact for that configuration, the thing the forward-only walk otherwise exists to prevent.

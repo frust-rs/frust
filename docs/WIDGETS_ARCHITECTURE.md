@@ -230,8 +230,11 @@ build from.
   contact to the child unchanged, and steals an in-progress child gesture with one synthesized
   `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a desktop `InputEvent::Scale`
   reaches `on_scale` only when the child ignores it first. Nesting two detectors is unsupported.
-  `pinch_detector` never joins the nested-scroll claim (see below), unlike `pan_zoom` — see
-  `pinch-under-scroll-view-claimant-takeover` in [LIMITATIONS.md](LIMITATIONS.md).
+  `pinch_detector` captures the ambient multi-contact veto cell (`scroll.rs`'s
+  `ambient_scroll_veto`) on its claiming `Down` and holds it raised while it tracks a second
+  contact, so a pinch beginning over a single-finger press inside a `ScrollView`/`ListView`
+  survives the claimant's own travel past slop; it still never joins the Down-time nested-scroll
+  claim itself (see below), unlike `pan_zoom`.
 - Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by
   `Affine::translate(offset) * Affine::scale(scale)` (`PanZoomTransform`), so frust-core's
   transformed-pod seam (see CORE_ARCHITECTURE.md) inverse-maps the child's hit-testing and events. A
@@ -241,8 +244,11 @@ build from.
   from every primary `Down`'s contacts, so a second finger routes here even when the child owns the
   first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same ambient
   cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing
-  scrollable defers to it; when the child owns the press, nothing is published, leaving the
-  scrollable's own default (unregistered) report in place. A `Scroll` arriving between `Scale`
+  scrollable defers to it; when the child owns the press instead, the view captures the ambient
+  multi-contact veto cell and holds it raised while a second contact is tracked, so a pinch
+  beginning over that child-owned press is not taken over by the enclosing scroll surface once the
+  claimant crosses slop — the veto clears, and the surface's ordinary takeover resumes, once back
+  down to one contact. A `Scroll` arriving between `Scale`
   events clears the stale `last_focal` left by an open bracket (a macOS trackpad pinch whose
   modifier released mid-gesture finishes as wheel events) so a later unrelated wheel notch does not
   anchor on it. `.min_scale`/`.max_scale` (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by
@@ -433,7 +439,11 @@ nothing to scroll, a deliberate UIKit-default deviation from Flutter's own `Boun
 which still claims a fits-viewport surface. The report is a `Down`-time snapshot
 and the outer's defer decision is sticky for the rest of the gesture — content that becomes (or
 stops being) scrollable mid-drag never registers, and a deferred gesture never hands back — the same
-class of accepted tradeoff the navigator's own Down-time claim already lives with.
+class of accepted tradeoff the navigator's own Down-time claim already lives with. Both `ScrollView`
+and `ListView` also run a live **multi-contact veto** alongside that Down-time claim: a per-gesture
+cell either surface replaces on every primary `Down` and consults on every `Move` takeover check, so
+a nested `pinch_detector`/`pan_zoom` that reports a second contact after the claim snapshot was taken
+still suppresses the takeover (see *Pinch flow*/*Pan-zoom flow* above).
 
 `ScrollInfo`'s shape, wheel handling, and its consumers — `frust-shadcn`'s `scroll_area`,
 `frust-glyph`'s `app_bar` scroll-collapse — are unaffected: the seam changes only what computes
@@ -474,9 +484,12 @@ accumulates and commits only once the fling settles, so it never fights the flin
 
 **Refresh/overscroll parity with ScrollView** (see *Scroll Physics*, above, for the shared seam
 itself). `on_refresh_release` and drag overscroll share `scroll.rs`'s `pub(crate)`
-resistance/trigger/settle constants *and* nested-scroll claim cells with `ScrollView`, not just the
-constants — `ScrollView` is no longer the framework's only pull-to-refresh-capable or nest-aware
-widget, and the default feel is the same platform-adaptive physics rather than flat rubber-band. The
+resistance/trigger/settle constants *and* nested-scroll claim/veto cells with `ScrollView`, not just
+the constants — `ScrollView` is no longer the framework's only pull-to-refresh-capable or nest-aware
+widget, and the default feel is the same platform-adaptive physics rather than flat rubber-band.
+`ListView` replaces and consults the same live multi-contact veto `ScrollView` does (see *Nested-scroll
+arbitration*, above), so a pinch or pan-zoom beginning over a single-finger press inside a list
+survives the claimant's travel past slop the same way it does inside a `ScrollView`. The
 clamped-windowing/paint-only-overscroll split (`list_view.rs`'s module doc, *Windowing offset vs.
 painted offset*) survives every installed physics unchanged: only what computes the past-edge
 displacement differs, never how this widget stores or paints it.

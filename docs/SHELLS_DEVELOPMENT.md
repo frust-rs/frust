@@ -140,9 +140,10 @@ contacts and resampling / Desktop scale gestures), using `examples/playground`'s
 on an iPhone SE (iOS 26.7, human-run, all legs) and the iOS Simulator (iOS 26.2, single-contact
 legs only; pinch not run), against `8a263d79` built with Xcode 27.0 — per-leg results in
 `examples/playground/README.md`'s gate checklist. The iPhone SE re-ran the pinch legs at
-`f47a9828` (after f3-01's multi-contact scroll veto) and passed: a pinch that starts on a node keeps
-the gesture through vertical travel, and a one-finger drag still scrolls the page. **Android and
-desktop: not run yet.**
+`f47a9828` (after the multi-contact scroll veto) and passed: a pinch that starts on a node keeps
+the gesture through vertical travel, and a one-finger drag still scrolls the page. **Android: passed
+2026-10-02** on a Pixel 5 (Android 14; human-run pinch legs, `adb`-driven single-contact legs;
+Xiaomi 12 not run) — same checklist. **Desktop: not run yet.**
 
 - **Android (Pixel 5, Xiaomi 12):** two-finger pinch zooms the graph about the gesture's midpoint
   and drag-pans it with one finger; after lifting to one finger mid-gesture, panning continues with
