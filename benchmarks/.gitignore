@@ -17,7 +17,7 @@
 #                     for that scenario's kept runs); whitelist-checked
 #                     line-by-line the same way as runN.log, by
 #                     ab_matrix.sh's self_check_raw_dir.
-# Pre-commit verification (conductor runs all three — one line per committed
+# Pre-commit verification (run all three by hand — one line per committed
 # artifact class above; the stats.txt expression is ab_matrix.sh's
 # STATS_WHITELIST_RE verbatim, keep the two identical):
 #   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' raw/ --include='*.log'   (expect no output)

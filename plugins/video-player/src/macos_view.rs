@@ -41,7 +41,7 @@
 //! `Cargo.toml`; report instead). So this module does **not** paint a black
 //! background: an uncovered letterbox area shows whatever is beneath this
 //! opaque native sibling instead of black. **Reported loudly, not silently
-//! dropped** — see the completion summary; the fix is a one-line Cargo.toml
+//! dropped**: the fix is a one-line Cargo.toml
 //! addition (`objc2-quartz-core`'s `objc2-core-graphics` feature) plus a
 //! `CALayer::setBackgroundColor(Some(&CGColor::new_srgb(0.0, 0.0, 0.0, 1.0)))`
 //! call in [`VideoPlayerNSView::new`], left for whoever picks up that Cargo

@@ -154,6 +154,13 @@
 //!   "The other round-1 case") or review vocabulary within the next
 //!   [`ROUND_WINDOW`] bytes ("round-1 busy-spin Critical"). Both halves are
 //!   drawn from the real in-tree exemplars this scan was widened to catch.
+//! - **Private-pipeline artifacts**: `completion summary`, `task card`,
+//!   `implementor`, `conductor`, and `review round` (case-insensitive,
+//!   word-bounded, optional plural). Each names a document or role that exists
+//!   only in the private development pipeline, so a comment pointing at one
+//!   sends the reader to something that does not ship; state the technical
+//!   fact directly instead. `implementor` is banned in its trait sense too —
+//!   say "implementing type" — which keeps the pattern unambiguous.
 //! - **Plan requirement numbers**: `req N`, but ONLY when the same line also
 //!   contains the substring `phase` (case-insensitive). A bare `req N` is
 //!   collision-prone on its own (`req` is a common abbreviation with no
@@ -463,6 +470,8 @@ const CFIX_REASON: &str = "fix-round reference (`cfix-2`)";
 const RE_REVIEW_REASON: &str = "review-round reference (`re-review`)";
 const REVIEW_ROUND_REASON: &str = "review-round reference (`review round N`)";
 const DEVICE_PARITY_REASON: &str = "device-parity-round reference";
+const PIPELINE_ARTIFACT_REASON: &str = "pointer to a private-pipeline artifact that does not ship \
+     (`completion summary`/`task card`/`implementor`/`conductor`/`review round`)";
 const REQ_REASON: &str = "plan requirement number (`req N`) alongside a phase reference";
 
 /// Ownership phrases that say *whose* phase a bare `Phase N` mention is — the
@@ -852,6 +861,43 @@ fn literal_hits(comment: &str, needle: &str, reason: &'static str, out: &mut Vec
     }
 }
 
+/// The process vocabulary [`pipeline_artifact_hits`] bans: each names an
+/// artifact or role that exists only in the private development pipeline, so
+/// a comment using it points the reader at something that does not ship.
+const PIPELINE_ARTIFACT_WORDS: &[&str] = &[
+    "completion summary",
+    "task card",
+    "implementor",
+    "conductor",
+    "review round",
+];
+
+/// Pushes every case-insensitive, word-bounded match of a
+/// [`PIPELINE_ARTIFACT_WORDS`] phrase (an optional plural `s` is part of the
+/// match, so `implementors` and `review rounds` are caught too). ASCII
+/// lowercasing keeps byte offsets identical to `comment`'s.
+fn pipeline_artifact_hits(comment: &str, out: &mut Vec<Hit>) {
+    let lowered = comment.to_ascii_lowercase();
+    for word in PIPELINE_ARTIFACT_WORDS {
+        for idx in find_all(&lowered, word) {
+            if !word_boundary_before(&lowered, idx) {
+                continue;
+            }
+            let mut end = idx + word.len();
+            if lowered[end..].starts_with('s') {
+                end += 1;
+            }
+            if !word_boundary_after(&lowered[end..]) {
+                continue;
+            }
+            out.push(Hit {
+                range: idx..end,
+                reason: PIPELINE_ARTIFACT_REASON,
+            });
+        }
+    }
+}
+
 /// Pushes every `req N` match, but only when the same comment also contains
 /// `phase` (case-insensitive) — the narrowed `req` rule (see module doc).
 fn req_with_phase_hits(comment: &str, out: &mut Vec<Hit>) {
@@ -892,6 +938,7 @@ fn banned_hits(comment: &str) -> Vec<Hit> {
         &mut hits,
     );
     req_with_phase_hits(comment, &mut hits);
+    pipeline_artifact_hits(comment, &mut hits);
     hits.sort_by_key(|hit| (hit.range.start, hit.range.end));
     hits
 }
@@ -1413,6 +1460,62 @@ mod scan_behavior {
         assert!(banned_reason("review round 1").is_some());
         assert!(banned_reason("device-parity-round").is_some());
         assert!(banned_reason("nothing banned here").is_none());
+    }
+
+    fn pipeline_artifact_violation(comment: &str) -> bool {
+        fires(pipeline_artifact_hits, comment)
+    }
+
+    /// Negative controls: one flagged line per pipeline-artifact pattern.
+    #[test]
+    fn pipeline_artifact_completion_summary_is_flagged() {
+        assert!(pipeline_artifact_violation(
+            "// See the completion summary for the run."
+        ));
+        assert!(pipeline_artifact_violation(
+            "// the Completion Summary says"
+        ));
+    }
+
+    #[test]
+    fn pipeline_artifact_task_card_is_flagged() {
+        assert!(pipeline_artifact_violation("// (see the task card)"));
+    }
+
+    #[test]
+    fn pipeline_artifact_implementor_is_flagged() {
+        assert!(pipeline_artifact_violation(
+            "/// The only implementor here."
+        ));
+        assert!(pipeline_artifact_violation("// reach an Implementors list"));
+    }
+
+    #[test]
+    fn pipeline_artifact_conductor_is_flagged() {
+        assert!(pipeline_artifact_violation(
+            "// re-pointed by the conductor"
+        ));
+    }
+
+    #[test]
+    fn pipeline_artifact_review_round_is_flagged() {
+        assert!(pipeline_artifact_violation(
+            "// survived three review rounds"
+        ));
+        assert!(pipeline_artifact_violation("// (review round, unnumbered)"));
+    }
+
+    /// Positive controls: ordinary sentences, and near-miss words, pass.
+    #[test]
+    fn pipeline_artifact_ordinary_text_passes() {
+        assert!(!pipeline_artifact_violation(
+            "// Summarise the result; the card below lists each task."
+        ));
+        assert!(!pipeline_artifact_violation(
+            "// the implementing type overrides this method"
+        ));
+        assert!(!pipeline_artifact_violation("// a nonconductor of heat"));
+        assert!(!pipeline_artifact_violation("// the review of each round"));
     }
 
     #[test]

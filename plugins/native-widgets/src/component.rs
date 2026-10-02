@@ -5,7 +5,7 @@
 //! views, which means naming `jni`/`objc2-ui-kit` types in the implementing
 //! crate, and this plugin re-exports neither FFI crate — see
 //! `docs/NATIVE_WIDGETS_ARCHITECTURE.md` for that wall and the audience it
-//! leaves. The only implementor here is the non-default `demo-components`
+//! leaves. The only implementing type here is the non-default `demo-components`
 //! composite (`crate::demo`).
 //!
 //! Where `crate::runtime`'s `NativeWidget` is the plugin's **internal** dispatch

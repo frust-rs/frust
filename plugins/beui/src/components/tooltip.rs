@@ -1310,8 +1310,7 @@ mod tests {
         // `slot.set_input(OverlayInput::Transparent)` call to
         // `OverlayInput::Interactive` makes this test fail — the root's
         // overlay pre-pass then claims the press for the tooltip's own pod
-        // instead of letting it fall through — see the completion summary for
-        // the failing run.
+        // instead of letting it fall through.
         let mut h = Harness::new();
         h.open(0.0);
         let rec = h.paint_at(2_000.0);
