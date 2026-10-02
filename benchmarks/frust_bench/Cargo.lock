@@ -1082,7 +1082,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "frust"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "any_spawner",
  "anyhow",
@@ -1112,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "frust-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "frust-scene",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "frust-database"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-paths",
  "log",
@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "frust-engine"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "frust-gpu",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "frust-material"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust",
  "kurbo",
@@ -1172,14 +1172,14 @@ dependencies = [
 
 [[package]]
 name = "frust-paths"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "frust-plugin"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "jni 0.22.4",
  "ndk-context",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "any_spawner",
  "futures",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "frust-render"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "frust-scene"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "kurbo",
  "peniko",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shared-preferences"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-paths",
  "frust-plugin",
@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-android"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit_android",
  "android_logger",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-common"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-desktop"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit_winit",
  "anyhow",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-ios"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "accesskit_ios",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-linux"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-shell-desktop",
  "log",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-macos"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-plugin",
  "frust-reactive",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-web"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-windows"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "frust-text"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-scene",
  "kurbo",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "frust-theme"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-text",
@@ -1400,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "frust-widgets"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frust-core",
  "frust-scene",

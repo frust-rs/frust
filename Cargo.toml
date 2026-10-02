@@ -73,10 +73,14 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "examples/native-widgets-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/frust-rs/frust"
+homepage = "https://frust.dev"
+keywords = ["gui", "ui", "mobile", "declarative", "wgpu"]
+categories = ["gui"]
 
 [workspace.dependencies]
 # rendering stack — pins are LAW (do not bump independently)
@@ -656,37 +660,37 @@ proptest = { version = "1.11.0", default-features = false, features = [
     "bit-set",
 ] }
 # intra-workspace
-frust-core = { path = "crates/frust-core" }
-frust-scene = { path = "crates/frust-scene" }
-frust-render = { path = "crates/frust-render" }
-frust-text = { path = "crates/frust-text" }
+frust-core = { path = "crates/frust-core", version = "0.5.0" }
+frust-scene = { path = "crates/frust-scene", version = "0.5.0" }
+frust-render = { path = "crates/frust-render", version = "0.5.0" }
+frust-text = { path = "crates/frust-text", version = "0.5.0" }
 # The engine plan's foundation crate above wgpu, and the engine crate built on
 # it. `crates/frust-engine` does not exist yet at this SHA (a later task adds
 # it) — declaring the row ahead of the crate is harmless: Cargo only resolves
 # a `[workspace.dependencies]` path when some member's manifest references it
 # via `{ workspace = true }`, and none does yet.
-frust-gpu = { path = "crates/frust-gpu" }
-frust-engine = { path = "crates/frust-engine" }
+frust-gpu = { path = "crates/frust-gpu", version = "0.5.0" }
+frust-engine = { path = "crates/frust-engine", version = "0.5.0" }
 # Neither edge carries `default-features = false` any more: both crates now
 # declare no default features at all. `frust-theme` is pure token
 # infrastructure (no design-language module, no bundled fonts) and
 # `frust-widgets` is the baseline widget set plus the `authoring` toolkit —
 # a design system, in-tree plugin or third-party, composes over both from its
 # own crate.
-frust-theme = { path = "crates/frust-theme" }
-frust-widgets = { path = "crates/frust-widgets" }
-frust-reactive = { path = "crates/frust-reactive" }
-frust-plugin = { path = "crates/frust-plugin" }
-frust-paths = { path = "crates/frust-paths" }
-frust-shell-desktop = { path = "crates/frust-shell-desktop" }
-frust-shell-common = { path = "crates/frust-shell-common" }
-frust-shell-android = { path = "crates/frust-shell-android" }
-frust-shell-ios = { path = "crates/frust-shell-ios" }
-frust-shell-macos = { path = "crates/frust-shell-macos" }
-frust-shell-windows = { path = "crates/frust-shell-windows" }
-frust-shell-linux = { path = "crates/frust-shell-linux" }
-frust-shell-web = { path = "crates/frust-shell-web" }
-frust = { path = "crates/frust" }
+frust-theme = { path = "crates/frust-theme", version = "0.5.0" }
+frust-widgets = { path = "crates/frust-widgets", version = "0.5.0" }
+frust-reactive = { path = "crates/frust-reactive", version = "0.5.0" }
+frust-plugin = { path = "crates/frust-plugin", version = "0.5.0" }
+frust-paths = { path = "crates/frust-paths", version = "0.5.0" }
+frust-shell-desktop = { path = "crates/frust-shell-desktop", version = "0.5.0" }
+frust-shell-common = { path = "crates/frust-shell-common", version = "0.5.0" }
+frust-shell-android = { path = "crates/frust-shell-android", version = "0.5.0" }
+frust-shell-ios = { path = "crates/frust-shell-ios", version = "0.5.0" }
+frust-shell-macos = { path = "crates/frust-shell-macos", version = "0.5.0" }
+frust-shell-windows = { path = "crates/frust-shell-windows", version = "0.5.0" }
+frust-shell-linux = { path = "crates/frust-shell-linux", version = "0.5.0" }
+frust-shell-web = { path = "crates/frust-shell-web", version = "0.5.0" }
+frust = { path = "crates/frust", version = "0.5.0" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
 # wgpu/naga's shader-pipeline

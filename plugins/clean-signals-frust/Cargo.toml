@@ -20,7 +20,7 @@
 
 [package]
 name = "clean-signals-frust"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/f0x-it-llc/clean-signals-rs"
