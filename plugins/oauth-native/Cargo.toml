@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Protocol half of an RFC 8252 OAuth 2.0 native-app sign-in for Frust: PKCE, state, authorization URL, callback validation and token grant bodies."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 # A pure-Rust protocol crate: no platform code, no HTTP client, no async, and
 # no `frust-*` dependency. The app owns the token endpoint's HTTP transport.

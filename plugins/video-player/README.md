@@ -17,6 +17,10 @@ Like every frust **platform plugin**, this crate is added to your app's own
 > plugin's platform code ships as its own Gradle library module rather than as
 > files copied into your app. On Apple there is nothing to add at all.
 
+**Platform support:** Android (Media3 ExoPlayer), iOS and macOS (AVFoundation). On every other target `VideoPlayer::open` fails with `VideoError::NotSupported`.
+
+More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
+
 ---
 
 ## 1. Add the dependency (always)
@@ -265,3 +269,8 @@ applied for you, idempotently, by the frust TUI's **Add Plugin** dialog
 (select `video-player`). There is nothing for it to do on Apple: those two
 contributions are the whole integration, because the iOS and macOS factories
 are Rust. This README is the manual contract that dialog encodes.
+
+## License
+
+Licensed under either of MIT or Apache-2.0 (SPDX: `MIT OR Apache-2.0`), at your
+option. See `LICENSE-MIT` and `LICENSE-APACHE` beside this README.

@@ -3,13 +3,19 @@
 The **protocol half of an RFC 8252 "OAuth 2.0 for Native Apps"** sign-in for
 frust apps: PKCE (S256), `state`, the authorization URL, callback validation
 (including RFC 9207 `iss`), and the token-grant request bodies and response
-parser. It pairs with [`frust-auth-session`](../auth-session/README.md),
+parser. It pairs with [`frust-auth-session`](https://github.com/frust-rs/frust/blob/main/plugins/auth-session/README.md),
 which shows the authorization URL in the platform's in-app browser tab and
 hands back the raw callback URL.
 
 This is a pure-Rust crate: **no platform code, no HTTP client, no async, no
 `frust-*` dependency**. Your app sends the token request with whatever HTTP
 client it already uses; this crate builds the body and parses the response.
+
+**Platform support:** every target — the crate is plain Rust with no platform-specific code.
+
+Applications depend on this crate directly; it is not re-exported by the `frust` facade.
+
+More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ---
 
@@ -156,7 +162,7 @@ let form = refresh_token_grant(&refresh_token, "example-app", None, &[]);
   `Debug`, and no error message prints the code, the `state`, the callback
   URL or a token response body.
 - **Store refresh tokens in
-  [`frust-secure-storage`](../secure-storage/README.md)**, never in plain
+  [`frust-secure-storage`](https://github.com/frust-rs/frust/blob/main/plugins/secure-storage/README.md)**, never in plain
   preferences. Keep the verifier and `state` in memory for one attempt only.
 
 ---
@@ -169,3 +175,8 @@ let form = refresh_token_grant(&refresh_token, "example-app", None, &[]);
 - [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707) — Resource Indicators
 - [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207) — Authorization Server Issuer Identification
 - [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986) — URI syntax (percent-encoding)
+
+## License
+
+Licensed under either of MIT or Apache-2.0 (SPDX: `MIT OR Apache-2.0`), at your
+option. See `LICENSE-MIT` and `LICENSE-APACHE` beside this README.

@@ -14,6 +14,10 @@ Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
 not re-export it.
 
+**Platform support:** every target the SQLite engine builds for; the data directory is resolved per platform, including Android once the host shell has installed its directories.
+
+More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
+
 ---
 
 ## 1. Add the dependency (the only step)
@@ -452,9 +456,7 @@ measures if it differs):
 | `engine-sqlite` + `engine-turso` | 22.80 MB | 23,904,912 |
 | **Delta** | **+9.83 MB** | **+10,303,352** |
 
-The probe app was never committed and its temp `target/` directory was never
-written under this repo's own `target/`, per the wave's shared-target-dir
-build note.
+The probe app was never committed.
 
 ---
 
@@ -511,3 +513,8 @@ Run the turso backend's own tests too:
 ```bash
 cargo test -p frust-database --features engine-turso
 ```
+
+## License
+
+Licensed under either of MIT or Apache-2.0 (SPDX: `MIT OR Apache-2.0`), at your
+option. See `LICENSE-MIT` and `LICENSE-APACHE` beside this README.
