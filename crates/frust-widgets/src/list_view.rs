@@ -2187,7 +2187,16 @@ impl ListViewWidget {
             position: pos,
             button: PointerButton::Primary,
         });
-        crate::authoring::route_event(&mut self.children, ctx, &cancel);
+        // A takeover, not the gesture's end: the captured row gets its
+        // `Cancel` exactly as `route_event` would deliver it, and is then
+        // released through the context, which also ends a contact opt-in held
+        // inside the row so the root stops routing other fingers to it.
+        if let Some(pod) = self.children.iter_mut().find(|pod| pod.is_active()) {
+            pod.event_child(ctx, &cancel);
+            ctx.release_captured_child(pod);
+        } else {
+            crate::authoring::route_event(&mut self.children, ctx, &cancel);
+        }
     }
 
     /// The event body, parameterised on an explicit timestamp so velocity math
@@ -6958,5 +6967,81 @@ mod tests {
             "the copy was answered by the focused row, through this router"
         );
         assert_eq!(state.value, "hello", "a copy edits nothing");
+    }
+}
+
+/// A takeover from a captured row ends a contact opt-in held inside it.
+#[cfg(test)]
+mod contact_release_tests {
+    use super::*;
+    use std::any::Any;
+
+    /// A row that captures every `Down`, opting into the gesture's other
+    /// contacts when `opt_in` is set.
+    struct Grab {
+        opt_in: bool,
+    }
+    impl Widget for Grab {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.capture_pointer();
+                if self.opt_in {
+                    ctx.capture_contacts();
+                }
+            }
+            EventResult::Handled
+        }
+    }
+
+    /// A 200 px list of ten 200 px rows whose one materialized row is a
+    /// [`Grab`].
+    fn list(opt_in: bool) -> ListViewWidget {
+        let mut w = ListViewWidget::new(10, 200.0);
+        w.viewport = Size::new(200.0, 200.0);
+        let mut pod = ChildPod::new(Box::new(Grab { opt_in }));
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(200.0, 200.0)),
+        );
+        w.children = vec![pod];
+        w.keys = vec![0];
+        w.sync_child_origins();
+        w
+    }
+
+    fn pointer(phase: PointerPhase, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(10.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Dispatch into the list; whether a capture release bubbled out of it.
+    fn released(w: &mut ListViewWidget, event: &InputEvent, t_ms: f64) -> bool {
+        let mut unit = ();
+        let sa: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, event, t_ms);
+        ctx.is_capture_released()
+    }
+
+    #[test]
+    fn a_takeover_releases_the_row_and_signals_only_an_opt_in() {
+        for opt_in in [true, false] {
+            let mut w = list(opt_in);
+            assert!(!released(&mut w, &pointer(PointerPhase::Down, 100.0), 0.0));
+            assert!(w.children[0].is_active(), "the row captured");
+            let signalled = released(&mut w, &pointer(PointerPhase::Move, 60.0), 16.0);
+            assert!(w.scrolling, "the list took the drag over");
+            assert!(!w.children[0].is_active(), "and released the row");
+            assert_eq!(signalled, opt_in, "signalled only when the row opted in");
+        }
     }
 }
