@@ -114,11 +114,19 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   which contact it was (`PointerId::MOUSE` for a bare `Pointer`). With no live capture, slot `0` is
   hit-tested exactly like the mouse and a capture taken on its `Down` latches that id as the
   claimant; slot ≥ 1 is dropped. While a capture is live, the claimant's events take the captured
-  path as usual, and another contact reaches the captor only if it called
-  `EventCtx::capture_contacts()` on its capturing `Down` — otherwise the root drops it; only the
-  claimant's `Up`/`Cancel` releases the capture. A thread-local `ContactPass` guard brackets each
-  root dispatch with the contact identity and opt-in flag so both survive a `ComponentWidget`
-  boundary's fresh `EventCtx`.
+  path as usual; another contact reaches only the captor — the widget that called
+  `EventCtx::capture_contacts()` on its capturing `Down` — and nothing above it on the active path:
+  each intervening container is handed an inert `InputEvent::Overlay` broadcast instead of running
+  its own pointer handling, while the real event rides alongside, re-based into each pod's space
+  (`ChildPod::event_child`/`walk_secondary`/`dispatch_local`); where a container does not forward
+  broadcasts to its children (an overlay owner whose captured pod is a floated surface), the real
+  event falls back to ordinary delivery to that child alone. Only the claimant's `Up`/`Cancel`
+  releases the capture. A thread-local `ContactPass` guard brackets each root dispatch with the
+  contact identity and opt-in flag so both survive a `ComponentWidget` boundary's fresh `EventCtx`.
+  A container that takes a gesture over from a captured child releases it through
+  `EventCtx::release_captured_child`, not `ChildPod::set_active(false)` directly: the claimant
+  keeps the capture until its own `Up`/`Cancel`, but the captor's contact opt-in ends
+  (`capture_contacts` clears) when the released subtree held it.
 - **Scale gestures.** `InputEvent::Scale(ScaleEvent { phase, scale_delta, focal, velocity })`
   (`ScalePhase::Begin`/`Update`/`End`) is hit-tested and bubbles exactly like `Scroll`;
   `OverlayEventKind::Scale` is its floated-surface mirror, and `InputEvent::position`/`translated`/
