@@ -39,5 +39,6 @@ NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, on
 GPU/ENGINE get no spoke of their own — they document inside RENDER's (`RENDER_ARCHITECTURE.md`,
 `RENDER_DEVELOPMENT.md`) since the engine plan folds them into that unit's render pipeline.
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics
-conventions, platform-view contract) stay in the shared indexes, not a spoke. `docs/TESTING.md`
-and `docs/LIMITATIONS.md` are auxiliary curated docs outside this schema set.
+conventions, platform-view contract) stay in the shared indexes, not a spoke. `docs/TESTING.md`,
+`docs/LIMITATIONS.md` and `docs/RELEASING.md` (target 200 lines) are auxiliary curated docs outside
+this schema set.

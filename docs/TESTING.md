@@ -625,8 +625,8 @@ manifest that still names the legacy theme, which must fail leg "template") is d
 script's header but not automated. `.github/workflows/android-smoke.yml` provisions an emulator
 (`workflow_dispatch` + nightly) and runs this script with `--target-platform android-x64
 --full-logcat`, but is a delivered template, not part of this repository's required gates; GitHub
-registers a workflow only from the default branch, so it cannot be dispatched or scheduled — and
-has never been executed — until `dev` is promoted to `main`.
+registers a workflow only from the default branch (`main`), so it can be dispatched or scheduled
+only once it is on `main`.
 
 ### Android Scenario Matrix
 
