@@ -5,7 +5,7 @@ A minimal, general-purpose **haptic-feedback** plugin for frust apps — Android
 `UIImpactFeedbackGenerator`/`UINotificationFeedbackGenerator` via `objc2-ui-kit`,
 desktop (macOS/Linux/Windows) unavailable by design.
 
-**Platform support:** Android and iOS. On macOS, Linux and Windows every call is a silent no-op by design; other targets report a typed unavailability error.
+**Platform support:** Android and iOS. On macOS, Linux and Windows, and on any other target, every call returns `HapticsError::NotAvailable(Unavailability::UnsupportedPlatform)`.
 
 Like every frust **platform plugin**, this crate is added to your app's own
 `Cargo.toml` alongside `frust` (the pubspec model) — the `frust` facade does
