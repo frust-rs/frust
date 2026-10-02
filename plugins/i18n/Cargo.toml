@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Fluent Project and ICU4X internationalization with compile-time bundle loading, system locale detection, and formatting."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 # I18nError variants callers match on — thiserror per CODE_STANDARDS.
@@ -17,7 +23,7 @@ log = { workspace = true }
 # ordinary items, so the split is mechanical, not a layering choice. This
 # crate re-exports it at its own root (`frust_i18n::locales`, see
 # `src/lib.rs`) so a caller never depends on the macros crate directly.
-frust-i18n-macros = { path = "macros" }
+frust-i18n-macros = { path = "macros", version = "0.5.0" }
 # Fluent Project's message-bundle engine (`src/engine`) — parses/resolves
 # `.ftl` message files per requested locale. Direct dependency per plan D6:
 # `fluent-templates` is deliberately NOT used — this crate owns bundle
@@ -51,7 +57,7 @@ unic-langid = { workspace = true }
 # design-system catalogs left the tree as their own plugin crates), so there
 # is nothing left to trim — the plain path edge stays for the override
 # freedom, not for a catalog opt-out.
-frust = { path = "../../crates/frust", optional = true }
+frust = { path = "../../crates/frust", version = "0.5.0", optional = true }
 
 # The `formatting` feature's ICU4X number/date/plural formatting stack
 # (`src/fmt`) — see root `Cargo.toml`'s comment for the pin rationale (the
@@ -128,7 +134,7 @@ formatting = [
 # unconditional dependency, keeps every non-Android host's dependency graph
 # free of it.
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 jni = { workspace = true }
 
 # `target_vendor = "apple"` (iOS + macOS) — wider than `frust-clipboard`/
