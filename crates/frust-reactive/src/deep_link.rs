@@ -132,6 +132,17 @@ fn slot() -> &'static Slot {
     })
 }
 
+/// Test-only: clears the recorded `initial` URL so a test can observe a first
+/// push regardless of which tests ran earlier in the same process. The slot is
+/// shared process-wide, so callers must hold `WAKER_TEST_LOCK`.
+#[cfg(test)]
+fn reset_initial_for_test() {
+    *slot()
+        .initial
+        .lock()
+        .expect("frust-reactive: deep_link initial mutex poisoned") = None;
+}
+
 /// Deliver a platform deep link (cold-start or warm) into the process-wide
 /// source. Called by a shell (the Android/iOS FFI glue) on the UI
 /// thread; app code never calls this directly.
@@ -329,6 +340,10 @@ mod tests {
 
         let (waker, wakes) = recording_waker();
         let _rt = ReactiveRuntime::init(waker);
+
+        // Other tests push links into the same process-wide slot, so start
+        // from a state where no link has been recorded as `initial`.
+        reset_initial_for_test();
 
         // Criterion: push before any tracked read — a late subscriber sees it
         // immediately via BOTH the `initial` snapshot and the live `latest`
