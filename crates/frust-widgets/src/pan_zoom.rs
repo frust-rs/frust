@@ -34,7 +34,14 @@
 //!   A pinch that begins over a child-owned gesture **steals** it: the child
 //!   receives a synthesized `Cancel` on the claimant's next event (the
 //!   [`crate::pinch`] wrapper's rule) and the rest of the gesture belongs to the
-//!   view.
+//!   view. When the child owns the gesture this view reports nothing into the
+//!   nested-scroll claim above (the child's press, not a pan, owns it), so a
+//!   second finger forming a pair here while nested in a `ScrollView`/`ListView`
+//!   raises that surface's live multi-contact veto instead
+//!   ([`crate::scroll::ambient_scroll_veto`], `crate::scroll`'s module docs'
+//!   *Multi-contact veto*) — the same seam `pinch_detector` raises — so the
+//!   enclosing surface does not steal the claimant's finger out from under the
+//!   nascent pinch.
 //! - **Wheel.** A plain [`InputEvent::Scroll`] (no modifier — the shell maps a
 //!   modified wheel to `Scale` instead) is routed to the child, so a scrollable
 //!   inside still scrolls; the view never pans on it.
@@ -66,7 +73,7 @@
 //! [`transform`](PanZoomController::transform) reads the transform the widget
 //! last published.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use frust_core::event::{PointerId, ScaleEvent, ScalePhase};
@@ -81,7 +88,7 @@ use crate::authoring::{presses, route_event_single};
 use crate::physics::simulation::FrictionSimulation;
 use crate::physics::{MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, Simulation, Tolerance};
 use crate::pinch::PinchRecognizer;
-use crate::scroll::{InnerScrollState, ambient_scroll_claim};
+use crate::scroll::{InnerScrollState, ambient_scroll_claim, ambient_scroll_veto};
 
 /// The smallest scale a [`PanZoomView`] allows unless
 /// [`min_scale`](PanZoomView::min_scale) says otherwise.
@@ -374,6 +381,11 @@ pub struct PanZoomWidget {
     notify_requested: bool,
     /// The last painted frame time in ms — the event pass's timestamp source.
     last_frame_ms: f64,
+    /// The enclosing scroll surface's live multi-contact veto, captured from
+    /// [`ambient_scroll_veto`] on the claiming `Down` while it is still
+    /// reachable — `None` outside a scroll surface. See the
+    /// [module docs](self#input)'s child-owned-gesture paragraph.
+    scroll_veto: Option<Rc<Cell<bool>>>,
 }
 
 impl<State: 'static> View<State> for PanZoomView<State> {
@@ -404,6 +416,7 @@ impl<State: 'static> View<State> for PanZoomView<State> {
             notify_owed: false,
             notify_requested: false,
             last_frame_ms: 0.0,
+            scroll_veto: None,
         }
     }
 
@@ -674,7 +687,15 @@ impl PanZoomWidget {
         self.tracker_x.clear();
         self.tracker_y.clear();
         self.claimant = Some(id);
+        // Capture the enclosing scroll surface's live multi-contact veto now,
+        // while the ambient cell from its `Down` forward is still reachable —
+        // needed below only for the child-owned branch, but captured
+        // unconditionally since this is the one point in the gesture the
+        // ambient cell is visible from (`crate::scroll`'s module docs'
+        // *Multi-contact veto*).
+        self.scroll_veto = ambient_scroll_veto();
         self.recognizer.handle(id, p, self.last_frame_ms);
+        self.sync_scroll_veto();
         let inside = self.child.contains(p.position);
         let result = if inside {
             self.child.event_child(ctx, event)
@@ -723,6 +744,20 @@ impl PanZoomWidget {
         ctx.capture_contacts();
     }
 
+    /// Raise or clear the captured [`PanZoomWidget::scroll_veto`] to match
+    /// whether [`PanZoomWidget::recognizer`] is tracking more than one
+    /// contact right now — called after every [`PinchRecognizer::handle`], so
+    /// an enclosing scroll surface sees the flip before its own next `Move`
+    /// decides whether to take the claimant's finger over. Live-only: the
+    /// `Drag::Pan` branch already claims unconditionally at `Down`
+    /// (`begin_gesture`'s nested-scroll report), so this matters for
+    /// `Drag::Child`, where that report is deliberately left unregistered.
+    fn sync_scroll_veto(&self) {
+        if let Some(veto) = &self.scroll_veto {
+            veto.set(self.recognizer.contact_count() >= 2);
+        }
+    }
+
     /// A later event of the claimant contact.
     fn claimant_event(
         &mut self,
@@ -734,6 +769,7 @@ impl PanZoomWidget {
         if let Some(scale) = self.recognizer.handle(id, p, self.last_frame_ms) {
             self.on_pinch(ctx, scale, p);
         }
+        self.sync_scroll_veto();
         let ends = matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel);
         match self.drag {
             Drag::Idle => {}
@@ -778,6 +814,7 @@ impl PanZoomWidget {
             self.drag = Drag::Idle;
             self.recognizer.reset();
             self.last_focal = None;
+            self.scroll_veto = None;
         }
     }
 }
@@ -861,9 +898,13 @@ impl Widget for PanZoomWidget {
                 }
                 if self.claimant == Some(id) {
                     self.claimant_event(ctx, event, id, p);
-                } else if let Some(scale) = self.recognizer.handle(id, p, self.last_frame_ms) {
-                    // Another contact of the gesture is the recogniser's alone.
-                    self.on_pinch(ctx, scale, p);
+                } else {
+                    let scale = self.recognizer.handle(id, p, self.last_frame_ms);
+                    self.sync_scroll_veto();
+                    if let Some(scale) = scale {
+                        // Another contact of the gesture is the recogniser's alone.
+                        self.on_pinch(ctx, scale, p);
+                    }
                 }
                 EventResult::Handled
             }
