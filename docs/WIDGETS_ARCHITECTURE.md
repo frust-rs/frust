@@ -19,6 +19,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
+| `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
+| `frust-widgets::pinch` | `PinchRecognizer` — a pure two-contact pinch state machine — and `pinch_detector`, the wrapper view feeding it from a gesture's contacts |
+| `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a drag-pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
 | `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics` trait, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) that `ScrollView`/`ListView` consult instead of hard-coding a feel — see *Scroll Physics* below |
@@ -214,6 +217,31 @@ build from.
   mechanism itself.
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
+- Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget
+  translates to its own origin and clips to its bounds before invoking the closure, so painting
+  happens entirely in local space. `.size(Size)`/`.expand()` (default) pick the sizing policy;
+  `.on_hit(Fn(Point, Size) -> bool)` narrows hit-testing and gates `.on_tap`/`.on_pointer`;
+  `.repaint_key(impl Hash)` requests a repaint when an external fingerprint changes, since the paint
+  closure itself is not comparable across a rebuild.
+- Pinch flow: `PinchRecognizer::handle(PointerId, &PointerEvent, time_ms) -> Option<ScaleEvent>`
+  reduces a gesture's tracked contacts (the first two, in `Down` order) to the same
+  `ScaleEvent`/`ScalePhase` stream a desktop source produces. `pinch_detector(child)` captures the
+  pointer and calls `EventCtx::capture_contacts()` on the first primary `Down`, forwards the first
+  contact to the child unchanged, and steals an in-progress child gesture with one synthesized
+  `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a desktop `InputEvent::Scale`
+  reaches `on_scale` only when the child ignores it first. Nesting two detectors is unsupported.
+- Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by
+  `Affine::translate(offset) * Affine::scale(scale)` (`PanZoomTransform`), so frust-core's
+  transformed-pod seam (see CORE_ARCHITECTURE.md) inverse-maps the child's hit-testing and events. A
+  primary `Down` is offered to the child first; an ignored press pans on the claimant's moves. An
+  `InputEvent::Scale` (desktop ctrl/⌘+wheel, trackpad pinch) is likewise offered to the child first
+  and applied here when ignored; a touch pinch is recognised in-widget by a `PinchRecognizer` fed
+  from every primary `Down`'s contacts, so a second finger routes here even when the child owns the
+  first. `.min_scale`/`.max_scale` (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by
+  default) glides a released pan on a per-axis `FrictionSimulation`; `.on_transform(Fn(&mut State,
+  PanZoomTransform))` notifies after every change; `.controller(PanZoomController)` attaches a
+  cloneable handle (`jump_to`/`fit_to_bounds`/`fit_rect`/`transform`/`viewport_size`/`content_size`)
+  whose commands apply at the next layout or paint. Panning is unbounded; only panning glides.
 
 ## Key Types
 
