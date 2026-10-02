@@ -1274,10 +1274,12 @@ mod tests {
     // Unix-only: this is an end-to-end proof that a real child's raw pipe
     // bytes flow through lossily-decoded (`decode_stream_line_replaces_invalid_utf8_lossily`
     // above already covers the decode logic itself, portably). Producing a
-    // single raw, non-UTF-8 byte (`\xff`) from a one-line shell command needs
+    // single raw, non-UTF-8 byte (0xFF) from a one-line shell command needs
     // `sh -c printf`; there is no `cmd`/PowerShell one-liner that emits a raw
     // invalid byte rather than an encoded character, so this stays Unix-only
-    // rather than gaining a non-equivalent Windows arm.
+    // rather than gaining a non-equivalent Windows arm. The byte is spelled
+    // as the octal escape `\377`: POSIX `printf` defines octal escapes only,
+    // and `dash` (`/bin/sh` on Debian and Ubuntu) prints `\xff` literally.
     #[cfg(unix)]
     #[test]
     fn run_streaming_handles_invalid_utf8_from_a_real_process() {
@@ -1289,7 +1291,7 @@ mod tests {
         let out = runner
             .run_streaming(
                 "/bin/sh",
-                &["-c", r"printf 'before\xffafter\n'"],
+                &["-c", r"printf 'before\377after\n'"],
                 None,
                 &[],
                 &mut |line| seen.push(line.to_string()),
