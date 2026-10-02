@@ -12,9 +12,9 @@
 # migrated into this repo, renamed and adopted from the sibling
 # `clean-signals-rs` checkout's pre-migration Frust glue crate. `frust*` deps
 # below resolve in-repo (this plugin lives inside the `frust` checkout,
-# unlike huddle's example); `clean-signals` is git+rev-pinned to the public
-# repo, matching huddle's own `clean-signals` spec exactly so the two resolve
-# the identical crate identity (type-identity rule — see
+# unlike huddle's example); `clean-signals` comes from crates.io with
+# the same requirement huddle's own `clean-signals` dependency declares, so
+# the two resolve the identical crate identity (type-identity rule — see
 # docs/DEVELOPMENT.md's Version-Pin Policy).
 [workspace]
 
@@ -28,11 +28,10 @@ description = "Frust integration for clean-signals: component-scoped controllers
 publish = false
 
 [dependencies]
-# git+rev pin to the public repo — the identical spec huddle's own
-# `clean-signals` dependency uses, so both consumers build one `clean-signals`
-# crate identity (type-identity rule). Never enable the `effects` feature
+# crates.io requirement — identical to huddle's own `clean-signals`
+# dependency, so both consumers build one `clean-signals` crate identity (type-identity rule). Never enable the `effects` feature
 # (see docs/DEVELOPMENT.md's Version-Pin Policy).
-clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
+clean-signals = "0.1"
 # In-repo path: this plugin lives inside the `frust` checkout itself
 # (`plugins/clean-signals-frust`), so `frust` collapses to a relative
 # in-repo path rather than the sibling-checkout path the pre-migration
@@ -46,7 +45,7 @@ frust = { path = "../../crates/frust" }
 # per CODE_STANDARDS). kurbo/peniko are pinned to Frust's rendering-stack
 # versions so the geometry/color types unify.
 [dev-dependencies]
-clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626", features = ["test-fixtures"] }
+clean-signals = { version = "0.1", features = ["test-fixtures"] }
 frust-core = { path = "../../crates/frust-core" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
