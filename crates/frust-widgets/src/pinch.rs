@@ -63,6 +63,22 @@
 //! desktop source is offered to the child first and reaches `on_scale` only when
 //! the child ignores it, so one callback covers touch and desktop alike. Nesting
 //! two detectors is unsupported: the outer one consumes the extra contacts.
+//!
+//! # Surviving an enclosing scroll surface
+//!
+//! The detector always captures contacts on the claimant's `Down`, whether or
+//! not that `Down` sits inside a `ScrollView`/`ListView` — so a second finger
+//! can start a pinch over content the claimant's own finger is dragging. The
+//! claimant's own `Move`s still take the ordinary captured path up through
+//! every container on it, which means the enclosing surface's slop/takeover
+//! logic still runs on them. To stop that surface stealing the claimant's
+//! finger out from under a live pinch, the detector captures
+//! [`crate::scroll::ambient_scroll_veto`]'s cell on the claiming `Down` (while
+//! it is still ambient) and raises it for as long as a second contact is
+//! tracked, clearing it the moment the pair breaks back down to one
+//! (`PinchDetectorWidget::sync_scroll_veto`) — see `crate::scroll`'s module
+//! docs' *Multi-contact veto*. Outside a scroll surface this is a no-op: the
+//! ambient cell is simply absent.
 
 use frust_core::event::{PointerId, ScaleEvent, ScalePhase};
 use frust_core::{
@@ -71,8 +87,11 @@ use frust_core::{
     VELOCITY_WINDOW_MS, View, Widget, any,
 };
 use kurbo::{Point, Size};
+use std::cell::Cell;
+use std::rc::Rc;
 
 use crate::authoring::presses;
+use crate::scroll::ambient_scroll_veto;
 
 /// How far (logical px) the distance between the two pinch contacts must change
 /// from its value when the pair formed before the pinch begins.
@@ -377,6 +396,11 @@ pub struct PinchDetectorWidget {
     route: ChildRoute,
     /// The last painted frame time in ms — the event pass's timestamp source.
     last_frame_ms: f64,
+    /// The enclosing scroll surface's live multi-contact veto, captured from
+    /// [`ambient_scroll_veto`] on the claiming `Down` while it is still
+    /// reachable — `None` outside a scroll surface, which simply has nothing
+    /// to raise (see the [module docs](self#surviving-an-enclosing-scroll-surface)).
+    scroll_veto: Option<Rc<Cell<bool>>>,
 }
 
 impl<State: 'static> View<State> for PinchDetectorView<State> {
@@ -393,6 +417,7 @@ impl<State: 'static> View<State> for PinchDetectorView<State> {
             claimant: None,
             route: ChildRoute::Forwarding,
             last_frame_ms: 0.0,
+            scroll_veto: None,
         }
     }
 
@@ -437,6 +462,18 @@ impl PinchDetectorWidget {
         }
     }
 
+    /// Raise or clear the captured [`PinchDetectorWidget::scroll_veto`] to
+    /// match whether the recogniser is tracking more than one contact right
+    /// now — called after every [`PinchRecognizer::handle`], so an enclosing
+    /// scroll surface sees the flip before its own next `Move` decides
+    /// whether to take the claimant's finger over (`crate::scroll`'s module
+    /// docs' *Multi-contact veto*).
+    fn sync_scroll_veto(&self) {
+        if let Some(veto) = &self.scroll_veto {
+            veto.set(self.recognizer.contact_count() >= 2);
+        }
+    }
+
     /// Route a first-contact event to the child according to [`ChildRoute`].
     fn route_claimant(&mut self, ctx: &mut EventCtx, event: &InputEvent, p: &PointerEvent) {
         let ends = matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel);
@@ -462,6 +499,7 @@ impl PinchDetectorWidget {
             self.claimant = None;
             self.route = ChildRoute::Forwarding;
             self.recognizer.reset();
+            self.scroll_veto = None;
         }
     }
 }
@@ -498,13 +536,22 @@ impl Widget for PinchDetectorWidget {
                     self.recognizer.reset();
                     self.claimant = Some(id);
                     self.route = ChildRoute::Forwarding;
+                    // Capture the enclosing scroll surface's live veto now,
+                    // while the ambient cell from its `Down` forward is still
+                    // reachable — a `None` snapshot here would be a surface's
+                    // own `Down`-time claim read too early to see a second
+                    // contact that has not arrived yet (see the module docs'
+                    // *Surviving an enclosing scroll surface*).
+                    self.scroll_veto = ambient_scroll_veto();
                     ctx.capture_pointer();
                     ctx.capture_contacts();
                     self.recognize(ctx, id, p);
+                    self.sync_scroll_veto();
                     self.child.event_child(ctx, event);
                     return EventResult::Handled;
                 }
                 self.recognize(ctx, id, p);
+                self.sync_scroll_veto();
                 if self.claimant == Some(id) {
                     self.route_claimant(ctx, event, p);
                 }
