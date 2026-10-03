@@ -1553,7 +1553,7 @@ mod tests {
                 Role::Navigator peers by raw wire sequence (birth), not by \
                 structural nesting depth. Expected to start passing once \
                 ranking accounts for nesting depth rather than birth order \
-                alone; rerun with `cargo test -p frust --lib \
+                alone; rerun with `cargo test -p frust-ui --lib \
                 wiring_order_does_not_flip -- --ignored` to observe the \
                 current failure."]
     fn wiring_order_does_not_flip_the_innermost_navigator_when_it_is_still_poppable() {

@@ -1537,7 +1537,7 @@ pub use wasm_bindgen as __wasm_bindgen;
 // facade because the `wasm_bindgen(start)` shim has nowhere to return one to.
 // The reference lives inside a `macro_rules!` body, so it is type-checked
 // only where a caller invokes [`web_app!`]/[`app!`] for a wasm32 target —
-// `cargo check --target wasm32-unknown-unknown -p frust --tests` covers it.
+// `cargo check --target wasm32-unknown-unknown -p frust-ui --tests` covers it.
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub use frust_shell_web as __frust_shell_web;
@@ -2301,8 +2301,8 @@ macro_rules! app {
 /// `Component + Default` fixture bound to all four platforms in one call —
 /// `cargo test --workspace` compiles this on host (criterion 1: `__frust_main`
 /// present, no Android JNI symbols), and `cargo check --target
-/// aarch64-linux-android -p frust --tests` / `--target
-/// aarch64-apple-ios-sim -p frust --tests` compile it for the two mobile
+/// aarch64-linux-android -p frust-ui --tests` / `--target
+/// aarch64-apple-ios-sim -p frust-ui --tests` compile it for the two mobile
 /// targets (criterion 2: the respective platform's exports appear,
 /// `__frust_main` absent on Android). Lives behind `cfg(test)` — never
 /// linked into a cdylib/staticlib/binary, so the fixed JNI/C-ABI export names
@@ -2312,7 +2312,7 @@ macro_rules! app {
 /// same reason.
 ///
 /// The fourth platform's own compile-check, `cargo check --target
-/// wasm32-unknown-unknown -p frust --tests`, type-checks `web_app!`'s
+/// wasm32-unknown-unknown -p frust-ui --tests`, type-checks `web_app!`'s
 /// generated shim (which calls `frust_shell_web::run_app` — see
 /// [`__frust_shell_web`]'s doc comment) and is part of the documented wasm
 /// gate in `docs/DEVELOPMENT.md`.
