@@ -371,7 +371,7 @@
 /* Begin XCLocalSwiftPackageReference section */
 		ABCDABCDABCDABCDABCD0034 /* XCLocalSwiftPackageReference "FrustEmbedding" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../platform/ios/FrustEmbedding";
+			relativePath = "../../../crates/frust-shell-ios/platform/ios/FrustEmbedding";
 		};
 /* End XCLocalSwiftPackageReference section */
 
