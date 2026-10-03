@@ -138,8 +138,17 @@ pub fn embedder_dir(project_dir: &Path) -> Result<PathBuf, WebBuildError> {
     embedder_page(dir)
 }
 
-/// [`embedder_dir`] through an injected locator — the form the pipeline and
-/// the preflight use, so one run asks cargo through the runner it was given.
+/// [`embedder_dir`] through an injected locator — the form the pipeline, the
+/// preflight and `frust doctor` use, so one run asks cargo through the runner
+/// it was given (and, behind a [`crate::packages::CachedLocator`], once).
+pub fn embedder_dir_with(
+    locator: &dyn PackageLocator,
+    project_dir: &Path,
+) -> Result<PathBuf, WebBuildError> {
+    locate_embedder(project_dir, locator)
+}
+
+/// The crate-internal spelling of [`embedder_dir_with`].
 pub(super) fn locate_embedder(
     project_dir: &Path,
     locator: &dyn PackageLocator,

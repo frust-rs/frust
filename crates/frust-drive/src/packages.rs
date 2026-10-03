@@ -16,7 +16,7 @@
 //! are the cargo-backed shorthand for a caller holding no runner.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,10 +44,13 @@ pub enum PackagesError {
         reason: String,
     },
     /// `cargo metadata` ran and failed; `stderr` is cargo's own explanation.
+    /// The message adds a network hint only when cargo's text is about the
+    /// index, a download or the network ([`metadata_failure_hint`]); any other
+    /// failure (a stale lock, a moved path dependency) is cargo's error alone.
     #[error(
-        "`cargo metadata` failed for '{}' — a project that depends on the published frust \
-         crates needs network access once, to download them:\n{stderr}",
-        project_dir.display()
+        "`cargo metadata` failed for '{}'{}:\n{stderr}",
+        project_dir.display(),
+        metadata_failure_hint(stderr)
     )]
     MetadataFailed {
         project_dir: PathBuf,
@@ -59,6 +62,20 @@ pub enum PackagesError {
     MetadataUnreadable {
         project_dir: PathBuf,
         reason: String,
+    },
+    /// Two versions of the package are both reachable from the project's root
+    /// package, so no single directory answers; `candidates` renders each as
+    /// `name@version (directory)`.
+    #[error(
+        "package `{package}` resolves to more than one version in the dependency graph of '{}': \
+         {}",
+        project_dir.display(),
+        candidates.join(", ")
+    )]
+    Ambiguous {
+        project_dir: PathBuf,
+        package: String,
+        candidates: Vec<String>,
     },
     /// The package is not in the project's dependency graph.
     /// `frust_dependency` is [`describe_frust_dependency`]'s rendering of how
@@ -74,6 +91,28 @@ pub enum PackagesError {
         package: String,
         frust_dependency: String,
     },
+}
+
+/// The text between "failed for '<dir>'" and cargo's stderr: a network hint
+/// when the stderr is about the registry index, a download or the network,
+/// nothing otherwise — a stale lock must not be blamed on connectivity.
+fn metadata_failure_hint(stderr: &str) -> &'static str {
+    const NETWORK_MARKERS: [&str; 7] = [
+        "failed to download",
+        "failed to fetch",
+        "unable to update registry",
+        "spurious network error",
+        "could not resolve host",
+        "network",
+        "download",
+    ];
+    let lower = stderr.to_lowercase();
+    if NETWORK_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        " — a project that depends on the published frust crates needs network access once, \
+         to download them"
+    } else {
+        ""
+    }
 }
 
 /// Resolves package names to the directories holding their `Cargo.toml`.
@@ -97,17 +136,18 @@ pub trait PackageLocator {
     }
 }
 
-/// How [`CargoLocator`] treats a project's existing `Cargo.lock`.
+/// How [`CargoLocator`] treats the project's `Cargo.lock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LockfilePolicy {
-    /// Pass `--locked` whenever `<project>/Cargo.lock` exists, so resolving a
-    /// location never rewrites the project's lockfile.
+    /// Resolve exactly as the following `cargo build` would: no `--locked`, so
+    /// cargo updates `Cargo.lock` when the manifest changed since it was
+    /// written (a dependency added after the first build) instead of failing.
     #[default]
-    Respect,
-    /// Never pass `--locked`: cargo may add entries to `Cargo.lock`. For a
-    /// caller that has just added a dependency to the manifest, where a
-    /// `--locked` resolve is guaranteed to fail.
     AllowUpdate,
+    /// Pass `--locked`: resolving never touches the lockfile and fails if it
+    /// is out of date. For a caller that must not modify the project; no
+    /// caller uses it today.
+    Locked,
 }
 
 /// The real [`PackageLocator`]: one `cargo metadata --format-version 1` run
@@ -123,7 +163,7 @@ impl<'r> CargoLocator<'r> {
     pub fn new(runner: &'r dyn ProcessRunner) -> Self {
         Self {
             runner,
-            lockfile: LockfilePolicy::Respect,
+            lockfile: LockfilePolicy::AllowUpdate,
         }
     }
 
@@ -134,7 +174,7 @@ impl<'r> CargoLocator<'r> {
     }
 
     /// The `cargo` argv for `project_dir`'s manifest at `manifest`.
-    fn metadata_args(&self, project_dir: &Path, manifest: &Path) -> Vec<String> {
+    fn metadata_args(&self, manifest: &Path) -> Vec<String> {
         let mut args = vec![
             "metadata".to_string(),
             "--format-version".to_string(),
@@ -142,7 +182,7 @@ impl<'r> CargoLocator<'r> {
             "--manifest-path".to_string(),
             manifest.to_string_lossy().into_owned(),
         ];
-        if self.lockfile == LockfilePolicy::Respect && project_dir.join("Cargo.lock").is_file() {
+        if self.lockfile == LockfilePolicy::Locked {
             args.push("--locked".to_string());
         }
         args
@@ -161,7 +201,7 @@ impl PackageLocator for CargoLocator<'_> {
                 project_dir: project_dir.to_path_buf(),
             });
         }
-        let args = self.metadata_args(project_dir, &manifest);
+        let args = self.metadata_args(&manifest);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out =
             self.runner
@@ -181,9 +221,12 @@ impl PackageLocator for CargoLocator<'_> {
 }
 
 /// Picks `packages` out of a `cargo metadata --format-version 1` document:
-/// each name's first `packages[]` entry, as the parent of its
-/// `manifest_path`. Split from [`CargoLocator`] so the parse is tested
-/// against canned JSON rather than a cargo run.
+/// each name's `packages[]` entry, as the parent of its `manifest_path`. When
+/// several packages share a name (two versions in one graph), the entry
+/// reachable from the root package through `resolve` — the version cargo
+/// actually builds the project against — wins; two reachable versions are
+/// [`PackagesError::Ambiguous`]. Split from [`CargoLocator`] so the parse is
+/// tested against canned JSON rather than a cargo run.
 pub(crate) fn packages_from_metadata(
     project_dir: &Path,
     metadata: &str,
@@ -199,13 +242,55 @@ pub(crate) fn packages_from_metadata(
         .get("packages")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| unreadable("no `packages` array".to_string()))?;
+    let str_of = |entry: &serde_json::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
 
+    let mut reachable: Option<HashSet<String>> = None;
     let mut dirs = Vec::with_capacity(packages.len());
     for wanted in packages {
-        let entry = listed
+        let mut candidates: Vec<&serde_json::Value> = listed
             .iter()
-            .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(*wanted));
-        let Some(entry) = entry else {
+            .filter(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(*wanted))
+            .collect();
+        if candidates.len() > 1 {
+            let closure = reachable.get_or_insert_with(|| root_closure(&doc));
+            let in_closure: Vec<&serde_json::Value> = candidates
+                .iter()
+                .copied()
+                .filter(|entry| str_of(entry, "id").is_some_and(|id| closure.contains(&id)))
+                .collect();
+            if in_closure.len() == 1 {
+                candidates = in_closure;
+            } else {
+                // Zero reachable means `resolve` could not discriminate
+                // (virtual workspace, absent graph): every candidate is
+                // equally plausible, which is the same ambiguity.
+                let named = if in_closure.is_empty() {
+                    candidates
+                } else {
+                    in_closure
+                };
+                return Err(PackagesError::Ambiguous {
+                    project_dir: project_dir.to_path_buf(),
+                    package: (*wanted).to_string(),
+                    candidates: named
+                        .iter()
+                        .map(|entry| {
+                            format!(
+                                "{wanted}@{} ({})",
+                                str_of(entry, "version").unwrap_or_else(|| "?".into()),
+                                str_of(entry, "manifest_path").unwrap_or_default()
+                            )
+                        })
+                        .collect(),
+                });
+            }
+        }
+        let Some(entry) = candidates.first() else {
             return Err(PackagesError::PackageAbsent {
                 project_dir: project_dir.to_path_buf(),
                 package: (*wanted).to_string(),
@@ -222,6 +307,51 @@ pub(crate) fn packages_from_metadata(
         dirs.push(dir.to_path_buf());
     }
     Ok(dirs)
+}
+
+/// The package ids reachable from the root package (every workspace member
+/// for a virtual workspace, which has no root) through `resolve.nodes`.
+/// Empty when the document carries no resolve graph.
+fn root_closure(doc: &serde_json::Value) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    let Some(resolve) = doc.get("resolve").filter(|resolve| !resolve.is_null()) else {
+        return seen;
+    };
+    let mut deps_of: HashMap<&str, Vec<&str>> = HashMap::new();
+    for node in resolve
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = node.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let deps = node
+            .get("dependencies")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        deps_of.insert(id, deps);
+    }
+    let mut stack: Vec<&str> = match resolve.get("root").and_then(serde_json::Value::as_str) {
+        Some(root) => vec![root],
+        None => doc
+            .get("workspace_members")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect(),
+    };
+    while let Some(id) = stack.pop() {
+        if seen.insert(id.to_string()) {
+            stack.extend(deps_of.get(id).into_iter().flatten().copied());
+        }
+    }
+    seen
 }
 
 /// How the project at `project_dir` declares its `frust` dependency, for an
@@ -310,8 +440,8 @@ impl PackageLocator for CachedLocator<'_> {
 }
 
 /// The directory of `package` in the dependency graph of the Cargo project at
-/// `project_dir`, resolved by `cargo metadata` (`--locked` when the project
-/// has a `Cargo.lock`).
+/// `project_dir`, resolved by `cargo metadata` the way the next `cargo build`
+/// would resolve (see [`LockfilePolicy::AllowUpdate`]).
 pub fn locate(project_dir: &Path, package: &str) -> Result<PathBuf, PackagesError> {
     CargoLocator::new(&RealProcessRunner).locate(project_dir, package)
 }
@@ -564,39 +694,30 @@ mod tests {
         let _ = fs::remove_dir_all(&project);
     }
 
-    /// `--locked` follows the lockfile: present when `Cargo.lock` exists under
-    /// the default policy, absent without one, and never under
-    /// [`LockfilePolicy::AllowUpdate`].
+    /// The default policy resolves as the next build would: no `--locked`,
+    /// whether or not a `Cargo.lock` exists. Only the explicit `Locked`
+    /// policy passes it.
     #[test]
-    fn locked_is_passed_only_when_a_lockfile_exists_and_is_respected() {
+    fn locked_is_passed_only_under_the_locked_policy() {
         let project = project_with("locked", "[package]\nname = \"a\"\n");
         let manifest = project.join("Cargo.toml");
         let runner = FakeProcessRunner::new();
-        let respect = CargoLocator::new(&runner);
-        assert!(
-            !respect
-                .metadata_args(&project, &manifest)
-                .contains(&"--locked".to_string())
-        );
-        assert!(
-            !respect
-                .metadata_args(&project, &manifest)
-                .contains(&"--no-deps".to_string()),
-            "locating a dependency needs the dependency graph"
-        );
-        fs::write(project.join("Cargo.lock"), "version = 4\n").unwrap();
+        let default = CargoLocator::new(&runner);
+        for lock in [false, true] {
+            if lock {
+                fs::write(project.join("Cargo.lock"), "version = 4\n").unwrap();
+            }
+            let args = default.metadata_args(&manifest);
+            assert!(!args.contains(&"--locked".to_string()), "lock={lock}");
+            assert!(
+                !args.contains(&"--no-deps".to_string()),
+                "locating a dependency needs the dependency graph"
+            );
+        }
+        let locked = CargoLocator::new(&runner).with_lockfile_policy(LockfilePolicy::Locked);
         assert_eq!(
-            respect
-                .metadata_args(&project, &manifest)
-                .last()
-                .map(String::as_str),
+            locked.metadata_args(&manifest).last().map(String::as_str),
             Some("--locked")
-        );
-        let update = CargoLocator::new(&runner).with_lockfile_policy(LockfilePolicy::AllowUpdate);
-        assert!(
-            !update
-                .metadata_args(&project, &manifest)
-                .contains(&"--locked".to_string())
         );
         let _ = fs::remove_dir_all(&project);
     }
@@ -638,8 +759,98 @@ mod tests {
             "{err:?}"
         );
         assert!(message.contains("failed to get `frust-ui`"), "{message}");
-        assert!(message.contains("network access once"), "{message}");
+        assert!(!message.contains("network"), "{message}");
         let _ = fs::remove_dir_all(&project);
+    }
+
+    /// A stale lock is cargo's error, not a connectivity problem; an index or
+    /// download failure keeps the network hint.
+    #[test]
+    fn the_network_hint_appears_only_for_network_failures() {
+        let project = project_with("hint", "[package]\nname = \"a\"\n");
+        let failed = |stderr: &str| PackagesError::MetadataFailed {
+            project_dir: project.clone(),
+            stderr: stderr.to_string(),
+        };
+        let stale = failed(
+            "error: the lock file needs to be updated but --locked was passed to prevent this",
+        )
+        .to_string();
+        assert!(
+            stale.contains("the lock file needs to be updated"),
+            "{stale}"
+        );
+        assert!(!stale.contains("network"), "{stale}");
+        for network in [
+            "error: failed to download `anyhow v1.0.0`",
+            "warning: spurious network error (3 tries remaining)",
+            "error: failed to get `x` as a dependency\nCaused by: unable to update registry `crates-io`",
+        ] {
+            let message = failed(network).to_string();
+            assert!(message.contains("network access once"), "{message}");
+            assert!(message.contains(network), "{message}");
+        }
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Canned metadata with two `serde` versions: 1.0.1 is a dependency of
+    /// the root package `app`, 0.9.0 only of a build-tool package outside the
+    /// root's closure.
+    fn two_version_metadata(both_reachable: bool) -> String {
+        let root_deps = if both_reachable {
+            r#""serde 1.0.1", "serde 0.9.0""#
+        } else {
+            r#""serde 1.0.1""#
+        };
+        format!(
+            r#"{{
+            "packages": [
+                {{"name":"app","version":"0.1.0","id":"app","manifest_path":"/work/app/Cargo.toml"}},
+                {{"name":"tool","version":"0.1.0","id":"tool","manifest_path":"/reg/tool/Cargo.toml"}},
+                {{"name":"serde","version":"0.9.0","id":"serde 0.9.0","manifest_path":"/reg/serde-0.9.0/Cargo.toml"}},
+                {{"name":"serde","version":"1.0.1","id":"serde 1.0.1","manifest_path":"/reg/serde-1.0.1/Cargo.toml"}}
+            ],
+            "workspace_members": ["app"],
+            "resolve": {{
+                "root": "app",
+                "nodes": [
+                    {{"id":"app","dependencies":[{root_deps}]}},
+                    {{"id":"tool","dependencies":["serde 0.9.0"]}},
+                    {{"id":"serde 0.9.0","dependencies":[]}},
+                    {{"id":"serde 1.0.1","dependencies":[]}}
+                ]
+            }},
+            "version": 1
+        }}"#
+        )
+    }
+
+    #[test]
+    fn a_name_shared_by_two_versions_resolves_to_the_roots_dependency() {
+        let dirs = packages_from_metadata(
+            Path::new("/work/app"),
+            &two_version_metadata(false),
+            &["serde"],
+        )
+        .unwrap();
+        assert_eq!(dirs, vec![PathBuf::from("/reg/serde-1.0.1")]);
+    }
+
+    #[test]
+    fn two_versions_both_reachable_from_the_root_are_ambiguous() {
+        let err = packages_from_metadata(
+            Path::new("/work/app"),
+            &two_version_metadata(true),
+            &["serde"],
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            matches!(&err, PackagesError::Ambiguous { candidates, .. } if candidates.len() == 2),
+            "{err:?}"
+        );
+        assert!(message.contains("serde@0.9.0"), "{message}");
+        assert!(message.contains("serde@1.0.1"), "{message}");
     }
 
     #[test]
@@ -704,10 +915,11 @@ mod tests {
     /// `--frust-path` = this checkout resolves `frust-shell-web` to the
     /// checkout's own crate directory. The checkout's `Cargo.lock` seeds the
     /// generated project's, so cargo resolves the framework graph from the
-    /// versions the workspace already pins rather than fetching an index; the
-    /// first, lock-updating resolve then leaves a lockfile the default
-    /// (`--locked`) [`locate_many`] reads as-is.
+    /// versions the workspace already pins rather than fetching an index.
+    /// Ignored with the e2e family: it spawns real cargo and writes a project
+    /// under the temp dir; run it with `--ignored`.
     #[test]
+    #[ignore = "spawns real cargo against a generated project; run with --ignored (e2e family)"]
     fn real_cargo_locates_the_shell_crate_of_a_generated_path_mode_project() {
         let root = checkout_root();
         let project = temp_dir("real-cargo").join("my_app");
@@ -724,11 +936,10 @@ mod tests {
         scaffold::generate(&project, &ctx, None, false, None).unwrap();
         fs::copy(root.join("Cargo.lock"), project.join("Cargo.lock")).unwrap();
 
-        let updating = CargoLocator::new(&RealProcessRunner)
-            .with_lockfile_policy(LockfilePolicy::AllowUpdate)
+        let located = CargoLocator::new(&RealProcessRunner)
             .locate(&project, "frust-ui")
             .unwrap();
-        assert_eq!(updating.canonicalize().unwrap(), root.join("crates/frust"));
+        assert_eq!(located.canonicalize().unwrap(), root.join("crates/frust"));
 
         let dirs = locate_many(&project, &["frust-shell-web", "frust-glyph"]).unwrap();
         assert_eq!(

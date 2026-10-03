@@ -1,12 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use frust_drive::doctor::report::ComponentStatus;
 use frust_drive::doctor::{DoctorCtx, RealEnv, Status, Validation, Validator};
-use frust_drive::packages::{CargoLocator, PackageLocator};
+use frust_drive::packages::{CachedLocator, CargoLocator, PackageLocator};
 use frust_drive::platform_wiring;
 use frust_drive::process::ProcessRunner;
-use frust_drive::web_build::{self, WebBuildError, WebPreflight};
+use frust_drive::web_build::{self, WebPreflight};
 
 /// Runs all doctor validators and prints their results, then the browser
 /// preflight under its own "Web" heading, and returns the process exit code
@@ -81,8 +81,11 @@ fn run_with(
     print_web_results(&web_preflight, verbose);
 
     if project_dir.join("frust.toml").is_file() {
-        let locator = CargoLocator::new(ctx.runner);
-        for line in package_dir_lines(&locator, project_dir, &web_build::embedder_dir) {
+        // One cached locator serves all three rows: a single `cargo metadata`
+        // run, through the injected runner.
+        let cargo = CargoLocator::new(ctx.runner);
+        let locator = CachedLocator::new(&cargo);
+        for line in package_dir_lines(&locator, project_dir) {
             println!("{line}");
         }
     }
@@ -93,13 +96,9 @@ fn run_with(
 /// The "Platform packages" heading's lines: one row per platform naming the
 /// embedding directory the project resolves, or the error that prevented
 /// it. Android and iOS come from one [`platform_wiring::resolve`] through
-/// `locator`; web is the browser host page `web_embedder` (in production
-/// [`web_build::embedder_dir`]) resolves.
-fn package_dir_lines(
-    locator: &dyn PackageLocator,
-    project_dir: &Path,
-    web_embedder: &dyn Fn(&Path) -> Result<PathBuf, WebBuildError>,
-) -> Vec<String> {
+/// `locator`; web is the browser host page [`web_build::embedder_dir_with`]
+/// resolves through the same locator.
+fn package_dir_lines(locator: &dyn PackageLocator, project_dir: &Path) -> Vec<String> {
     let (android, ios) = match platform_wiring::resolve(locator, project_dir) {
         Ok(dirs) => (Ok(dirs.android), Ok(dirs.ios)),
         Err(err) => {
@@ -107,7 +106,7 @@ fn package_dir_lines(
             (Err(message.clone()), Err(message))
         }
     };
-    let web = web_embedder(project_dir).map_err(|err| err.to_string());
+    let web = web_build::embedder_dir_with(locator, project_dir).map_err(|err| err.to_string());
 
     let mut lines = vec!["Platform packages".to_string()];
     for (name, resolved) in [("android", android), ("ios", ios), ("web", web)] {
@@ -500,9 +499,13 @@ mod tests {
                 root.join("frust-shell-ios"),
             );
         let web_dir = root.join("frust-shell-web/platform/web");
-        let web_ok = |_: &Path| Ok(web_dir.clone());
+        std::fs::create_dir_all(&web_dir).unwrap();
+        for file in ["index.html", "frust_web.js"] {
+            std::fs::write(web_dir.join(file), "x").unwrap();
+        }
+        let stub = stub.with("frust-shell-web", root.join("frust-shell-web"));
 
-        let lines = package_dir_lines(&stub, &root, &web_ok);
+        let lines = package_dir_lines(&stub, &root);
         assert_eq!(
             lines,
             vec![
@@ -527,20 +530,14 @@ mod tests {
         );
 
         let offline = StubLocator::failing("network is unreachable");
-        let web_err = |dir: &Path| {
-            Err(WebBuildError::EmbedderUnlocated {
-                source: frust_drive::packages::PackagesError::NoManifest {
-                    project_dir: dir.to_path_buf(),
-                },
-            })
-        };
-        let lines = package_dir_lines(&offline, &root, &web_err);
+        let lines = package_dir_lines(&offline, &root);
         assert_eq!(lines.len(), 7, "{lines:?}");
         for (row, name) in [(1, "android"), (3, "ios"), (5, "web")] {
             assert_eq!(lines[row], format!("[\u{2717}] {name}"), "{lines:?}");
         }
         assert!(lines[2].contains("network is unreachable"), "{lines:?}");
         assert!(lines[4].contains("network is unreachable"), "{lines:?}");
+        assert!(lines[6].contains("network is unreachable"), "{lines:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

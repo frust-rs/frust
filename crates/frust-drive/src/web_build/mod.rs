@@ -99,7 +99,7 @@ use crate::manifest::{self, Manifest};
 use crate::packages::{CachedLocator, CargoLocator, PackageLocator};
 use crate::process::{ProcessRunner, tail_lines};
 
-pub use bundle::{artifact_dir, embedder_dir};
+pub use bundle::{artifact_dir, embedder_dir, embedder_dir_with};
 pub use preflight::{
     BINDGEN_COMPONENT, BindgenRowKind, EMBEDDER_COMPONENT, HOST_PAGE_COMPONENT, MANIFEST_COMPONENT,
     TARGET_COMPONENT, WASM_OPT_COMPONENT, WebPreflight, preflight,

@@ -42,12 +42,20 @@ pub enum FrustPathError {
 /// [`frust_path_from_project_subdir`]); it must be normalised before it ever
 /// reaches them.
 pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> {
-    if manifest_names_facade(path) {
-        return Ok(path.to_path_buf());
+    resolve_frust_checkout(path).map(|(dir, _)| dir)
+}
+
+/// [`resolve_frust_crate_path`] plus the facade package name the directory's
+/// manifest declares (`frust-ui` or the older `frust`), which the generated
+/// dependency must repeat as `package = "<name>"` for cargo to find it —
+/// see [`FrustDependency::PathPackage`].
+pub fn resolve_frust_checkout(path: &Path) -> Result<(PathBuf, String), FrustPathError> {
+    if let Some(name) = facade_package_name(path) {
+        return Ok((path.to_path_buf(), name.to_string()));
     }
     let nested = path.join("crates").join("frust");
-    if manifest_names_facade(&nested) {
-        return Ok(nested);
+    if let Some(name) = facade_package_name(&nested) {
+        return Ok((nested, name.to_string()));
     }
     Err(FrustPathError::NotFacadeCrate {
         given: path.display().to_string(),
@@ -70,8 +78,10 @@ struct CargoPackageName {
 /// The facade is published as `frust-ui` (crates.io `frust` is held by
 /// another project, https://github.com/lloydmeta/frunk/issues/258) but older
 /// checkouts still name the package `frust`; both are accepted.
-fn manifest_names_facade(dir: &Path) -> bool {
-    manifest_names_package(dir, "frust-ui") || manifest_names_package(dir, "frust")
+fn facade_package_name(dir: &Path) -> Option<&'static str> {
+    ["frust-ui", "frust"]
+        .into_iter()
+        .find(|name| manifest_names_package(dir, name))
 }
 
 /// Whether `<dir>/Cargo.toml` exists, parses, and names package `expected`.
@@ -128,8 +138,13 @@ pub const DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION: &str = "11.0";
 /// (`--frust-path`, framework development).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrustDependency {
-    /// A checkout's facade crate directory (project-root-relative or absolute).
+    /// A checkout's facade crate directory (project-root-relative or absolute),
+    /// whose package is the published name `frust-ui`.
     Path(String),
+    /// A checkout's facade crate directory whose manifest names the package
+    /// `package` — `frust` for a checkout older than the rename. What
+    /// `--frust-path` produces via [`resolve_frust_checkout`].
+    PathPackage { path: String, package: String },
     /// The crates.io release at this version.
     Registry { version: String },
 }
@@ -139,7 +154,7 @@ impl FrustDependency {
     /// plugin dependencies in the Cargo.toml templates read it).
     pub fn path(&self) -> &str {
         match self {
-            Self::Path(p) => p,
+            Self::Path(p) | Self::PathPackage { path: p, .. } => p,
             Self::Registry { .. } => "",
         }
     }
@@ -147,7 +162,7 @@ impl FrustDependency {
     /// The release version in registry mode, empty in path mode.
     pub fn registry_version(&self) -> &str {
         match self {
-            Self::Path(_) => "",
+            Self::Path(_) | Self::PathPackage { .. } => "",
             Self::Registry { version } => version,
         }
     }
@@ -156,13 +171,19 @@ impl FrustDependency {
     /// as `frust-ui` and imported as `frust`
     /// (<https://github.com/lloydmeta/frunk/issues/258>), so both forms name
     /// the package: a path dependency keyed `frust` without `package` would
-    /// look for a package named `frust` at that path and find `frust-ui`.
+    /// look for a package named `frust` at that path and find `frust-ui`. A
+    /// path dependency names whichever package the checkout's manifest
+    /// declares.
     pub fn dep_line(&self) -> String {
+        let path_line = |path: &str, package: &str| {
+            format!(
+                "frust = {{ package = \"{package}\", path = \"{}\" }}",
+                host_path::to_portable_string(Path::new(path))
+            )
+        };
         match self {
-            Self::Path(p) => format!(
-                "frust = {{ package = \"frust-ui\", path = \"{}\" }}",
-                host_path::to_portable_string(Path::new(p))
-            ),
+            Self::Path(p) => path_line(p, "frust-ui"),
+            Self::PathPackage { path, package } => path_line(path, package),
             Self::Registry { version } => {
                 format!("frust = {{ package = \"frust-ui\", version = \"{version}\" }}")
             }
@@ -898,6 +919,36 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&root);
             let _ = std::fs::remove_dir_all(&repo);
+        }
+
+        /// The matched package name comes back with the directory, and the
+        /// dependency line repeats it.
+        #[test]
+        fn the_checkout_resolution_reports_the_facade_package_name() {
+            for name in ["frust", "frust-ui"] {
+                let root = unique_temp_dir(&format!("named-{name}"));
+                write_manifest(&root.join("crates").join("frust"), name);
+                let (dir, package) = resolve_frust_checkout(&root).unwrap();
+                assert_eq!(dir, root.join("crates").join("frust"));
+                assert_eq!(package, name);
+                let dep = FrustDependency::PathPackage {
+                    path: "/checkout/crates/frust".into(),
+                    package,
+                };
+                assert_eq!(
+                    dep.dep_line(),
+                    format!(
+                        "frust = {{ package = \"{name}\", path = \"/checkout/crates/frust\" }}"
+                    )
+                );
+                assert_eq!(dep.path(), "/checkout/crates/frust");
+                assert_eq!(dep.registry_version(), "");
+                let _ = std::fs::remove_dir_all(&root);
+            }
+            assert_eq!(
+                FrustDependency::Path("/c".into()).dep_line(),
+                "frust = { package = \"frust-ui\", path = \"/c\" }"
+            );
         }
 
         /// Shape 2: `path` is the repo root containing `crates/frust` ->
