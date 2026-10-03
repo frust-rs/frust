@@ -59,4 +59,3 @@ pub fn greeting_page(state: &mut Arc<GreetingController>) -> AnyView<Arc<Greetin
         |failure: AppFailure| any(text(failure.user_message()).size(20.0)),
     )
 }
-
