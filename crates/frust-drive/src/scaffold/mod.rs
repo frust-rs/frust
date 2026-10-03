@@ -791,8 +791,12 @@ mod tests {
         );
         // Xcode's per-user state, written whenever the project is opened.
         assert!(gitignore.contains("xcuserdata/"), "{gitignore}");
-        // The machine-local symlink `platform_wiring::sync` maintains.
-        assert!(gitignore.contains("ios/FrustEmbedding"), "{gitignore}");
+        // The machine-local Swift package symlinks `platform_wiring` maintains
+        // (`ios/FrustEmbedding`, and one per plugin package).
+        assert!(
+            gitignore.lines().any(|line| line == "/ios/Frust*"),
+            "{gitignore}"
+        );
         assert!(dest.join("assets/.gitkeep").exists());
         // The Android link-flags file: a dot-directory manifest entry
         // (`.cargo/config.toml`), carried verbatim so a scaffolded app
@@ -932,13 +936,15 @@ mod tests {
         );
 
         // The embedding module is wired in by path: an `include`, a
-        // `projectDir` pointing at the frust checkout, and the build-output
-        // redirect that keeps that checkout pristine.
+        // `projectDir` resolved through the machine-local-directory helper,
+        // and the build-output redirect that keeps the shared checkout
+        // pristine. The helper is the very text `frust plugin add` inserts
+        // into a settings file that predates it.
         let settings = fs::read_to_string(dest.join("android/settings.gradle.kts")).unwrap();
         for needle in [
+            crate::plugin::apply::SETTINGS_LOCAL_DIR_HELPER,
             "include(\":frust-embedding\")",
-            "project(\":frust-embedding\").projectDir =",
-            "file(providers.gradleProperty(\"frust.embedding.dir\").get())",
+            "project(\":frust-embedding\").projectDir = frustLocalDir(\"frust.embedding.dir\")",
             "gradle.lifecycle.beforeProject {",
             "layout.buildDirectory.set(rootDir.resolve(\"../build/android/app\"))",
             "layout.buildDirectory.set(rootDir.resolve(\"../build/android/frust-embedding\"))",
@@ -948,28 +954,31 @@ mod tests {
                 "expected `{needle}`:\n{settings}"
             );
         }
+        // The helper is defined before its first use, and the plugin anchor
+        // stays below every built-in module.
+        let helper_at = settings.find("fun frustLocalDir(").unwrap();
+        let use_at = settings
+            .find("frustLocalDir(\"frust.embedding.dir\")")
+            .unwrap();
+        let anchor_at = settings.find("// frust:plugin-includes").unwrap();
+        assert!(helper_at < use_at && use_at < anchor_at, "{settings}");
+        assert!(!settings.contains("gradleProperty"), "{settings}");
 
-        // `frust.embedding.dir` is not a scaffold-time value: the template
-        // renders the key with a placeholder `platform_wiring::sync` replaces
-        // with the resolved shell crate's module directory, so a project
-        // that never synced fails Gradle naming the fix rather than pointing
-        // somewhere plausible but wrong.
+        // No machine-local location in a tracked file: `gradle.properties`
+        // carries no `frust.embedding.dir` (the key lives in the gitignored
+        // `local.properties`, written by `platform_wiring::sync`), and
+        // neither file names an absolute path.
         let gradle_properties = fs::read_to_string(dest.join("android/gradle.properties")).unwrap();
-        let embedding_lines: Vec<&str> = gradle_properties
-            .lines()
-            .filter(|line| line.starts_with(crate::platform_wiring::EMBEDDING_DIR_KEY))
-            .collect();
-        assert_eq!(
-            embedding_lines,
-            [format!(
-                "{}={}",
-                crate::platform_wiring::EMBEDDING_DIR_KEY,
-                crate::platform_wiring::UNRESOLVED_EMBEDDING_DIR
-            )],
+        assert!(
+            !gradle_properties.contains(crate::platform_wiring::EMBEDDING_DIR_KEY),
             "{gradle_properties}"
         );
         assert!(!gradle_properties.contains("{{"), "{gradle_properties}");
         assert!(!gradle_properties.contains('\\'), "{gradle_properties}");
+        assert!(
+            !dest.join(crate::platform_wiring::LOCAL_PROPERTIES).exists(),
+            "the scaffold itself writes no machine-local file"
+        );
 
         assert!(
             build_gradle.contains("implementation(project(\":frust-embedding\"))"),

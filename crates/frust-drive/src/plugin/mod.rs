@@ -16,6 +16,13 @@
 //! why there is no `KotlinFile`/`ProguardRule` contribution — a copied file
 //! and a hand-appended keep rule both drift from the plugin they came from.
 //!
+//! Where a plugin's Gradle module or Swift package lives on disk is
+//! machine-local (a checkout, or cargo's registry cache), so no tracked file
+//! names it: the tracked edits reference a [`NativeModule`] by key or link
+//! name only, and its location is kept in `android/local.properties` / an
+//! `ios/` symlink by [`crate::platform_wiring`] — written by [`add_plugin`]
+//! for the modules it adds and refreshed by every `frust run`/`frust build`.
+//!
 //! The desktop lane ([`Contribution::MacosPlistEntry`]/
 //! [`Contribution::MacosEntitlement`]/[`Contribution::LinuxDesktopEntry`])
 //! never edits a project file at all: unlike every mobile contribution above,
@@ -75,6 +82,48 @@ pub struct PluginSpec {
     pub requires_sibling: Option<&'static str>,
 }
 
+impl PluginSpec {
+    /// Every native module this plugin can contribute — its base
+    /// contributions' and every optional feature's — located inside the
+    /// package its base [`Contribution::CargoDep`] adds. A registry path
+    /// outside that package (which [`add_plugin`] refuses) is left out.
+    pub fn native_modules(&self) -> Vec<NativeModule> {
+        self.base
+            .iter()
+            .chain(self.optional_features.iter().flat_map(|f| f.contributions))
+            .filter_map(|contribution| apply::native_module(self, contribution)?.ok())
+            .collect()
+    }
+}
+
+/// A plugin's Gradle library module or local Swift package, as the
+/// machine-local wiring knows it: which package ships it, where inside that
+/// package, and the name the generated host project refers to it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeModule {
+    /// The cargo package shipping the module (the plugin's own crate).
+    pub package: &'static str,
+    /// The module's directory inside that package, e.g. `platform/android`.
+    pub dir_in_package: &'static str,
+    /// What kind of module it is, with its host-project name.
+    pub kind: NativeKind,
+}
+
+/// The two kinds of [`NativeModule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeKind {
+    /// A Gradle library module ([`Contribution::GradleModule`]), named by its
+    /// Gradle path, e.g. `":frust-iap"`; its directory lives under
+    /// [`crate::platform_wiring::plugin_module_key`] in
+    /// `android/local.properties`.
+    GradleModule { gradle_name: &'static str },
+    /// A local Swift package ([`Contribution::SwiftPackageRef`]), named by its
+    /// package/product name, e.g. `"FrustIap"`; referenced as
+    /// `relativePath = "FrustIap"`, resolved through the
+    /// [`crate::platform_wiring::swift_package_link`] symlink.
+    SwiftPackage { package_name: &'static str },
+}
+
 /// An opt-in bundle of contributions under a [`PluginSpec`], selected by id.
 #[derive(Debug, Clone, Copy)]
 pub struct FeatureSpec {
@@ -117,7 +166,10 @@ pub enum Contribution {
     /// A Gradle library module included into the generated project: appends
     /// the `include(...)` + `projectDir` (+ build-directory redirect) lines to
     /// `android/settings.gradle.kts` and the `implementation(project(...))`
-    /// line to `android/app/build.gradle.kts`, both idempotently.
+    /// line to `android/app/build.gradle.kts`, both idempotently. The
+    /// `projectDir` names no path: it reads the module's
+    /// `frust.plugin.<module>.dir` key from `android/local.properties`, which
+    /// [`add_plugin`] writes alongside (see [`NativeModule`]).
     ///
     /// One contribution, two files, **one** [`AddItem`] — the report is a
     /// per-contribution ledger, not a per-file one. A half-applied state (one
@@ -127,9 +179,9 @@ pub enum Contribution {
         /// The Gradle project path, e.g. `":frust-secure-storage"`.
         gradle_name: &'static str,
         /// The module directory, relative to the frust repo root, e.g.
-        /// `"plugins/secure-storage/platform/android"`. Written into the
-        /// project as the same subdirectory of the plugin's package wherever
-        /// cargo locates it (`<package>/platform/android`).
+        /// `"plugins/secure-storage/platform/android"`. Wired as the same
+        /// subdirectory of the plugin's package wherever cargo locates it
+        /// (`<package>/platform/android`).
         rel_path: &'static str,
     },
     /// A plugin's local Swift package added to the generated app's
@@ -156,10 +208,10 @@ pub enum Contribution {
         package_name: &'static str,
         /// The package directory, relative to the frust repo root, e.g.
         /// `"plugins/camera/platform/ios"` — resolved exactly like a
-        /// [`Contribution::GradleModule`]'s `rel_path`. A located package is
-        /// written as an absolute path; only a project-root-relative fallback
-        /// needs the extra `../` for Xcode resolving `relativePath` against
-        /// the directory *containing* the `.xcodeproj` (`<project>/ios/`).
+        /// [`Contribution::GradleModule`]'s `rel_path`. The reference itself
+        /// is `relativePath = "<package_name>"`, which Xcode resolves against
+        /// `<project>/ios/` — through the `ios/<package_name>` symlink
+        /// [`add_plugin`] creates to the located directory.
         rel_path: &'static str,
     },
     /// A system framework linked into the generated app's Runner target by
@@ -459,7 +511,8 @@ pub enum PluginAddError {
     NoFrustDependency,
     /// Cargo could not say where a package lives in a project depending on
     /// the crates.io release, where — unlike a checkout path — there is no
-    /// other place to derive it from.
+    /// other place to derive it from. Raised before any platform file is
+    /// edited.
     #[error("could not locate the `{package}` package through cargo: {source}")]
     PackageNotLocated {
         package: String,
@@ -507,7 +560,8 @@ pub enum PluginAddError {
     /// A required sibling checkout (facade plugin) is not on disk.
     #[error("required sibling checkout `{sibling}` not found (expected at `{}`)", .expected.display())]
     SiblingCheckoutMissing { sibling: String, expected: PathBuf },
-    /// A filesystem write failed.
+    /// A filesystem write failed — a project file, or the machine-local
+    /// `android/local.properties` key / `ios/` symlink a module is wired by.
     #[error("writing `{path}`: {message}")]
     Io { path: String, message: String },
     /// A [`Contribution::CargoFeature`] named a dependency with no existing
