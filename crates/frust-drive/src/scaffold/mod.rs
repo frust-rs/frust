@@ -1334,7 +1334,7 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20</activity>\n\
              \x20\x20\x20\x20</application>\n\
              \n\
-             </manifest>",
+             </manifest>\n",
             title = ctx.title_case_name,
             project = ctx.project_name,
         );
@@ -1435,7 +1435,7 @@ mod tests {
              \t<key>CADisableMinimumFrameDurationOnPhone</key>\n\
              \t<true/>\n\
              </dict>\n\
-             </plist>";
+             </plist>\n";
         assert!(
             plist.ends_with(expected_tail),
             "expected plist to end with:\n{expected_tail}\ngot:\n{plist}"
@@ -2192,17 +2192,6 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    /// A verbatim source file as `renderer::render` would emit it: minijinja
-    /// keeps Jinja2's `keep_trailing_newline = false` default and drops one
-    /// trailing newline from every rendered template, so a `.tmpl` copied
-    /// byte-for-byte from a source file still loses that byte on the way
-    /// out. Every rendered file in a scaffolded project already shows this
-    /// (`linux/app.desktop`, `macos/Info.plist`, …); the drift tests below
-    /// model it rather than treating it as drift.
-    fn as_rendered(raw: &str) -> &str {
-        raw.strip_suffix('\n').unwrap_or(raw)
-    }
-
     /// Every file under `root`, as `(relative path, bytes)`, sorted by path.
     fn tree_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
         fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, Vec<u8>)>) {
@@ -2663,8 +2652,7 @@ mod tests {
         .expect("reading crates/frust-shell-web/platform/web/frust_web.js");
         let scaffolded = fs::read_to_string(dest.join("web/frust_web.js")).unwrap();
         assert_eq!(
-            scaffolded,
-            as_rendered(&embedder),
+            scaffolded, embedder,
             "crates/frust-drive/templates/app/web.tmpl/frust_web.js.tmpl has drifted from \
              crates/frust-shell-web/platform/web/frust_web.js — re-copy it verbatim rather than \
              editing either copy alone"
@@ -2704,7 +2692,7 @@ mod tests {
         let scaffolded = fs::read_to_string(dest.join("web/index.html")).unwrap();
         assert_eq!(
             body(&scaffolded),
-            as_rendered(&expected),
+            expected.as_str(),
             "crates/frust-drive/templates/app/web.tmpl/index.html.tmpl has drifted from \
              crates/frust-shell-web/platform/web/index.html beyond its title and `?module=` default"
         );

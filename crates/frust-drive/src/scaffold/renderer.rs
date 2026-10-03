@@ -16,6 +16,9 @@ use minijinja::{Environment, UndefinedBehavior};
 pub fn render(template: &str, vars: &BTreeMap<&str, String>) -> Result<String> {
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
+    // Jinja2's default drops one trailing newline from every render, which
+    // leaves generated source files failing `cargo fmt --check`.
+    env.set_keep_trailing_newline(true);
     env.render_str(template, vars)
         .context("rendering template content")
 }
@@ -100,6 +103,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "name = \"my_app\"");
+    }
+
+    #[test]
+    fn render_keeps_exactly_one_trailing_newline() {
+        let out = render("fn main() {}\n", &BTreeMap::new()).unwrap();
+        assert_eq!(out, "fn main() {}\n");
     }
 
     #[test]
