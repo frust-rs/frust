@@ -221,7 +221,7 @@ const DEFAULT_WEB_PORT: u16 = 8000;
 /// Every field is optional with a documented default, so the whole section
 /// may be absent (what `frust create` scaffolds): the defaults describe
 /// exactly the layout `crates/frust-drive/templates/app/web.tmpl/` produces and the recipe
-/// `platform/web/README.md` documents (`cargo build --target
+/// `crates/frust-shell-web/platform/web/README.md` documents (`cargo build --target
 /// wasm32-unknown-unknown` + `wasm-bindgen --target web --out-dir
 /// <out-dir>/pkg --out-name <out-name>`). Read each one through its
 /// accessor rather than matching the field directly, the same contract

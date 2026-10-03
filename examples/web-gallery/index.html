@@ -10,13 +10,13 @@
   app_handler.rs`'s `DEFAULT_CANVAS_SIZE` doc comment). Canvas-host binding,
   live resize/DPR sync, and the `postMessage({type:"frust:height",...})`
   contract are no longer this page's own script — they are
-  `platform/web/frust_web.js`'s `mount()`, the framework's own host-page glue
+  `crates/frust-shell-web/platform/web/frust_web.js`'s `mount()`, the framework's own host-page glue
   (see that file's doc). This page imports it directly by its real relative
   path rather than carrying a second copy: `mount()` is read-only evidence
   here, outside this task's write scope, and duplicating it would drift the
   moment the framework's contract changes. This is one of the two embedding
   routes the task named (`mount()` here, vs. letting `frust build web` stage
-  the framework's own `platform/web/index.html` verbatim) — see README.md's
+  the framework's own `crates/frust-shell-web/platform/web/index.html` verbatim) — see README.md's
   "Embedding" section for why both routes are documented and which one this
   task's own binary-size record was measured against.
 
@@ -52,7 +52,7 @@
   page, not this file — README.md explains why) and the manual
   cargo/wasm-bindgen/wasm-opt recipe this file's own `--out-name
   web_gallery` matches, plus the exact static-server invocation this page's
-  `../../platform/web/frust_web.js` import requires (the server root must be
+  `../../crates/frust-shell-web/platform/web/frust_web.js` import requires (the server root must be
   the repository root, not this directory, so that relative path resolves).
 
   `pkg/`, `build/` and `target/` are generated and MUST NOT be committed —
@@ -93,7 +93,7 @@
          stylesheet rule regardless of specificity; verified empirically
          while building this very page, before `frust_web.js` existed to fix
          it generally — see README.md's Milestone 6). `line-height: 0`
-         mirrors `platform/web/index.html`'s own identical rule, avoiding a
+         mirrors `crates/frust-shell-web/platform/web/index.html`'s own identical rule, avoiding a
          few stray pixels of inline-box descender space under the canvas. */
       #frust-host {
         display: block;
@@ -175,7 +175,7 @@
       }
     </script>
     <script type="module">
-      // `frust_web.js` is the framework's host-page glue (`platform/web/
+      // `frust_web.js` is the framework's host-page glue (`crates/frust-shell-web/platform/web/
       // frust_web.js` — read-only evidence for this task, see the header
       // comment for why it is imported rather than copied). `mount()`
       // replaces this page's own former hand-rolled canvas-binding/resize
@@ -188,7 +188,7 @@
       // way a Rust-side panic already is (`reportFailure`, into
       // `document.title` and `options.log`), so this page no longer needs
       // its own `init().catch(...)` mirror either.
-      import { mount } from "../../platform/web/frust_web.js";
+      import { mount } from "../../crates/frust-shell-web/platform/web/frust_web.js";
 
       // wasm-bindgen `--target web` glue. `--out-name web_gallery` is passed
       // explicitly at build time (see README.md's manual recipe) so this

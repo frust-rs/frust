@@ -427,7 +427,7 @@ fn wasm_opt_check(runner: &dyn ProcessRunner) -> Component {
 }
 
 /// The host page a build would stage — the project's own `[web] host-dir`
-/// when it carries both host-page files, else the framework's `platform/web`,
+/// when it carries both host-page files, else the framework's `crates/frust-shell-web/platform/web`,
 /// reachable through the project's `frust` path dependency. Mirrors
 /// [`super::bundle::resolve_embedder`] exactly, so this row never disagrees
 /// with what [`super::build`] itself would pick.
@@ -632,7 +632,7 @@ mod tests {
     /// `wasm-bindgen` the way `examples/web-gallery` does — target-gated.
     fn checkout(tag: &str, manifest: &str) -> (PathBuf, PathBuf) {
         let root = temp_dir(tag);
-        let embedder = root.join("platform/web");
+        let embedder = root.join("crates/frust-shell-web/platform/web");
         fs::create_dir_all(&embedder).unwrap();
         for file in ["index.html", "frust_web.js"] {
             fs::write(embedder.join(file), "// stub").unwrap();

@@ -30,10 +30,10 @@
 //! **synchronous** on Android: `FrustInputConnection.sync()` calls
 //! `nativeImeApply`, then immediately re-reads `nativeImeState` and reconciles
 //! its `Editable` against it, with an explicit wholesale-replace branch when Rust
-//! returns different text (`platform/android/frust-embedding`'s
+//! returns different text (`crates/frust-shell-android/platform/android/frust-embedding`'s
 //! `FrustSurfaceView.kt`). iOS mirrors that shape: `syncToRust()` pushes and
 //! `applyReconciled(_:)` folds the returned state back into its
-//! `NSMutableString` (`platform/ios/FrustEmbedding`'s `FrustTextInput.swift`).
+//! `NSMutableString` (`crates/frust-shell-ios/platform/ios/FrustEmbedding`'s `FrustTextInput.swift`).
 //!
 //! # Why the sentinel is two ZERO WIDTH SPACEs
 //!

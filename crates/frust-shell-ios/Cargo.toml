@@ -10,6 +10,8 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+# The Swift embedding ships in `platform/`; keep SwiftPM build output out of the package.
+exclude = ["platform/ios/FrustEmbedding/.build/"]
 
 [dependencies]
 # Unconditional: the `ios_app!` macro is defined on every target (its generated

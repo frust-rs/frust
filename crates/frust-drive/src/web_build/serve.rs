@@ -9,7 +9,7 @@
 //! (`WebAssembly.instantiateStreaming`'s own MIME check), and the artifact
 //! directory's whole payload is one multi-megabyte `.wasm`. `wasm-bindgen`'s
 //! generated glue does carry an `arrayBuffer()` fallback for a server that
-//! answers wrongly (`platform/web/README.md` records this), so a bad
+//! answers wrongly (`crates/frust-shell-web/platform/web/README.md` records this), so a bad
 //! `Content-Type` degrades rather than breaks — but it degrades by buffering
 //! the entire module before compiling any of it, which is the difference
 //! between a preview that starts while it downloads and one that stares at a
@@ -127,7 +127,7 @@ const NO_CACHE_HEADERS: &str = "Cache-Control: no-store, no-cache, must-revalida
 /// this module.
 ///
 /// `wasm` is the load-bearing row (see the module doc). The rest cover what a
-/// `wasm-bindgen --target web` output directory plus `platform/web`'s host
+/// `wasm-bindgen --target web` output directory plus `crates/frust-shell-web/platform/web`'s host
 /// page actually contain, plus the ordinary static assets an app author drops
 /// beside them. Anything unlisted falls back to
 /// [`DEFAULT_CONTENT_TYPE`] rather than being guessed at: a wrong specific

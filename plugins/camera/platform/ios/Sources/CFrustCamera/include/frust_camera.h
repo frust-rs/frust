@@ -1,6 +1,6 @@
 // The `frust-camera` plugin's C FFI surface, consumed from Swift as
 // `import CFrustCamera` — the plugin-package mirror of
-// `platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`.
+// `crates/frust-shell-ios/platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`.
 //
 // The symbol below is DECLARED here and DEFINED nowhere in this package: it
 // is a `#[no_mangle] extern "C"` export of `plugins/camera/src/apple.rs`,
