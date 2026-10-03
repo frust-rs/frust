@@ -4,7 +4,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::cli::CreatePlatformArgs;
 use frust_drive::host_path;
+use frust_drive::platform_wiring::{self, Report, SyncError};
 use frust_drive::scaffold::{
     self, DesignSystemContext, FrustDependency, ScaffoldPlatform, TemplateContext, context,
 };
@@ -31,17 +33,25 @@ pub struct CreateArgs {
     /// `String` rather than `crate::cli::ArchArg` so `scaffold` stays
     /// decoupled from `clap` (mirrors every other field here).
     pub arch: Option<String>,
-    /// `--platforms`: comma-separated platform tags, or `None` for the
-    /// default set (android, ios, macos, windows, linux). Kept a plain
-    /// `String` (the comma-separated list) rather than a parsed `Vec` so
-    /// `scaffold` stays decoupled from `clap`.
-    pub platforms: Option<String>,
+    /// `--platforms` (comma-separated platform tags, `None` for the default
+    /// set: android, ios, macos, windows, linux) and `--no-sync` (skip
+    /// [`platform_wiring::sync`] after generating).
+    pub platforms: CreatePlatformArgs,
     /// `--design-system`: scaffold a design-system crate (see
     /// `cli::Command::Create`'s doc comment) instead of an app.
     pub design_system: bool,
 }
 
+/// How `create` wires a generated project's Android/iOS projects — the
+/// injection point that lets a test answer for cargo.
+type WireFn<'a> = &'a dyn Fn(&Path) -> Result<Report, SyncError>;
+
 pub fn run(args: CreateArgs) -> Result<u8> {
+    run_with(args, &platform_wiring::sync)
+}
+
+/// [`run`] with the wiring step injected.
+fn run_with(args: CreateArgs, sync: WireFn<'_>) -> Result<u8> {
     if args.design_system {
         return run_design_system(args);
     }
@@ -74,7 +84,7 @@ pub fn run(args: CreateArgs) -> Result<u8> {
     };
 
     // Parse the platforms list from the comma-separated string, or use DEFAULT.
-    let platforms: Vec<ScaffoldPlatform> = match args.platforms.as_deref() {
+    let platforms: Vec<ScaffoldPlatform> = match args.platforms.list.as_deref() {
         Some(list) => {
             let tags: Vec<&str> = list.split(',').map(|s| s.trim()).collect();
             let mut platforms = Vec::new();
@@ -103,6 +113,11 @@ pub fn run(args: CreateArgs) -> Result<u8> {
     )?;
 
     println!("Created {} file(s) in {}", written.len(), dest.display());
+    let wires_a_platform = platforms.contains(&ScaffoldPlatform::Android)
+        || platforms.contains(&ScaffoldPlatform::Ios);
+    if wires_a_platform {
+        wire_platforms(&dest, args.platforms.no_sync, sync);
+    }
     println!();
     println!("All done! `{project_name}` is ready.");
     println!();
@@ -113,6 +128,31 @@ pub fn run(args: CreateArgs) -> Result<u8> {
     println!("  cargo run");
 
     Ok(0)
+}
+
+/// Points the generated `android/`/`ios/` projects at the embedding modules
+/// of the shell crates cargo resolves, printing what was written. Never fails
+/// `create`: the project is already on disk, and `frust run`/`frust build`
+/// redo this step before every Android or iOS build — so a skipped
+/// (`--no-sync`) or failed wiring is a note naming that later path.
+fn wire_platforms(dest: &Path, no_sync: bool, sync: WireFn<'_>) {
+    const LATER: &str = "`frust run` / `frust build` for Android or iOS wire them before invoking \
+                         Gradle or Xcode";
+    if no_sync {
+        println!("Skipped wiring the Android/iOS projects (--no-sync); {LATER}.");
+        return;
+    }
+    match sync(dest) {
+        Ok(report) => {
+            for line in report.lines() {
+                println!("{line}");
+            }
+        }
+        Err(err) => {
+            println!("warning: could not wire the Android/iOS projects: {err}");
+            println!("The project itself is complete; {LATER} once cargo can resolve them.");
+        }
+    }
 }
 
 /// `frust create --design-system`: scaffolds a design-system crate instead
@@ -294,7 +334,10 @@ mod tests {
             deeplink_scheme: None,
             deeplink_host: None,
             arch: None,
-            platforms: None,
+            platforms: CreatePlatformArgs {
+                list: None,
+                no_sync: true,
+            },
             design_system: false,
         }
     }
@@ -398,7 +441,7 @@ mod tests {
     fn run_with_platforms_web_includes_web_files() {
         let dest = unique_temp_dir("platforms-web");
         let mut args = base_args(&dest);
-        args.platforms = Some("web".to_string());
+        args.platforms.list = Some("web".to_string());
 
         assert!(run(args).is_ok());
         assert!(dest.join("Cargo.toml").exists());
@@ -419,7 +462,7 @@ mod tests {
     fn run_with_platforms_android_web() {
         let dest = unique_temp_dir("platforms-android-web");
         let mut args = base_args(&dest);
-        args.platforms = Some("android,web".to_string());
+        args.platforms.list = Some("android,web".to_string());
 
         assert!(run(args).is_ok());
         assert!(dest.join("Cargo.toml").exists());
@@ -435,12 +478,109 @@ mod tests {
     fn run_rejects_unknown_platform_tag() {
         let dest = unique_temp_dir("unknown-platform");
         let mut args = base_args(&dest);
-        args.platforms = Some("android,bogus".to_string());
+        args.platforms.list = Some("android,bogus".to_string());
 
         let err = run(args).unwrap_err();
         assert!(err.to_string().contains("unknown platform tag"), "{err}");
         assert!(!dest.join("Cargo.toml").exists());
 
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// Without `--no-sync`, `create` wires what it generated: the property
+    /// gets the resolved module directory and `ios/FrustEmbedding` links to
+    /// the resolved package — here answered by a stub standing in for cargo.
+    #[cfg(unix)]
+    #[test]
+    fn run_wires_the_generated_platform_projects() {
+        use frust_drive::packages::StubLocator;
+
+        let root = unique_temp_dir("wired");
+        let shells = root.join("checkout");
+        let android = shells.join("frust-shell-android");
+        let ios = shells.join("frust-shell-ios");
+        std::fs::create_dir_all(android.join(platform_wiring::ANDROID_EMBEDDING_REL)).unwrap();
+        std::fs::create_dir_all(ios.join(platform_wiring::IOS_EMBEDDING_REL)).unwrap();
+        let shells = shells.canonicalize().unwrap();
+        let stub = StubLocator::new()
+            .with(
+                platform_wiring::ANDROID_SHELL_PACKAGE,
+                shells.join("frust-shell-android"),
+            )
+            .with(
+                platform_wiring::IOS_SHELL_PACKAGE,
+                shells.join("frust-shell-ios"),
+            );
+
+        let dest = root.join("app");
+        let mut args = base_args(&dest);
+        args.platforms.no_sync = false;
+        run_with(args, &|dir| platform_wiring::sync_with(&stub, dir)).unwrap();
+
+        let properties =
+            std::fs::read_to_string(dest.join(platform_wiring::GRADLE_PROPERTIES)).unwrap();
+        assert!(
+            properties.contains(&format!(
+                "frust.embedding.dir={}\n",
+                shells
+                    .join("frust-shell-android")
+                    .join(platform_wiring::ANDROID_EMBEDDING_REL)
+                    .display()
+            )),
+            "{properties}"
+        );
+        assert_eq!(
+            std::fs::read_link(dest.join(platform_wiring::IOS_EMBEDDING_LINK)).unwrap(),
+            shells
+                .join("frust-shell-ios")
+                .join(platform_wiring::IOS_EMBEDDING_REL)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `--no-sync` never reaches the wiring step, and a wiring failure
+    /// (offline, say) still leaves a successful `create` with the
+    /// placeholder in place for `run`/`build` to replace.
+    #[test]
+    fn no_sync_skips_wiring_and_a_failed_wiring_does_not_fail_create() {
+        let calls = std::cell::Cell::new(0);
+        let failing = |dir: &Path| {
+            calls.set(calls.get() + 1);
+            Err(SyncError::Locate(
+                frust_drive::packages::PackagesError::NoManifest {
+                    project_dir: dir.to_path_buf(),
+                },
+            ))
+        };
+
+        let skipped = unique_temp_dir("no-sync");
+        assert_eq!(run_with(base_args(&skipped), &failing).unwrap(), 0);
+        assert_eq!(calls.get(), 0, "--no-sync must not wire");
+
+        let offline = unique_temp_dir("sync-fails");
+        let mut args = base_args(&offline);
+        args.platforms.no_sync = false;
+        assert_eq!(run_with(args, &failing).unwrap(), 0);
+        assert_eq!(calls.get(), 1);
+        let properties =
+            std::fs::read_to_string(offline.join(platform_wiring::GRADLE_PROPERTIES)).unwrap();
+        assert!(
+            properties.contains(platform_wiring::UNRESOLVED_EMBEDDING_DIR),
+            "{properties}"
+        );
+
+        // A scaffold with neither Android nor iOS has nothing to wire.
+        let web_only = unique_temp_dir("web-only");
+        let mut args = base_args(&web_only);
+        args.platforms = CreatePlatformArgs {
+            list: Some("web".to_string()),
+            no_sync: false,
+        };
+        assert_eq!(run_with(args, &failing).unwrap(), 0);
+        assert_eq!(calls.get(), 1);
+
+        for dir in [skipped, offline, web_only] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

@@ -89,17 +89,10 @@ pub enum Command {
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
 
-        /// Comma-separated list of target platforms to include in the
-        /// scaffold (e.g. `android,ios,macos,windows,linux,web`). Accepted
-        /// values are the platform tags from `scaffold::known_platform_tags()`;
-        /// unknown tags are rejected. Omit to use the default platform set
-        /// (android, ios, macos, windows, linux — all except web), which
-        /// preserves byte-identical output for existing projects. Including
-        /// `web` adds a `web/` host page alongside the native platform
-        /// projects; subsequent `frust build web` produces a browser-runnable
-        /// artifact in `build/web`.
-        #[arg(long = "platforms", value_name = "LIST")]
-        platforms: Option<String>,
+        // `--platforms` and `--no-sync`: which platform projects to render,
+        // and whether to wire them to the resolved shell crates afterwards.
+        #[command(flatten)]
+        platforms: CreatePlatformArgs,
 
         /// Scaffold an out-of-tree **design-system** crate instead of an
         /// app: a themed widget catalog crate depending on nothing but
@@ -157,6 +150,35 @@ pub enum Command {
         #[command(subcommand)]
         target: BuildTarget,
     },
+}
+
+/// `frust create`'s platform options: which platform projects the scaffold
+/// renders (`--platforms`), and whether the generated `android/`/`ios/`
+/// projects are then pointed at the embedding modules inside the
+/// `frust-shell-android`/`frust-shell-ios` crates cargo resolves
+/// (`--no-sync` skips that). Grouped because the second acts on the first's
+/// output.
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreatePlatformArgs {
+    /// Comma-separated list of target platforms to include in the
+    /// scaffold (e.g. `android,ios,macos,windows,linux,web`). Accepted
+    /// values are the platform tags from `scaffold::known_platform_tags()`;
+    /// unknown tags are rejected. Omit to use the default platform set
+    /// (android, ios, macos, windows, linux — all except web), which
+    /// preserves byte-identical output for existing projects. Including
+    /// `web` adds a `web/` host page alongside the native platform
+    /// projects; subsequent `frust build web` produces a browser-runnable
+    /// artifact in `build/web`.
+    #[arg(long = "platforms", value_name = "LIST")]
+    pub list: Option<String>,
+
+    /// Skip wiring the generated Android/iOS projects to the frust shell
+    /// crates (the offline path). Wiring runs `cargo metadata`, which needs
+    /// network access once for a project on the published crates; without
+    /// it, `frust run` / `frust build` for Android or iOS do the wiring
+    /// later, before they invoke Gradle or Xcode.
+    #[arg(long = "no-sync")]
+    pub no_sync: bool,
 }
 
 /// The artifact `frust build` produces. Kept off
@@ -552,7 +574,7 @@ mod tests {
         let cli = Cli::parse_from(["frust", "create", "myapp", "--platforms", "web"]);
         match cli.command.unwrap() {
             Command::Create { platforms, .. } => {
-                assert_eq!(platforms.as_deref(), Some("web"));
+                assert_eq!(platforms.list.as_deref(), Some("web"));
             }
             other => panic!("expected Create, got {other:?}"),
         }
@@ -564,19 +586,56 @@ mod tests {
         let cli = Cli::parse_from(["frust", "create", "myapp", "--platforms", "android,web"]);
         match cli.command.unwrap() {
             Command::Create { platforms, .. } => {
-                assert_eq!(platforms.as_deref(), Some("android,web"));
+                assert_eq!(platforms.list.as_deref(), Some("android,web"));
             }
             other => panic!("expected Create, got {other:?}"),
         }
     }
 
-    /// Omitting `--platforms` defaults to `None` (the default platform set).
+    /// Omitting `--platforms` defaults to `None` (the default platform set),
+    /// and omitting `--no-sync` wires the platform projects.
     #[test]
     fn parses_create_without_platforms_defaults_to_none() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
         match cli.command.unwrap() {
-            Command::Create { platforms, .. } => assert_eq!(platforms, None),
+            Command::Create { platforms, .. } => {
+                assert_eq!(platforms, CreatePlatformArgs::default());
+            }
             other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// `--no-sync` parses beside `--platforms`, in either order.
+    #[test]
+    fn parses_create_with_no_sync() {
+        for argv in [
+            [
+                "frust",
+                "create",
+                "myapp",
+                "--no-sync",
+                "--platforms",
+                "android",
+            ],
+            [
+                "frust",
+                "create",
+                "myapp",
+                "--platforms",
+                "android",
+                "--no-sync",
+            ],
+        ] {
+            match Cli::parse_from(argv).command.unwrap() {
+                Command::Create { platforms, .. } => assert_eq!(
+                    platforms,
+                    CreatePlatformArgs {
+                        list: Some("android".to_string()),
+                        no_sync: true,
+                    }
+                ),
+                other => panic!("expected Create, got {other:?}"),
+            }
         }
     }
 

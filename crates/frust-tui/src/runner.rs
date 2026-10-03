@@ -1260,8 +1260,11 @@ fn spawn_add_plugin(
 
 /// Scaffold a new project off the UI thread via
 /// `frust_drive::scaffold::generate` (the template is embedded, so this is
-/// cheap), posting [`Message::ScaffoldSucceeded`] with the new project's
-/// absolute root, or [`Message::ScaffoldFailed`] with a rendered error chain.
+/// cheap), then wire its Android/iOS projects to the resolved shell crates
+/// ([`frust_drive::platform_wiring::sync`], one `cargo metadata` run).
+/// Posts [`Message::ScaffoldSucceeded`] with the new project's absolute root,
+/// or [`Message::ScaffoldFailed`] with a rendered error chain; a wiring
+/// failure does not fail the scaffold — it follows as a warn toast.
 fn scaffold_project(
     directory: String,
     project_name: String,
@@ -1269,18 +1272,50 @@ fn scaffold_project(
     tx: UnboundedSender<Message>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let msg = match do_scaffold(&directory, &project_name, arch.as_deref()) {
-            Ok(project_root) => Message::ScaffoldSucceeded { project_root },
-            Err(e) => Message::ScaffoldFailed(format!("{e:#}")),
+        let wire = |root: &Path| frust_drive::platform_wiring::sync(root).map(|_| ());
+        let messages = match do_scaffold(&directory, &project_name, arch.as_deref(), &wire) {
+            Ok((project_root, wiring)) => scaffold_messages(project_root, wiring),
+            Err(e) => vec![Message::ScaffoldFailed(format!("{e:#}"))],
         };
-        let _ = tx.send(msg);
+        for msg in messages {
+            let _ = tx.send(msg);
+        }
     });
 }
 
+/// What a successful scaffold reports: the success itself, then — when the
+/// platform wiring failed — a warn toast saying the project is fine and that
+/// launching it on Android/iOS (or `frust run`/`frust build`) redoes the
+/// wiring. Stderr is invisible under the raw-mode TUI, so a toast is the only
+/// place the failure can surface.
+fn scaffold_messages(
+    project_root: PathBuf,
+    wiring: Result<(), frust_drive::platform_wiring::SyncError>,
+) -> Vec<Message> {
+    let mut messages = vec![Message::ScaffoldSucceeded { project_root }];
+    if let Err(err) = wiring {
+        messages.push(Message::Notify {
+            level: ToastKind::Warn,
+            text: format!(
+                "project created, but its Android/iOS wiring failed: {err} — `frust run` / \
+                 `frust build` for Android or iOS retry it"
+            ),
+        });
+    }
+    messages
+}
+
 /// The blocking scaffold: resolve `directory` against the process cwd, render
-/// the embedded template with a default org/description and the dev-time
-/// `frust` path/version, and return the new project's absolute root.
-fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Result<PathBuf> {
+/// the embedded template with a default org/description and the crates.io
+/// `frust` release, run `wire` on the generated project, and return the new
+/// project's absolute root beside the wiring's outcome. Only a scaffold
+/// failure is an `Err`; the project exists whatever `wire` answers.
+fn do_scaffold(
+    directory: &str,
+    project_name: &str,
+    arch: Option<&str>,
+    wire: &dyn Fn(&Path) -> Result<(), frust_drive::platform_wiring::SyncError>,
+) -> Result<(PathBuf, Result<(), frust_drive::platform_wiring::SyncError>)> {
     let dest = resolve_dest(directory)?;
     let ctx = TemplateContext {
         title_case_name: scaffold::title_case(project_name),
@@ -1305,7 +1340,9 @@ fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Resul
     // that host; `canonicalize_simplified` strips it back to the plain
     // drive form so the toast/sidebar (and whatever persists this root next)
     // never carry it forward.
-    Ok(frust_drive::host_path::canonicalize_simplified(&dest).unwrap_or(dest))
+    let root = frust_drive::host_path::canonicalize_simplified(&dest).unwrap_or(dest);
+    let wiring = wire(&root);
+    Ok((root, wiring))
 }
 
 /// Resolve the wizard's directory string against the process cwd (an absolute
@@ -4542,5 +4579,56 @@ mod tests {
         assert!(!run_loop_registers_sessions_before_their_events(
             biased_missing_but_words_appear_later
         ));
+    }
+
+    /// The TUI's scaffold flow wires the generated project after generating
+    /// it, and a wiring failure still yields the scaffold's success — followed
+    /// by a warn toast — rather than a failed scaffold.
+    #[test]
+    fn scaffold_wires_the_project_and_a_wiring_failure_is_a_toast() {
+        let scratch = watch_scratch_dir("scaffold-wiring");
+        let dest = scratch.join("wired_app");
+        let wired = std::cell::RefCell::new(Vec::new());
+        let failing = |root: &Path| {
+            wired.borrow_mut().push(root.to_path_buf());
+            Err(frust_drive::platform_wiring::SyncError::Locate(
+                frust_drive::packages::PackagesError::MetadataFailed {
+                    project_dir: root.to_path_buf(),
+                    stderr: "network is unreachable".to_string(),
+                },
+            ))
+        };
+
+        let (root, wiring) =
+            do_scaffold(dest.to_str().unwrap(), "wired_app", None, &failing).unwrap();
+        assert!(root.join("android/gradle.properties").is_file());
+        assert_eq!(
+            *wired.borrow(),
+            vec![root.clone()],
+            "wired exactly once, at the root"
+        );
+
+        let messages = scaffold_messages(root.clone(), wiring);
+        assert_eq!(messages.len(), 2);
+        assert!(
+            matches!(&messages[0], Message::ScaffoldSucceeded { project_root } if *project_root == root)
+        );
+        match &messages[1] {
+            Message::Notify { level, text } => {
+                assert_eq!(*level, ToastKind::Warn);
+                assert!(text.contains("network is unreachable"), "{text}");
+                assert!(text.contains("frust run"), "{text}");
+            }
+            _ => panic!("expected a warn toast after the success"),
+        }
+
+        assert!(
+            matches!(
+                scaffold_messages(root.clone(), Ok(())).as_slice(),
+                [Message::ScaffoldSucceeded { .. }]
+            ),
+            "a wired scaffold reports only its success"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

@@ -38,10 +38,9 @@ pub enum FrustPathError {
 /// the root `Cargo.toml`, a virtual workspace manifest with no `[package]`
 /// table — a hard Cargo error, not a merely-wrong-but-working path — so a
 /// repo-root value cannot be made to work by adjusting the other
-/// `frust_path`-derived joins ([`frust_path_from_project_subdir`],
-/// [`TemplateContext::frust_embedding_android_dir`],
-/// [`TemplateContext::frust_embedding_ios_dir`]); it must be normalised
-/// before it ever reaches them.
+/// `frust_path`-derived joins (the template's plugin path dependencies,
+/// [`frust_path_from_project_subdir`]); it must be normalised before it ever
+/// reaches them.
 pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> {
     if manifest_names_facade(path) {
         return Ok(path.to_path_buf());
@@ -96,23 +95,18 @@ fn manifest_names_package(dir: &Path, expected: &str) -> bool {
 /// `frust_path` is written into `Cargo.toml`'s `frust = { package = "frust-ui", path = ... }`, and
 /// `Cargo.toml` sits at the project root — so that is the base every relative
 /// `frust_path` is expressed against (`plugin::apply::resolve_sibling` joins it
-/// onto `project_root` for exactly that reason). But Gradle resolves
-/// `frust.embedding.dir` / a plugin module's `projectDir` against
-/// `<project>/android/`, and Xcode resolves an
+/// onto `project_root` for exactly that reason). But Gradle resolves a plugin
+/// module's `projectDir` against `<project>/android/`, and Xcode resolves an
 /// `XCLocalSwiftPackageReference`'s `relativePath` against `<project>/ios/`
 /// (the directory *containing* `Runner.xcodeproj`, not the bundle). Both are
-/// one level down, so a relative path
-/// needs one extra `../` to climb back out; an **absolute** path is base-
-/// independent and is returned byte-identical.
+/// one level down, so a relative path needs one extra `../` to climb back
+/// out; an **absolute** path is base-independent and is returned
+/// byte-identical.
 ///
-/// The adjustment is deliberately **lexical**: the target need not exist at
-/// scaffold time (`frust create` runs before any checkout is guaranteed in
-/// place), so canonicalizing is not an option.
-///
-/// The single helper behind all three emitters
-/// ([`TemplateContext::frust_embedding_android_dir`],
-/// [`TemplateContext::frust_embedding_ios_dir`] and
-/// `plugin::apply::repo_relative_path`) — one path convention, not two.
+/// The adjustment is deliberately **lexical**: the target need not exist yet,
+/// so canonicalizing is not an option. `plugin::apply::repo_relative_path` is
+/// its caller; the framework's own embedding modules are not placed this way
+/// at all, but resolved through cargo (`crate::platform_wiring`).
 pub fn frust_path_from_project_subdir(frust_path: &str) -> String {
     if Path::new(frust_path).is_absolute() {
         frust_path.to_string()
@@ -141,9 +135,8 @@ pub enum FrustDependency {
 }
 
 impl FrustDependency {
-    /// The facade path in path mode, empty in registry mode (platform
-    /// templates still read it until they are wired from resolved package
-    /// directories).
+    /// The facade path in path mode, empty in registry mode (the path-mode
+    /// plugin dependencies in the Cargo.toml templates read it).
     pub fn path(&self) -> &str {
         match self {
             Self::Path(p) => p,
@@ -240,11 +233,6 @@ impl TemplateContext {
                 "deeplink_host",
                 self.deeplink_host.clone().unwrap_or_default(),
             ),
-            (
-                "frust_embedding_android_dir",
-                self.frust_embedding_android_dir(),
-            ),
-            ("frust_embedding_ios_dir", self.frust_embedding_ios_dir()),
             ("web_module_name", self.web_module_name().to_string()),
         ])
         .into_iter()
@@ -326,61 +314,6 @@ impl TemplateContext {
     /// would reject.
     pub(crate) fn validate_ios_identifier(&self) -> Result<(), crate::ios_id::IdError> {
         crate::ios_id::validate(&self.ios_identifier())
-    }
-
-    /// The Android embedding Gradle library module's location, derived from
-    /// `frust_path` the same way `plugin::apply::plugin_dep_path` derives a
-    /// plugin crate directory: `frust` resolves to the facade crate dir
-    /// (`crates/frust`), two levels below the repo root, so
-    /// `{frust_path}/../frust-shell-android/platform/android/frust-embedding` reaches the
-    /// module directory.
-    ///
-    /// The emitted value lands in `android/gradle.properties`'
-    /// `frust.embedding.dir` and is resolved by `file(...)` in
-    /// `android/settings.gradle.kts` — i.e. from `<project>/android/`, **not**
-    /// from the project root a relative `frust_path` is expressed against. So
-    /// the path is re-based by [`frust_path_from_project_subdir`] first; an
-    /// absolute `frust_path` (the `frust create` default) is unaffected.
-    ///
-    /// This **widens** the blast radius of the machine-specific
-    /// developer-checkout path `frust_path` already carries rather than merely
-    /// inheriting it: before the embedding extraction only `cargo build`
-    /// needed the frust checkout and a scaffolded app's Gradle build was
-    /// self-contained, whereas now a missing or moved checkout fails Gradle
-    /// *sync* — the project cannot be opened or configured at all, not just
-    /// linked. That is a deliberate trade-off, taken because the value is a
-    /// placeholder for a published Maven coordinate once the embedding module
-    /// ships to a registry post-crates.io, and because `gradle.properties`
-    /// keeps it to one line to edit when a project moves machines.
-    pub fn frust_embedding_android_dir(&self) -> String {
-        format!(
-            "{}/../frust-shell-android/platform/android/frust-embedding",
-            frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
-                self.frust.path()
-            )))
-        )
-    }
-
-    /// The iOS embedding Swift package's location, derived from `frust_path`
-    /// the same way as [`Self::frust_embedding_android_dir`] above, and
-    /// re-based by the same [`frust_path_from_project_subdir`]: the value
-    /// becomes an `XCLocalSwiftPackageReference`'s `relativePath` in
-    /// `ios/Runner.xcodeproj`, which Xcode resolves against `<project>/ios/`
-    /// — the directory containing the `.xcodeproj`, not the bundle itself.
-    ///
-    /// It widens the developer-checkout blast radius exactly as the Android
-    /// accessor above describes — a missing checkout fails Xcode's *package
-    /// resolution*, so the project won't open, not just link — under the same
-    /// deliberate trade-off, and is a placeholder for a published Swift
-    /// package reference once the embedding package ships to a registry
-    /// post-crates.io.
-    pub fn frust_embedding_ios_dir(&self) -> String {
-        format!(
-            "{}/../frust-shell-ios/platform/ios/FrustEmbedding",
-            frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
-                self.frust.path()
-            )))
-        )
     }
 }
 
@@ -782,146 +715,14 @@ mod tests {
         assert_eq!(vars.get("deeplink_host").unwrap(), "open");
     }
 
+    /// The embedding modules' locations are no scaffold-time value: they
+    /// are written after generation from the shell crates cargo resolves
+    /// (`crate::platform_wiring`), so no template can bake one in.
     #[test]
-    fn embedding_dirs_derive_from_frust_path() {
-        let ctx = test_context(); // frust_path = abs_path("path/to/frust")
-        assert_eq!(
-            ctx.frust_embedding_android_dir(),
-            format!(
-                "{}/../frust-shell-android/platform/android/frust-embedding",
-                abs_path("path/to/frust")
-            )
-        );
-        assert_eq!(
-            ctx.frust_embedding_ios_dir(),
-            format!(
-                "{}/../frust-shell-ios/platform/ios/FrustEmbedding",
-                abs_path("path/to/frust")
-            )
-        );
-    }
-
-    #[test]
-    fn embedding_dirs_are_render_vars_not_path_vars() {
-        let ctx = test_context();
-        let render_vars = ctx.render_vars();
-        assert_eq!(
-            render_vars.get("frust_embedding_android_dir").unwrap(),
-            &ctx.frust_embedding_android_dir()
-        );
-        assert_eq!(
-            render_vars.get("frust_embedding_ios_dir").unwrap(),
-            &ctx.frust_embedding_ios_dir()
-        );
-
-        let path_vars = ctx.path_vars();
-        assert!(!path_vars.contains_key("frust_embedding_android_dir"));
-        assert!(!path_vars.contains_key("frust_embedding_ios_dir"));
-    }
-
-    #[test]
-    fn embedding_dirs_preserve_absolute_or_relative_form() {
-        let mut ctx = test_context();
-        let absolute = abs_path("absolute/frust");
-        ctx.frust = FrustDependency::Path(absolute.clone());
-        assert!(ctx.frust_embedding_android_dir().starts_with(&absolute));
-        assert!(ctx.frust_embedding_ios_dir().starts_with(&absolute));
-        // An absolute path is base-independent: emitted byte-identical.
-        assert_eq!(
-            ctx.frust_embedding_android_dir(),
-            format!("{absolute}/../frust-shell-android/platform/android/frust-embedding")
-        );
-        assert_eq!(
-            ctx.frust_embedding_ios_dir(),
-            format!("{absolute}/../frust-shell-ios/platform/ios/FrustEmbedding")
-        );
-
-        // A relative path carries one extra `../`: both values are resolved
-        // from a project *subdirectory* (`android/`, `ios/`), while
-        // `frust_path` itself is expressed against the project root.
-        ctx.frust = FrustDependency::Path("../relative/frust".into());
-        assert!(!ctx.frust_embedding_android_dir().starts_with('/'));
-        assert!(!ctx.frust_embedding_ios_dir().starts_with('/'));
-        assert_eq!(
-            ctx.frust_embedding_android_dir(),
-            "../../relative/frust/../frust-shell-android/platform/android/frust-embedding"
-        );
-        assert_eq!(
-            ctx.frust_embedding_ios_dir(),
-            "../../relative/frust/../frust-shell-ios/platform/ios/FrustEmbedding"
-        );
-    }
-
-    /// Lexical `..`/`.` collapse — the scaffold targets need not exist, so
-    /// `fs::canonicalize` is unavailable (mirrors the accessors' own
-    /// deliberately lexical derivation).
-    fn normalize_lexically(path: &std::path::Path) -> std::path::PathBuf {
-        use std::path::{Component, PathBuf};
-        let mut out = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::ParentDir => {
-                    out.pop();
-                }
-                Component::CurDir => {}
-                other => out.push(other.as_os_str()),
-            }
-        }
-        out
-    }
-
-    /// The *intent* behind [`embedding_dirs_preserve_absolute_or_relative_form`]'s
-    /// literal strings: each emitted path, resolved from the subdirectory that
-    /// actually consumes it, must land where the project-root-relative
-    /// `frust_path` convention reaches from the project root. A string-only
-    /// assertion is what let the one-level-short form ship in the first place.
-    #[test]
-    fn embedding_dirs_resolve_from_their_consumers_base_directory() {
-        use std::path::Path;
-
-        let project_root = Path::new("/projects/my_app");
-        for frust_path in [
-            "../checkouts/frust/crates/frust".to_string(),
-            "vendor/frust/crates/frust".to_string(),
-            abs_path("absolute/checkout/crates/frust"),
-        ] {
-            let frust_path = frust_path.as_str();
-            let mut ctx = test_context();
-            ctx.frust = FrustDependency::Path(frust_path.into());
-
-            // What `frust_path`'s own (project-root-relative) convention
-            // reaches — the same walk `plugin::apply::resolve_sibling` does.
-            let android_truth = normalize_lexically(
-                &project_root
-                    .join(frust_path)
-                    .join("../frust-shell-android/platform/android/frust-embedding"),
-            );
-            let ios_truth = normalize_lexically(
-                &project_root
-                    .join(frust_path)
-                    .join("../frust-shell-ios/platform/ios/FrustEmbedding"),
-            );
-
-            // What the emitted values reach from the directories that
-            // actually resolve them: `<proj>/android/` (Gradle) and
-            // `<proj>/ios/` (Xcode, the dir containing `Runner.xcodeproj`).
-            let android_actual = normalize_lexically(
-                &project_root
-                    .join("android")
-                    .join(ctx.frust_embedding_android_dir()),
-            );
-            let ios_actual =
-                normalize_lexically(&project_root.join("ios").join(ctx.frust_embedding_ios_dir()));
-
-            assert_eq!(
-                android_actual, android_truth,
-                "android embedding dir for frust_path `{frust_path}`"
-            );
-            assert_eq!(
-                ios_actual, ios_truth,
-                "ios embedding dir for frust_path `{frust_path}`"
-            );
-        }
+    fn render_vars_carry_no_embedding_location() {
+        let vars = test_context().render_vars();
+        assert!(!vars.contains_key("frust_embedding_android_dir"));
+        assert!(!vars.contains_key("frust_embedding_ios_dir"));
     }
 
     #[test]
@@ -977,43 +778,6 @@ mod tests {
             .as_str()
             .expect("frust dependency must carry a `path`");
         assert_eq!(frust_dep_path, "C:/dev/frust-checkout/crates/frust");
-    }
-
-    /// Same defect, `gradle.properties`: a raw backslash is itself an escape
-    /// character in a Java `.properties` value, so `frust.embedding.dir`
-    /// must come out backslash-free too.
-    #[test]
-    fn windows_shaped_frust_path_renders_gradle_properties_with_no_backslash() {
-        use super::super::renderer;
-
-        let mut ctx = test_context();
-        ctx.frust = FrustDependency::Path(host_path::to_portable_string_inner(
-            Path::new(r"\\?\C:\dev\frust-checkout\crates\frust"),
-            true,
-        ));
-        let vars = ctx.render_vars();
-
-        let template = include_str!("../../templates/app/android.tmpl/gradle.properties.tmpl");
-        let rendered = renderer::render(template, &vars)
-            .expect("gradle.properties.tmpl must render with every placeholder defined");
-
-        assert!(
-            !rendered.contains('\\'),
-            "rendered gradle.properties must contain no backslashes: {rendered}"
-        );
-        // `Path::is_absolute()` only recognises a drive-letter path as
-        // absolute on an actual Windows host, so `frust_path_from_project_subdir`
-        // prepends a `../` for this same string on this (Linux) test host —
-        // harmless (still one valid relative path down to the same
-        // directory) and irrelevant to what this test asserts: the value is
-        // portable (forward-slash, no backslash) end to end.
-        assert!(
-            rendered.contains("frust.embedding.dir=")
-                && rendered.trim_end().ends_with(
-                    "C:/dev/frust-checkout/crates/frust/../frust-shell-android/platform/android/frust-embedding"
-                ),
-            "{rendered}"
-        );
     }
 
     fn test_design_system_context() -> DesignSystemContext {

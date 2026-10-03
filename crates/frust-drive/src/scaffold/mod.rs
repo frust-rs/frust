@@ -947,17 +947,27 @@ mod tests {
             );
         }
 
-        // `frust.embedding.dir` is the single machine-specific indirection
-        // point, resolved (not a literal placeholder) at scaffold time.
+        // `frust.embedding.dir` is not a scaffold-time value: the template
+        // renders the key with a placeholder `platform_wiring::sync` replaces
+        // with the resolved shell crate's module directory, so a project
+        // that never synced fails Gradle naming the fix rather than pointing
+        // somewhere plausible but wrong.
         let gradle_properties = fs::read_to_string(dest.join("android/gradle.properties")).unwrap();
-        assert!(
-            gradle_properties.contains(&format!(
-                "frust.embedding.dir={}",
-                ctx.frust_embedding_android_dir()
-            )),
+        let embedding_lines: Vec<&str> = gradle_properties
+            .lines()
+            .filter(|line| line.starts_with(crate::platform_wiring::EMBEDDING_DIR_KEY))
+            .collect();
+        assert_eq!(
+            embedding_lines,
+            [format!(
+                "{}={}",
+                crate::platform_wiring::EMBEDDING_DIR_KEY,
+                crate::platform_wiring::UNRESOLVED_EMBEDDING_DIR
+            )],
             "{gradle_properties}"
         );
         assert!(!gradle_properties.contains("{{"), "{gradle_properties}");
+        assert!(!gradle_properties.contains('\\'), "{gradle_properties}");
 
         assert!(
             build_gradle.contains("implementation(project(\":frust-embedding\"))"),
@@ -1221,9 +1231,10 @@ mod tests {
         let pbxproj =
             fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
 
-        // (1) The local package reference itself, carrying the resolved (not
-        // placeholder) embedding path under the `relativePath` key Xcode
-        // reads even for an absolute value.
+        // (1) The local package reference itself, naming the
+        // `ios/FrustEmbedding` symlink `platform_wiring::sync` points at the
+        // resolved shell crate's package — a path relative to `ios/`, the
+        // directory containing `Runner.xcodeproj`.
         let package_ref_id = pbx_definition_id(
             &pbxproj,
             "/* XCLocalSwiftPackageReference \"FrustEmbedding\" */ = {",
@@ -1234,10 +1245,7 @@ mod tests {
             "{pbxproj}"
         );
         assert!(
-            package_ref_section.contains(&format!(
-                "relativePath = \"{}\";",
-                ctx.frust_embedding_ios_dir()
-            )),
+            package_ref_section.contains("relativePath = \"FrustEmbedding\";"),
             "{pbxproj}"
         );
 

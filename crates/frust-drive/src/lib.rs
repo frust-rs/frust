@@ -60,6 +60,10 @@ pub mod metrics;
 /// of `cargo metadata` rather than derived from the project's `frust`
 /// dependency — one answer for a checkout path and a crates.io version alike.
 pub mod packages;
+/// Writes a generated project's Android `frust.embedding.dir` and iOS
+/// `ios/FrustEmbedding` link from the shell crates [`packages`] resolves —
+/// run after `create` and before every Android/iOS `run`/`build`.
+pub mod platform_wiring;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;
