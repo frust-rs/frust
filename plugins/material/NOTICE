@@ -10,13 +10,19 @@ The package's declared license is `Apache-2.0 AND OFL-1.1` (see Cargo.toml):
 the crate bundles Apache-2.0-only ported code (material-color-utilities,
 androidx.graphics.shapes lineage, Material Icons path data) and OFL-1.1 font
 data alongside its own workspace-licensed sources, so no MIT-only arm can be
-offered for the combined artifact. There is no workspace-root LICENSE file;
-the license texts live at `plugins/material/licenses/Apache-2.0.txt`,
-`plugins/material/fonts/roboto-flex/OFL.txt`, and
-`plugins/material/fonts/roboto-mono/OFL.txt`.
+offered for the combined artifact. The workspace root carries `LICENSE-MIT`
+and `LICENSE-APACHE` for the workspace's own code; this crate ships its own
+copies of every license text it needs, beside this file:
 
-Unless a different license is stated in a subsection below, vendored MIT
-components use the same MIT License terms as the workspace.
+- `LICENSE-APACHE` — the Apache License, Version 2.0 (copy of the root text)
+- `licenses/Apache-2.0.txt` — the Apache License, Version 2.0, for the ported
+  Android Open Source Project and Google LLC code
+- `licenses/MIT.txt` — the MIT License, for the ported and vendored components
+  whose copyright holders are listed in the two MIT sections below
+- `licenses/BSD-3-Clause.txt` — the BSD 3-Clause License of The Flutter
+  Authors, for the carousel view lineage
+- `fonts/roboto-flex/OFL.txt` and `fonts/roboto-mono/OFL.txt` — the SIL Open
+  Font License 1.1 of the bundled fonts
 
 ================================================================================
 MIT License — Root Crate
@@ -26,7 +32,7 @@ This crate contains a Rust port of material_3_expressive v1.0.8.
 
 Copyright (c) 2026 Paa Developments <paa.code.me@gmail.com>
   Original upstream: https://github.com/paadevelopments/material_3_expressive
-  License: MIT
+  License: MIT (text: `plugins/material/licenses/MIT.txt`)
 
 ================================================================================
 MIT License — Additional Copyright Holders (Vendored Components)
@@ -104,7 +110,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Applies to the carousel view component (src/components/carousel/):
 The carousel view is ported from m3_carousel, which itself is derived from
-Flutter's CarouselView.
+Flutter's CarouselView. The same text is vendored as
+`plugins/material/licenses/BSD-3-Clause.txt`.
 
 ================================================================================
 Apache License, Version 2.0 — The Android Open Source Project
