@@ -9,7 +9,7 @@
 //! shell's unit tests run in a host `cargo test --workspace`: both mobile
 //! shells' `app` modules are `#[cfg(target_os = "android"/"ios")]`, so their
 //! `#[cfg(test)]` twins are neither compiled by the documented compile gates
-//! (`cargo check --target ... -p frust`, which never builds test cfg) nor
+//! (`cargo check --target ... -p frust-ui`, which never builds test cfg) nor
 //! runnable without a device. Left at that, a regression in either mobile arm
 //! would ship through a fully green gate — the exact hole this file closes.
 //!

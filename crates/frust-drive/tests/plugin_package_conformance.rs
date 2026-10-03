@@ -35,7 +35,7 @@
 //! test, not a broadened version of this one.
 //!
 //! This test lives in `frust-drive` rather than the published facade crate's
-//! own test suite, since coupling `cargo test -p frust` to every plugin's
+//! own test suite, since coupling `cargo test -p frust-ui` to every plugin's
 //! Kotlin layout would be in tension
 //! with `docs/ARCHITECTURE.md`'s "the facade never depends on or re-exports a
 //! plugin." `frust-drive` is the right host instead: it is an explicit leaf

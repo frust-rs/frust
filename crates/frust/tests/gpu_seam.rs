@@ -6,7 +6,7 @@
 //! through `frust::gpu`'s re-exported types alone.
 //!
 //! Gated behind the `gpu` feature this crate carries — off by default, so a
-//! default `cargo test -p frust` run compiles this file to nothing, the same
+//! default `cargo test -p frust-ui` run compiles this file to nothing, the same
 //! shape `frust-shell-common/tests/devtools_loopback.rs`'s
 //! `#![cfg(feature = "devtools")]` already uses for a feature-gated
 //! integration test.
@@ -118,7 +118,7 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 /// `SceneTexture` — it proves real device bring-up and draw-recording
 /// independently instead of end to end.
 #[test]
-#[ignore = "needs a real GPU adapter; run with `cargo test -p frust --features gpu --test \
+#[ignore = "needs a real GPU adapter; run with `cargo test -p frust-ui --features gpu --test \
             gpu_seam -- --ignored` (WGPU_BACKEND/WGPU_ADAPTER_NAME pin the adapter; \
             FRUST_GOLDEN_EXPECT_ADAPTER verifies it resolved)"]
 fn scene_texture_seam_reaches_a_real_headless_device_through_the_facade_context() {
@@ -166,7 +166,7 @@ fn scene_texture_seam_reaches_a_real_headless_device_through_the_facade_context(
 /// out through `with_context`. Both bring up a real adapter, so both are
 /// `--ignored`.
 #[test]
-#[ignore = "needs a real GPU adapter; run with `cargo test -p frust --features gpu --test \
+#[ignore = "needs a real GPU adapter; run with `cargo test -p frust-ui --features gpu --test \
             gpu_seam -- --ignored` (WGPU_BACKEND/WGPU_ADAPTER_NAME pin the adapter; \
             FRUST_GOLDEN_EXPECT_ADAPTER verifies it resolved)"]
 fn with_context_reaches_a_handle_installed_the_way_a_shell_would() {

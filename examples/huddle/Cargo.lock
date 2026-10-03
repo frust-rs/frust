@@ -688,7 +688,7 @@ name = "clean-signals-frust"
 version = "0.5.0"
 dependencies = [
  "clean-signals",
- "frust",
+ "frust-ui",
 ]
 
 [[package]]
@@ -1091,36 +1091,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
-name = "frust"
-version = "0.5.0"
-dependencies = [
- "any_spawner",
- "anyhow",
- "console_error_panic_hook",
- "console_log",
- "frust-core",
- "frust-reactive",
- "frust-render",
- "frust-scene",
- "frust-shell-android",
- "frust-shell-common",
- "frust-shell-desktop",
- "frust-shell-ios",
- "frust-shell-linux",
- "frust-shell-macos",
- "frust-shell-web",
- "frust-shell-windows",
- "frust-text",
- "frust-theme",
- "frust-widgets",
- "kurbo",
- "log",
- "peniko",
- "reactive_graph",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "frust-core"
 version = "0.5.0"
 dependencies = [
@@ -1136,7 +1106,7 @@ dependencies = [
 name = "frust-cupertino"
 version = "0.5.0"
 dependencies = [
- "frust",
+ "frust-ui",
  "kurbo",
  "peniko",
 ]
@@ -1161,7 +1131,7 @@ dependencies = [
 name = "frust-glyph"
 version = "0.5.0"
 dependencies = [
- "frust",
+ "frust-ui",
  "kurbo",
  "peniko",
 ]
@@ -1183,7 +1153,7 @@ dependencies = [
 name = "frust-material"
 version = "0.5.0"
 dependencies = [
- "frust",
+ "frust-ui",
  "kurbo",
  "peniko",
 ]
@@ -1401,6 +1371,36 @@ dependencies = [
  "frust-core",
  "frust-text",
  "peniko",
+]
+
+[[package]]
+name = "frust-ui"
+version = "0.5.0"
+dependencies = [
+ "any_spawner",
+ "anyhow",
+ "console_error_panic_hook",
+ "console_log",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-android",
+ "frust-shell-common",
+ "frust-shell-desktop",
+ "frust-shell-ios",
+ "frust-shell-linux",
+ "frust-shell-macos",
+ "frust-shell-web",
+ "frust-shell-windows",
+ "frust-text",
+ "frust-theme",
+ "frust-widgets",
+ "kurbo",
+ "log",
+ "peniko",
+ "reactive_graph",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1913,7 +1913,6 @@ version = "0.1.0"
 dependencies = [
  "clean-signals",
  "clean-signals-frust",
- "frust",
  "frust-core",
  "frust-cupertino",
  "frust-glyph",
@@ -1921,6 +1920,7 @@ dependencies = [
  "frust-reactive",
  "frust-scene",
  "frust-text",
+ "frust-ui",
  "kurbo",
  "log",
  "peniko",

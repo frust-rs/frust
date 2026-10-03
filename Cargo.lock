@@ -746,8 +746,8 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "beui-demo"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-beui",
+ "frust-ui",
 ]
 
 [[package]]
@@ -2094,39 +2094,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frust"
-version = "0.5.0"
-dependencies = [
- "any_spawner",
- "anyhow",
- "console_error_panic_hook",
- "console_log",
- "frust-core",
- "frust-gpu",
- "frust-reactive",
- "frust-render",
- "frust-scene",
- "frust-shell-android",
- "frust-shell-common",
- "frust-shell-desktop",
- "frust-shell-ios",
- "frust-shell-linux",
- "frust-shell-macos",
- "frust-shell-web",
- "frust-shell-windows",
- "frust-text",
- "frust-theme",
- "frust-widgets",
- "image",
- "kurbo",
- "log",
- "peniko",
- "reactive_graph",
- "wasm-bindgen",
- "wgpu",
-]
-
-[[package]]
 name = "frust-auth-session"
 version = "0.5.0"
 dependencies = [
@@ -2147,8 +2114,8 @@ dependencies = [
 name = "frust-beui"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-core",
+ "frust-ui",
  "frust-widgets",
  "kurbo",
  "peniko",
@@ -2217,8 +2184,8 @@ dependencies = [
 name = "frust-cupertino"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-core",
+ "frust-ui",
  "frust-widgets",
  "kurbo",
  "peniko",
@@ -2325,8 +2292,8 @@ dependencies = [
 name = "frust-glyph"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-core",
+ "frust-ui",
  "frust-widgets",
  "kurbo",
  "peniko",
@@ -2365,10 +2332,10 @@ version = "0.5.0"
 dependencies = [
  "fluent-bundle",
  "fluent-langneg",
- "frust",
  "frust-i18n-macros",
  "frust-plugin",
  "frust-reactive",
+ "frust-ui",
  "icu_datetime",
  "icu_decimal",
  "icu_experimental",
@@ -2416,8 +2383,8 @@ dependencies = [
 name = "frust-material"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-core",
+ "frust-ui",
  "frust-widgets",
  "kurbo",
  "peniko",
@@ -2446,12 +2413,12 @@ version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
- "frust",
  "frust-core",
  "frust-plugin",
  "frust-scene",
  "frust-text",
  "frust-theme",
+ "frust-ui",
  "jni 0.22.4",
  "kurbo",
  "log",
@@ -2555,8 +2522,8 @@ dependencies = [
 name = "frust-shadcn"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-core",
+ "frust-ui",
  "frust-widgets",
  "kurbo",
  "peniko",
@@ -2808,6 +2775,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-ui"
+version = "0.5.0"
+dependencies = [
+ "any_spawner",
+ "anyhow",
+ "console_error_panic_hook",
+ "console_log",
+ "frust-core",
+ "frust-gpu",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-android",
+ "frust-shell-common",
+ "frust-shell-desktop",
+ "frust-shell-ios",
+ "frust-shell-linux",
+ "frust-shell-macos",
+ "frust-shell-web",
+ "frust-shell-windows",
+ "frust-text",
+ "frust-theme",
+ "frust-widgets",
+ "image",
+ "kurbo",
+ "log",
+ "peniko",
+ "reactive_graph",
+ "wasm-bindgen",
+ "wgpu",
+]
+
+[[package]]
 name = "frust-url-launcher"
 version = "0.5.0"
 dependencies = [
@@ -2827,8 +2827,8 @@ version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
- "frust",
  "frust-plugin",
+ "frust-ui",
  "jni 0.22.4",
  "log",
  "objc2 0.6.4",
@@ -6873,8 +6873,8 @@ dependencies = [
 name = "shadcn-demo"
 version = "0.5.0"
 dependencies = [
- "frust",
  "frust-shadcn",
+ "frust-ui",
 ]
 
 [[package]]

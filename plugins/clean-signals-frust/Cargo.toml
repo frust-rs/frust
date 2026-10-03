@@ -8,14 +8,12 @@
 # duplicated from the root's `[workspace.package]` verbatim.
 #
 # Facade tier: this plugin is deliberately nothing more than a crate
-# depending on `frust` (+ `clean-signals`) — the first facade-tier plugin
-# migrated into this repo, renamed and adopted from the sibling
-# `clean-signals-rs` checkout's pre-migration Frust glue crate. `frust*` deps
-# below resolve in-repo (this plugin lives inside the `frust` checkout,
-# unlike huddle's example); `clean-signals` comes from crates.io with
-# the same requirement huddle's own `clean-signals` dependency declares, so
-# the two resolve the identical crate identity (type-identity rule — see
-# docs/DEVELOPMENT.md's Version-Pin Policy).
+# depending on `frust` (+ `clean-signals`). It is published from this
+# repository as `clean-signals-frust`. `frust*` deps below resolve in-repo
+# (this plugin lives inside the `frust` checkout, unlike huddle's example);
+# `clean-signals` comes from crates.io with the same requirement huddle's own
+# `clean-signals` dependency declares, so the two resolve the identical crate
+# identity (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
 [workspace]
 
 [package]
@@ -23,20 +21,21 @@ name = "clean-signals-frust"
 version = "0.5.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/f0x-it-llc/clean-signals-rs"
+repository = "https://github.com/frust-rs/frust"
+homepage = "https://frust.dev"
+readme = "README.md"
+keywords = ["gui", "ui", "mobile", "declarative", "wgpu"]
+categories = ["gui"]
 description = "Frust integration for clean-signals: component-scoped controllers and failure listeners"
-publish = false
 
 [dependencies]
 # crates.io requirement — identical to huddle's own `clean-signals`
 # dependency, so both consumers build one `clean-signals` crate identity (type-identity rule). Never enable the `effects` feature
 # (see docs/DEVELOPMENT.md's Version-Pin Policy).
 clean-signals = "0.1"
-# In-repo path: this plugin lives inside the `frust` checkout itself
-# (`plugins/clean-signals-frust`), so `frust` collapses to a relative
-# in-repo path rather than the sibling-checkout path the pre-migration
-# glue crate used.
-frust = { path = "../../crates/frust" }
+# In-repo path plus the published version; the facade package is named
+# `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.0" }
 
 # Dev-only: the headless glue tests drive Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) and pump the reactive runtime's

@@ -4,7 +4,7 @@
 //! module doc) — every crate that wants its golden/oracle/fuzz contracts
 //! must take it as a `[dev-dependencies]` edge, never `[dependencies]`,
 //! `[build-dependencies]`, or a `[target.'cfg(...)'.*dependencies]` table.
-//! Declaring it anywhere else would put it on `cargo tree -p frust -e
+//! Declaring it anywhere else would put it on `cargo tree -p frust-ui -e
 //! normal`'s output, exactly the leak this crate's own doc comment promises
 //! never happens.
 //!

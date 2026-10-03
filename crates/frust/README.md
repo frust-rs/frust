@@ -23,8 +23,10 @@ Add the dependency:
 
 ```toml
 [dependencies]
-frust = '0.5'
+frust = { package = "frust-ui", version = "0.5" }
 ```
+
+The package is published as `frust-ui` and imported as `frust` because the crates.io name `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
 
 A counter-style component, as shown in the crate-level documentation:
 

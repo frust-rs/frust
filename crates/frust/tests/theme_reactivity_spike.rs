@@ -20,7 +20,7 @@
 //! arbitrary: it uses the design-language-free `Theme::neutral()` — the one
 //! baseline no design system owns — so this pin keeps running in every feature
 //! configuration of the facade, including
-//! `cargo test -p frust --no-default-features`.
+//! `cargo test -p frust-ui --no-default-features`.
 
 use std::sync::{Arc, Mutex};
 

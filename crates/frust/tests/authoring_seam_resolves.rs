@@ -1,7 +1,7 @@
 //! Compile-only proof that `frust::authoring` (and its `text`/`scene`
 //! submodules) resolve with `frust` as the test target's only dependency —
 //! the machine-checked half of the seam's sufficiency claim alongside the
-//! `authoring` module's own doctest (`cargo test -p frust --doc`).
+//! `authoring` module's own doctest (`cargo test -p frust-ui --doc`).
 
 use frust::authoring::scene::SceneBuilder;
 use frust::authoring::text::TextContext;
