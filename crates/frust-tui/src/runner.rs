@@ -1290,7 +1290,12 @@ fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Resul
         org: "com.example".to_string(),
         description: "A new Frust application.".to_string(),
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust: frust_drive::scaffold::FrustDependency::Path(resolve_frust_path()),
+        // The TUI always scaffolds the published crates.io release (the
+        // workspace version is shared with the CLI). Path mode is not offered
+        // here; framework developers use `frust create --frust-path`.
+        frust: frust_drive::scaffold::FrustDependency::Registry {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
         deeplink_scheme: None,
         deeplink_host: None,
     };
@@ -1313,22 +1318,6 @@ fn resolve_dest(directory: &str) -> Result<PathBuf> {
         let cwd = std::env::current_dir().context("reading current directory")?;
         Ok(cwd.join(dir))
     }
-}
-
-/// The dev-time path to the `frust` facade crate (`<repo>/crates/frust`),
-/// mirroring `frust create`'s default (a temporary `frust_path`
-/// mechanism until the crates are published).
-///
-/// Rendered through [`frust_drive::host_path::to_portable_string`] rather
-/// than a bare `to_string_lossy()`: on Windows, `canonicalize()` returns a
-/// verbatim `\\?\C:\...` path, which is both an invalid escape once
-/// substituted into `Cargo.toml`'s `frust = { path = "..." }` and
-/// unresolvable by a template's `..`-relative sibling joins. Identity on
-/// every other host.
-fn resolve_frust_path() -> String {
-    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    let canonical = raw.canonicalize().unwrap_or(raw);
-    frust_drive::host_path::to_portable_string(&canonical)
 }
 
 /// Discover devices off the UI thread (the `frust-drive` discoverer set is
