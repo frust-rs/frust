@@ -19,7 +19,11 @@ Documentation and project home: <https://frust.dev>. Source: <https://github.com
 The crate's SPDX expression is `Apache-2.0 AND OFL-1.1`. It bundles
 Apache-2.0-only ported code (material-color-utilities, androidx graphics-shapes
 lineage, Material Icons path data) and OFL-1.1 fonts, so no MIT-only arm is
-offered. The licence file beside the manifest is [LICENSE-APACHE](LICENSE-APACHE).
+offered. The licence file beside the manifest is [LICENSE-APACHE](LICENSE-APACHE);
+the texts for the ported third-party components are vendored under
+[licenses/](licenses/) (`Apache-2.0.txt`, `MIT.txt`, `BSD-3-Clause.txt`) and
+the fonts' `OFL.txt` files, with every copyright holder listed in
+[NOTICE](NOTICE).
 
 Third-party material shipped in this package:
 
