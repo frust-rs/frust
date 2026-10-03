@@ -241,12 +241,17 @@ fn resolve_frust_dependency(overridden: Option<&str>) -> Result<FrustDependency>
             version: env!("CARGO_PKG_VERSION").to_string(),
         });
     };
-    let resolved = context::resolve_frust_crate_path(Path::new(path))?;
+    // The checkout decides the package name the generated manifest names:
+    // `frust-ui` since the rename, `frust` for an older checkout.
+    let (resolved, package) = context::resolve_frust_checkout(Path::new(path))?;
     let resolved = host_path::to_portable_string(&resolved);
     if resolved != path {
         println!("note: --frust-path `{path}` normalised to `{resolved}`");
     }
-    Ok(FrustDependency::Path(resolved))
+    Ok(FrustDependency::PathPackage {
+        path: resolved,
+        package,
+    })
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`
