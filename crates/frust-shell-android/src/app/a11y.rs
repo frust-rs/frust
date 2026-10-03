@@ -234,7 +234,7 @@ impl AndroidAppHandle {
 /// of this crate by deliberate design (see `Cargo.toml`), so it cannot be a host
 /// test the way [`crate::ffi_support`]'s pure helpers are — worse, the
 /// documented Android compile gate (`cargo check --target aarch64-linux-android
-/// -p frust`) never builds test cfg either, so nothing below is even
+/// -p frust-ui`) never builds test cfg either, so nothing below is even
 /// type-checked without an explicit `--all-targets`.
 #[cfg(test)]
 mod tests {

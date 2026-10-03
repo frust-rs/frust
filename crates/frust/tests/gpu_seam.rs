@@ -6,7 +6,7 @@
 //! through `frust::gpu`'s re-exported types alone.
 //!
 //! Gated behind the `gpu` feature this crate carries — off by default, so a
-//! default `cargo test -p frust` run compiles this file to nothing, the same
+//! default `cargo test -p frust-ui` run compiles this file to nothing, the same
 //! shape `frust-shell-common/tests/devtools_loopback.rs`'s
 //! `#![cfg(feature = "devtools")]` already uses for a feature-gated
 //! integration test.

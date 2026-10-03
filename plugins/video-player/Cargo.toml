@@ -46,7 +46,8 @@ frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 # forbids a workspace-inherited dependency from overriding `default-features`
 # unless the workspace-level entry already sets it explicitly, and the root
 # `frust` entry doesn't (`plugins/i18n/Cargo.toml` carries the same note).
-frust = { path = "../../crates/frust", version = "0.5.0", default-features = false, optional = true }
+# Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.0", default-features = false, optional = true }
 
 # Android: this plugin's own JNI surface — the exports the Kotlin host calls
 # back through and the Rust→Kotlin player calls — needs `jni` directly,

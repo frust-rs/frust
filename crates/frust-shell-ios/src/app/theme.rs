@@ -275,7 +275,7 @@ impl IosAppHandle {
 /// [`Theme`] and `frust_shell_common`, both iOS-gated dependencies of this crate
 /// by deliberate design (see `Cargo.toml`), so it cannot be a host test the way
 /// [`crate::ffi_support`]'s pure helpers are — worse, the documented iOS
-/// compile gate (`cargo check --target aarch64-apple-ios-sim -p frust`) never
+/// compile gate (`cargo check --target aarch64-apple-ios-sim -p frust-ui`) never
 /// builds test cfg either, so nothing below is even type-checked without an
 /// explicit `--all-targets`.
 ///

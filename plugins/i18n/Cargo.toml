@@ -57,7 +57,8 @@ unic-langid = { workspace = true }
 # design-system catalogs left the tree as their own plugin crates), so there
 # is nothing left to trim — the plain path edge stays for the override
 # freedom, not for a catalog opt-out.
-frust = { path = "../../crates/frust", version = "0.5.0", optional = true }
+# Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.0", optional = true }
 
 # The `formatting` feature's ICU4X number/date/plural formatting stack
 # (`src/fmt`) — see root `Cargo.toml`'s comment for the pin rationale (the

@@ -690,7 +690,8 @@ frust-shell-macos = { path = "crates/frust-shell-macos", version = "0.5.0" }
 frust-shell-windows = { path = "crates/frust-shell-windows", version = "0.5.0" }
 frust-shell-linux = { path = "crates/frust-shell-linux", version = "0.5.0" }
 frust-shell-web = { path = "crates/frust-shell-web", version = "0.5.0" }
-frust = { path = "crates/frust", version = "0.5.0" }
+# Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
+frust = { package = "frust-ui", path = "crates/frust", version = "0.5.0" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
 # wgpu/naga's shader-pipeline
