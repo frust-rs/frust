@@ -1,0 +1,94 @@
+# Release on a version tag: verify, publish what is still missing from
+# crates.io through Trusted Publishing, then create the GitHub release.
+#
+# The first release of every crate (0.5.0) is published by hand with an API
+# token, because crates.io can only configure Trusted Publishing for a crate
+# that already exists (docs/RELEASING.md). From the next version on, pushing
+# the tag `vX.Y.Z` runs this workflow. Its publish job uploads without
+# rebuilding: the verification build happens in the `verify` job because the
+# OIDC-exchanged token lives thirty minutes, and `publish-remaining.sh` only
+# publishes what the index does not list yet, so a run that stops on the
+# crates.io rate limit (or outlives the token) is re-run and resumes.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same disk discipline as ci.yml: a hosted runner cannot hold a full-debug
+  # build of every package's verification target.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install Linux build packages
+        run: |
+          pkgs=(
+            pkg-config
+            libfontconfig1-dev libfreetype-dev
+            libwayland-dev libxkbcommon-dev
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
+          )
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - name: The tag names the workspace version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          tag="${GITHUB_REF_NAME}"
+          echo "tag $tag, workspace version $version"
+          [ "$tag" = "v$version" ] || { echo "tag $tag does not match version $version" >&2; exit 1; }
+      - name: Licence texts are in sync
+        run: scripts/sync-licenses.sh --check
+      - name: Every package builds as it will be published
+        run: cargo publish --workspace --locked --dry-run
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      - name: Publish what the index does not list yet
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: scripts/ci/publish-remaining.sh --publish --no-verify
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
