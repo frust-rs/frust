@@ -6,8 +6,11 @@
 #   (no flags)    print the unpublished packages, one `name@version` per line
 #   --publish     run `cargo publish` for exactly those packages (cargo orders
 #                 them by dependency and waits for each to reach the index)
-#   --no-verify   with --publish: skip the verification build of each package
-#   --dry-run     with --publish: pass --dry-run to cargo (nothing is uploaded)
+#   --no-verify   with --publish: skip the verification build of each workspace
+#                 package (the standalone packages are always verified)
+#   --dry-run     with --publish: pass --dry-run to cargo (nothing is uploaded);
+#                 the standalone packages are reported as not verifiable
+#                 instead of attempted, see below
 #
 # A package counts as published when the crates.io sparse index lists its
 # version. crates.io rate-limits new crates (a burst, then one per ten
@@ -19,9 +22,10 @@
 # `plugins/clean-signals-frust` is a standalone workspace excluded from the
 # root graph (it pins its own `clean-signals`), so `cargo metadata` at the
 # root never lists it. It is enumerated separately below and published LAST,
-# one `cargo publish --manifest-path` at a time: its `frust-ui` dependency is
-# a path dependency with a version, which cargo can only resolve from the
-# registry once the workspace packages are up.
+# one `cargo publish --manifest-path` at a time, always with the verification
+# build: its `frust-ui` dependency is a path dependency with a version, which
+# cargo resolves from the registry, so it can only be packaged once the
+# workspace packages are up — which is also why a dry run skips it.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -67,29 +71,42 @@ for p in json.load(sys.stdin)["packages"]:
 ' | sort
 }
 
-# Whether the index already lists `name@version`.
+# Whether the index already lists `name@version`. A 404 means the crate has
+# never been published; any other failure (network, 5xx) aborts, because
+# treating it as "not published" would misreport every package as missing.
 published() {
-  local name="$1" version="$2" body
-  body="$(curl -sS -f -A "$user_agent" "$(index_url "$name")" 2>/dev/null || true)"
-  [ -n "$body" ] && printf '%s\n' "$body" | grep -q "\"vers\":\"$version\""
+  local name="$1" version="$2" body code
+  body="$(curl -sS -A "$user_agent" -w '\n%{http_code}' "$(index_url "$name")" 2>&1)" || {
+    echo "error: index lookup for $name failed: ${body##*$'\n'}" >&2; exit 1; }
+  code="${body##*$'\n'}"
+  body="${body%$'\n'*}"
+  case "$code" in
+    200) printf '%s\n' "$body" | grep -q "\"vers\":\"$version\"" ;;
+    404) return 1 ;;
+    *) echo "error: index lookup for $name returned HTTP $code" >&2; exit 1 ;;
+  esac
 }
 
+# Enumerations are captured first so an enumeration failure aborts under
+# `set -e` (a here-document's command substitution would swallow it).
+workspace_packages="$(publishable)"
 missing=()
 while read -r name version; do
   [ -n "$name" ] || continue
   published "$name" "$version" || missing+=("$name@$version")
 done <<EOT
-$(publishable)
+$workspace_packages
 EOT
 
 # `name@version@manifest` per standalone package not on the index yet.
 missing_standalone=()
 for manifest in "${standalone_manifests[@]}"; do
+  standalone_packages="$(publishable "$manifest")"
   while read -r name version; do
     [ -n "$name" ] || continue
     published "$name" "$version" || missing_standalone+=("$name@$version@$manifest")
   done <<EOT
-$(publishable "$manifest")
+$standalone_packages
 EOT
 done
 
@@ -98,8 +115,12 @@ if [ "${#missing[@]}" -eq 0 ] && [ "${#missing_standalone[@]}" -eq 0 ]; then
   exit 0
 fi
 
-[ "${#missing[@]}" -eq 0 ] || printf '%s\n' "${missing[@]}"
-for m in "${missing_standalone[@]}"; do
+# Empty arrays expand with `${arr[@]+"${arr[@]}"}`: bash before 4.4 treats a
+# bare `"${arr[@]}"` on an empty array as an unbound variable under `set -u`.
+for m in ${missing[@]+"${missing[@]}"}; do
+  printf '%s\n' "$m"
+done
+for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
   printf '%s\n' "${m%@*}"
 done
 [ "$publish" -eq 1 ] || exit 0
@@ -130,15 +151,23 @@ run_publish() {
 }
 
 if [ "${#missing[@]}" -gt 0 ]; then
-  args=(publish --locked "${verify_flag[@]}" "${dry_run_flag[@]}")
+  args=(publish --locked ${verify_flag[@]+"${verify_flag[@]}"} ${dry_run_flag[@]+"${dry_run_flag[@]}"})
   for m in "${missing[@]}"; do
     args+=(-p "${m%@*}")
   done
   run_publish "${args[@]}"
 fi
 
-# The standalone packages go last, after every workspace package is up.
-for m in "${missing_standalone[@]}"; do
-  run_publish publish --locked "${verify_flag[@]}" "${dry_run_flag[@]}" --manifest-path "${m##*@}"
+# The standalone packages go last, after every workspace package is up, and
+# always with the verification build: that build is the only check they get
+# before the irreversible upload. A dry run cannot do it at all — their
+# `frust-ui` dependency is resolved from the registry, where this version
+# does not exist until a real run has uploaded the workspace packages.
+for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
+  if [ "${#dry_run_flag[@]}" -gt 0 ]; then
+    echo "${m%@*}: not verifiable in a dry run (its frust-ui dependency is resolved from the registry); a real run publishes it last" >&2
+    continue
+  fi
+  run_publish publish --locked --manifest-path "${m##*@}"
 done
 exit 0
