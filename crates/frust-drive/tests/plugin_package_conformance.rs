@@ -81,6 +81,20 @@
 //! (Swift included — see the Scope section above) are walked but deliberately
 //! filtered out before the bare-package check runs; that filter is this
 //! test's Kotlin-only scope boundary, not an oversight.
+//!
+//! # A plugin's platform files are found through its package
+//!
+//! `frust_drive::plugin::add_plugin` wires a plugin's Gradle module and Swift
+//! package from wherever cargo locates the plugin's own crate — a checkout's
+//! `plugins/<dir>` under a `frust` path dependency, the unpacked crates.io
+//! release under a version. The `plugin_package_location` cases below hold
+//! both halves of that to the real tree: every platform directory the
+//! registry names exists inside the package its base Cargo dependency adds
+//! (what a located crate has to carry), and the public `add_plugin_with`
+//! seam writes the right Cargo line and platform paths for a project
+//! scaffolded in each mode — through a stubbed locator, so no fixture runs
+//! cargo. They need the `test-util` stub, which the packaged crate (no self
+//! dev-dependency) does not build, so they compile only alongside it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -297,4 +311,209 @@ fn scanner_rejects_a_subpackage_as_bare_dev_frust() {
     assert!(declares_bare_dev_frust(
         "// a comment\npackage dev.frust\n\nimport android.view.View\n"
     ));
+}
+
+#[cfg(feature = "test-util")]
+mod plugin_package_location {
+    use super::{rel, workspace_root};
+    use frust_drive::host_path::to_portable_string;
+    use frust_drive::packages::StubLocator;
+    use frust_drive::plugin::{AddOutcome, Contribution, add_plugin_with, known_plugins};
+    use frust_drive::scaffold::{FrustDependency, TemplateContext, generate};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "frust-drive-plugin-package-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A freshly scaffolded app under `<scratch>/app` depending on frust as
+    /// `frust` says, returning `(scratch, app)`.
+    fn scaffolded(tag: &str, frust: FrustDependency) -> (PathBuf, PathBuf) {
+        let scratch = unique_temp_dir(tag);
+        let app = scratch.join("app");
+        let ctx = TemplateContext {
+            project_name: "my_app".into(),
+            title_case_name: "My App".into(),
+            org: "dev.f0x".into(),
+            description: "A new Frust application.".into(),
+            frust_version: "0.5.0".into(),
+            frust,
+            deeplink_scheme: None,
+            deeplink_host: None,
+        };
+        generate(&app, &ctx, None, false, None).expect("scaffold generate");
+        (scratch, app)
+    }
+
+    fn read(path: &Path) -> String {
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    }
+
+    /// The `[package] name` of the crate at `dir`.
+    fn package_name(dir: &Path) -> String {
+        let doc = read(&dir.join("Cargo.toml"))
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        doc["package"]["name"].as_str().unwrap().to_string()
+    }
+
+    /// Every platform directory the registry names exists in this checkout
+    /// inside `plugins/<crate_dir>/`, the directory of the very package the
+    /// plugin's base Cargo dependency adds — so locating that package, by
+    /// path or as a downloaded release, finds the directory under it.
+    #[test]
+    fn every_registry_platform_directory_ships_inside_its_plugins_package() {
+        let root = workspace_root();
+        let mut checked = 0;
+        for spec in known_plugins() {
+            let package = spec
+                .base
+                .iter()
+                .find_map(|c| match c {
+                    Contribution::CargoDep { name } => Some(*name),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("`{}` adds no Cargo dependency", spec.id));
+            let crate_root = root.join("plugins").join(spec.crate_dir);
+            let contributions = spec
+                .base
+                .iter()
+                .chain(spec.optional_features.iter().flat_map(|f| f.contributions));
+            for contribution in contributions {
+                let rel_path = match contribution {
+                    Contribution::GradleModule { rel_path, .. }
+                    | Contribution::SwiftPackageRef { rel_path, .. } => *rel_path,
+                    _ => continue,
+                };
+                let prefix = format!("plugins/{}/", spec.crate_dir);
+                assert!(
+                    rel_path.starts_with(&prefix),
+                    "`{}` names `{rel_path}` outside its own package `{prefix}`",
+                    spec.id
+                );
+                assert!(
+                    root.join(rel_path).is_dir(),
+                    "`{}` names `{rel_path}`, which is not a directory in this checkout",
+                    spec.id
+                );
+                assert_eq!(
+                    package_name(&crate_root),
+                    package,
+                    "`{}`'s platform files live in {}, whose package is not the `{package}` \
+                     its Cargo dependency adds",
+                    spec.id,
+                    rel(&crate_root)
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no Gradle module or Swift package found in the registry — the scan proved nothing"
+        );
+    }
+
+    /// Registry mode, the `frust create` default: the plugin dependency takes
+    /// the facade's version, and the Gradle module and Swift package point
+    /// into the crate cargo unpacked.
+    #[test]
+    fn registry_mode_add_writes_a_version_and_wires_the_unpacked_crate() {
+        let (scratch, app) = scaffolded(
+            "registry",
+            FrustDependency::Registry {
+                version: "0.5.0".into(),
+            },
+        );
+        let unpacked = scratch.join("registry-src/frust-iap-0.5.0");
+        let locator = StubLocator::new().with("frust-iap", unpacked.clone());
+
+        let report = add_plugin_with(&locator, &app, "iap", &[]).expect("add iap");
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::Applied),
+            "{report:?}"
+        );
+
+        let cargo = read(&app.join("Cargo.toml"));
+        assert!(cargo.contains("frust-iap = \"0.5.0\""), "{cargo}");
+        let settings = read(&app.join("android/settings.gradle.kts"));
+        let module = to_portable_string(&unpacked.join("platform/android"));
+        assert!(
+            settings.contains(&format!(
+                "project(\":frust-iap\").projectDir = file(\"{module}\")"
+            )),
+            "{settings}"
+        );
+        let pbxproj = read(&app.join("ios/Runner.xcodeproj/project.pbxproj"));
+        let package = to_portable_string(&unpacked.join("platform/ios/FrustIap"));
+        assert!(
+            pbxproj.contains(&format!("relativePath = \"{package}\";")),
+            "{pbxproj}"
+        );
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A registry project the locator cannot answer for (offline, say) is a
+    /// typed refusal naming the package; no platform file is edited.
+    #[test]
+    fn registry_mode_add_without_a_located_crate_refuses_the_platform_edits() {
+        let (scratch, app) = scaffolded(
+            "registry-offline",
+            FrustDependency::Registry {
+                version: "0.5.0".into(),
+            },
+        );
+        let settings_before = read(&app.join("android/settings.gradle.kts"));
+        let offline = StubLocator::failing("error: failed to download `frust-iap v0.5.0`");
+
+        let err = add_plugin_with(&offline, &app, "iap", &[]).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("frust-iap"), "{message}");
+        assert!(message.contains("failed to download"), "{message}");
+        assert_eq!(
+            read(&app.join("android/settings.gradle.kts")),
+            settings_before
+        );
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// Path mode keeps its Cargo line — a path into the same checkout as the
+    /// `frust` dependency — while the platform files come from the located
+    /// package, as an absolute path.
+    #[test]
+    fn path_mode_add_keeps_its_path_line_and_wires_the_located_package() {
+        let (scratch, app) = scaffolded(
+            "path",
+            FrustDependency::Path("../checkout/crates/frust".into()),
+        );
+        let located = scratch.join("checkout/plugins/iap");
+        let locator = StubLocator::new().with("frust-iap", located.clone());
+
+        add_plugin_with(&locator, &app, "iap", &[]).expect("add iap");
+
+        let cargo = read(&app.join("Cargo.toml"));
+        assert!(
+            cargo.contains("frust-iap = { path = \"../checkout/crates/frust/../../plugins/iap\" }"),
+            "{cargo}"
+        );
+        let settings = read(&app.join("android/settings.gradle.kts"));
+        let module = to_portable_string(&located.join("platform/android"));
+        assert!(
+            settings.contains(&format!("file(\"{module}\")")),
+            "{settings}"
+        );
+        let _ = fs::remove_dir_all(&scratch);
+    }
 }

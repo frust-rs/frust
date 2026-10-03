@@ -35,7 +35,7 @@
 pub mod apply;
 pub mod registry;
 
-pub use apply::{DesktopContribution, add_plugin, desktop_contributions};
+pub use apply::{DesktopContribution, add_plugin, add_plugin_with, desktop_contributions};
 pub use registry::known_plugins;
 
 use std::path::PathBuf;
@@ -51,9 +51,12 @@ pub struct PluginSpec {
     pub id: &'static str,
     /// One-line human summary for a selection UI.
     pub summary: &'static str,
-    /// Path segment under `<frust repo>/plugins/` the crate lives in — the
-    /// `frust = { path = ... }` dep the project already has is walked back to
-    /// the repo root and down into this directory to derive the dep path.
+    /// Path segment under `<frust repo>/plugins/` the crate lives in. In path
+    /// mode the project's `frust = { path = ... }` dep is walked back to the
+    /// repo root and down into this directory to write the plugin's own path
+    /// dep; every [`Contribution::GradleModule`]/[`Contribution::SwiftPackageRef`]
+    /// `rel_path` must sit under `plugins/<crate_dir>/`, since only the part
+    /// below it is carried over to wherever cargo locates the package.
     pub crate_dir: &'static str,
     /// Contributions applied unconditionally when this plugin is added
     /// (always at least its own Cargo.toml dependency).
@@ -62,7 +65,8 @@ pub struct PluginSpec {
     /// secure-storage's `"biometric-gate"`), each adding further contributions.
     pub optional_features: &'static [FeatureSpec],
     /// A sibling checkout this plugin needs present (facade-tier plugins whose
-    /// own deps path into it), declared relative to the frust repo root.
+    /// own deps path into it), declared relative to the frust repo root —
+    /// two levels above the facade package cargo locates for the project.
     /// [`add_plugin`] errors [`PluginAddError::SiblingCheckoutMissing`] when
     /// it isn't on disk. No current registry entry sets this —
     /// `clean-signals-frust` needs none because `clean-signals` is a crates.io
@@ -86,9 +90,11 @@ pub struct FeatureSpec {
 /// to one target file and one skip-if-present guard.
 #[derive(Debug, Clone, Copy)]
 pub enum Contribution {
-    /// A `[dependencies]` entry; the path is derived at apply time from the
-    /// project's existing `frust` path dep (crates unpublished — version deps
-    /// come post-publish). `name` is the crate/dependency name.
+    /// A `[dependencies]` entry written in the form the project's own `frust`
+    /// dependency takes: a path into the same checkout (path mode), or the
+    /// same version requirement (registry mode — the plugin crates release in
+    /// lockstep with the facade). `name` is the crate/dependency name, and
+    /// the package the plugin's platform files are located in.
     CargoDep { name: &'static str },
     /// A `<uses-permission android:name="..."/>` line inserted into the app's
     /// own `AndroidManifest.xml` before `</manifest>`.
@@ -121,7 +127,9 @@ pub enum Contribution {
         /// The Gradle project path, e.g. `":frust-secure-storage"`.
         gradle_name: &'static str,
         /// The module directory, relative to the frust repo root, e.g.
-        /// `"plugins/secure-storage/platform/android"`.
+        /// `"plugins/secure-storage/platform/android"`. Written into the
+        /// project as the same subdirectory of the plugin's package wherever
+        /// cargo locates it (`<package>/platform/android`).
         rel_path: &'static str,
     },
     /// A plugin's local Swift package added to the generated app's
@@ -147,11 +155,11 @@ pub enum Contribution {
         /// embedding's own wiring names `FrustEmbedding`.
         package_name: &'static str,
         /// The package directory, relative to the frust repo root, e.g.
-        /// `"plugins/camera/platform/ios/FrustCamera"` — resolved exactly like
-        /// a [`Contribution::GradleModule`]'s `rel_path`, since the written
-        /// `relativePath` is resolved by Xcode against the directory
-        /// *containing* the `.xcodeproj` (`<project>/ios/`), one level below
-        /// the project root a relative `frust` path dep is written against.
+        /// `"plugins/camera/platform/ios"` — resolved exactly like a
+        /// [`Contribution::GradleModule`]'s `rel_path`. A located package is
+        /// written as an absolute path; only a project-root-relative fallback
+        /// needs the extra `../` for Xcode resolving `relativePath` against
+        /// the directory *containing* the `.xcodeproj` (`<project>/ios/`).
         rel_path: &'static str,
     },
     /// A system framework linked into the generated app's Runner target by
@@ -443,9 +451,32 @@ pub enum PluginAddError {
     /// The project's Cargo.toml doesn't parse — never rewritten.
     #[error("failed to parse the project's Cargo.toml: {0}")]
     UnparseableCargoToml(String),
-    /// No `frust = {{ path = ... }}` dependency to derive plugin paths from.
-    #[error("no `frust = {{ path = ... }}` dependency to derive plugin paths from")]
+    /// No `frust` dependency carrying a `path` or a `version` — nothing to
+    /// write a plugin dependency against.
+    #[error(
+        "no `frust` dependency with a `path` or a `version` to write the plugin's dependency against"
+    )]
     NoFrustDependency,
+    /// Cargo could not say where a package lives in a project depending on
+    /// the crates.io release, where — unlike a checkout path — there is no
+    /// other place to derive it from.
+    #[error("could not locate the `{package}` package through cargo: {source}")]
+    PackageNotLocated {
+        package: String,
+        source: crate::packages::PackagesError,
+    },
+    /// A registry entry names a platform path outside its plugin's own
+    /// package (`plugins/<crate_dir>/…`), which no package lookup can
+    /// resolve — a registry bug, refused before anything is written.
+    #[error(
+        "plugin `{plugin}` names platform path `{rel_path}` outside its own package \
+         (`plugins/{crate_dir}/…`, added by its base Cargo dependency), so it cannot be located"
+    )]
+    NativePathOutsidePackage {
+        plugin: String,
+        rel_path: String,
+        crate_dir: String,
+    },
     /// A freshly minted `project.pbxproj` object id is already in use.
     /// Unreachable while the mint scans the same file it writes, but a
     /// collision would silently redefine an existing object — the one

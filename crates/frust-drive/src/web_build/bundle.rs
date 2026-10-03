@@ -17,23 +17,16 @@
 //! 1. **The app's own page**, at `<project>/<host-dir>` (`[web] host-dir`,
 //!    default `web` — the exact directory `crates/frust-drive/templates/app/web.tmpl/` renders
 //!    to). Used when both [`EMBEDDER_FILES`] exist there.
-//! 2. **The framework's `crates/frust-shell-web/platform/web`**, otherwise —
-//!    reached through the project's own `frust` path dependency, the same way
-//!    the Android `frust-embedding` and iOS `FrustEmbedding` packages are:
-//!    `<frust>/../frust-shell-web/platform/web`, where `<frust>` is the app's
-//!    `frust` dependency path (the facade crate directory, a sibling of the
-//!    shell crates). `crate::plugin::apply`'s
-//!    `resolve_sibling`/`plugin_dep_path` and `crate::scaffold::context`'s
-//!    `frust_embedding_android_dir` are the same walk; those helpers are
-//!    private to their own modules, so [`embedder_dir`] restates it rather
-//!    than widening someone else's surface — the convention is shared, the
-//!    code is not.
+//! 2. **The framework's page**, otherwise: `platform/web` inside the
+//!    `frust-shell-web` package, wherever cargo resolves that package in the
+//!    project's dependency graph ([`crate::packages`]) — the checkout's
+//!    `crates/frust-shell-web` under a `frust` path dependency, the unpacked
+//!    crate in cargo's registry cache under a crates.io version. Nothing here
+//!    reads the `frust` dependency itself, so both forms take the same route.
 //!
-//! This inherits the same machine-specific-checkout trade-off those accessors
-//! document: an app whose `frust` path dependency has moved cannot fall back
-//! to the framework page until it is repointed. The mitigation is the same
-//! one, too — the path is a placeholder for a published artifact once the
-//! embedder ships to a registry. A project that supplies its own host page
+//! An app whose framework checkout has moved, or whose registry crates cargo
+//! cannot fetch, has no framework page to fall back to; the typed error
+//! carries cargo's own explanation. A project that supplies its own host page
 //! never needs the fallback at all.
 //!
 //! # Staged, not templated
@@ -51,8 +44,8 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::host_path;
 use crate::manifest::WebSection;
+use crate::packages::{self, PackageLocator};
 
 use super::WebBuildError;
 
@@ -60,9 +53,11 @@ use super::WebBuildError;
 /// by both host pages' own `./pkg/<name>.js` shape.
 pub(super) const PKG_DIR: &str = "pkg";
 
-/// The embedder's directory relative to the `crates/` directory holding the
-/// `frust` facade, when the framework's own page is staged.
-const EMBEDDER_REL_PATH: &str = "frust-shell-web/platform/web";
+/// The package that ships the framework's host page.
+pub(super) const EMBEDDER_PACKAGE: &str = "frust-shell-web";
+
+/// The host page's directory inside [`EMBEDDER_PACKAGE`].
+const EMBEDDER_PACKAGE_REL: &str = "platform/web";
 
 /// The host-page files every embedder — the app's own or the framework's —
 /// must carry, in copy order. Both are required: `index.html` imports
@@ -105,9 +100,13 @@ pub(super) enum EmbedderSource {
 /// but not the other is read as "no app page here", and the framework page is
 /// tried next rather than the build failing on an incomplete `<host-dir>` a
 /// project may never have meant to populate.
+///
+/// `locator` answers where `frust-shell-web` lives, and is asked only when
+/// the project supplies no page of its own.
 pub(super) fn resolve_embedder(
     project_dir: &Path,
     web: &WebSection,
+    locator: &dyn PackageLocator,
 ) -> Result<(PathBuf, EmbedderSource), WebBuildError> {
     let app_dir = project_dir.join(web.host_dir_or_default());
     if EMBEDDER_FILES
@@ -116,67 +115,51 @@ pub(super) fn resolve_embedder(
     {
         return Ok((app_dir, EmbedderSource::App));
     }
-    embedder_dir(project_dir).map(|dir| (dir, EmbedderSource::Framework))
+    locate_embedder(project_dir, locator).map(|dir| (dir, EmbedderSource::Framework))
 }
 
-/// The absolute `crates/frust-shell-web/platform/web` directory this project's `frust` dependency
-/// resolves to, verified to carry both [`EMBEDDER_FILES`].
+/// The framework's host-page directory for this project — `platform/web`
+/// inside the `frust-shell-web` package cargo resolves in its dependency
+/// graph — verified to carry both [`EMBEDDER_FILES`].
 ///
-/// Read from the project's own `Cargo.toml` rather than from a manifest key,
-/// because the `frust` path dependency is the only value that already names
-/// the framework checkout an app is built against — a second, hand-maintained
-/// pointer would be free to disagree with the one cargo actually compiles.
+/// Resolved by `cargo metadata` ([`crate::packages::locate`]) rather than
+/// from a manifest key or the `frust` dependency's own value, because cargo
+/// is what compiles the app: its answer is the shell crate actually built,
+/// whether that is a checkout's or a downloaded release's.
 ///
 /// Fails with a typed error rather than degrading: unlike a missing icon (a
 /// quality question the desktop pipeline answers with a note), a missing
 /// embedder means the artifact directory would contain a `pkg/` and no page
-/// to load it from — servable, and broken in the browser. [`resolve_embedder`]
-/// only reaches this when the project supplies no host page of its own.
+/// to load it from — servable, and broken in the browser. A build only needs
+/// this when the project supplies no host page of its own.
 pub fn embedder_dir(project_dir: &Path) -> Result<PathBuf, WebBuildError> {
-    let manifest = project_dir.join("Cargo.toml");
-    let frust_path = frust_dep_path(&manifest).ok_or_else(|| WebBuildError::NoFrustDependency {
-        manifest: manifest.clone(),
-    })?;
-    // `frust_path` is read back verbatim from an existing project's
-    // `Cargo.toml`; a project scaffolded on Windows before the scaffold
-    // emitted a portable path may still carry a verbatim `\\?\C:\...`
-    // prefix, which `.join("..")` can't climb (verbatim disables `..`/`.`
-    // normalization) — simplify first, same as `plugin::apply::resolve_sibling`.
-    let simplified = host_path::simplify(Path::new(&frust_path));
-    let frust_abs = if simplified.is_absolute() {
-        simplified
-    } else {
-        project_dir.join(&simplified)
-    };
-    let dir = frust_abs.join("..").join(EMBEDDER_REL_PATH);
+    let dir = packages::locate(project_dir, EMBEDDER_PACKAGE)
+        .map_err(|source| WebBuildError::EmbedderUnlocated { source })?;
+    embedder_page(dir)
+}
+
+/// [`embedder_dir`] through an injected locator — the form the pipeline and
+/// the preflight use, so one run asks cargo through the runner it was given.
+pub(super) fn locate_embedder(
+    project_dir: &Path,
+    locator: &dyn PackageLocator,
+) -> Result<PathBuf, WebBuildError> {
+    let dir = locator
+        .locate(project_dir, EMBEDDER_PACKAGE)
+        .map_err(|source| WebBuildError::EmbedderUnlocated { source })?;
+    embedder_page(dir)
+}
+
+/// `platform/web` under the located package directory, checked for both
+/// [`EMBEDDER_FILES`].
+fn embedder_page(package_dir: PathBuf) -> Result<PathBuf, WebBuildError> {
+    let dir = package_dir.join(EMBEDDER_PACKAGE_REL);
     for file in EMBEDDER_FILES {
         if !dir.join(file).is_file() {
-            return Err(WebBuildError::EmbedderIncomplete {
-                dir: dir.clone(),
-                missing: file,
-                frust_path: frust_path.clone(),
-            });
+            return Err(WebBuildError::EmbedderIncomplete { dir, missing: file });
         }
     }
     Ok(dir)
-}
-
-/// The `frust` dependency's `path` value, exactly as written (relative or
-/// absolute). Mirrors `crate::plugin::apply`'s `frust_dep_path` — a
-/// format-preserving read of one key, not a deserialize of the whole manifest,
-/// so an app manifest carrying keys this crate has no type for is still
-/// readable.
-fn frust_dep_path(manifest: &Path) -> Option<String> {
-    let text = fs::read_to_string(manifest).ok()?;
-    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
-    let path = doc
-        .get("dependencies")?
-        .as_table_like()?
-        .get("frust")?
-        .as_table_like()?
-        .get("path")?
-        .as_str()?;
-    Some(path.to_string())
 }
 
 /// The app crate's package name, as `Cargo.toml`'s `[package] name` spells it
@@ -299,9 +282,9 @@ fn is_strictly_contained(dir: &Path, project_dir: &Path) -> bool {
 /// `path` with its `.` components dropped and each `..` folded into the
 /// component before it (a leading `..` with nothing to fold into is kept).
 /// Purely lexical — no filesystem access, no symlink resolution — so the
-/// overlap guards below can compare a derived path such as
-/// `<frust path>/../frust-shell-web/platform/web` ([`embedder_dir`]'s shape) against an
-/// artifact directory without a `..` in the middle hiding a real overlap.
+/// overlap guards below can compare a path carrying `..` components (a
+/// configured `[web] host-dir` or `out-dir` such as `../site`) against
+/// another without a `..` in the middle hiding a real overlap.
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -333,8 +316,8 @@ fn paths_overlap(a: &Path, b: &Path) -> bool {
 /// Every host-page directory a browser build must never delete, whatever
 /// page it resolves: the app's configured `<host-dir>` (present, partial, or
 /// absent — a directory the developer named is protected before it is
-/// populated), the framework's `crates/frust-shell-web/platform/web` when the project's `frust`
-/// dependency locates one, and the page the build actually resolved
+/// populated), the framework's page when `locator` finds the
+/// `frust-shell-web` package, and the page the build actually resolved
 /// (`embedder`, when the caller has one). Deduplicated, in that order. The
 /// project's `src/` is not listed because [`guard_artifact_dir`] protects it
 /// unconditionally — no caller can leave it out.
@@ -350,6 +333,7 @@ pub(super) fn protected_dirs(
     project_dir: &Path,
     web: &WebSection,
     embedder: Option<&Path>,
+    locator: &dyn PackageLocator,
 ) -> Vec<PathBuf> {
     let mut dirs = vec![project_dir.join(web.host_dir_or_default())];
     let mut protect = |dir: PathBuf| {
@@ -357,7 +341,7 @@ pub(super) fn protected_dirs(
             dirs.push(dir);
         }
     };
-    if let Ok(framework) = embedder_dir(project_dir) {
+    if let Ok(framework) = locate_embedder(project_dir, locator) {
         protect(framework);
     }
     if let Some(embedder) = embedder {
@@ -502,10 +486,51 @@ pub(super) fn pkg_artifacts(pkg_dir: &Path) -> Result<Vec<PathBuf>, WebBuildErro
     Ok(files)
 }
 
+/// The locator the web fake-checkout fixtures share (this module's
+/// `checkout_with_app`, `web_build`'s and the preflight's `checkout`): a
+/// project at `<checkout>/examples/<app>` finds `frust-shell-web` at
+/// `<checkout>/crates/frust-shell-web` when that directory exists — what
+/// cargo would answer for the fixtures' `frust = { path =
+/// "../../crates/frust" }` — and no such package otherwise. A stub, so no
+/// fixture test runs cargo against a checkout that holds no real crates.
+#[cfg(test)]
+pub(super) fn fixture_locator(project_dir: &Path) -> packages::StubLocator {
+    let shell = project_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(|checkout| checkout.join("crates").join(EMBEDDER_PACKAGE));
+    match shell {
+        Some(dir) if dir.is_dir() => packages::StubLocator::new().with(EMBEDDER_PACKAGE, dir),
+        _ => packages::StubLocator::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// [`super::locate_embedder`] through the fixtures' stubbed locator.
+    fn embedder_dir(project_dir: &Path) -> Result<PathBuf, WebBuildError> {
+        locate_embedder(project_dir, &fixture_locator(project_dir))
+    }
+
+    /// [`super::resolve_embedder`] through the fixtures' stubbed locator.
+    fn resolve_embedder(
+        project_dir: &Path,
+        web: &WebSection,
+    ) -> Result<(PathBuf, EmbedderSource), WebBuildError> {
+        super::resolve_embedder(project_dir, web, &fixture_locator(project_dir))
+    }
+
+    /// [`super::protected_dirs`] through the fixtures' stubbed locator.
+    fn protected_dirs(
+        project_dir: &Path,
+        web: &WebSection,
+        embedder: Option<&Path>,
+    ) -> Vec<PathBuf> {
+        super::protected_dirs(project_dir, web, embedder, &fixture_locator(project_dir))
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -519,11 +544,12 @@ mod tests {
         dir
     }
 
-    /// Lays out a fake framework checkout with a `crates/frust-shell-web/platform/web` embedder and an
-    /// app project whose `frust` dependency points into it, returning the
-    /// project directory. Mirrors the real relative shape exactly
-    /// (`<repo>/crates/frust`, `<repo>/crates/frust-shell-web/platform/web`) so the `../` walk is
-    /// exercised rather than asserted.
+    /// Lays out a fake framework checkout with a
+    /// `crates/frust-shell-web/platform/web` embedder and an app project whose
+    /// `frust` dependency points into it, returning `(checkout, project)`.
+    /// Mirrors the real relative shape (`<repo>/crates/frust`,
+    /// `<repo>/crates/frust-shell-web`), which is what [`fixture_locator`]
+    /// answers from.
     fn checkout_with_app(tag: &str, files: &[&str]) -> (PathBuf, PathBuf) {
         let root = temp_dir(tag);
         let embedder = root.join("crates/frust-shell-web/platform/web");
@@ -560,12 +586,12 @@ mod tests {
     }
 
     #[test]
-    fn the_embedder_resolves_through_the_frust_path_dependency() {
+    fn the_embedder_is_platform_web_inside_the_located_shell_package() {
         let (root, project) = checkout_with_app("embedder-ok", EMBEDDER_FILES);
         let dir = embedder_dir(&project).unwrap();
         assert!(dir.join("frust_web.js").is_file());
-        // The walk lands on the checkout's own `crates/frust-shell-web/platform/web`, not somewhere
-        // that merely happens to contain the two files.
+        // `platform/web` under the package directory the locator answered,
+        // not somewhere that merely happens to contain the two files.
         assert_eq!(
             dir.canonicalize().unwrap(),
             root.join("crates/frust-shell-web/platform/web")
@@ -586,14 +612,42 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A graph with no `frust-shell-web` is a typed refusal carrying the
+    /// locator's own reason, which names how the project depends on frust.
     #[test]
-    fn an_app_with_no_frust_path_dependency_names_its_manifest() {
+    fn an_unlocatable_shell_package_is_a_typed_refusal_naming_the_frust_dependency() {
         let dir = temp_dir("no-frust-dep");
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
-        assert!(matches!(
-            embedder_dir(&dir),
-            Err(WebBuildError::NoFrustDependency { .. })
-        ));
+        let err = embedder_dir(&dir).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                WebBuildError::EmbedderUnlocated {
+                    source: packages::PackagesError::PackageAbsent { .. }
+                }
+            ),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains("frust-shell-web"), "{message}");
+        assert!(message.contains("no `frust` entry"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `cargo metadata` failure (offline, a moved checkout) reaches the
+    /// caller with cargo's own words.
+    #[test]
+    fn a_failed_package_lookup_carries_cargos_message() {
+        let dir = temp_dir("lookup-fails");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        let locator =
+            packages::StubLocator::failing("error: failed to load source for dependency `frust`");
+        let err = locate_embedder(&dir, &locator).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to load source for dependency `frust`"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -670,7 +724,7 @@ mod tests {
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
         assert!(matches!(
             resolve_embedder(&dir, &WebSection::default()),
-            Err(WebBuildError::NoFrustDependency { .. })
+            Err(WebBuildError::EmbedderUnlocated { .. })
         ));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1032,9 +1086,9 @@ mod tests {
         let _ = fs::remove_dir_all(&bare);
     }
 
-    /// Overlap detection sees through `..` components, since the framework
-    /// page is derived as `<frust path>/../frust-shell-web/platform/web` — a vendored
-    /// framework checkout inside the project must still be recognized.
+    /// Overlap detection sees through `..` components, so a configured path
+    /// that climbs out and back in (or a vendored framework checkout inside
+    /// the project reached that way) is still recognized.
     #[test]
     fn overlap_detection_folds_parent_components() {
         let project = Path::new("/p");

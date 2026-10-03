@@ -2,6 +2,7 @@
 //! project. Every edit is idempotent and format-preserving; a file that fails
 //! to parse (or lacks its insertion anchor) is never rewritten.
 
+use std::cell::RefCell;
 use std::fs;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +13,8 @@ use super::registry::{find_plugin, known_plugins};
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
 use crate::build_dirs::BuildLayout;
 use crate::host_path;
+use crate::packages::{CargoLocator, LockfilePolicy, PackageLocator};
+use crate::process::RealProcessRunner;
 use crate::scaffold::context::frust_path_from_project_subdir;
 
 /// Project-relative paths of the files a contribution edits.
@@ -37,7 +40,41 @@ const APP_DEPS_ANCHOR: &str = "// frust:plugin-dependencies";
 /// project at `project_root`, returning a per-edit [`AddReport`]. Idempotent:
 /// a second call with the same arguments reports every item
 /// [`AddOutcome::AlreadyPresent`] and writes nothing.
+///
+/// Plugin packages are located by `cargo metadata` ([`crate::packages`]),
+/// allowed to add the new dependency to an existing `Cargo.lock` — the
+/// manifest has just gained it, so a `--locked` resolve could only fail.
 pub fn add_plugin(
+    project_root: &Path,
+    id: &str,
+    features: &[&str],
+) -> Result<AddReport, PluginAddError> {
+    let locator =
+        CargoLocator::new(&RealProcessRunner).with_lockfile_policy(LockfilePolicy::AllowUpdate);
+    add_plugin_with(&locator, project_root, id, features)
+}
+
+/// [`add_plugin`] with the package locator injected — the seam a test stubs,
+/// since a fixture project's dependencies are not real crates cargo could
+/// resolve.
+///
+/// The project's `frust` dependency decides the Cargo line: a `path` makes
+/// this **path mode** (`<plugin> = { path = "<frust>/../../plugins/<dir>" }`,
+/// relative to the same base as the `frust` path), a `version` without a
+/// `path` **registry mode** (`<plugin> = "<that version>"`). Either way the
+/// plugin's Gradle module and Swift package are referenced where `locator`
+/// finds the plugin's own package, as an absolute path; only in path mode,
+/// when the locator cannot answer (a checkout not on disk yet, no network to
+/// resolve the rest of the graph), is the location derived from the path the
+/// Cargo line names instead, so wiring a plugin never depends on the checkout
+/// already being in place.
+///
+/// Cargo can only locate a package the manifest depends on, so every
+/// `Cargo.toml` edit is applied and written **before** the platform-file
+/// contributions run; the report still lists items in registry order. A run
+/// that finds every platform edit already present never asks the locator.
+pub fn add_plugin_with(
+    locator: &dyn PackageLocator,
     project_root: &Path,
     id: &str,
     features: &[&str],
@@ -54,8 +91,9 @@ pub fn add_plugin(
         }
     }
 
-    // Read + parse Cargo.toml once: it is the source of the `frust` path dep
-    // every plugin path is derived from, and never rewritten if it can't parse.
+    // Read + parse Cargo.toml once: its `frust` dependency decides how every
+    // plugin dependency is written, and it is never rewritten if it can't
+    // parse.
     let cargo_path = project_root.join(CARGO_TOML_REL);
     let cargo_src = fs::read_to_string(&cargo_path)
         .map_err(|_| PluginAddError::MissingProjectFile(CARGO_TOML_REL.to_string()))?;
@@ -63,19 +101,8 @@ pub fn add_plugin(
         .parse::<DocumentMut>()
         .map_err(|e| PluginAddError::UnparseableCargoToml(e.to_string()))?;
 
-    let frust_path = frust_dep_path(&doc).ok_or(PluginAddError::NoFrustDependency)?;
-
-    // Facade plugins (clean-signals-frust) need a sibling checkout present;
-    // check before any edit so a missing sibling leaves the tree untouched.
-    if let Some(sibling) = spec.requires_sibling {
-        let expected = resolve_sibling(project_root, &frust_path, sibling);
-        if !expected.exists() {
-            return Err(PluginAddError::SiblingCheckoutMissing {
-                sibling: sibling.to_string(),
-                expected,
-            });
-        }
-    }
+    let frust = FrustDep::read(&doc).ok_or(PluginAddError::NoFrustDependency)?;
+    let resolution = Resolution::new(locator, project_root, &spec, &frust);
 
     // Base contributions, then the selected features' (in registry order for
     // a stable report regardless of the caller's feature ordering).
@@ -84,49 +111,99 @@ pub fn add_plugin(
         .iter()
         .filter(|f| features.contains(&f.id))
         .flat_map(|f| f.contributions.iter());
-    let contributions = spec.base.iter().chain(feature_contribs);
+    let contributions: Vec<&Contribution> = spec.base.iter().chain(feature_contribs).collect();
 
-    let mut items = Vec::new();
+    // A registry entry naming a platform path outside its own package cannot
+    // be located; refuse it before anything is written.
+    for contribution in &contributions {
+        if let Some(rel_path) = native_rel_path(contribution) {
+            package_location(&spec, rel_path)?;
+        }
+    }
+
+    // Facade plugins need a sibling checkout present; check before any edit
+    // so a missing sibling leaves the tree untouched.
+    if let Some(sibling) = spec.requires_sibling {
+        let expected = resolution.sibling(sibling)?;
+        if !expected.exists() {
+            return Err(PluginAddError::SiblingCheckoutMissing {
+                sibling: sibling.to_string(),
+                expected,
+            });
+        }
+    }
+
+    // The `Cargo.toml` edits first, in memory, then one write — only if a
+    // dep or feature was actually inserted, so an all-`AlreadyPresent` run
+    // touches no file (byte-identical tree).
+    let mut outcomes: Vec<Option<AddOutcome>> = vec![None; contributions.len()];
     let mut cargo_changed = false;
-    for contribution in contributions {
-        let outcome = apply_contribution(
-            contribution,
-            &spec,
-            project_root,
-            &frust_path,
-            &mut doc,
-            &mut cargo_changed,
-        )?;
+    for (slot, contribution) in outcomes.iter_mut().zip(&contributions) {
+        if is_cargo_contribution(contribution) {
+            *slot = Some(apply_contribution(
+                contribution,
+                &resolution,
+                &mut doc,
+                &mut cargo_changed,
+            )?);
+        }
+    }
+    if cargo_changed {
+        write_file(&cargo_path, CARGO_TOML_REL, &doc.to_string())?;
+    }
+
+    // Everything else, now that cargo can see the plugin's dependency.
+    let mut items = Vec::with_capacity(contributions.len());
+    for (contribution, applied) in contributions.iter().zip(outcomes) {
+        let outcome = match applied {
+            Some(outcome) => outcome,
+            None => apply_contribution(contribution, &resolution, &mut doc, &mut cargo_changed)?,
+        };
         items.push(AddItem {
             description: contribution.describe(),
             outcome,
         });
     }
-
-    // A single write for the Cargo.toml, only if a dep was actually inserted —
-    // so an all-`AlreadyPresent` run touches no file (byte-identical tree).
-    if cargo_changed {
-        write_file(&cargo_path, CARGO_TOML_REL, &doc.to_string())?;
-    }
-
     Ok(AddReport {
         plugin_id: id.to_string(),
         items,
     })
 }
 
+/// Whether `contribution` edits `Cargo.toml` (applied before every other
+/// contribution — see [`add_plugin_with`]).
+fn is_cargo_contribution(contribution: &Contribution) -> bool {
+    matches!(
+        contribution,
+        Contribution::CargoDep { .. } | Contribution::CargoFeature { .. }
+    )
+}
+
+/// The repo-root-relative platform path a Gradle module or Swift package
+/// contribution names, `None` for every other contribution.
+fn native_rel_path(contribution: &Contribution) -> Option<&'static str> {
+    match contribution {
+        Contribution::GradleModule { rel_path, .. }
+        | Contribution::SwiftPackageRef { rel_path, .. } => Some(rel_path),
+        _ => None,
+    }
+}
+
 fn apply_contribution(
     contribution: &Contribution,
-    spec: &PluginSpec,
-    project_root: &Path,
-    frust_path: &str,
+    resolution: &Resolution,
     doc: &mut DocumentMut,
     cargo_changed: &mut bool,
 ) -> Result<AddOutcome, PluginAddError> {
+    let project_root = resolution.project_root;
     match contribution {
-        Contribution::CargoDep { name } => {
-            apply_cargo_dep(doc, cargo_changed, name, spec.crate_dir, frust_path)
-        }
+        Contribution::CargoDep { name } => apply_cargo_dep(
+            doc,
+            cargo_changed,
+            name,
+            resolution.spec.crate_dir,
+            resolution.frust,
+        ),
         Contribution::ManifestPermission { permission } => {
             apply_manifest_permission(project_root, permission)
         }
@@ -138,11 +215,15 @@ fn apply_contribution(
         Contribution::GradleModule {
             gradle_name,
             rel_path,
-        } => apply_gradle_module(project_root, frust_path, gradle_name, rel_path),
+        } => apply_gradle_module(project_root, gradle_name, &|| {
+            resolution.native_dir(rel_path)
+        }),
         Contribution::SwiftPackageRef {
             package_name,
             rel_path,
-        } => apply_swift_package_ref(project_root, frust_path, package_name, rel_path),
+        } => apply_swift_package_ref(project_root, package_name, &|| {
+            resolution.native_dir(rel_path)
+        }),
         Contribution::IosFramework { name } => apply_ios_framework(project_root, name),
         Contribution::AppCrateMacro {
             invocation,
@@ -338,74 +419,205 @@ fn apply_app_crate_macro(
     Ok(AddOutcome::Applied)
 }
 
-/// The `frust` dependency's `path` value (relative or absolute, as written),
-/// or `None` if there is no `frust = { path = ... }` dep to derive from.
-fn frust_dep_path(doc: &DocumentMut) -> Option<String> {
-    let deps = doc.get("dependencies")?.as_table_like()?;
-    let frust = deps.get("frust")?;
-    let path = frust.as_table_like()?.get("path")?.as_str()?;
-    Some(path.to_string())
+/// How the project depends on the framework facade, read from its
+/// `[dependencies].frust` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FrustDep {
+    /// A `path` is present: a local checkout (path mode). `path` is the value
+    /// as written, relative to the project root or absolute.
+    Path { path: String, package: String },
+    /// A `version` without a `path`, or the `frust = "<version>"` shorthand:
+    /// the crates.io release (registry mode). `version` is the requirement as
+    /// written.
+    Registry { version: String, package: String },
 }
 
-/// Resolve a plugin's absolute crate directory from the project's `frust` path
-/// dep: `<frust>/../../plugins/<crate_dir>` — the same walk the scaffold's
-/// template uses for its own commented plugin example (`frust` resolves to the
-/// facade crate dir, two levels below the repo root).
+impl FrustDep {
+    /// The mode `doc`'s `frust` entry declares, or `None` when there is no
+    /// such entry or it carries neither a `path` nor a `version`. `package`
+    /// defaults to the dependency key, as cargo's own does — though every
+    /// scaffolded project names `frust-ui` explicitly in both modes.
+    fn read(doc: &DocumentMut) -> Option<Self> {
+        let item = doc.get("dependencies")?.as_table_like()?.get("frust")?;
+        if let Some(version) = item.as_str() {
+            return Some(Self::Registry {
+                version: version.to_string(),
+                package: "frust".to_string(),
+            });
+        }
+        let table = item.as_table_like()?;
+        let package = table
+            .get("package")
+            .and_then(Item::as_str)
+            .unwrap_or("frust")
+            .to_string();
+        if let Some(path) = table.get("path").and_then(Item::as_str) {
+            return Some(Self::Path {
+                path: path.to_string(),
+                package,
+            });
+        }
+        let version = table.get("version").and_then(Item::as_str)?;
+        Some(Self::Registry {
+            version: version.to_string(),
+            package,
+        })
+    }
+
+    /// The facade's package name.
+    fn package(&self) -> &str {
+        match self {
+            Self::Path { package, .. } | Self::Registry { package, .. } => package,
+        }
+    }
+}
+
+/// The path-mode Cargo dependency path for a plugin: `<frust>/../../plugins/<crate_dir>`
+/// — the facade crate sits two levels below the checkout root, every plugin
+/// crate under its `plugins/`. Relative to the same base as `frust_path`.
 fn plugin_dep_path(frust_path: &str, crate_dir: &str) -> String {
     format!("{frust_path}/../../plugins/{crate_dir}")
 }
 
-/// Resolve a repo-root-relative directory (a [`Contribution::GradleModule`]'s
-/// `rel_path`) the same way [`plugin_dep_path`] resolves a crate dir, and the
-/// same way the scaffold derives `frust.embedding.dir`:
-/// `<frust>/../../<rel_path>`. One path convention, not two.
-///
-/// Unlike [`plugin_dep_path`] — whose output lands in the project root's
-/// `Cargo.toml`, the base a relative `frust_path` is written against — this
-/// value lands one directory below the project root: in
-/// `android/settings.gradle.kts` (via [`settings_include_block`]), resolved by
-/// `file(...)` from `<project>/android/`, or in
-/// `ios/Runner.xcodeproj/project.pbxproj` (via [`apply_swift_package_ref`]),
-/// whose `relativePath` Xcode resolves against `<project>/ios/` — the
-/// directory *containing* the `.xcodeproj`, not the bundle itself. A relative
-/// `frust_path` therefore needs one extra `../` to climb out of that
-/// subdirectory in either case, applied by the single shared
-/// [`frust_path_from_project_subdir`] helper the scaffold's two embedding
-/// accessors use; an absolute path is emitted unchanged.
-///
-/// Like those accessors, this **widens** the reach of the machine-specific
-/// developer-checkout path `frust_path` already carries rather than merely
-/// inheriting it: a missing checkout now fails Gradle *sync* (the project
-/// won't configure), not just the Rust link step. A deliberate trade-off,
-/// mitigated by the published-coordinate future in this feature's
-/// `design/PUBLICATION_SEAM.md` §5.
-fn repo_relative_path(frust_path: &str, rel_path: &str) -> String {
-    format!(
-        "{}/../../{rel_path}",
-        frust_path_from_project_subdir(frust_path)
-    )
+/// The package a plugin's platform files ship in: the crate its base
+/// [`Contribution::CargoDep`] adds.
+fn plugin_package(spec: &PluginSpec) -> Option<&'static str> {
+    spec.base
+        .iter()
+        .find_map(|contribution| match contribution {
+            Contribution::CargoDep { name } => Some(*name),
+            _ => None,
+        })
 }
 
-/// Resolve a `requires_sibling` path to an absolute location for the on-disk
-/// existence check: the frust repo root (two levels above the `frust` facade
-/// crate dir) joined with the sibling's repo-root-relative path.
-///
-/// `frust_path` is read back verbatim from an existing project's
-/// `Cargo.toml` (see [`frust_dep_path`]), which — for a project scaffolded on
-/// Windows before this module existed — may still carry a verbatim
-/// `\\?\C:\...` prefix; `.join("..")` doesn't climb a verbatim path the way
-/// it climbs a plain one (verbatim disables `..`/`.` normalization by
-/// design), so [`host_path::simplify`] runs first. This only widens what
-/// this existence check can resolve; it never rewrites the project's own
-/// `Cargo.toml`.
-fn resolve_sibling(project_root: &Path, frust_path: &str, sibling: &str) -> PathBuf {
-    let frust_path = host_path::simplify(Path::new(frust_path));
-    let frust_abs = if frust_path.is_absolute() {
-        frust_path
-    } else {
-        project_root.join(&frust_path)
+/// Where a registry platform path (repo-root-relative,
+/// `plugins/<crate_dir>/…`) lives as a package location: the plugin's own
+/// package ([`plugin_package`]) and the path inside it, e.g.
+/// `platform/android` — the part that stays the same wherever cargo finds
+/// the package.
+fn package_location<'r>(
+    spec: &PluginSpec,
+    rel_path: &'r str,
+) -> Result<(&'static str, &'r str), PluginAddError> {
+    let outside = || PluginAddError::NativePathOutsidePackage {
+        plugin: spec.id.to_string(),
+        rel_path: rel_path.to_string(),
+        crate_dir: spec.crate_dir.to_string(),
     };
-    frust_abs.join("..").join("..").join(sibling)
+    let package = plugin_package(spec).ok_or_else(outside)?;
+    let inside = rel_path
+        .strip_prefix("plugins/")
+        .and_then(|rest| rest.strip_prefix(spec.crate_dir))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .ok_or_else(outside)?;
+    Ok((package, inside))
+}
+
+/// Where one `add_plugin` run resolves locations from: the project, the
+/// plugin, how the project depends on frust, and the locator that answers
+/// where a package lives. The plugin's package directory is asked for at
+/// most once per run, and only when a platform edit actually needs it.
+struct Resolution<'a> {
+    locator: &'a dyn PackageLocator,
+    project_root: &'a Path,
+    spec: &'a PluginSpec,
+    frust: &'a FrustDep,
+    package_dir: RefCell<Option<String>>,
+}
+
+impl<'a> Resolution<'a> {
+    fn new(
+        locator: &'a dyn PackageLocator,
+        project_root: &'a Path,
+        spec: &'a PluginSpec,
+        frust: &'a FrustDep,
+    ) -> Self {
+        Self {
+            locator,
+            project_root,
+            spec,
+            frust,
+            package_dir: RefCell::new(None),
+        }
+    }
+
+    /// The plugin's package directory as text a generated file can carry:
+    /// the located directory, absolute and forward-slashed; or — path mode
+    /// only, when the locator cannot answer — the very path the project's
+    /// Cargo line names for the plugin ([`plugin_dep_path`]), which is where
+    /// cargo will look once the checkout is in place. Registry mode has no
+    /// such fallback: the crate exists only where cargo unpacks it.
+    fn package_dir(&self, package: &str) -> Result<String, PluginAddError> {
+        if let Some(dir) = self.package_dir.borrow().as_ref() {
+            return Ok(dir.clone());
+        }
+        let dir = match self.locator.locate(self.project_root, package) {
+            Ok(dir) => host_path::to_portable_string(&dir),
+            Err(source) => match self.frust {
+                FrustDep::Path { path, .. } => plugin_dep_path(path, self.spec.crate_dir),
+                FrustDep::Registry { .. } => {
+                    return Err(PluginAddError::PackageNotLocated {
+                        package: package.to_string(),
+                        source,
+                    });
+                }
+            },
+        };
+        *self.package_dir.borrow_mut() = Some(dir.clone());
+        Ok(dir)
+    }
+
+    /// The text a generated Gradle or Xcode file names a plugin platform
+    /// directory by: `<package dir>/<path inside the package>`, for a
+    /// registry `rel_path` of `plugins/<crate_dir>/<path inside the package>`.
+    ///
+    /// Both destinations sit one directory below the project root —
+    /// `android/settings.gradle.kts` (via [`settings_include_block`]),
+    /// resolved by `file(...)` from `<project>/android/`, and
+    /// `ios/Runner.xcodeproj/project.pbxproj`, whose `relativePath` Xcode
+    /// resolves against `<project>/ios/` — so a project-root-relative package
+    /// directory (the path-mode fallback above) gains one `../`, through the
+    /// same [`frust_path_from_project_subdir`] the scaffold's embedding
+    /// accessors use. A located directory is absolute and passes unchanged.
+    fn native_dir(&self, rel_path: &str) -> Result<String, PluginAddError> {
+        let (package, inside) = package_location(self.spec, rel_path)?;
+        let package_dir = self.package_dir(package)?;
+        Ok(format!(
+            "{}/{inside}",
+            frust_path_from_project_subdir(&package_dir)
+        ))
+    }
+
+    /// Where a `requires_sibling` checkout is expected: `sibling`, relative
+    /// to the checkout root two levels above the located facade package. In
+    /// path mode a locator failure falls back to the `frust` path itself
+    /// (simplified first: a project scaffolded on Windows before paths were
+    /// written portably may carry a verbatim `\\?\C:\...` prefix, which
+    /// `..` cannot climb).
+    fn sibling(&self, sibling: &str) -> Result<PathBuf, PluginAddError> {
+        let package = self.frust.package();
+        let facade = match self.locator.locate(self.project_root, package) {
+            Ok(dir) => dir,
+            Err(source) => match self.frust {
+                FrustDep::Path { path, .. } => {
+                    let path = host_path::simplify(Path::new(path));
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        self.project_root.join(path)
+                    }
+                }
+                FrustDep::Registry { .. } => {
+                    return Err(PluginAddError::PackageNotLocated {
+                        package: package.to_string(),
+                        source,
+                    });
+                }
+            },
+        };
+        Ok(facade.join("..").join("..").join(sibling))
+    }
 }
 
 fn apply_cargo_dep(
@@ -413,21 +625,29 @@ fn apply_cargo_dep(
     changed: &mut bool,
     name: &str,
     crate_dir: &str,
-    frust_path: &str,
+    frust: &FrustDep,
 ) -> Result<AddOutcome, PluginAddError> {
     let deps = doc
         .get_mut("dependencies")
         .and_then(Item::as_table_like_mut)
-        // Unreachable in practice — `frust_dep_path` already read a path from
+        // Unreachable in practice — `FrustDep::read` already found
         // `[dependencies].frust` — but avoid an `unwrap` at an FFI-free core.
         .ok_or(PluginAddError::NoFrustDependency)?;
 
     if deps.contains_key(name) {
         return Ok(AddOutcome::AlreadyPresent);
     }
-    let mut inline = InlineTable::new();
-    inline.insert("path", Value::from(plugin_dep_path(frust_path, crate_dir)));
-    deps.insert(name, Item::Value(Value::InlineTable(inline)));
+    let value = match frust {
+        FrustDep::Path { path, .. } => {
+            let mut inline = InlineTable::new();
+            inline.insert("path", Value::from(plugin_dep_path(path, crate_dir)));
+            Value::InlineTable(inline)
+        }
+        // The plugin crates release in lockstep with the facade, so the
+        // facade's own requirement is the plugin's.
+        FrustDep::Registry { version, .. } => Value::from(version.as_str()),
+    };
+    deps.insert(name, Item::Value(value));
     *changed = true;
     Ok(AddOutcome::Applied)
 }
@@ -436,10 +656,13 @@ fn apply_cargo_dep(
 /// ([`Contribution::CargoFeature`]): get-or-create the dep's `features` array
 /// and push `feature` if it isn't already there.
 ///
-/// The dependency must already carry an inline table (a prior
-/// [`Contribution::CargoDep`] applied by the same or an earlier `add_plugin`
-/// call, per [`apply_cargo_dep`]'s shape) — [`PluginAddError::NoSuchCargoDep`]
-/// if it doesn't, never a silently minted dep.
+/// The dependency must already exist (a prior [`Contribution::CargoDep`]
+/// applied by the same or an earlier `add_plugin` call, per
+/// [`apply_cargo_dep`]'s shape) — [`PluginAddError::NoSuchCargoDep`] if it
+/// doesn't, never a silently minted dep. A registry-mode dependency written
+/// as the `name = "<version>"` shorthand is promoted in place to
+/// `{ version = "<version>", features = [...] }`, the only form that can
+/// carry a feature.
 fn apply_cargo_feature(
     doc: &mut DocumentMut,
     changed: &mut bool,
@@ -456,10 +679,13 @@ fn apply_cargo_feature(
         .and_then(Item::as_table_like_mut)
         .ok_or_else(no_such_dep)?;
 
-    let dep = deps
-        .get_mut(name)
-        .and_then(Item::as_inline_table_mut)
-        .ok_or_else(no_such_dep)?;
+    let dep = deps.get_mut(name).ok_or_else(no_such_dep)?;
+    if let Some(version) = dep.as_str().map(str::to_string) {
+        let mut inline = InlineTable::new();
+        inline.insert("version", Value::from(version));
+        *dep = Item::Value(Value::InlineTable(inline));
+    }
+    let dep = dep.as_inline_table_mut().ok_or_else(no_such_dep)?;
 
     let features = dep
         .entry("features")
@@ -581,12 +807,14 @@ fn safe_scaffold_rel_path(rel_path: &str) -> Result<&Path, PluginAddError> {
 /// The module directory is *not* checked for existence — the mutation is a
 /// text insert, and whether the path resolves is Gradle's problem at build
 /// time, not `add_plugin`'s (a plugin can legitimately be wired before the
-/// frust checkout moves into place).
+/// frust checkout moves into place). `module_dir` yields the text the include
+/// names the directory by ([`Resolution::native_dir`]); it is only called
+/// when the include is actually missing, so a fully wired project never
+/// spends a package lookup.
 fn apply_gradle_module(
     project_root: &Path,
-    frust_path: &str,
     gradle_name: &str,
-    rel_path: &str,
+    module_dir: &dyn Fn() -> Result<String, PluginAddError>,
 ) -> Result<AddOutcome, PluginAddError> {
     let settings_path = project_root.join(SETTINGS_GRADLE_REL);
     let settings_src = read_required(&settings_path, SETTINGS_GRADLE_REL)?;
@@ -599,7 +827,7 @@ fn apply_gradle_module(
         Some(insert_after_anchor_line(
             &settings_src,
             SETTINGS_ANCHOR,
-            &settings_include_block(gradle_name, frust_path, rel_path),
+            &settings_include_block(gradle_name, &module_dir()?),
             SETTINGS_GRADLE_REL,
         )?)
     };
@@ -634,10 +862,10 @@ fn apply_gradle_module(
 /// redirect literal is derived from [`BuildLayout::android_module`] (not
 /// duplicated here) so it cannot drift from the `<app>/build/android/<module>`
 /// root the scaffold's own `settings.gradle.kts.tmpl` redirects every module
-/// under.
-fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -> String {
+/// under. `module_dir` is written verbatim ([`Resolution::native_dir`]'s
+/// text).
+fn settings_include_block(gradle_name: &str, module_dir: &str) -> String {
     let build_dir = gradle_name.trim_start_matches(':');
-    let module_dir = repo_relative_path(frust_path, rel_path);
     // `Path::display()` renders with the host's native separator (backslash
     // on Windows); this literal is embedded verbatim into a Kotlin-DSL
     // `rootDir.resolve(...)` string, which — like every other path literal
@@ -655,8 +883,8 @@ fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -
     format!(
         "\n\
          // Added by `frust` Add Plugin: a plugin's Android library module,\n\
-         // included by path out of the frust checkout (the same derivation\n\
-         // `frust.embedding.dir` and the plugin's Cargo path dep use).\n\
+         // included by path from the plugin package cargo resolves for\n\
+         // this app.\n\
          include(\"{gradle_name}\")\n\
          project(\"{gradle_name}\").projectDir = file(\"{module_dir}\")\n\
          \n\
@@ -817,30 +1045,32 @@ impl PbxSite {
 /// Anchors are the template's own section markers and list terminators; a
 /// missing one is [`PluginAddError::MalformedProjectFile`], never a rewrite
 /// (this module's standing rule). The package directory is *not* checked for
-/// existence, exactly as [`apply_gradle_module`] documents.
+/// existence, exactly as [`apply_gradle_module`] documents, and — as there —
+/// `package_dir` (the reference's `relativePath` text,
+/// [`Resolution::native_dir`]) is only asked for when a site is missing.
 fn apply_swift_package_ref(
     project_root: &Path,
-    frust_path: &str,
     package_name: &str,
-    rel_path: &str,
+    package_dir: &dyn Fn() -> Result<String, PluginAddError>,
 ) -> Result<AddOutcome, PluginAddError> {
     let path = project_root.join(PBXPROJ_REL);
     let src = read_required(&path, PBXPROJ_REL)?;
 
-    let ids = resolve_or_mint_ids(&src, package_name)?;
-    let relative_path = repo_relative_path(frust_path, rel_path);
-
-    let mut out = src;
-    let mut changed = false;
+    let mut missing = Vec::new();
     for site in PBX_SITES {
-        if pbx_site_body(&out, site)?.contains(&site.needle(package_name)) {
-            continue;
+        if !pbx_site_body(&src, site)?.contains(&site.needle(package_name)) {
+            missing.push(site);
         }
-        out = insert_pbx_site(&out, site, package_name, &ids, &relative_path)?;
-        changed = true;
     }
-    if !changed {
+    if missing.is_empty() {
         return Ok(AddOutcome::AlreadyPresent);
+    }
+
+    let ids = resolve_or_mint_ids(&src, package_name)?;
+    let relative_path = package_dir()?;
+    let mut out = src;
+    for site in missing {
+        out = insert_pbx_site(&out, site, package_name, &ids, &relative_path)?;
     }
 
     // All-or-nothing: every site must be present *and* carry this run's id
@@ -1232,6 +1462,7 @@ fn write_file(path: &Path, rel: &str, contents: &str) -> Result<(), PluginAddErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packages::{PackagesError, StubLocator};
     use crate::scaffold::{self, TemplateContext};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1269,6 +1500,59 @@ mod tests {
         scaffold::generate(&dest, &test_context(), None, false, None).unwrap();
         dest
     }
+
+    /// What cargo would answer for a path-mode fixture project: the facade
+    /// package at the project's `frust` path, and every registry plugin's
+    /// package at `<checkout>/plugins/<crate_dir>`, `<checkout>` being two
+    /// levels above that path — folded lexically, since the fixture checkout
+    /// never exists on disk. A project with no readable path-mode `frust`
+    /// dependency gets a locator that finds nothing.
+    fn checkout_locator(root: &Path) -> StubLocator {
+        let frust = fs::read_to_string(root.join(CARGO_TOML_REL))
+            .ok()
+            .and_then(|text| text.parse::<DocumentMut>().ok())
+            .and_then(|doc| FrustDep::read(&doc));
+        let Some(FrustDep::Path { path, package }) = frust else {
+            return StubLocator::new();
+        };
+        let facade = normalize_lexically(&root.join(host_path::simplify(Path::new(&path))));
+        let checkout = normalize_lexically(&facade.join("../.."));
+        known_plugins()
+            .iter()
+            .fold(
+                StubLocator::new().with(package, facade),
+                |stub, spec| match plugin_package(spec) {
+                    Some(name) => stub.with(name, checkout.join("plugins").join(spec.crate_dir)),
+                    None => stub,
+                },
+            )
+    }
+
+    /// [`super::add_plugin_with`] through [`checkout_locator`] — what every
+    /// fixture test below means by applying a plugin, with no cargo run.
+    fn add_plugin(
+        project_root: &Path,
+        id: &str,
+        features: &[&str],
+    ) -> Result<AddReport, PluginAddError> {
+        add_plugin_with(&checkout_locator(project_root), project_root, id, features)
+    }
+
+    /// A path-mode `FrustDep` on `path`, as a scaffolded project declares it.
+    fn path_dep(path: &str) -> FrustDep {
+        FrustDep::Path {
+            path: path.to_string(),
+            package: "frust-ui".to_string(),
+        }
+    }
+
+    /// The checkout root [`checkout_locator`] places plugins under for
+    /// `test_context()`'s facade path (`<root>/frust/checkout` → `<root>`),
+    /// host-real absolute like the facade path itself.
+    #[cfg(windows)]
+    const FIXTURE_CHECKOUT: &str = "C:/nonexistent";
+    #[cfg(not(windows))]
+    const FIXTURE_CHECKOUT: &str = "/nonexistent";
 
     /// Snapshot every file under `root` as `relpath -> bytes` for a
     /// byte-identity comparison.
@@ -1391,8 +1675,9 @@ mod tests {
         );
 
         // settings.gradle.kts: include + projectDir + build-dir redirect, with
-        // the module path derived from the same frust path dep, and the
-        // pre-existing `:frust-embedding` wiring untouched.
+        // the module path under the plugin package the locator found (an
+        // absolute path), and the pre-existing `:frust-embedding` wiring
+        // untouched.
         let settings = fs::read_to_string(root.join(SETTINGS_GRADLE_REL)).unwrap();
         assert!(
             settings.contains("include(\":frust-secure-storage\")"),
@@ -1401,7 +1686,7 @@ mod tests {
         assert!(
             settings.contains(&format!(
                 "project(\":frust-secure-storage\").projectDir = \
-                 file(\"{FRUST_PATH}/../../plugins/secure-storage/platform/android\")"
+                 file(\"{FIXTURE_CHECKOUT}/plugins/secure-storage/platform/android\")"
             )),
             "{settings}"
         );
@@ -1441,8 +1726,7 @@ mod tests {
     fn settings_include_block_build_redirect_is_always_forward_slash() {
         let block = settings_include_block(
             ":frust-secure-storage",
-            "/nonexistent/frust/checkout",
-            "plugins/secure-storage/platform/android",
+            "/nonexistent/plugins/secure-storage/platform/android",
         );
         assert!(
             block.contains(r#"rootDir.resolve("../build/android/frust-secure-storage")"#),
@@ -1459,10 +1743,8 @@ mod tests {
     #[test]
     fn gradle_module_applies_even_though_its_resolved_path_is_absent() {
         let root = scaffold_project("gradle-module-absent-path");
-        let module_dir = PathBuf::from(repo_relative_path(
-            "/nonexistent/frust/checkout",
-            "plugins/secure-storage/platform/android",
-        ));
+        let module_dir =
+            PathBuf::from(FIXTURE_CHECKOUT).join("plugins/secure-storage/platform/android");
         assert!(
             !module_dir.exists(),
             "precondition: the module dir is absent"
@@ -1496,12 +1778,14 @@ mod tests {
         out
     }
 
-    /// `test_context`'s `frust_path` is absolute, which is immune to the
-    /// base-directory question — only a **relative** `--frust-path` (a
-    /// supported input) exposes it. The `projectDir` this writes is resolved
-    /// by `file(...)` from `<project>/android/`, one level below the project
-    /// root the Cargo `frust` path dep is expressed against, so it must carry
-    /// one extra `../`.
+    /// The path-mode fallback, when cargo cannot locate the plugin package (a
+    /// checkout not on disk yet): the module is named by the path the Cargo
+    /// line itself names. A located package is absolute, immune to the
+    /// base-directory question — only this fallback under a **relative**
+    /// `--frust-path` (a supported input) exposes it. The `projectDir` this
+    /// writes is resolved by `file(...)` from `<project>/android/`, one level
+    /// below the project root the Cargo `frust` path dep is expressed
+    /// against, so it must carry one extra `../`.
     #[test]
     fn gradle_module_projectdir_resolves_from_the_android_subdirectory() {
         let root = scaffold_project("gradle-module-relative-frust-path");
@@ -1517,7 +1801,16 @@ mod tests {
         assert_ne!(rewritten, cargo, "expected to rewrite the frust path dep");
         fs::write(&cargo_path, rewritten).unwrap();
 
-        let report = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        let nothing_located = StubLocator::failing("error: failed to read `Cargo.toml`");
+        let add = || {
+            add_plugin_with(
+                &nothing_located,
+                &root,
+                "secure-storage",
+                &["biometric-gate"],
+            )
+        };
+        let report = add().unwrap();
         let item = report
             .items
             .iter()
@@ -1537,8 +1830,7 @@ mod tests {
 
         // The intent behind that literal: resolved from `<project>/android/`
         // (Gradle's base for `settings.gradle.kts`), it must land exactly
-        // where the project-root-relative convention reaches from `<project>/`
-        // — the same walk `resolve_sibling` performs.
+        // where the Cargo line's path reaches from `<project>/`.
         let truth = normalize_lexically(&root.join(REL_FRUST).join("../..").join(MODULE_REL));
         let actual = normalize_lexically(&root.join("android").join(&emitted));
         assert_eq!(actual, truth);
@@ -1557,7 +1849,7 @@ mod tests {
 
         // Still idempotent with a relative path.
         let before = snapshot_tree(&root);
-        let second = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        let second = add().unwrap();
         assert!(
             second
                 .items
@@ -1567,6 +1859,299 @@ mod tests {
         assert_eq!(before, snapshot_tree(&root));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // Registry mode — a project depending on the crates.io release
+    // (`frust = { package = "frust-ui", version = ... }`), the form `frust
+    // create` emits by default.
+    // -----------------------------------------------------------------------
+
+    /// Where the stubbed registry cache unpacks the plugin crates — host-real
+    /// absolute (drive-rooted on Windows), as cargo's own answer always is.
+    #[cfg(windows)]
+    const REGISTRY_SRC: &str = "C:/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
+    #[cfg(not(windows))]
+    const REGISTRY_SRC: &str = "/home/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
+
+    /// A located checkout's plugin directory, host-real absolute.
+    #[cfg(windows)]
+    const LOCATED_IAP: &str = "C:/work/frust/plugins/iap";
+    #[cfg(not(windows))]
+    const LOCATED_IAP: &str = "/work/frust/plugins/iap";
+
+    /// A scaffolded project rewritten to registry mode at version `0.5.0`.
+    fn registry_project(tag: &str) -> PathBuf {
+        let root = scaffold_project(tag);
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let cargo = fs::read_to_string(&cargo_path).unwrap();
+        let rewritten = cargo.replace(
+            "path = \"/nonexistent/frust/checkout\" }",
+            "version = \"0.5.0\" }",
+        );
+        assert_ne!(rewritten, cargo, "expected to rewrite the frust dep");
+        assert!(
+            rewritten.contains("frust = { package = \"frust-ui\", version = \"0.5.0\" }"),
+            "{rewritten}"
+        );
+        fs::write(&cargo_path, rewritten).unwrap();
+        root
+    }
+
+    /// What cargo answers once a registry project depends on `iap` (or
+    /// `secure-storage`): the unpacked crates under the registry cache.
+    fn registry_locator() -> StubLocator {
+        StubLocator::new()
+            .with("frust-iap", format!("{REGISTRY_SRC}/frust-iap-0.5.0"))
+            .with(
+                "frust-secure-storage",
+                format!("{REGISTRY_SRC}/frust-secure-storage-0.5.0"),
+            )
+    }
+
+    #[test]
+    fn frust_dep_reads_every_declaration_form() {
+        for (manifest, expected) in [
+            (
+                "[dependencies]\nfrust = { package = \"frust-ui\", path = \"../f/crates/frust\" }\n",
+                Some(FrustDep::Path {
+                    path: "../f/crates/frust".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                "[dependencies]\nfrust = { package = \"frust-ui\", version = \"0.5.0\" }\n",
+                Some(FrustDep::Registry {
+                    version: "0.5.0".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                // A path wins over a version, exactly as cargo builds it.
+                "[dependencies]\nfrust = { package = \"frust-ui\", version = \"0.5\", path = \"f\" }\n",
+                Some(FrustDep::Path {
+                    path: "f".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                "[dependencies]\nfrust = \"0.5.0\"\n",
+                Some(FrustDep::Registry {
+                    version: "0.5.0".into(),
+                    package: "frust".into(),
+                }),
+            ),
+            (
+                "[dependencies.frust]\npackage = \"frust-ui\"\nversion = \"0.5.0\"\n",
+                Some(FrustDep::Registry {
+                    version: "0.5.0".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                "[dependencies]\nfrust = { package = \"frust-ui\", git = \"https://x\" }\n",
+                None,
+            ),
+            ("[dependencies]\nserde = \"1\"\n", None),
+        ] {
+            let doc = manifest.parse::<DocumentMut>().unwrap();
+            assert_eq!(FrustDep::read(&doc), expected, "{manifest}");
+        }
+    }
+
+    /// The registry-mode acceptance shape for `iap`: the Cargo line takes the
+    /// facade's version, and the Gradle module and Swift package point into
+    /// the plugin crate cargo unpacked — `platform/android` and
+    /// `platform/ios/FrustIap` under it.
+    #[test]
+    fn registry_mode_writes_a_version_line_and_wires_the_located_crate() {
+        let root = registry_project("registry-iap");
+        let locator = registry_locator();
+
+        let report = add_plugin_with(&locator, &root, "iap", &[]).unwrap();
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::Applied),
+            "{report:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
+        assert!(cargo.contains("frust-iap = \"0.5.0\""), "{cargo}");
+        assert!(!cargo.contains("plugins/iap"), "{cargo}");
+
+        let settings = fs::read_to_string(root.join(SETTINGS_GRADLE_REL)).unwrap();
+        assert!(
+            settings.contains(&format!(
+                "project(\":frust-iap\").projectDir = \
+                 file(\"{REGISTRY_SRC}/frust-iap-0.5.0/platform/android\")"
+            )),
+            "{settings}"
+        );
+        let pbxproj = read_pbxproj(&root);
+        assert!(
+            pbxproj.contains(&format!(
+                "relativePath = \"{REGISTRY_SRC}/frust-iap-0.5.0/platform/ios/FrustIap\";"
+            )),
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+        assert_eq!(locator.calls(), 1, "one lookup serves both platforms");
+
+        // Idempotent, and a fully wired project asks cargo nothing.
+        let before = snapshot_tree(&root);
+        let second = add_plugin_with(&locator, &root, "iap", &[]).unwrap();
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(before, snapshot_tree(&root));
+        assert_eq!(locator.calls(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A feature on a registry-mode dependency promotes the version
+    /// shorthand to the table form rather than failing to find a table.
+    #[test]
+    fn registry_mode_features_promote_the_version_shorthand() {
+        let root = registry_project("registry-feature");
+        add_plugin_with(&StubLocator::new(), &root, "database", &["engine-turso"]).unwrap();
+        let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
+        let doc = cargo.parse::<DocumentMut>().unwrap();
+        let dep = doc["dependencies"]["frust-database"]
+            .as_inline_table()
+            .unwrap_or_else(|| panic!("expected an inline table: {cargo}"));
+        assert_eq!(dep.get("version").and_then(Value::as_str), Some("0.5.0"));
+        assert_eq!(
+            dep.get("features")
+                .and_then(Value::as_array)
+                .map(|features| features
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["engine-turso"])
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Registry mode has no checkout path to fall back on: a lookup cargo
+    /// cannot answer (offline, say) is a typed error carrying cargo's words.
+    /// The dependency line it was asked to add is already written — cargo
+    /// can only look up a package the manifest names — so a rerun once
+    /// cargo can answer completes the platform edits.
+    #[test]
+    fn registry_mode_without_a_located_package_is_a_typed_error() {
+        let root = registry_project("registry-unlocated");
+        let settings_before = fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap();
+        let offline = StubLocator::failing("error: failed to download `frust-iap v0.5.0`");
+
+        let err = add_plugin_with(&offline, &root, "iap", &[]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PluginAddError::PackageNotLocated {
+                    package,
+                    source: PackagesError::MetadataFailed { .. },
+                } if package == "frust-iap"
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("failed to download"), "{err}");
+        assert_eq!(
+            fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap(),
+            settings_before
+        );
+        let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
+        assert!(cargo.contains("frust-iap = \"0.5.0\""), "{cargo}");
+
+        let report = add_plugin_with(&registry_locator(), &root, "iap", &[]).unwrap();
+        assert_eq!(report.items[0].outcome, AddOutcome::AlreadyPresent);
+        assert!(
+            report.items[1..]
+                .iter()
+                .all(|i| i.outcome == AddOutcome::Applied),
+            "{report:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Path mode asks cargo first and uses its answer — an absolute package
+    /// directory — even where the checkout path is relative.
+    #[test]
+    fn path_mode_prefers_the_located_package_over_the_cargo_line() {
+        let root = scaffold_project("path-located");
+        let locator = StubLocator::new().with("frust-iap", LOCATED_IAP);
+        add_plugin_with(&locator, &root, "iap", &[]).unwrap();
+        let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
+        assert!(
+            cargo.contains(
+                "frust-iap = { path = \"/nonexistent/frust/checkout/../../plugins/iap\" }"
+            ),
+            "{cargo}"
+        );
+        let settings = fs::read_to_string(root.join(SETTINGS_GRADLE_REL)).unwrap();
+        assert!(
+            settings.contains(&format!("file(\"{LOCATED_IAP}/platform/android\")")),
+            "{settings}"
+        );
+        assert!(read_pbxproj(&root).contains(&format!(
+            "relativePath = \"{LOCATED_IAP}/platform/ios/FrustIap\";"
+        )));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every real registry entry's platform paths sit inside its own package,
+    /// so none can trip [`PluginAddError::NativePathOutsidePackage`].
+    #[test]
+    fn every_registry_platform_path_is_inside_its_plugin_package() {
+        for spec in known_plugins() {
+            let contributions = spec
+                .base
+                .iter()
+                .chain(spec.optional_features.iter().flat_map(|f| f.contributions));
+            for contribution in contributions {
+                if let Some(rel_path) = native_rel_path(contribution) {
+                    let (package, inside) = package_location(&spec, rel_path)
+                        .unwrap_or_else(|e| panic!("{}: {e}", spec.id));
+                    assert!(inside.starts_with("platform/"), "{}: {inside}", spec.id);
+                    assert!(package.starts_with("frust-"), "{}: {package}", spec.id);
+                }
+            }
+        }
+    }
+
+    /// A platform path outside the plugin's own package is refused before
+    /// any file is written.
+    #[test]
+    fn a_platform_path_outside_the_plugin_package_is_refused_untouched() {
+        const STRAY: PluginSpec = PluginSpec {
+            id: "stray",
+            summary: "synthetic, test-only",
+            crate_dir: "stray",
+            base: &[
+                Contribution::CargoDep {
+                    name: "frust-stray",
+                },
+                Contribution::GradleModule {
+                    gradle_name: ":frust-stray",
+                    rel_path: "plugins/other/platform/android",
+                },
+            ],
+            optional_features: &[],
+            requires_sibling: None,
+        };
+        assert!(matches!(
+            package_location(&STRAY, "plugins/other/platform/android"),
+            Err(PluginAddError::NativePathOutsidePackage { .. })
+        ));
+        assert!(package_location(&STRAY, "plugins/stray/platform/android").is_ok());
+        assert!(package_location(&STRAY, "plugins/stray").is_err());
+        assert!(package_location(&STRAY, "plugins/strayer/platform/android").is_err());
     }
 
     /// A half-applied module (settings wired, app dependency removed) must
@@ -1821,7 +2406,7 @@ mod tests {
             &mut changed,
             "frust-secure-storage",
             "secure-storage",
-            "/nonexistent/frust/checkout",
+            &path_dep("/nonexistent/frust/checkout"),
         )
         .unwrap();
         assert!(changed);
@@ -1859,7 +2444,7 @@ mod tests {
             &mut changed,
             "frust-secure-storage",
             "secure-storage",
-            "/nonexistent/frust/checkout",
+            &path_dep("/nonexistent/frust/checkout"),
         )
         .unwrap();
 
@@ -1928,15 +2513,15 @@ mod tests {
             .unwrap();
         let mut changed = false;
         let spec = find_plugin("secure-storage").unwrap();
-        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        let frust = path_dep("/nonexistent/frust/checkout");
+        let locator = StubLocator::new();
+        let resolution = Resolution::new(&locator, &root, &spec, &frust);
 
         apply_contribution(
             &Contribution::CargoDep {
                 name: "frust-secure-storage",
             },
-            &spec,
-            &root,
-            FRUST_PATH,
+            &resolution,
             &mut doc,
             &mut changed,
         )
@@ -1947,9 +2532,7 @@ mod tests {
                 name: "frust-secure-storage",
                 feature: "biometric",
             },
-            &spec,
-            &root,
-            FRUST_PATH,
+            &resolution,
             &mut doc,
             &mut changed,
         )
@@ -2097,37 +2680,24 @@ mod tests {
             .unwrap();
         let mut changed = false;
         let spec = find_plugin("secure-storage").unwrap();
-        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        let frust = path_dep("/nonexistent/frust/checkout");
+        let locator = StubLocator::new();
+        let resolution = Resolution::new(&locator, &root, &spec, &frust);
         let contribution = Contribution::ScaffoldFile {
             rel_path: SCAFFOLD_REL,
             contents: SCAFFOLD_CONTENTS,
             comment: "test-only scaffold file",
         };
 
-        let first = apply_contribution(
-            &contribution,
-            &spec,
-            &root,
-            FRUST_PATH,
-            &mut doc,
-            &mut changed,
-        )
-        .unwrap();
+        let first = apply_contribution(&contribution, &resolution, &mut doc, &mut changed).unwrap();
         assert_eq!(first, AddOutcome::Applied);
         assert_eq!(
             fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
             SCAFFOLD_CONTENTS
         );
 
-        let second = apply_contribution(
-            &contribution,
-            &spec,
-            &root,
-            FRUST_PATH,
-            &mut doc,
-            &mut changed,
-        )
-        .unwrap();
+        let second =
+            apply_contribution(&contribution, &resolution, &mut doc, &mut changed).unwrap();
         assert_eq!(
             second,
             AddOutcome::AlreadyPresent,
@@ -2166,7 +2736,9 @@ mod tests {
             .unwrap();
         let mut changed = false;
         let spec = find_plugin("secure-storage").unwrap();
-        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        let frust = path_dep("/nonexistent/frust/checkout");
+        let locator = StubLocator::new();
+        let resolution = Resolution::new(&locator, &root, &spec, &frust);
         let before = snapshot_tree(&root);
 
         for contribution in [
@@ -2185,15 +2757,8 @@ mod tests {
                 comment: "test",
             },
         ] {
-            let outcome = apply_contribution(
-                &contribution,
-                &spec,
-                &root,
-                FRUST_PATH,
-                &mut doc,
-                &mut changed,
-            )
-            .unwrap();
+            let outcome =
+                apply_contribution(&contribution, &resolution, &mut doc, &mut changed).unwrap();
             assert_eq!(outcome, AddOutcome::AppliedAtBuild);
         }
 
@@ -2681,7 +3246,22 @@ mod tests {
     const MINTED_PACKAGE_REF: &str = "ABCDABCDABCDABCDABCD0036";
 
     fn apply_test_package(root: &Path) -> Result<AddOutcome, PluginAddError> {
-        apply_swift_package_ref(root, TEST_FRUST_PATH, PKG, PKG_REL)
+        apply_test_package_from(root, TEST_FRUST_PATH)
+    }
+
+    /// The package wired from a path-mode project on `frust_path` whose
+    /// locator finds nothing, so `relativePath` is the path-mode fallback —
+    /// `<frust_path>/../../<PKG_REL>`, re-based for `ios/` when relative —
+    /// the text the assertions below pin.
+    fn apply_test_package_from(
+        root: &Path,
+        frust_path: &str,
+    ) -> Result<AddOutcome, PluginAddError> {
+        let spec = find_plugin("camera").unwrap();
+        let frust = path_dep(frust_path);
+        let locator = StubLocator::new();
+        let resolution = Resolution::new(&locator, root, &spec, &frust);
+        apply_swift_package_ref(root, PKG, &|| resolution.native_dir(PKG_REL))
     }
 
     fn read_pbxproj(root: &Path) -> String {
@@ -2939,7 +3519,7 @@ mod tests {
         const REL_FRUST: &str = "../checkouts/frust/crates/frust";
 
         assert_eq!(
-            apply_swift_package_ref(&root, REL_FRUST, PKG, PKG_REL).unwrap(),
+            apply_test_package_from(&root, REL_FRUST).unwrap(),
             AddOutcome::Applied
         );
 
@@ -2952,7 +3532,7 @@ mod tests {
 
         // The intent behind that literal: resolved from `<project>/ios/`, it
         // must land exactly where the project-root-relative convention reaches
-        // from `<project>/` (the same walk `resolve_sibling` performs).
+        // from `<project>/`.
         let truth = normalize_lexically(&root.join(REL_FRUST).join("../..").join(PKG_REL));
         let actual = normalize_lexically(&root.join("ios").join(&emitted));
         assert_eq!(actual, truth);
