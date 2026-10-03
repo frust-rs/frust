@@ -2078,7 +2078,7 @@ mod tests {
     #[test]
     fn corner_shift_moves_the_large_variants_row_one() {
         let view: AppBarView<()> = app_bar("host")
-            .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+            .large(large_config("203.0.113.57", leaf_any(120.0, 12.0)))
             .leading(leaf_any(40.0, 40.0));
         let insets = WindowInsets::new(top_padding(0.0), WindowEdgeInsets::ZERO)
             .with_corner_insets(corners((44.0, 30.0), (0.0, 0.0)));
@@ -2520,7 +2520,7 @@ mod tests {
 
     fn large_view(progress: f64) -> AppBarView<()> {
         app_bar("host")
-            .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+            .large(large_config("203.0.113.57", leaf_any(120.0, 12.0)))
             .collapse_progress(progress)
     }
 
@@ -2567,7 +2567,7 @@ mod tests {
         // A bar that is both `large` and in `selection` renders the compact
         // selection face (its owned close button is laid out).
         let v = app_bar("host")
-            .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+            .large(large_config("203.0.113.57", leaf_any(120.0, 12.0)))
             .selection(Some(selection_bar(2, |_: &mut ()| {})));
         let mut w = build(&v);
         assert!(w.selection_present);
@@ -2811,7 +2811,7 @@ mod tests {
     fn large_and_banner_semantics_join_the_titlebar_children() {
         fn logic(_: &mut ()) -> AppBarView<()> {
             app_bar("terminal — dev")
-                .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+                .large(large_config("203.0.113.57", leaf_any(120.0, 12.0)))
                 .banner(Some(banner_spec("connection lost", BannerVariant::Warning)))
         }
         let mut root: RenderRoot<(), AppBarView<()>> = RenderRoot::new();
@@ -2826,7 +2826,7 @@ mod tests {
             .find(|(_, n)| n.role() == Role::TitleBar)
             .expect("a TitleBar container node");
         // The large variant labels the bar with its big title.
-        assert_eq!(node.label(), Some("100.71.31.57"));
+        assert_eq!(node.label(), Some("203.0.113.57"));
         // The banner text joins the container as a Label node.
         assert!(
             update
