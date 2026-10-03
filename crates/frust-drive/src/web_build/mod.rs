@@ -26,7 +26,7 @@
 //!
 //! 1. **Resolve the host page first, and verify it.** [`bundle::resolve_embedder`]
 //!    picks between the project's own `<host-dir>` and the framework's
-//!    `platform/web` (reached through the project's `frust` path dependency —
+//!    `crates/frust-shell-web/platform/web` (reached through the project's `frust` path dependency —
 //!    see [`bundle`]) before anything is compiled, and
 //!    [`bundle::verify_host_page_module`] refuses a resolved app page whose
 //!    `?module=` default disagrees with the `wasm-bindgen --out-name` this
@@ -109,7 +109,7 @@ pub use serve::{
 };
 
 /// The `wasm-bindgen --out-name` a build uses when the framework's
-/// `platform/web` page is staged, matching that page's fixed
+/// `crates/frust-shell-web/platform/web` page is staged, matching that page's fixed
 /// `./pkg/app.js` default — see the module doc's `--out-name` section.
 pub const BINDGEN_OUT_NAME: &str = "app";
 
@@ -159,7 +159,7 @@ pub enum WebBuildNote {
     /// The project's own host page (`[web] host-dir`, default `web`) was
     /// staged.
     AppHostPageStaged,
-    /// No app host page was found; the framework's `platform/web` was staged
+    /// No app host page was found; the framework's `crates/frust-shell-web/platform/web` was staged
     /// instead.
     FrameworkHostPageStaged,
     /// The framework page was staged, so an explicit `[web] out-name` was
@@ -196,7 +196,7 @@ impl fmt::Display for WebBuildNote {
             }
             WebBuildNote::FrameworkHostPageStaged => write!(
                 f,
-                "no project host page found — staged the framework's `platform/web` page instead"
+                "no project host page found — staged the framework's `crates/frust-shell-web/platform/web` page instead"
             ),
             WebBuildNote::FrameworkOutNameIgnored { out_name } => write!(
                 f,
@@ -244,7 +244,7 @@ pub enum WebBuildError {
     },
     #[error(
         "the project's `Cargo.toml` at '{}' declares no `frust = {{ path = ... }}` dependency, \
-         so the browser embedder (`platform/web`) cannot be located — a browser build stages its \
+         so the browser embedder (`crates/frust-shell-web/platform/web`) cannot be located — a browser build stages its \
          host page from the framework checkout the app is built against, when the project \
          supplies no host page of its own",
         manifest.display()
@@ -972,7 +972,7 @@ mod tests {
     /// Returns `(checkout root, project dir, target dir)`.
     fn checkout(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         let root = temp_dir(tag);
-        let embedder = root.join("platform/web");
+        let embedder = root.join("crates/frust-shell-web/platform/web");
         fs::create_dir_all(&embedder).unwrap();
         fs::write(embedder.join("index.html"), "<!doctype html>").unwrap();
         fs::write(embedder.join("frust_web.js"), "export function mount() {}").unwrap();

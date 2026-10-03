@@ -266,7 +266,7 @@ impl TemplateContext {
     /// `frust_path` the same way `plugin::apply::plugin_dep_path` derives a
     /// plugin crate directory: `frust` resolves to the facade crate dir
     /// (`crates/frust`), two levels below the repo root, so
-    /// `{frust_path}/../../platform/android/frust-embedding` reaches the
+    /// `{frust_path}/../frust-shell-android/platform/android/frust-embedding` reaches the
     /// module directory.
     ///
     /// The emitted value lands in `android/gradle.properties`'
@@ -288,7 +288,7 @@ impl TemplateContext {
     /// keeps it to one line to edit when a project moves machines.
     pub fn frust_embedding_android_dir(&self) -> String {
         format!(
-            "{}/../../platform/android/frust-embedding",
+            "{}/../frust-shell-android/platform/android/frust-embedding",
             frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
                 &self.frust_path
             )))
@@ -310,7 +310,7 @@ impl TemplateContext {
     /// post-crates.io.
     pub fn frust_embedding_ios_dir(&self) -> String {
         format!(
-            "{}/../../platform/ios/FrustEmbedding",
+            "{}/../frust-shell-ios/platform/ios/FrustEmbedding",
             frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
                 &self.frust_path
             )))
@@ -723,14 +723,14 @@ mod tests {
         assert_eq!(
             ctx.frust_embedding_android_dir(),
             format!(
-                "{}/../../platform/android/frust-embedding",
+                "{}/../frust-shell-android/platform/android/frust-embedding",
                 abs_path("path/to/frust")
             )
         );
         assert_eq!(
             ctx.frust_embedding_ios_dir(),
             format!(
-                "{}/../../platform/ios/FrustEmbedding",
+                "{}/../frust-shell-ios/platform/ios/FrustEmbedding",
                 abs_path("path/to/frust")
             )
         );
@@ -764,11 +764,11 @@ mod tests {
         // An absolute path is base-independent: emitted byte-identical.
         assert_eq!(
             ctx.frust_embedding_android_dir(),
-            format!("{absolute}/../../platform/android/frust-embedding")
+            format!("{absolute}/../frust-shell-android/platform/android/frust-embedding")
         );
         assert_eq!(
             ctx.frust_embedding_ios_dir(),
-            format!("{absolute}/../../platform/ios/FrustEmbedding")
+            format!("{absolute}/../frust-shell-ios/platform/ios/FrustEmbedding")
         );
 
         // A relative path carries one extra `../`: both values are resolved
@@ -779,11 +779,11 @@ mod tests {
         assert!(!ctx.frust_embedding_ios_dir().starts_with('/'));
         assert_eq!(
             ctx.frust_embedding_android_dir(),
-            "../../relative/frust/../../platform/android/frust-embedding"
+            "../../relative/frust/../frust-shell-android/platform/android/frust-embedding"
         );
         assert_eq!(
             ctx.frust_embedding_ios_dir(),
-            "../../relative/frust/../../platform/ios/FrustEmbedding"
+            "../../relative/frust/../frust-shell-ios/platform/ios/FrustEmbedding"
         );
     }
 
@@ -829,12 +829,12 @@ mod tests {
             let android_truth = normalize_lexically(
                 &project_root
                     .join(frust_path)
-                    .join("../../platform/android/frust-embedding"),
+                    .join("../frust-shell-android/platform/android/frust-embedding"),
             );
             let ios_truth = normalize_lexically(
                 &project_root
                     .join(frust_path)
-                    .join("../../platform/ios/FrustEmbedding"),
+                    .join("../frust-shell-ios/platform/ios/FrustEmbedding"),
             );
 
             // What the emitted values reach from the directories that
@@ -945,7 +945,7 @@ mod tests {
         assert!(
             rendered.contains("frust.embedding.dir=")
                 && rendered.trim_end().ends_with(
-                    "C:/dev/frust-checkout/crates/frust/../../platform/android/frust-embedding"
+                    "C:/dev/frust-checkout/crates/frust/../frust-shell-android/platform/android/frust-embedding"
                 ),
             "{rendered}"
         );

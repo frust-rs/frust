@@ -1028,7 +1028,7 @@ mod tests {
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
         seen.insert(
             "frustembedding".to_string(),
-            "platform/ios/FrustEmbedding".to_string(),
+            "crates/frust-shell-ios/platform/ios/FrustEmbedding".to_string(),
         );
         for plugin in known_plugins() {
             for contribution in plugin.base.iter().chain(

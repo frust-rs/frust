@@ -76,7 +76,7 @@
 //! [`no_plugin_kotlin_uses_the_bare_dev_frust_package`] therefore fails if
 //! ANY `.kt` file under `plugins/**` declares the bare `package dev.frust`.
 //! Scoped to `plugins/**` only — the embedding module's own
-//! `platform/android/frust-embedding` legitimately ships bare `dev.frust`
+//! `crates/frust-shell-android/platform/android/frust-embedding` legitimately ships bare `dev.frust`
 //! Kotlin and must never trip this scan. Non-`.kt` files under `plugins/**`
 //! (Swift included — see the Scope section above) are walked but deliberately
 //! filtered out before the bare-package check runs; that filter is this

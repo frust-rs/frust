@@ -830,7 +830,7 @@ mod tests {
         // The generated `MainActivity` is a near-empty subclass of the
         // framework-owned `dev.frust.FrustActivity` — every
         // lifecycle/deep-link/back/IME behavior it used to carry inline now
-        // lives in `platform/android/frust-embedding` (covered by that
+        // lives in `crates/frust-shell-android/platform/android/frust-embedding` (covered by that
         // module's own compile gate and the on-device run, not by this test).
         assert!(
             main_activity.contains("import dev.frust.FrustActivity"),
@@ -997,7 +997,7 @@ mod tests {
         // `ios/Runner/` ships exactly four things — the two thin delegates,
         // the Info.plist and the asset catalog. Every framework Swift
         // source (and the bridging header) now lives in the
-        // `platform/ios/FrustEmbedding` Swift package.
+        // `crates/frust-shell-ios/platform/ios/FrustEmbedding` Swift package.
         let mut runner_entries: Vec<String> = fs::read_dir(dest.join("ios/Runner"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -2186,7 +2186,7 @@ mod tests {
     // ---- platform-inclusion axis -------------------------------------
 
     /// The repository root, resolved `CARGO_MANIFEST_DIR`-relative — used by
-    /// the drift tests below to read the `platform/web` embedder these
+    /// the drift tests below to read the `crates/frust-shell-web/platform/web` embedder these
     /// templates are derived from.
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -2646,7 +2646,7 @@ mod tests {
     }
 
     /// Drift guard #1: the scaffolded `frust_web.js` is a byte-identical
-    /// copy of `platform/web/frust_web.js`. That embedder is the source of
+    /// copy of `crates/frust-shell-web/platform/web/frust_web.js`. That embedder is the source of
     /// truth for the host-page contract; two copies of 300+ lines of glue
     /// silently diverging is the whole risk this duplication carries, and
     /// the glue is entirely app-agnostic so there is nothing to substitute.
@@ -2657,14 +2657,16 @@ mod tests {
 
         generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
 
-        let embedder = fs::read_to_string(repo_root().join("platform/web/frust_web.js"))
-            .expect("reading platform/web/frust_web.js");
+        let embedder = fs::read_to_string(
+            repo_root().join("crates/frust-shell-web/platform/web/frust_web.js"),
+        )
+        .expect("reading crates/frust-shell-web/platform/web/frust_web.js");
         let scaffolded = fs::read_to_string(dest.join("web/frust_web.js")).unwrap();
         assert_eq!(
             scaffolded,
             as_rendered(&embedder),
             "crates/frust-drive/templates/app/web.tmpl/frust_web.js.tmpl has drifted from \
-             platform/web/frust_web.js — re-copy it verbatim rather than \
+             crates/frust-shell-web/platform/web/frust_web.js — re-copy it verbatim rather than \
              editing either copy alone"
         );
 
@@ -2672,7 +2674,7 @@ mod tests {
     }
 
     /// Drift guard #2: the scaffolded `index.html` differs from
-    /// `platform/web/index.html` in exactly three documented ways — its
+    /// `crates/frust-shell-web/platform/web/index.html` in exactly three documented ways — its
     /// leading HTML comment (which addresses an app author rather than a
     /// framework reader), its `<title>`, and its `?module=` default. Every
     /// other byte — the whole `<style>` block that defines the canvas-host
@@ -2690,8 +2692,9 @@ mod tests {
 
         generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
 
-        let embedder = fs::read_to_string(repo_root().join("platform/web/index.html"))
-            .expect("reading platform/web/index.html");
+        let embedder =
+            fs::read_to_string(repo_root().join("crates/frust-shell-web/platform/web/index.html"))
+                .expect("reading crates/frust-shell-web/platform/web/index.html");
         let expected = body(&embedder)
             .replace(
                 "<title>frust app</title>",
@@ -2703,7 +2706,7 @@ mod tests {
             body(&scaffolded),
             as_rendered(&expected),
             "crates/frust-drive/templates/app/web.tmpl/index.html.tmpl has drifted from \
-             platform/web/index.html beyond its title and `?module=` default"
+             crates/frust-shell-web/platform/web/index.html beyond its title and `?module=` default"
         );
 
         let _ = fs::remove_dir_all(&dest);

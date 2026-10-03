@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 /// The Rust target triple every browser build compiles to — the single
 /// spelling shared by the drive-side web build, `frust doctor`'s toolchain
-/// check, and the recipe `platform/web/README.md` documents. There is no
+/// check, and the recipe `crates/frust-shell-web/platform/web/README.md` documents. There is no
 /// second wasm triple in play here: `wasm32-unknown-emscripten` and
 /// `wasm32-wasip1` are neither what `wasm-bindgen --target web` consumes nor
 /// what `crates/frust-shell-web` builds against.
@@ -390,7 +390,7 @@ mod tests {
 
     /// The wasm artifact path a browser build has to resolve, assembled from
     /// the two constants this module owns — proof they compose into the
-    /// layout `platform/web/README.md`'s recipe reads from.
+    /// layout `crates/frust-shell-web/platform/web/README.md`'s recipe reads from.
     #[test]
     fn wasm_artifact_dir_composes_from_the_triple_and_the_profile_dir() {
         assert_eq!(WASM_TARGET_TRIPLE, "wasm32-unknown-unknown");
