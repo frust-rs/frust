@@ -34,7 +34,7 @@ pub enum FrustPathError {
 /// Deliberately file-probed rather than string-matched on a trailing
 /// `crates/frust` path segment, so a vendored or renamed checkout still
 /// resolves. This closes a fourth broken path surface a repo-root value
-/// otherwise produces silently: `frust = { path = "<repo-root>" }` points at
+/// otherwise produces silently: `frust = { package = "frust-ui", path = "<repo-root>" }` points at
 /// the root `Cargo.toml`, a virtual workspace manifest with no `[package]`
 /// table — a hard Cargo error, not a merely-wrong-but-working path — so a
 /// repo-root value cannot be made to work by adjusting the other
@@ -93,7 +93,7 @@ fn manifest_names_package(dir: &Path, expected: &str) -> bool {
 /// resolves it from a project *subdirectory* one level down (`android/`,
 /// `ios/`) instead of from the project root.
 ///
-/// `frust_path` is written into `Cargo.toml`'s `frust = { path = ... }`, and
+/// `frust_path` is written into `Cargo.toml`'s `frust = { package = "frust-ui", path = ... }`, and
 /// `Cargo.toml` sits at the project root — so that is the base every relative
 /// `frust_path` is expressed against (`plugin::apply::resolve_sibling` joins it
 /// onto `project_root` for exactly that reason). But Gradle resolves
@@ -160,11 +160,14 @@ impl FrustDependency {
     }
 
     /// The full `frust = ...` TOML dependency line. The facade is published
-    /// as `frust-ui` and imported as `frust`.
+    /// as `frust-ui` and imported as `frust`
+    /// (<https://github.com/lloydmeta/frunk/issues/258>), so both forms name
+    /// the package: a path dependency keyed `frust` without `package` would
+    /// look for a package named `frust` at that path and find `frust-ui`.
     pub fn dep_line(&self) -> String {
         match self {
             Self::Path(p) => format!(
-                "frust = {{ path = \"{}\" }}",
+                "frust = {{ package = \"frust-ui\", path = \"{}\" }}",
                 host_path::to_portable_string(Path::new(p))
             ),
             Self::Registry { version } => {

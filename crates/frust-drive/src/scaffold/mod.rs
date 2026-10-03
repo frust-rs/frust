@@ -714,7 +714,7 @@ mod tests {
         // `frust-glyph` is depended on directly, the same shape
         // `frust-shared-preferences` uses below.
         assert!(
-            cargo_toml.contains("frust = { path = \"/path/to/frust\" }"),
+            cargo_toml.contains("frust = { package = \"frust-ui\", path = \"/path/to/frust\" }"),
             "{cargo_toml}"
         );
         assert!(
@@ -2850,7 +2850,7 @@ mod tests {
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains("frust = { path = \"/path/to/frust\""),
+            cargo_toml.contains("frust = { package = \"frust-ui\", path = \"/path/to/frust\""),
             "{cargo_toml}"
         );
         // Catalogs-off contract: no built-in design-system feature, ever —
