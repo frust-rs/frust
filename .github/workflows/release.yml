@@ -58,11 +58,12 @@ jobs:
           [ "$tag" = "v$version" ] || { echo "tag $tag does not match version $version" >&2; exit 1; }
       - name: Licence texts are in sync
         run: scripts/sync-licenses.sh --check
-      # The standalone plugins/clean-signals-frust package is not checked here:
-      # cargo resolves its versioned `frust-ui` path dependency from the
+      # The standalone plugins/clean-signals-frust package cannot be checked
+      # here: cargo resolves its versioned `frust-ui` path dependency from the
       # registry, where this release's version does not exist until the
       # publish job has uploaded the workspace packages. publish-remaining.sh
-      # publishes it last, and that upload is its verification.
+      # publishes it last and keeps cargo's verification build for it (the
+      # `--no-verify` below applies to the workspace packages only).
       - name: Every package builds as it will be published
         run: cargo publish --workspace --locked --dry-run
 
