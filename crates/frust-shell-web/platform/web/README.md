@@ -1,7 +1,8 @@
 # crates/frust-shell-web/platform/web
 
 The browser embedder — the third host tier consumed by path, alongside
-`platform/android`'s `frust-embedding` and `platform/ios`'s `FrustEmbedding`.
+`crates/frust-shell-android/platform/android/frust-embedding` and
+`crates/frust-shell-ios/platform/ios/FrustEmbedding`.
 Unlike those two (native platform-project libraries), this one is a static
 host-page pair: `index.html` (a template an app author drops their own
 `wasm-bindgen`-built app behind) and `frust_web.js` (the framework-free
@@ -278,7 +279,7 @@ instruction); this section describes what each one showed, mirroring
 - **Documentation rows.** `docs/SHELLS_ARCHITECTURE.md` and
   `docs/SHELLS_DEVELOPMENT.md` (doc-maintainer-owned, not edited by this
   task) should gain a row for `crates/frust-shell-web/platform/web` alongside the existing
-  `platform/android`/`platform/ios` entries: this embedder's canvas
+  `frust-shell-android`/`frust-shell-ios` embedding entries: this embedder's canvas
   host/resize/DPR contract, and the two documented no-hook gaps above, are
   facts a future web-shell task should not have to rediscover from this
   README alone.

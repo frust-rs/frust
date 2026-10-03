@@ -2,10 +2,11 @@
 <!--
   crates/frust-shell-web/platform/web — the browser embedder's host-page template.
 
-  The third embedder, alongside `platform/android` and `platform/ios`: an
-  ordinary host page a `frust::web_app!` binary is consumed from by path, the
-  same way an Android/iOS app links `platform/android`/`platform/ios`'s own
-  embedding libraries. It carries no app logic of its own — see README.md for
+  The third embedder, alongside the Android and iOS embeddings shipped in
+  `crates/frust-shell-android` and `crates/frust-shell-ios`: an ordinary host
+  page a `frust::web_app!` binary is consumed from by path, the same way an
+  Android/iOS app links those crates' own embedding libraries. It carries no
+  app logic of its own — see README.md for
   the full host-page contract this file and `frust_web.js` together provide.
 
   Point it at your own build with `?module=./pkg/<name>.js`, the `--out-name`
