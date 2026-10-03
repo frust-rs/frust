@@ -1,6 +1,7 @@
 // frust_web.js — vanilla-JS host-page glue for embedding a Frust
 // `wasm-bindgen`-built browser app (a `frust::web_app!` binary). This is the
-// browser embedder's counterpart to `platform/android`/`platform/ios`: an app
+// browser embedder's counterpart to the Android and iOS embeddings shipped in
+// `crates/frust-shell-android` and `crates/frust-shell-ios`: an app
 // author's own host page (`index.html` here, or a page they write themselves)
 // imports this module and hands it their app's generated `init` function; it
 // does the rest of the host-page wiring the shell itself has no browser-DOM
