@@ -23,7 +23,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # that generated this project (the `frust_path` mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
-frust = { path = "../../crates/frust" }
+# The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+frust = { package = "frust-ui", path = "../../crates/frust" }
 
 # frust-material: the one Material 3 dark baseline this example forces app-wide
 # (`ShadertoyApp::init`, matching `benchmarks/frust_bench`'s shell) — no other

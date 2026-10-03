@@ -26,7 +26,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # this app showcases is the `frust-glyph` plugin crate below, depended on
 # beside the facade, never inside it (docs/ARCHITECTURE.md's facade/plugin
 # boundary).
-frust = { path = "../../crates/frust" }
+# The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+frust = { package = "frust-ui", path = "../../crates/frust" }
 # `frust` is the ONLY framework line this catalog ships for widget authoring.
 # `AppBackground` (`lib.rs`), `AnchorReporter` (`pages/appbar.rs`),
 # `FrameTicker` (`pages/interactions.rs`), and `StaticRoundedRectView`

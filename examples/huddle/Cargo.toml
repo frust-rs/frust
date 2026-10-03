@@ -33,7 +33,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # through `frust::authoring` (and `frust::kurbo`/`frust::peniko`, the
 # long-tail valve, where a type isn't lifted by name); no production
 # code names `frust-core`/`kurbo`/`peniko` directly any more.
-frust = { path = "../../crates/frust" }
+# The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+frust = { package = "frust-ui", path = "../../crates/frust" }
 
 # Design-system plugins: the flat Material/Cupertino/Glyph widget/theme
 # symbols this app's presentation layer names (`frust_material::AppBar`,

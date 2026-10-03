@@ -29,7 +29,8 @@ publish = false
 # `set_default_theme`, `spawn_local`, ...) comes from here, never from a
 # `frust-*` crate named directly — the same discipline every other Frust app
 # in this repo follows.
-frust = { path = "../../crates/frust" }
+# The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+frust = { package = "frust-ui", path = "../../crates/frust" }
 # The shared case registry (`cases()`/`find(slug)`/`theme(design, variant)`)
 # this app renders. A ROOT-workspace member (see its own `Cargo.toml`
 # header), reached here the same way `examples/huddle`'s standalone workspace
