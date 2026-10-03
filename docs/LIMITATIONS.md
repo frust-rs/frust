@@ -279,7 +279,7 @@ the app just did. Reporting a null read as an error would put a failure in
 front of the user for the ordinary case of an empty clipboard.
 
 **Evidence**:
-`platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
+`crates/frust-shell-android/platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
 `readClipboardText` doc comment, which names all three behaviours in place,
 and its `writeClipboardText` neighbour for the copy confirmation.
 
@@ -367,7 +367,7 @@ outstanding read captured, so a clip replaced during the wait pastes the one
 that was on the clipboard when the first press asked.
 
 **Evidence**:
-`platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
+`crates/frust-shell-android/platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
 `readClipboardText`/`readClipboardTextAsync` doc comments and
 `CLIPBOARD_RESOLUTION_TIMEOUT_MS`; the identity it compares crosses JNI as
 `nativeFocusEpoch` (`crates/frust-shell-android/src/jni_glue.rs`) from
@@ -449,7 +449,7 @@ rather than skipped, and is named here so it is not quietly assumed to have
 passed alongside the legs that did.
 
 **Evidence**:
-`platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustView.swift`'s
+`crates/frust-shell-ios/platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustView.swift`'s
 "Clipboard / system edit menu" section with its `canPerformAction` and
 `paste(_:)` overrides (the exemption is stated there in place);
 `crates/frust-shell-ios/src/ffi_glue.rs`'s

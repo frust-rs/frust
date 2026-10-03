@@ -31,13 +31,13 @@ rustflags tables must match, and the template's `[build]` table must be exactly 
 "build/rust"` — the root's config deliberately carries no `[build]` table, since this checkout's
 own `target/` is referenced directly by docs and CI and must not move.
 
-**Platform embedding modules ship in-repo, not templated.**
-`platform/android/frust-embedding` and `platform/ios/FrustEmbedding` are consumed by a
-scaffolded project by path — edit the module in place and rebuild the consuming app
-directly, no re-scaffold needed. A scaffolded project's embedding path is
-machine-specific: moving it means editing `gradle.properties`'s `frust.embedding.dir`
-line (Android) or the local package reference in `project.pbxproj` (iOS); `frust clean`
-also removes the redirected Gradle build output.
+**Platform embedding modules ship inside the shell crates, not templated.**
+`crates/frust-shell-android/platform/android/frust-embedding` and
+`crates/frust-shell-ios/platform/ios/FrustEmbedding` (each shell crate packages its embedding, so
+a project built from the published crates can resolve it) are consumed by a scaffolded project by
+path — edit in place and rebuild, no re-scaffold needed. The path is machine-specific: moving it
+means editing `gradle.properties`'s `frust.embedding.dir` (Android) or the local package
+reference in `project.pbxproj` (iOS); `frust clean` also removes the redirected Gradle output.
 
 The scaffold's own end-to-end tests (`create_e2e`, `create_ios`, `build_e2e`) are `#[ignore]`d
 and listed with the other manual/gated tests in [DEVELOPMENT.md](DEVELOPMENT.md)'s Test section.

@@ -31,7 +31,7 @@ numbers: labs 1–8's line anchors drift, names don't.
 | Declared vs resolved surface mode | `crates/frust-shell-common/src/surface_mode.rs` | `declare_host_translucent_surface`, `resolved_surface_mode`, `ResolvedSurfaceMode` |
 | Whether a surface actually resolved translucent | `crates/frust-gpu/src/surface.rs` | `resolve_alpha_mode`, `ConfiguredSurface::resolved_translucent` |
 | The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-engine/src/compile/clear.rs` → `crates/frust-engine/src/schedule/mod.rs` | `PlatformViewWidget::paint`, `clear::punch_rect`, `schedule::cut_at`, `shield` |
-| Host-side factory resolution | `platform/android/frust-embedding/…/FrustViewHost.kt` · `platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
+| Host-side factory resolution | `crates/frust-shell-android/platform/android/frust-embedding/…/FrustViewHost.kt` · `crates/frust-shell-ios/platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
 | A plugin author's own native subtree | `plugins/native-widgets/src/component.rs` | `NativeComponent`, `ComponentCtx`, `register_component`, `native_component` |
 | The device-gate vehicle | `examples/native-widgets-demo/src/pages/stress.rs` | `page`, `STRESS_SLOT_COUNT`, `CYCLE_STEP_MS`, `cycle_phase`, `live_slot_count` |
 
