@@ -7,6 +7,11 @@ gate, the Android/iOS compile gates, and the version-pin *policy* live in
 [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md), its conventions in
 [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md).
 
+A plugin's Android module and Swift package are reached through `packages::locate` and wired by
+`platform_wiring::sync` (`frust.plugin.<module>.dir` in `android/local.properties`, an
+`ios/<Package>` symlink). Re-running Add Plugin, or `frust run`/`frust build` with `-d
+android|ios`, re-syncs.
+
 ## Shared-preferences manual test (desktop + Android + iOS)
 
 A kill-and-relaunch persistence gate for `frust-shared-preferences`

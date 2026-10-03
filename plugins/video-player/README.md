@@ -27,7 +27,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-video-player = { path = "<frust>/plugins/video-player" }  # crates.io later
+frust-video-player = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

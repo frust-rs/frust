@@ -26,7 +26,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-auth-session = { path = "<frust>/plugins/auth-session" }  # crates.io later
+frust-auth-session = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

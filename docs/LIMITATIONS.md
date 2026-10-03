@@ -6738,3 +6738,34 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: an explicit per-pod secondary-contact route, or a mutable child visitor the root can use to address an arbitrary descendant pod directly instead of riding the broadcast channel.
 
 **Evidence**: `crates/frust-core/src/widget.rs`'s `ChildPod::walk_secondary`/`event_child` doc comments (the "On the path, above the captor" fallback case).
+
+---
+
+### `create-registry-needs-network-once` — registry-mode `frust create` needs the network once before it can write the Android/iOS wiring
+
+**Observed**: `frust create` (the default, registry mode) resolves the embedding and plugin native-module locations with one `cargo metadata` run, and in a project that has not built yet cargo downloads the frust crates to answer it. Offline, that run fails, so `android/local.properties` and the `ios/<Package>` symlinks are not written; the project itself is created (the TUI scaffold shows a warning toast).
+
+**Applies to**: `frust create` and the TUI's new-project flow with an empty or unseeded cargo registry cache and no network; `--frust-path` projects whose checkout is local are not affected.
+
+**Why accepted**: the wiring points at the directories cargo resolves for the project, which only exist once cargo has fetched the crates; writing a guess would put a machine path back into the project. `frust create --no-sync` skips the step for offline use and defers it: the next `frust run`/`frust build` with `-d android|ios` (online) performs it, and `frust doctor`'s "Platform packages" section shows what a project currently resolves.
+
+**Trigger for removal**: none planned; the wiring depends on the resolved crate directories.
+
+**Evidence**: `crates/frust-drive/src/platform_wiring.rs` and `crates/frust-drive/src/packages.rs` module docs; `cli::CreatePlatformArgs` (`--no-sync`); `crates/frust-tui/src/runner.rs`'s `scaffold_messages`.
+
+---
+
+### `scaffold-0.5.0-path-dependency` — projects scaffolded by frust-cli/frust-tui 0.5.0 (yanked) carry checkout paths and are not migrated automatically
+
+**Observed**: a project scaffolded by the yanked 0.5.0 `frust-cli`/`frust-tui` depends on `frust` by a path into a framework checkout, and its tracked `android/gradle.properties` (`frust.embedding.dir`) and `ios/Runner.xcodeproj/project.pbxproj` (the `FrustEmbedding` package `relativePath`) hold machine paths into that checkout. No command rewrites them.
+
+**Applies to**: projects created by 0.5.0 only; 0.5.1 and later scaffold registry projects with no machine path in a tracked file.
+
+**Why accepted**: the set of affected projects is small (0.5.0 was yanked) and the edit is mechanical; an automatic migration would rewrite user-owned manifests.
+
+**Workaround**: re-scaffold with 0.5.1+ and move the app's sources over, or edit the three files by hand: in `Cargo.toml` replace the `frust` path dependency (and any `frust-*` plugin path dependencies) with the registry form `frust = { package = "frust-ui", version = "<release>" }` and `frust-<plugin> = "<release>"`; in `android/gradle.properties` leave `frust.embedding.dir` to be refreshed by `frust run`/`frust build -d android` (it remains a tracked machine path); in `project.pbxproj` set the `XCLocalSwiftPackageReference "FrustEmbedding"` `relativePath` to `"FrustEmbedding"` so the `ios/FrustEmbedding` symlink that `frust run`/`frust build -d ios` creates resolves it.
+
+**Trigger for removal**: a `frust` migration command, or 0.5.0 projects falling out of use.
+
+**Evidence**: deferred action item act_000001a1021c875bkG9kgNET; the 0.5.0 templates (`crates/frust-drive/templates/app/` before the platform-wiring change).
+

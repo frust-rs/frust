@@ -23,8 +23,8 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-oauth-native = { path = "<frust>/plugins/oauth-native" }  # crates.io later
-frust-auth-session = { path = "<frust>/plugins/auth-session" }
+frust-oauth-native = "0.5"
+frust-auth-session = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

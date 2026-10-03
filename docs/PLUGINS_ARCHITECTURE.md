@@ -107,7 +107,9 @@ Android and `objc2`/`objc2-foundation`/`block2` on iOS, with **no** desktop depe
 desktop arm is a dependency-free, always-erroring stub rather than a real backend. Its iOS package
 also makes it the second plugin (after `camera`) to ship its own Swift package, and the first whose
 package declares an **external** SwiftPM dependency (`OpenIAP`, exact-pinned) rather than only the
-local `FrustEmbedding` one every other plugin package depends on.
+local `FrustEmbedding` one every other plugin package depends on — the `ios/FrustEmbedding`
+symlink `platform_wiring` creates, which each plugin package's own `ios/<Package>` symlink sits
+beside.
 `clean-signals-frust` instead depends on the `frust` facade crate — its sole framework dependency —
 to bind a `clean_signals` controller into a `Component`'s reactive `Owner`. `database` depends on
 neither `frust-plugin` nor any target-gated FFI crate — its own dependencies are `frust-paths` (data
@@ -304,6 +306,12 @@ Design-System Contract for the toolkit they all build against). Their shared cha
 
 ## Data Flow
 
+- A plugin's native modules (Gradle module, Swift package) ship inside its own crate and are
+  located through `frust-drive`'s `packages::locate` in registry and `--frust-path` mode alike,
+  then wired by `platform_wiring::sync` as `frust.plugin.<module>.dir` in the project's gitignored
+  `android/local.properties` and an `ios/<Package>` symlink. Adding a plugin to an existing project
+  (`add_plugin`) writes its module location the same way, so no tracked file carries a machine path
+  (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 - Android requires an explicit platform-handle init (JavaVM/Context, via `frust_plugin::android`)
   before any plugin can reach the OS, done through scoped, per-call JNI attaches; Apple needs no
   init step since `objc2` reaches the ObjC runtime globally. `camera`, `iap`, `video-player`, and

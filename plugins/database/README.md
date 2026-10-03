@@ -24,7 +24,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-database = { path = "<frust>/plugins/database" }  # crates.io later
+frust-database = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -276,7 +276,7 @@ the default features:
 
 ```toml
 # Your app's Cargo.toml
-frust-database = { path = "<frust>/plugins/database" }  # engine-sqlite enabled by default
+frust-database = "0.5"  # engine-sqlite enabled by default
 ```
 
 **What it costs:** ~1.0–1.7 MB (measured in the ship profile — see §6).
@@ -346,7 +346,7 @@ To use it, enable the feature and pass the engine explicitly:
 
 ```toml
 # Your app's Cargo.toml
-frust-database = { path = "<frust>/plugins/database", features = ["engine-turso"] }
+frust-database = { version = "0.5", features = ["engine-turso"] }
 ```
 
 ```rust
