@@ -43,11 +43,11 @@ pub enum FrustPathError {
 /// [`TemplateContext::frust_embedding_ios_dir`]); it must be normalised
 /// before it ever reaches them.
 pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> {
-    if manifest_names_package(path, "frust") {
+    if manifest_names_facade(path) {
         return Ok(path.to_path_buf());
     }
     let nested = path.join("crates").join("frust");
-    if manifest_names_package(&nested, "frust") {
+    if manifest_names_facade(&nested) {
         return Ok(nested);
     }
     Err(FrustPathError::NotFacadeCrate {
@@ -66,6 +66,13 @@ struct CargoManifestName {
 #[derive(Debug, Deserialize)]
 struct CargoPackageName {
     name: Option<String>,
+}
+
+/// The facade is published as `frust-ui` (crates.io `frust` is held by
+/// another project, https://github.com/lloydmeta/frunk/issues/258) but older
+/// checkouts still name the package `frust`; both are accepted.
+fn manifest_names_facade(dir: &Path) -> bool {
+    manifest_names_package(dir, "frust-ui") || manifest_names_package(dir, "frust")
 }
 
 /// Whether `<dir>/Cargo.toml` exists, parses, and names package `expected`.
@@ -122,6 +129,63 @@ pub fn frust_path_from_project_subdir(frust_path: &str) -> String {
 /// two never drift.
 pub const DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION: &str = "11.0";
 
+/// How a generated project depends on the `frust` facade: the crates.io
+/// release at the CLI's version (the default), or a local checkout by path
+/// (`--frust-path`, framework development).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrustDependency {
+    /// A checkout's facade crate directory (project-root-relative or absolute).
+    Path(String),
+    /// The crates.io release at this version.
+    Registry { version: String },
+}
+
+impl FrustDependency {
+    /// The facade path in path mode, empty in registry mode (platform
+    /// templates still read it until they are wired from resolved package
+    /// directories).
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Path(p) => p,
+            Self::Registry { .. } => "",
+        }
+    }
+
+    /// The release version in registry mode, empty in path mode.
+    pub fn registry_version(&self) -> &str {
+        match self {
+            Self::Path(_) => "",
+            Self::Registry { version } => version,
+        }
+    }
+
+    /// The full `frust = ...` TOML dependency line. The facade is published
+    /// as `frust-ui` and imported as `frust`.
+    pub fn dep_line(&self) -> String {
+        match self {
+            Self::Path(p) => format!(
+                "frust = {{ path = \"{}\" }}",
+                host_path::to_portable_string(Path::new(p))
+            ),
+            Self::Registry { version } => {
+                format!("frust = {{ package = \"frust-ui\", version = \"{version}\" }}")
+            }
+        }
+    }
+
+    /// The template variables every Cargo.toml template reads.
+    fn render_vars(&self) -> [(&'static str, String); 3] {
+        [
+            ("frust_dep_line", self.dep_line()),
+            ("frust_plugin_version", self.registry_version().to_string()),
+            (
+                "frust_path",
+                host_path::to_portable_string(Path::new(self.path())),
+            ),
+        ]
+    }
+}
+
 /// Values substituted into `.tmpl` file contents, and (a subset of) values
 /// usable as literal path-segment placeholders.
 #[derive(Debug, Clone)]
@@ -131,7 +195,7 @@ pub struct TemplateContext {
     pub org: String,
     pub description: String,
     pub frust_version: String,
-    pub frust_path: String,
+    pub frust: FrustDependency,
     /// `--deeplink-scheme`: the URL scheme (e.g. `myapp`, no
     /// `://`) the generated Android manifest/iOS Info.plist register for
     /// deep links, and the value written into the generated `frust.toml`
@@ -158,10 +222,6 @@ impl TemplateContext {
             ("org", self.org.clone()),
             ("description", self.description.clone()),
             ("frust_version", self.frust_version.clone()),
-            (
-                "frust_path",
-                host_path::to_portable_string(Path::new(&self.frust_path)),
-            ),
             ("android_identifier", self.android_identifier()),
             ("iosIdentifier", self.ios_identifier()),
             ("desktop_identifier", self.desktop_identifier()),
@@ -184,6 +244,9 @@ impl TemplateContext {
             ("frust_embedding_ios_dir", self.frust_embedding_ios_dir()),
             ("web_module_name", self.web_module_name().to_string()),
         ])
+        .into_iter()
+        .chain(self.frust.render_vars())
+        .collect()
     }
 
     /// The `wasm-bindgen --out-name` a browser build of this project
@@ -290,7 +353,7 @@ impl TemplateContext {
         format!(
             "{}/../frust-shell-android/platform/android/frust-embedding",
             frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
-                &self.frust_path
+                self.frust.path()
             )))
         )
     }
@@ -312,7 +375,7 @@ impl TemplateContext {
         format!(
             "{}/../frust-shell-ios/platform/ios/FrustEmbedding",
             frust_path_from_project_subdir(&host_path::to_portable_string(Path::new(
-                &self.frust_path
+                self.frust.path()
             )))
         )
     }
@@ -380,7 +443,7 @@ pub struct DesignSystemContext {
     /// `frust create` app scaffold's `project_name` uses.
     pub name: String,
     pub frust_version: String,
-    pub frust_path: String,
+    pub frust: FrustDependency,
 }
 
 impl DesignSystemContext {
@@ -391,11 +454,10 @@ impl DesignSystemContext {
             ("name", self.name.clone()),
             ("title_case_name", title_case(&self.name)),
             ("frust_version", self.frust_version.clone()),
-            (
-                "frust_path",
-                host_path::to_portable_string(Path::new(&self.frust_path)),
-            ),
         ])
+        .into_iter()
+        .chain(self.frust.render_vars())
+        .collect()
     }
 
     /// Placeholder values usable as literal path segments — see
@@ -589,7 +651,7 @@ mod tests {
             org: "dev.f0x".into(),
             description: "A new Frust application.".into(),
             frust_version: "0.1.0".into(),
-            frust_path: abs_path("path/to/frust"),
+            frust: FrustDependency::Path(abs_path("path/to/frust")),
             deeplink_scheme: None,
             deeplink_host: None,
         }
@@ -758,7 +820,7 @@ mod tests {
     fn embedding_dirs_preserve_absolute_or_relative_form() {
         let mut ctx = test_context();
         let absolute = abs_path("absolute/frust");
-        ctx.frust_path = absolute.clone();
+        ctx.frust = FrustDependency::Path(absolute.clone());
         assert!(ctx.frust_embedding_android_dir().starts_with(&absolute));
         assert!(ctx.frust_embedding_ios_dir().starts_with(&absolute));
         // An absolute path is base-independent: emitted byte-identical.
@@ -774,7 +836,7 @@ mod tests {
         // A relative path carries one extra `../`: both values are resolved
         // from a project *subdirectory* (`android/`, `ios/`), while
         // `frust_path` itself is expressed against the project root.
-        ctx.frust_path = "../relative/frust".into();
+        ctx.frust = FrustDependency::Path("../relative/frust".into());
         assert!(!ctx.frust_embedding_android_dir().starts_with('/'));
         assert!(!ctx.frust_embedding_ios_dir().starts_with('/'));
         assert_eq!(
@@ -822,7 +884,7 @@ mod tests {
         ] {
             let frust_path = frust_path.as_str();
             let mut ctx = test_context();
-            ctx.frust_path = frust_path.into();
+            ctx.frust = FrustDependency::Path(frust_path.into());
 
             // What `frust_path`'s own (project-root-relative) convention
             // reaches — the same walk `plugin::apply::resolve_sibling` does.
@@ -889,10 +951,10 @@ mod tests {
         // this (Linux) test host — see the module's own tests for why the
         // plain public `to_portable_string` can't (`cfg!(windows)` is false
         // here regardless of the input string's shape).
-        ctx.frust_path = host_path::to_portable_string_inner(
+        ctx.frust = FrustDependency::Path(host_path::to_portable_string_inner(
             Path::new(r"\\?\C:\dev\frust-checkout\crates\frust"),
             true,
-        );
+        ));
 
         let mut vars = ctx.render_vars();
         vars.extend(platform_render_vars(ScaffoldPlatform::DEFAULT));
@@ -922,10 +984,10 @@ mod tests {
         use super::super::renderer;
 
         let mut ctx = test_context();
-        ctx.frust_path = host_path::to_portable_string_inner(
+        ctx.frust = FrustDependency::Path(host_path::to_portable_string_inner(
             Path::new(r"\\?\C:\dev\frust-checkout\crates\frust"),
             true,
-        );
+        ));
         let vars = ctx.render_vars();
 
         let template = include_str!("../../templates/app/android.tmpl/gradle.properties.tmpl");
@@ -955,7 +1017,7 @@ mod tests {
         DesignSystemContext {
             name: "acme_design".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/path/to/frust".into(),
+            frust: FrustDependency::Path("/path/to/frust".into()),
         }
     }
 
@@ -1050,6 +1112,25 @@ mod tests {
             assert_eq!(resolve_frust_crate_path(&root).unwrap(), root);
 
             let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// The facade is published as `frust-ui`
+        /// (https://github.com/lloydmeta/frunk/issues/258); both shapes accept it.
+        #[test]
+        fn accepts_the_frust_ui_package_name() {
+            let root = unique_temp_dir("frust-ui-direct");
+            write_manifest(&root, "frust-ui");
+            assert_eq!(resolve_frust_crate_path(&root).unwrap(), root);
+
+            let repo = unique_temp_dir("frust-ui-repo-root");
+            write_manifest(&repo.join("crates").join("frust"), "frust-ui");
+            assert_eq!(
+                resolve_frust_crate_path(&repo).unwrap(),
+                repo.join("crates").join("frust")
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&repo);
         }
 
         /// Shape 2: `path` is the repo root containing `crates/frust` ->

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use frust_drive::host_path;
 use frust_drive::scaffold::{
-    self, DesignSystemContext, ScaffoldPlatform, TemplateContext, context,
+    self, DesignSystemContext, FrustDependency, ScaffoldPlatform, TemplateContext, context,
 };
 
 /// Parsed + defaulted arguments for `frust create` (mirrors
@@ -68,7 +68,7 @@ pub fn run(args: CreateArgs) -> Result<u8> {
         org: args.org,
         description: args.description,
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust_path: resolve_frust_path(args.frust_path.as_deref())?,
+        frust: resolve_frust_dependency(args.frust_path.as_deref())?,
         deeplink_scheme: args.deeplink_scheme,
         deeplink_host: args.deeplink_host,
     };
@@ -154,7 +154,7 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
     let ctx = DesignSystemContext {
         name: name.clone(),
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust_path: resolve_frust_path(args.frust_path.as_deref())?,
+        frust: resolve_frust_dependency(args.frust_path.as_deref())?,
     };
 
     let template_dir_override = args.template_dir.as_deref().map(Path::new);
@@ -174,10 +174,9 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
     Ok(0)
 }
 
-/// Resolves `--frust-path`, defaulting to this repo's `crates/frust`
-/// (a temporary mechanism until Frust crates are
-/// published), derived from `frust-cli`'s own compile-time manifest
-/// directory.
+/// Resolves the generated project's `frust` dependency: with `--frust-path`,
+/// a path dependency on that checkout; without it, the crates.io release at
+/// this CLI's own version.
 ///
 /// An override accepts either the facade crate itself or its repo root
 /// (see [`context::resolve_frust_crate_path`]); a repo-root value is
@@ -187,25 +186,25 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
 /// "<repo-root>" }`, a virtual-workspace manifest with no `[package]` table
 /// and a hard Cargo error at build time instead of scaffold time.
 ///
-/// Both the default and the (normalised) override value are rendered through
-/// [`host_path::to_portable_string`] before returning: on Windows,
-/// `Path::canonicalize()` returns a verbatim `\\?\C:\...` path, which is
-/// both an invalid TOML escape sequence once substituted into `Cargo.toml`'s
-/// `frust = { path = "..." }` and unresolvable by a template's `..`-relative
-/// sibling joins — the portable, forward-slash form Cargo/Gradle/Xcode all
-/// accept on Windows fixes both. Identity on every other host.
-fn resolve_frust_path(overridden: Option<&str>) -> Result<String> {
-    if let Some(path) = overridden {
-        let resolved = context::resolve_frust_crate_path(Path::new(path))?;
-        let resolved = host_path::to_portable_string(&resolved);
-        if resolved != path {
-            println!("note: --frust-path `{path}` normalised to `{resolved}`");
-        }
-        return Ok(resolved);
+/// The override value is rendered through [`host_path::to_portable_string`]
+/// before returning: on Windows, `Path::canonicalize()` returns a verbatim
+/// `\\?\C:\...` path, which is both an invalid TOML escape sequence once
+/// substituted into `Cargo.toml`'s `frust = { path = "..." }` and
+/// unresolvable by a template's `..`-relative sibling joins — the portable,
+/// forward-slash form Cargo/Gradle/Xcode all accept on Windows fixes both.
+/// Identity on every other host.
+fn resolve_frust_dependency(overridden: Option<&str>) -> Result<FrustDependency> {
+    let Some(path) = overridden else {
+        return Ok(FrustDependency::Registry {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        });
+    };
+    let resolved = context::resolve_frust_crate_path(Path::new(path))?;
+    let resolved = host_path::to_portable_string(&resolved);
+    if resolved != path {
+        println!("note: --frust-path `{path}` normalised to `{resolved}`");
     }
-    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    let canonical = raw.canonicalize().unwrap_or(raw);
-    Ok(host_path::to_portable_string(&canonical))
+    Ok(FrustDependency::Path(resolved))
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`

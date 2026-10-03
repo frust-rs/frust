@@ -21,16 +21,17 @@ build = "windows/build.rs"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project ("frust_path" is explicitly a temporary
-# mechanism). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead.
+# The facade crate is published as `frust-ui` and imported as `frust`, because
+# crates.io `frust` is held by another project
+# (https://github.com/lloydmeta/frunk/issues/258). `frust create` emits the
+# crates.io release at the CLI's version; `--frust-path <checkout>` emits a
+# path dependency on a local checkout instead (framework development).
 #
 # `frust` itself carries no design-system catalog and its own `[features]`
 # default is `default = []` — there is nothing left to opt out of with
 # `default-features = false`, so this edge names no features at all (mirrors
 # the default `Cargo.toml.tmpl`'s comment).
-frust = { path = "{{ frust_path }}" }
+{{ frust_dep_line }}
 
 # Design system (gs1): Glyph is this app's design system, brought in as a
 # sibling plugin crate (`frust-glyph`, below) rather than a `frust` Cargo
@@ -41,7 +42,11 @@ frust = { path = "{{ frust_path }}" }
 # opt out (still builds, neutral-themed), or swap it for `frust-material`/
 # `frust-cupertino` plus the matching `install()` call to use one of the
 # other two built-in design systems instead.
+{%- if frust_plugin_version %}
+frust-glyph = "{{ frust_plugin_version }}"
+{%- else %}
 frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
+{%- endif %}
 
 # `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,
@@ -50,7 +55,11 @@ frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
 # `../../plugins/clean-signals-frust` walks back up to the repo root and
 # down into the plugin's own directory — mirrors `frust-shared-preferences`'s
 # dependency line in the default `Cargo.toml.tmpl`).
+{%- if frust_plugin_version %}
+clean-signals-frust = "{{ frust_plugin_version }}"
+{%- else %}
 clean-signals-frust = { path = "{{ frust_path }}/../../plugins/clean-signals-frust" }
+{%- endif %}
 
 # `clean-signals` comes from crates.io with the exact same requirement
 # `clean-signals-frust`'s own `clean-signals` dependency declares, so Cargo

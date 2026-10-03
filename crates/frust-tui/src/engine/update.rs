@@ -5198,7 +5198,7 @@ mod tests {
             org: "dev.f0x".to_string(),
             description: "A new Frust application.".to_string(),
             frust_version: "0.1.0".to_string(),
-            frust_path: "/path/to/frust".to_string(),
+            frust: frust_drive::scaffold::FrustDependency::Path("/path/to/frust".to_string()),
             deeplink_scheme: None,
             deeplink_host: None,
         };

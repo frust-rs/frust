@@ -1290,7 +1290,7 @@ fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Resul
         org: "com.example".to_string(),
         description: "A new Frust application.".to_string(),
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust_path: resolve_frust_path(),
+        frust: frust_drive::scaffold::FrustDependency::Path(resolve_frust_path()),
         deeplink_scheme: None,
         deeplink_host: None,
     };

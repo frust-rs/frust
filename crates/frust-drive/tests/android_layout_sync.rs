@@ -45,7 +45,7 @@ fn test_context() -> TemplateContext {
         org: "dev.f0x".into(),
         description: "A new Frust application.".into(),
         frust_version: "0.1.0".into(),
-        frust_path: "/path/to/frust".into(),
+        frust: frust_drive::scaffold::FrustDependency::Path("/path/to/frust".into()),
         deeplink_scheme: None,
         deeplink_host: None,
     }

@@ -22,16 +22,17 @@ build = "windows/build.rs"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project ("frust_path" is explicitly a temporary
-# mechanism). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead.
+# The facade crate is published as `frust-ui` and imported as `frust`, because
+# crates.io `frust` is held by another project
+# (https://github.com/lloydmeta/frunk/issues/258). `frust create` emits the
+# crates.io release at the CLI's version; `--frust-path <checkout>` emits a
+# path dependency on a local checkout instead (framework development).
 #
 # `frust` itself carries no design-system catalog and its own `[features]`
 # default is `default = []` (see `crates/frust/Cargo.toml`) — there is
 # nothing left to opt out of with `default-features = false`, so this edge
 # names no features at all.
-frust = { path = "{{ frust_path }}" }
+{{ frust_dep_line }}
 
 # Design system (gs1): Glyph is this app's design system, brought in as a
 # sibling plugin crate (`frust-glyph`, below) rather than a `frust` Cargo
@@ -49,7 +50,11 @@ frust = { path = "{{ frust_path }}" }
 # To drop every built-in design system entirely: remove the `frust-glyph`
 # dependency and its `install()` call in `src/lib.rs` — the app still
 # builds, now neutral-themed.
+{%- if frust_plugin_version %}
+frust-glyph = "{{ frust_plugin_version }}"
+{%- else %}
 frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
+{%- endif %}
 
 # `frust-shared-preferences` demo: a platform plugin
 # the notes app below uses to persist its notes list + draft, the same way
@@ -57,7 +62,11 @@ frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
 # temporary-path mechanism applies here too — `frust_path` resolves to
 # `crates/frust`, so `../../plugins/shared-preferences` walks back up to
 # the repo root and down into the plugin's own directory).
+{%- if frust_plugin_version %}
+frust-shared-preferences = "{{ frust_plugin_version }}"
+{%- else %}
 frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-preferences" }
+{%- endif %}
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).

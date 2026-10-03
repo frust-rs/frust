@@ -1257,7 +1257,7 @@ mod tests {
             org: "dev.f0x".into(),
             description: "A new Frust application.".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/nonexistent/frust/checkout".into(),
+            frust: crate::scaffold::FrustDependency::Path("/nonexistent/frust/checkout".into()),
             deeplink_scheme: None,
             deeplink_host: None,
         }

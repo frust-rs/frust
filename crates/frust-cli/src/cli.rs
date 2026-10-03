@@ -52,13 +52,15 @@ pub enum Command {
         #[arg(long = "template-dir", value_name = "PATH", hide = true)]
         template_dir: Option<String>,
 
-        /// Override the computed path to the `frust` facade crate
-        /// (development only; a temporary `frust_path` mechanism).
+        /// Depend on this frust checkout by path instead of the crates.io
+        /// release (framework development).
+        ///
         /// Accepts either the facade crate itself (a directory whose
-        /// Cargo.toml names package `frust`, e.g. `<repo>/crates/frust`)
-        /// or that repo's root (e.g. `<repo>`), which is normalised to the
-        /// nested facade crate directory; anything else is rejected.
-        #[arg(long = "frust-path", value_name = "PATH", hide = true)]
+        /// Cargo.toml names package `frust-ui` or `frust`, e.g.
+        /// `<repo>/crates/frust`) or that repo's root (e.g. `<repo>`), which
+        /// is normalised to the nested facade crate directory; anything else
+        /// is rejected.
+        #[arg(long = "frust-path", value_name = "PATH")]
         frust_path: Option<String>,
 
         /// URL scheme to register for deep links (e.g. `myapp`, no `://`) —

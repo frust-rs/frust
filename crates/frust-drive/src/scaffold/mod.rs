@@ -8,7 +8,7 @@ pub mod renderer;
 #[allow(unused_imports)]
 // NameError/DeepLinkError: public API surface for future callers matching on variants
 pub use context::{
-    DeepLinkError, DesignSystemContext, NameError, TemplateContext, title_case,
+    DeepLinkError, DesignSystemContext, FrustDependency, NameError, TemplateContext, title_case,
     validate_deeplink_scheme, validate_project_name,
 };
 
@@ -611,9 +611,18 @@ mod tests {
             org: "dev.f0x".into(),
             description: "A new Frust application.".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/path/to/frust".into(),
+            frust: FrustDependency::Path("/path/to/frust".into()),
             deeplink_scheme: None,
             deeplink_host: None,
+        }
+    }
+
+    fn registry_test_context() -> TemplateContext {
+        TemplateContext {
+            frust: FrustDependency::Registry {
+                version: "0.5.0".into(),
+            },
+            ..test_context()
         }
     }
 
@@ -621,8 +630,65 @@ mod tests {
         DesignSystemContext {
             name: "acme_design".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/path/to/frust".into(),
+            frust: FrustDependency::Path("/path/to/frust".into()),
         }
+    }
+
+    /// Registry mode (the `frust create` default): the facade is the
+    /// published `frust-ui` package imported as `frust`, and every plugin is a
+    /// plain version requirement. See https://github.com/lloydmeta/frunk/issues/258.
+    #[test]
+    fn registry_mode_renders_version_dependencies() {
+        let dest = unique_temp_dir("registry-mode");
+        let ctx = registry_test_context();
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        for line in [
+            "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
+            "frust-glyph = \"0.5.0\"",
+            "frust-shared-preferences = \"0.5.0\"",
+        ] {
+            assert!(
+                cargo_toml.lines().any(|l| l == line),
+                "missing `{line}` in {cargo_toml}"
+            );
+        }
+        assert!(!cargo_toml.contains("path ="), "{cargo_toml}");
+        let manifest: toml::Value = toml::from_str(&cargo_toml).expect("manifest parses");
+        assert_eq!(
+            manifest["dependencies"]["frust"]["package"].as_str(),
+            Some("frust-ui")
+        );
+
+        let clean = unique_temp_dir("registry-mode-clean-signals");
+        generate(&clean, &ctx, None, false, Some("clean-signals")).unwrap();
+        let cargo_toml = fs::read_to_string(clean.join("Cargo.toml")).unwrap();
+        for line in [
+            "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
+            "frust-glyph = \"0.5.0\"",
+            "clean-signals-frust = \"0.5.0\"",
+        ] {
+            assert!(
+                cargo_toml.lines().any(|l| l == line),
+                "missing `{line}` in {cargo_toml}"
+            );
+        }
+        assert!(!cargo_toml.contains("path ="), "{cargo_toml}");
+
+        let ds = unique_temp_dir("registry-mode-design-system");
+        let ds_ctx = DesignSystemContext {
+            frust: ctx.frust.clone(),
+            ..test_design_system_context()
+        };
+        generate_design_system(&ds, &ds_ctx, None, false).unwrap();
+        let cargo_toml = fs::read_to_string(ds.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml
+                .lines()
+                .any(|l| l == "frust = { package = \"frust-ui\", version = \"0.5.0\" }"),
+            "{cargo_toml}"
+        );
     }
 
     #[test]
@@ -648,11 +714,17 @@ mod tests {
         // `frust-glyph` is depended on directly, the same shape
         // `frust-shared-preferences` uses below.
         assert!(
-            cargo_toml.contains(&format!("frust = {{ path = \"{}\" }}", ctx.frust_path)),
+            cargo_toml.contains("frust = { path = \"/path/to/frust\" }"),
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains("frust-glyph = { path ="),
+            cargo_toml.contains("frust-glyph = { path = \"/path/to/frust/../../plugins/glyph\" }"),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains(
+                "frust-shared-preferences = { path = \"/path/to/frust/../../plugins/shared-preferences\" }"
+            ),
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("[\"glyph\""), "{cargo_toml}");
