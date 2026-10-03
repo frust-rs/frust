@@ -15,6 +15,10 @@ depending on it directly.
 See <https://frust.dev> for the framework documentation and
 <https://github.com/frust-rs/frust> for the source repository.
 
+## Host page
+
+The host-page template (`index.html`, `frust_web.js` and a README) lives in `platform/web/` inside this crate and ships with it.
+
 ## License
 
 The crate's SPDX expression is `(MIT OR Apache-2.0) AND OFL-1.1`. The Frust

@@ -16,15 +16,15 @@
 # directory into its own tree (`gradle.lifecycle.beforeProject`), so these
 # should never appear — but a missing redirect must not commit build output
 # into the framework checkout.
-/platform/android/frust-embedding/build/
-/platform/android/frust-embedding/.gradle/
+/crates/frust-shell-android/platform/android/frust-embedding/build/
+/crates/frust-shell-android/platform/android/frust-embedding/.gradle/
 
 # The iOS mirror of the above. Building the embedding package in place — a
 # manual macOS package-build verification gate — drops a ~138MB SwiftPM
 # `.build/` (index-build output) into the framework checkout. A consuming
 # app passes its own `-derivedDataPath`, so this only appears when the
 # package itself is built directly, but it must never be committed.
-/platform/ios/FrustEmbedding/.build/
+/crates/frust-shell-ios/platform/ios/FrustEmbedding/.build/
 
 # Same rule for a plugin's own Swift package (`plugins/<name>/platform/ios` —
 # ARCHITECTURE's plugin-contribution shape). Building one in place drops the
@@ -48,7 +48,7 @@
 # tooling exhaust, never committed.
 /plugins/*/platform/ios/Package.resolved
 /plugins/*/platform/ios/*/Package.resolved
-/platform/ios/FrustEmbedding/Package.resolved
+/crates/frust-shell-ios/platform/ios/FrustEmbedding/Package.resolved
 
 # Xcode writes per-user SwiftPM state (scheme order, workspace settings) into a
 # `.swiftpm/` directory beside every local package it opens, including when a

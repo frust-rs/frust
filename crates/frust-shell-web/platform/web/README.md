@@ -1,4 +1,4 @@
-# platform/web
+# crates/frust-shell-web/platform/web
 
 The browser embedder — the third host tier consumed by path, alongside
 `platform/android`'s `frust-embedding` and `platform/ios`'s `FrustEmbedding`.
@@ -205,7 +205,7 @@ Rig: headed Chrome 151.0.7922.108 inside the `frust-linux-native` container
 (`DISPLAY=:20`, host networking), `chromedriver` at
 `/home/user/apps/chromedriver-linux64/chromedriver` on port 9517, driven over
 the raw W3C WebDriver HTTP protocol. Served from a staging directory outside
-this repository (`platform/web`'s three files plus `examples/web-gallery`'s
+this repository (`crates/frust-shell-web/platform/web`'s three files plus `examples/web-gallery`'s
 own `pkg/` output, built unmodified from this task's base commit) via
 `python3 -m http.server 8932 --bind 127.0.0.1`, reachable from the container
 at `http://localhost:8932/`.
@@ -277,7 +277,7 @@ instruction); this section describes what each one showed, mirroring
   for this task).
 - **Documentation rows.** `docs/SHELLS_ARCHITECTURE.md` and
   `docs/SHELLS_DEVELOPMENT.md` (doc-maintainer-owned, not edited by this
-  task) should gain a row for `platform/web` alongside the existing
+  task) should gain a row for `crates/frust-shell-web/platform/web` alongside the existing
   `platform/android`/`platform/ios` entries: this embedder's canvas
   host/resize/DPR contract, and the two documented no-hook gaps above, are
   facts a future web-shell task should not have to rediscover from this

@@ -10,6 +10,8 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+# The Kotlin embedding ships in `platform/`; keep Gradle build output out of the package.
+exclude = ["platform/android/frust-embedding/build/", "platform/android/frust-embedding/.gradle/"]
 
 [dependencies]
 # Unconditional: the `android_app!` macro is defined on every target (it only

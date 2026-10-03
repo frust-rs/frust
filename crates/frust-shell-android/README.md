@@ -4,11 +4,15 @@ The Android platform shell for Frust: the Rust half of the JNI bridge. It is the
 
 On Android the crate composes the retained tree, scene, render and text crates with the `jni` and `ndk` FFI crates. On every other target only the macro definition and a small host-testable helper module compile, so the crate is inert in a host build.
 
-Applications do not depend on this crate directly. The Kotlin embedding under `platform/android/` in the repository hosts it, and `frust create` wires that up.
+Applications do not depend on this crate directly. The Kotlin embedding under `platform/android/` in this crate hosts it, and `frust create` wires that up.
 
 Optional features: `perf-trace`, `devtools` and `gpu`, each forwarding to the matching feature of the crates below it. docs.rs builds this crate for `aarch64-linux-android`.
 
 Documentation and project home: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
+
+## Native embedding
+
+The Kotlin embedding lives in `platform/android/frust-embedding/` inside this crate and ships with it, so a published `frust-shell-android` carries the host module it pairs with.
 
 ## License
 
