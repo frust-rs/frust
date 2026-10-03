@@ -68,7 +68,9 @@ appear in the index before publishing its dependents. Members with `publish = fa
 lost token): with no flags it prints every publishable package whose version the crates.io index
 does not list yet; `--publish` runs `cargo publish --locked` for exactly those packages, and
 exits 1 with the remainder and cargo's retry time when the registry refuses, so re-running it
-resumes. `--no-verify` and `--dry-run` pass through to cargo.
+resumes. `--no-verify` and `--dry-run` pass through to cargo. The standalone
+`plugins/clean-signals-frust` package (excluded from the root workspace) is enumerated separately
+and published last, after every workspace package is on the index.
 
 ### Rate limits
 
