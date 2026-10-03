@@ -26,7 +26,9 @@ aggregate `ci-ok`).
 4. The `Cargo.lock` of each standalone workspace records the frust crate versions. Refresh each by
    running `cargo metadata --format-version 1 > /dev/null` inside its directory (the list is in
    [DEVELOPMENT.md](DEVELOPMENT.md) § Test), then commit the lock files.
-5. The root `Cargo.lock`, refreshed by any `cargo build --workspace`.
+5. The root `Cargo.lock`, refreshed by `cargo update -w` (or any `cargo build --workspace`).
+6. Check: `git grep -n '"<old version>"' -- '*Cargo.toml'` prints nothing, and every lock-file diff
+   consists of frust `version` lines only — a third-party line in it is a pin change, not a bump.
 
 Members with `publish = false` (`frust-testing`, the demo and gallery packages) are never published.
 

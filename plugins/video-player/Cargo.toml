@@ -39,7 +39,7 @@ log = { workspace = true }
 # Unconditional per this crate's platform-plugin charter: **no other
 # `frust-*` dependency** (see `docs/ARCHITECTURE.md`'s Module Structure /
 # `docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
 
 # The app-facing `frust-api` feature's only dependency — optional, gated
 # above. A literal `path` dependency, not `{ workspace = true }`: Cargo
@@ -47,7 +47,7 @@ frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
 # unless the workspace-level entry already sets it explicitly, and the root
 # `frust` entry doesn't (`plugins/i18n/Cargo.toml` carries the same note).
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.0", default-features = false, optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.1", default-features = false, optional = true }
 
 # Android: this plugin's own JNI surface — the exports the Kotlin host calls
 # back through and the Rust→Kotlin player calls — needs `jni` directly,

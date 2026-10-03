@@ -22,8 +22,8 @@ anyhow.workspace = true
 # android/ios run/build pipelines) now lives in `frust-drive`; `frust-cli`
 # is the thin clap front-end over it. All non-clap CLI deps (serde, toml,
 # minijinja, include_dir, ctrlc, thiserror) followed their modules there.
-frust-drive = { path = "../frust-drive", version = "0.5.0" }
-frust-tui = { path = "../frust-tui", version = "0.5.0" }
+frust-drive = { path = "../frust-drive", version = "0.5.1" }
+frust-tui = { path = "../frust-tui", version = "0.5.1" }
 # Tokio runtime for executing `frust tui`'s async entry point; rt-multi-thread required for Runtime::new().
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Targeted exception, direct precedent `ctrlc` (frust-drive's Cargo.toml):
@@ -46,7 +46,7 @@ ctrlc.workspace = true
 # The command-handler tests drive their `run_in` cores with
 # `frust_drive::process::FakeProcessRunner`, exposed behind frust-drive's
 # `test-util` feature (off in the shipped binary).
-frust-drive = { path = "../frust-drive", version = "0.5.0", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.5.1", features = ["test-util"] }
 # `tests/profile_sync.rs` parses `.cargo/config.toml` (root and template)
 # structurally to compare their `[target.*]`/`[build]` tables — frust-cli
 # itself has no runtime need for TOML (all non-clap deps live in
