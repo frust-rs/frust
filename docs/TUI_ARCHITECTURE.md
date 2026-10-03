@@ -317,6 +317,11 @@ server started.
   fixes launch as supervised sessions and re-preflight on exit.
 - Perf: session log lines are scanned for `frust-perf` trace output into a per-session sparkline
   panel.
+- Scaffold: the new-project flow renders a Registry-default project (`FrustDependency::Registry`
+  at the crates.io release matching the binary) through `frust-drive::scaffold`, then runs
+  `platform_wiring::sync` off the UI thread; a wiring failure leaves the project created and
+  surfaces as a warning toast, since stderr is invisible under raw mode (`frust run`/`frust build`
+  for Android/iOS retry it; see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 - Add-plugin: a guided dialog drives `frust-drive`'s plugin registry synchronously or via an ad-hoc
   session (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) and
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)).

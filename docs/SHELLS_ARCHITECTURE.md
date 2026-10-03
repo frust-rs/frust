@@ -56,6 +56,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-web::ime` | The hidden-`<input>` overlay bridging real browser composition into `ImeEvent::Compose`/`Commit`, and the canvas re-dispatch that keeps plain typing on winit's existing key path — see Cross-cutting host signals below |
 | `frust-shell-web::logging` | Routes the `log` facade to the browser console (`console_log`/`console_error_panic_hook`), idempotent against the facade's own install, plus a `?log=` query-param level knob |
 
+The Android (`platform/android/frust-embedding`), iOS (`platform/ios/FrustEmbedding`) and web
+(`platform/web`) embeddings ship inside `frust-shell-android`, `frust-shell-ios` and
+`frust-shell-web`, so a project reaches them wherever cargo resolves those crates — a registry
+unpack or a `--frust-path` checkout. `frust-drive`'s `packages::locate` finds the directory and
+`platform_wiring::sync` records it per host: the Android `frust.embedding.dir` key in the project's
+gitignored `local.properties`, the iOS `ios/FrustEmbedding` symlink, and for web a lookup at build
+time by `web_build` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
+
 ## Layer Dependencies
 
 Every concrete shell depends on `frust-core` (`RenderRoot`, widget tree, input, insets,

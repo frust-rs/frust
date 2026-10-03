@@ -34,13 +34,29 @@ own `target/` is referenced directly by docs and CI and must not move.
 **Platform embedding modules ship inside the shell crates, not templated.**
 `crates/frust-shell-android/platform/android/frust-embedding` and
 `crates/frust-shell-ios/platform/ios/FrustEmbedding` (each shell crate packages its embedding, so
-a project built from the published crates can resolve it) are consumed by a scaffolded project by
-path — edit in place and rebuild, no re-scaffold needed. The path is machine-specific: moving it
-means editing `gradle.properties`'s `frust.embedding.dir` (Android) or the local package
-reference in `project.pbxproj` (iOS); `frust clean` also removes the redirected Gradle output.
+a project built from the published crates can resolve it) are reached by a scaffolded project
+through `packages::locate` and `platform_wiring::sync`, never through a tracked path. The Android
+location (`frust.embedding.dir`, plus `frust.plugin.<module>.dir` per plugin module) lives in the
+gitignored `android/local.properties`, read by `settings.gradle.kts`'s `frustLocalDir(key)`; the
+iOS one is a gitignored `ios/FrustEmbedding` symlink (one `ios/<Package>` per plugin package)
+that `project.pbxproj` references by relative path. In path mode (`--frust-path`) an edit to the
+checkout's embedding rebuilds without re-scaffolding. `frust create` runs the sync after
+rendering (`--no-sync` skips it); `frust run`/`frust build` with `-d android|ios` refresh it before
+building; `frust doctor`'s "Platform packages" section prints the resolved directories. `frust
+clean` also removes the redirected Gradle output.
 
-The scaffold's own end-to-end tests (`create_e2e`, `create_ios`, `build_e2e`) are `#[ignore]`d
-and listed with the other manual/gated tests in [DEVELOPMENT.md](DEVELOPMENT.md)'s Test section.
+The scaffold's own end-to-end tests are `#[ignore]`d (`crates/frust-cli/tests`) and listed with
+the other manual/gated tests in [DEVELOPMENT.md](DEVELOPMENT.md)'s Test section:
+
+```
+cargo test -p frust-cli --test create_e2e -- --ignored    # path mode (also build_e2e; create_ios on macOS)
+cargo test -p frust-cli --test create_e2e scaffolded_project_builds_from_the_registry -- --ignored
+```
+
+The first checks the local.properties and symlink wiring (`assert_path_mode_wiring`); the second
+builds a registry-mode project and needs the release on crates.io. The facade package is
+`frust-ui` ([lloydmeta/frunk#258](https://github.com/lloydmeta/frunk/issues/258) — crates.io
+`frust` is another project's).
 
 ## Version Pins
 

@@ -321,7 +321,7 @@ cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ign
 
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android \
-  -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
+  -p frust-ui -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
   -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
@@ -333,7 +333,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android 
 # or running an iOS app needs macOS, see Prerequisites): the whole facade graph must compile
 # for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
-  -p frust -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
+  -p frust-ui -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
   -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
@@ -343,7 +343,7 @@ cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios -p 
 
 # wasm compile gate (no browser needed): the facade's whole default graph + web_app! must
 # compile for wasm32-unknown-unknown, and so must the web shell crate + gallery registry.
-cargo check --target wasm32-unknown-unknown -p frust --tests
+cargo check --target wasm32-unknown-unknown -p frust-ui --tests
 cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery
 
 # Windows compile gate (cross-check; host-side if mingw-w64 + the rustup target are
@@ -351,12 +351,12 @@ cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery
 # AND the other two per-OS shells must compile inert off-target (the frust-shell-android
 # precedent, extended to desktop).
 cargo check --target x86_64-pc-windows-gnu \
-  -p frust -p frust-shell-windows -p frust-shell-macos -p frust-shell-linux
+  -p frust-ui -p frust-shell-windows -p frust-shell-macos -p frust-shell-linux
 
 # macOS compile gate (cross-check; proven from a non-macOS host — objc2/muda are pure
 # Rust, no Apple SDK needed). Same inert-off-target coverage as the Windows gate.
 cargo check --target aarch64-apple-darwin \
-  -p frust -p frust-shell-macos -p frust-shell-windows -p frust-shell-linux
+  -p frust-ui -p frust-shell-macos -p frust-shell-windows -p frust-shell-linux
 cargo check --target aarch64-apple-darwin -p frust-native-widgets --features demo-components
 
 # Linux: the standard `cargo check --workspace` gate above is native and green on a Linux
