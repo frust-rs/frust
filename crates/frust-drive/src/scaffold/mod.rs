@@ -8,7 +8,7 @@ pub mod renderer;
 #[allow(unused_imports)]
 // NameError/DeepLinkError: public API surface for future callers matching on variants
 pub use context::{
-    DeepLinkError, DesignSystemContext, NameError, TemplateContext, title_case,
+    DeepLinkError, DesignSystemContext, FrustDependency, NameError, TemplateContext, title_case,
     validate_deeplink_scheme, validate_project_name,
 };
 
@@ -611,9 +611,18 @@ mod tests {
             org: "dev.f0x".into(),
             description: "A new Frust application.".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/path/to/frust".into(),
+            frust: FrustDependency::Path("/path/to/frust".into()),
             deeplink_scheme: None,
             deeplink_host: None,
+        }
+    }
+
+    fn registry_test_context() -> TemplateContext {
+        TemplateContext {
+            frust: FrustDependency::Registry {
+                version: "0.5.0".into(),
+            },
+            ..test_context()
         }
     }
 
@@ -621,8 +630,65 @@ mod tests {
         DesignSystemContext {
             name: "acme_design".into(),
             frust_version: "0.1.0".into(),
-            frust_path: "/path/to/frust".into(),
+            frust: FrustDependency::Path("/path/to/frust".into()),
         }
+    }
+
+    /// Registry mode (the `frust create` default): the facade is the
+    /// published `frust-ui` package imported as `frust`, and every plugin is a
+    /// plain version requirement. See https://github.com/lloydmeta/frunk/issues/258.
+    #[test]
+    fn registry_mode_renders_version_dependencies() {
+        let dest = unique_temp_dir("registry-mode");
+        let ctx = registry_test_context();
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        for line in [
+            "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
+            "frust-glyph = \"0.5.0\"",
+            "frust-shared-preferences = \"0.5.0\"",
+        ] {
+            assert!(
+                cargo_toml.lines().any(|l| l == line),
+                "missing `{line}` in {cargo_toml}"
+            );
+        }
+        assert!(!cargo_toml.contains("path ="), "{cargo_toml}");
+        let manifest: toml::Value = toml::from_str(&cargo_toml).expect("manifest parses");
+        assert_eq!(
+            manifest["dependencies"]["frust"]["package"].as_str(),
+            Some("frust-ui")
+        );
+
+        let clean = unique_temp_dir("registry-mode-clean-signals");
+        generate(&clean, &ctx, None, false, Some("clean-signals")).unwrap();
+        let cargo_toml = fs::read_to_string(clean.join("Cargo.toml")).unwrap();
+        for line in [
+            "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
+            "frust-glyph = \"0.5.0\"",
+            "clean-signals-frust = \"0.5.0\"",
+        ] {
+            assert!(
+                cargo_toml.lines().any(|l| l == line),
+                "missing `{line}` in {cargo_toml}"
+            );
+        }
+        assert!(!cargo_toml.contains("path ="), "{cargo_toml}");
+
+        let ds = unique_temp_dir("registry-mode-design-system");
+        let ds_ctx = DesignSystemContext {
+            frust: ctx.frust.clone(),
+            ..test_design_system_context()
+        };
+        generate_design_system(&ds, &ds_ctx, None, false).unwrap();
+        let cargo_toml = fs::read_to_string(ds.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml
+                .lines()
+                .any(|l| l == "frust = { package = \"frust-ui\", version = \"0.5.0\" }"),
+            "{cargo_toml}"
+        );
     }
 
     #[test]
@@ -648,11 +714,17 @@ mod tests {
         // `frust-glyph` is depended on directly, the same shape
         // `frust-shared-preferences` uses below.
         assert!(
-            cargo_toml.contains(&format!("frust = {{ path = \"{}\" }}", ctx.frust_path)),
+            cargo_toml.contains("frust = { package = \"frust-ui\", path = \"/path/to/frust\" }"),
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains("frust-glyph = { path ="),
+            cargo_toml.contains("frust-glyph = { path = \"/path/to/frust/../../plugins/glyph\" }"),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains(
+                "frust-shared-preferences = { path = \"/path/to/frust/../../plugins/shared-preferences\" }"
+            ),
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("[\"glyph\""), "{cargo_toml}");
@@ -719,6 +791,12 @@ mod tests {
         );
         // Xcode's per-user state, written whenever the project is opened.
         assert!(gitignore.contains("xcuserdata/"), "{gitignore}");
+        // The machine-local Swift package symlinks `platform_wiring` maintains
+        // (`ios/FrustEmbedding`, and one per plugin package).
+        assert!(
+            gitignore.lines().any(|line| line == "/ios/Frust*"),
+            "{gitignore}"
+        );
         assert!(dest.join("assets/.gitkeep").exists());
         // The Android link-flags file: a dot-directory manifest entry
         // (`.cargo/config.toml`), carried verbatim so a scaffolded app
@@ -858,13 +936,15 @@ mod tests {
         );
 
         // The embedding module is wired in by path: an `include`, a
-        // `projectDir` pointing at the frust checkout, and the build-output
-        // redirect that keeps that checkout pristine.
+        // `projectDir` resolved through the machine-local-directory helper,
+        // and the build-output redirect that keeps the shared checkout
+        // pristine. The helper is the very text `frust plugin add` inserts
+        // into a settings file that predates it.
         let settings = fs::read_to_string(dest.join("android/settings.gradle.kts")).unwrap();
         for needle in [
+            crate::plugin::apply::SETTINGS_LOCAL_DIR_HELPER,
             "include(\":frust-embedding\")",
-            "project(\":frust-embedding\").projectDir =",
-            "file(providers.gradleProperty(\"frust.embedding.dir\").get())",
+            "project(\":frust-embedding\").projectDir = frustLocalDir(\"frust.embedding.dir\")",
             "gradle.lifecycle.beforeProject {",
             "layout.buildDirectory.set(rootDir.resolve(\"../build/android/app\"))",
             "layout.buildDirectory.set(rootDir.resolve(\"../build/android/frust-embedding\"))",
@@ -874,18 +954,31 @@ mod tests {
                 "expected `{needle}`:\n{settings}"
             );
         }
+        // The helper is defined before its first use, and the plugin anchor
+        // stays below every built-in module.
+        let helper_at = settings.find("fun frustLocalDir(").unwrap();
+        let use_at = settings
+            .find("frustLocalDir(\"frust.embedding.dir\")")
+            .unwrap();
+        let anchor_at = settings.find("// frust:plugin-includes").unwrap();
+        assert!(helper_at < use_at && use_at < anchor_at, "{settings}");
+        assert!(!settings.contains("gradleProperty"), "{settings}");
 
-        // `frust.embedding.dir` is the single machine-specific indirection
-        // point, resolved (not a literal placeholder) at scaffold time.
+        // No machine-local location in a tracked file: `gradle.properties`
+        // carries no `frust.embedding.dir` (the key lives in the gitignored
+        // `local.properties`, written by `platform_wiring::sync`), and
+        // neither file names an absolute path.
         let gradle_properties = fs::read_to_string(dest.join("android/gradle.properties")).unwrap();
         assert!(
-            gradle_properties.contains(&format!(
-                "frust.embedding.dir={}",
-                ctx.frust_embedding_android_dir()
-            )),
+            !gradle_properties.contains(crate::platform_wiring::EMBEDDING_DIR_KEY),
             "{gradle_properties}"
         );
         assert!(!gradle_properties.contains("{{"), "{gradle_properties}");
+        assert!(!gradle_properties.contains('\\'), "{gradle_properties}");
+        assert!(
+            !dest.join(crate::platform_wiring::LOCAL_PROPERTIES).exists(),
+            "the scaffold itself writes no machine-local file"
+        );
 
         assert!(
             build_gradle.contains("implementation(project(\":frust-embedding\"))"),
@@ -1149,9 +1242,10 @@ mod tests {
         let pbxproj =
             fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
 
-        // (1) The local package reference itself, carrying the resolved (not
-        // placeholder) embedding path under the `relativePath` key Xcode
-        // reads even for an absolute value.
+        // (1) The local package reference itself, naming the
+        // `ios/FrustEmbedding` symlink `platform_wiring::sync` points at the
+        // resolved shell crate's package — a path relative to `ios/`, the
+        // directory containing `Runner.xcodeproj`.
         let package_ref_id = pbx_definition_id(
             &pbxproj,
             "/* XCLocalSwiftPackageReference \"FrustEmbedding\" */ = {",
@@ -1162,10 +1256,7 @@ mod tests {
             "{pbxproj}"
         );
         assert!(
-            package_ref_section.contains(&format!(
-                "relativePath = \"{}\";",
-                ctx.frust_embedding_ios_dir()
-            )),
+            package_ref_section.contains("relativePath = \"FrustEmbedding\";"),
             "{pbxproj}"
         );
 
@@ -2778,7 +2869,7 @@ mod tests {
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains("frust = { path = \"/path/to/frust\""),
+            cargo_toml.contains("frust = { package = \"frust-ui\", path = \"/path/to/frust\""),
             "{cargo_toml}"
         );
         // Catalogs-off contract: no built-in design-system feature, ever —

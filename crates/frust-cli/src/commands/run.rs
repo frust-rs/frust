@@ -18,6 +18,8 @@ use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
 use frust_drive::ios_run;
 use frust_drive::manifest;
+use frust_drive::packages::CargoLocator;
+use frust_drive::platform_wiring;
 use frust_drive::process::{ProcessRunner, StreamHandle, TryRecvError};
 use frust_drive::web_build::{self, RequestLog};
 
@@ -123,26 +125,54 @@ fn run_in_with_hooks(
 }
 
 /// Dispatches a resolved [`Device`] to its platform's mode/flavor-aware
-/// drive pipeline.
+/// drive pipeline, after [`refresh_platform_wiring`] has brought the
+/// project's Android/iOS embedding wiring up to date.
 fn run_on_device(
     runner: &dyn ProcessRunner,
     device: &Device,
     info: &BuildInfo,
     extra_features: &[String],
 ) -> Result<u8> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    refresh_platform_wiring(runner, &cwd, &mut |line| println!("{line}"));
     match (device.platform, device.kind) {
         (Platform::Android, _) => run_android(runner, device, info, extra_features),
         (Platform::Ios, Kind::Simulator) => {
-            let cwd = std::env::current_dir().context("reading current directory")?;
             ios_run::run(runner, &cwd, device, info, extra_features)
         }
         (Platform::Ios, Kind::PhysicalDevice) => {
-            let cwd = std::env::current_dir().context("reading current directory")?;
             ios_run::run_physical(runner, &cwd, device, info, extra_features)
         }
         (Platform::Ios, Kind::Emulator) => {
             unreachable!("iOS devices are never discovered as Kind::Emulator")
         }
+    }
+}
+
+/// Points `project_dir`'s `android/gradle.properties` and `ios/FrustEmbedding`
+/// at the embedding modules of the shell crates cargo resolves through
+/// `runner` — the step that keeps a project building after `cargo update`
+/// moves those crates, or when it was created with `--no-sync`. Shared by
+/// `frust run` and `frust build`'s Android/iOS lanes, ahead of Gradle/Xcode.
+///
+/// Emits one line per platform it rewrote (nothing when everything was
+/// already current). A failure is a warning, never an error: the project
+/// may still carry a valid wiring from an earlier run, and when it does not,
+/// the Gradle/Xcode failure that follows names the unresolved path.
+pub(crate) fn refresh_platform_wiring(
+    runner: &dyn ProcessRunner,
+    project_dir: &Path,
+    on_line: &mut dyn FnMut(&str),
+) {
+    match platform_wiring::sync_with(&CargoLocator::new(runner), project_dir) {
+        Ok(report) => {
+            for line in report.lines() {
+                on_line(&line);
+            }
+        }
+        Err(err) => on_line(&format!(
+            "warning: could not refresh the Android/iOS embedding wiring: {err}"
+        )),
     }
 }
 
@@ -846,6 +876,90 @@ mod tests {
         assert!(message.contains("frust.toml"), "{message}");
     }
 
+    fn wiring_project(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "frust-cli-run-wiring-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("android")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        std::fs::write(
+            dir.join("android/gradle.properties"),
+            "frust.embedding.dir=unresolved\n",
+        )
+        .unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn metadata_key(dir: &Path) -> String {
+        format!(
+            "cargo metadata --format-version 1 --manifest-path {}",
+            dir.join("Cargo.toml").display()
+        )
+    }
+
+    /// The refresh asks cargo through the injected runner and emits one line
+    /// for the rewrite — then nothing on a second, already-current run.
+    #[test]
+    fn refresh_platform_wiring_reports_a_rewrite_once() {
+        let dir = wiring_project("rewrite");
+        let shell = dir.join("shells/frust-shell-android");
+        std::fs::create_dir_all(shell.join(platform_wiring::ANDROID_EMBEDDING_REL)).unwrap();
+        let runner = FakeProcessRunner::new().with(
+            metadata_key(&dir),
+            Output {
+                success: true,
+                stdout: format!(
+                    r#"{{"packages":[{{"name":"frust-shell-android","manifest_path":"{}"}}]}}"#,
+                    shell.join("Cargo.toml").display()
+                ),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        refresh_platform_wiring(&runner, &dir, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("Android embedding: android/gradle.properties -> "),
+            "{lines:?}"
+        );
+
+        lines.clear();
+        refresh_platform_wiring(&runner, &dir, &mut |line| lines.push(line.to_string()));
+        assert!(lines.is_empty(), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cargo failure becomes one warning line, and the project is left as
+    /// it was for Gradle to report on.
+    #[test]
+    fn refresh_platform_wiring_warns_instead_of_failing() {
+        let dir = wiring_project("warns");
+        let runner = FakeProcessRunner::new().with(
+            metadata_key(&dir),
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: no matching package named `frust-ui` found".to_string(),
+            },
+        );
+        let mut lines = Vec::new();
+        refresh_platform_wiring(&runner, &dir, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("warning: "), "{lines:?}");
+        assert!(lines[0].contains("no matching package"), "{lines:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("android/gradle.properties")).unwrap(),
+            "frust.embedding.dir=unresolved\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The plan the desktop fallback resolves for `info`, with the mode's own
     /// (unfiltered) feature list — the declaring-app case every expectation
     /// below is written against.
@@ -1064,10 +1178,11 @@ mod tests {
 
     /// `-d web` is checked before device discovery too — with no
     /// `Cargo.toml`/`frust.toml` fixture in the test process's own cwd (the
-    /// `frust-cli` crate root), `run_web` fails at its own `package_name`
-    /// read rather than ever reaching `devices::discover_all` (no responses
-    /// are registered for `adb`/`xcrun` here, so a discovery call would fail
-    /// loudly and differently).
+    /// `frust-cli` crate root), `run_web` fails at its embedder lookup (the
+    /// `frust-shell-web` package is located through `cargo metadata`, which
+    /// the fake runner has no answer for) rather than ever reaching
+    /// `devices::discover_all` (no responses are registered for `adb`/`xcrun`
+    /// here, so a discovery call would fail loudly and differently).
     #[test]
     fn run_in_with_device_web_skips_device_discovery() {
         let runner = FakeProcessRunner::new();
@@ -1081,7 +1196,7 @@ mod tests {
             RunHooks::fake(),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+        assert!(err.to_string().contains("frust-shell-web"), "{err}");
     }
 
     /// `-d web` is matched case-insensitively — `-d Web`/`-d WEB` reach the
@@ -1099,7 +1214,7 @@ mod tests {
             RunHooks::fake(),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+        assert!(err.to_string().contains("frust-shell-web"), "{err}");
     }
 
     /// `--watch -d web` is refused by the same pre-discovery bail every other

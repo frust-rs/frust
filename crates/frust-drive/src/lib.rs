@@ -37,9 +37,8 @@ pub mod devtools_client;
 pub mod doctor;
 /// Windows verbatim-path (`\\?\...`) simplification and portable
 /// (forward-slash) path rendering shared by every scaffold-time `frust`-path
-/// resolver, the plugin/web-embedder sibling lookups that read one back from
-/// an existing `Cargo.toml`, and (`same_path`/`is_under`) a front-end's own
-/// path-identity checks.
+/// resolver, the generated-file paths plugin apply writes, and
+/// (`same_path`/`is_under`) a front-end's own path-identity checks.
 pub mod host_path;
 pub mod icons;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
@@ -56,6 +55,15 @@ pub mod manifest;
 /// protocol, this reads OS-level process/host stats a running app never
 /// reports itself.
 pub mod metrics;
+/// Where a project's dependency packages live on disk (a framework crate's
+/// shipped platform files, a plugin's Gradle module or Swift package), asked
+/// of `cargo metadata` rather than derived from the project's `frust`
+/// dependency — one answer for a checkout path and a crates.io version alike.
+pub mod packages;
+/// Writes a generated project's Android `frust.embedding.dir` and iOS
+/// `ios/FrustEmbedding` link from the shell crates [`packages`] resolves —
+/// run after `create` and before every Android/iOS `run`/`build`.
+pub mod platform_wiring;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;

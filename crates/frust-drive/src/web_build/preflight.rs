@@ -61,7 +61,7 @@
 //! embedder and the host-page-module check can: without any one of them there
 //! is no build [`super::build`] would actually run to completion.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::build_info::WASM_TARGET_TRIPLE;
 use crate::doctor::report::{Component, ComponentStatus, FixCommand};
@@ -69,9 +69,10 @@ use crate::doctor::wasm_bindgen_cli;
 use crate::doctor::wasm_opt::{self, WasmOptProbe};
 use crate::doctor::wasm_target::{self, TargetProbe};
 use crate::manifest::{self, WebSection};
+use crate::packages::{CachedLocator, CargoLocator, PackageLocator};
 use crate::process::ProcessRunner;
 
-use super::bundle;
+use super::{WebBuildError, bundle};
 
 /// The component names this module reports under. Named constants because a
 /// front-end filtering or ordering the rows should key off the same strings
@@ -198,6 +199,20 @@ impl WebPreflight {
 /// an error — the entire point is to answer "what is wrong" in one pass
 /// instead of surfacing the first problem and hiding the rest.
 pub fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight {
+    preflight_with(runner, &CargoLocator::new(runner), project_dir)
+}
+
+/// [`preflight`] with the package locator injected — the seam fixture tests
+/// stub, since their fake checkouts hold no crates cargo could resolve. The
+/// host page is resolved once and its answer shared by every row that
+/// depends on it, and the locator's answers are cached, so a report costs at
+/// most one `cargo metadata` run.
+pub(super) fn preflight_with(
+    runner: &dyn ProcessRunner,
+    locator: &dyn PackageLocator,
+    project_dir: &Path,
+) -> WebPreflight {
+    let locator = CachedLocator::new(locator);
     let (manifest_component, manifest) = manifest_check(project_dir);
     let crate_name = bundle::package_name(project_dir).ok();
     let app_name = manifest
@@ -211,6 +226,7 @@ pub fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight
         .unwrap_or_default();
 
     let (bindgen_component, bindgen_row_kind) = bindgen_check(runner, project_dir);
+    let resolved = bundle::resolve_embedder(project_dir, &web, &locator);
 
     WebPreflight {
         components: vec![
@@ -218,13 +234,16 @@ pub fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight
             target_check(runner),
             bindgen_component,
             wasm_opt_check(runner),
-            embedder_check(project_dir, &web),
-            host_page_module_check(project_dir, &web, &app_name),
-            artifact_dir_safety_check(project_dir, &web),
+            embedder_check(&resolved),
+            host_page_module_check(&resolved, &web, &app_name),
+            artifact_dir_safety_check(project_dir, &web, &resolved, &locator),
         ],
         bindgen_row_kind,
     }
 }
+
+/// [`bundle::resolve_embedder`]'s answer, shared by the rows built from it.
+type ResolvedEmbedder = Result<(PathBuf, bundle::EmbedderSource), WebBuildError>;
 
 /// The project's `frust.toml`, read the same optional way [`super::build`]
 /// does: `Ok(None)` for a genuinely absent manifest reports `Ok` (this
@@ -427,13 +446,13 @@ fn wasm_opt_check(runner: &dyn ProcessRunner) -> Component {
 }
 
 /// The host page a build would stage — the project's own `[web] host-dir`
-/// when it carries both host-page files, else the framework's `crates/frust-shell-web/platform/web`,
-/// reachable through the project's `frust` path dependency. Mirrors
-/// [`super::bundle::resolve_embedder`] exactly, so this row never disagrees
-/// with what [`super::build`] itself would pick.
-fn embedder_check(project_dir: &Path, web: &WebSection) -> Component {
+/// when it carries both host-page files, else the framework's page inside the
+/// `frust-shell-web` package cargo resolves for the project. Rendered from
+/// [`super::bundle::resolve_embedder`]'s own answer, so this row never
+/// disagrees with what [`super::build`] itself would pick.
+fn embedder_check(resolved: &ResolvedEmbedder) -> Component {
     let name = EMBEDDER_COMPONENT.to_string();
-    match bundle::resolve_embedder(project_dir, web) {
+    match resolved {
         Ok((dir, bundle::EmbedderSource::App)) => Component {
             name,
             status: ComponentStatus::Ok,
@@ -465,9 +484,13 @@ fn embedder_check(project_dir: &Path, web: &WebSection) -> Component {
 /// is always [`super::BINDGEN_OUT_NAME`], which is defined to match it) or
 /// when no host page resolves at all ([`embedder_check`] already reports
 /// that).
-fn host_page_module_check(project_dir: &Path, web: &WebSection, app_name: &str) -> Component {
+fn host_page_module_check(
+    resolved: &ResolvedEmbedder,
+    web: &WebSection,
+    app_name: &str,
+) -> Component {
     let name = HOST_PAGE_COMPONENT.to_string();
-    match bundle::resolve_embedder(project_dir, web) {
+    match resolved {
         Ok((_, bundle::EmbedderSource::Framework)) => Component {
             name,
             status: ComponentStatus::Ok,
@@ -476,7 +499,7 @@ fn host_page_module_check(project_dir: &Path, web: &WebSection, app_name: &str) 
         },
         Ok((dir, bundle::EmbedderSource::App)) => {
             let out_name = web.out_name_or(app_name);
-            match bundle::verify_host_page_module(&dir, out_name) {
+            match bundle::verify_host_page_module(dir, out_name) {
                 Ok(()) => Component {
                     name,
                     status: ComponentStatus::Ok,
@@ -569,18 +592,21 @@ fn installed_bindgen_version(runner: &dyn ProcessRunner) -> Option<String> {
 /// directory the build would refuse.
 ///
 /// Deliberately independent of the host page resolving: the configured
-/// host directory, the framework page when the project's `frust` dependency
-/// locates one, and `src/` are protected whether or not
+/// host directory, the framework page when `frust-shell-web` can be located,
+/// and `src/` are protected whether or not
 /// [`super::bundle::resolve_embedder`] succeeds, because a partial app page
 /// (`index.html` without `frust_web.js`) fails resolution while still being
 /// exactly the directory an `out-dir = "web"` would delete.
-fn artifact_dir_safety_check(project_dir: &Path, web: &WebSection) -> Component {
+fn artifact_dir_safety_check(
+    project_dir: &Path,
+    web: &WebSection,
+    resolved: &ResolvedEmbedder,
+    locator: &dyn PackageLocator,
+) -> Component {
     let name = ARTIFACT_DIR_COMPONENT.to_string();
     let artifact = bundle::artifact_dir(project_dir, web);
-    let resolved = bundle::resolve_embedder(project_dir, web)
-        .ok()
-        .map(|(dir, _)| dir);
-    let protected = bundle::protected_dirs(project_dir, web, resolved.as_deref());
+    let resolved = resolved.as_ref().ok().map(|(dir, _)| dir.as_path());
+    let protected = bundle::protected_dirs(project_dir, web, resolved, locator);
     match bundle::guard_artifact_dir(&artifact, project_dir, &protected) {
         Ok(()) => Component {
             name,
@@ -657,6 +683,42 @@ mod tests {
             )
             .with("wasm-bindgen --version", ok("wasm-bindgen 0.2.128\n"))
             .with("wasm-opt --version", ok("wasm-opt version 130\n"))
+    }
+
+    /// [`super::preflight_with`] with the fixtures' stubbed package locator
+    /// ([`bundle::fixture_locator`]) — the fake checkout holds no real crates
+    /// for cargo to resolve.
+    fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight {
+        preflight_with(runner, &bundle::fixture_locator(project_dir), project_dir)
+    }
+
+    /// The real entry point resolves through the runner it is handed — a
+    /// fake one that has scripted no `cargo metadata` leaves the framework
+    /// page unlocated (a `Missing` row with cargo's reason), never a panic or
+    /// a silent green row.
+    #[test]
+    fn the_real_entry_point_asks_cargo_through_the_injected_runner() {
+        let (root, project) = checkout("real-entry", PINNED_MANIFEST);
+        let report = super::preflight(&healthy_runner(), &project);
+        let embedder = component(&report, EMBEDDER_COMPONENT);
+        assert_eq!(embedder.status, ComponentStatus::Missing, "{embedder:?}");
+        assert!(
+            embedder.summary.contains("cargo metadata"),
+            "{}",
+            embedder.summary
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The page is resolved once per report however many rows read it.
+    #[test]
+    fn one_report_asks_the_locator_once() {
+        let (root, project) = checkout("one-lookup", PINNED_MANIFEST);
+        let locator = bundle::fixture_locator(&project);
+        let report = preflight_with(&healthy_runner(), &locator, &project);
+        assert!(report.is_ready(), "{report:?}");
+        assert_eq!(locator.calls(), 1);
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn component<'a>(report: &'a WebPreflight, name: &str) -> &'a Component {

@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use frust_drive::doctor::report::ComponentStatus;
 use frust_drive::doctor::{DoctorCtx, RealEnv, Status, Validation, Validator};
+use frust_drive::packages::{CachedLocator, CargoLocator, PackageLocator};
+use frust_drive::platform_wiring;
 use frust_drive::process::ProcessRunner;
 use frust_drive::web_build::{self, WebPreflight};
 
@@ -38,6 +40,12 @@ use frust_drive::web_build::{self, WebPreflight};
 /// Each Web row prints the preflight's own icon and summary exactly as the
 /// browser pipeline reports it: the rows are excluded from the exit code, not
 /// reworded.
+///
+/// Inside a Frust project (a directory holding `frust.toml`) a last
+/// "Platform packages" heading prints where the project's Android, iOS and
+/// web embeddings resolve — the directories `frust run`/`frust build` wire
+/// the host projects to — or why they could not be located. Informational
+/// too: it never moves the exit code.
 pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let env = RealEnv;
     let ctx = DoctorCtx {
@@ -72,7 +80,48 @@ fn run_with(
     let web_preflight = web_build::preflight(ctx.runner, project_dir);
     print_web_results(&web_preflight, verbose);
 
+    if project_dir.join("frust.toml").is_file() {
+        // One cached locator serves all three rows: a single `cargo metadata`
+        // run, through the injected runner.
+        let cargo = CargoLocator::new(ctx.runner);
+        let locator = CachedLocator::new(&cargo);
+        for line in package_dir_lines(&locator, project_dir) {
+            println!("{line}");
+        }
+    }
+
     exit_code(&results)
+}
+
+/// The "Platform packages" heading's lines: one row per platform naming the
+/// embedding directory the project resolves, or the error that prevented
+/// it. Android and iOS come from one [`platform_wiring::resolve`] through
+/// `locator`; web is the browser host page [`web_build::embedder_dir_with`]
+/// resolves through the same locator.
+fn package_dir_lines(locator: &dyn PackageLocator, project_dir: &Path) -> Vec<String> {
+    let (android, ios) = match platform_wiring::resolve(locator, project_dir) {
+        Ok(dirs) => (Ok(dirs.android), Ok(dirs.ios)),
+        Err(err) => {
+            let message = err.to_string();
+            (Err(message.clone()), Err(message))
+        }
+    };
+    let web = web_build::embedder_dir_with(locator, project_dir).map_err(|err| err.to_string());
+
+    let mut lines = vec!["Platform packages".to_string()];
+    for (name, resolved) in [("android", android), ("ios", ios), ("web", web)] {
+        match resolved {
+            Ok(dir) => {
+                lines.push(format!("[\u{2713}] {name}"));
+                lines.push(format!("    {}", dir.display()));
+            }
+            Err(message) => {
+                lines.push(format!("[\u{2717}] {name}"));
+                lines.push(format!("    {message}"));
+            }
+        }
+    }
+    lines
 }
 
 /// The exit-code rule in one place: `1` if any validator is `Fail`, else
@@ -426,6 +475,70 @@ mod tests {
     #[test]
     fn run_in_reaches_the_web_preflight() {
         run_in(&FakeProcessRunner::new(), false).expect("doctor runs to completion");
+    }
+
+    /// The "Platform packages" rows name each resolved directory, and a
+    /// locate failure is printed in place of the rows it prevented.
+    #[test]
+    fn package_dir_lines_name_each_directory_or_the_error() {
+        use frust_drive::packages::StubLocator;
+
+        let root = empty_dir("package-dirs");
+        let android = root.join("frust-shell-android");
+        let ios = root.join("frust-shell-ios");
+        std::fs::create_dir_all(android.join(platform_wiring::ANDROID_EMBEDDING_REL)).unwrap();
+        std::fs::create_dir_all(ios.join(platform_wiring::IOS_EMBEDDING_REL)).unwrap();
+        let root = root.canonicalize().unwrap();
+        let stub = StubLocator::new()
+            .with(
+                platform_wiring::ANDROID_SHELL_PACKAGE,
+                root.join("frust-shell-android"),
+            )
+            .with(
+                platform_wiring::IOS_SHELL_PACKAGE,
+                root.join("frust-shell-ios"),
+            );
+        let web_dir = root.join("frust-shell-web/platform/web");
+        std::fs::create_dir_all(&web_dir).unwrap();
+        for file in ["index.html", "frust_web.js"] {
+            std::fs::write(web_dir.join(file), "x").unwrap();
+        }
+        let stub = stub.with("frust-shell-web", root.join("frust-shell-web"));
+
+        let lines = package_dir_lines(&stub, &root);
+        assert_eq!(
+            lines,
+            vec![
+                "Platform packages".to_string(),
+                "[\u{2713}] android".to_string(),
+                format!(
+                    "    {}",
+                    root.join("frust-shell-android")
+                        .join(platform_wiring::ANDROID_EMBEDDING_REL)
+                        .display()
+                ),
+                "[\u{2713}] ios".to_string(),
+                format!(
+                    "    {}",
+                    root.join("frust-shell-ios")
+                        .join(platform_wiring::IOS_EMBEDDING_REL)
+                        .display()
+                ),
+                "[\u{2713}] web".to_string(),
+                format!("    {}", web_dir.display()),
+            ]
+        );
+
+        let offline = StubLocator::failing("network is unreachable");
+        let lines = package_dir_lines(&offline, &root);
+        assert_eq!(lines.len(), 7, "{lines:?}");
+        for (row, name) in [(1, "android"), (3, "ios"), (5, "web")] {
+            assert_eq!(lines[row], format!("[\u{2717}] {name}"), "{lines:?}");
+        }
+        assert!(lines[2].contains("network is unreachable"), "{lines:?}");
+        assert!(lines[4].contains("network is unreachable"), "{lines:?}");
+        assert!(lines[6].contains("network is unreachable"), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// [`print_web_results`] never panics on an empty component list (a

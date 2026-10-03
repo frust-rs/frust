@@ -16,6 +16,13 @@
 //! why there is no `KotlinFile`/`ProguardRule` contribution — a copied file
 //! and a hand-appended keep rule both drift from the plugin they came from.
 //!
+//! Where a plugin's Gradle module or Swift package lives on disk is
+//! machine-local (a checkout, or cargo's registry cache), so no tracked file
+//! names it: the tracked edits reference a [`NativeModule`] by key or link
+//! name only, and its location is kept in `android/local.properties` / an
+//! `ios/` symlink by [`crate::platform_wiring`] — written by [`add_plugin`]
+//! for the modules it adds and refreshed by every `frust run`/`frust build`.
+//!
 //! The desktop lane ([`Contribution::MacosPlistEntry`]/
 //! [`Contribution::MacosEntitlement`]/[`Contribution::LinuxDesktopEntry`])
 //! never edits a project file at all: unlike every mobile contribution above,
@@ -35,7 +42,7 @@
 pub mod apply;
 pub mod registry;
 
-pub use apply::{DesktopContribution, add_plugin, desktop_contributions};
+pub use apply::{DesktopContribution, add_plugin, add_plugin_with, desktop_contributions};
 pub use registry::known_plugins;
 
 use std::path::PathBuf;
@@ -51,9 +58,12 @@ pub struct PluginSpec {
     pub id: &'static str,
     /// One-line human summary for a selection UI.
     pub summary: &'static str,
-    /// Path segment under `<frust repo>/plugins/` the crate lives in — the
-    /// `frust = { path = ... }` dep the project already has is walked back to
-    /// the repo root and down into this directory to derive the dep path.
+    /// Path segment under `<frust repo>/plugins/` the crate lives in. In path
+    /// mode the project's `frust = { path = ... }` dep is walked back to the
+    /// repo root and down into this directory to write the plugin's own path
+    /// dep; every [`Contribution::GradleModule`]/[`Contribution::SwiftPackageRef`]
+    /// `rel_path` must sit under `plugins/<crate_dir>/`, since only the part
+    /// below it is carried over to wherever cargo locates the package.
     pub crate_dir: &'static str,
     /// Contributions applied unconditionally when this plugin is added
     /// (always at least its own Cargo.toml dependency).
@@ -62,13 +72,56 @@ pub struct PluginSpec {
     /// secure-storage's `"biometric-gate"`), each adding further contributions.
     pub optional_features: &'static [FeatureSpec],
     /// A sibling checkout this plugin needs present (facade-tier plugins whose
-    /// own deps path into it), declared relative to the frust repo root.
+    /// own deps path into it), declared relative to the frust repo root —
+    /// two levels above the facade package cargo locates for the project.
     /// [`add_plugin`] errors [`PluginAddError::SiblingCheckoutMissing`] when
     /// it isn't on disk. No current registry entry sets this —
     /// `clean-signals-frust` needs none because `clean-signals` is a crates.io
     /// dependency (see `registry.rs`'s `CLEAN_SIGNALS_FRUST`) — but the
     /// mechanism stays in place for a future facade-tier plugin that does.
     pub requires_sibling: Option<&'static str>,
+}
+
+impl PluginSpec {
+    /// Every native module this plugin can contribute — its base
+    /// contributions' and every optional feature's — located inside the
+    /// package its base [`Contribution::CargoDep`] adds. A registry path
+    /// outside that package (which [`add_plugin`] refuses) is left out.
+    pub fn native_modules(&self) -> Vec<NativeModule> {
+        self.base
+            .iter()
+            .chain(self.optional_features.iter().flat_map(|f| f.contributions))
+            .filter_map(|contribution| apply::native_module(self, contribution)?.ok())
+            .collect()
+    }
+}
+
+/// A plugin's Gradle library module or local Swift package, as the
+/// machine-local wiring knows it: which package ships it, where inside that
+/// package, and the name the generated host project refers to it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeModule {
+    /// The cargo package shipping the module (the plugin's own crate).
+    pub package: &'static str,
+    /// The module's directory inside that package, e.g. `platform/android`.
+    pub dir_in_package: &'static str,
+    /// What kind of module it is, with its host-project name.
+    pub kind: NativeKind,
+}
+
+/// The two kinds of [`NativeModule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeKind {
+    /// A Gradle library module ([`Contribution::GradleModule`]), named by its
+    /// Gradle path, e.g. `":frust-iap"`; its directory lives under
+    /// [`crate::platform_wiring::plugin_module_key`] in
+    /// `android/local.properties`.
+    GradleModule { gradle_name: &'static str },
+    /// A local Swift package ([`Contribution::SwiftPackageRef`]), named by its
+    /// package/product name, e.g. `"FrustIap"`; referenced as
+    /// `relativePath = "FrustIap"`, resolved through the
+    /// [`crate::platform_wiring::swift_package_link`] symlink.
+    SwiftPackage { package_name: &'static str },
 }
 
 /// An opt-in bundle of contributions under a [`PluginSpec`], selected by id.
@@ -86,9 +139,11 @@ pub struct FeatureSpec {
 /// to one target file and one skip-if-present guard.
 #[derive(Debug, Clone, Copy)]
 pub enum Contribution {
-    /// A `[dependencies]` entry; the path is derived at apply time from the
-    /// project's existing `frust` path dep (crates unpublished — version deps
-    /// come post-publish). `name` is the crate/dependency name.
+    /// A `[dependencies]` entry written in the form the project's own `frust`
+    /// dependency takes: a path into the same checkout (path mode), or the
+    /// same version requirement (registry mode — the plugin crates release in
+    /// lockstep with the facade). `name` is the crate/dependency name, and
+    /// the package the plugin's platform files are located in.
     CargoDep { name: &'static str },
     /// A `<uses-permission android:name="..."/>` line inserted into the app's
     /// own `AndroidManifest.xml` before `</manifest>`.
@@ -111,7 +166,10 @@ pub enum Contribution {
     /// A Gradle library module included into the generated project: appends
     /// the `include(...)` + `projectDir` (+ build-directory redirect) lines to
     /// `android/settings.gradle.kts` and the `implementation(project(...))`
-    /// line to `android/app/build.gradle.kts`, both idempotently.
+    /// line to `android/app/build.gradle.kts`, both idempotently. The
+    /// `projectDir` names no path: it reads the module's
+    /// `frust.plugin.<module>.dir` key from `android/local.properties`, which
+    /// [`add_plugin`] writes alongside (see [`NativeModule`]).
     ///
     /// One contribution, two files, **one** [`AddItem`] — the report is a
     /// per-contribution ledger, not a per-file one. A half-applied state (one
@@ -121,7 +179,9 @@ pub enum Contribution {
         /// The Gradle project path, e.g. `":frust-secure-storage"`.
         gradle_name: &'static str,
         /// The module directory, relative to the frust repo root, e.g.
-        /// `"plugins/secure-storage/platform/android"`.
+        /// `"plugins/secure-storage/platform/android"`. Wired as the same
+        /// subdirectory of the plugin's package wherever cargo locates it
+        /// (`<package>/platform/android`).
         rel_path: &'static str,
     },
     /// A plugin's local Swift package added to the generated app's
@@ -147,11 +207,11 @@ pub enum Contribution {
         /// embedding's own wiring names `FrustEmbedding`.
         package_name: &'static str,
         /// The package directory, relative to the frust repo root, e.g.
-        /// `"plugins/camera/platform/ios/FrustCamera"` — resolved exactly like
-        /// a [`Contribution::GradleModule`]'s `rel_path`, since the written
-        /// `relativePath` is resolved by Xcode against the directory
-        /// *containing* the `.xcodeproj` (`<project>/ios/`), one level below
-        /// the project root a relative `frust` path dep is written against.
+        /// `"plugins/camera/platform/ios"` — resolved exactly like a
+        /// [`Contribution::GradleModule`]'s `rel_path`. The reference itself
+        /// is `relativePath = "<package_name>"`, which Xcode resolves against
+        /// `<project>/ios/` — through the `ios/<package_name>` symlink
+        /// [`add_plugin`] creates to the located directory.
         rel_path: &'static str,
     },
     /// A system framework linked into the generated app's Runner target by
@@ -443,9 +503,33 @@ pub enum PluginAddError {
     /// The project's Cargo.toml doesn't parse — never rewritten.
     #[error("failed to parse the project's Cargo.toml: {0}")]
     UnparseableCargoToml(String),
-    /// No `frust = {{ path = ... }}` dependency to derive plugin paths from.
-    #[error("no `frust = {{ path = ... }}` dependency to derive plugin paths from")]
+    /// No `frust` dependency carrying a `path` or a `version` — nothing to
+    /// write a plugin dependency against.
+    #[error(
+        "no `frust` dependency with a `path` or a `version` to write the plugin's dependency against"
+    )]
     NoFrustDependency,
+    /// Cargo could not say where a package lives in a project depending on
+    /// the crates.io release, where — unlike a checkout path — there is no
+    /// other place to derive it from. Raised before any platform file is
+    /// edited.
+    #[error("could not locate the `{package}` package through cargo: {source}")]
+    PackageNotLocated {
+        package: String,
+        source: crate::packages::PackagesError,
+    },
+    /// A registry entry names a platform path outside its plugin's own
+    /// package (`plugins/<crate_dir>/…`), which no package lookup can
+    /// resolve — a registry bug, refused before anything is written.
+    #[error(
+        "plugin `{plugin}` names platform path `{rel_path}` outside its own package \
+         (`plugins/{crate_dir}/…`, added by its base Cargo dependency), so it cannot be located"
+    )]
+    NativePathOutsidePackage {
+        plugin: String,
+        rel_path: String,
+        crate_dir: String,
+    },
     /// A freshly minted `project.pbxproj` object id is already in use.
     /// Unreachable while the mint scans the same file it writes, but a
     /// collision would silently redefine an existing object — the one
@@ -476,7 +560,8 @@ pub enum PluginAddError {
     /// A required sibling checkout (facade plugin) is not on disk.
     #[error("required sibling checkout `{sibling}` not found (expected at `{}`)", .expected.display())]
     SiblingCheckoutMissing { sibling: String, expected: PathBuf },
-    /// A filesystem write failed.
+    /// A filesystem write failed — a project file, or the machine-local
+    /// `android/local.properties` key / `ios/` symlink a module is wired by.
     #[error("writing `{path}`: {message}")]
     Io { path: String, message: String },
     /// A [`Contribution::CargoFeature`] named a dependency with no existing

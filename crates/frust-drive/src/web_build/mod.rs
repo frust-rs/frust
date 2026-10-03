@@ -25,9 +25,9 @@
 //! # The pipeline, and why the order is not negotiable
 //!
 //! 1. **Resolve the host page first, and verify it.** [`bundle::resolve_embedder`]
-//!    picks between the project's own `<host-dir>` and the framework's
-//!    `crates/frust-shell-web/platform/web` (reached through the project's `frust` path dependency —
-//!    see [`bundle`]) before anything is compiled, and
+//!    picks between the project's own `<host-dir>` and the framework's page
+//!    (`platform/web` in the `frust-shell-web` package cargo resolves — see
+//!    [`bundle`]) before anything is compiled, and
 //!    [`bundle::verify_host_page_module`] refuses a resolved app page whose
 //!    `?module=` default disagrees with the `wasm-bindgen --out-name` this
 //!    build would use. Both checks run before the compile because a
@@ -96,9 +96,10 @@ use crate::doctor::{EnvLookup, RealEnv};
 #[cfg(test)]
 use crate::manifest::WebSection;
 use crate::manifest::{self, Manifest};
+use crate::packages::{CachedLocator, CargoLocator, PackageLocator};
 use crate::process::{ProcessRunner, tail_lines};
 
-pub use bundle::{artifact_dir, embedder_dir};
+pub use bundle::{artifact_dir, embedder_dir, embedder_dir_with};
 pub use preflight::{
     BINDGEN_COMPONENT, BindgenRowKind, EMBEDDER_COMPONENT, HOST_PAGE_COMPONENT, MANIFEST_COMPONENT,
     TARGET_COMPONENT, WASM_OPT_COMPONENT, WebPreflight, preflight,
@@ -243,24 +244,20 @@ pub enum WebBuildError {
         reason: String,
     },
     #[error(
-        "the project's `Cargo.toml` at '{}' declares no `frust = {{ path = ... }}` dependency, \
-         so the browser embedder (`crates/frust-shell-web/platform/web`) cannot be located — a browser build stages its \
-         host page from the framework checkout the app is built against, when the project \
-         supplies no host page of its own",
-        manifest.display()
+        "the browser embedder ships as `platform/web` inside the `frust-shell-web` crate, which \
+         could not be located for this project — a browser build stages that host page when \
+         the project supplies none of its own: {source}"
     )]
-    NoFrustDependency { manifest: PathBuf },
+    EmbedderUnlocated {
+        source: crate::packages::PackagesError,
+    },
     #[error(
-        "the browser embedder at '{}' has no `{missing}` — that path is derived from this \
-         project's `frust` dependency ('{frust_path}'), so a moved or incomplete framework \
-         checkout is the usual cause",
+        "the browser embedder at '{}' has no `{missing}` — that directory is inside the \
+         `frust-shell-web` package cargo resolves for this project, so an incomplete framework \
+         checkout or crate is the usual cause",
         dir.display()
     )]
-    EmbedderIncomplete {
-        dir: PathBuf,
-        missing: &'static str,
-        frust_path: String,
-    },
+    EmbedderIncomplete { dir: PathBuf, missing: &'static str },
     #[error("reading `[package] name` from '{}': {reason}", manifest.display())]
     PackageName { manifest: PathBuf, reason: String },
     #[error(
@@ -349,18 +346,30 @@ pub fn build(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<WebBuildReport, WebBuildError> {
-    build_with_env(runner, &RealEnv, project_dir, info, on_line)
+    build_with(
+        runner,
+        &RealEnv,
+        &CargoLocator::new(runner),
+        project_dir,
+        info,
+        on_line,
+    )
 }
 
 /// The testable core of [`build`]: `env` is injected so `CARGO_TARGET_DIR`
-/// resolution can be driven without touching the real process environment.
-fn build_with_env(
+/// resolution can be driven without touching the real process environment,
+/// and `locator` so the framework page's package can be answered without
+/// running cargo against a fixture checkout. Its answers are cached for the
+/// run, so the page resolution and the artifact guard share one lookup.
+fn build_with(
     runner: &dyn ProcessRunner,
     env: &dyn EnvLookup,
+    locator: &dyn PackageLocator,
     project_dir: &Path,
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<WebBuildReport, WebBuildError> {
+    let locator = CachedLocator::new(locator);
     let manifest = load_manifest(project_dir)?;
     let crate_name = bundle::package_name(project_dir)?;
     let app_name = manifest
@@ -373,7 +382,7 @@ fn build_with_env(
         .unwrap_or_default();
 
     // Before the compile, never after: see the module doc's pipeline order.
-    let (embedder, source) = bundle::resolve_embedder(project_dir, &web)?;
+    let (embedder, source) = bundle::resolve_embedder(project_dir, &web, &locator)?;
     let out_name = match source {
         bundle::EmbedderSource::App => web.out_name_or(&app_name).to_string(),
         bundle::EmbedderSource::Framework => BINDGEN_OUT_NAME.to_string(),
@@ -386,7 +395,7 @@ fn build_with_env(
     // the delete itself by `prepare_dir` below. The protected set does not
     // depend on which page resolved — see `bundle::protected_dirs`.
     let root = artifact_dir(project_dir, &web);
-    let protected = bundle::protected_dirs(project_dir, &web, Some(&embedder));
+    let protected = bundle::protected_dirs(project_dir, &web, Some(&embedder), &locator);
     bundle::guard_artifact_dir(&root, project_dir, &protected)?;
 
     cargo_build(runner, project_dir, info, on_line)?;
@@ -778,6 +787,26 @@ mod tests {
         BuildInfo::from_args(BuildArgs::default(), mode).unwrap()
     }
 
+    /// [`super::build_with`] with the fixtures' stubbed package locator
+    /// ([`bundle::fixture_locator`]) — the fake checkout holds no real crates
+    /// for cargo to resolve.
+    fn build_with_env(
+        runner: &dyn ProcessRunner,
+        env: &dyn EnvLookup,
+        project_dir: &Path,
+        info: &BuildInfo,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<WebBuildReport, WebBuildError> {
+        build_with(
+            runner,
+            env,
+            &bundle::fixture_locator(project_dir),
+            project_dir,
+            info,
+            on_line,
+        )
+    }
+
     /// How one scripted tool behaves in a [`PipelineRunner`] run.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Tool {
@@ -965,10 +994,11 @@ mod tests {
         }
     }
 
-    /// A framework checkout plus an app crate, in the real relative shape,
-    /// with **no** app-owned host page — every test that wants the framework
-    /// page staged uses this as-is; tests that want the app's own page add a
-    /// `web/` directory of their own.
+    /// A framework checkout plus an app crate, in the real relative shape
+    /// [`bundle::fixture_locator`] answers from, with **no** app-owned host
+    /// page — every test that wants the framework page staged uses this
+    /// as-is; tests that want the app's own page add a `web/` directory of
+    /// their own.
     /// Returns `(checkout root, project dir, target dir)`.
     fn checkout(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         let root = temp_dir(tag);
@@ -1598,7 +1628,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, WebBuildError::EmbedderIncomplete { .. }),
+            matches!(err, WebBuildError::EmbedderUnlocated { .. }),
             "{err:?}"
         );
         assert!(

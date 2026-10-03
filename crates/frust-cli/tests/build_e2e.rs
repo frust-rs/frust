@@ -63,6 +63,54 @@ fn workspace_frust_path() -> PathBuf {
         .expect("crates/frust must exist in this workspace checkout")
 }
 
+/// Asserts the path-mode wiring `frust create --frust-path` wrote: the
+/// machine-local `android/local.properties` `frust.embedding.dir` and the
+/// `ios/FrustEmbedding` symlink both point into this checkout's shell crates,
+/// while the tracked `gradle.properties` and `settings.gradle.kts` name no
+/// path at all.
+fn assert_path_mode_wiring(dest: &Path) {
+    let checkout = workspace_frust_path()
+        .join("../..")
+        .canonicalize()
+        .expect("the checkout root must exist");
+    let android = checkout.join("crates/frust-shell-android/platform/android/frust-embedding");
+    let ios = checkout.join("crates/frust-shell-ios/platform/ios/FrustEmbedding");
+
+    let properties = std::fs::read_to_string(dest.join("android/local.properties"))
+        .expect("reading android/local.properties");
+    let value = properties
+        .lines()
+        .find_map(|line| line.strip_prefix("frust.embedding.dir="))
+        .unwrap_or_else(|| panic!("no frust.embedding.dir in:\n{properties}"));
+    for tracked in ["android/gradle.properties", "android/settings.gradle.kts"] {
+        let text = std::fs::read_to_string(dest.join(tracked)).expect(tracked);
+        assert!(
+            !text.contains(&checkout.display().to_string()),
+            "{tracked} names the checkout:\n{text}"
+        );
+        assert!(
+            !text.contains("frust.embedding.dir=") && !text.contains("gradleProperty"),
+            "{tracked} still carries the embedding key:\n{text}"
+        );
+    }
+    assert_eq!(
+        Path::new(value)
+            .canonicalize()
+            .expect("embedding dir exists"),
+        android.canonicalize().expect("android embedding exists"),
+        "{properties}"
+    );
+
+    let link = dest.join("ios/FrustEmbedding");
+    let target = std::fs::read_link(&link).expect("ios/FrustEmbedding must be a symlink");
+    assert_eq!(
+        target.canonicalize().expect("ios embedding target exists"),
+        ios.canonicalize().expect("ios embedding exists"),
+        "symlink target {}",
+        target.display()
+    );
+}
+
 /// A fresh, never-before-used scratch directory under the system temp dir.
 fn unique_dir(tag: &str) -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -154,6 +202,7 @@ fn scaffold(project: &Path) {
         .status()
         .expect("failed to spawn `frust create`");
     assert!(create_status.success(), "`frust create` exited non-zero");
+    assert_path_mode_wiring(project);
 }
 
 /// Generates a throwaway upload keystore at `at` (never leaves the scratch

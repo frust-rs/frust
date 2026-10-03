@@ -2,12 +2,15 @@
 //! full `BuildTarget` flag surface into a [`BuildInfo`] + platform artifact
 //! enum, resolves the project root (mirrors `run`'s `frust.toml`
 //! detection), and dispatches to the `android_build`/`ios_build`/
-//! `desktop_build`/`web_build` pipelines.
+//! `desktop_build`/`web_build` pipelines — the Android/iOS lanes after
+//! refreshing the project's embedding wiring
+//! ([`super::run::refresh_platform_wiring`]).
 
 use std::path::Path;
 
 use anyhow::{Result, bail};
 
+use super::run::refresh_platform_wiring;
 use crate::cli::{BuildFlags, BuildTarget, validate_feature_token_charset};
 use frust_drive::android_build::{self, AndroidArtifact};
 use frust_drive::android_run;
@@ -290,6 +293,7 @@ fn build_android(
 ) -> Result<u8> {
     let project = android_run::project::detect(project_dir)?;
     android_run::project::require_android_dir(&project.root)?;
+    refresh_platform_wiring(runner, project_dir, &mut |line| println!("{line}"));
     println!(
         "Building `{}` — Gradle build type `{}`, cargo profile args {:?}…",
         project.app_id,
@@ -320,6 +324,7 @@ fn build_ios(
 ) -> Result<u8> {
     let project = ios_run::project::detect(project_dir)?;
     ios_run::project::require_ios_dir(&project.root)?;
+    refresh_platform_wiring(runner, project_dir, &mut |line| println!("{line}"));
     println!(
         "Building `{}` — Xcode configuration `{}`, cargo profile args {:?}…",
         project.bundle_id,
@@ -584,6 +589,54 @@ mod tests {
             err.to_string()
                 .contains("rustup target add aarch64-linux-android"),
             "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `build apk` rewrites `frust.embedding.dir` from cargo's answer before
+    /// the pipeline runs: the pipeline still fails at its own preflight (no
+    /// `rustup` is scripted), but the property already names the shell
+    /// crate's module directory resolved through the injected runner.
+    #[test]
+    fn build_apk_refreshes_the_embedding_wiring_before_the_pipeline() {
+        let dir = android_project_dir("apk-wiring");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"myapp\"\n").unwrap();
+        fs::write(
+            dir.join("android/gradle.properties"),
+            "android.useAndroidX=true\nfrust.embedding.dir=stale\n",
+        )
+        .unwrap();
+        let shell = dir.join("shells/frust-shell-android");
+        let module = shell.join("platform/android/frust-embedding");
+        fs::create_dir_all(&module).unwrap();
+        let metadata = format!(
+            r#"{{"packages":[{{"name":"frust-shell-android","manifest_path":"{}"}}]}}"#,
+            shell.join("Cargo.toml").display()
+        );
+        let runner = FakeProcessRunner::new().with(
+            format!(
+                "cargo metadata --format-version 1 --manifest-path {}",
+                dir.join("Cargo.toml").display()
+            ),
+            Output {
+                success: true,
+                stdout: metadata,
+                stderr: String::new(),
+            },
+        );
+        let target = BuildTarget::Apk {
+            build: BuildFlags::default(),
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(err.to_string().contains("rustup target add"), "{err}");
+        assert_eq!(
+            fs::read_to_string(dir.join("android/gradle.properties")).unwrap(),
+            format!(
+                "android.useAndroidX=true\nfrust.embedding.dir={}\n",
+                module.canonicalize().unwrap().display()
+            )
         );
         let _ = fs::remove_dir_all(&dir);
     }
