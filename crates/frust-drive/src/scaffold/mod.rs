@@ -791,6 +791,8 @@ mod tests {
         );
         // Xcode's per-user state, written whenever the project is opened.
         assert!(gitignore.contains("xcuserdata/"), "{gitignore}");
+        // The machine-local symlink `platform_wiring::sync` maintains.
+        assert!(gitignore.contains("ios/FrustEmbedding"), "{gitignore}");
         assert!(dest.join("assets/.gitkeep").exists());
         // The Android link-flags file: a dot-directory manifest entry
         // (`.cargo/config.toml`), carried verbatim so a scaffolded app

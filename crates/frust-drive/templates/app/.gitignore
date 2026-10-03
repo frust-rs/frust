@@ -51,3 +51,8 @@ android/local.properties
 # .swiftpm/) whenever the project is opened in Xcode; never shared config.
 xcuserdata/
 .swiftpm/
+
+# Machine-local symlink to the `frust-shell-ios` crate's Swift embedding
+# package, written by `frust create` and refreshed by `frust run`/`frust build`
+# (platform wiring sync); its target is wherever cargo resolved that crate.
+ios/FrustEmbedding

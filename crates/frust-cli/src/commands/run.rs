@@ -1178,10 +1178,11 @@ mod tests {
 
     /// `-d web` is checked before device discovery too — with no
     /// `Cargo.toml`/`frust.toml` fixture in the test process's own cwd (the
-    /// `frust-cli` crate root), `run_web` fails at its own `package_name`
-    /// read rather than ever reaching `devices::discover_all` (no responses
-    /// are registered for `adb`/`xcrun` here, so a discovery call would fail
-    /// loudly and differently).
+    /// `frust-cli` crate root), `run_web` fails at its embedder lookup (the
+    /// `frust-shell-web` package is located through `cargo metadata`, which
+    /// the fake runner has no answer for) rather than ever reaching
+    /// `devices::discover_all` (no responses are registered for `adb`/`xcrun`
+    /// here, so a discovery call would fail loudly and differently).
     #[test]
     fn run_in_with_device_web_skips_device_discovery() {
         let runner = FakeProcessRunner::new();
@@ -1195,7 +1196,7 @@ mod tests {
             RunHooks::fake(),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+        assert!(err.to_string().contains("frust-shell-web"), "{err}");
     }
 
     /// `-d web` is matched case-insensitively — `-d Web`/`-d WEB` reach the
@@ -1213,7 +1214,7 @@ mod tests {
             RunHooks::fake(),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+        assert!(err.to_string().contains("frust-shell-web"), "{err}");
     }
 
     /// `--watch -d web` is refused by the same pre-discovery bail every other
