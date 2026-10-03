@@ -30,7 +30,7 @@ log = { workspace = true }
 # crate's platform-plugin charter: **no other `frust-*` dependency** (see
 # `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
 # Plugin Conventions).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
 
 # QR decode engine for the platform-independent `barcode` module
 # (`src/barcode/engine.rs`) — unconditional, unlike the Android/Apple FFI

@@ -89,7 +89,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # re-export) for this crate's own JNI signature calls
 # (`KeyGenParameterSpec`/`Cipher`/`BiometricPrompt`).
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.0" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
 jni = { workspace = true }
 
 # Desktop secret store (storage only — biometric gate stays

@@ -22,7 +22,7 @@ readme = "README.md"
 
 [dependencies]
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.0", default-features = false }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.1", default-features = false }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 
@@ -37,9 +37,9 @@ default = ["bundled-fonts"]
 bundled-fonts = []
 
 [dev-dependencies]
-frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.0", features = ["test-support"] }
+frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.1", features = ["test-support"] }
 # Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
 # the facade does not re-export), and `test-support` turns on the
 # `PaintCtx::for_test` clock seam — the same dev-dependency shape every other
 # design-system plugin carries.
-frust-core = { path = "../../crates/frust-core", version = "0.5.0", features = ["test-support"] }
+frust-core = { path = "../../crates/frust-core", version = "0.5.1", features = ["test-support"] }
