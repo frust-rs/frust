@@ -71,7 +71,7 @@ shape `frust-drive::web_build::bundle::resolve_embedder`'s own test names
 this crate by: *"No app host page at all (`examples/web-gallery`'s shape: an
 `index.html` at the project root, not under `web/`) falls back to the
 framework embedder."* So `frust build web` **always** stages
-`platform/web/index.html` + `platform/web/frust_web.js` verbatim, named
+`crates/frust-shell-web/platform/web/index.html` + `crates/frust-shell-web/platform/web/frust_web.js` verbatim, named
 `pkg/app.js`/`pkg/app_bg.wasm` (`BINDGEN_OUT_NAME`) — never this directory's
 own `index.html`, whatever it says. That framework page already implements
 the height-report contract (see "Embedding" below), so this is the recipe
@@ -105,7 +105,7 @@ directory's own `index.html` imports by that fixed `--out-name`. Unlike the
 primary recipe, this one **does** serve this directory's own `index.html` —
 see "Serve" below for the one requirement that recipe adds (serving from the
 repository root, not this directory, so `index.html`'s
-`../../platform/web/frust_web.js` import resolves).
+`../../crates/frust-shell-web/platform/web/frust_web.js` import resolves).
 
 Host tool versions the sizes below were measured with: `wasm-bindgen-cli`
 0.2.128 (must equal the crate's own `=0.2.128` pin — see `Cargo.toml`),
@@ -238,7 +238,7 @@ python3 -m http.server 8931 --bind 127.0.0.1 --directory build/web
 ```
 
 **Manual recipe's `index.html`** — this directory's own page now imports
-`../../platform/web/frust_web.js` directly rather than carrying a copy (see
+`../../crates/frust-shell-web/platform/web/frust_web.js` directly rather than carrying a copy (see
 "Embedding" below for why), so the server root must be the **repository
 root**, not this directory, or that relative import 404s:
 
@@ -264,7 +264,7 @@ plus reporting the embedded page's own rendered height to a parent frame, so
 a preview host (g3-02's lazy iframe) can size itself without guessing.
 
 **The height contract is the framework's, not this crate's own code.**
-`platform/web/frust_web.js`'s `mount()` (read-only evidence for this task —
+`crates/frust-shell-web/platform/web/frust_web.js`'s `mount()` (read-only evidence for this task —
 outside `write_files`) posts `{type: "frust:height", height}` to
 `window.parent` via `postMessage`, on canvas-ready, after the wasm module's
 own `init()` resolves, and on every `window resize` event — see that file's
@@ -275,11 +275,11 @@ put this crate's own page on that contract, both inside this task's
 `write_files`, and both are now live:
 
 1. **`frust build web --release` stages the framework's own
-   `platform/web/index.html` verbatim**, because this crate has no `web/`
+   `crates/frust-shell-web/platform/web/index.html` verbatim**, because this crate has no `web/`
    host-page directory of its own (see "Primary recipe" above) — no code
    change needed at all; the framework page already calls `mount()`.
 2. **This directory's own `index.html` now imports `mount` from
-   `../../platform/web/frust_web.js` directly**, replacing its former
+   `../../crates/frust-shell-web/platform/web/frust_web.js` directly**, replacing its former
    hand-rolled canvas-binding/resize script (the "Milestone 6" fix below) —
    the general version of the identical technique, plus the height-report
    calls that script never made. Chosen over copying `frust_web.js` into
@@ -514,7 +514,7 @@ is a `frust-shell-web` fact this app's `write_files` cannot fix at the
 source; see "Recommended follow-up" below.
 
 **Update (g3-01):** this page's own `MutationObserver` script described
-above has since been removed — `platform/web/frust_web.js`'s `mount()` now
+above has since been removed — `crates/frust-shell-web/platform/web/frust_web.js`'s `mount()` now
 implements the identical fix, generalized from a fixed `100vw`/`100vh`
 target to an arbitrary host element's own box (see "Embedding" above). The
 finding and its root-cause diagnosis above remain accurate history; only
@@ -809,7 +809,7 @@ every load.
 |---|---|
 | `Cargo.toml` | Standalone workspace manifest: the `frust` facade + `frust-gallery` path deps, the `wasm32`-gated `wasm-bindgen`/`web-sys`/`js-sys`/`wasm-bindgen-futures`/`frust-shell-web` rows, and this crate's own `[profile.release]`. |
 | `src/main.rs` | The app. `fn main() {}` (required for a `[[bin]]` target; the real entry is `wasm_bindgen(start)`) plus a `wasm32`-only `mod app`: `AppState`, the font-registration/case-theme-embed-resolution/log-level startup sequence (`resolve_case_from_query`, `resolve_theme_override_from_query`, `resolve_embed_from_query`), `label`/`nav_row` (the font-defect workaround, now largely redundant — see "Text on `wasm32`" below), `CaseHost` (the `Component` state-boundary bridge into a `()`-state `Case`), `case_view`/`embedded_case_view`/`index_view`, and the `frust::web_app!` invocation. |
-| `index.html` | Host page for the manual recipe. No `<canvas>` of its own (the shell creates one) — carries the `?arm=webgl` WebGPU-removal script and the load-failure `<pre id="log">` mirror; canvas-host binding, resize/DPR sync, and the iframe height-report contract are now `platform/web/frust_web.js`'s `mount()` (imported directly, see "Embedding" above), not a page-local script. Not read at all by `frust build web --release`, which stages the framework's own page instead (see "Primary recipe" above). |
+| `index.html` | Host page for the manual recipe. No `<canvas>` of its own (the shell creates one) — carries the `?arm=webgl` WebGPU-removal script and the load-failure `<pre id="log">` mirror; canvas-host binding, resize/DPR sync, and the iframe height-report contract are now `crates/frust-shell-web/platform/web/frust_web.js`'s `mount()` (imported directly, see "Embedding" above), not a page-local script. Not read at all by `frust build web --release`, which stages the framework's own page instead (see "Primary recipe" above). |
 | `README.md` | This file. |
 | `pkg/` | `wasm-bindgen`/`wasm-opt` output (manual recipe). Generated; **not committed** (`.gitignore`-covered — see "Serve" above). |
 | `target/` | Cargo build output. Generated; **not committed** (`.gitignore`-covered). |
