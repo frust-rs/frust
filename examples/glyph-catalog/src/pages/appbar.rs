@@ -462,7 +462,7 @@ fn collapse_meta_row() -> AnyView<CatalogState> {
                 frust_glyph::badge("connected", BadgeVariant::Success).dot(true)
             )),
             gap(8.0),
-            inflexible(text("100.71.31.57:50051 · 42ms").size(11.0).color(muted())),
+            inflexible(text("203.0.113.57:50051 · 42ms").size(11.0).color(muted())),
         ],
     )
     .cross_axis(CrossAxisAlignment::Center))

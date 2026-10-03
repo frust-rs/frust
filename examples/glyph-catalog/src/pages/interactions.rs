@@ -531,7 +531,7 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
             inflexible(SizedBox(Some(6.0), None)),
             inflexible(badge("connected", BadgeVariant::Success).dot(true)),
             inflexible(SizedBox(Some(10.0), None)),
-            flexible(1, text("100.71.31.57:50051 · zellij 0.44.3").size(11.5)),
+            flexible(1, text("203.0.113.57:50051 · zellij 0.44.3").size(11.5)),
             inflexible(
                 text(format!("{:.0}ms", latency))
                     .size(12.0)
@@ -1387,7 +1387,7 @@ fn demo_copy_burst() -> FlexChild<CatalogState> {
         FlexView::new(
             Axis::Horizontal,
             vec![
-                flexible(1, text("100.71.31.57:50051").size(11.5)),
+                flexible(1, text("203.0.113.57:50051").size(11.5)),
                 inflexible(text("⧉").size(13.0).color(muted())),
             ],
         )
