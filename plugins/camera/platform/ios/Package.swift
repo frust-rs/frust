@@ -3,7 +3,7 @@ import PackageDescription
 
 // `frust-camera`'s iOS Swift package — the FIRST plugin Swift package
 // (`docs/ARCHITECTURE.md`'s Module Structure). Mirrors
-// `platform/ios/FrustEmbedding/Package.swift`'s shape exactly: one
+// `crates/frust-shell-ios/platform/ios/FrustEmbedding/Package.swift`'s shape exactly: one
 // header-only C target declaring an `extern "C"` surface resolved at the
 // consuming app's final link, plus a Swift target consuming it.
 //
@@ -38,9 +38,10 @@ let package = Package(
     ],
     dependencies: [
         // Relative to this manifest: plugins/camera/platform/ios/ ->
-        // platform/ios/FrustEmbedding (repo-root-relative
-        // platform/ios/FrustEmbedding, four levels up from this file).
-        .package(path: "../../../../platform/ios/FrustEmbedding")
+        // crates/frust-shell-ios/platform/ios/FrustEmbedding (the repo root is
+        // four levels up from this file; the embedding ships inside the
+        // frust-shell-ios crate).
+        .package(path: "../../../../crates/frust-shell-ios/platform/ios/FrustEmbedding")
     ],
     targets: [
         .target(name: "CFrustCamera"),

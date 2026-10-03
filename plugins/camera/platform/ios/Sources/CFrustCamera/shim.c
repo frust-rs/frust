@@ -1,5 +1,5 @@
 // DO NOT DELETE — this file is not dead code, it is a build requirement.
-// Mirrors `platform/ios/FrustEmbedding/Sources/CFrustFFI/shim.c` exactly,
+// Mirrors `crates/frust-shell-ios/platform/ios/FrustEmbedding/Sources/CFrustFFI/shim.c` exactly,
 // for the same reason: `CFrustCamera` is a header-only C target (it declares
 // the `frust_camera_*` FFI surface and defines nothing), but Xcode's SwiftPM
 // integration unconditionally expects a `<CTarget>.o` product for every
