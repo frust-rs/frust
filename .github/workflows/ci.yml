@@ -22,10 +22,18 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A debug build of every workspace test binary with full debug info does not
+  # fit a hosted runner's disk: the linker died with SIGBUS while writing its
+  # output. Nothing here runs a debugger, so CI builds without debug info and
+  # without incremental state. Panic locations and symbol names are unaffected.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
@@ -34,6 +42,7 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
@@ -57,6 +66,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # A runner that runs out of disk stops responding instead of failing; the
+    # default limit is six hours.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
@@ -78,11 +90,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --workspace --locked
+      - name: Disk before the build
+        run: df -h /
+      # --no-fail-fast: run every test binary and report every failure, not
+      # only the first binary that fails.
+      - run: cargo test --workspace --locked --no-fail-fast
+      - name: Disk after the build
+        if: always()
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
 
   standalone:
     name: standalone (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +166,7 @@ jobs:
 
   hygiene:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -161,6 +184,7 @@ jobs:
     if: always()
     needs: [fmt, clippy, test, standalone, hygiene]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every needed job to have succeeded
         env:

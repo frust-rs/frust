@@ -1,7 +1,8 @@
 //! Polish integration tests: swipe-to-reply opens a message's thread,
 //! a feed avatar tap opens the author's profile, an empty DM shows the
-//! empty-conversation state, and the workspace drawer's entrance self-heals
-//! across a disposed reactive owner (a previously reported flake).
+//! empty-conversation state, the workspace drawer's entrance self-heals
+//! across a disposed reactive owner (a previously reported flake), and the
+//! drawer's entrance ticker only ever writes from the UI thread's pump.
 //!
 //! Like `tests/actions.rs`/`tests/feed.rs` these drive the whole mounted
 //! [`HuddleApp`] through its real navigator and assert black-box against
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use frust::{AnyView, Component, GetUntracked};
 use frust_core::{FrameTime, PointerPhase, RenderRoot};
-use frust_reactive::ReactiveRuntime;
+use frust_reactive::{ReactiveRuntime, TrackedScope};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
@@ -298,5 +299,54 @@ fn drawer_entrance_survives_a_disposed_owner() {
         );
 
         drop(ambient);
+    }
+}
+
+/// The workspace drawer's entrance ticker runs on the UI thread's local task
+/// queue, never on the background runtime. A background `set` racing this
+/// thread's `get` made `reactive_graph` report the lost `RwLock::try_read` as a
+/// disposed signal and failed `tests/matrix_smoke.rs` in CI. Deterministic
+/// witness: the rebuild runs under a [`TrackedScope`] the way a shell's does,
+/// so the drawer's progress read subscribes the scope and any write to the
+/// entrance signal dirties it. With the local queue never pumped, nothing may
+/// write however much wall-clock time passes — a background ticker would have
+/// run the whole 220 ms animation on its own. Pumping then lets the ticker
+/// write.
+#[test]
+fn drawer_entrance_only_advances_on_the_ui_thread_pump() {
+    let _g = serial();
+    let _ambient = setup();
+    let runtime = ReactiveRuntime::get().expect("setup() installed the reactive runtime");
+    let scope = TrackedScope::new();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = HuddleApp.init();
+    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+
+    scope.track(|| root.rebuild(&mut logic, &mut state));
+    state.nav.router().push("/workspace-switcher");
+    // Builds the drawer page: its tracked progress read subscribes the scope
+    // to the entrance signal, and `entrance_progress` spawns the ticker.
+    scope.track(|| root.rebuild(&mut logic, &mut state));
+
+    // Longer than the whole entrance animation, and no pump in between.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !scope.is_dirty(),
+        "a tracked signal was written while the UI thread's local queue was never pumped",
+    );
+
+    // Pumped, the ticker runs between pumps and its writes dirty the scope.
+    let deadline = Instant::now() + LOAD_WAIT;
+    loop {
+        runtime.pump_local();
+        if scope.is_dirty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pumped entrance ticker never wrote the entrance signal"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
 }

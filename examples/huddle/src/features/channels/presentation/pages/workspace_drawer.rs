@@ -130,15 +130,24 @@ thread_local! {
     static ENTRANCE: Cell<Option<RwSignal<f64>>> = const { Cell::new(None) };
 }
 
-/// The `0.0..=1.0` entrance progress, animated once per process by a
-/// background timer loop — the same `frust::spawn` + sleep + signal-write
-/// pattern `crate::ui::toast`'s auto-dismiss timer already uses (see its
-/// module docs), reused here because a plain page-builder function (this
-/// one) has no per-frame `PaintCtx`/`request_frame` hook to drive an
+/// The `0.0..=1.0` entrance progress, animated once per process by a timer
+/// loop (sleep + signal write), used because a plain page-builder function
+/// (this one) has no per-frame `PaintCtx`/`request_frame` hook to drive an
 /// [`AnimationController`] the way a retained framework `Widget` would (see
 /// `docs/ARCHITECTURE.md`'s Frame pipeline) — that hook only exists inside
 /// `frust-core`/`-widgets`, which this crate's production code doesn't
 /// depend on (see this crate's `Cargo.toml`).
+///
+/// The loop runs on the UI thread's local task queue (`frust::spawn_local`),
+/// not on the background runtime (`frust::spawn`): each tick is polled by the
+/// shell's `pump_local` between frames, so its `set` never runs concurrently
+/// with this page's `get` below. That matters because `reactive_graph` reads a
+/// signal through `RwLock::try_read` and reports a lost race against a writer
+/// on another thread as "already been disposed" — which is how
+/// `tests/matrix_smoke.rs` failed in CI with the ticker on a background thread.
+/// The timer still fires on the background runtime (`pump_local` enters its
+/// context), and a local task's re-wake fires the frame waker, so the
+/// animation keeps advancing frame to frame.
 fn entrance_progress() -> RwSignal<f64> {
     ENTRANCE.with(|cell| {
         if let Some(sig) = cell.get()
@@ -151,7 +160,7 @@ fn entrance_progress() -> RwSignal<f64> {
         let sig = RwSignal::new(0.0);
         cell.set(Some(sig));
 
-        frust::spawn(async move {
+        frust::spawn_local(async move {
             let mut controller =
                 AnimationController::new(ENTRANCE_DURATION).with_curve(Curve::EaseOut);
             controller.animate_to(1.0);
