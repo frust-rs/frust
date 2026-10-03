@@ -1,9 +1,2 @@
 org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
 android.useAndroidX=true
-
-# Absolute path of the Android embedding module (`settings.gradle.kts`
-# includes it as `:frust-embedding`) inside the `frust-shell-android` crate
-# cargo resolves for this project. Written by `frust create`, and refreshed by
-# `frust run` / `frust build` whenever that crate moves (a `cargo update`, a
-# different checkout) — not a value to edit by hand.
-frust.embedding.dir=unresolved--run-frust-build-or-frust-run-in-the-project-directory

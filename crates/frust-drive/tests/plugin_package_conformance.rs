@@ -87,14 +87,17 @@
 //! `frust_drive::plugin::add_plugin` wires a plugin's Gradle module and Swift
 //! package from wherever cargo locates the plugin's own crate — a checkout's
 //! `plugins/<dir>` under a `frust` path dependency, the unpacked crates.io
-//! release under a version. The `plugin_package_location` cases below hold
-//! both halves of that to the real tree: every platform directory the
-//! registry names exists inside the package its base Cargo dependency adds
-//! (what a located crate has to carry), and the public `add_plugin_with`
-//! seam writes the right Cargo line and platform paths for a project
-//! scaffolded in each mode — through a stubbed locator, so no fixture runs
-//! cargo. They need the `test-util` stub, which the packaged crate (no self
-//! dev-dependency) does not build, so they compile only alongside it.
+//! release under a version — into the project's machine-local wiring
+//! (`android/local.properties`, an `ios/<Package>` symlink), never into a
+//! tracked file. The `plugin_package_location` cases below hold both halves
+//! of that to the real tree: every platform directory the registry names
+//! exists inside the package its base Cargo dependency adds (what a located
+//! crate has to carry), and the public `add_plugin_with` seam writes the
+//! right Cargo line, location-free tracked edits and machine-local wiring for
+//! a project scaffolded in each mode — through a stubbed locator, so no
+//! fixture runs cargo. They need the `test-util` stub, which the packaged
+//! crate (no self dev-dependency) does not build, so they compile only
+//! alongside it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -316,8 +319,9 @@ fn scanner_rejects_a_subpackage_as_bare_dev_frust() {
 #[cfg(feature = "test-util")]
 mod plugin_package_location {
     use super::{rel, workspace_root};
-    use frust_drive::host_path::to_portable_string;
+    use frust_drive::host_path::{canonicalize_simplified, to_portable_string};
     use frust_drive::packages::StubLocator;
+    use frust_drive::platform_wiring;
     use frust_drive::plugin::{AddOutcome, Contribution, add_plugin_with, known_plugins};
     use frust_drive::scaffold::{FrustDependency, TemplateContext, generate};
     use std::fs;
@@ -333,7 +337,38 @@ mod plugin_package_location {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        canonicalize_simplified(&dir).unwrap()
+    }
+
+    /// `package_dir` with the iap crate's two native directories planted.
+    fn plant_iap(package_dir: &Path) -> PathBuf {
+        fs::create_dir_all(package_dir.join("platform/android")).unwrap();
+        fs::create_dir_all(package_dir.join("platform/ios/FrustIap")).unwrap();
+        canonicalize_simplified(package_dir).unwrap()
+    }
+
+    /// The value of `key` in the project's `android/local.properties`.
+    fn local_property(app: &Path, key: &str) -> Option<String> {
+        read(&app.join(platform_wiring::LOCAL_PROPERTIES))
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")).map(str::to_string))
+    }
+
+    /// Every file under `dir` (symlinks not followed, `local.properties`
+    /// skipped — the machine-local half) whose text contains `needle`.
+    fn tracked_files_naming(dir: &Path, needle: &str, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.file_type().is_symlink() || path.ends_with("android/local.properties") {
+                continue;
+            }
+            if meta.is_dir() {
+                tracked_files_naming(&path, needle, out);
+            } else if String::from_utf8_lossy(&fs::read(&path).unwrap()).contains(needle) {
+                out.push(path);
+            }
+        }
     }
 
     /// A freshly scaffolded app under `<scratch>/app` depending on frust as
@@ -424,8 +459,9 @@ mod plugin_package_location {
     }
 
     /// Registry mode, the `frust create` default: the plugin dependency takes
-    /// the facade's version, and the Gradle module and Swift package point
-    /// into the crate cargo unpacked.
+    /// the facade's version; the Gradle module and Swift package are named in
+    /// the tracked files by key and package name only, and the machine-local
+    /// key and symlink point into the crate cargo unpacked.
     #[test]
     fn registry_mode_add_writes_a_version_and_wires_the_unpacked_crate() {
         let (scratch, app) = scaffolded(
@@ -434,7 +470,7 @@ mod plugin_package_location {
                 version: "0.5.0".into(),
             },
         );
-        let unpacked = scratch.join("registry-src/frust-iap-0.5.0");
+        let unpacked = plant_iap(&scratch.join("registry-src/frust-iap-0.5.0"));
         let locator = StubLocator::new().with("frust-iap", unpacked.clone());
 
         let report = add_plugin_with(&locator, &app, "iap", &[]).expect("add iap");
@@ -449,18 +485,32 @@ mod plugin_package_location {
         let cargo = read(&app.join("Cargo.toml"));
         assert!(cargo.contains("frust-iap = \"0.5.0\""), "{cargo}");
         let settings = read(&app.join("android/settings.gradle.kts"));
-        let module = to_portable_string(&unpacked.join("platform/android"));
         assert!(
-            settings.contains(&format!(
-                "project(\":frust-iap\").projectDir = file(\"{module}\")"
-            )),
+            settings.contains(
+                "project(\":frust-iap\").projectDir = frustLocalDir(\"frust.plugin.frust-iap.dir\")"
+            ),
             "{settings}"
         );
         let pbxproj = read(&app.join("ios/Runner.xcodeproj/project.pbxproj"));
-        let package = to_portable_string(&unpacked.join("platform/ios/FrustIap"));
         assert!(
-            pbxproj.contains(&format!("relativePath = \"{package}\";")),
+            pbxproj.contains("relativePath = \"FrustIap\";"),
             "{pbxproj}"
+        );
+
+        assert_eq!(
+            local_property(&app, "frust.plugin.frust-iap.dir"),
+            Some(to_portable_string(&unpacked.join("platform/android")))
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(app.join("ios/FrustIap")).unwrap(),
+            unpacked.join("platform/ios/FrustIap")
+        );
+        let mut naming = Vec::new();
+        tracked_files_naming(&app, &to_portable_string(&scratch), &mut naming);
+        assert!(
+            naming.is_empty(),
+            "tracked files name the cache: {naming:?}"
         );
         let _ = fs::remove_dir_all(&scratch);
     }
@@ -490,15 +540,15 @@ mod plugin_package_location {
     }
 
     /// Path mode keeps its Cargo line — a path into the same checkout as the
-    /// `frust` dependency — while the platform files come from the located
-    /// package, as an absolute path.
+    /// `frust` dependency — while the machine-local wiring follows the located
+    /// package.
     #[test]
     fn path_mode_add_keeps_its_path_line_and_wires_the_located_package() {
         let (scratch, app) = scaffolded(
             "path",
             FrustDependency::Path("../checkout/crates/frust".into()),
         );
-        let located = scratch.join("checkout/plugins/iap");
+        let located = plant_iap(&scratch.join("checkout/plugins/iap"));
         let locator = StubLocator::new().with("frust-iap", located.clone());
 
         add_plugin_with(&locator, &app, "iap", &[]).expect("add iap");
@@ -508,10 +558,13 @@ mod plugin_package_location {
             cargo.contains("frust-iap = { path = \"../checkout/crates/frust/../../plugins/iap\" }"),
             "{cargo}"
         );
+        assert_eq!(
+            local_property(&app, "frust.plugin.frust-iap.dir"),
+            Some(to_portable_string(&located.join("platform/android")))
+        );
         let settings = read(&app.join("android/settings.gradle.kts"));
-        let module = to_portable_string(&located.join("platform/android"));
         assert!(
-            settings.contains(&format!("file(\"{module}\")")),
+            !settings.contains(&to_portable_string(&located)),
             "{settings}"
         );
         let _ = fs::remove_dir_all(&scratch);

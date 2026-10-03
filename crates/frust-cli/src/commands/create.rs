@@ -131,10 +131,12 @@ fn run_with(args: CreateArgs, sync: WireFn<'_>) -> Result<u8> {
 }
 
 /// Points the generated `android/`/`ios/` projects at the embedding modules
-/// of the shell crates cargo resolves, printing what was written. Never fails
-/// `create`: the project is already on disk, and `frust run`/`frust build`
-/// redo this step before every Android or iOS build — so a skipped
-/// (`--no-sync`) or failed wiring is a note naming that later path.
+/// of the shell crates cargo resolves — the machine-local
+/// `android/local.properties` key and `ios/FrustEmbedding` symlink — printing
+/// what was written. Never fails `create`: the project is already on disk,
+/// and `frust run`/`frust build` redo this step before every Android or iOS
+/// build — so a skipped (`--no-sync`) or failed wiring is a note naming that
+/// later path (a Gradle run before it fails naming the same commands).
 fn wire_platforms(dest: &Path, no_sync: bool, sync: WireFn<'_>) {
     const LATER: &str = "`frust run` / `frust build` for Android or iOS wire them before invoking \
                          Gradle or Xcode";
@@ -487,9 +489,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
     }
 
-    /// Without `--no-sync`, `create` wires what it generated: the property
-    /// gets the resolved module directory and `ios/FrustEmbedding` links to
-    /// the resolved package — here answered by a stub standing in for cargo.
+    /// Without `--no-sync`, `create` wires what it generated: the
+    /// machine-local `local.properties` key gets the resolved module
+    /// directory, `ios/FrustEmbedding` links to the resolved package — here
+    /// answered by a stub standing in for cargo — and the tracked
+    /// `gradle.properties` names no path.
     #[cfg(unix)]
     #[test]
     fn run_wires_the_generated_platform_projects() {
@@ -518,7 +522,7 @@ mod tests {
         run_with(args, &|dir| platform_wiring::sync_with(&stub, dir)).unwrap();
 
         let properties =
-            std::fs::read_to_string(dest.join(platform_wiring::GRADLE_PROPERTIES)).unwrap();
+            std::fs::read_to_string(dest.join(platform_wiring::LOCAL_PROPERTIES)).unwrap();
         assert!(
             properties.contains(&format!(
                 "frust.embedding.dir={}\n",
@@ -528,6 +532,12 @@ mod tests {
                     .display()
             )),
             "{properties}"
+        );
+        let gradle_properties =
+            std::fs::read_to_string(dest.join(platform_wiring::GRADLE_PROPERTIES)).unwrap();
+        assert!(
+            !gradle_properties.contains(platform_wiring::EMBEDDING_DIR_KEY),
+            "{gradle_properties}"
         );
         assert_eq!(
             std::fs::read_link(dest.join(platform_wiring::IOS_EMBEDDING_LINK)).unwrap(),
@@ -539,8 +549,9 @@ mod tests {
     }
 
     /// `--no-sync` never reaches the wiring step, and a wiring failure
-    /// (offline, say) still leaves a successful `create` with the
-    /// placeholder in place for `run`/`build` to replace.
+    /// (offline, say) still leaves a successful `create` — with no
+    /// `local.properties` yet, so Gradle fails naming `frust run`/`frust
+    /// build` until one of them writes it.
     #[test]
     fn no_sync_skips_wiring_and_a_failed_wiring_does_not_fail_create() {
         let calls = std::cell::Cell::new(0);
@@ -562,11 +573,12 @@ mod tests {
         args.platforms.no_sync = false;
         assert_eq!(run_with(args, &failing).unwrap(), 0);
         assert_eq!(calls.get(), 1);
-        let properties =
-            std::fs::read_to_string(offline.join(platform_wiring::GRADLE_PROPERTIES)).unwrap();
+        assert!(!offline.join(platform_wiring::LOCAL_PROPERTIES).exists());
+        let settings =
+            std::fs::read_to_string(offline.join("android/settings.gradle.kts")).unwrap();
         assert!(
-            properties.contains(platform_wiring::UNRESOLVED_EMBEDDING_DIR),
-            "{properties}"
+            settings.contains("`frust run` or `frust build`"),
+            "the missing-key failure names the fix:\n{settings}"
         );
 
         // A scaffold with neither Android nor iOS has nothing to wire.

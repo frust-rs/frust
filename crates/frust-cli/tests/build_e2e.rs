@@ -64,8 +64,10 @@ fn workspace_frust_path() -> PathBuf {
 }
 
 /// Asserts the path-mode wiring `frust create --frust-path` wrote: the
-/// generated `android/gradle.properties` `frust.embedding.dir` and the
-/// `ios/FrustEmbedding` symlink both point into this checkout's shell crates.
+/// machine-local `android/local.properties` `frust.embedding.dir` and the
+/// `ios/FrustEmbedding` symlink both point into this checkout's shell crates,
+/// while the tracked `gradle.properties` and `settings.gradle.kts` name no
+/// path at all.
 fn assert_path_mode_wiring(dest: &Path) {
     let checkout = workspace_frust_path()
         .join("../..")
@@ -74,12 +76,23 @@ fn assert_path_mode_wiring(dest: &Path) {
     let android = checkout.join("crates/frust-shell-android/platform/android/frust-embedding");
     let ios = checkout.join("crates/frust-shell-ios/platform/ios/FrustEmbedding");
 
-    let properties = std::fs::read_to_string(dest.join("android/gradle.properties"))
-        .expect("reading android/gradle.properties");
+    let properties = std::fs::read_to_string(dest.join("android/local.properties"))
+        .expect("reading android/local.properties");
     let value = properties
         .lines()
         .find_map(|line| line.strip_prefix("frust.embedding.dir="))
         .unwrap_or_else(|| panic!("no frust.embedding.dir in:\n{properties}"));
+    for tracked in ["android/gradle.properties", "android/settings.gradle.kts"] {
+        let text = std::fs::read_to_string(dest.join(tracked)).expect(tracked);
+        assert!(
+            !text.contains(&checkout.display().to_string()),
+            "{tracked} names the checkout:\n{text}"
+        );
+        assert!(
+            !text.contains("frust.embedding.dir=") && !text.contains("gradleProperty"),
+            "{tracked} still carries the embedding key:\n{text}"
+        );
+    }
     assert_eq!(
         Path::new(value)
             .canonicalize()

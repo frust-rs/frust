@@ -65,15 +65,41 @@ fn create_ios_project_is_parseable() {
         xcodeproj.join("project.pbxproj").display()
     );
 
-    // The local package reference and the symlink it resolves through.
+    // The local package reference names the package, and the machine-local
+    // symlink it resolves through points into this checkout's shell crate —
+    // no tracked file carries the location.
     let pbxproj = std::fs::read_to_string(xcodeproj.join("project.pbxproj")).unwrap();
     assert!(
         pbxproj.contains("relativePath = \"FrustEmbedding\";"),
         "pbxproj lacks the FrustEmbedding local package reference"
     );
+    let checkout = frust_path
+        .join("../..")
+        .canonicalize()
+        .expect("the checkout root must exist");
     assert!(
-        dest.join("ios/FrustEmbedding").is_symlink(),
+        !pbxproj.contains(&checkout.display().to_string()),
+        "the pbxproj names the checkout"
+    );
+    let link = dest.join("ios/FrustEmbedding");
+    assert!(
+        link.is_symlink(),
         "expected ios/FrustEmbedding to be a symlink"
+    );
+    assert_eq!(
+        std::fs::read_link(&link)
+            .unwrap()
+            .canonicalize()
+            .expect("the symlink target exists"),
+        checkout
+            .join("crates/frust-shell-ios/platform/ios/FrustEmbedding")
+            .canonicalize()
+            .expect("the iOS embedding exists"),
+    );
+    let gitignore = std::fs::read_to_string(dest.join(".gitignore")).unwrap();
+    assert!(
+        gitignore.lines().any(|line| line == "/ios/Frust*"),
+        "the symlink must be gitignored:\n{gitignore}"
     );
 
     // `xcodebuild -list` parses the pbxproj and enumerates targets/schemes
