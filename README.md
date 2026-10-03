@@ -122,29 +122,19 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 
 ## Quickstart
 
-Prerequisites: Rust 1.88+ (edition 2024). Nothing is published to crates.io yet, so the `frust`
-binary is built from a checkout rather than `cargo install`ed by name — see
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for platform toolchains (Android/iOS/Web) beyond the
-desktop preview.
+Prerequisites: Rust 1.88+ (edition 2024). See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for
+platform toolchains (Android/iOS/Web) beyond the desktop preview.
 
 ```bash
-# Clone the framework and build the `frust` CLI from it
-git clone https://github.com/frust-rs/frust
-cd frust
-cargo install --path crates/frust-cli
-
-# Bare `frust` opens the terminal workbench: the toolchain wizard gets this
-# machine building Frust apps, then the workbench scaffolds and runs one
-frust
-```
-
-The workbench's actions map to CLI commands you can also run directly:
-
-```bash
+cargo install frust-cli
 frust create my_app && cd my_app   # scaffold a new app
 frust run                          # build/install/launch on a connected device/emulator/simulator
-frust doctor                       # what the toolchain wizard checks, non-interactively
 ```
+
+Bare `frust` opens the terminal workbench: the toolchain wizard gets this machine building Frust
+apps, then the workbench scaffolds and runs one. `frust doctor` runs the wizard's checks
+non-interactively. Contributors can build a generated project against a checkout of this repository
+with `frust create my_app --frust-path <checkout>`.
 
 ## Hello, Frust
 

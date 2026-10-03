@@ -26,7 +26,7 @@ Add the dependency:
 frust = { package = "frust-ui", version = "0.5" }
 ```
 
-The package is published as `frust-ui` and imported as `frust` because the crates.io name `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
+The package is named `frust-ui` and imported as `frust`, because the crates.io name `frust` belongs to another project (<https://github.com/lloydmeta/frunk/issues/258>).
 
 A counter-style component, as shown in the crate-level documentation:
 
@@ -56,8 +56,10 @@ Install the command-line tool and create a project:
 
 ```sh
 cargo install frust-cli
-frust create
+frust create my_app
 ```
+
+`frust create` writes the dependency above into the new project.
 
 Design systems ship as separate plugin crates that an application depends on beside `frust`; the
 facade itself carries only the baseline widget set.
