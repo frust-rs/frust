@@ -367,7 +367,7 @@ parity across idioms.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-native-widgets = { path = "<frust>/plugins/native-widgets" }  # crates.io later
+frust-native-widgets = "0.5"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

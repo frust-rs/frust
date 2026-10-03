@@ -34,7 +34,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-iap = { path = "<frust>/plugins/iap" }  # crates.io later
+frust-iap = "0.5"
 serde_json = "1"
 ```
 

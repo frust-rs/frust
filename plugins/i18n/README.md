@@ -71,7 +71,7 @@ and formatting are pure Rust, and `src/detect`'s platform reads (Android JNI `Lo
 
    ```toml
    # app Cargo.toml — [dependencies]
-   frust-i18n = { path = "<frust>/plugins/i18n" }  # crates.io later
+   frust-i18n = "0.5"
    ```
 
    `<frust>` is the path to your frust checkout — derive it from the `frust = { path = "…" }`
