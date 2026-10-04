@@ -95,7 +95,7 @@ use frust::{
     Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
     EdgeInsets, FlexView, GestureDetector, Get, GetUntracked, ListView, NavigatorController,
     Padding, RwSignal, Set, SizedBox, Stack, Theme, Update, any, flexible, hero, icon, icons,
-    inflexible, kurbo::Size, safe_area, text, text_input, use_context,
+    inflexible, kurbo::Size, text, text_input, use_context,
 };
 use frust_cupertino::cupertino_activity_indicator;
 use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
@@ -385,12 +385,9 @@ fn feed_app_bar(
     let back = frust::GestureDetector(icon(icons::ARROW_BACK).size(24.0))
         .on_tap(move |_st: &mut HuddleState| navigator.pop());
 
-    // Clears the top status-bar/cutout inset — see `shell::bottom_bar`'s doc
-    // for the matching known v1 background-extension gap.
-    any(safe_area(
-        app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))),
-    )
-    .bottom(false))
+    // Docked at the window top: the bar insets itself (top + sides) and
+    // paints its container through the status-bar band.
+    any(app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))))
 }
 
 /// One row of the virtualized feed list — the two ephemeral singleton rows
