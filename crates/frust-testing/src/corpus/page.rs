@@ -254,6 +254,7 @@ fn material_home() -> CorpusCase {
             .cross_axis(CrossAxisAlignment::Stretch);
             any(
                 frust_widgets::scaffold::<(), _>(Padding(EdgeInsets::all(GUTTER), content))
+                    // Scaffold app_bar is docked at the window top by design; consumes insets as default
                     .app_bar(any(frust_material::app_bar::<()>("")))
                     .bottom_bar(any(frust_material::navigation_bar::<(), _>(
                         vec![
