@@ -102,21 +102,21 @@ fn mounted_app() -> (Owner, AppRoot, (), TextContext) {
     (owner, root, (), TextContext::new())
 }
 
-fn app_logic(_s: &mut ()) -> AnyView<()> {
+fn build(_s: &mut ()) -> AnyView<()> {
     any(component(ShadertoyApp))
 }
 
 #[test]
 fn running_screen_paints_exactly_one_shader_quad_and_hud_text() {
     let (_owner, mut root, mut state, mut tcx) = mounted_app();
-    let (menu, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 0);
+    let (menu, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 0);
     assert_eq!(menu.quads.len(), 0, "the menu never paints a shader quad");
     assert_eq!(menu.rounded.len(), 4, "one button per registered shader");
 
     // Tap the first shader button to enter the running screen.
     tap(&mut root, &mut state, menu.rounded[0]);
 
-    let (running, needs_frame) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 16);
+    let (running, needs_frame) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 16);
     assert_eq!(
         running.quads.len(),
         1,
@@ -138,14 +138,14 @@ fn running_screen_paints_exactly_one_shader_quad_and_hud_text() {
 #[test]
 fn needs_frame_is_true_while_running_and_false_on_menu() {
     let (_owner, mut root, mut state, mut tcx) = mounted_app();
-    let (menu, menu_needs_frame) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 0);
+    let (menu, menu_needs_frame) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 0);
     assert!(
         !menu_needs_frame,
         "the static menu never requests another frame"
     );
 
     tap(&mut root, &mut state, menu.rounded[0]);
-    let (_, running_needs_frame) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 16);
+    let (_, running_needs_frame) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 16);
     assert!(
         running_needs_frame,
         "a running shader continuously requests frames"
@@ -155,18 +155,18 @@ fn needs_frame_is_true_while_running_and_false_on_menu() {
 #[test]
 fn switching_shaders_swaps_the_recorded_program_id() {
     let (_owner, mut root, mut state, mut tcx) = mounted_app();
-    let (menu, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 0);
+    let (menu, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 0);
     assert_eq!(menu.rounded.len(), 4, "four shaders are registered");
 
     // Run the first shader.
     tap(&mut root, &mut state, menu.rounded[0]);
-    let (first_run, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 16);
+    let (first_run, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 16);
     let first_id = first_run.quads[0].0;
 
     // Back to the menu, then run the second shader.
     let back_button = first_run.rounded[0];
     tap(&mut root, &mut state, back_button);
-    let (back_to_menu, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 32);
+    let (back_to_menu, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 32);
     assert_eq!(
         back_to_menu.quads.len(),
         0,
@@ -174,7 +174,7 @@ fn switching_shaders_swaps_the_recorded_program_id() {
     );
 
     tap(&mut root, &mut state, back_to_menu.rounded[1]);
-    let (second_run, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 48);
+    let (second_run, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 48);
     let second_id = second_run.quads[0].0;
 
     assert_ne!(
@@ -186,14 +186,14 @@ fn switching_shaders_swaps_the_recorded_program_id() {
 #[test]
 fn back_button_returns_to_menu_with_no_quad_recorded() {
     let (_owner, mut root, mut state, mut tcx) = mounted_app();
-    let (menu, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 0);
+    let (menu, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 0);
     tap(&mut root, &mut state, menu.rounded[0]);
-    let (running, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 16);
+    let (running, _) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 16);
     assert_eq!(running.quads.len(), 1);
 
     let back_button = running.rounded[0];
     tap(&mut root, &mut state, back_button);
-    let (back_to_menu, needs_frame) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 32);
+    let (back_to_menu, needs_frame) = frame_at(&mut root, &mut build, &mut state, &mut tcx, 32);
     assert_eq!(back_to_menu.quads.len(), 0, "back returns to the menu");
     assert_eq!(
         back_to_menu.rounded.len(),
