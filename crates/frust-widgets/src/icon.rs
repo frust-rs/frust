@@ -93,8 +93,8 @@ impl IconData {
     ///
     /// This is the composability requirement: an app can paint any vector shape
     /// as an icon, not just the vendored Material Symbols set. The path is
-    /// stored in an `Arc`, so cloning the resulting [`IconData`] (as `app_logic`
-    /// does every frame) is a refcount bump, never a copy of the geometry.
+    /// stored in an `Arc`, so cloning the resulting [`IconData`] (as a build
+    /// closure does every frame) is a refcount bump, never a copy of the geometry.
     pub fn from_path(path: BezPath, design_size: f64) -> Self {
         Self {
             repr: IconRepr::Path(Arc::new(PathGeom {

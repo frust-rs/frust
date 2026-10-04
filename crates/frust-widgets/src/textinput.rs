@@ -3059,7 +3059,7 @@ mod tests {
         reject: bool,
     }
 
-    fn app_logic(state: &mut AppState) -> TextInputView<AppState> {
+    fn build(state: &mut AppState) -> TextInputView<AppState> {
         text_input(state.value.clone(), |s: &mut AppState, v: String| {
             s.changes += 1;
             if !s.reject {
@@ -3073,10 +3073,10 @@ mod tests {
         })
     }
 
-    /// Build + lay out a render root over `app_logic`, ready for events.
+    /// Build + lay out a render root over the build closure, ready for events.
     fn harness(state: &mut AppState) -> RenderRoot<AppState, TextInputView<AppState>> {
         let mut root = RenderRoot::new();
-        root.rebuild(&mut app_logic, state);
+        root.rebuild(&mut build, state);
         root.layout(Size::new(300.0, 200.0));
         root
     }
@@ -3439,7 +3439,7 @@ mod tests {
         assert_eq!(widget(&root).editor.text(), "x");
 
         // The next rebuild reconciles the editor back to the app's (empty) value.
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         assert_eq!(
             widget(&root).editor.text(),
             "",
@@ -3472,7 +3472,7 @@ mod tests {
         assert_ne!(before.base, before.extent);
 
         // Rebuild with the unchanged value: no reconcile, selection preserved.
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         let after = widget(&root).editor.editing_state_bytes();
         assert_eq!(
             (before.base, before.extent),
@@ -4147,7 +4147,7 @@ mod tests {
         // Simulate an app-driven controlled clear (what `on_submit` → clear draft
         // does): set the controlled value to "" and run a frame with NO event.
         state.value.clear();
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(300.0, 200.0));
         root.paint(&mut sink, FrameTime::ZERO);
 
@@ -5030,7 +5030,7 @@ mod tests {
         // calls `set_controlled_value`; only `max_visible_lines` flips to
         // `None`, exercising the single-line `layout` branch on a widget whose
         // editor still carries the old wrap width.
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         let single_height = root.layout(Size::new(120.0, 800.0)).height;
 
         assert_eq!(
@@ -5053,7 +5053,7 @@ mod tests {
             ..AppState::default()
         };
         let mut fresh_root = RenderRoot::new();
-        fresh_root.rebuild(&mut app_logic, &mut fresh_state);
+        fresh_root.rebuild(&mut build, &mut fresh_state);
         let fresh_height = fresh_root.layout(Size::new(120.0, 800.0)).height;
         assert_eq!(
             single_height, fresh_height,

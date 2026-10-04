@@ -150,7 +150,7 @@ fn cull_covered_builds_freezes_a_covered_page_and_resumes_on_the_reveal_frame() 
     // The pop is applied before the reconcile loop, so the revealed page
     // rebuilds on the SAME frame — nothing has to wake it. `enqueue` also
     // raises the pending-flush mark on this `pop()` (see the type's doc),
-    // which this same `root.rebuild` drains into one extra `app_logic` +
+    // which this same `root.rebuild` drains into one extra build +
     // view-diff pass once the ops are already applied and the page is
     // already revealed — so the now-uncovered root page rebuilds twice
     // within this one call, not once: the revealing pass itself, plus the

@@ -671,12 +671,12 @@ mod tests {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut root: RenderRoot<(), Host> = RenderRoot::new();
         let captured = Rc::clone(&log);
-        let mut app_logic = move |_: &mut ()| Host {
+        let mut build = move |_: &mut ()| Host {
             actions,
             log: Rc::clone(&captured),
         };
         let mut state = ();
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         let mut tcx = frust_text::TextContext::new();
         root.layout_with_text(WINDOW, &mut tcx as &mut dyn std::any::Any);
         root.paint(&mut RecordingScene::default(), FrameTime::from_nanos(0));

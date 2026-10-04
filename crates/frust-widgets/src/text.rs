@@ -182,7 +182,7 @@ impl ThemeTextType {
 
 /// A declarative description of a run of text.
 ///
-/// Content does not read application state in v0 — `app_logic` interpolates the
+/// Content does not read application state in v0 — the build closure interpolates the
 /// string and hands the finished text in. Styling is applied with the
 /// [`TextView::size`]/[`TextView::color`]/[`TextView::weight`]/
 /// [`TextView::family`]/[`TextView::italic`]/[`TextView::letter_spacing`]/

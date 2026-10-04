@@ -534,7 +534,7 @@ impl<State: 'static> NavigatorController<State> {
     /// other reader (`RenderRoot::rebuild`'s pending-flush convergence loop)
     /// cannot tell "just force a run" apart from "a callback is genuinely
     /// owed": the frame that applies a queued op also pays one extra, empty
-    /// `app_logic` + view-diff pass it did not strictly need. That pass is
+    /// build + view-diff pass it did not strictly need. That pass is
     /// bounded (never more than one here, since nothing re-raises the flag for
     /// a plain structural op) and lands only on the frame a nav op was actually
     /// queued, not on every frame — a cost this crate's authoring toolkit

@@ -17,7 +17,7 @@
 //! order:
 //!
 //! ```text
-//! root.rebuild(logic, state);                    // app_logic -> view diff
+//! root.rebuild(build, state);                    // build -> view diff
 //! root.layout_with_text(logical_size, tcx);      // LOGICAL px, text shaped
 //! builder.push_transform(Affine::scale(scale));  // exactly what the desktop
 //! root.paint(&mut builder, frame_time);          // shell pushes at paint time
@@ -384,7 +384,7 @@ pub fn frame<S: 'static, V: View<S>>(
 /// Lays out and paints a single `()`-state view into `scene` under `theme` —
 /// the shape almost every corpus case takes.
 ///
-/// `build` is called on every rebuild pass, exactly as an app's `app_logic`
+/// `build` is called on every rebuild pass, exactly as an app's Component::build
 /// is. `theme` is installed on the root
 /// ([`RenderRoot::set_theme`](frust_core::RenderRoot::set_theme)), which is
 /// the type-erased path widgets recover through `Theme::from_layout_ctx` /

@@ -91,12 +91,12 @@ fn bars() -> WindowInsets {
 /// Rebuild, push `insets`, lay out against a 500x500 window, paint once, and
 /// return the inspect snapshot.
 fn run<V: View<()>>(
-    app_logic: &mut impl FnMut(&mut ()) -> V,
+    build: &mut impl FnMut(&mut ()) -> V,
     insets: WindowInsets,
 ) -> Vec<InspectNode> {
     let mut root: RenderRoot<(), V> = RenderRoot::new();
     let mut state = ();
-    root.rebuild(app_logic, &mut state);
+    root.rebuild(build, &mut state);
     root.set_insets(insets);
     root.layout(Size::new(500.0, 500.0));
     root.paint(&mut DiscardScene, FrameTime::from_nanos(0));
