@@ -67,16 +67,29 @@
 //! counter template gives its `AppBar`; `.elevation(2)` adds a level-2 shadow
 //! beneath it.
 //!
-//! A top bar ([`app_bar`] and [`search_app_bar`]) consumes the **top** window
-//! inset itself by default, like [`crate::navigation_bar`] does the bottom
-//! one: its `layout` reads `ctx.window_insets().padding().top`, grows the bar
-//! by it, paints the fill (and shadow) through that band so a colored bar
-//! extends under the status bar, and lays the slots out below it. A parent
-//! `frust::safe_area` that already consumed the top inset leaves 0 here, so
-//! wrapping the bar in `safe_area(..).bottom(false)` never double-insets —
-//! it only leaves the status-bar band outside the bar unpainted.
-//! [`AppBarView::safe_area`]`(false)` opts out for a bar that is not docked to
-//! the window's top edge.
+//! A top bar ([`app_bar`] and [`search_app_bar`]) consumes the **top, left
+//! and right** window insets itself by default — Flutter's `AppBar`, whose
+//! toolbar sits in a `SafeArea(bottom: false)` — the way
+//! [`crate::navigation_bar`] consumes the bottom one: its `layout` reads
+//! `ctx.window_insets().padding()`, grows the bar by the top inset, paints
+//! the fill (and shadow) edge to edge through that band and across the full
+//! width so a colored bar extends under the status bar and a landscape
+//! cutout, and lays the slots out below the top inset and inside the side
+//! ones. Every horizontal slot rule (leading at `PAD_X`, a bare title edge at
+//! `TITLE_EDGE_INSET`, actions ending `PAD_X` in, the centered-title
+//! arithmetic) measures from the inset-adjusted edge. A parent
+//! `frust::safe_area` that already consumed an edge leaves 0 on it here, so
+//! wrapping the bar in `safe_area(..).bottom(false)` never double-insets — it
+//! only leaves the consumed bands outside the bar unpainted.
+//! [`AppBarView::safe_area`]`(false)` opts out of all three edges for a bar
+//! that is not docked to the window's top edge.
+//!
+//! The corner shift above stacks on the consumed side padding: a
+//! `CornerInsets` width is measured from the safe-area edge, not the window
+//! edge, so a slot's origin is `padding.left + corner_insets.top_left.width`
+//! (mirrored on the right). That is exactly what the same bar gets under a
+//! parent safe area that consumed the side padding first (the corner is never
+//! consumed), so both compositions place the slots identically.
 //!
 //! # Metrics ([`AppBarMetrics`]), densities, and the one deliberate divergence
 //!
@@ -181,10 +194,10 @@
 //! # Not ported
 //!
 //! * **`safeArea` / `MediaQuery.viewPadding` on the collapsing and bottom
-//!   bars.** Only the fixed top bar self-insets (see *Top-bar container,
+//!   bars.** Only the fixed top bar (and [`crate::selection_app_bar`]'s
+//!   contextual branch, which mirrors it) self-insets (see *Top-bar container,
 //!   elevation, and self-inset* above); a caller wraps a collapsing or bottom
-//!   app bar in `frust::safe_area(...)`, the same way
-//!   [`crate::selection_app_bar`] documents.
+//!   app bar in `frust::safe_area(...)`.
 //! * **`automaticallyImplyLeading`.** Upstream reads `Navigator.maybeOf(context)`
 //!   to synthesize a back button; a widget here has no navigator handle, and
 //!   this catalog's convention is an explicit `leading` slot (supply
@@ -692,24 +705,26 @@ fn resolve_top_container(
         Some(AppBarContainer::Surface) => SurfaceRole::Surface,
         Some(AppBarContainer::SurfaceContainer) => SurfaceRole::SurfaceContainer,
         Some(AppBarContainer::InversePrimary) => {
-            return match theme {
-                Some(theme) => theme.scheme().inverse_primary,
-                None => crate::tokens::color_scheme_light().inverse_primary,
-            };
+            return with_scheme(theme, |scheme| scheme.inverse_primary);
         }
         Some(AppBarContainer::PrimaryContainer) => {
-            return match theme {
-                Some(theme) => theme.scheme().primary_container,
-                None => crate::tokens::color_scheme_light().primary_container,
-            };
+            return with_scheme(theme, |scheme| scheme.primary_container);
         }
         None if elevation > 0 => elevation_level(theme, elevation).surface_role,
         None => SurfaceRole::Surface,
     };
-    match (theme, role) {
-        (None, SurfaceRole::Surface) => CONTAINER,
-        (Some(theme), role) => surface_role_color(theme.scheme(), role),
-        (None, role) => surface_role_color(&crate::tokens::color_scheme_light(), role),
+    if theme.is_none() && role == SurfaceRole::Surface {
+        return CONTAINER;
+    }
+    with_scheme(theme, |scheme| surface_role_color(scheme, role))
+}
+
+/// `pick` applied to the theme's scheme, or to the Material 3 baseline light
+/// scheme unthemed.
+fn with_scheme(theme: Option<&Theme>, pick: impl FnOnce(&frust::ColorScheme) -> Color) -> Color {
+    match theme {
+        Some(theme) => pick(theme.scheme()),
+        None => pick(&crate::tokens::color_scheme_light()),
     }
 }
 
@@ -725,14 +740,17 @@ fn surface_role_color(scheme: &frust::ColorScheme, role: SurfaceRole) -> Color {
     }
 }
 
-/// Elevation level `level` (clamped to [`MAX_ELEVATION`]) of the theme's
-/// table, or of this catalog's own [`crate::tokens::elevation`] table unthemed.
+/// Elevation level `level` of the theme's table, or of this catalog's own
+/// [`crate::tokens::elevation`] table unthemed. Callers pass the value
+/// [`AppBarView::elevation`](top::AppBarView::elevation) already clamped to
+/// [`MAX_ELEVATION`]; the match's last arm reads level 5 for anything above
+/// it regardless.
 fn elevation_level(theme: Option<&Theme>, level: u8) -> ElevationLevel {
     let table = match theme {
         Some(theme) => theme.elevation,
         None => crate::tokens::elevation(),
     };
-    match level.min(MAX_ELEVATION) {
+    match level {
         0 => table.level0,
         1 => table.level1,
         2 => table.level2,
