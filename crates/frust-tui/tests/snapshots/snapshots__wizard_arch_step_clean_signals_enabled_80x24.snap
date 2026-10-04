@@ -13,7 +13,7 @@ expression: "render_to_string(80, 24, &wizard_state(WizardStep::Arch, \"my_app\"
         │                                                              │▓▓      
         │  Architecture                                                │▓▓      
         │    ( ) Default                                               │▓▓      
-        │        The standard notes-app template.                      │▓▓      
+        │        The standard Material counter template.               │▓▓      
         │  ▸ (o) Clean Signals                                         │▓▓      
         │        Controller + use-case + async_view via clean-signals  │▓▓      
         │                                                              │▓▓      
