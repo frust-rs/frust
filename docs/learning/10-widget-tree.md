@@ -27,8 +27,8 @@ after lab 2 and before lab 3.
 
 ## The five ideas
 
-1. **Three layers, one direction of ownership.** A **View** is a `'static` value `app_logic`
-   re-creates every frame. `View<State>` has `type Element: Widget` plus `build` (make the widget),
+1. **Three layers, one direction of ownership.** A **View** is a `'static` value the root component's
+   `build` re-creates every frame. `View<State>` has `type Element: Widget` plus `build` (make the widget),
    `rebuild(prev, element, ctx) -> ChangeFlags` (mutate the live widget to match), and `teardown`.
    Its `BuildCtx` does two jobs. `alloc_id` mints a `WidgetId`; the only production caller is the
    root's first build (`app.rs` ≈1367). It also threads the **focus chain**
@@ -86,7 +86,7 @@ after lab 2 and before lab 3.
    pre-routes overlays (`route_overlay` ≈2616), advances the focus epoch, and calls the root widget.
 
 4. **`RenderRoot` drives, and `ChangeFlags` are a report, not a skip list.** `rebuild` calls
-   `app_logic` as a plain closure. The reactive `TrackedScope`/`Owner` wrap is the *shell's*
+   the root component's `build` closure. The reactive `TrackedScope`/`Owner` wrap is the *shell's*
    (`crates/frust-shell-desktop/src/app_handler.rs`, `scope.track(|| root.rebuild` ≈2771). It diffs
    (idea 2), runs at most `MAX_PENDING_RESULT_FLUSH_PASSES` = 3 (≈163) `Housekeeping` flush/re-diff
    passes, drains `take_focus_orphaned` into `release_focus_session` (≈1274–1276), then ORs the
@@ -220,7 +220,7 @@ any(Column(vec![])) } else { any(SizedBox(..)) }` and flip `swap`. The id stays;
 
 ## What to notice before moving on
 
-- Nothing skips a subtree. A frame costs the whole diff, which is why `app_logic` must stay cheap
+- Nothing skips a subtree. A frame costs the whole diff, which is why `Component::build` must stay cheap
   (lab 3, experiment 3.3).
 - A `ChildPod` is a *slot*. Identity, geometry, and interaction paths hang off the slot, not the
   widget. Keys decide which slot a child lands in; type swaps decide whether the slot's paths

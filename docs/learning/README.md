@@ -54,7 +54,7 @@ The repository's own verify gate is the bare `cargo test --workspace` (`docs/DEV
 ## The pipeline, end to end (the map you'll fill in)
 
 ```
-app_logic(&mut State) -> View                                    (your code, every frame)
+Component::build(&mut State) -> View                            (your code, every frame)
    │  rebuild: diff view vs retained Widget tree                 ── ch. 10 (and 3)
    ▼
 RenderRoot::layout   (BoxConstraints down, Size up)               ── ch. 2, 3
