@@ -8,6 +8,7 @@
   "assets/.gitkeep",
   "assets/logo.png",
   "src/lib.rs.tmpl",
+  "src/home_page.rs.tmpl",
   "src/lib.rs.clean-signals.tmpl",
   "src/failure.rs.clean-signals.tmpl",
   "src/features/mod.rs.clean-signals.tmpl",

@@ -219,7 +219,7 @@ fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() 
 /// Registry mode: `frust create` without `--frust-path` scaffolds the
 /// crates.io release, and the result builds and passes `frust doctor`.
 ///
-/// Needs network and the released crates (`frust-ui`, `frust-glyph`, ...) on
+/// Needs network and the released crates (`frust-ui`, `frust-material`, ...) on
 /// crates.io at this workspace's version. The go-public plan's r5-06 is where
 /// it first runs for real; until 0.5.0 is published it is expected to fail.
 /// Run explicitly:
@@ -252,9 +252,10 @@ fn scaffolded_project_builds_from_the_registry() {
         "{cargo_toml}"
     );
     assert!(
-        cargo_toml.contains(&format!("frust-glyph = \"{version}\"")),
+        cargo_toml.contains(&format!("frust-material = \"{version}\"")),
         "{cargo_toml}"
     );
+    assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
 
     let build_status = Command::new("cargo")
         .arg("build")
