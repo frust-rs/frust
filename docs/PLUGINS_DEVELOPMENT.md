@@ -15,15 +15,15 @@ android|ios`, re-syncs.
 ## Shared-preferences manual test (desktop + Android + iOS)
 
 A kill-and-relaunch persistence gate for `frust-shared-preferences`
-(`plugins/shared-preferences`), against the scaffolded notes app template (`frust
-create`'s default `lib.rs.tmpl`, persisting its notes list + draft):
+(`plugins/shared-preferences`), against a fresh `frust create` app: add `frust-shared-preferences`
+to its `Cargo.toml`, persist the `HomePage` count through it:
 
-- **Persistence:** add a note (and/or edit the draft), kill the app, relaunch it, and
+- **Persistence:** bump the count, kill the app, relaunch it, and
   confirm it survived — desktop preview, an installed Android device, and an installed
   iPhone.
 - **Old-scaffold graceful error:** a project scaffolded *before* the plugin existed must
   still boot with empty state rather than crash (`PrefsError::PlatformNotInitialized`,
-  caught by the template's load path).
+  caught by the app's load path).
 - **macOS storage-location caveat:** the unbundled desktop preview (no
   `CFBundleIdentifier`) writes `NSUserDefaults` to the global defaults domain rather
   than an app-specific plist — a storage-location difference, not a behavioral one.

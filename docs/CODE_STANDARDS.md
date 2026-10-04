@@ -125,11 +125,11 @@ off this index — read this plus the one that covers what you are touching:
   panic-on-mismatch `downcast_mut::<T>()`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
   When a function returns an `impl Trait` that borrows nothing from its parameters (e.g.
-  `app_logic(&mut State) -> impl View<State>`, where views are `'static`), opt out
+  a widget fn returning `impl View<State>`, where views are `'static`), opt out
   explicitly:
 
   ```rust
-  fn app_logic(state: &mut AppState) -> impl frust::View<AppState> + use<> {
+  fn greeting(state: &AppState) -> impl frust::View<AppState> + use<> {
       frust::text(state.greeting.clone()).size(32.0)
   }
   ```

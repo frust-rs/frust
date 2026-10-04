@@ -87,7 +87,7 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run
   a deferred callback that needs `&mut State` but was queued during the state-free view diff (a
   navigator's pop-result and `frust-widgets`' gesture long-press latch are the shipped producers;
-  see WIDGETS_ARCHITECTURE.md). It then re-runs `app_logic` + the view diff so the same frame
+  see WIDGETS_ARCHITECTURE.md). It then re-runs the root component's `build` + the view diff so the same frame
   reflects the mutated state, bounded at `MAX_PENDING_RESULT_FLUSH_PASSES` (3) passes; a remainder
   past the cap folds into `paint`'s `needs_frame` so a dirty-driven desktop loop still wakes for it
   next frame. The dispatch's `EventOutcome` is propagated as part of the same contract: a

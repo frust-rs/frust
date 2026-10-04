@@ -19,7 +19,7 @@ executors (see "The render-thread split" below):
 | Step | Code | File · Anchor |
 |---|---|---|
 | Entry | `WindowEvent::RedrawRequested =>` | `app_handler.rs` ≈2702 |
-| **Rebuild** | `runtime.with_owner(\|\| scope.track(\|\| root.rebuild(app_logic, state)))` | `app_handler.rs` ≈2771 |
+| **Rebuild** | `runtime.with_owner(\|\| scope.track(\|\| root.rebuild(build, state)))` | `app_handler.rs` ≈2771 |
 | **Layout** | `root.layout_with_text(logical, text_ctx)` | `app_handler.rs` ≈2794 |
 | Scene clear | `scene.reset()` — reuses last frame's allocations | `app_handler.rs` ≈2809 |
 | Clock | `FrameTime::from_nanos(self.epoch.elapsed()...)` | `app_handler.rs` ≈2814 |
@@ -59,7 +59,7 @@ point at one function no matter which executor is active.
 
 Four things make this loop what it is:
 
-1. **`app_logic` runs *inside* `scope.track(..)`** — every signal `.get()`
+1. **The root component's `build` runs *inside* `scope.track(..)`** — every signal `.get()`
    during rebuild subscribes it. A later `.set()` anywhere (including a tokio
    timer on another thread) fires the `FrameWaker` →
    `ShellUserEvent::SignalsDirty` → `request_redraw()`. That's the entire
