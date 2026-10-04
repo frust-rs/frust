@@ -1,0 +1,57 @@
+//! [`CountSource`] — the in-memory stand-in for a real transport (HTTP,
+//! database, …).
+//!
+//! [`SourceError`] is this source's internal, transport-ish failure type —
+//! it **never leaves this layer**. `repositories::map_source_error` is the
+//! feature's single conversion site into the domain-facing
+//! [`crate::failure::AppFailure`]; nothing above `data/` ever sees a
+//! [`SourceError`].
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
+
+/// Mocked latency of the first fetch (opening the store), long enough that
+/// the loading state (see `presentation::pages::counter_page`) is actually
+/// visible before it resolves. Later reads and writes are served from memory.
+pub const LOAD_LATENCY_MS: u64 = 400;
+
+/// The transport-ish failure [`CountSource`] can produce. Never produced in
+/// this scaffold — a real source populates it from an actual transport error.
+#[derive(Debug)]
+pub enum SourceError {
+    /// The mocked backend was unreachable.
+    Unavailable(String),
+}
+
+/// In-memory "transport" stand-in — a real app swaps this for an HTTP/DB
+/// client behind the same `fetch_count`/`store_count` shape. Clones share
+/// one stored count.
+#[derive(Clone, Default)]
+pub struct CountSource {
+    count: Arc<AtomicU32>,
+    opened: Arc<AtomicBool>,
+}
+
+impl CountSource {
+    /// A fresh source holding a count of zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fetches the stored count, after a mocked round trip on the first call.
+    /// Never fails in this scaffold — a real source maps a genuine transport
+    /// failure into [`SourceError`] here instead of unwrapping/panicking.
+    pub async fn fetch_count(&self) -> Result<u32, SourceError> {
+        if !self.opened.swap(true, Ordering::Relaxed) {
+            clean_signals::sleep(Duration::from_millis(LOAD_LATENCY_MS)).await;
+        }
+        Ok(self.count.load(Ordering::Relaxed))
+    }
+
+    /// Stores `count`. Never fails in this scaffold (see [`Self::fetch_count`]).
+    pub async fn store_count(&self, count: u32) -> Result<(), SourceError> {
+        self.count.store(count, Ordering::Relaxed);
+        Ok(())
+    }
+}

@@ -1,0 +1,78 @@
+//! [`CounterController`] — the counter screen's view model.
+//!
+//! Mirrors `examples/huddle`'s controller shape: it embeds a
+//! [`ControllerCore`] by composition and owns the one signal the page
+//! renders — an [`AsyncState`] over the count. Both use cases write that
+//! signal through `run_into`, so the page shows a loading state, the value,
+//! or a failure message.
+
+use std::sync::Arc;
+
+use clean_signals::{AsyncState, ControllerCore, NoParams, RunOptions, async_state_signal};
+use frust::RwSignal;
+
+use crate::failure::AppFailure;
+use crate::features::counter::domain::repositories::CounterRepository;
+use crate::features::counter::domain::use_cases::{IncrementCount, LoadCount};
+
+/// View model for the counter screen.
+pub struct CounterController {
+    core: ControllerCore<AppFailure>,
+    load_count: LoadCount,
+    increment_count: IncrementCount,
+    /// The count's async state — `Loading` until the first load resolves,
+    /// then `Data(count)` (`Reloading(count)` while an increment is in
+    /// flight), or `Error` on failure.
+    pub count: RwSignal<AsyncState<u32, AppFailure>>,
+}
+
+impl CounterController {
+    /// A fresh controller with an empty (`Loading`) signal, wired to the
+    /// injected [`CounterRepository`] (built once by the composition root —
+    /// see `crate`'s root `Component::init`).
+    pub fn new(repo: Arc<dyn CounterRepository + Send + Sync>) -> Self {
+        Self {
+            core: ControllerCore::new(),
+            load_count: LoadCount::new(Arc::clone(&repo)),
+            increment_count: IncrementCount::new(repo),
+            count: async_state_signal(),
+        }
+    }
+
+    /// Runs [`LoadCount`] into [`Self::count`]. Called once from
+    /// `presentation::pages::init_controller`.
+    pub async fn load(&self) {
+        let _ = self
+            .core
+            .run_into(
+                &self.load_count,
+                NoParams,
+                self.count,
+                RunOptions::default(),
+            )
+            .await;
+    }
+
+    /// Runs [`IncrementCount`] into [`Self::count`]. Called from the page's
+    /// increment button.
+    pub async fn increment(&self) {
+        let _ = self
+            .core
+            .run_into(
+                &self.increment_count,
+                NoParams,
+                self.count,
+                RunOptions::default(),
+            )
+            .await;
+    }
+}
+
+// The `use_controller`/`ControllerCore::run_into` seam needs this: a
+// controller shares its `ControllerCore` by `AsRef` rather than by field
+// access, so the helpers stay generic over any controller shape.
+impl AsRef<ControllerCore<AppFailure>> for CounterController {
+    fn as_ref(&self) -> &ControllerCore<AppFailure> {
+        &self.core
+    }
+}

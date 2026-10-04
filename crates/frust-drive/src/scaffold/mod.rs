@@ -675,7 +675,7 @@ mod tests {
         let cargo_toml = fs::read_to_string(clean.join("Cargo.toml")).unwrap();
         for line in [
             "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
-            "frust-glyph = \"0.5.0\"",
+            "frust-material = \"0.5.0\"",
             "clean-signals-frust = \"0.5.0\"",
         ] {
             assert!(
@@ -1706,8 +1706,8 @@ mod tests {
     }
 
     /// `--arch clean-signals` renders the variant `Cargo.toml`/full
-    /// `greeting` feature-slice tree in place of the retired single-file
-    /// demo, while every arch-agnostic file (frust.toml, assets, android/ios
+    /// `counter` feature-slice tree in place of the default template's
+    /// counter screen, while every arch-agnostic file (frust.toml, assets, android/ios
     /// trees) still lands exactly once.
     #[test]
     fn generate_with_clean_signals_arch_renders_variant_content_in_place_of_defaults() {
@@ -1749,24 +1749,31 @@ mod tests {
             !cargo_toml.contains("frust-shared-preferences = {"),
             "{cargo_toml}"
         );
+        // Material 3 is this variant's design system too.
+        assert!(
+            cargo_toml
+                .contains("frust-material = { path = \"/path/to/frust/../../plugins/material\" }"),
+            "{cargo_toml}"
+        );
+        assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
 
-        // The full `greeting` feature-slice tree lands — the single-file
-        // demo is retired from the manifest.
+        // The full `counter` feature-slice tree lands.
         let expected_files = [
             "src/lib.rs",
             "src/failure.rs",
             "src/features/mod.rs",
-            "src/features/greeting/mod.rs",
-            "src/features/greeting/domain/mod.rs",
-            "src/features/greeting/domain/repositories.rs",
-            "src/features/greeting/domain/use_cases/mod.rs",
-            "src/features/greeting/domain/use_cases/load_greeting.rs",
-            "src/features/greeting/data/mod.rs",
-            "src/features/greeting/data/sources.rs",
-            "src/features/greeting/data/repositories.rs",
-            "src/features/greeting/presentation/mod.rs",
-            "src/features/greeting/presentation/controllers.rs",
-            "src/features/greeting/presentation/pages.rs",
+            "src/features/counter/mod.rs",
+            "src/features/counter/domain/mod.rs",
+            "src/features/counter/domain/repositories.rs",
+            "src/features/counter/domain/use_cases/mod.rs",
+            "src/features/counter/domain/use_cases/load_count.rs",
+            "src/features/counter/domain/use_cases/increment_count.rs",
+            "src/features/counter/data/mod.rs",
+            "src/features/counter/data/sources.rs",
+            "src/features/counter/data/repositories.rs",
+            "src/features/counter/presentation/mod.rs",
+            "src/features/counter/presentation/controllers.rs",
+            "src/features/counter/presentation/pages.rs",
         ];
         for f in expected_files {
             assert!(
@@ -1777,19 +1784,30 @@ mod tests {
         }
 
         // lib.rs shrinks to module decls + `app!` wiring + the composition
-        // root — no `GreetingController`/`use_controller`/`async_view`
+        // root — no `CounterController` construction/`use_controller`/`async_view`
         // details leak into it anymore (those moved into the feature
         // slice).
         let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("pub mod failure;"), "{lib_rs}");
         assert!(lib_rs.contains("pub mod features;"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
-        // Glyph-by-default applies to this variant too — see the matching
+        // Material-by-default applies to this variant too — see the matching
         // assertion in `generate_produces_manifest_listed_files_with_substitutions`.
         assert!(
             lib_rs.contains(
-                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_glyph::install();\n    }\n);"
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_material::install();\n    }\n);"
             ),
+            "{lib_rs}"
+        );
+        assert!(
+            lib_rs.contains("type State = Arc<CounterController>;"),
+            "{lib_rs}"
+        );
+        assert!(lib_rs.contains("pages::counter_page(state)"), "{lib_rs}");
+        assert!(!lib_rs.contains("app_logic"), "{lib_rs}");
+        assert!(!lib_rs.contains("frust-glyph"), "{lib_rs}");
+        assert!(
+            !lib_rs.contains("        frust_glyph::install();"),
             "{lib_rs}"
         );
         // The controller's construction/rendering detail moved into the
@@ -1808,39 +1826,56 @@ mod tests {
         assert!(failure_rs.contains("Validation(String)"), "{failure_rs}");
 
         let domain_repo =
-            fs::read_to_string(dest.join("src/features/greeting/domain/repositories.rs")).unwrap();
+            fs::read_to_string(dest.join("src/features/counter/domain/repositories.rs")).unwrap();
         assert!(
-            domain_repo.contains("pub trait GreetingRepository"),
+            domain_repo.contains("pub trait CounterRepository"),
             "{domain_repo}"
         );
 
-        let use_case = fs::read_to_string(
-            dest.join("src/features/greeting/domain/use_cases/load_greeting.rs"),
+        let load_count =
+            fs::read_to_string(dest.join("src/features/counter/domain/use_cases/load_count.rs"))
+                .unwrap();
+        assert!(load_count.contains("pub struct LoadCount"), "{load_count}");
+        assert!(load_count.contains("NoParams"), "{load_count}");
+        let increment_count = fs::read_to_string(
+            dest.join("src/features/counter/domain/use_cases/increment_count.rs"),
         )
         .unwrap();
-        assert!(use_case.contains("pub struct LoadGreeting"), "{use_case}");
-        assert!(use_case.contains("NoParams"), "{use_case}");
+        assert!(
+            increment_count.contains("pub struct IncrementCount"),
+            "{increment_count}"
+        );
 
         let data_repo =
-            fs::read_to_string(dest.join("src/features/greeting/data/repositories.rs")).unwrap();
+            fs::read_to_string(dest.join("src/features/counter/data/repositories.rs")).unwrap();
         assert!(
-            data_repo.contains("pub struct InMemoryGreetingRepository"),
+            data_repo.contains("pub struct InMemoryCounterRepository"),
             "{data_repo}"
         );
         assert!(data_repo.contains("fn map_source_error"), "{data_repo}");
 
         let controllers =
-            fs::read_to_string(dest.join("src/features/greeting/presentation/controllers.rs"))
+            fs::read_to_string(dest.join("src/features/counter/presentation/controllers.rs"))
                 .unwrap();
         assert!(
-            controllers.contains("pub struct GreetingController"),
+            controllers.contains("pub struct CounterController"),
             "{controllers}"
         );
 
+        // The page is a Material scaffold built from small widget fns.
         let pages =
-            fs::read_to_string(dest.join("src/features/greeting/presentation/pages.rs")).unwrap();
+            fs::read_to_string(dest.join("src/features/counter/presentation/pages.rs")).unwrap();
         assert!(pages.contains("use_controller"), "{pages}");
         assert!(pages.contains("async_view"), "{pages}");
+        assert!(
+            pages.contains("pub fn counter_page")
+                && pages.contains("scaffold(")
+                && pages.contains("app_bar")
+                && pages.contains("fab(")
+                && pages.contains("icons::ADD"),
+            "{pages}"
+        );
+        assert!(!pages.contains("frust_glyph"), "{pages}");
 
         // No `.clean-signals.` leftover in any written path, and no stray
         // `Cargo.toml.clean-signals`/`src/lib.rs.clean-signals` files.
@@ -2703,7 +2738,7 @@ mod tests {
         .unwrap();
 
         // Arch resolution still happened...
-        assert!(dest.join("src/features/greeting/domain/mod.rs").is_file());
+        assert!(dest.join("src/features/counter/domain/mod.rs").is_file());
         // ...and the platform selection still holds.
         assert!(dest.join("web/index.html").is_file());
         assert!(!dest.join("android").exists());
