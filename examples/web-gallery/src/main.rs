@@ -677,7 +677,7 @@ mod app {
         .cross_axis(CrossAxisAlignment::Stretch))
     }
 
-    /// `web_app!`'s `app_logic`: dispatches to
+    /// `web_app!`'s build closure: dispatches to
     /// [`case_view`]/[`embedded_case_view`]/[`index_view`] on
     /// [`AppState::case`] and [`AppState::embed`]. `embed` only chooses
     /// between the two case pages — a missing/unknown `?case=` still falls
