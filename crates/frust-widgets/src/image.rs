@@ -229,17 +229,60 @@ pub struct ImageWidget {
     fit: ImageFit,
 }
 
+/// Constrain a natural size to fit within the given constraints while preserving
+/// aspect ratio. Follows Flutter's `BoxConstraints.constrainSizeAndAttemptToPreserveAspectRatio`.
+///
+/// For a degenerate (zero or non-finite) natural size, falls back to
+/// `bc.constrain(natural)` (the existing behaviour for degenerate images).
+/// For a valid aspect ratio, clamps width and height on each axis (min, then max)
+/// while adjusting the other axis to preserve the aspect ratio.
+fn constrain_size_preserve_aspect_ratio(natural: Size, bc: &BoxConstraints) -> Size {
+    let mut width = natural.width;
+    let mut height = natural.height;
+
+    // Degenerate natural size: fall back to regular constrain
+    if width <= 0.0 || height <= 0.0 || !width.is_finite() || !height.is_finite() {
+        return bc.constrain(natural);
+    }
+
+    let aspect = width / height;
+    let max = bc.max();
+    let min = bc.min();
+
+    // Clamp to max on each axis, preserving aspect ratio
+    if width > max.width {
+        width = max.width;
+        height = width / aspect;
+    }
+    if height > max.height {
+        height = max.height;
+        width = height * aspect;
+    }
+
+    // Clamp to min on each axis, preserving aspect ratio
+    if width < min.width {
+        width = min.width;
+        height = width / aspect;
+    }
+    if height < min.height {
+        height = min.height;
+        width = height * aspect;
+    }
+
+    bc.constrain(Size::new(width, height))
+}
+
 impl Widget for ImageWidget {
     fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // A tight constraint (e.g. this image sits inside a `SizedBox`) wins
-        // outright; otherwise the image prefers its natural size, clamped
-        // into the incoming bounds — mirrors `TextWidget`'s intrinsic-size
-        // pattern. `fit` only affects how that box's content is scaled at
-        // paint time, never the box itself.
+        // outright. For a non-tight constraint, preserve the natural aspect ratio
+        // by sizing the box according to the aspect-ratio-preserving algorithm,
+        // then further constraining the result. `fit` only affects how that box's
+        // content is scaled at paint time, never the box itself.
         if bc.is_tight() {
             return bc.max();
         }
-        bc.constrain(self.source.natural_size())
+        constrain_size_preserve_aspect_ratio(self.source.natural_size(), bc)
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -454,6 +497,83 @@ mod tests {
         assert_eq!(size, Size::new(50.0, 50.0));
     }
 
+    // -- aspect ratio preservation in layout -----------------------------------
+
+    #[test]
+    fn aspect_ratio_square_large_in_narrow_unbounded() {
+        // The Pixel 5 case: 1024x1024 image in a 393-wide, unbounded-height Column
+        // -> should become 393x393
+        let view = Image(rgba(1024, 1024));
+        let mut w: ImageWidget = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(
+            &mut lctx,
+            &BoxConstraints::loose(Size::new(393.0, f64::INFINITY)),
+        );
+        assert_eq!(size, Size::new(393.0, 393.0));
+    }
+
+    #[test]
+    fn aspect_ratio_square_large_in_both_axes_bounded() {
+        // Both axes constrained; height is tighter; scale down to 200x200
+        let view = Image(rgba(1024, 1024));
+        let mut w: ImageWidget = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(393.0, 200.0)));
+        assert_eq!(size, Size::new(200.0, 200.0));
+    }
+
+    #[test]
+    fn aspect_ratio_landscape_constrained_by_width() {
+        // 2:1 landscape (800x400) in max(400, INF): width-limited, height scales down
+        // -> should become 400x200
+        let view = Image(rgba(800, 400));
+        let mut w: ImageWidget = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(
+            &mut lctx,
+            &BoxConstraints::loose(Size::new(400.0, f64::INFINITY)),
+        );
+        assert_eq!(size, Size::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn aspect_ratio_small_fits_unchanged() {
+        // Small image fits within bounds; should stay 64x32
+        let view = Image(rgba(64, 32));
+        let mut w: ImageWidget = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(
+            &mut lctx,
+            &BoxConstraints::loose(Size::new(393.0, f64::INFINITY)),
+        );
+        assert_eq!(size, Size::new(64.0, 32.0));
+    }
+
+    #[test]
+    fn aspect_ratio_with_min_width_constraint() {
+        // Min width of 100 forces 10x10 to scale up to 100x100 to maintain aspect
+        let view = Image(rgba(10, 10));
+        let mut w: ImageWidget = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let min = Size::new(100.0, 0.0);
+        let max = Size::new(200.0, f64::INFINITY);
+        let bc = BoxConstraints::new(min, max);
+        let size = w.layout(&mut lctx, &bc);
+        assert_eq!(size, Size::new(100.0, 100.0));
+    }
+
+    #[test]
+    fn aspect_ratio_degenerate_0x0_natural_uses_fallback_constrain() {
+        // Degenerate natural size should use bc.constrain fallback
+        let view = Image(ImageSource::from_rgba8(vec![], 0, 0));
+        let mut w: ImageWidget = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(50.0, 50.0)));
+        // bc.constrain on Size::ZERO should be Size::ZERO
+        assert_eq!(size, Size::ZERO);
+    }
+
     // -- paint / cache identity --------------------------------------------
 
     /// A minimal recording [`PaintScene`] capturing only what `Image::paint`
@@ -540,7 +660,7 @@ mod tests {
         let original_source = w.source.clone();
 
         // The next view re-passes a *clone* of the same source (the ordinary
-        // "app_logic re-runs every frame" shape) — never a fresh decode.
+        // "build function re-runs every frame" shape) — never a fresh decode.
         let next: ImageView = Image(source.clone());
         let mut counter = 0u64;
         <ImageView as View<()>>::rebuild(&next, &view, &mut w, &mut BuildCtx::new(&mut counter));
