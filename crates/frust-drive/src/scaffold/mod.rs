@@ -1745,7 +1745,7 @@ mod tests {
             cargo_toml.contains("clean-signals = \"0.1\""),
             "{cargo_toml}"
         );
-        // The notes-app demo's plugin dependency doesn't apply to this
+        // The default counter template's plugin dependency doesn't apply to this
         // variant.
         assert!(
             !cargo_toml.contains("frust-shared-preferences = {"),
@@ -1817,7 +1817,7 @@ mod tests {
         assert!(!lib_rs.contains("ControllerCore"), "{lib_rs}");
         assert!(!lib_rs.contains("use_controller"), "{lib_rs}");
         assert!(!lib_rs.contains("async_view"), "{lib_rs}");
-        // The notes-app demo's own shape doesn't leak into this variant.
+        // The default counter template's own shape doesn't leak into this variant.
         assert!(!lib_rs.contains("SharedPreferences"), "{lib_rs}");
         assert!(!lib_rs.contains("text_input("), "{lib_rs}");
 
