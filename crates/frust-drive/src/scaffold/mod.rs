@@ -840,6 +840,8 @@ mod tests {
         assert!(readme.contains("frust_cupertino::install()"), "{readme}");
         assert!(readme.contains("register_app_fonts"), "{readme}");
         assert!(readme.contains("Theme::builder"), "{readme}");
+        assert!(readme.contains("frust::register_app_fonts("), "{readme}");
+        assert!(!readme.contains("bundles no font"), "{readme}");
         // Verify no unresolved {{ }} placeholders remain
         assert!(!readme.contains("{{"), "{readme}");
 
