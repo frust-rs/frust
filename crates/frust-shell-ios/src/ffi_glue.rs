@@ -272,7 +272,7 @@ unsafe fn handle_mut<'a>(handle: *mut c_void) -> Option<&'a mut IosAppHandle> {
 /// `frust_init`: build the native handle for the app's `CAMetalLayer` and
 /// return it to Swift as an opaque pointer.
 ///
-/// `make_app` is supplied by the macro and erases the app's `State`/`app_logic`;
+/// `make_app` is supplied by the macro and erases the app's `State`/`build`;
 /// on any failure (null layer, GPU init error, panic) returns null, matching
 /// Swift's "no native side yet" sentinel.
 pub fn init(

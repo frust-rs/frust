@@ -2,19 +2,43 @@
 
 A Frust app created with `frust create`.
 
+## Structure
+
+{%- if arch == "clean-signals" %}
+- `src/lib.rs` — the entry point (`frust::app!`) and the root component.
+- `src/failure.rs` — the app's error type, shared across layers.
+- `src/features/counter/` — the counter feature slice with a `clean-signals`-driven
+  component lifecycle (`ControllerCore`, `CounterController`):
+  - `domain/` — the business logic layer (`CounterRepository` trait, use cases).
+  - `data/` — the data layer (repository impl, data sources).
+  - `presentation/` — the UI layer (`controllers.rs`, `pages.rs` with `counter_page()`).
+
+The architecture layers all your business logic into the feature slice; `lib.rs`
+stays shallow and only wires the app's `app!()` entry and component's `State`.
+{%- else %}
+- `src/lib.rs` — the entry point (`frust::app!`) and the root component.
+- `src/home_page.rs` — the counter screen, a `Component` built from small widget fns.
+
+Add screens as components in their own modules, and keep `build` shallow by
+pulling stateless pieces out into small widget fns.
+{%- endif %}
+
 ## Theming
 
-This app uses the **Glyph design system** by default — brought in as the
-`frust-glyph` plugin crate dependency in `Cargo.toml` and installed by the
-`frust_glyph::install()` call in `src/lib.rs`'s `frust::app!(setup = {..})`
-block — which automatically adapts to the device's light/dark preference.
-To swap to Material 3 or Cupertino instead, replace the `frust-glyph`
-dependency with `frust-material`/`frust-cupertino` and swap the setup call:
+This app uses the **Material 3 design system** by default — the
+`frust-material` plugin crate dependency in `Cargo.toml`, installed by the
+`frust_material::install()` call in `src/lib.rs`'s `frust::app!(setup = {..})`
+block — which adapts to the device's light/dark preference.
+To swap to Glyph or Cupertino, replace the `frust-material` dependency with
+`frust-glyph`/`frust-cupertino` and swap the setup call:
 
 ```rust
 frust::app!(MyAppApp, setup = {
-    // Material 3 (M3)
+    // Material 3 (default)
     frust_material::install();
+
+    // Or Glyph
+    // frust_glyph::install();
 
     // Or Cupertino
     // frust_cupertino::install();
@@ -22,44 +46,48 @@ frust::app!(MyAppApp, setup = {
 ```
 
 Each `install()` is shorthand for
-`frust::set_default_theme(frust_material::baseline())` /
-`frust::set_default_theme(frust_cupertino::baseline())` — call
-`set_default_theme` directly instead if you want the tokens without the
-crate's install-timing contract.
+`frust::set_default_theme(frust_material::baseline())` (and likewise for the
+others) — call `set_default_theme` directly instead if you want the tokens
+without the crate's install-timing contract.
 
 ## Custom Fonts
 
-By default, this app's Glyph design system bundles IBM Plex Mono and Space
-Mono fonts (`frust-glyph`'s `install()` registers them unconditionally — see
-above). Dropping the `frust-glyph` dependency (or swapping to
-`frust-material`/`frust-cupertino`, neither of which bundles a font) drops
-the bundled fonts too.
-
-Register your own fonts at app startup regardless of design system:
+`frust-material`'s `install()` registers two bundled faces, Roboto Flex and
+Roboto Mono, so Material typography resolves out of the box (disable the
+crate's default `bundled-fonts` feature to compile them out). `frust-glyph`
+likewise bundles and registers Space Mono and IBM Plex Mono; `frust-cupertino`
+ships no typefaces and uses the platform's system faces. Register your own fonts
+at app startup regardless of design system — `register_app_fonts` takes the
+raw bytes of one TTF/OTF (or TTC/OTC) file per call. Call it in the same
+`setup = { .. }` block as `install()`:
 
 ```rust
-use frust::register_app_fonts;
-
-fn init() {
-    register_app_fonts(&[
-        ("MyFont", include_bytes!("../assets/MyFont.ttf")),
-    ]);
-}
+frust::app!(MyAppApp, setup = {
+    frust_material::install();
+    frust::register_app_fonts(include_bytes!("../assets/MyFont.ttf").to_vec());
+});
 ```
 
 ## Theme Customization
 
-Customize colors, motion, and spacing using the builder:
+Customize colors, motion, and spacing by building on a baseline theme with
+`Theme::builder(base)`, then force it with `set_app_theme` (call it from the
+`setup` block, or later to switch themes at runtime):
 
 ```rust
-use frust::{ColorScheme, Theme};
+use frust::{Color, Theme, set_app_theme};
 
-let custom = Theme::builder()
-    .light_scheme(ColorScheme {
-        // ... customize roles
-    })
-    .build();
-set_app_theme(custom);
+fn customize() {
+    let custom = Theme::builder(frust_material::baseline())
+        .map_colors_light(|mut scheme| {
+            scheme.primary = Color::from_rgb8(0x1B, 0x6E, 0xF3);
+            scheme
+        })
+        .build();
+    set_app_theme(custom);
+}
 ```
 
+`set_app_theme` pins the theme end-to-end (it no longer follows the system
+light/dark preference); `frust::clear_app_theme()` returns to the default.
 See `frust-theme`'s docs in the Frust repo for the full token reference.

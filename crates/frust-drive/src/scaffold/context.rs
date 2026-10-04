@@ -531,7 +531,7 @@ pub fn validate_project_name(name: &str) -> Result<(), NameError> {
 }
 
 /// Converts a validated `snake_case` project name into `Title Case` (used
-/// for doc comments / the generated greeting).
+/// for doc comments / the generated app title).
 pub fn title_case(project_name: &str) -> String {
     project_name
         .split('_')

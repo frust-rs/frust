@@ -114,8 +114,22 @@
 //! 4dp) — duplicated here since those constants are private to that module,
 //! the same citation shape [`mod@super::toggle_button`]'s
 //! `ToggleButtonSize::square_radius` uses for a private sibling-module value.
-//! **`appbar.rs` is read-only from this module** — its own rework is a later
-//! phase; this bar is its own surface, not a shared base type.
+//! This bar is its own surface, not a shared base type over the app bar.
+//!
+//! **Window insets: the contextual branch insets like the idle bar.** An idle
+//! [`crate::app_bar`]/[`crate::search_app_bar`] consumes the top, left and
+//! right window insets itself by default (Flutter's `AppBar`). The contextual
+//! branch does the same: it grows by `padding().top`, lays its close button,
+//! count, actions and select-all row out below it and inside the side
+//! insets, and paints its `primary_container` fill edge to edge through the
+//! whole band. So the swap keeps one height and one set of slot offsets in
+//! every composition — unwrapped (both branches consume the inset) or under
+//! a consuming `frust::safe_area(..)` (both see 0). The idle view is an
+//! opaque [`AnyView`], so its own `.safe_area(..)` cannot be read from here:
+//! this bar mirrors the app bar's default, and a caller that opts its idle
+//! bar out with `.safe_area(false)` opts this one out too
+//! ([`SelectionAppBarView::safe_area`]). The contextual branch does not apply
+//! the app bar's window-control `corner_shift`.
 //!
 //! # Controlled semantics
 //!
@@ -158,11 +172,6 @@
 //!   every other component in this crate.
 //! * The `AnimatedSize`/`AnimatedSwitcher` contextual-bar transition — see
 //!   the Contextual bar section above.
-//! * A window-inset top pad on the contextual branch
-//!   (`MediaQuery.viewPaddingOf(context).top`) — this crate's chrome widgets
-//!   don't self-inset (`docs/CODE_STANDARDS.md`'s self-sizing-chrome-consumes-
-//!   its-own-inset rule); a caller wraps the whole `selection_app_bar` in
-//!   `frust::safe_area(...)` the way an idle `app_bar` would be.
 //!
 //! # Attribution
 //!
@@ -658,6 +667,7 @@ pub struct SelectionAppBarView<State: 'static> {
     select_all_label: String,
     on_clear: OnClear<State>,
     on_all_selected: Option<OnAllSelected<State>>,
+    safe_area: bool,
 }
 
 /// Create a selection app bar showing `idle` while `selected` is empty, and
@@ -684,6 +694,7 @@ where
         select_all_label: "Select all".to_string(),
         on_clear: Rc::new(on_clear),
         on_all_selected: None,
+        safe_area: true,
     }
 }
 
@@ -717,6 +728,19 @@ impl<State: 'static> SelectionAppBarView<State> {
         on_all_selected: F,
     ) -> Self {
         self.on_all_selected = Some(Rc::new(on_all_selected));
+        self
+    }
+
+    /// Whether the contextual branch consumes the top, left and right window
+    /// insets itself (default `true`), exactly as an idle [`crate::app_bar`]
+    /// or [`crate::search_app_bar`] does by default — see the [module
+    /// docs](self)' Contextual bar section. The idle view is opaque here, so
+    /// this setting cannot be read off it: a caller that passes
+    /// `.safe_area(false)` to its idle bar passes it here too, keeping both
+    /// branches at the same height and offsets. It never affects the idle
+    /// branch, which lays out (and insets) on its own terms.
+    pub fn safe_area(mut self, enabled: bool) -> Self {
+        self.safe_area = enabled;
         self
     }
 }
@@ -902,6 +926,9 @@ pub struct SelectionAppBarWidget {
     item_count: usize,
     show_select_all: bool,
     select_all_label: String,
+    /// Whether the contextual branch consumes the top/left/right window
+    /// insets — see [`SelectionAppBarView::safe_area`].
+    safe_area: bool,
 }
 
 impl<State: 'static> View<State> for SelectionAppBarView<State> {
@@ -917,6 +944,7 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
             item_count: self.item_count,
             show_select_all: self.show_select_all,
             select_all_label: self.select_all_label.clone(),
+            safe_area: self.safe_area,
         }
     }
 
@@ -1004,6 +1032,10 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
             // The idle/contextual branch itself may have flipped.
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        if element.safe_area != self.safe_area {
+            element.safe_area = self.safe_area;
+            flags |= ChangeFlags::LAYOUT;
+        }
         element.item_count = self.item_count;
         element.show_select_all = self.show_select_all;
         element.select_all_label = self.select_all_label.clone();
@@ -1032,28 +1064,47 @@ impl Widget for SelectionAppBarWidget {
             return bc.constrain(Size::new(width, idle_size.height));
         }
 
+        // Consume the same top/left/right window insets an idle top app bar
+        // does, so the swap keeps one height and one set of slot offsets in
+        // every composition (a consuming parent safe area leaves 0 here, for
+        // both branches alike).
+        let (pad_l, top, pad_r) = if self.safe_area {
+            let padding = ctx.window_insets().padding();
+            (
+                padding.left.max(0.0),
+                padding.top.max(0.0),
+                padding.right.max(0.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let leading_edge = pad_l + APP_BAR_PAD_X;
+        let trailing_edge = width - pad_r - APP_BAR_PAD_X;
+
         let slots = self.contextual_slots;
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, APP_BAR_HEIGHT));
 
         let close_size = self.contextual[slots.close].layout_child(ctx, &slot_bc);
         self.contextual[slots.close].set_origin(Point::new(
-            APP_BAR_PAD_X + (ACTION_SLOT - close_size.width).max(0.0) / 2.0,
-            (APP_BAR_HEIGHT - close_size.height) / 2.0,
+            leading_edge + (ACTION_SLOT - close_size.width).max(0.0) / 2.0,
+            top + (APP_BAR_HEIGHT - close_size.height) / 2.0,
         ));
 
         // Trailing actions, right-to-left from the trailing edge — mirrors
         // `appbar.rs`'s own reverse-iteration layout.
-        let mut right = width - APP_BAR_PAD_X;
+        let mut right = trailing_edge;
         for i in (0..slots.actions_len).rev() {
             let idx = slots.actions_start + i;
             let size = self.contextual[idx].layout_child(ctx, &slot_bc);
             right -= size.width;
-            self.contextual[idx]
-                .set_origin(Point::new(right, (APP_BAR_HEIGHT - size.height) / 2.0));
+            self.contextual[idx].set_origin(Point::new(
+                right,
+                top + (APP_BAR_HEIGHT - size.height) / 2.0,
+            ));
             right -= APP_BAR_GAP;
         }
 
-        let count_left = APP_BAR_PAD_X + ACTION_SLOT + APP_BAR_GAP;
+        let count_left = leading_edge + ACTION_SLOT + APP_BAR_GAP;
         let count_max_width = (right - count_left).max(0.0);
         let count_size = self.contextual[slots.count_text].layout_child(
             ctx,
@@ -1061,20 +1112,20 @@ impl Widget for SelectionAppBarWidget {
         );
         self.contextual[slots.count_text].set_origin(Point::new(
             count_left,
-            (APP_BAR_HEIGHT - count_size.height) / 2.0,
+            top + (APP_BAR_HEIGHT - count_size.height) / 2.0,
         ));
 
-        let mut height = APP_BAR_HEIGHT;
+        let mut height = top + APP_BAR_HEIGHT;
         if let Some((cb_idx, lbl_idx)) = slots.select_all {
             let cb_bc = BoxConstraints::loose(Size::new(f64::INFINITY, SELECT_ALL_HEIGHT));
             let cb_size = self.contextual[cb_idx].layout_child(ctx, &cb_bc);
             self.contextual[cb_idx].set_origin(Point::new(
-                APP_BAR_PAD_X + (ACTION_SLOT - cb_size.width).max(0.0) / 2.0,
+                leading_edge + (ACTION_SLOT - cb_size.width).max(0.0) / 2.0,
                 height + (SELECT_ALL_HEIGHT - cb_size.height) / 2.0,
             ));
 
-            let lbl_left = APP_BAR_PAD_X + ACTION_SLOT + APP_BAR_GAP;
-            let lbl_max_width = (width - APP_BAR_PAD_X - lbl_left).max(0.0);
+            let lbl_left = leading_edge + ACTION_SLOT + APP_BAR_GAP;
+            let lbl_max_width = (trailing_edge - lbl_left).max(0.0);
             let lbl_size = self.contextual[lbl_idx].layout_child(
                 ctx,
                 &BoxConstraints::loose(Size::new(lbl_max_width, SELECT_ALL_HEIGHT)),
@@ -1504,6 +1555,152 @@ mod tests {
             size.height, APP_BAR_HEIGHT,
             "the toolbar band matches appbar.rs's own HEIGHT metric"
         );
+    }
+
+    // ---- Window insets: the contextual branch insets like the idle bar ----
+
+    /// A phone in landscape under a status bar: 47px side bands, 24px top.
+    fn notched() -> frust::authoring::WindowInsets {
+        frust::authoring::WindowInsets::new(
+            frust::authoring::WindowEdgeInsets::new(47.0, 24.0, 47.0, 0.0),
+            frust::authoring::WindowEdgeInsets::ZERO,
+        )
+    }
+
+    fn bar_layout_with(
+        w: &mut SelectionAppBarWidget,
+        width: f64,
+        insets: frust::authoring::WindowInsets,
+    ) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        lctx.with_window_insets(insets, |ctx| {
+            w.layout(ctx, &BoxConstraints::loose(Size::new(width, 400.0)))
+        })
+    }
+
+    /// A selection bar over a real idle top app bar, with one 48px action on
+    /// each branch and no select-all row, so both bands are comparable.
+    fn real_bar(selected: &BTreeSet<usize>, safe_area: bool) -> SelectionAppBarView<()> {
+        use frust_widgets::test_support::leaf_any;
+        let idle = crate::app_bar::<()>("Inbox")
+            .leading(leaf_any(48.0, 48.0))
+            .actions(vec![leaf_any(48.0, 48.0)])
+            .safe_area(safe_area);
+        selection_app_bar(any(idle), selected, 3, |_: &mut ()| {})
+            .show_select_all(false)
+            .actions(vec![leaf_any(48.0, 48.0)])
+            .safe_area(safe_area)
+    }
+
+    #[test]
+    fn idle_to_selection_keeps_height_and_slot_offsets_under_window_insets() {
+        let idle_set = BTreeSet::new();
+        let selected = BTreeSet::from([0]);
+
+        let mut idle = bar_build(&real_bar(&idle_set, true));
+        let idle_size = bar_layout_with(&mut idle, 800.0, notched());
+        let mut ctx_w = bar_build(&real_bar(&selected, true));
+        let ctx_size = bar_layout_with(&mut ctx_w, 800.0, notched());
+
+        assert_eq!(idle_size, Size::new(800.0, 24.0 + APP_BAR_HEIGHT));
+        assert_eq!(ctx_size, idle_size, "the swap keeps the bar's height");
+
+        // The contextual slots sit below the top inset and inside the side
+        // ones, at the idle bar's own leading/trailing rule.
+        let close = &ctx_w.contextual[ctx_w.contextual_slots.close];
+        assert_eq!(
+            close.origin().x,
+            47.0 + APP_BAR_PAD_X + (ACTION_SLOT - close.size().width).max(0.0) / 2.0
+        );
+        assert_eq!(
+            close.origin().y,
+            24.0 + (APP_BAR_HEIGHT - close.size().height) / 2.0
+        );
+        let action = &ctx_w.contextual[ctx_w.contextual_slots.actions_start];
+        assert_eq!(
+            action.origin().x + action.size().width,
+            800.0 - 47.0 - APP_BAR_PAD_X
+        );
+        assert_eq!(action.origin().y, 24.0 + (APP_BAR_HEIGHT - 48.0) / 2.0);
+        let count = &ctx_w.contextual[ctx_w.contextual_slots.count_text];
+        assert_eq!(
+            count.origin().x,
+            47.0 + APP_BAR_PAD_X + ACTION_SLOT + APP_BAR_GAP
+        );
+
+        // The fill covers the whole band, the consumed top inset included.
+        let mut scene = RectRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, ctx_size);
+        ctx_w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects[0], (Point::ZERO, ctx_size));
+    }
+
+    #[test]
+    fn idle_to_selection_stays_continuous_under_a_consuming_safe_area() {
+        let idle_set = BTreeSet::new();
+        let selected = BTreeSet::from([0]);
+        let consumed = notched().consuming(true, true, true, false);
+
+        // Inside a consuming scope both branches see zero padding.
+        let mut idle = bar_build(&real_bar(&idle_set, true));
+        let idle_size = bar_layout_with(&mut idle, 706.0, consumed);
+        let mut ctx_w = bar_build(&real_bar(&selected, true));
+        let ctx_size = bar_layout_with(&mut ctx_w, 706.0, consumed);
+        assert_eq!(idle_size.height, APP_BAR_HEIGHT);
+        assert_eq!(ctx_size, idle_size);
+        let close = &ctx_w.contextual[ctx_w.contextual_slots.close];
+        assert_eq!(
+            close.origin().x,
+            APP_BAR_PAD_X + (ACTION_SLOT - close.size().width).max(0.0) / 2.0
+        );
+        let action = &ctx_w.contextual[ctx_w.contextual_slots.actions_start];
+        assert_eq!(
+            action.origin().x + action.size().width,
+            706.0 - APP_BAR_PAD_X
+        );
+
+        // Through a real `frust::safe_area`: one 24px pad, never two.
+        let heights: Vec<f64> = [&idle_set, &selected]
+            .into_iter()
+            .map(|set| {
+                let wrapped = frust::safe_area(real_bar(set, true)).bottom(false);
+                let mut counter = 0u64;
+                let mut w = View::<()>::build(&wrapped, &mut BuildCtx::new(&mut counter));
+                let mut tcx = TextContext::new();
+                let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+                lctx.with_window_insets(notched(), |ctx| {
+                    w.layout(ctx, &BoxConstraints::loose(Size::new(800.0, 400.0)))
+                })
+                .height
+            })
+            .collect();
+        assert_eq!(heights, vec![24.0 + APP_BAR_HEIGHT; 2]);
+    }
+
+    #[test]
+    fn safe_area_false_opts_the_contextual_branch_out_like_the_idle_bar() {
+        let idle_set = BTreeSet::new();
+        let selected = BTreeSet::from([0]);
+        let mut idle = bar_build(&real_bar(&idle_set, false));
+        let idle_size = bar_layout_with(&mut idle, 800.0, notched());
+        let mut ctx_w = bar_build(&real_bar(&selected, false));
+        let ctx_size = bar_layout_with(&mut ctx_w, 800.0, notched());
+        assert_eq!(idle_size.height, APP_BAR_HEIGHT);
+        assert_eq!(ctx_size, idle_size);
+        let action = &ctx_w.contextual[ctx_w.contextual_slots.actions_start];
+        assert_eq!(
+            action.origin().x + action.size().width,
+            800.0 - APP_BAR_PAD_X
+        );
+
+        // Flipping the setting is a layout change.
+        let mut counter = 0u64;
+        let prev = real_bar(&selected, false);
+        let next = real_bar(&selected, true);
+        let flags = View::<()>::rebuild(&next, &prev, &mut ctx_w, &mut BuildCtx::new(&mut counter));
+        assert!(flags.needs_layout());
+        assert!(ctx_w.safe_area);
     }
 
     #[test]

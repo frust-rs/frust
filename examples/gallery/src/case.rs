@@ -66,7 +66,7 @@ pub struct Case {
     /// which theme) this case renders under.
     pub design: Design,
     /// The pure `View` constructor this case records — called fresh on every
-    /// rebuild pass, exactly like an app's `app_logic`.
+    /// rebuild pass, exactly like a `Component::build`.
     pub build: fn() -> frust_core::AnyView<()>,
 }
 

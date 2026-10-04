@@ -88,15 +88,9 @@ fn menu_screen(state: &AppState) -> AnyView<AppState> {
     any(safe_area(menu))
 }
 
-/// The running screen: the shader canvas filling the window, under a HUD
-/// overlay (back button + shader name + FPS traffic-light readout at the
-/// top, a hint caption at the bottom).
-fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
-    let (name, program) = &state.shaders[idx];
-    let name = *name;
-    let program = program.clone();
-
-    let fps = state.fps.get();
+/// The running screen's HUD: back button + shader name + FPS traffic-light
+/// readout at the top, a hint caption at the bottom.
+fn hud_overlay(name: &'static str, fps: f64) -> impl frust::View<AppState> {
     let fps_label = if fps > 0.0 {
         format!("FPS: {fps:.1}")
     } else {
@@ -125,7 +119,7 @@ fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
             .size(12.0)
             .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3));
 
-    let hud = Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(
             Axis::Vertical,
@@ -135,17 +129,20 @@ fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
                 inflexible(hint),
             ],
         ),
-    );
-
-    any(Stack(vec![any(shader_view(program, state.fps)), any(hud)]))
+    )
 }
 
-/// The showcase's view: the menu picker, or a running shader under its HUD.
-fn app_logic(state: &mut AppState) -> AnyView<AppState> {
-    match state.screen {
-        Screen::Menu => menu_screen(state),
-        Screen::Running(idx) => running_screen(state, idx),
-    }
+/// The running screen: the shader canvas filling the window, under a HUD
+/// overlay (back button + shader name + FPS traffic-light readout at the
+/// top, a hint caption at the bottom).
+fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
+    let (name, program) = &state.shaders[idx];
+    let name = *name;
+    let program = program.clone();
+
+    let hud = hud_overlay(name, state.fps.get());
+
+    any(Stack(vec![any(shader_view(program, state.fps)), any(hud)]))
 }
 
 /// The root [`Component`]: builds the shader registry once and
@@ -168,7 +165,10 @@ impl Component for ShadertoyApp {
     }
 
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
-        app_logic(state)
+        match state.screen {
+            Screen::Menu => menu_screen(state),
+            Screen::Running(idx) => running_screen(state, idx),
+        }
     }
 }
 

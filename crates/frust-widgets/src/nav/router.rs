@@ -1559,9 +1559,9 @@ mod tests {
 
     // ================= RouteNavigator seam (pump) =================
 
-    /// The `app_logic` closure [`RenderRoot::rebuild`] drives, boxed so
+    /// The build closure [`RenderRoot::rebuild`] drives, boxed so
     /// [`PumpHarness`] can store it as a field.
-    type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
+    type Build = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
 
     /// A router + navigator harness for the pump tests: the same shape the
     /// other stack tests use, bundled so a test can queue → pump → rebuild →
@@ -1569,7 +1569,7 @@ mod tests {
     struct PumpHarness {
         router: Router<()>,
         root: RenderRoot<(), NavigatorView<()>>,
-        app: AppLogic,
+        app: Build,
         state: (),
     }
 
@@ -1580,7 +1580,7 @@ mod tests {
             // which panics without a threaded `TextContext`.
             let router =
                 Router::with_controller(&controller, routes).error_builder(|_| sized(99.0, 99.0));
-            let app: AppLogic =
+            let app: Build =
                 Box::new(move |_: &mut ()| navigator(&controller, || sized(10.0, 10.0)));
             let mut harness = PumpHarness {
                 router,
@@ -1779,7 +1779,7 @@ mod tests {
         outer: NavigatorController<()>,
         inner: NavigatorController<()>,
         root: RenderRoot<(), NavigatorView<()>>,
-        app: AppLogic,
+        app: Build,
         /// Builds of the shell page's chrome — see [`BuildCounter`].
         shell_builds: Rc<Cell<u32>>,
     }
@@ -1815,7 +1815,7 @@ mod tests {
             ];
             let router =
                 Router::with_controller(&outer, routes).error_builder(|_| sized(99.0, 99.0));
-            let app: AppLogic = {
+            let app: Build = {
                 let c = outer.clone();
                 Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
             };
@@ -2044,7 +2044,7 @@ mod tests {
             )
         };
         let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
-        let mut app: AppLogic = {
+        let mut app: Build = {
             let c = outer.clone();
             Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
         };
@@ -2070,7 +2070,7 @@ mod tests {
             ],
         );
         let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
-        let mut app: AppLogic = {
+        let mut app: Build = {
             let c = controller.clone();
             Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
         };

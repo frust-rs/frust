@@ -1,0 +1,10 @@
+//! `counter` domain — the [`CounterRepository`] contract and its
+//! [`LoadCount`]/[`IncrementCount`] use cases. Imports nothing from `data/`
+//! or `presentation/`, and no `frust` widget/reactive types — only
+//! `crate::failure` plus `clean_signals`.
+
+pub mod repositories;
+pub mod use_cases;
+
+pub use repositories::CounterRepository;
+pub use use_cases::{IncrementCount, LoadCount};

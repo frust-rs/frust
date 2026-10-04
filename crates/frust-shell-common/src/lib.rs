@@ -2,7 +2,7 @@
 //!
 //! The Android (`frust-shell-android`) and iOS shells both need the same
 //! non-FFI machinery: the [`AppTree`] type-erasure that lets a non-generic
-//! native handle drive any app's `State`/`app_logic`, a handful of pure
+//! native handle drive any app's `State`/`build`, a handful of pure
 //! helpers for crossing an FFI boundary safely ([`guard`]) and turning an
 //! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]/
 //! [`logical_insets`]/[`logical_corner_insets`], the last two converting platform

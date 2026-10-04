@@ -6,9 +6,9 @@
 // Porting decisions (each restated with its reference site in the module docs
 // below): the collapsing bar's scroll linkage is an app-fed controlled prop
 // rather than a sliver-protocol participant; the small/collapsed band keeps M3's
-// published 64dp rather than upstream's own 72dp content-padding model; and the
-// bar's own edge/slot insets stay this catalog's 4dp rather than upstream's
-// 0/8dp pair.
+// published 64dp rather than upstream's own 72dp content-padding model; the
+// bar's slot edge insets and slot gap stay this catalog's 4dp rather than
+// upstream's 0/8dp pair, while a top bar's title keeps M3's 16dp edge inset.
 
 //! The M3 Expressive **app bar** family: four constructors over one set of
 //! metrics, shape families, and densities.
@@ -46,8 +46,50 @@
 //! themed `onSurface` (the `Text` default role) so it survives a live theme swap
 //! through `Text`'s own layout-time color resolution, ellipsized to one line
 //! (upstream's `overflow: TextOverflow.ellipsis` on both `titleText` paths).
+//! A top bar on [`AppBarContainer::PrimaryContainer`] themes it
+//! `onPrimaryContainer` instead, through the same deferred color-role seam.
 //! [`AppBarView::title_view`] replaces it with any caller view — upstream's
 //! `title` widget slot, and what [`search_app_bar`] itself uses.
+//!
+//! # Top-bar container, elevation, and self-inset
+//!
+//! A top bar's fill resolves at paint time, so it follows a brightness flip
+//! or a live theme swap. Precedence: [`AppBarView::background`], then an
+//! explicit [`AppBarView::container`] role, then — when
+//! [`AppBarView::elevation`] is above 0 — that elevation level's
+//! `surface_role` (M3 tonal elevation: level 2 is `surfaceContainer`), then
+//! `colors.surface`. An elevation above 0 also paints a drop shadow first, the
+//! way [`mod@crate::card`]'s elevated variant does
+//! ([`frust::authoring::PaintScene::draw_shadow`] from the level's
+//! `ShadowSpec`, `colors.shadow` at its alpha), then the fill, then the slots.
+//! A `Scaffold` paints its body before its app bar, so the shadow lands on the
+//! body. `container(AppBarContainer::InversePrimary)` is the fill Flutter's
+//! counter template gives its `AppBar`; `.elevation(2)` adds a level-2 shadow
+//! beneath it.
+//!
+//! A top bar ([`app_bar`] and [`search_app_bar`]) consumes the **top, left
+//! and right** window insets itself by default — Flutter's `AppBar`, whose
+//! toolbar sits in a `SafeArea(bottom: false)` — the way
+//! [`crate::navigation_bar`] consumes the bottom one: its `layout` reads
+//! `ctx.window_insets().padding()`, grows the bar by the top inset, paints
+//! the fill (and shadow) edge to edge through that band and across the full
+//! width so a colored bar extends under the status bar and a landscape
+//! cutout, and lays the slots out below the top inset and inside the side
+//! ones. Every horizontal slot rule (leading at `PAD_X`, a bare title edge at
+//! `TITLE_EDGE_INSET`, actions ending `PAD_X` in, the centered-title
+//! arithmetic) measures from the inset-adjusted edge. A parent
+//! `frust::safe_area` that already consumed an edge leaves 0 on it here, so
+//! wrapping the bar in `safe_area(..).bottom(false)` never double-insets — it
+//! only leaves the consumed bands outside the bar unpainted.
+//! [`AppBarView::safe_area`]`(false)` opts out of all three edges for a bar
+//! that is not docked to the window's top edge.
+//!
+//! The corner shift above stacks on the consumed side padding: a
+//! `CornerInsets` width is measured from the safe-area edge, not the window
+//! edge, so a slot's origin is `padding.left + corner_insets.top_left.width`
+//! (mirrored on the right). That is exactly what the same bar gets under a
+//! parent safe area that consumed the side padding first (the corner is never
+//! consumed), so both compositions place the slots identically.
 //!
 //! # Metrics ([`AppBarMetrics`]), densities, and the one deliberate divergence
 //!
@@ -70,9 +112,16 @@
 //! [`crate::selection_app_bar`]'s contextual band mirrors so the two read as one
 //! continuous surface across a selection-mode swap. Upstream's 72dp is
 //! reachable as an explicit [`AppBarView::toolbar_height`] (its own
-//! `toolbarHeight` override). The same reasoning keeps this family's 4dp edge
-//! inset and 4dp slot gap rather than upstream's `contentPadding` (0 horizontal)
-//! + `titleGap` (8dp) pair.
+//! `toolbarHeight` override). The same reasoning keeps this family's 4dp slot
+//! edge inset and 4dp slot gap rather than upstream's `contentPadding` (0
+//! horizontal) + `titleGap` (8dp) pair: a leading or action icon button
+//! carries a 48dp touch target, which puts its 24dp glyph at the M3 16dp mark.
+//! The **title** is the exception: a top bar with no leading slot starts its
+//! title `TITLE_EDGE_INSET` (16dp) from the leading edge, and one with no
+//! actions ends the title's available width 16dp from the trailing edge —
+//! the published M3 small-top-app-bar geometry (and Flutter's
+//! `NavigationToolbar` middle spacing), since a bare title has no touch
+//! target to carry it off the edge.
 //!
 //! # Shape families
 //!
@@ -144,15 +193,11 @@
 //!
 //! # Not ported
 //!
-//! * **`safeArea` / `MediaQuery.viewPadding`.** This family's own bars still
-//!   never self-inset (`docs/CODE_STANDARDS.md`'s
-//!   self-sizing-chrome-consumes-its-own-inset rule leaves the choice to the
-//!   composer); a caller wraps a top/collapsing/bottom app bar in
-//!   `frust::safe_area(...)`, the same way [`crate::selection_app_bar`]
-//!   documents. [`crate::navigation_bar`] is this catalog's one
-//!   self-insetting chrome widget (the bottom edge, `.safe_area(bool)`,
-//!   default on) — an exception to this family's contract, not a precedent
-//!   for it.
+//! * **`safeArea` / `MediaQuery.viewPadding` on the collapsing and bottom
+//!   bars.** Only the fixed top bar (and [`crate::selection_app_bar`]'s
+//!   contextual branch, which mirrors it) self-insets (see *Top-bar container,
+//!   elevation, and self-inset* above); a caller wraps a collapsing or bottom
+//!   app bar in `frust::safe_area(...)`.
 //! * **`automaticallyImplyLeading`.** Upstream reads `Navigator.maybeOf(context)`
 //!   to synthesize a back button; a widget here has no navigator handle, and
 //!   this catalog's convention is an explicit `leading` slot (supply
@@ -162,9 +207,9 @@
 //!   reveal-on-scroll-up computes its own collapse fraction and feeds it in.
 //!   [`SliverAppBarView::pinned`] *is* ported — it selects whether the bar
 //!   bottoms out at the collapsed band or scrolls away entirely.
-//! * **`elevation` / `Material` shadow.** Upstream's own default is `0`, so a
-//!   ported default paints nothing; this family has no shadow to place behind an
-//!   elevation token (the FAB/Card precedent owns that).
+//! * **`elevation` / `Material` shadow on the collapsing and bottom bars.**
+//!   Upstream's own default is `0`, so a ported default paints nothing; only
+//!   the fixed top bar takes [`AppBarView::elevation`].
 //! * **`clipBehavior`.** The collapsing bar clips its own content band once the
 //!   bar is shorter than it (see [`mod@sliver`]); nothing else in the family
 //!   overflows its box, so there is no clip knob to expose.
@@ -181,8 +226,8 @@
 //! (Vendored Components)" section and its Module Attribution Header Convention.
 
 use frust::authoring::text::{FontWeight, LineHeight, TextOverflow};
-use frust::authoring::{AnyView, ChildPod, Role, ThemeTextType};
-use frust::{ShapeScale, Theme, text};
+use frust::authoring::{AnyView, ChildPod, Role, ThemeTextColor, ThemeTextType};
+use frust::{ElevationLevel, ShapeScale, SurfaceRole, Theme, text};
 use peniko::Color;
 
 pub mod bottom;
@@ -207,6 +252,16 @@ const HEIGHT: f64 = 64.0;
 /// Horizontal inset from a bar's leading/trailing edges to the leading/action
 /// slots, in logical px (upstream's `contentPadding`, 0 horizontal).
 const PAD_X: f64 = 4.0;
+
+/// Horizontal inset from a top bar's leading/trailing edge to its title when
+/// no leading slot / no action sits on that side, in logical px — the M3
+/// small-top-app-bar title margin (m3.material.io/components/top-app-bars/specs).
+/// Slots keep [`PAD_X`]; see the [module docs](self)' divergence paragraph.
+const TITLE_EDGE_INSET: f64 = 16.0;
+
+/// Highest elevation level [`AppBarView::elevation`](top::AppBarView::elevation)
+/// accepts (`theme.elevation.level5`); larger values clamp to it.
+const MAX_ELEVATION: u8 = 5;
 
 /// Gap between adjacent slots (leading↔title, title↔actions, action↔action), in
 /// logical px (upstream's `titleGap`, 8dp).
@@ -268,9 +323,52 @@ const CONTAINER: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 /// container" role.
 const BOTTOM_CONTAINER: Color = Color::from_rgb8(0xF3, 0xED, 0xF7);
 
+/// Unthemed fallback shadow color: opaque black at the elevation table's `0.3`
+/// alpha, the same constant [`mod@crate::card`]'s elevated variant falls back to.
+const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
+
 /// Unthemed fallback corner radius for [`AppBarShapeFamily::Round`], in logical
 /// px — `crate::tokens::shape_scale()`'s own `small` value.
 const ROUND_RADIUS: f64 = 8.0;
+
+/// The theme color role a top bar's container fills with —
+/// [`AppBarView::container`](top::AppBarView::container). Resolved at paint
+/// time from the live theme's scheme; an explicit
+/// [`AppBarView::background`](top::AppBarView::background) still wins.
+///
+/// | Role | Fill | String-title color |
+/// |---|---|---|
+/// | [`Surface`](Self::Surface) | `surface` | `onSurface` |
+/// | [`SurfaceContainer`](Self::SurfaceContainer) | `surfaceContainer` | `onSurface` |
+/// | [`InversePrimary`](Self::InversePrimary) | `inversePrimary` | `onSurface` |
+/// | [`PrimaryContainer`](Self::PrimaryContainer) | `primaryContainer` | `onPrimaryContainer` |
+///
+/// `InversePrimary` is the fill Flutter's own counter template gives its
+/// `AppBar`; Flutter keeps the foreground `onSurface` there, and so does this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppBarContainer {
+    /// `colors.surface` — the M3 default.
+    #[default]
+    Surface,
+    /// `colors.surface_container` — the M3 on-scroll fill.
+    SurfaceContainer,
+    /// `colors.inverse_primary`.
+    InversePrimary,
+    /// `colors.primary_container`, with an `onPrimaryContainer` string title.
+    PrimaryContainer,
+}
+
+impl AppBarContainer {
+    /// The themed color role a string title takes over this container.
+    fn title_role(self) -> ThemeTextColor {
+        match self {
+            AppBarContainer::PrimaryContainer => ThemeTextColor::OnPrimaryContainer,
+            AppBarContainer::Surface
+            | AppBarContainer::SurfaceContainer
+            | AppBarContainer::InversePrimary => ThemeTextColor::OnSurface,
+        }
+    }
+}
 
 /// Which collapsing-bar layout [`sliver_app_bar`] renders —
 /// `M3EAppBarVariant`. The variant influences only the collapsing bar; the
@@ -529,7 +627,16 @@ impl<State: 'static> TitleSlot<State> {
 /// (Space Mono headline, IBM Plex Mono title) or Cupertino's (SF Pro Display
 /// at 20pt and up, SF Pro Text below) — the expanded headline therefore
 /// renders in the title face. The Material scale gives both roles Roboto Flex.
-fn title_text_view<State: 'static>(title: &str, size: f32, line_height: f32) -> AnyView<State> {
+///
+/// `role` is the themed color role: `OnSurface` everywhere but a top bar whose
+/// container calls for a different foreground (see
+/// [`AppBarContainer::title_role`]).
+fn title_text_view<State: 'static>(
+    title: &str,
+    size: f32,
+    line_height: f32,
+    role: ThemeTextColor,
+) -> AnyView<State> {
     frust::authoring::any::<State, _>(
         text(title.to_string())
             .size(size)
@@ -537,6 +644,7 @@ fn title_text_view<State: 'static>(title: &str, size: f32, line_height: f32) -> 
             .line_height(LineHeight::Absolute(line_height))
             .max_lines(1)
             .overflow(TextOverflow::Ellipsis)
+            .themed_role(role)
             .themed_family(ThemeTextType::TitleLargeEmphasized),
     )
 }
@@ -553,9 +661,20 @@ fn title_ref<'a, State: 'static>(
     size: f32,
     line_height: f32,
 ) -> &'a AnyView<State> {
+    title_ref_in(slot, storage, size, line_height, ThemeTextColor::OnSurface)
+}
+
+/// [`title_ref`] with an explicit themed color `role` for the string case.
+fn title_ref_in<'a, State: 'static>(
+    slot: &'a TitleSlot<State>,
+    storage: &'a mut Option<AnyView<State>>,
+    size: f32,
+    line_height: f32,
+    role: ThemeTextColor,
+) -> &'a AnyView<State> {
     match slot {
         TitleSlot::Text(title) => {
-            storage.insert(title_text_view::<State>(title, size, line_height))
+            storage.insert(title_text_view::<State>(title, size, line_height, role))
         }
         TitleSlot::View(view) => view,
     }
@@ -568,6 +687,100 @@ fn resolve_container(theme: Option<&Theme>) -> Color {
     match theme {
         Some(theme) => theme.scheme().surface,
         None => CONTAINER,
+    }
+}
+
+/// The resolved container fill of a fixed top bar with an optional explicit
+/// `container` role at `elevation` (already clamped). Precedence (the
+/// builder's own `background` is applied by the caller first): `container`,
+/// then the elevation level's `surface_role` when `elevation > 0`, then
+/// `colors.surface`. Unthemed, `Surface` keeps the [`CONTAINER`] fallback and
+/// every other role reads the Material 3 baseline light scheme.
+fn resolve_top_container(
+    theme: Option<&Theme>,
+    container: Option<AppBarContainer>,
+    elevation: u8,
+) -> Color {
+    let role = match container {
+        Some(AppBarContainer::Surface) => SurfaceRole::Surface,
+        Some(AppBarContainer::SurfaceContainer) => SurfaceRole::SurfaceContainer,
+        Some(AppBarContainer::InversePrimary) => {
+            return with_scheme(theme, |scheme| scheme.inverse_primary);
+        }
+        Some(AppBarContainer::PrimaryContainer) => {
+            return with_scheme(theme, |scheme| scheme.primary_container);
+        }
+        None if elevation > 0 => elevation_level(theme, elevation).surface_role,
+        None => SurfaceRole::Surface,
+    };
+    if theme.is_none() && role == SurfaceRole::Surface {
+        return CONTAINER;
+    }
+    with_scheme(theme, |scheme| surface_role_color(scheme, role))
+}
+
+/// `pick` applied to the theme's scheme, or to the Material 3 baseline light
+/// scheme unthemed.
+fn with_scheme(theme: Option<&Theme>, pick: impl FnOnce(&frust::ColorScheme) -> Color) -> Color {
+    match theme {
+        Some(theme) => pick(theme.scheme()),
+        None => pick(&crate::tokens::color_scheme_light()),
+    }
+}
+
+/// `role`'s color in `scheme`.
+fn surface_role_color(scheme: &frust::ColorScheme, role: SurfaceRole) -> Color {
+    match role {
+        SurfaceRole::Surface => scheme.surface,
+        SurfaceRole::SurfaceContainerLowest => scheme.surface_container_lowest,
+        SurfaceRole::SurfaceContainerLow => scheme.surface_container_low,
+        SurfaceRole::SurfaceContainer => scheme.surface_container,
+        SurfaceRole::SurfaceContainerHigh => scheme.surface_container_high,
+        SurfaceRole::SurfaceContainerHighest => scheme.surface_container_highest,
+    }
+}
+
+/// Elevation level `level` of the theme's table, or of this catalog's own
+/// [`crate::tokens::elevation`] table unthemed. Callers pass the value
+/// [`AppBarView::elevation`](top::AppBarView::elevation) already clamped to
+/// [`MAX_ELEVATION`]; the match's last arm reads level 5 for anything above
+/// it regardless.
+fn elevation_level(theme: Option<&Theme>, level: u8) -> ElevationLevel {
+    let table = match theme {
+        Some(theme) => theme.elevation,
+        None => crate::tokens::elevation(),
+    };
+    match level {
+        0 => table.level0,
+        1 => table.level1,
+        2 => table.level2,
+        3 => table.level3,
+        4 => table.level4,
+        _ => table.level5,
+    }
+}
+
+/// The drop shadow a top bar at `elevation` paints beneath its fill, as
+/// `(y_offset, blur_std_dev, color)` — `None` at level 0. Themed: the level's
+/// `ShadowSpec` for the theme's brightness, `colors.shadow` at its alpha
+/// (mirroring [`mod@crate::card`]'s `resolve_shadow_color`). Unthemed: the same
+/// level of [`crate::tokens::elevation`] with [`FALLBACK_SHADOW_COLOR`].
+fn resolve_elevation_shadow(theme: Option<&Theme>, elevation: u8) -> Option<(f64, f64, Color)> {
+    if elevation == 0 {
+        return None;
+    }
+    let level = elevation_level(theme, elevation);
+    match theme {
+        Some(theme) => {
+            let spec = level.shadow(theme.brightness);
+            let c = theme.scheme().shadow.components;
+            let color = Color::new([c[0], c[1], c[2], spec.color_alpha]);
+            Some((spec.y_offset, spec.blur_std_dev, color))
+        }
+        None => {
+            let spec = level.shadow_light;
+            Some((spec.y_offset, spec.blur_std_dev, FALLBACK_SHADOW_COLOR))
+        }
     }
 }
 

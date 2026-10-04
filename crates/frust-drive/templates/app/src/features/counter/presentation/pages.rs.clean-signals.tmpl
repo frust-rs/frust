@@ -1,0 +1,89 @@
+//! The counter page, built from small widget fns.
+//!
+//! [`init_controller`]/[`counter_page`] are what `crate`'s root `Component`
+//! (the composition root in `lib.rs`) delegates its `init`/`build` to. The
+//! repository is built once there and handed in here as a plain prop: a
+//! single page needs no `provide_context`/`use_context` indirection, unlike
+//! `examples/huddle`'s multi-route case.
+
+use std::sync::Arc;
+
+use clean_signals::{AsyncState, Failure};
+use clean_signals_frust::{async_view, use_controller};
+use frust::{
+    Align, Alignment, AnyView, Column, CrossAxisAlignment, Get, View, any, scaffold,
+    spawn_local, text,
+};
+
+use crate::failure::AppFailure;
+use crate::features::counter::domain::repositories::CounterRepository;
+use crate::features::counter::presentation::controllers::CounterController;
+
+/// The page's state: the shared controller handle.
+type PageState = Arc<CounterController>;
+
+/// Builds the page's [`CounterController`], wired to the injected `repo`
+/// prop, and kicks off the initial load. Called once from the root
+/// `Component::init`, where a reactive `Owner` is ambient (so
+/// `use_controller`'s disposal-on-unmount cleanup binds correctly).
+pub fn init_controller(repo: Arc<dyn CounterRepository + Send + Sync>) -> PageState {
+    let controller =
+        use_controller::<CounterController, AppFailure>(move || CounterController::new(repo));
+    let handle = Arc::clone(&controller);
+    spawn_local(async move {
+        handle.load().await;
+    });
+    controller
+}
+
+/// The counter screen: a Material scaffold with an app bar, the count and an
+/// increment button.
+pub fn counter_page(state: &mut PageState) -> AnyView<PageState> {
+    // Tracked read: the controller writes this signal from spawned tasks,
+    // which wakes the frame and rebuilds the page.
+    let count = state.count.get();
+    any(scaffold(counter_body(count))
+        .app_bar(any(app_bar("{{ title_case_name }}")))
+        .fab(any(increment_fab())))
+}
+
+// The Material app bar insets itself under the status bar, so no safe_area wrapper is needed.
+fn app_bar(title: &str) -> impl View<PageState> + use<> {
+    frust_material::app_bar::<PageState>(title)
+        .container(frust_material::AppBarContainer::InversePrimary)
+        .elevation(2)
+}
+
+fn counter_body(count: AsyncState<u32, AppFailure>) -> impl View<PageState> + use<> {
+    Align(
+        Alignment::CENTER,
+        async_view(
+            count,
+            || any(text("Loading…")),
+            |count: u32| any(counter_column(count)),
+            |failure: AppFailure| any(text(failure.user_message())),
+        ),
+    )
+}
+
+fn counter_column(count: u32) -> impl View<PageState> + use<> {
+    Column(vec![
+        any(text("You have pushed the button this many times:")),
+        any(text(count.to_string()).size(48.0)),
+    ])
+    .cross_axis(CrossAxisAlignment::Center)
+}
+
+// The Scaffold keeps the FAB clear of the gesture-nav inset.
+fn increment_fab() -> impl View<PageState> + use<> {
+    frust_material::fab(
+        any(frust::icon(frust_material::icons::ADD)),
+        |state: &mut PageState| {
+            let handle = Arc::clone(state);
+            spawn_local(async move {
+                handle.increment().await;
+            });
+        },
+    )
+    .label("Increment")
+}

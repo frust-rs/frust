@@ -310,7 +310,7 @@ fn build_cards() -> Vec<ArchCard> {
     let mut cards = vec![ArchCard {
         tag: None,
         label: "Default".to_string(),
-        description: "The standard notes-app template.".to_string(),
+        description: "The standard Material counter template.".to_string(),
         enabled: true,
         disabled_reason: None,
         sibling_gated: false,

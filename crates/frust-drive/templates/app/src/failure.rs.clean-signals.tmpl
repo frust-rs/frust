@@ -4,7 +4,7 @@
 //! One [`Failure`] implementor for the whole scaffold (team-demo's
 //! convention, mirrored by `examples/huddle`'s own `failure.rs`): every use
 //! case maps its errors into this generic retry/failure vocabulary at the
-//! data-layer boundary (see `features::greeting::data::repositories`'s
+//! data-layer boundary (see `features::counter::data::repositories`'s
 //! `map_source_error`, this scaffold's single mapping site). Matched
 //! exhaustively by presentation code, never string-matched — no catch-all
 //! variant.

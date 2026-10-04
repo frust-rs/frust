@@ -34,12 +34,12 @@ use frust_widgets::{
 };
 use kurbo::Size;
 
-/// Build + lay out `app_logic`'s tree under a 400x400 window and return the
+/// Build + lay out a build closure's tree under a 400x400 window and return the
 /// resulting inspect snapshot.
-fn inspect<V: View<()>>(app_logic: &mut impl FnMut(&mut ()) -> V) -> Vec<InspectNode> {
+fn inspect<V: View<()>>(build: &mut impl FnMut(&mut ()) -> V) -> Vec<InspectNode> {
     let mut root: RenderRoot<(), V> = RenderRoot::new();
     let mut state = ();
-    root.rebuild(app_logic, &mut state);
+    root.rebuild(build, &mut state);
     let mut text_ctx = TextContext::new();
     root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
     root.inspect()
@@ -154,13 +154,13 @@ fn a_transient_slot_publishes_its_child_only_while_one_is_playing() {
     // switcher freezes the outgoing child at rebuild), so no paint clock is
     // needed here.
     let mut root: RenderRoot<u32, _> = RenderRoot::new();
-    let mut app_logic = |key: &mut u32| -> PatternSwitcherView<u32, FadeThrough> {
+    let mut build = |key: &mut u32| -> PatternSwitcherView<u32, FadeThrough> {
         pattern_switcher(*key, FadeThrough, text("page"))
     };
     let mut state = 0u32;
     let mut text_ctx = TextContext::new();
 
-    root.rebuild(&mut app_logic, &mut state);
+    root.rebuild(&mut build, &mut state);
     root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
     assert_eq!(
         short_names(&root.inspect()),
@@ -169,7 +169,7 @@ fn a_transient_slot_publishes_its_child_only_while_one_is_playing() {
     );
 
     state = 1;
-    root.rebuild(&mut app_logic, &mut state);
+    root.rebuild(&mut build, &mut state);
     root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
     let playing = root.inspect();
     assert_eq!(
@@ -205,7 +205,7 @@ fn a_type_swapped_child_reports_its_new_widget_type() {
     // The pod's recorded name is refreshed on the one path that can change it:
     // an `AnyView` concrete-type swap through the shared child plumbing.
     let mut root: RenderRoot<bool, _> = RenderRoot::new();
-    let mut app_logic = |editing: &mut bool| -> frust_widgets::PaddingView<bool> {
+    let mut build = |editing: &mut bool| -> frust_widgets::PaddingView<bool> {
         Padding(
             EdgeInsets::all(1.0),
             if *editing {
@@ -216,7 +216,7 @@ fn a_type_swapped_child_reports_its_new_widget_type() {
         )
     };
     let mut state = false;
-    root.rebuild(&mut app_logic, &mut state);
+    root.rebuild(&mut build, &mut state);
     let mut text_ctx = TextContext::new();
     root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
     assert_eq!(
@@ -225,7 +225,7 @@ fn a_type_swapped_child_reports_its_new_widget_type() {
     );
 
     state = true;
-    root.rebuild(&mut app_logic, &mut state);
+    root.rebuild(&mut build, &mut state);
     root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
     assert_eq!(
         short_names(&root.inspect()),

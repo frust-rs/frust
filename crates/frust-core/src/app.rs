@@ -3,13 +3,13 @@
 //! It owns the widget [`WidgetTree`] and the previous [`View`], and exposes the
 //! three framework passes in Masonry order (the subset relevant to v0):
 //!
-//! * [`RenderRoot::rebuild`] — run `app_logic`, diff against the previous view,
+//! * [`RenderRoot::rebuild`] — run the root build closure, diff against the previous view,
 //!   producing/mutating the retained widget.
 //! * [`RenderRoot::layout`] — hand the root widget window-sized constraints and
 //!   record the size it returns.
 //! * [`RenderRoot::paint`] — emit the root widget's draw commands into a scene.
 //!
-//! v0 is single-root: `app_logic` returns one `impl View<State>` whose concrete
+//! v0 is single-root: the root component's build closure returns one `impl View<State>` whose concrete
 //! type is fixed, so the root's previous view and element are stored typed.
 //! ViewSequence / multiple children are explicitly out of scope for now.
 
@@ -81,7 +81,7 @@ use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewF
 ///
 /// `provide_context` is a plain insert into the owner's context map — it
 /// notifies nothing — and `use_context` inside `Component::build` (or the
-/// root `app_logic`) creates no subscription, so re-providing a changed
+/// root build closure) creates no subscription, so re-providing a changed
 /// `WindowMetrics` does not itself mark anything dirty or wake a frame. A new
 /// value becomes visible only on the next rebuild, which the resize or inset
 /// change that produced it already drives; do not write a shell that assumes
@@ -156,7 +156,7 @@ impl Orientation {
 /// must never be allowed to spin: a pair of callbacks that push each other would
 /// otherwise hang the frame. Three passes covers every shape observed in
 /// practice (a result that navigates once, and that page's own result), while
-/// keeping the worst case at four `app_logic` runs per frame — `app_logic` is
+/// keeping the worst case at four build-closure runs per frame — the closure is
 /// cheap by construction (see [`RenderRoot::rebuild`]).
 ///
 /// Past the cap the mark stays raised and one more frame is requested, so the
@@ -289,7 +289,7 @@ enum OverlayRoute {
 /// single-root application.
 ///
 /// Generic over the application `State` and the concrete root view type `V`
-/// returned by `app_logic`.
+/// returned by the build closure.
 pub struct RenderRoot<State: 'static, V: View<State>> {
     tree: WidgetTree,
     root_id: Option<WidgetId>,
@@ -1185,10 +1185,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.tree.inspect()
     }
 
-    /// Run `app_logic`, then build (first call) or rebuild (subsequent calls)
+    /// Run the build closure, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
-    /// `app_logic` is expected to be cheap and re-entrant: it is
+    /// the build closure is expected to be cheap and re-entrant: it is
     /// re-run in full every rebuild.
     ///
     /// # Deferred-callback flush
@@ -1207,7 +1207,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// touch went to chrome outside the navigator).
     ///
     /// A flushed callback mutates `State`, so the view built before it ran is
-    /// stale — the `app_logic` + `rebuild_view` cycle therefore re-runs after
+    /// stale — the build closure + `rebuild_view` cycle therefore re-runs after
     /// each flush, and the same frame shows the result. Results can queue further
     /// nav ops, so the loop is **bounded**; past the cap the flag is left standing
     /// and one more frame is requested rather than spinning (see
@@ -1221,14 +1221,14 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// wakes both the mobile frame gate and the desktop `Wait` loop.
     pub fn rebuild(
         &mut self,
-        app_logic: &mut impl FnMut(&mut State) -> V,
+        build: &mut impl FnMut(&mut State) -> V,
         state: &mut State,
     ) -> ChangeFlags {
         // Republish this root's focus session before the diff runs: a pod
         // severed by it compares its own stamp against the channel from its
         // destructor, and the channel mirrors one root at a time.
         self.publish_focus_session();
-        let view = app_logic(state);
+        let view = build(state);
         let mut flags = self.rebuild_view(view);
 
         // Deferred-callback convergence loop (see the method doc). Each pass:
@@ -1250,7 +1250,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             }
             // The dispatch's own outcome is load-bearing, not noise: a flushed
             // callback whose *only* effect is `EventCtx::request_redraw` (no
-            // signal write, no state the next `app_logic` run reads) leaves the
+            // signal write, no state the next build-closure run reads) leaves the
             // re-diff below reporting `ChangeFlags::NONE`, so nothing else in
             // this method would ever mark the frame dirty and the requested
             // redraw would be dropped on the floor. Fold it into exactly the
@@ -1275,7 +1275,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 flags |= ChangeFlags::PAINT;
                 self.deferred_frame = true;
             }
-            let view = app_logic(state);
+            let view = build(state);
             flags |= self.rebuild_view(view);
             passes += 1;
         }
@@ -3089,7 +3089,7 @@ mod tests {
         fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {}
     }
 
-    fn app_logic(state: &mut AppState) -> MockTextView {
+    fn build(state: &mut AppState) -> MockTextView {
         MockTextView {
             text: state.label.clone(),
         }
@@ -3101,7 +3101,7 @@ mod tests {
         let mut state = AppState {
             label: "hello".to_string(),
         };
-        let flags = root.rebuild(&mut app_logic, &mut state);
+        let flags = root.rebuild(&mut build, &mut state);
         // First build dirties both passes.
         assert!(flags.needs_layout());
         assert!(flags.needs_paint());
@@ -3116,9 +3116,9 @@ mod tests {
         let mut state = AppState {
             label: "a".to_string(),
         };
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         state.label = "b".to_string();
-        let flags = root.rebuild(&mut app_logic, &mut state);
+        let flags = root.rebuild(&mut build, &mut state);
         assert_eq!(flags, ChangeFlags::PAINT);
     }
 
@@ -3128,8 +3128,8 @@ mod tests {
         let mut state = AppState {
             label: "same".to_string(),
         };
-        root.rebuild(&mut app_logic, &mut state);
-        let flags = root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
+        let flags = root.rebuild(&mut build, &mut state);
         assert_eq!(flags, ChangeFlags::NONE);
     }
 
@@ -3139,7 +3139,7 @@ mod tests {
         let mut state = AppState {
             label: "hi".to_string(),
         };
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         let size = root.layout(Size::new(800.0, 600.0));
         // "hi" -> 2 * 8 = 16 wide, 16 tall, within the window.
         assert_eq!(size, Size::new(16.0, 16.0));
@@ -3158,7 +3158,7 @@ mod tests {
         // Before the first build there is nothing to inspect.
         assert!(root.inspect().is_empty());
 
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(800.0, 600.0));
 
         let nodes = root.inspect();
@@ -3186,7 +3186,7 @@ mod tests {
         let mut state = AppState {
             label: "wwwwwwwwwww".to_string(), // 10 chars -> 80 wide intrinsic
         };
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         let size = root.layout(Size::new(40.0, 40.0));
         // Intrinsic width 80 is clamped to the 40-wide window.
         assert_eq!(size.width, 40.0);
@@ -3198,7 +3198,7 @@ mod tests {
         let mut state = AppState {
             label: "one".to_string(),
         };
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(200.0, 200.0));
 
         let mut scene = RecordingScene::default();
@@ -3207,7 +3207,7 @@ mod tests {
 
         // Change data, rebuild, repaint -> new text.
         state.label = "two".to_string();
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         let mut scene2 = RecordingScene::default();
         root.paint(&mut scene2, FrameTime::ZERO);
         assert_eq!(scene2.texts, vec![(Point::ZERO, "two".to_string())]);
@@ -3484,7 +3484,7 @@ mod tests {
         let mut state = AppState {
             label: "x".to_string(),
         };
-        still.rebuild(&mut app_logic, &mut state);
+        still.rebuild(&mut build, &mut state);
         still.layout(Size::new(100.0, 100.0));
         let mut scene = RecordingScene::default();
         assert!(!still.paint(&mut scene, FrameTime::ZERO).needs_frame);
@@ -3971,7 +3971,7 @@ mod tests {
         let mut state = AppState {
             label: "x".to_string(),
         };
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         // First build accumulated LAYOUT|PAINT.
         let flags = root.take_change_flags();
         assert!(flags.needs_layout());
@@ -3992,7 +3992,7 @@ mod tests {
         let mut state = AppState {
             label: "x".to_string(),
         };
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         // First build accumulated LAYOUT|PAINT — the peek sees it...
         assert!(root.has_pending_change_flags());
         // ...and repeated peeks do NOT drain it.
@@ -4453,7 +4453,7 @@ mod tests {
         // (a) The pop shape. Before this, the paint take stored `Some(inactive)`
         // and never touched `focus_active`, so the session outlived the page.
         let clear = Rc::new(Cell::new(false));
-        let mut logic = {
+        let mut build = {
             let clear = clear.clone();
             move |_state: &mut ClickState| PopImeView {
                 clear: clear.clone(),
@@ -4461,7 +4461,7 @@ mod tests {
         };
         let mut root: RenderRoot<ClickState, PopImeView> = RenderRoot::new();
         let mut state = ClickState::default();
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(100.0, 100.0));
 
         let mut scene = RecordingScene::default();
@@ -4539,7 +4539,7 @@ mod tests {
         // screen, which is why the reconciler's mark is drained here.
         let _ = crate::event::take_focus_orphaned();
         let orphan = Rc::new(Cell::new(false));
-        let mut logic = {
+        let mut build = {
             let orphan = orphan.clone();
             move |_state: &mut ClickState| UnmountView {
                 orphan: orphan.clone(),
@@ -4547,7 +4547,7 @@ mod tests {
         };
         let mut root: RenderRoot<ClickState, UnmountView> = RenderRoot::new();
         let mut state = ClickState::default();
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(100.0, 100.0));
 
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
@@ -4557,7 +4557,7 @@ mod tests {
 
         // The unmount rebuild.
         orphan.set(true);
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         assert!(
             !root.is_focus_active(),
             "the root's focus mirror does not outlive the widget it mirrors"
@@ -4572,13 +4572,13 @@ mod tests {
         // The mark was drained, so an ordinary rebuild afterwards is inert...
         let released = root.focus_ime_generation();
         orphan.set(false);
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         assert_eq!(root.focus_ime_generation(), released);
 
         // ...and re-marking against an already-released root fires no edge
         // either (a stale `focused` flag torn down later must not spin it).
         orphan.set(true);
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         assert_eq!(root.focus_ime_generation(), released);
         assert!(!root.is_focus_active());
     }
@@ -4726,7 +4726,7 @@ mod tests {
         // the whole life of a focus session — exactly the per-vsync forcing the
         // edge exists to remove.
         let published = Rc::new(RefCell::new("abc".to_string()));
-        let mut logic = {
+        let mut build = {
             let published = published.clone();
             move |_state: &mut ClickState| PaintImeView {
                 published: published.clone(),
@@ -4734,7 +4734,7 @@ mod tests {
         };
         let mut root: RenderRoot<ClickState, PaintImeView> = RenderRoot::new();
         let mut state = ClickState::default();
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(100.0, 100.0));
 
         // Focus the field, then let it paint: the first paint publishes.
@@ -4780,7 +4780,7 @@ mod tests {
         // The Key/Ime/Scroll arm of the root focus path: a dispatch that
         // RELEASES focus clears both the flag and the published surface.
         let published = Rc::new(RefCell::new("abc".to_string()));
-        let mut logic = {
+        let mut build = {
             let published = published.clone();
             move |_state: &mut ClickState| PaintImeView {
                 published: published.clone(),
@@ -4788,7 +4788,7 @@ mod tests {
         };
         let mut root: RenderRoot<ClickState, PaintImeView> = RenderRoot::new();
         let mut state = ClickState::default();
-        root.rebuild(&mut logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(Size::new(100.0, 100.0));
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         let mut scene = RecordingScene::default();
@@ -5670,8 +5670,8 @@ mod tests {
         /// How many more times a running callback re-queues itself — the knob the
         /// chained/capped tests turn.
         chain_left: u32,
-        /// The `flushes` value each `app_logic` run observed, in order. This is
-        /// what proves the rebuild re-runs `app_logic` *after* a flush rather than
+        /// The `flushes` value each build-closure run observed, in order. This is
+        /// what proves the rebuild re-runs the build closure *after* a flush rather than
         /// shipping the now-stale pre-flush view.
         observed: Vec<u32>,
     }
@@ -5763,7 +5763,7 @@ mod tests {
         assert_eq!(
             state.observed,
             vec![0],
-            "nothing queued ⇒ exactly one app_logic run, no broadcast"
+            "nothing queued ⇒ exactly one build run, no broadcast"
         );
 
         // Queue one op — the `NavigatorController::pop_with_result` analog.
@@ -5778,7 +5778,7 @@ mod tests {
         assert_eq!(
             state.observed,
             vec![0, 1],
-            "app_logic re-ran after the flush and saw the post-callback state, so \
+            "the build closure re-ran after the flush and saw the post-callback state, so \
              the view this frame ships is not the stale pre-flush one"
         );
         assert!(

@@ -1539,9 +1539,9 @@ mod browser_loop {
     /// The browser shell's winit `ApplicationHandler` — the retained tree, the
     /// reactive plumbing, the shell-owned appearance state, and the wake
     /// bookkeeping the frame loop runs on.
-    struct WebShellHandler<State: 'static, Logic, V: View<State>> {
+    struct WebShellHandler<State: 'static, Build, V: View<State>> {
         state: State,
-        app_logic: Logic,
+        build: Build,
         /// The process-wide reactive runtime, initialized on this (the page's
         /// only) thread. Per-frame rebuilds run under its root `Owner`, and
         /// `pump_local` drains the local task queue on each wake and frame.
@@ -1615,11 +1615,11 @@ mod browser_loop {
         cursor_icon: CursorIcon,
     }
 
-    impl<State, Logic, V> WebShellHandler<State, Logic, V>
+    impl<State, Build, V> WebShellHandler<State, Build, V>
     where
         State: 'static,
         V: View<State>,
-        Logic: FnMut(&mut State) -> V + 'static,
+        Build: FnMut(&mut State) -> V + 'static,
     {
         /// Deliver one mapped input event to the tree under the reactive
         /// root `Owner` ([`super::event_under_owner`]), re-sync the two
@@ -1874,9 +1874,9 @@ mod browser_loop {
             let runtime = self.runtime;
             let scope = &self.scope;
             let root = &mut self.root;
-            let app_logic = &mut self.app_logic;
+            let build = &mut self.build;
             let state = &mut self.state;
-            let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
+            let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(build, state)));
             let rebuild = rebuild_start.elapsed();
 
             // HiDPI: lay out in logical pixels, then scale the whole scene by
@@ -1980,11 +1980,11 @@ mod browser_loop {
         }
     }
 
-    impl<State, Logic, V> ApplicationHandler<ShellUserEvent> for WebShellHandler<State, Logic, V>
+    impl<State, Build, V> ApplicationHandler<ShellUserEvent> for WebShellHandler<State, Build, V>
     where
         State: 'static,
         V: View<State>,
-        Logic: FnMut(&mut State) -> V + 'static,
+        Build: FnMut(&mut State) -> V + 'static,
     {
         /// A tracked-signal write routes here through the frame waker and the
         /// event-loop proxy. Pump the local task queue first (a completing
@@ -2258,11 +2258,11 @@ mod browser_loop {
     /// The reactive runtime is initialized here, on the page's only thread,
     /// because that thread must be the one that owns the local task queue
     /// `pump_local` drains.
-    pub fn spawn_app<State, Logic, V>(state: State, app_logic: Logic) -> Result<(), EventLoopError>
+    pub fn spawn_app<State, Build, V>(state: State, build: Build) -> Result<(), EventLoopError>
     where
         State: 'static,
         V: View<State>,
-        Logic: FnMut(&mut State) -> V + 'static,
+        Build: FnMut(&mut State) -> V + 'static,
     {
         // Captured before anything else, so the frame clock's origin is the
         // earliest moment this shell exists.
@@ -2285,7 +2285,7 @@ mod browser_loop {
 
         let mut handler = WebShellHandler {
             state,
-            app_logic,
+            build,
             runtime,
             scope: TrackedScope::new(),
             root: RenderRoot::new(),
@@ -2320,8 +2320,8 @@ mod browser_loop {
     }
 
     /// The facade's entry point: the shape `frust::web_app!` hands its
-    /// initialised state and app-logic closure to (`run_app(state, logic)`,
-    /// mirroring `frust_shell_desktop::run_desktop_with`'s `(state, logic, ..)`
+    /// initialised state and build closure to (`run_app(state, build)`,
+    /// mirroring `frust_shell_desktop::run_desktop_with`'s `(state, build, ..)`
     /// convention). A thin wrapper over [`spawn_app`]: the generated
     /// `#[wasm_bindgen(start)]` shim has nowhere to return an error to, so an
     /// event-loop construction failure is reported through the `log` facade
@@ -2330,13 +2330,13 @@ mod browser_loop {
     /// with a no-op waker before building the state; `spawn_app`'s own
     /// `ReactiveRuntime::init` call then replaces that waker with the
     /// event-loop proxy — the documented idempotent re-init path.
-    pub fn run_app<State, Logic, V>(state: State, app_logic: Logic)
+    pub fn run_app<State, Build, V>(state: State, build: Build)
     where
         State: 'static,
         V: View<State>,
-        Logic: FnMut(&mut State) -> V + 'static,
+        Build: FnMut(&mut State) -> V + 'static,
     {
-        if let Err(err) = spawn_app(state, app_logic) {
+        if let Err(err) = spawn_app(state, build) {
             log::error!("frust-shell-web: could not start the browser event loop: {err}");
         }
     }

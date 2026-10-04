@@ -11,12 +11,14 @@
 //! body are two stacked widgets, not one participant in a shared viewport
 //! (see that module's own "why this is a box widget, not a sliver" section).
 //!
-//! **Safe area** is not a widget prop on this family (`AppBarView` carries no
-//! `safeArea` field — see the appbar module docs' *Not ported* list): the
-//! toggle here wraps the previewed bar in [`frust::safe_area`] instead, the
-//! documented app-side pattern, rather than being dropped as inert. On a
-//! desktop preview with no window insets it has no visible effect, but the
-//! control still exercises the real seam.
+//! **Safe area** is a widget prop on the top and search bars
+//! (`AppBarView::safe_area`, default on): the toggle drives `.safe_area(on)`
+//! on the previewed bar, and the framed mid-page preview defaults to off
+//! because it does not sit at the window top. The bottom and sliver bars
+//! carry no such prop, so for those the toggle wraps the bar in
+//! [`frust::safe_area`], the app-side pattern. On a desktop preview with no
+//! window insets it has no visible effect, but the control still exercises
+//! the real seam.
 
 use frust::{
     AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, Padding,
@@ -180,9 +182,9 @@ fn icon_slot(source: frust::IconSource, label: &str) -> AnyView<AppBarsState> {
     any(icon_button(any(icon(source)), |_: &mut AppBarsState| {}).semantic_label(label))
 }
 
-/// Wrap `bar` in [`frust::safe_area`] when the Safe area toggle is on — see
-/// this module's own docs for why this is an app-side wrap rather than a
-/// widget prop.
+/// Wrap `bar` in [`frust::safe_area`] when the Safe area toggle is on. Only
+/// for the bottom and sliver bars, which have no `safe_area` prop; the top
+/// and search bars take `.safe_area(on)` directly.
 fn wrap_safe_area(state: &AppBarsState, bar: AnyView<AppBarsState>) -> AnyView<AppBarsState> {
     if state.safe_area {
         any(safe_area(bar))
@@ -202,8 +204,8 @@ fn framed(theme: &Theme, child: impl View<AppBarsState>) -> AnyView<AppBarsState
 
 fn preview_content(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState> {
     match state.kind {
-        AppBarKind::Top => framed(theme, wrap_safe_area(state, top_bar_view(state))),
-        AppBarKind::Search => framed(theme, wrap_safe_area(state, search_bar_view(state))),
+        AppBarKind::Top => framed(theme, top_bar_view(state)),
+        AppBarKind::Search => framed(theme, search_bar_view(state)),
         AppBarKind::Bottom => framed(theme, wrap_safe_area(state, bottom_bar_view(state))),
         AppBarKind::Sliver => sliver_preview(theme, state),
     }
@@ -214,6 +216,7 @@ fn top_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
         .center_title(state.center_title)
         .density(state.density)
         .shape_family(state.shape)
+        .safe_area(state.safe_area)
         .leading(icon_slot(icons::MENU, "Menu"))
         .actions(vec![icon_slot(icons::SEARCH, "Search")]))
 }
@@ -228,6 +231,7 @@ fn search_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
     )
     .density(state.density)
     .shape_family(state.shape)
+    .safe_area(state.safe_area)
     .center_title(state.center_title)
     .leading(icon_slot(icons::MENU, "Menu"))
     .actions(vec![icon_slot(icons::ACCOUNT_CIRCLE, "Account")]))

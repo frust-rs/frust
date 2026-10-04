@@ -1,0 +1,36 @@
+//! [`IncrementCount`] — adds one to the stored count and returns the new
+//! value. Driven through `ControllerCore::run_into` like [`LoadCount`](super::LoadCount)
+//! (see `presentation::controllers::CounterController::increment`).
+
+use std::sync::Arc;
+
+use clean_signals::{NoParams, UseCase};
+
+use crate::failure::AppFailure;
+use crate::features::counter::domain::repositories::CounterRepository;
+
+/// Loads the count, adds one, saves it and returns the new value.
+pub struct IncrementCount {
+    repo: Arc<dyn CounterRepository + Send + Sync>,
+}
+
+impl IncrementCount {
+    /// Construct with the injected repository.
+    pub fn new(repo: Arc<dyn CounterRepository + Send + Sync>) -> Self {
+        Self { repo }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl UseCase for IncrementCount {
+    type Params = NoParams;
+    type Output = u32;
+    type Failure = AppFailure;
+
+    async fn execute(&self, _params: NoParams) -> Result<u32, AppFailure> {
+        let next = self.repo.load().await? + 1;
+        self.repo.save(next).await?;
+        Ok(next)
+    }
+}

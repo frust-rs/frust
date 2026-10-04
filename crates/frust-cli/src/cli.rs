@@ -78,14 +78,14 @@ pub enum Command {
 
         /// Opt-in clean-architecture variant: scaffolds a controller +
         /// use-case + `async_view` screen wired to `clean-signals-frust`
-        /// instead of the default notes-app demo.
-        /// **Dev-machine-only while `frust` is unpublished**: the generated
-        /// `Cargo.toml` path-deps into this Frust checkout for `frust` and
-        /// the in-repo `clean-signals-frust` plugin — the project won't
-        /// build without this checkout present. `clean-signals` itself is
-        /// a crates.io dependency (the same registry requirement at every
-        /// consumer), so no sibling checkout and no git access is
-        /// required.
+        /// instead of the default counter app.
+        /// For framework development, `--frust-path <checkout>` emits path
+        /// dependencies for `frust` and the in-repo `clean-signals-frust`
+        /// plugin (the project won't build without this checkout present).
+        /// Otherwise `Cargo.toml` emits registry dependencies on the
+        /// published `frust` and `clean-signals-frust` crates (no checkout
+        /// required). `clean-signals` is a crates.io dependency with no
+        /// checkout requirement.
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
 

@@ -563,7 +563,7 @@ fn a_result_callback_that_navigates_converges_within_one_rebuild() {
     // B fires B's callback, which pushes C *and* pops it again; that pop fires
     // C's callback. Both land inside the single `rebuild` below, and the stack
     // it leaves behind is the post-chain one — proving the flush/re-diff cycle
-    // really re-runs `app_logic` rather than shipping a stale view.
+    // really re-runs the build closure rather than shipping a stale view.
     let controller: NavigatorController<ChainState> = NavigatorController::new();
     let mut root: RenderRoot<ChainState, NavigatorView<ChainState>> = RenderRoot::new();
     let mut app = {

@@ -85,7 +85,7 @@ fn shell_page(_params: &RouteParams) -> AnyView<St> {
         |_: &mut St, _: usize| {},
     );
     any(scaffold(any(SizedBox::<St>(None, None)))
-        .app_bar(any(safe_area(bar).bottom(false)))
+        .app_bar(any(bar))
         .bottom_bar(any(safe_area(nav_bar).top(false))))
 }
 

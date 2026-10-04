@@ -9,9 +9,12 @@
 //! families, and semantics all live there.
 //!
 //! Layout is one band of [`AppBarMetrics::small_height`] (or an explicit
-//! [`AppBarView::toolbar_height`]): the leading slot hugs the leading edge,
-//! actions hug the trailing edge in reading order, and the title takes the
-//! space between them — start-aligned by default,
+//! [`AppBarView::toolbar_height`]), below the top window inset and inside the
+//! left/right ones the bar consumes itself (see [`AppBarView::safe_area`]):
+//! the leading slot hugs the leading edge (4dp in), actions hug the trailing
+//! edge in reading order (4dp in), and the title takes the space between
+//! them — 16dp from an edge that
+//! has no slot on it, start-aligned by default,
 //! [`centered`](AppBarView::center_title) *within that remaining space* on
 //! request, which is what upstream's own `_TitleSlot` (an `Align` inside the
 //! `Expanded`) centers within too. Everything is vertically centered in the
@@ -27,16 +30,17 @@
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, Widget, build_child,
+    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, ThemeTextColor, View, Widget, build_child,
     rebuild_children, route_event, teardown_child, visit_children,
 };
 use kurbo::{Point, Size};
 use peniko::Color;
 
 use super::{
-    AppBarDensity, AppBarMetrics, AppBarShapeFamily, GAP, PAD_X, TITLE_LINE_HEIGHT, TITLE_SIZE,
-    TitleSlot, fill_container, finite_or_zero, push_bar_semantics, resolve_container,
-    resolve_radius, title_ref,
+    AppBarContainer, AppBarDensity, AppBarMetrics, AppBarShapeFamily, GAP, MAX_ELEVATION, PAD_X,
+    TITLE_EDGE_INSET, TITLE_LINE_HEIGHT, TITLE_SIZE, TitleSlot, fill_container, finite_or_zero,
+    push_bar_semantics, resolve_elevation_shadow, resolve_radius, resolve_top_container,
+    title_ref_in,
 };
 use crate::search::SearchBarView;
 
@@ -51,6 +55,9 @@ pub struct AppBarView<State: 'static> {
     shape_family: AppBarShapeFamily,
     toolbar_height: Option<f64>,
     background: Option<Color>,
+    container: Option<AppBarContainer>,
+    elevation: u8,
+    safe_area: bool,
     semantic_label: Option<String>,
 }
 
@@ -68,6 +75,9 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         shape_family: AppBarShapeFamily::Square,
         toolbar_height: None,
         background: None,
+        container: None,
+        elevation: 0,
+        safe_area: true,
         semantic_label: None,
     }
 }
@@ -179,10 +189,59 @@ impl<State: 'static> AppBarView<State> {
         self
     }
 
-    /// Override the container fill (`backgroundColor`), winning over the theme
-    /// role and its fallback alike.
+    /// Override the container fill (`backgroundColor`), winning over
+    /// [`Self::container`], the elevation surface role, the theme default and
+    /// its fallback alike.
     pub fn background(mut self, color: Color) -> Self {
         self.background = Some(color);
+        self
+    }
+
+    /// Fill the container with a theme color role (default
+    /// [`AppBarContainer::Surface`]), resolved at paint time so it follows a
+    /// brightness flip or theme swap. An explicit role also wins over the
+    /// elevation surface role [`Self::elevation`] would otherwise pick, and a
+    /// string title takes the role's foreground (see [`AppBarContainer`]).
+    /// [`Self::background`] still wins over it.
+    ///
+    /// ```
+    /// use frust_material::{AppBarContainer, app_bar};
+    ///
+    /// // Flutter's counter-template bar: an inverse-primary fill, raised.
+    /// let bar = app_bar::<()>("Counter")
+    ///     .container(AppBarContainer::InversePrimary)
+    ///     .elevation(2);
+    /// # let _ = bar;
+    /// ```
+    pub fn container(mut self, role: AppBarContainer) -> Self {
+        self.container = Some(role);
+        self
+    }
+
+    /// Raise the bar to M3 elevation `level` (`0..=5`, clamped; default 0),
+    /// resolved at paint time against the theme's elevation table: a level
+    /// above 0 paints that level's drop shadow beneath the container and, with
+    /// no [`Self::container`]/[`Self::background`] set, fills with the level's
+    /// surface role (level 2 is `surfaceContainer`). See [`super`]'s module
+    /// docs for the paint order.
+    pub fn elevation(mut self, level: u8) -> Self {
+        self.elevation = level.min(MAX_ELEVATION);
+        self
+    }
+
+    /// Whether the bar consumes the **top, left and right** window insets
+    /// itself (default `true`) — Flutter's `AppBar` wrapping its toolbar in
+    /// `SafeArea(bottom: false)`. It grows by
+    /// `ctx.window_insets().padding().top`, paints its fill (and shadow) edge
+    /// to edge through that band and across the full width, and lays its
+    /// slots out below the top inset and inside the left/right ones (a
+    /// landscape notch or home-indicator edge). A parent `frust::safe_area`
+    /// that already consumed an edge leaves nothing on it to consume, so it
+    /// never double-insets. Pass `false` for a bar that is not docked to the
+    /// window's top edge (a preview, a pane, a sheet); it then consumes no
+    /// edge at all.
+    pub fn safe_area(mut self, enabled: bool) -> Self {
+        self.safe_area = enabled;
         self
     }
 
@@ -198,6 +257,23 @@ impl<State: 'static> AppBarView<State> {
     fn band(&self) -> f64 {
         self.toolbar_height
             .unwrap_or_else(|| AppBarMetrics::for_density(self.density).small_height)
+    }
+
+    /// The themed color role a string title takes over this bar's container.
+    fn title_role(&self) -> ThemeTextColor {
+        self.container.unwrap_or_default().title_role()
+    }
+
+    /// This bar's title slot as a view reference, composing a string title
+    /// into `storage` at the top bar's size and container-driven color role.
+    fn title_ref<'a>(&'a self, storage: &'a mut Option<AnyView<State>>) -> &'a AnyView<State> {
+        title_ref_in(
+            &self.title,
+            storage,
+            TITLE_SIZE,
+            TITLE_LINE_HEIGHT,
+            self.title_role(),
+        )
     }
 
     /// The label this bar's semantics container carries.
@@ -245,6 +321,18 @@ pub struct AppBarWidget {
     band: f64,
     shape_family: AppBarShapeFamily,
     background: Option<Color>,
+    container: Option<AppBarContainer>,
+    /// Already clamped to `0..=5`.
+    elevation: u8,
+    safe_area: bool,
+    /// The top window inset consumed on the last `layout` pass — `0.0` when
+    /// `safe_area` is off or nothing is left to consume. The slots sit below
+    /// it; the fill and shadow cover it.
+    top_inset: f64,
+    /// The `(left, right)` window insets consumed on the last `layout` pass,
+    /// `0.0` under the same conditions as [`Self::top_inset`]. The slots sit
+    /// inside them; the fill and shadow still span the full width.
+    side_insets: (f64, f64),
     /// The semantics container's label, retained across rebuilds.
     label: Option<String>,
 }
@@ -261,7 +349,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AppBarWidget {
         let mut storage = None;
-        let title = title_ref(&self.title, &mut storage, TITLE_SIZE, TITLE_LINE_HEIGHT);
+        let title = self.title_ref(&mut storage);
         let slots = slot_views(self, title)
             .into_iter()
             .map(|view| build_child(view, ctx))
@@ -274,6 +362,11 @@ impl<State: 'static> View<State> for AppBarView<State> {
             band: self.band(),
             shape_family: self.shape_family,
             background: self.background,
+            container: self.container,
+            elevation: self.elevation,
+            safe_area: self.safe_area,
+            top_inset: 0.0,
+            side_insets: (0.0, 0.0),
             label: self.label().map(str::to_string),
         }
     }
@@ -286,18 +379,8 @@ impl<State: 'static> View<State> for AppBarView<State> {
     ) -> ChangeFlags {
         let mut prev_storage = None;
         let mut next_storage = None;
-        let prev_title = title_ref(
-            &prev.title,
-            &mut prev_storage,
-            TITLE_SIZE,
-            TITLE_LINE_HEIGHT,
-        );
-        let next_title = title_ref(
-            &self.title,
-            &mut next_storage,
-            TITLE_SIZE,
-            TITLE_LINE_HEIGHT,
-        );
+        let prev_title = prev.title_ref(&mut prev_storage);
+        let next_title = self.title_ref(&mut next_storage);
         let mut flags = rebuild_children(
             &slot_views(prev, prev_title),
             &slot_views(self, next_title),
@@ -325,9 +408,19 @@ impl<State: 'static> View<State> for AppBarView<State> {
             element.band = band;
             flags |= ChangeFlags::LAYOUT;
         }
-        if element.shape_family != self.shape_family || element.background != self.background {
+        if element.safe_area != self.safe_area {
+            element.safe_area = self.safe_area;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        if element.shape_family != self.shape_family
+            || element.background != self.background
+            || element.container != self.container
+            || element.elevation != self.elevation
+        {
             element.shape_family = self.shape_family;
             element.background = self.background;
+            element.container = self.container;
+            element.elevation = self.elevation;
             flags |= ChangeFlags::PAINT;
         }
         // A label carries no geometry or pixels of its own: assigned outright,
@@ -339,7 +432,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
 
     fn teardown(&self, element: &mut AppBarWidget, ctx: &mut BuildCtx<'_>) {
         let mut storage = None;
-        let title = title_ref(&self.title, &mut storage, TITLE_SIZE, TITLE_LINE_HEIGHT);
+        let title = self.title_ref(&mut storage);
         for (view, pod) in slot_views(self, title)
             .into_iter()
             .zip(element.slots.iter_mut())
@@ -355,9 +448,29 @@ impl Widget for AppBarWidget {
         let band = self.band;
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, band));
         let title_index = self.title_index();
+        let has_actions = self.slots.len() > title_index + 1;
+
+        // Consume the top, left and right window insets (Flutter's
+        // `SafeArea(bottom: false)`): the bar grows by the top one, and the
+        // slots sit below it and inside the side ones. A parent safe area that
+        // already consumed an edge leaves 0 here.
+        let (pad_l, top, pad_r) = if self.safe_area {
+            let padding = ctx.window_insets().padding();
+            (
+                padding.left.max(0.0),
+                padding.top.max(0.0),
+                padding.right.max(0.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        self.top_inset = top;
+        self.side_insets = (pad_l, pad_r);
 
         // Shift the row out from under a protruding window-control corner (the
-        // iPadOS 26+ traffic lights); see the module docs of `appbar`.
+        // iPadOS 26+ traffic lights); see the module docs of `appbar`. A
+        // corner's width is measured beyond the safe-area edge, so it stacks
+        // on the consumed side padding rather than overlapping it.
         let (shift_l, shift_r) = if self.corner_shift {
             let corners = ctx.window_insets().corner_insets;
             (
@@ -376,21 +489,31 @@ impl Widget for AppBarWidget {
             (0.0, 0.0)
         };
 
-        let mut left = PAD_X + shift_l;
+        // Slots sit `PAD_X` in (their touch targets carry the glyph to the M3
+        // 16dp mark); a bare title edge sits `TITLE_EDGE_INSET` in instead.
+        let mut left = pad_l + shift_l;
         if self.has_leading {
+            left += PAD_X;
             let size = self.slots[0].layout_child(ctx, &slot_bc);
-            self.slots[0].set_origin(Point::new(left, (band - size.height) / 2.0));
+            self.slots[0].set_origin(Point::new(left, top + (band - size.height) / 2.0));
             left += size.width + GAP;
+        } else {
+            left += TITLE_EDGE_INSET;
         }
 
         // Lay out actions in reverse so the *last* action lands flush against
         // the trailing edge, preserving left-to-right reading order.
-        let mut right = width - PAD_X - shift_r;
-        for pod in self.slots[title_index + 1..].iter_mut().rev() {
-            let size = pod.layout_child(ctx, &slot_bc);
-            right -= size.width;
-            pod.set_origin(Point::new(right, (band - size.height) / 2.0));
-            right -= GAP;
+        let mut right = width - pad_r - shift_r;
+        if has_actions {
+            right -= PAD_X;
+            for pod in self.slots[title_index + 1..].iter_mut().rev() {
+                let size = pod.layout_child(ctx, &slot_bc);
+                right -= size.width;
+                pod.set_origin(Point::new(right, top + (band - size.height) / 2.0));
+                right -= GAP;
+            }
+        } else {
+            right -= TITLE_EDGE_INSET;
         }
 
         let available = (right - left).max(0.0);
@@ -402,17 +525,30 @@ impl Widget for AppBarWidget {
         } else {
             left
         };
-        title_pod.set_origin(Point::new(title_x, (band - title_size.height) / 2.0));
+        title_pod.set_origin(Point::new(title_x, top + (band - title_size.height) / 2.0));
 
-        bc.constrain(Size::new(width, band))
+        bc.constrain(Size::new(width, band + top))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         let origin = ctx.origin();
         let size = ctx.size();
-        let fill = self.background.unwrap_or_else(|| resolve_container(theme));
+        let fill = self
+            .background
+            .unwrap_or_else(|| resolve_top_container(theme, self.container, self.elevation));
         let radius = resolve_radius(theme, self.shape_family, size.width, size.height);
+        // Shadow first, then the fill over it, then the slots — the order an
+        // elevated card paints in, so only the offset/blurred rim shows.
+        if let Some((y_offset, blur, color)) = resolve_elevation_shadow(theme, self.elevation) {
+            scene.draw_shadow(
+                Point::new(origin.x, origin.y + y_offset),
+                size,
+                radius,
+                blur,
+                color,
+            );
+        }
         fill_container(scene, origin, size, radius, fill);
         for pod in &mut self.slots {
             pod.paint_child(ctx, scene);
@@ -434,7 +570,7 @@ impl Widget for AppBarWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
-    use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
+    use frust::authoring::{CornerInset, CornerInsets, WindowEdgeInsets, WindowInsets};
     use frust_widgets::test_support::{RecordingScene, leaf_any};
     use std::any::Any;
 
@@ -479,6 +615,42 @@ mod tests {
         })
     }
 
+    /// Lay out under a window carrying `top` px of status-bar inset and
+    /// nothing else.
+    fn layout_with_top_inset(w: &mut AppBarWidget, bc: &BoxConstraints, top: f64) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(status_bar(top), |ctx| w.layout(ctx, bc))
+    }
+
+    fn status_bar(top: f64) -> WindowInsets {
+        WindowInsets::new(
+            WindowEdgeInsets::new(0.0, top, 0.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        )
+    }
+
+    /// Lay out `view` under `theme` and paint it at its own laid-out size,
+    /// returning what the paint pass recorded.
+    fn paint_themed(view: &AppBarView<()>, theme: &Theme) -> FillRecorder {
+        let mut w = build(view);
+        let size = layout_themed(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 100.0)),
+            theme,
+        );
+        let mut scene = FillRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, size).with_theme(theme);
+        w.paint(&mut pctx, &mut scene);
+        scene
+    }
+
+    fn dark_baseline() -> Theme {
+        let mut theme = crate::baseline();
+        theme.brightness = frust::Brightness::Dark;
+        theme
+    }
+
     fn top_corners() -> CornerInsets {
         CornerInsets::new(
             CornerInset::new(44.0, 30.0),
@@ -489,20 +661,29 @@ mod tests {
     }
 
     /// Records both container shapes — `fill_rect` (square family) and
-    /// `fill_rounded_rect` (round family) — with their colors, which
-    /// [`RecordingScene`] (geometry only, `fill_rect` only) cannot observe.
+    /// `fill_rounded_rect` (round family) — with their colors, plus every
+    /// drop shadow, which [`RecordingScene`] (geometry only, `fill_rect`
+    /// only) cannot observe. `ops` keeps the call order.
     #[derive(Default)]
     struct FillRecorder {
         rects: Vec<(Point, Size, Color)>,
         rrects: Vec<(Point, Size, f64, Color)>,
+        shadows: Vec<(Point, Size, f64, f64, Color)>,
+        ops: Vec<&'static str>,
     }
     impl PaintScene for FillRecorder {
         fn fill_rect(&mut self, o: Point, s: Size, c: Color) {
             self.rects.push((o, s, c));
+            self.ops.push("fill");
         }
         fn draw_text(&mut self, _o: Point, _t: &str) {}
         fn fill_rounded_rect(&mut self, o: Point, s: Size, radius: f64, color: Color) {
             self.rrects.push((o, s, radius, color));
+            self.ops.push("rounded");
+        }
+        fn draw_shadow(&mut self, o: Point, s: Size, radius: f64, std_dev: f64, color: Color) {
+            self.shadows.push((o, s, radius, std_dev, color));
+            self.ops.push("shadow");
         }
     }
 
@@ -530,11 +711,65 @@ mod tests {
     }
 
     #[test]
-    fn layout_without_leading_starts_title_at_pad_x() {
+    fn layout_without_leading_starts_title_at_the_m3_title_inset() {
         let view: AppBarView<()> = app_bar("Home");
         let mut w = build(&view);
         layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        assert_eq!(TITLE_EDGE_INSET, 16.0);
+        assert_eq!(w.slots[0].origin().x, TITLE_EDGE_INSET);
+    }
+
+    #[test]
+    fn layout_without_actions_ends_the_title_width_at_the_m3_title_inset() {
+        // A greedy title view fills whatever width it is offered, so its end
+        // is exactly where the available width stops.
+        let view: AppBarView<()> = app_bar("").title_view(leaf_any(1_000.0, 40.0));
+        let mut w = build(&view);
+        layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        let title = &w.slots[0];
+        assert_eq!(title.origin().x, TITLE_EDGE_INSET);
+        assert_eq!(
+            title.origin().x + title.size().width,
+            300.0 - TITLE_EDGE_INSET
+        );
+    }
+
+    #[test]
+    fn leading_and_actions_keep_the_4dp_slot_edge_inset() {
+        let view: AppBarView<()> = app_bar("")
+            .title_view(leaf_any(1_000.0, 40.0))
+            .leading(leaf_any(48.0, 48.0))
+            .actions(vec![leaf_any(48.0, 48.0)]);
+        let mut w = build(&view);
+        layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 100.0)));
         assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            300.0 - PAD_X
+        );
+        // The title sits one gap off each slot, not 16dp off either edge.
+        assert_eq!(w.slots[1].origin().x, PAD_X + 48.0 + GAP);
+        assert_eq!(
+            w.slots[1].origin().x + w.slots[1].size().width,
+            300.0 - PAD_X - 48.0 - GAP
+        );
+    }
+
+    #[test]
+    fn the_title_inset_applies_after_the_corner_shift() {
+        let view: AppBarView<()> = app_bar("").title_view(leaf_any(1_000.0, 40.0));
+        let mut w = build(&view);
+        layout_with_corners(
+            &mut w,
+            &BoxConstraints::loose(Size::new(400.0, 200.0)),
+            top_corners(),
+        );
+        let title = &w.slots[0];
+        assert_eq!(title.origin().x, 44.0 + TITLE_EDGE_INSET);
+        assert_eq!(
+            title.origin().x + title.size().width,
+            400.0 - 52.0 - TITLE_EDGE_INSET
+        );
     }
 
     #[test]
@@ -740,6 +975,443 @@ mod tests {
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(300.0, BAND)).with_theme(&theme);
         w.paint(&mut pctx, &mut scene);
         assert_eq!(scene.rects[0].2, custom);
+    }
+
+    // ---- Container role ---------------------------------------------------
+
+    #[test]
+    fn the_inverse_primary_container_follows_the_theme_brightness() {
+        let view: AppBarView<()> = app_bar("Home").container(AppBarContainer::InversePrimary);
+        let light = crate::baseline();
+        let dark = dark_baseline();
+        assert_eq!(
+            paint_themed(&view, &light).rects[0].2,
+            light.scheme().inverse_primary
+        );
+        assert_eq!(
+            paint_themed(&view, &dark).rects[0].2,
+            dark.scheme().inverse_primary
+        );
+        assert_ne!(
+            light.scheme().inverse_primary,
+            dark.scheme().inverse_primary
+        );
+    }
+
+    #[test]
+    fn every_container_role_resolves_its_own_scheme_color() {
+        let theme = crate::baseline();
+        let scheme = theme.scheme();
+        for (role, expected) in [
+            (AppBarContainer::Surface, scheme.surface),
+            (AppBarContainer::SurfaceContainer, scheme.surface_container),
+            (AppBarContainer::InversePrimary, scheme.inverse_primary),
+            (AppBarContainer::PrimaryContainer, scheme.primary_container),
+        ] {
+            let view: AppBarView<()> = app_bar("Home").container(role);
+            assert_eq!(paint_themed(&view, &theme).rects[0].2, expected, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_primary_container_changes_the_title_role() {
+        assert_eq!(
+            app_bar::<()>("Home").title_role(),
+            ThemeTextColor::OnSurface
+        );
+        for (role, expected) in [
+            (AppBarContainer::Surface, ThemeTextColor::OnSurface),
+            (AppBarContainer::SurfaceContainer, ThemeTextColor::OnSurface),
+            (AppBarContainer::InversePrimary, ThemeTextColor::OnSurface),
+            (
+                AppBarContainer::PrimaryContainer,
+                ThemeTextColor::OnPrimaryContainer,
+            ),
+        ] {
+            assert_eq!(app_bar::<()>("Home").container(role).title_role(), expected);
+        }
+    }
+
+    #[test]
+    fn an_explicit_background_wins_over_container_and_elevation() {
+        let theme = crate::baseline();
+        let custom = Color::from_rgb8(0x12, 0x34, 0x56);
+        let view: AppBarView<()> = app_bar("Home")
+            .container(AppBarContainer::InversePrimary)
+            .elevation(2)
+            .background(custom);
+        let scene = paint_themed(&view, &theme);
+        assert_eq!(scene.rects[0].2, custom);
+        // The background replaces the fill only; the shadow still paints.
+        assert_eq!(scene.shadows.len(), 1);
+    }
+
+    // ---- Elevation --------------------------------------------------------
+
+    #[test]
+    fn elevation_two_paints_a_shadow_then_a_surface_container_fill() {
+        let theme = crate::baseline();
+        let view: AppBarView<()> = app_bar("Home").elevation(2);
+        let scene = paint_themed(&view, &theme);
+
+        assert_eq!(scene.ops[..2], ["shadow", "fill"], "shadow before the fill");
+        let level = theme.elevation.level2;
+        let spec = level.shadow(theme.brightness);
+        let (origin, size, radius, blur, color) = scene.shadows[0];
+        assert_eq!(origin, Point::new(0.0, spec.y_offset));
+        assert_eq!(size, Size::new(300.0, BAND));
+        assert_eq!(radius, 0.0);
+        assert_eq!(blur, spec.blur_std_dev);
+        assert_eq!(color.components[3], spec.color_alpha);
+        assert_eq!((spec.blur_std_dev, spec.y_offset), (3.0, 2.5));
+
+        // M3 tonal elevation: level 2's surface role.
+        assert_eq!(level.surface_role, frust::SurfaceRole::SurfaceContainer);
+        assert_eq!(scene.rects[0].2, theme.scheme().surface_container);
+    }
+
+    #[test]
+    fn an_explicit_container_wins_over_the_elevation_surface_role() {
+        let theme = crate::baseline();
+        let view: AppBarView<()> = app_bar("Home")
+            .elevation(2)
+            .container(AppBarContainer::Surface);
+        let scene = paint_themed(&view, &theme);
+        assert_eq!(scene.rects[0].2, theme.scheme().surface);
+        assert_eq!(scene.shadows.len(), 1);
+    }
+
+    #[test]
+    fn elevation_zero_paints_no_shadow_and_large_levels_clamp() {
+        let theme = crate::baseline();
+        assert!(paint_themed(&app_bar("Home"), &theme).shadows.is_empty());
+
+        let clamped = paint_themed(&app_bar("Home").elevation(9), &theme);
+        let top = paint_themed(&app_bar("Home").elevation(5), &theme);
+        assert_eq!(clamped.shadows, top.shadows);
+        assert_eq!(clamped.rects[0].2, top.rects[0].2);
+        assert_eq!(clamped.rects[0].2, theme.scheme().surface_container_highest);
+    }
+
+    #[test]
+    fn an_unthemed_elevated_bar_uses_the_catalog_table_and_fallback_shadow() {
+        let view: AppBarView<()> = app_bar("Home").elevation(2);
+        let mut w = build(&view);
+        layout(&mut w, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        let mut scene = FillRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(300.0, BAND));
+        w.paint(&mut pctx, &mut scene);
+        let (origin, _, _, blur, color) = scene.shadows[0];
+        assert_eq!((origin.y, blur), (2.5, 3.0));
+        assert_eq!(color, super::super::FALLBACK_SHADOW_COLOR);
+        assert_eq!(
+            scene.rects[0].2,
+            crate::tokens::color_scheme_light().surface_container
+        );
+    }
+
+    // ---- Self-inset (`safe_area`) -----------------------------------------
+
+    #[test]
+    fn safe_area_grows_the_band_by_the_top_inset_and_fills_it() {
+        let theme = crate::baseline();
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .container(AppBarContainer::InversePrimary)
+            .elevation(2);
+        let mut w = build(&view);
+        let size = layout_with_top_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            24.0,
+        );
+        assert_eq!(size, Size::new(300.0, BAND + 24.0));
+        assert_eq!(w.top_inset, 24.0);
+        // Every slot is centred in the band below the inset.
+        assert_eq!(w.slots[0].origin().y, 24.0 + (BAND - 40.0) / 2.0);
+        assert_eq!(w.slots[2].origin().y, 24.0 + (BAND - 24.0) / 2.0);
+        let title = &w.slots[1];
+        assert_eq!(title.origin().y, 24.0 + (BAND - title.size().height) / 2.0);
+
+        // The fill and the shadow both cover the consumed band.
+        let mut scene = FillRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects[0].0, Point::ZERO);
+        assert_eq!(scene.rects[0].1, Size::new(300.0, BAND + 24.0));
+        assert_eq!(scene.rects[0].2, theme.scheme().inverse_primary);
+        assert_eq!(scene.shadows[0].1, Size::new(300.0, BAND + 24.0));
+    }
+
+    #[test]
+    fn safe_area_false_ignores_the_top_inset() {
+        let view: AppBarView<()> = app_bar("Home").safe_area(false);
+        let mut w = build(&view);
+        let size = layout_with_top_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            24.0,
+        );
+        assert_eq!(size.height, BAND);
+        assert_eq!(w.top_inset, 0.0);
+    }
+
+    /// Lay out under an arbitrary `insets` value.
+    fn layout_with_insets(w: &mut AppBarWidget, bc: &BoxConstraints, insets: WindowInsets) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(insets, |ctx| w.layout(ctx, bc))
+    }
+
+    /// A landscape phone: a 47px cutout / home-indicator band on each side,
+    /// no status bar.
+    fn landscape() -> WindowInsets {
+        WindowInsets::new(
+            WindowEdgeInsets::new(47.0, 0.0, 47.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        )
+    }
+
+    #[test]
+    fn safe_area_pads_the_slots_inside_the_side_insets_and_fills_full_width() {
+        let theme = crate::baseline();
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)])
+            .elevation(2);
+        let mut w = build(&view);
+        let size = layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            landscape(),
+        );
+        assert_eq!(size, Size::new(800.0, BAND));
+        assert_eq!(w.side_insets, (47.0, 47.0));
+        assert_eq!(w.slots[0].origin().x, 47.0 + PAD_X);
+        assert_eq!(
+            w.slots[3].origin().x + w.slots[3].size().width,
+            800.0 - 47.0 - PAD_X
+        );
+        // The title starts one gap past the leading slot.
+        assert_eq!(w.slots[1].origin().x, 47.0 + PAD_X + 40.0 + GAP);
+
+        // The fill and the shadow still span the whole width.
+        let mut scene = FillRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects[0].0, Point::ZERO);
+        assert_eq!(scene.rects[0].1, Size::new(800.0, BAND));
+        assert_eq!(scene.shadows[0].0.x, 0.0);
+        assert_eq!(scene.shadows[0].1, Size::new(800.0, BAND));
+    }
+
+    #[test]
+    fn a_bare_title_keeps_the_m3_title_inset_inside_the_side_insets() {
+        let view: AppBarView<()> = app_bar("").title_view(leaf_any(1_000.0, 40.0));
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            landscape(),
+        );
+        let title = &w.slots[0];
+        assert_eq!(title.origin().x, 47.0 + TITLE_EDGE_INSET);
+        assert_eq!(
+            title.origin().x + title.size().width,
+            800.0 - 47.0 - TITLE_EDGE_INSET
+        );
+    }
+
+    #[test]
+    fn center_title_centers_between_the_slots_inside_the_side_insets() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .center_title(true);
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            WindowInsets::new(
+                WindowEdgeInsets::new(47.0, 0.0, 10.0, 0.0),
+                WindowEdgeInsets::ZERO,
+            ),
+        );
+        let leading_end = w.slots[0].origin().x + w.slots[0].size().width;
+        let title_start = w.slots[1].origin().x;
+        let title_end = title_start + w.slots[1].size().width;
+        let left_gap = title_start - leading_end;
+        let right_gap = w.slots[2].origin().x - title_end;
+        assert!(
+            (left_gap - right_gap).abs() < 0.01,
+            "left_gap={left_gap}, right_gap={right_gap}"
+        );
+    }
+
+    #[test]
+    fn the_corner_shift_stacks_beyond_the_consumed_side_padding() {
+        // A corner's width is measured from the safe-area edge (see
+        // `CornerInsets`), so the slot origin is padding + corner, never the
+        // larger of the two — and it equals what the same bar gets under a
+        // parent safe area that consumed the side padding first.
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)]);
+        let bc = BoxConstraints::loose(Size::new(800.0, 200.0));
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(20.0, 24.0, 30.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        )
+        .with_corner_insets(top_corners());
+
+        let mut w = build(&view);
+        layout_with_insets(&mut w, &bc, insets);
+        assert_eq!(w.slots[0].origin().x, 20.0 + 44.0 + PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            800.0 - 30.0 - 52.0 - PAD_X
+        );
+
+        // The parent-consumed composition: the bar sees no padding, sits 20px
+        // in, and still shifts for the (never consumed) corner.
+        let mut nested = build(&view);
+        layout_with_insets(
+            &mut nested,
+            &BoxConstraints::loose(Size::new(800.0 - 20.0 - 30.0, 200.0)),
+            insets.consuming(true, true, true, false),
+        );
+        assert_eq!(nested.side_insets, (0.0, 0.0));
+        assert_eq!(20.0 + nested.slots[0].origin().x, w.slots[0].origin().x);
+        assert_eq!(
+            20.0 + nested.slots[2].origin().x + nested.slots[2].size().width,
+            w.slots[2].origin().x + w.slots[2].size().width
+        );
+    }
+
+    #[test]
+    fn a_side_consuming_safe_area_leaves_no_side_padding_to_consume_again() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(706.0, 200.0)),
+            landscape().consuming(true, true, true, false),
+        );
+        assert_eq!(w.side_insets, (0.0, 0.0));
+        assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            706.0 - PAD_X
+        );
+
+        // Through a real `frust::safe_area`: the bar is laid out 47px in and
+        // the whole stack keeps the window width.
+        let wrapped = frust::safe_area(app_bar::<()>("Home")).bottom(false);
+        let mut counter = 0u64;
+        let mut sw = View::<()>::build(&wrapped, &mut ctx(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        let size = lctx.with_window_insets(landscape(), |ctx| {
+            sw.layout(ctx, &BoxConstraints::loose(Size::new(800.0, 400.0)))
+        });
+        assert_eq!(size.height, BAND);
+    }
+
+    #[test]
+    fn safe_area_false_ignores_the_side_insets_too() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .safe_area(false);
+        let mut w = build(&view);
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(47.0, 24.0, 47.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        );
+        let size = layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            insets,
+        );
+        assert_eq!(size.height, BAND);
+        assert_eq!(w.side_insets, (0.0, 0.0));
+        assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            800.0 - PAD_X
+        );
+    }
+
+    #[test]
+    fn a_search_app_bar_self_insets_too() {
+        let view: AppBarView<()> = search_app_bar(crate::search_bar("", |_: &mut (), _| {}));
+        let mut w = build(&view);
+        let size = layout_with_top_inset(
+            &mut w,
+            &BoxConstraints::loose(Size::new(300.0, 200.0)),
+            24.0,
+        );
+        assert_eq!(size.height, BAND + 24.0);
+
+        // And consumes the side insets: the pill sits inside them.
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            landscape(),
+        );
+        let title = &w.slots[0];
+        assert_eq!(title.origin().x, 47.0 + TITLE_EDGE_INSET);
+        assert!(title.origin().x + title.size().width <= 800.0 - 47.0 - TITLE_EDGE_INSET);
+    }
+
+    #[test]
+    fn a_top_consuming_safe_area_leaves_no_inset_to_consume_again() {
+        // `safe_area(bar).bottom(false)` is how material3-demo and the gallery
+        // dock the bar: the safe area pads 24 and hands the bar zero, so the
+        // whole stack is 24 + 64, never 24 + 24 + 64.
+        let wrapped = frust::safe_area(app_bar::<()>("Home")).bottom(false);
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&wrapped, &mut ctx(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        let size = lctx.with_window_insets(status_bar(24.0), |ctx| {
+            w.layout(ctx, &BoxConstraints::loose(Size::new(300.0, 400.0)))
+        });
+        assert_eq!(size.height, 24.0 + BAND);
+    }
+
+    #[test]
+    fn rebuild_flags_container_and_elevation_as_paint_and_safe_area_as_layout() {
+        let mut counter = 0u64;
+        let prev: AppBarView<()> = app_bar("Home");
+        let mut w = View::<()>::build(&prev, &mut ctx(&mut counter));
+
+        let next: AppBarView<()> = app_bar("Home").elevation(2);
+        let flags = View::<()>::rebuild(&next, &prev, &mut w, &mut ctx(&mut counter));
+        assert!(flags.contains(ChangeFlags::PAINT));
+        assert!(!flags.needs_layout());
+        assert_eq!(w.elevation, 2);
+
+        let prev = next;
+        let next: AppBarView<()> = app_bar("Home")
+            .elevation(2)
+            .container(AppBarContainer::InversePrimary);
+        let flags = View::<()>::rebuild(&next, &prev, &mut w, &mut ctx(&mut counter));
+        assert!(flags.contains(ChangeFlags::PAINT));
+        assert_eq!(w.container, Some(AppBarContainer::InversePrimary));
+
+        let prev = next;
+        let next: AppBarView<()> = app_bar("Home")
+            .elevation(2)
+            .container(AppBarContainer::InversePrimary)
+            .safe_area(false);
+        let flags = View::<()>::rebuild(&next, &prev, &mut w, &mut ctx(&mut counter));
+        assert!(flags.needs_layout());
+        assert!(!w.safe_area);
     }
 
     #[test]

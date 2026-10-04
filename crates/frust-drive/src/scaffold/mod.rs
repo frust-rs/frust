@@ -115,6 +115,10 @@ const MANIFEST_FILE: &str = "template_manifest.json";
 /// variant appears in the UI with no front-end change.
 pub const KNOWN_ARCHES: &[&str] = &["clean-signals"];
 
+/// Logical paths only the default (no `--arch`) template emits: an arch
+/// variant lays out its sources differently and must not inherit them.
+const DEFAULT_ONLY_PATHS: &[&str] = &["src/home_page.rs"];
+
 /// Splits a mode-stripped logical path into `(base, tag)` if it carries a
 /// recognized [`KNOWN_ARCHES`] suffix (see that const's doc for the
 /// convention). `None` for a default-template entry.
@@ -387,6 +391,12 @@ pub fn generate_with_platforms(
     // skip below. See `context::platform_render_vars`'s doc.
     let mut render_vars = ctx.render_vars();
     render_vars.extend(context::platform_render_vars(platforms));
+    // Arch selector is threaded into the render context too: templates like
+    // `README.md.tmpl` can branch on the selected architecture (e.g.
+    // `{% if arch == "clean-signals" %}`) to customize content. An empty string
+    // (falsy in minijinja) when no arch is selected, matching the pattern
+    // `platform_render_vars` uses for platform flags.
+    render_vars.insert("arch", arch.unwrap_or("").to_string());
     let path_vars = ctx.path_vars();
 
     let mut written = Vec::with_capacity(manifest.len());
@@ -401,6 +411,12 @@ pub fn generate_with_platforms(
         if let Some((platform, _)) = split_platform_dir(logical)
             && !platforms.contains(&platform)
         {
+            continue;
+        }
+
+        // Default-only files (`DEFAULT_ONLY_PATHS`) are not emitted for any
+        // `--arch` variant: that variant supplies its own source layout.
+        if arch.is_some() && DEFAULT_ONLY_PATHS.contains(&logical) {
             continue;
         }
 
@@ -646,8 +662,7 @@ mod tests {
         let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         for line in [
             "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
-            "frust-glyph = \"0.5.0\"",
-            "frust-shared-preferences = \"0.5.0\"",
+            "frust-material = \"0.5.0\"",
         ] {
             assert!(
                 cargo_toml.lines().any(|l| l == line),
@@ -666,7 +681,7 @@ mod tests {
         let cargo_toml = fs::read_to_string(clean.join("Cargo.toml")).unwrap();
         for line in [
             "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
-            "frust-glyph = \"0.5.0\"",
+            "frust-material = \"0.5.0\"",
             "clean-signals-frust = \"0.5.0\"",
         ] {
             assert!(
@@ -708,23 +723,21 @@ mod tests {
             cargo_toml.contains("crate-type = [\"cdylib\", \"staticlib\", \"rlib\"]"),
             "{cargo_toml}"
         );
-        // Glyph ships as a sibling plugin crate dependency, not a `frust`
+        // Material 3 ships as a sibling plugin crate dependency, not a `frust`
         // Cargo feature: the `frust` edge itself names no features at all
-        // (`frust` carries no design-system catalog, `default = []`), and
-        // `frust-glyph` is depended on directly, the same shape
-        // `frust-shared-preferences` uses below.
+        // (`frust` carries no design-system catalog, `default = []`).
         assert!(
             cargo_toml.contains("frust = { package = \"frust-ui\", path = \"/path/to/frust\" }"),
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains("frust-glyph = { path = \"/path/to/frust/../../plugins/glyph\" }"),
+            cargo_toml
+                .contains("frust-material = { path = \"/path/to/frust/../../plugins/material\" }"),
             "{cargo_toml}"
         );
+        assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
         assert!(
-            cargo_toml.contains(
-                "frust-shared-preferences = { path = \"/path/to/frust/../../plugins/shared-preferences\" }"
-            ),
+            !cargo_toml.contains("frust-shared-preferences"),
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("[\"glyph\""), "{cargo_toml}");
@@ -743,37 +756,43 @@ mod tests {
         assert!(!lib_rs.contains("ios_app!"), "{lib_rs}");
         assert!(!lib_rs.contains("App::new"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
-        // The generated app ships Glyph by default: the `app!` invocation's
+        // The generated app ships Material 3 by default: the `app!` invocation's
         // `setup` block is what actually seeds it as the active theme (the
-        // `frust-glyph` dependency alone only compiles the code in) — see
-        // `frust_glyph::install`'s doc comment for the ordering contract.
+        // `frust-material` dependency alone only compiles the code in).
         assert!(
             lib_rs.contains(
-                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_glyph::install();\n    }\n);"
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_material::install();\n    }\n);"
             ),
             "{lib_rs}"
         );
-        // The generated demo is a notes app: an embedded logo Image, a
-        // controlled TextInput whose submit appends a keyed note row (each with a
-        // Delete button), inside a scroll view. The `app_logic` keeps the
-        // `-> impl View<AppState> + use<>` shape so a fresh scaffold compiles for
-        // both mobile targets.
+        // The generated demo is the Flutter-style counter: the root component
+        // hosts a `HomePage` component (its own module) built from widget fns.
         assert!(
-            lib_rs
-                .contains("pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<>")
-                && lib_rs.contains("text_input(")
-                && lib_rs.contains(".on_submit(")
-                && lib_rs.contains("keyed(")
-                && lib_rs.contains("Button(\"Delete\"")
-                && lib_rs.contains("Image(logo)")
-                && lib_rs.contains("scroll_view("),
+            lib_rs.contains("component(") && lib_rs.contains("mod home_page"),
             "{lib_rs}"
         );
-        // The demo bundles a logo asset it decodes once via `include_bytes!`.
+        let home_rs = fs::read_to_string(dest.join("src/home_page.rs")).unwrap();
         assert!(
-            lib_rs.contains("include_bytes!(\"../assets/logo.png\")"),
+            home_rs.contains("impl Component for HomePage")
+                && home_rs.contains("scaffold(")
+                && home_rs.contains("app_bar")
+                && home_rs.contains("fab(")
+                && home_rs.contains("icons::ADD")
+                && home_rs.contains("InversePrimary")
+                && home_rs.contains("elevation(2)"),
+            "{home_rs}"
+        );
+        for src in [&lib_rs, &home_rs] {
+            assert!(!src.contains("app_logic"), "{src}");
+            assert!(!src.contains("frust-glyph"), "{src}");
+        }
+        // lib.rs's comment may name the swap; the live setup call must not.
+        assert!(
+            !lib_rs.contains("        frust_glyph::install();"),
             "{lib_rs}"
         );
+        assert!(!home_rs.contains("frust_glyph"), "{home_rs}");
+        // The launcher icon still ships even though the UI no longer shows it.
         assert!(dest.join("assets/logo.png").exists());
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
@@ -823,11 +842,14 @@ mod tests {
 
         // README.md generated with theme/font docs and examples
         let readme = fs::read_to_string(dest.join("README.md")).unwrap();
-        assert!(readme.contains("Glyph design system"), "{readme}");
+        assert!(readme.contains("Material 3 design system"), "{readme}");
+        assert!(readme.contains("home_page.rs"), "{readme}");
         assert!(readme.contains("frust_material::install()"), "{readme}");
         assert!(readme.contains("frust_cupertino::install()"), "{readme}");
         assert!(readme.contains("register_app_fonts"), "{readme}");
         assert!(readme.contains("Theme::builder"), "{readme}");
+        assert!(readme.contains("frust::register_app_fonts("), "{readme}");
+        assert!(!readme.contains("bundles no font"), "{readme}");
         // Verify no unresolved {{ }} placeholders remain
         assert!(!readme.contains("{{"), "{readme}");
 
@@ -1694,8 +1716,8 @@ mod tests {
     }
 
     /// `--arch clean-signals` renders the variant `Cargo.toml`/full
-    /// `greeting` feature-slice tree in place of the retired single-file
-    /// demo, while every arch-agnostic file (frust.toml, assets, android/ios
+    /// `counter` feature-slice tree in place of the default template's
+    /// counter screen, while every arch-agnostic file (frust.toml, assets, android/ios
     /// trees) still lands exactly once.
     #[test]
     fn generate_with_clean_signals_arch_renders_variant_content_in_place_of_defaults() {
@@ -1731,30 +1753,37 @@ mod tests {
             cargo_toml.contains("clean-signals = \"0.1\""),
             "{cargo_toml}"
         );
-        // The notes-app demo's plugin dependency doesn't apply to this
+        // The default counter template's plugin dependency doesn't apply to this
         // variant.
         assert!(
             !cargo_toml.contains("frust-shared-preferences = {"),
             "{cargo_toml}"
         );
+        // Material 3 is this variant's design system too.
+        assert!(
+            cargo_toml
+                .contains("frust-material = { path = \"/path/to/frust/../../plugins/material\" }"),
+            "{cargo_toml}"
+        );
+        assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
 
-        // The full `greeting` feature-slice tree lands — the single-file
-        // demo is retired from the manifest.
+        // The full `counter` feature-slice tree lands.
         let expected_files = [
             "src/lib.rs",
             "src/failure.rs",
             "src/features/mod.rs",
-            "src/features/greeting/mod.rs",
-            "src/features/greeting/domain/mod.rs",
-            "src/features/greeting/domain/repositories.rs",
-            "src/features/greeting/domain/use_cases/mod.rs",
-            "src/features/greeting/domain/use_cases/load_greeting.rs",
-            "src/features/greeting/data/mod.rs",
-            "src/features/greeting/data/sources.rs",
-            "src/features/greeting/data/repositories.rs",
-            "src/features/greeting/presentation/mod.rs",
-            "src/features/greeting/presentation/controllers.rs",
-            "src/features/greeting/presentation/pages.rs",
+            "src/features/counter/mod.rs",
+            "src/features/counter/domain/mod.rs",
+            "src/features/counter/domain/repositories.rs",
+            "src/features/counter/domain/use_cases/mod.rs",
+            "src/features/counter/domain/use_cases/load_count.rs",
+            "src/features/counter/domain/use_cases/increment_count.rs",
+            "src/features/counter/data/mod.rs",
+            "src/features/counter/data/sources.rs",
+            "src/features/counter/data/repositories.rs",
+            "src/features/counter/presentation/mod.rs",
+            "src/features/counter/presentation/controllers.rs",
+            "src/features/counter/presentation/pages.rs",
         ];
         for f in expected_files {
             assert!(
@@ -1765,19 +1794,30 @@ mod tests {
         }
 
         // lib.rs shrinks to module decls + `app!` wiring + the composition
-        // root — no `GreetingController`/`use_controller`/`async_view`
+        // root — no `CounterController` construction/`use_controller`/`async_view`
         // details leak into it anymore (those moved into the feature
         // slice).
         let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("pub mod failure;"), "{lib_rs}");
         assert!(lib_rs.contains("pub mod features;"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
-        // Glyph-by-default applies to this variant too — see the matching
+        // Material-by-default applies to this variant too — see the matching
         // assertion in `generate_produces_manifest_listed_files_with_substitutions`.
         assert!(
             lib_rs.contains(
-                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_glyph::install();\n    }\n);"
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_material::install();\n    }\n);"
             ),
+            "{lib_rs}"
+        );
+        assert!(
+            lib_rs.contains("type State = Arc<CounterController>;"),
+            "{lib_rs}"
+        );
+        assert!(lib_rs.contains("pages::counter_page(state)"), "{lib_rs}");
+        assert!(!lib_rs.contains("app_logic"), "{lib_rs}");
+        assert!(!lib_rs.contains("frust-glyph"), "{lib_rs}");
+        assert!(
+            !lib_rs.contains("        frust_glyph::install();"),
             "{lib_rs}"
         );
         // The controller's construction/rendering detail moved into the
@@ -1785,7 +1825,7 @@ mod tests {
         assert!(!lib_rs.contains("ControllerCore"), "{lib_rs}");
         assert!(!lib_rs.contains("use_controller"), "{lib_rs}");
         assert!(!lib_rs.contains("async_view"), "{lib_rs}");
-        // The notes-app demo's own shape doesn't leak into this variant.
+        // The default counter template's own shape doesn't leak into this variant.
         assert!(!lib_rs.contains("SharedPreferences"), "{lib_rs}");
         assert!(!lib_rs.contains("text_input("), "{lib_rs}");
 
@@ -1796,43 +1836,64 @@ mod tests {
         assert!(failure_rs.contains("Validation(String)"), "{failure_rs}");
 
         let domain_repo =
-            fs::read_to_string(dest.join("src/features/greeting/domain/repositories.rs")).unwrap();
+            fs::read_to_string(dest.join("src/features/counter/domain/repositories.rs")).unwrap();
         assert!(
-            domain_repo.contains("pub trait GreetingRepository"),
+            domain_repo.contains("pub trait CounterRepository"),
             "{domain_repo}"
         );
 
-        let use_case = fs::read_to_string(
-            dest.join("src/features/greeting/domain/use_cases/load_greeting.rs"),
+        let load_count =
+            fs::read_to_string(dest.join("src/features/counter/domain/use_cases/load_count.rs"))
+                .unwrap();
+        assert!(load_count.contains("pub struct LoadCount"), "{load_count}");
+        assert!(load_count.contains("NoParams"), "{load_count}");
+        let increment_count = fs::read_to_string(
+            dest.join("src/features/counter/domain/use_cases/increment_count.rs"),
         )
         .unwrap();
-        assert!(use_case.contains("pub struct LoadGreeting"), "{use_case}");
-        assert!(use_case.contains("NoParams"), "{use_case}");
+        assert!(
+            increment_count.contains("pub struct IncrementCount"),
+            "{increment_count}"
+        );
 
         let data_repo =
-            fs::read_to_string(dest.join("src/features/greeting/data/repositories.rs")).unwrap();
+            fs::read_to_string(dest.join("src/features/counter/data/repositories.rs")).unwrap();
         assert!(
-            data_repo.contains("pub struct InMemoryGreetingRepository"),
+            data_repo.contains("pub struct InMemoryCounterRepository"),
             "{data_repo}"
         );
         assert!(data_repo.contains("fn map_source_error"), "{data_repo}");
 
         let controllers =
-            fs::read_to_string(dest.join("src/features/greeting/presentation/controllers.rs"))
+            fs::read_to_string(dest.join("src/features/counter/presentation/controllers.rs"))
                 .unwrap();
         assert!(
-            controllers.contains("pub struct GreetingController"),
+            controllers.contains("pub struct CounterController"),
             "{controllers}"
         );
 
+        // The page is a Material scaffold built from small widget fns.
         let pages =
-            fs::read_to_string(dest.join("src/features/greeting/presentation/pages.rs")).unwrap();
+            fs::read_to_string(dest.join("src/features/counter/presentation/pages.rs")).unwrap();
         assert!(pages.contains("use_controller"), "{pages}");
         assert!(pages.contains("async_view"), "{pages}");
+        assert!(
+            pages.contains("pub fn counter_page")
+                && pages.contains("scaffold(")
+                && pages.contains("app_bar")
+                && pages.contains("fab(")
+                && pages.contains("icons::ADD")
+                && pages.contains("InversePrimary")
+                && pages.contains("elevation(2)"),
+            "{pages}"
+        );
+        assert!(!pages.contains("frust_glyph"), "{pages}");
 
         // No `.clean-signals.` leftover in any written path, and no stray
         // `Cargo.toml.clean-signals`/`src/lib.rs.clean-signals` files.
         assert!(!dest.join("Cargo.toml.clean-signals").exists());
+        // The default template's counter screen is not part of this arch.
+        assert!(!dest.join("src/home_page.rs").exists());
         assert!(!dest.join("src/lib.rs.clean-signals").exists());
         assert!(
             written
@@ -1851,6 +1912,77 @@ mod tests {
         assert!(dest.join("linux").is_dir());
 
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// README.md.tmpl is arch-aware: the default arch describes
+    /// `src/home_page.rs` as the counter screen, while the clean-signals arch
+    /// describes the clean-signals feature structure instead.
+    #[test]
+    fn generate_readme_structure_section_is_arch_aware() {
+        let dest_default = unique_temp_dir("readme-default");
+        let dest_clean_signals = unique_temp_dir("readme-clean-signals");
+        let ctx = test_context();
+
+        generate(&dest_default, &ctx, None, false, None).unwrap();
+        generate(
+            &dest_clean_signals,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+        )
+        .unwrap();
+
+        let readme_default = fs::read_to_string(dest_default.join("README.md")).unwrap();
+        let readme_clean_signals =
+            fs::read_to_string(dest_clean_signals.join("README.md")).unwrap();
+
+        // Default arch mentions `src/home_page.rs` as the counter screen.
+        assert!(
+            readme_default.contains("src/home_page.rs"),
+            "default README must mention src/home_page.rs: {readme_default}"
+        );
+        assert!(
+            readme_default.contains("counter screen, a `Component` built from small widget fns"),
+            "default README must describe home_page.rs as the counter screen: {readme_default}"
+        );
+        assert!(
+            !readme_default.contains("src/features/counter"),
+            "default README must not mention features: {readme_default}"
+        );
+
+        // Clean-signals arch mentions `src/features/counter` but not `src/home_page.rs`.
+        assert!(
+            readme_clean_signals.contains("src/features/counter/"),
+            "clean-signals README must mention src/features/counter/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("domain/"),
+            "clean-signals README must mention domain/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("data/"),
+            "clean-signals README must mention data/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("presentation/"),
+            "clean-signals README must mention presentation/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("`clean-signals`-driven"),
+            "clean-signals README must mention clean-signals: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("`ControllerCore`, `CounterController`"),
+            "clean-signals README must mention ControllerCore and CounterController: {readme_clean_signals}"
+        );
+        assert!(
+            !readme_clean_signals.contains("src/home_page.rs"),
+            "clean-signals README must not mention home_page.rs: {readme_clean_signals}"
+        );
+
+        let _ = fs::remove_dir_all(&dest_default);
+        let _ = fs::remove_dir_all(&dest_clean_signals);
     }
 
     #[test]
@@ -2689,7 +2821,7 @@ mod tests {
         .unwrap();
 
         // Arch resolution still happened...
-        assert!(dest.join("src/features/greeting/domain/mod.rs").is_file());
+        assert!(dest.join("src/features/counter/domain/mod.rs").is_file());
         // ...and the platform selection still holds.
         assert!(dest.join("web/index.html").is_file());
         assert!(!dest.join("android").exists());

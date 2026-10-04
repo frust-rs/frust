@@ -211,20 +211,20 @@ impl Widget for SelfInsetBarWidget {
 /// snapshot — mirrors `safe_area.rs`'s own test ordering (`set_insets` after
 /// `rebuild`, before `layout`).
 fn inspect<V: View<()>>(
-    app_logic: &mut impl FnMut(&mut ()) -> V,
+    build: &mut impl FnMut(&mut ()) -> V,
     window: Size,
     insets: WindowInsets,
 ) -> Vec<InspectNode> {
     let mut root: RenderRoot<(), V> = RenderRoot::new();
     let mut state = ();
-    root.rebuild(app_logic, &mut state);
+    root.rebuild(build, &mut state);
     root.set_insets(insets);
     root.layout(window);
     root.inspect()
 }
 
 /// Like [`inspect`], but rebuilds *twice* against `first` then `second` — each
-/// a fresh view the way a real `app_logic` re-runs every frame — running a
+/// a fresh view the way a build closure re-runs every frame — running a
 /// REAL second [`RenderRoot::layout`] pass in between, rather than the single
 /// build-then-layout pass every test above exercises. Returns both inspect
 /// snapshots plus the [`ChangeFlags`] the **second** rebuild reported (the

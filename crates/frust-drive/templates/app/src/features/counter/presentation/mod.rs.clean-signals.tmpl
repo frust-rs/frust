@@ -1,0 +1,9 @@
+//! `counter` presentation layer: [`controllers::CounterController`] (the
+//! view model) and [`pages`] (the page functions
+//! `crate::{{ title_case_name | replace(" ", "") }}App`, this scaffold's
+//! composition root, delegates to). Imports domain only, never `data/`.
+
+pub mod controllers;
+pub mod pages;
+
+pub use controllers::CounterController;
