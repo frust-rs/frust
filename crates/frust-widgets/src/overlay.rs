@@ -1639,8 +1639,8 @@ mod tests {
         /// One whole frame: rebuild, layout, paint — returning what was painted,
         /// in paint order.
         fn frame(&mut self) -> RecordingScene {
-            let mut app_logic: fn(&mut App) -> StackView<App> = logic;
-            self.root.rebuild(&mut app_logic, &mut self.state);
+            let mut build: fn(&mut App) -> StackView<App> = logic;
+            self.root.rebuild(&mut build, &mut self.state);
             self.root.layout(WINDOW);
             self.clock_ms += 16.0;
             let mut scene = RecordingScene::default();
@@ -2249,12 +2249,12 @@ mod tests {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut root: RenderRoot<(), ToolbarHost> = RenderRoot::new();
         let captured = Rc::clone(&log);
-        let mut app_logic = move |_: &mut ()| ToolbarHost {
+        let mut build = move |_: &mut ()| ToolbarHost {
             log: Rc::clone(&captured),
             reaction,
         };
         let mut state = ();
-        root.rebuild(&mut app_logic, &mut state);
+        root.rebuild(&mut build, &mut state);
         root.layout(WINDOW);
         root.paint(&mut RecordingScene::default(), FrameTime::from_nanos(0));
         (root, log)

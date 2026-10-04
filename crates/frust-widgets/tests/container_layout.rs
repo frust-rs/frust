@@ -873,10 +873,10 @@ fn divider_paints_its_line_via_a_single_fill_rect() {
 /// node `RenderRoot::semantics` publishes for any tree (see
 /// `tests/semantics_tree.rs`'s identical precedent) — the roles this test
 /// file actually cares about are the widget tree's own.
-fn inspect_roles<V: View<()>>(mut app_logic: impl FnMut(&mut ()) -> V) -> Vec<Role> {
+fn inspect_roles<V: View<()>>(mut build: impl FnMut(&mut ()) -> V) -> Vec<Role> {
     let mut root: RenderRoot<(), V> = RenderRoot::new();
     let mut state = ();
-    root.rebuild(&mut app_logic, &mut state);
+    root.rebuild(&mut build, &mut state);
     let mut text_ctx = frust_text::TextContext::new();
     root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
     root.semantics()

@@ -213,7 +213,7 @@ fn run_listview(frames: usize, mut make_view: impl FnMut() -> ListView<()>) -> V
 }
 
 /// The `ScrollView` + eagerly-built `Column` baseline: every frame's
-/// `app_logic` reconstructs a fresh `Vec` of `n` `AnyView`s (no windowing),
+/// build closure reconstructs a fresh `Vec` of `n` `AnyView`s (no windowing),
 /// so `Flex`'s positional reconciliation diffs all `n` children every frame
 /// — the O(N) counterpart to [`run_listview`]'s O(window).
 fn run_baseline(n: usize, frames: usize) -> Vec<f64> {
