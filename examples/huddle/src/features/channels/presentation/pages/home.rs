@@ -80,8 +80,8 @@ use frust::{
     Align, Alignment, AnimationController, AnyView, Axis, ChildKey, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
     ListView, NavigatorController, Padding, PopResult, Row, SizedBox, Stack, Theme, View, any,
-    button, component, flexible, hero, icon, icons, inflexible, safe_area, scroll_view, text,
-    text_input, use_context,
+    button, component, flexible, hero, icon, icons, inflexible, scroll_view, text, text_input,
+    use_context,
 };
 use frust_cupertino::{action, show_cupertino_alert};
 use frust_material::{ProgressValue, app_bar, circular_progress, dialog, show_dialog, switch};
@@ -376,16 +376,11 @@ impl frust::Component for HomeScreen {
             .map(|t| t.design_language)
             .unwrap_or(DesignLanguage::Material3);
 
-        // The app bar clears the top status-bar/cutout inset — its own
-        // background still only fills the un-padded bar height (see
-        // `shell::bottom_bar`'s doc for the same known v1 gap on the
-        // opposite edge).
-        let bar = any(safe_area(
-            app_bar::<HomeState>("Huddle")
-                .leading(workspace_tile(&state.nav))
-                .actions(vec![create_channel_action()]),
-        )
-        .bottom(false));
+        // Docked at the window top: the bar insets itself (top + sides) and
+        // paints its container through the status-bar band.
+        let bar = any(app_bar::<HomeState>("Huddle")
+            .leading(workspace_tile(&state.nav))
+            .actions(vec![create_channel_action()]));
 
         let screen = any(
             FlexView::new(Axis::Vertical, vec![inflexible(bar), flexible(1, body)])
