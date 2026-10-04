@@ -11,7 +11,7 @@ use std::sync::Arc;
 use clean_signals::{AsyncState, Failure};
 use clean_signals_frust::{async_view, use_controller};
 use frust::{
-    Align, Alignment, AnyView, Column, CrossAxisAlignment, Get, View, any, safe_area, scaffold,
+    Align, Alignment, AnyView, Column, CrossAxisAlignment, Get, View, any, scaffold,
     spawn_local, text,
 };
 
@@ -47,9 +47,11 @@ pub fn counter_page(state: &mut PageState) -> AnyView<PageState> {
         .fab(any(increment_fab())))
 }
 
-// A Scaffold consumes no inset itself, so the bar pads the top edge.
+// The Material app bar insets itself under the status bar, so no safe_area wrapper is needed.
 fn app_bar(title: &str) -> impl View<PageState> + use<> {
-    safe_area(frust_material::app_bar::<PageState>(title)).bottom(false)
+    frust_material::app_bar::<PageState>(title)
+        .container(frust_material::AppBarContainer::InversePrimary)
+        .elevation(2)
 }
 
 fn counter_body(count: AsyncState<u32, AppFailure>) -> impl View<PageState> + use<> {
