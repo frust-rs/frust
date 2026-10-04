@@ -213,7 +213,8 @@ fn app_bar_case() -> AnyView<()> {
                         any(icon_button(glyph(icons::SEARCH), |_: &mut ()| {})),
                         any(icon_button(glyph(icons::MORE_VERT), |_: &mut ()| {})),
                     ])
-                    .density(AppBarDensity::Regular),
+                    .density(AppBarDensity::Regular)
+                    .safe_area(false),
             ),
             gap(24.0),
             bleed(
