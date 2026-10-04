@@ -971,7 +971,7 @@ unsafe fn handle_mut<'a>(handle: jlong) -> Option<&'a mut AndroidAppHandle> {
 /// `nativeInit`: build the native handle for the first surface and return it to
 /// the JVM as an opaque `jlong`.
 ///
-/// `make_app` is supplied by the macro and erases the app's `State`/`app_logic`;
+/// `make_app` is supplied by the macro and erases the app's `State`/`build`;
 /// on any failure (null window, GPU init error, panic) returns `0`, matching
 /// Kotlin's "no native side yet" sentinel.
 ///

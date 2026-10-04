@@ -5,7 +5,7 @@
 //! Kotlin `FrustSurfaceView` (see `platform/android/frust-embedding/src/main/kotlin/dev/frust/
 //! FrustSurfaceView.kt`): the JVM calls a fixed set of
 //! `Java_dev_frust_FrustSurfaceView_native*` symbols, and each generated
-//! app supplies its own `State`/`app_logic` through the [`android_app!`] macro,
+//! app supplies its own `State`/`build` through the [`android_app!`] macro,
 //! which stamps out those symbols bound to the app's types.
 //!
 //! # Layering
@@ -98,13 +98,13 @@ pub mod __jni {
     pub use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 }
 
-/// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
+/// Bind a generated app's `State`/`build` to the fixed Android JNI exports
 /// (a Makepad `app_main!` precedent).
 ///
 /// Stamps out the twenty-two `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
-/// view tree from a state factory and `$app_logic`; the rest operate on the
+/// view tree from a state factory and `$build`; the rest operate on the
 /// opaque `jlong` handle. The three IME exports (`nativeImeApply`,
 /// `nativeImeState`, `nativeImeAction`) carry the soft-keyboard
 /// state-sync contract: Kotlin pushes a whole editing state in
@@ -150,28 +150,28 @@ pub mod __jni {
 ///
 /// ```ignore
 /// #[cfg(target_os = "android")]
-/// frust::android_app!(AppState, app_logic);
+/// frust::android_app!(AppState, move |s| root.build(s));
 /// ```
 ///
 /// Two forms:
-/// - `android_app!($state_ty, $app_logic)` — `$state_ty` must implement
+/// - `android_app!($state_ty, $build)` — `$state_ty` must implement
 ///   [`Default`]; the state is built via `<$state_ty as Default>::default`.
-/// - `android_app!($state_ty, $state_init, $app_logic)` — `$state_init` is a
+/// - `android_app!($state_ty, $state_init, $build)` — `$state_init` is a
 ///   `FnOnce() -> $state_ty` factory (e.g. a closure or a bare function path
 ///   like `MyState::new`), for a `State` that doesn't implement `Default`. The
 ///   2-arg form delegates to this one.
 ///
-/// `$app_logic` is a `FnMut(&mut State) -> impl View<State>`.
+/// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` (`move |s| root.build(s)`).
 #[macro_export]
 macro_rules! android_app {
-    ($state_ty:ty, $app_logic:expr $(,)?) => {
+    ($state_ty:ty, $build:expr $(,)?) => {
         $crate::android_app!(
             $state_ty,
             <$state_ty as ::core::default::Default>::default,
-            $app_logic
+            $build
         );
     };
-    ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
+    ($state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
         ///
         /// `cache_dir` is the app's `context.cacheDir.absolutePath`,
@@ -189,7 +189,7 @@ macro_rules! android_app {
             cache_dir: $crate::__jni::JString<'local>,
         ) -> $crate::__jni::jlong {
             $crate::jni_glue::native_init(env, surface, scale, cache_dir, || {
-                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $app_logic)
+                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })
         }
 

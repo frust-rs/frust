@@ -3,7 +3,7 @@
 //!
 //! Ownership mirrors the shared platform bootstrap: the shell owns
 //! the shared [`TextContext`], the [`RenderRoot`], the application
-//! `State`/`app_logic`, and a [`FrameExecutor`](crate::render::FrameExecutor).
+//! `State`/`build`, and a [`FrameExecutor`](crate::render::FrameExecutor).
 //! The executor owns the render stack — either on this (the UI) thread (the
 //! single-thread fallback) or on a dedicated render thread (the
 //! split, chosen by the `FRUST_NO_RENDER_THREAD` kill switch — see
@@ -821,7 +821,7 @@ fn paste_answer_dispatch(asked_in: Option<u64>, live: u64, text: PasteText) -> O
     (asked_in == Some(live)).then(move || paste_input_event(text))
 }
 
-/// Run `app_logic` over `state` in a desktop preview window until it is closed.
+/// Run `build` over `state` in a desktop preview window until it is closed.
 ///
 /// Blocks the calling thread on the winit event loop. The event loop is
 /// on-demand ([`ControlFlow::Wait`]): frames are produced only in response to a
@@ -832,13 +832,13 @@ fn paste_answer_dispatch(asked_in: Option<u64>, live: u64, text: PasteText) -> O
 /// and [`NoExtensions`], so the dev preview behaves exactly as it did before
 /// either seam existed. A per-OS shell crate calls [`run_desktop_with`]
 /// instead.
-pub fn run_desktop<State, Logic, V>(state: State, app_logic: Logic) -> Result<()>
+pub fn run_desktop<State, Build, V>(state: State, build: Build) -> Result<()>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
 {
-    run_desktop_with(state, app_logic, DesktopConfig::default(), NoExtensions)
+    run_desktop_with(state, build, DesktopConfig::default(), NoExtensions)
 }
 
 /// [`run_desktop`] with the app's desktop identity ([`DesktopConfig`]) and a
@@ -850,16 +850,16 @@ where
 /// this core only carries — `app_id`, `window_icon`, `menu_spec`) and call
 /// here. Generic over `E` rather than boxed — see [`crate::extensions`]'s
 /// module docs.
-pub fn run_desktop_with<State, Logic, V, E>(
+pub fn run_desktop_with<State, Build, V, E>(
     state: State,
-    app_logic: Logic,
+    build: Build,
     config: DesktopConfig,
     mut extensions: E,
 ) -> Result<()>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
     E: DesktopExtensions,
 {
     // Install the stderr `log::Log` sink once, so `frust-shell-common::perf`'s
@@ -935,7 +935,7 @@ where
 
     let mut handler = ShellHandler {
         state,
-        app_logic,
+        build,
         config,
         extensions,
         runtime,
@@ -1651,9 +1651,9 @@ struct ImeSync {
 }
 
 /// Owns everything a running desktop app needs across frames.
-struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
+struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     state: State,
-    app_logic: Logic,
+    build: Build,
     /// The app's desktop identity, threaded in from [`run_desktop_with`]. Read
     /// by this core only for the window title (see [`window_attributes`]); the
     /// rest of it is the per-OS shells' business, and they hold their own copy.
@@ -1913,11 +1913,11 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     paste_session: Option<u64>,
 }
 
-impl<State, Logic, V, E> ShellHandler<State, Logic, V, E>
+impl<State, Build, V, E> ShellHandler<State, Build, V, E>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
     E: DesktopExtensions,
 {
     /// Deliver one input event to the tree and schedule a frame if it dirtied
@@ -2356,12 +2356,12 @@ fn build_tree_update(update: &SemanticsUpdate, scale: f64) -> TreeUpdate {
 /// the same helper every winit event goes through, so an injected tap is
 /// hit-tested, IME-synced and redraw-scheduled exactly like a real one.
 #[cfg(feature = "devtools")]
-impl<State, Logic, V, E> frust_shell_common::devtools::DevtoolsUi
-    for ShellHandler<State, Logic, V, E>
+impl<State, Build, V, E> frust_shell_common::devtools::DevtoolsUi
+    for ShellHandler<State, Build, V, E>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
     E: DesktopExtensions,
 {
     fn inspect(&self) -> Vec<frust_core::InspectNode> {
@@ -2378,17 +2378,17 @@ where
     }
 }
 
-impl<State, Logic, V, E> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Logic, V, E>
+impl<State, Build, V, E> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Build, V, E>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
     E: DesktopExtensions,
 {
     /// A tracked-signal write from any thread routes here via the frame waker →
     /// [`winit::event_loop::EventLoopProxy::send_event`]. Pump the UI-thread
     /// local task queue first (a completing local task may have driven the
-    /// write), then request a redraw so the next frame re-runs `app_logic` and
+    /// write), then request a redraw so the next frame re-runs `build` and
     /// re-tracks. The waker can fire before the window exists (an early
     /// background spawn), so a redraw is only requested when a window is present
     /// — the first rebuild after `resumed` re-tracks regardless.
@@ -2869,7 +2869,7 @@ where
                     self.root.set_theme(Box::new(self.theme.clone()));
                 }
 
-                // Rebuild the view tree every frame (app_logic is cheap by
+                // Rebuild the view tree every frame (build is cheap by
                 // construction). A real dirty-tracking loop would skip
                 // this when state is unchanged; the on-demand `Wait` control
                 // flow already keeps us from free-running.
@@ -2884,9 +2884,9 @@ where
                 let runtime = self.runtime;
                 let scope = &self.scope;
                 let root = &mut self.root;
-                let app_logic = &mut self.app_logic;
+                let build = &mut self.build;
                 let state = &mut self.state;
-                let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
+                let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(build, state)));
                 let rebuild_dur = rebuild_start.elapsed();
                 // Perf instrumentation: the app's first-ever rebuild,
                 // recorded once. Inline records it here; in the split path the
@@ -4910,8 +4910,8 @@ mod tests {
         let mut root: RenderRoot<(), ProbeView> = RenderRoot::new();
         let scope = TrackedScope::new();
         let seen_for_logic = seen.clone();
-        let mut app_logic = move |_state: &mut ()| {
-            // A view read, the way a real `app_logic`/`Component::build` reads
+        let mut build = move |_state: &mut ()| {
+            // A view read, the way a real `build`/`Component::build` reads
             // state — this is the subscription the frame loop depends on.
             let _ = view_signal.get();
             ProbeView {
@@ -4920,7 +4920,7 @@ mod tests {
             }
         };
         // The production rebuild wrap, verbatim.
-        runtime.with_owner(|| scope.track(|| root.rebuild(&mut app_logic, &mut ())));
+        runtime.with_owner(|| scope.track(|| root.rebuild(&mut build, &mut ())));
         root.layout(Size::new(100.0, 100.0));
 
         (runtime, root, seen, scope, view_signal, handler_signal)

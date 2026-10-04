@@ -6,7 +6,7 @@
 //! `SurfaceRenderer`, [`TextContext`], reusable [`Scene`], plus the app tree —
 //! but is driven by Choreographer-posted JNI frames instead of a winit loop.
 //! It contains no `unsafe`; the FFI boundary lives entirely in
-//! [`crate::jni_glue`]. The `State`/`app_logic` erasure it drives
+//! [`crate::jni_glue`]. The `State`/`build` erasure it drives
 //! ([`AppTree`](frust_shell_common::AppTree)) is platform-agnostic and lives
 //! in `frust-shell-common`.
 //!
@@ -586,7 +586,7 @@ impl AndroidAppHandle {
         surface::seed_translucent_resolved(app.as_mut(), &translucent_resolved);
         provide_context(theme.clone());
         // Seed the app-facing window-shape context beside the theme, so an
-        // `app_logic`/`Component::build` calling `use_context::<WindowMetrics>()`
+        // `build`/`Component::build` calling `use_context::<WindowMetrics>()`
         // during the very first rebuild below resolves a real value rather than
         // `None`. Insets start at zero here — Kotlin's first
         // `nativeOnInsetsChanged` arrives after `nativeInit` and re-polls this
