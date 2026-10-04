@@ -9,7 +9,7 @@
 //!
 //! * [`view`] — layer 1: the [`View`](view::View) trait, [`ChangeFlags`], and
 //!   [`BuildCtx`](view::BuildCtx). Views are cheap descriptors produced by
-//!   `fn app_logic(&mut State) -> impl View<State>`.
+//!   `fn build(&mut State) -> impl View<State>`.
 //! * [`widget`] — layer 2: the [`Widget`](widget::Widget) trait and its
 //!   layout/paint/event contexts, the [`PaintScene`](widget::PaintScene) paint
 //!   boundary, and container-owned [`ChildPod`](widget::ChildPod) children.

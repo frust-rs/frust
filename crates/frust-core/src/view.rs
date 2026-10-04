@@ -1,8 +1,8 @@
 //! Layer 1: the declarative [`View`] trait.
 //!
-//! Views are cheap, short-lived descriptors produced by a pure `app_logic`
-//! function of application state (`fn app_logic(&mut State) -> impl View<State>`).
-//! They are *not* the retained tree — re-running `app_logic` on every state
+//! Views are cheap, short-lived descriptors produced by a root component's `Component::build`
+//! closure, a pure function of application state (`fn build(&mut State) -> impl View<State>`).
+//! They are *not* the retained tree — re-running the build closure on every state
 //! mutation must stay cheap by construction.
 //!
 //! The lifecycle mirrors `xilem_core`'s proven `View` design

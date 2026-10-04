@@ -717,7 +717,7 @@ pub enum InputEvent {
     /// # Why it exists
     ///
     /// [`crate::app::RenderRoot::rebuild`] is the only unconditional per-frame
-    /// pass holding `&mut State`, and it hands that state to `app_logic` alone —
+    /// pass holding `&mut State`, and it hands that state to the build closure alone —
     /// the view diff itself (and therefore every `View::rebuild`, where a
     /// navigator applies its queued push/pop ops) is state-free. A widget that
     /// needs to call back into app state from there had, before this variant, no
