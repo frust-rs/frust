@@ -119,10 +119,10 @@ pub mod toolbar;
 pub mod tooltip;
 
 pub use appbar::{
-    AppBar, AppBarCollapse, AppBarDensity, AppBarMetrics, AppBarShapeFamily, AppBarVariant,
-    AppBarView, AppBarWidget, BottomAppBar, BottomAppBarView, BottomAppBarWidget, SearchAppBar,
-    SliverAppBar, SliverAppBarView, SliverAppBarWidget, app_bar, bottom_app_bar, search_app_bar,
-    sliver_app_bar,
+    AppBar, AppBarCollapse, AppBarContainer, AppBarDensity, AppBarMetrics, AppBarShapeFamily,
+    AppBarVariant, AppBarView, AppBarWidget, BottomAppBar, BottomAppBarView, BottomAppBarWidget,
+    SearchAppBar, SliverAppBar, SliverAppBarView, SliverAppBarWidget, app_bar, bottom_app_bar,
+    search_app_bar, sliver_app_bar,
 };
 pub use badge::{BadgeAlignment, BadgeView, BadgeWidget, badge};
 pub use button::{
