@@ -6,7 +6,7 @@
 //! plus the app tree — but is driven by the generated Swift app's
 //! `CADisplayLink`-posted `frust_render_frame` calls instead of a winit loop
 //! or Choreographer. It contains no `unsafe`; the FFI boundary lives entirely in
-//! [`crate::ffi_glue`]. The `State`/`app_logic` erasure it drives
+//! [`crate::ffi_glue`]. The `State`/`build` erasure it drives
 //! ([`AppTree`](frust_shell_common::AppTree)) is platform-agnostic and lives
 //! in `frust-shell-common`.
 //!
@@ -463,7 +463,7 @@ impl IosAppHandle {
         surface::seed_resolved_translucency(app.as_mut(), &translucent_resolved);
         provide_context(theme.clone());
         // Seed the app-facing window-shape context beside the theme, so an
-        // `app_logic`/`Component::build` calling `use_context::<WindowMetrics>()`
+        // `build`/`Component::build` calling `use_context::<WindowMetrics>()`
         // during the very first rebuild below resolves a real value rather than
         // `None`. Insets start at zero here — Swift's first `frust_set_insets`
         // arrives after `frust_init` and re-polls this publisher (see

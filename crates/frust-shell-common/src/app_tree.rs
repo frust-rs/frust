@@ -1,5 +1,5 @@
 //! [`AppTree`]: the type-erasure that lets a single non-generic native handle
-//! drive any app's `State`/`app_logic`/`View`.
+//! drive any app's `State`/`build`/`View`.
 //!
 //! Every platform shell stores its running app as a `Box<dyn AppTree>` behind an
 //! opaque handle, so the FFI-exported entry points (which can't be generic) stay
@@ -20,7 +20,7 @@ use frust_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
 use kurbo::Size;
 
 /// Type-erased app tree: the one seam that lets a shell's native handle stay
-/// non-generic while still driving a concrete `State`/`app_logic`/`View`.
+/// non-generic while still driving a concrete `State`/`build`/`View`.
 ///
 /// Mirrors the desktop facade's erasure approach (a stored generic behind a
 /// non-generic driver): a platform shell's generated `extern` entry points can't
@@ -28,7 +28,7 @@ use kurbo::Size;
 /// with the app's types and stores the result as a `Box<dyn AppTree>` inside the
 /// handle.
 pub trait AppTree {
-    /// Re-run `app_logic` and reconcile the retained tree.
+    /// Re-run the build closure and reconcile the retained tree.
     fn rebuild(&mut self);
 
     /// Take (and clear) the layout/paint dirtiness accumulated since the last
@@ -403,24 +403,24 @@ pub trait AppTree {
     }
 }
 
-/// Concrete [`AppTree`] holding one app's state, logic and retained root.
-struct ErasedApp<State: 'static, Logic, V: View<State>> {
+/// Concrete [`AppTree`] holding one app's state, build closure and retained root.
+struct ErasedApp<State: 'static, Build, V: View<State>> {
     state: State,
-    logic: Logic,
+    build: Build,
     root: RenderRoot<State, V>,
 }
 
-impl<State, Logic, V> AppTree for ErasedApp<State, Logic, V>
+impl<State, Build, V> AppTree for ErasedApp<State, Build, V>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
 {
     fn rebuild(&mut self) {
-        // app_logic is cheap by construction. The returned flags are
+        // The build closure is cheap by construction. The returned flags are
         // merged into `RenderRoot::pending` and surfaced to the shell's frame
         // gate via `take_change_flags`/`has_pending_change_flags` below.
-        let _flags = self.root.rebuild(&mut self.logic, &mut self.state);
+        let _flags = self.root.rebuild(&mut self.build, &mut self.state);
     }
 
     fn take_change_flags(&mut self) -> ChangeFlags {
@@ -541,7 +541,7 @@ where
     }
 }
 
-/// Erase an app's `State`/`app_logic` into a `Box<dyn AppTree>`, building the
+/// Erase an app's `State`/`build` into a `Box<dyn AppTree>`, building the
 /// initial `State` from a caller-supplied factory rather than a ready-made
 /// value.
 ///
@@ -550,32 +550,32 @@ where
 /// The factory form lets an entry macro (e.g. a future `Component::init`
 /// binding) construct `State` itself from inside the closure instead of
 /// requiring the caller to build a value up front.
-pub fn new_boxed_app_with<State, Logic, V, F>(state_init: F, app_logic: Logic) -> Box<dyn AppTree>
+pub fn new_boxed_app_with<State, Build, V, F>(state_init: F, build: Build) -> Box<dyn AppTree>
 where
     F: FnOnce() -> State,
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
 {
     Box::new(ErasedApp {
         state: state_init(),
-        logic: app_logic,
+        build,
         root: RenderRoot::new(),
     })
 }
 
-/// Erase an app's `State`/`app_logic` into a `Box<dyn AppTree>`.
+/// Erase an app's `State`/`build` into a `Box<dyn AppTree>`.
 ///
 /// Called by a shell's app-binding macro (e.g. `frust::android_app!`) from its
 /// generated init entry point; kept here (not in the macro) so the erasure and
 /// the trait live together and the macro stays a thin shim.
-pub fn new_boxed_app<State, Logic, V>(state: State, logic: Logic) -> Box<dyn AppTree>
+pub fn new_boxed_app<State, Build, V>(state: State, build: Build) -> Box<dyn AppTree>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
 {
-    new_boxed_app_with(move || state, logic)
+    new_boxed_app_with(move || state, build)
 }
 
 #[cfg(test)]
@@ -824,7 +824,7 @@ mod tests {
                 StubView
             },
         );
-        // Drive one rebuild so `app_logic` actually observes the factory-built
+        // Drive one rebuild so `build` actually observes the factory-built
         // state (it's a closure param above, but this also exercises the
         // AppTree seam end-to-end rather than just constructing the box).
         app.rebuild();

@@ -5,7 +5,7 @@
 //! and the Android shell is driven by a Kotlin `SurfaceView` over JNI, the iOS
 //! shell is *driven* by the generated Swift app (see the Swift template): Swift
 //! calls a fixed set of `frust_*` C functions, and each generated app supplies
-//! its own `State`/`app_logic` through the [`ios_app!`] macro, which stamps out
+//! its own `State`/`build` through the [`ios_app!`] macro, which stamps out
 //! those exports bound to the app's types.
 //!
 //! # Layering
@@ -76,7 +76,7 @@ pub mod ffi_glue;
 #[doc(hidden)]
 pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 
-/// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
+/// Bind a generated app's `State`/`build` to the fixed iOS C-ABI exports
 /// (Makepad `app_main!` precedent).
 ///
 /// Stamps out the twenty-four `frust_*` symbols the generated Swift app
@@ -119,29 +119,29 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// `#[cfg(target_os = "ios")]`, so off-iOS the invocation expands to nothing:
 ///
 /// ```ignore
-/// frust::ios_app!(AppState, app_logic);
+/// frust::ios_app!(AppState, move |s| root.build(s));
 /// ```
 ///
 /// Two forms:
-/// - `ios_app!($state_ty, $app_logic)` — `$state_ty` must implement [`Default`];
+/// - `ios_app!($state_ty, $build)` — `$state_ty` must implement [`Default`];
 ///   the initial state is `$state_ty::default()`.
-/// - `ios_app!($state_ty, $state_init, $app_logic)` — `$state_init` is a
+/// - `ios_app!($state_ty, $state_init, $build)` — `$state_init` is a
 ///   `FnOnce() -> $state_ty` factory, for a state type that doesn't implement
 ///   `Default` (e.g. one a future `Component::init` builds). The 2-arg form
 ///   delegates to this one with `<$state_ty as Default>::default` as the
 ///   factory.
 ///
-/// `$app_logic` is a `FnMut(&mut State) -> impl View<State>`.
+/// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` (`move |s| root.build(s)`).
 #[macro_export]
 macro_rules! ios_app {
-    ($state_ty:ty, $app_logic:expr $(,)?) => {
+    ($state_ty:ty, $build:expr $(,)?) => {
         $crate::ios_app!(
             $state_ty,
             <$state_ty as ::core::default::Default>::default,
-            $app_logic
+            $build
         );
     };
-    ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
+    ($state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         /// `frust_init`: create the native handle for the app's CAMetalLayer.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
@@ -152,7 +152,7 @@ macro_rules! ios_app {
             scale: f32,
         ) -> *mut ::core::ffi::c_void {
             $crate::ffi_glue::init(metal_layer, width, height, scale, || {
-                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $app_logic)
+                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })
         }
 
