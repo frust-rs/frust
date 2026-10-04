@@ -39,7 +39,7 @@ const H: f64 = 600.0;
 
 // --- In-test fixture app (ported from examples/counter/src/lib.rs) ---
 
-/// Counter demo state (the `app_logic` model).
+/// Counter demo state (the root component's state).
 ///
 /// The view is a pure function of these three fields; every interaction
 /// mutates one of them and the next rebuild reflects it.

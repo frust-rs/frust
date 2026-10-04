@@ -611,7 +611,7 @@ mod tests {
         any(frust_widgets::text("x"))
     }
 
-    /// The `app_logic` closure type [`RenderRoot::rebuild`] drives, boxed so
+    /// The build closure type [`RenderRoot::rebuild`] drives, boxed so
     /// [`Harness`] can store it (mirroring `router_glue`'s `AppLogic`).
     type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
 
