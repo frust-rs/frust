@@ -777,7 +777,9 @@ mod tests {
                 && home_rs.contains("scaffold(")
                 && home_rs.contains("app_bar")
                 && home_rs.contains("fab(")
-                && home_rs.contains("icons::ADD"),
+                && home_rs.contains("icons::ADD")
+                && home_rs.contains("InversePrimary")
+                && home_rs.contains("elevation(2)"),
             "{home_rs}"
         );
         for src in [&lib_rs, &home_rs] {
@@ -1880,7 +1882,9 @@ mod tests {
                 && pages.contains("scaffold(")
                 && pages.contains("app_bar")
                 && pages.contains("fab(")
-                && pages.contains("icons::ADD"),
+                && pages.contains("icons::ADD")
+                && pages.contains("InversePrimary")
+                && pages.contains("elevation(2)"),
             "{pages}"
         );
         assert!(!pages.contains("frust_glyph"), "{pages}");

@@ -1,7 +1,7 @@
 //! The home screen: a counter, built from small widget fns.
 
 use frust::{
-    Align, Alignment, AnyView, Column, Component, CrossAxisAlignment, View, any, safe_area, scaffold,
+    Align, Alignment, AnyView, Column, Component, CrossAxisAlignment, View, any, scaffold,
     text,
 };
 
@@ -24,9 +24,11 @@ impl Component for HomePage {
     }
 }
 
-// A Scaffold consumes no inset itself, so the bar pads the top edge.
+// The Material app bar insets itself under the status bar, so no safe_area wrapper is needed.
 fn app_bar(title: &str) -> impl View<u32> + use<> {
-    safe_area(frust_material::app_bar::<u32>(title)).bottom(false)
+    frust_material::app_bar::<u32>(title)
+        .container(frust_material::AppBarContainer::InversePrimary)
+        .elevation(2)
 }
 
 fn counter_body(count: u32) -> impl View<u32> + use<> {
