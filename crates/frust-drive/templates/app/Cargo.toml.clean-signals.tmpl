@@ -50,7 +50,7 @@ frust-material = { path = "{{ frust_path }}/../../plugins/material" }
 # `async_view`, etc.) — an in-repo plugin, added like any other Frust
 # plugin (`frust_path` resolves to `crates/frust`, so
 # `../../plugins/clean-signals-frust` walks back up to the repo root and
-# down into the plugin's own directory — mirrors `frust-shared-preferences`'s
+# down into the plugin's own directory — mirrors the `frust-material`
 # dependency line in the default `Cargo.toml.tmpl`).
 {%- if frust_plugin_version %}
 clean-signals-frust = "{{ frust_plugin_version }}"

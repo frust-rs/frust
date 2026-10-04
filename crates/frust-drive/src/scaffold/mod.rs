@@ -391,6 +391,12 @@ pub fn generate_with_platforms(
     // skip below. See `context::platform_render_vars`'s doc.
     let mut render_vars = ctx.render_vars();
     render_vars.extend(context::platform_render_vars(platforms));
+    // Arch selector is threaded into the render context too: templates like
+    // `README.md.tmpl` can branch on the selected architecture (e.g.
+    // `{% if arch == "clean-signals" %}`) to customize content. An empty string
+    // (falsy in minijinja) when no arch is selected, matching the pattern
+    // `platform_render_vars` uses for platform flags.
+    render_vars.insert("arch", arch.unwrap_or("").to_string());
     let path_vars = ctx.path_vars();
 
     let mut written = Vec::with_capacity(manifest.len());
@@ -1902,6 +1908,77 @@ mod tests {
         assert!(dest.join("linux").is_dir());
 
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// README.md.tmpl is arch-aware: the default arch describes
+    /// `src/home_page.rs` as the counter screen, while the clean-signals arch
+    /// describes the clean-signals feature structure instead.
+    #[test]
+    fn generate_readme_structure_section_is_arch_aware() {
+        let dest_default = unique_temp_dir("readme-default");
+        let dest_clean_signals = unique_temp_dir("readme-clean-signals");
+        let ctx = test_context();
+
+        generate(&dest_default, &ctx, None, false, None).unwrap();
+        generate(
+            &dest_clean_signals,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+        )
+        .unwrap();
+
+        let readme_default = fs::read_to_string(dest_default.join("README.md")).unwrap();
+        let readme_clean_signals =
+            fs::read_to_string(dest_clean_signals.join("README.md")).unwrap();
+
+        // Default arch mentions `src/home_page.rs` as the counter screen.
+        assert!(
+            readme_default.contains("src/home_page.rs"),
+            "default README must mention src/home_page.rs: {readme_default}"
+        );
+        assert!(
+            readme_default.contains("counter screen, a `Component` built from small widget fns"),
+            "default README must describe home_page.rs as the counter screen: {readme_default}"
+        );
+        assert!(
+            !readme_default.contains("src/features/counter"),
+            "default README must not mention features: {readme_default}"
+        );
+
+        // Clean-signals arch mentions `src/features/counter` but not `src/home_page.rs`.
+        assert!(
+            readme_clean_signals.contains("src/features/counter/"),
+            "clean-signals README must mention src/features/counter/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("domain/"),
+            "clean-signals README must mention domain/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("data/"),
+            "clean-signals README must mention data/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("presentation/"),
+            "clean-signals README must mention presentation/: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("`clean-signals`-driven"),
+            "clean-signals README must mention clean-signals: {readme_clean_signals}"
+        );
+        assert!(
+            readme_clean_signals.contains("`ControllerCore`, `CounterController`"),
+            "clean-signals README must mention ControllerCore and CounterController: {readme_clean_signals}"
+        );
+        assert!(
+            !readme_clean_signals.contains("src/home_page.rs"),
+            "clean-signals README must not mention home_page.rs: {readme_clean_signals}"
+        );
+
+        let _ = fs::remove_dir_all(&dest_default);
+        let _ = fs::remove_dir_all(&dest_clean_signals);
     }
 
     #[test]

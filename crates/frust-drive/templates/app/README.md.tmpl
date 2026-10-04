@@ -4,11 +4,24 @@ A Frust app created with `frust create`.
 
 ## Structure
 
+{%- if arch == "clean-signals" %}
+- `src/lib.rs` — the entry point (`frust::app!`) and the root component.
+- `src/failure.rs` — the app's error type, shared across layers.
+- `src/features/counter/` — the counter feature slice with a `clean-signals`-driven
+  component lifecycle (`ControllerCore`, `CounterController`):
+  - `domain/` — the business logic layer (`CounterRepository` trait, use cases).
+  - `data/` — the data layer (repository impl, data sources).
+  - `presentation/` — the UI layer (`controllers.rs`, `pages.rs` with `counter_page()`).
+
+The architecture layers all your business logic into the feature slice; `lib.rs`
+stays shallow and only wires the app's `app!()` entry and component's `State`.
+{%- else %}
 - `src/lib.rs` — the entry point (`frust::app!`) and the root component.
 - `src/home_page.rs` — the counter screen, a `Component` built from small widget fns.
 
 Add screens as components in their own modules, and keep `build` shallow by
 pulling stateless pieces out into small widget fns.
+{%- endif %}
 
 ## Theming
 
