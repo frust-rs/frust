@@ -276,6 +276,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
              \u{20}   items.len(),\n\
              \u{20}   |state| state.selected = selection::cleared(),\n\
              )\n\
+             .safe_area(false) // mid-page, below the page's own bar\n\
              .show_select_all({select_all})\n\
              .actions(vec![any(icon_button(any(icon(icons::DELETE)), |_| {{}}))])\n\
              .on_all_selected(|state, all| {{\n\
@@ -386,6 +387,8 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
         )
         .hint(SEARCH_HINT),
     )
+    // Mid-page, below the page's own app bar: not at the window top.
+    .safe_area(false)
     .leading(any(icon_button(
         any(icon(icons::ARROW_BACK)),
         move |_: &mut DemoState| {
@@ -400,6 +403,8 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
         ITEMS.len(),
         |state: &mut DemoState| state.selected = selection::cleared(),
     )
+    // Matches the idle bar so the swap stays continuous.
+    .safe_area(false)
     .show_select_all(show_select_all)
     .actions(vec![
         any(
