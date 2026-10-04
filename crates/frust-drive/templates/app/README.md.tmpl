@@ -2,19 +2,30 @@
 
 A Frust app created with `frust create`.
 
+## Structure
+
+- `src/lib.rs` — the entry point (`frust::app!`) and the root component.
+- `src/home_page.rs` — the counter screen, a `Component` built from small widget fns.
+
+Add screens as components in their own modules, and keep `build` shallow by
+pulling stateless pieces out into small widget fns.
+
 ## Theming
 
-This app uses the **Glyph design system** by default — brought in as the
-`frust-glyph` plugin crate dependency in `Cargo.toml` and installed by the
-`frust_glyph::install()` call in `src/lib.rs`'s `frust::app!(setup = {..})`
-block — which automatically adapts to the device's light/dark preference.
-To swap to Material 3 or Cupertino instead, replace the `frust-glyph`
-dependency with `frust-material`/`frust-cupertino` and swap the setup call:
+This app uses the **Material 3 design system** by default — the
+`frust-material` plugin crate dependency in `Cargo.toml`, installed by the
+`frust_material::install()` call in `src/lib.rs`'s `frust::app!(setup = {..})`
+block — which adapts to the device's light/dark preference.
+To swap to Glyph or Cupertino, replace the `frust-material` dependency with
+`frust-glyph`/`frust-cupertino` and swap the setup call:
 
 ```rust
 frust::app!(MyAppApp, setup = {
-    // Material 3 (M3)
+    // Material 3 (default)
     frust_material::install();
+
+    // Or Glyph
+    // frust_glyph::install();
 
     // Or Cupertino
     // frust_cupertino::install();
@@ -22,20 +33,15 @@ frust::app!(MyAppApp, setup = {
 ```
 
 Each `install()` is shorthand for
-`frust::set_default_theme(frust_material::baseline())` /
-`frust::set_default_theme(frust_cupertino::baseline())` — call
-`set_default_theme` directly instead if you want the tokens without the
-crate's install-timing contract.
+`frust::set_default_theme(frust_material::baseline())` (and likewise for the
+others) — call `set_default_theme` directly instead if you want the tokens
+without the crate's install-timing contract.
 
 ## Custom Fonts
 
-By default, this app's Glyph design system bundles IBM Plex Mono and Space
-Mono fonts (`frust-glyph`'s `install()` registers them unconditionally — see
-above). Dropping the `frust-glyph` dependency (or swapping to
-`frust-material`/`frust-cupertino`, neither of which bundles a font) drops
-the bundled fonts too.
-
-Register your own fonts at app startup regardless of design system:
+`frust-material` bundles no font: text uses the platform/fallback face.
+(`frust-glyph` bundles IBM Plex Mono and Space Mono; `frust-cupertino` bundles
+none either.) Register your own fonts at app startup regardless of design system:
 
 ```rust
 use frust::register_app_fonts;

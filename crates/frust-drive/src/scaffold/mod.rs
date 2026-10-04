@@ -115,6 +115,10 @@ const MANIFEST_FILE: &str = "template_manifest.json";
 /// variant appears in the UI with no front-end change.
 pub const KNOWN_ARCHES: &[&str] = &["clean-signals"];
 
+/// Logical paths only the default (no `--arch`) template emits: an arch
+/// variant lays out its sources differently and must not inherit them.
+const DEFAULT_ONLY_PATHS: &[&str] = &["src/home_page.rs"];
+
 /// Splits a mode-stripped logical path into `(base, tag)` if it carries a
 /// recognized [`KNOWN_ARCHES`] suffix (see that const's doc for the
 /// convention). `None` for a default-template entry.
@@ -404,6 +408,12 @@ pub fn generate_with_platforms(
             continue;
         }
 
+        // Default-only files (`DEFAULT_ONLY_PATHS`) are not emitted for any
+        // `--arch` variant: that variant supplies its own source layout.
+        if arch.is_some() && DEFAULT_ONLY_PATHS.contains(&logical) {
+            continue;
+        }
+
         // Arch-tag resolution: an entry whose logical path carries a
         // recognized `.{arch}` suffix only renders when that tag is the
         // selected `arch` (skipped entirely otherwise), landing at the
@@ -646,8 +656,7 @@ mod tests {
         let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         for line in [
             "frust = { package = \"frust-ui\", version = \"0.5.0\" }",
-            "frust-glyph = \"0.5.0\"",
-            "frust-shared-preferences = \"0.5.0\"",
+            "frust-material = \"0.5.0\"",
         ] {
             assert!(
                 cargo_toml.lines().any(|l| l == line),
@@ -708,23 +717,21 @@ mod tests {
             cargo_toml.contains("crate-type = [\"cdylib\", \"staticlib\", \"rlib\"]"),
             "{cargo_toml}"
         );
-        // Glyph ships as a sibling plugin crate dependency, not a `frust`
+        // Material 3 ships as a sibling plugin crate dependency, not a `frust`
         // Cargo feature: the `frust` edge itself names no features at all
-        // (`frust` carries no design-system catalog, `default = []`), and
-        // `frust-glyph` is depended on directly, the same shape
-        // `frust-shared-preferences` uses below.
+        // (`frust` carries no design-system catalog, `default = []`).
         assert!(
             cargo_toml.contains("frust = { package = \"frust-ui\", path = \"/path/to/frust\" }"),
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml.contains("frust-glyph = { path = \"/path/to/frust/../../plugins/glyph\" }"),
+            cargo_toml
+                .contains("frust-material = { path = \"/path/to/frust/../../plugins/material\" }"),
             "{cargo_toml}"
         );
+        assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
         assert!(
-            cargo_toml.contains(
-                "frust-shared-preferences = { path = \"/path/to/frust/../../plugins/shared-preferences\" }"
-            ),
+            !cargo_toml.contains("frust-shared-preferences"),
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("[\"glyph\""), "{cargo_toml}");
@@ -743,37 +750,41 @@ mod tests {
         assert!(!lib_rs.contains("ios_app!"), "{lib_rs}");
         assert!(!lib_rs.contains("App::new"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
-        // The generated app ships Glyph by default: the `app!` invocation's
+        // The generated app ships Material 3 by default: the `app!` invocation's
         // `setup` block is what actually seeds it as the active theme (the
-        // `frust-glyph` dependency alone only compiles the code in) — see
-        // `frust_glyph::install`'s doc comment for the ordering contract.
+        // `frust-material` dependency alone only compiles the code in).
         assert!(
             lib_rs.contains(
-                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_glyph::install();\n    }\n);"
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_material::install();\n    }\n);"
             ),
             "{lib_rs}"
         );
-        // The generated demo is a notes app: an embedded logo Image, a
-        // controlled TextInput whose submit appends a keyed note row (each with a
-        // Delete button), inside a scroll view. The `app_logic` keeps the
-        // `-> impl View<AppState> + use<>` shape so a fresh scaffold compiles for
-        // both mobile targets.
+        // The generated demo is the Flutter-style counter: the root component
+        // hosts a `HomePage` component (its own module) built from widget fns.
         assert!(
-            lib_rs
-                .contains("pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<>")
-                && lib_rs.contains("text_input(")
-                && lib_rs.contains(".on_submit(")
-                && lib_rs.contains("keyed(")
-                && lib_rs.contains("Button(\"Delete\"")
-                && lib_rs.contains("Image(logo)")
-                && lib_rs.contains("scroll_view("),
+            lib_rs.contains("component(") && lib_rs.contains("mod home_page"),
             "{lib_rs}"
         );
-        // The demo bundles a logo asset it decodes once via `include_bytes!`.
+        let home_rs = fs::read_to_string(dest.join("src/home_page.rs")).unwrap();
         assert!(
-            lib_rs.contains("include_bytes!(\"../assets/logo.png\")"),
+            home_rs.contains("impl Component for HomePage")
+                && home_rs.contains("scaffold(")
+                && home_rs.contains("app_bar")
+                && home_rs.contains("fab(")
+                && home_rs.contains("icons::ADD"),
+            "{home_rs}"
+        );
+        for src in [&lib_rs, &home_rs] {
+            assert!(!src.contains("app_logic"), "{src}");
+            assert!(!src.contains("frust-glyph"), "{src}");
+        }
+        // lib.rs's comment may name the swap; the live setup call must not.
+        assert!(
+            !lib_rs.contains("        frust_glyph::install();"),
             "{lib_rs}"
         );
+        assert!(!home_rs.contains("frust_glyph"), "{home_rs}");
+        // The launcher icon still ships even though the UI no longer shows it.
         assert!(dest.join("assets/logo.png").exists());
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
@@ -823,7 +834,8 @@ mod tests {
 
         // README.md generated with theme/font docs and examples
         let readme = fs::read_to_string(dest.join("README.md")).unwrap();
-        assert!(readme.contains("Glyph design system"), "{readme}");
+        assert!(readme.contains("Material 3 design system"), "{readme}");
+        assert!(readme.contains("home_page.rs"), "{readme}");
         assert!(readme.contains("frust_material::install()"), "{readme}");
         assert!(readme.contains("frust_cupertino::install()"), "{readme}");
         assert!(readme.contains("register_app_fonts"), "{readme}");
@@ -1833,6 +1845,8 @@ mod tests {
         // No `.clean-signals.` leftover in any written path, and no stray
         // `Cargo.toml.clean-signals`/`src/lib.rs.clean-signals` files.
         assert!(!dest.join("Cargo.toml.clean-signals").exists());
+        // The default template's counter screen is not part of this arch.
+        assert!(!dest.join("src/home_page.rs").exists());
         assert!(!dest.join("src/lib.rs.clean-signals").exists());
         assert!(
             written
