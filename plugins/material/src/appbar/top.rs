@@ -9,10 +9,11 @@
 //! families, and semantics all live there.
 //!
 //! Layout is one band of [`AppBarMetrics::small_height`] (or an explicit
-//! [`AppBarView::toolbar_height`]), below the top window inset the bar
-//! consumes itself (see [`AppBarView::safe_area`]): the leading slot hugs the
-//! leading edge (4dp in), actions hug the trailing edge in reading order (4dp
-//! in), and the title takes the space between them — 16dp from an edge that
+//! [`AppBarView::toolbar_height`]), below the top window inset and inside the
+//! left/right ones the bar consumes itself (see [`AppBarView::safe_area`]):
+//! the leading slot hugs the leading edge (4dp in), actions hug the trailing
+//! edge in reading order (4dp in), and the title takes the space between
+//! them — 16dp from an edge that
 //! has no slot on it, start-aligned by default,
 //! [`centered`](AppBarView::center_title) *within that remaining space* on
 //! request, which is what upstream's own `_TitleSlot` (an `Align` inside the
@@ -228,13 +229,17 @@ impl<State: 'static> AppBarView<State> {
         self
     }
 
-    /// Whether the bar consumes the **top** window inset itself (default
-    /// `true`): it grows by `ctx.window_insets().padding().top`, paints its
-    /// fill (and shadow) through that band, and lays its slots out below it —
-    /// Flutter's `AppBar` under a status bar. A parent `frust::safe_area` that
-    /// already consumed the top edge leaves nothing here to consume, so it
+    /// Whether the bar consumes the **top, left and right** window insets
+    /// itself (default `true`) — Flutter's `AppBar` wrapping its toolbar in
+    /// `SafeArea(bottom: false)`. It grows by
+    /// `ctx.window_insets().padding().top`, paints its fill (and shadow) edge
+    /// to edge through that band and across the full width, and lays its
+    /// slots out below the top inset and inside the left/right ones (a
+    /// landscape notch or home-indicator edge). A parent `frust::safe_area`
+    /// that already consumed an edge leaves nothing on it to consume, so it
     /// never double-insets. Pass `false` for a bar that is not docked to the
-    /// window's top edge (a preview, a pane, a sheet).
+    /// window's top edge (a preview, a pane, a sheet); it then consumes no
+    /// edge at all.
     pub fn safe_area(mut self, enabled: bool) -> Self {
         self.safe_area = enabled;
         self
@@ -324,6 +329,10 @@ pub struct AppBarWidget {
     /// `safe_area` is off or nothing is left to consume. The slots sit below
     /// it; the fill and shadow cover it.
     top_inset: f64,
+    /// The `(left, right)` window insets consumed on the last `layout` pass,
+    /// `0.0` under the same conditions as [`Self::top_inset`]. The slots sit
+    /// inside them; the fill and shadow still span the full width.
+    side_insets: (f64, f64),
     /// The semantics container's label, retained across rebuilds.
     label: Option<String>,
 }
@@ -357,6 +366,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             elevation: self.elevation,
             safe_area: self.safe_area,
             top_inset: 0.0,
+            side_insets: (0.0, 0.0),
             label: self.label().map(str::to_string),
         }
     }
@@ -440,17 +450,27 @@ impl Widget for AppBarWidget {
         let title_index = self.title_index();
         let has_actions = self.slots.len() > title_index + 1;
 
-        // Consume the top window inset: the bar grows by it and the slots sit
-        // below it (a top-consuming parent safe area leaves 0 here).
-        let top = if self.safe_area {
-            ctx.window_insets().padding().top.max(0.0)
+        // Consume the top, left and right window insets (Flutter's
+        // `SafeArea(bottom: false)`): the bar grows by the top one, and the
+        // slots sit below it and inside the side ones. A parent safe area that
+        // already consumed an edge leaves 0 here.
+        let (pad_l, top, pad_r) = if self.safe_area {
+            let padding = ctx.window_insets().padding();
+            (
+                padding.left.max(0.0),
+                padding.top.max(0.0),
+                padding.right.max(0.0),
+            )
         } else {
-            0.0
+            (0.0, 0.0, 0.0)
         };
         self.top_inset = top;
+        self.side_insets = (pad_l, pad_r);
 
         // Shift the row out from under a protruding window-control corner (the
-        // iPadOS 26+ traffic lights); see the module docs of `appbar`.
+        // iPadOS 26+ traffic lights); see the module docs of `appbar`. A
+        // corner's width is measured beyond the safe-area edge, so it stacks
+        // on the consumed side padding rather than overlapping it.
         let (shift_l, shift_r) = if self.corner_shift {
             let corners = ctx.window_insets().corner_insets;
             (
@@ -471,7 +491,7 @@ impl Widget for AppBarWidget {
 
         // Slots sit `PAD_X` in (their touch targets carry the glyph to the M3
         // 16dp mark); a bare title edge sits `TITLE_EDGE_INSET` in instead.
-        let mut left = shift_l;
+        let mut left = pad_l + shift_l;
         if self.has_leading {
             left += PAD_X;
             let size = self.slots[0].layout_child(ctx, &slot_bc);
@@ -483,7 +503,7 @@ impl Widget for AppBarWidget {
 
         // Lay out actions in reverse so the *last* action lands flush against
         // the trailing edge, preserving left-to-right reading order.
-        let mut right = width - shift_r;
+        let mut right = width - pad_r - shift_r;
         if has_actions {
             right -= PAD_X;
             for pod in self.slots[title_index + 1..].iter_mut().rev() {
@@ -1137,6 +1157,194 @@ mod tests {
         assert_eq!(w.top_inset, 0.0);
     }
 
+    /// Lay out under an arbitrary `insets` value.
+    fn layout_with_insets(w: &mut AppBarWidget, bc: &BoxConstraints, insets: WindowInsets) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        lctx.with_window_insets(insets, |ctx| w.layout(ctx, bc))
+    }
+
+    /// A landscape phone: a 47px cutout / home-indicator band on each side,
+    /// no status bar.
+    fn landscape() -> WindowInsets {
+        WindowInsets::new(
+            WindowEdgeInsets::new(47.0, 0.0, 47.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        )
+    }
+
+    #[test]
+    fn safe_area_pads_the_slots_inside_the_side_insets_and_fills_full_width() {
+        let theme = crate::baseline();
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0), leaf_any(24.0, 24.0)])
+            .elevation(2);
+        let mut w = build(&view);
+        let size = layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            landscape(),
+        );
+        assert_eq!(size, Size::new(800.0, BAND));
+        assert_eq!(w.side_insets, (47.0, 47.0));
+        assert_eq!(w.slots[0].origin().x, 47.0 + PAD_X);
+        assert_eq!(
+            w.slots[3].origin().x + w.slots[3].size().width,
+            800.0 - 47.0 - PAD_X
+        );
+        // The title starts one gap past the leading slot.
+        assert_eq!(w.slots[1].origin().x, 47.0 + PAD_X + 40.0 + GAP);
+
+        // The fill and the shadow still span the whole width.
+        let mut scene = FillRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects[0].0, Point::ZERO);
+        assert_eq!(scene.rects[0].1, Size::new(800.0, BAND));
+        assert_eq!(scene.shadows[0].0.x, 0.0);
+        assert_eq!(scene.shadows[0].1, Size::new(800.0, BAND));
+    }
+
+    #[test]
+    fn a_bare_title_keeps_the_m3_title_inset_inside_the_side_insets() {
+        let view: AppBarView<()> = app_bar("").title_view(leaf_any(1_000.0, 40.0));
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            landscape(),
+        );
+        let title = &w.slots[0];
+        assert_eq!(title.origin().x, 47.0 + TITLE_EDGE_INSET);
+        assert_eq!(
+            title.origin().x + title.size().width,
+            800.0 - 47.0 - TITLE_EDGE_INSET
+        );
+    }
+
+    #[test]
+    fn center_title_centers_between_the_slots_inside_the_side_insets() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .center_title(true);
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            WindowInsets::new(
+                WindowEdgeInsets::new(47.0, 0.0, 10.0, 0.0),
+                WindowEdgeInsets::ZERO,
+            ),
+        );
+        let leading_end = w.slots[0].origin().x + w.slots[0].size().width;
+        let title_start = w.slots[1].origin().x;
+        let title_end = title_start + w.slots[1].size().width;
+        let left_gap = title_start - leading_end;
+        let right_gap = w.slots[2].origin().x - title_end;
+        assert!(
+            (left_gap - right_gap).abs() < 0.01,
+            "left_gap={left_gap}, right_gap={right_gap}"
+        );
+    }
+
+    #[test]
+    fn the_corner_shift_stacks_beyond_the_consumed_side_padding() {
+        // A corner's width is measured from the safe-area edge (see
+        // `CornerInsets`), so the slot origin is padding + corner, never the
+        // larger of the two — and it equals what the same bar gets under a
+        // parent safe area that consumed the side padding first.
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)]);
+        let bc = BoxConstraints::loose(Size::new(800.0, 200.0));
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(20.0, 24.0, 30.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        )
+        .with_corner_insets(top_corners());
+
+        let mut w = build(&view);
+        layout_with_insets(&mut w, &bc, insets);
+        assert_eq!(w.slots[0].origin().x, 20.0 + 44.0 + PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            800.0 - 30.0 - 52.0 - PAD_X
+        );
+
+        // The parent-consumed composition: the bar sees no padding, sits 20px
+        // in, and still shifts for the (never consumed) corner.
+        let mut nested = build(&view);
+        layout_with_insets(
+            &mut nested,
+            &BoxConstraints::loose(Size::new(800.0 - 20.0 - 30.0, 200.0)),
+            insets.consuming(true, true, true, false),
+        );
+        assert_eq!(nested.side_insets, (0.0, 0.0));
+        assert_eq!(20.0 + nested.slots[0].origin().x, w.slots[0].origin().x);
+        assert_eq!(
+            20.0 + nested.slots[2].origin().x + nested.slots[2].size().width,
+            w.slots[2].origin().x + w.slots[2].size().width
+        );
+    }
+
+    #[test]
+    fn a_side_consuming_safe_area_leaves_no_side_padding_to_consume_again() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)]);
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(706.0, 200.0)),
+            landscape().consuming(true, true, true, false),
+        );
+        assert_eq!(w.side_insets, (0.0, 0.0));
+        assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            706.0 - PAD_X
+        );
+
+        // Through a real `frust::safe_area`: the bar is laid out 47px in and
+        // the whole stack keeps the window width.
+        let wrapped = frust::safe_area(app_bar::<()>("Home")).bottom(false);
+        let mut counter = 0u64;
+        let mut sw = View::<()>::build(&wrapped, &mut ctx(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        let size = lctx.with_window_insets(landscape(), |ctx| {
+            sw.layout(ctx, &BoxConstraints::loose(Size::new(800.0, 400.0)))
+        });
+        assert_eq!(size.height, BAND);
+    }
+
+    #[test]
+    fn safe_area_false_ignores_the_side_insets_too() {
+        let view: AppBarView<()> = app_bar("Home")
+            .leading(leaf_any(40.0, 40.0))
+            .actions(vec![leaf_any(24.0, 24.0)])
+            .safe_area(false);
+        let mut w = build(&view);
+        let insets = WindowInsets::new(
+            WindowEdgeInsets::new(47.0, 24.0, 47.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        );
+        let size = layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            insets,
+        );
+        assert_eq!(size.height, BAND);
+        assert_eq!(w.side_insets, (0.0, 0.0));
+        assert_eq!(w.slots[0].origin().x, PAD_X);
+        assert_eq!(
+            w.slots[2].origin().x + w.slots[2].size().width,
+            800.0 - PAD_X
+        );
+    }
+
     #[test]
     fn a_search_app_bar_self_insets_too() {
         let view: AppBarView<()> = search_app_bar(crate::search_bar("", |_: &mut (), _| {}));
@@ -1147,6 +1355,17 @@ mod tests {
             24.0,
         );
         assert_eq!(size.height, BAND + 24.0);
+
+        // And consumes the side insets: the pill sits inside them.
+        let mut w = build(&view);
+        layout_with_insets(
+            &mut w,
+            &BoxConstraints::loose(Size::new(800.0, 200.0)),
+            landscape(),
+        );
+        let title = &w.slots[0];
+        assert_eq!(title.origin().x, 47.0 + TITLE_EDGE_INSET);
+        assert!(title.origin().x + title.size().width <= 800.0 - 47.0 - TITLE_EDGE_INSET);
     }
 
     #[test]
