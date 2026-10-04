@@ -189,8 +189,9 @@ build from.
   most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
   slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
   `bottom_bar` self-size for the top/bottom inset the same way (reading `ctx.window_insets()` in their own
-  `layout` — Material's `navigation_bar` is one such self-insetting `bottom_bar`, see
-  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)), and `body` is never pre-inset; `fab` is the one slot
+  `layout` — Material's `app_bar`/`search_app_bar` self-inset the top and the left/right edges by default and
+  `navigation_bar` the bottom only, see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md); the sliver and
+  bottom app bars do not, wrap them in `safe_area`), and `body` is never pre-inset; `fab` is the one slot
   the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw
   window edge otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars
   (listed in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by
