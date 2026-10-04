@@ -74,7 +74,7 @@ fn logo_decode_count() -> usize {
     LOGO_DECODES.load(Ordering::Relaxed)
 }
 
-/// Notes demo state (the `app_logic` model).
+/// Notes demo state (the root component's state).
 ///
 /// The view is a pure function of these fields. `draft` is the controlled
 /// [`text_input`]'s current text; `notes` is the submitted list, each entry a

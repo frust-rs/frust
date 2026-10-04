@@ -381,7 +381,7 @@ mod tests {
         Router::new(routes()).error_builder(|_loc| sized(ERROR.width, ERROR.height))
     }
 
-    /// The `app_logic` closure type [`RenderRoot::rebuild`] drives, boxed so
+    /// The build closure type [`RenderRoot::rebuild`] drives, boxed so
     /// [`Harness`] can store it as a field.
     type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
 

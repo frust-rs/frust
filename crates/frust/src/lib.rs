@@ -6,7 +6,13 @@
 //! shape reads exactly as the spec promises:
 //!
 //! ```no_run
-//! use frust::{Component, View, AnyView, any, text};
+//! use frust::{AnyView, Column, Component, View, any, text};
+//!
+//! // A small stateless widget: a plain fn, generic over the state of
+//! // whichever component places it.
+//! fn greeting<S: 'static>(message: &str) -> impl View<S> + use<S> {
+//!     text(message.to_owned()).size(24.0)
+//! }
 //!
 //! struct Counter;
 //!
@@ -17,34 +23,43 @@
 //!         0
 //!     }
 //!
+//!     // The whole UI lives in `build`; split it into widget fns like
+//!     // `greeting` rather than nesting ever deeper inside it.
 //!     fn build(&self, state: &mut i32) -> AnyView<i32> {
-//!         any(text(format!("count: {state}")).size(32.0))
+//!         any(Column(vec![
+//!             any(greeting("Hello from Frust")),
+//!             any(text(format!("count: {state}")).size(32.0)),
+//!         ]))
 //!     }
 //! }
 //!
 //! frust::run(Counter).unwrap();
 //! ```
 //!
+//! The composition rule: stateless pieces are plain widget functions called
+//! from `build`; a piece with its own state is a child [`Component`] mounted
+//! with [`component`], which gives it a private state boundary. [`run`] (or
+//! the [`app!`] macro, which also covers the mobile and web shells) starts it.
+//!
 //! ## Low-level escape hatch: `App::new`
 //!
-//! [`App`] is the older, lower-level entry point [`run`] is built on: a
-//! single ambient `State` and a plain `app_logic(&mut State) -> impl View<State>`
-//! function, with no [`Component`] state-boundary or retained local state.
-//! It stays fully supported (backward compat is a feature) for apps that
-//! don't need per-subtree state:
+//! [`App`] is the low-level primitive [`run`] and [`app!`] expand into
+//! (`App::new(state, move |state| root.build(state))`): a single ambient
+//! `State` and a build closure, with no [`Component`] state-boundary or
+//! retained local state. Ordinary apps use a [`Component`] with [`run`] or
+//! [`app!`]; reach for `App::new` directly only when you need that raw
+//! `(state, build)` pair:
 //!
 //! ```no_run
 //! struct AppState {
 //!     greeting: String,
 //! }
 //!
-//! // `+ use<>`: opt out of edition-2024's implicit lifetime capture; views
-//! // are `'static` and borrow nothing from `state`.
-//! fn app_logic(state: &mut AppState) -> impl frust::View<AppState> + use<> {
-//!     frust::text(state.greeting.clone()).size(32.0)
-//! }
+//! let build = |state: &mut AppState| -> frust::AnyView<AppState> {
+//!     frust::any(frust::text(state.greeting.clone()).size(32.0))
+//! };
 //!
-//! frust::App::new(AppState { greeting: "Hello from Frust".into() }, app_logic)
+//! frust::App::new(AppState { greeting: "Hello from Frust".into() }, build)
 //!     .run()
 //!     .unwrap();
 //! ```
@@ -57,18 +72,24 @@
 //! ```
 //! use frust::{Align, Alignment, Column, EdgeInsets, Padding, Row, SizedBox, any, text};
 //!
-//! struct AppState;
+//! struct Layouts;
 //!
-//! fn app_logic(_state: &mut AppState) -> impl frust::View<AppState> + use<> {
-//!     Column(vec![
-//!         any(text("title").size(24.0)),
-//!         any(Row(vec![any(text("left")), any(text("right"))])),
-//!         any(Padding(EdgeInsets::all(8.0), text("padded"))),
-//!         any(Align(Alignment::CENTER, text("centered"))),
-//!         any(SizedBox(Some(0.0), Some(12.0))),
-//!     ])
+//! impl frust::Component for Layouts {
+//!     type State = ();
+//!
+//!     fn init(&self) {}
+//!
+//!     fn build(&self, _state: &mut ()) -> frust::AnyView<()> {
+//!         any(Column(vec![
+//!             any(text("title").size(24.0)),
+//!             any(Row(vec![any(text("left")), any(text("right"))])),
+//!             any(Padding(EdgeInsets::all(8.0), text("padded"))),
+//!             any(Align(Alignment::CENTER, text("centered"))),
+//!             any(SizedBox(Some(0.0), Some(12.0))),
+//!         ]))
+//!     }
 //! }
-//! # let _ = app_logic;
+//! # let _ = Layouts;
 //! ```
 
 pub use frust_core::component::{Component, ComponentView, component};
@@ -1380,22 +1401,32 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 ///
 /// struct AppState;
 ///
+/// struct NavDemo;
+///
 /// fn build_router() -> Router<AppState> {
 ///     Router::new(vec![Route::new("/", |_params| -> AnyView<AppState> {
 ///         any(text("home"))
 ///     })])
 /// }
 ///
-/// fn app_logic(_state: &mut AppState) -> impl frust::View<AppState> + use<> {
-///     let _router = build_router();
-///     // A late-subscribed read: `initial` sees a cold-start link (if any);
-///     // `latest` is the live signal a rebuild tracks for warm links.
-///     let links = deep_links();
-///     let _ = links.initial;
-///     let _ = links.latest;
-///     text("nav demo")
+/// impl frust::Component for NavDemo {
+///     type State = AppState;
+///
+///     fn init(&self) -> AppState {
+///         AppState
+///     }
+///
+///     fn build(&self, _state: &mut AppState) -> AnyView<AppState> {
+///         let _router = build_router();
+///         // A late-subscribed read: `initial` sees a cold-start link (if any);
+///         // `latest` is the live signal a rebuild tracks for warm links.
+///         let links = deep_links();
+///         let _ = links.initial;
+///         let _ = links.latest;
+///         any(text("nav demo"))
+///     }
 /// }
-/// # let _ = app_logic;
+/// # let _ = NavDemo;
 /// ```
 /// [`push_deep_link`] is normally called by a mobile shell's platform-link
 /// handler; it is also re-exported here as the desktop dev seam
@@ -1502,14 +1533,14 @@ mod image_async;
 pub use image_async::{ImageDecodeError, decode_image_async};
 
 // Re-export the Android JNI-bridge macro so generated apps write
-// `frust::android_app!(AppState, app_logic)`. `pub use` of a
+// `frust::android_app!(AppState, build)`. `pub use` of a
 // `#[macro_export]` macro re-exports it on edition 2021+; the macro only expands
 // to real code where its call site is `#[cfg(target_os = "android")]`, so this is
 // inert on desktop.
 pub use frust_shell_android::android_app;
 
 // Re-export the iOS C-ABI-bridge macro so generated apps write
-// `frust::ios_app!(AppState, app_logic)`. Unlike `android_app!`,
+// `frust::ios_app!(AppState, build)`. Unlike `android_app!`,
 // the invocation is unconditional — the macro's generated `frust_*` exports
 // are each `#[cfg(target_os = "ios")]`, so it is inert off-iOS.
 pub use frust_shell_ios::ios_app;
@@ -1528,9 +1559,9 @@ pub use wasm_bindgen as __wasm_bindgen;
 
 // Hidden, wasm32-only re-export of the browser shell crate, for the identical
 // reason as `__wasm_bindgen` above. [`web_app!`]'s generated shim hands the
-// initialized state and app-logic closure to `__frust_shell_web::run_app`
-// (`fn run_app<State: 'static, Logic, V>(state: State, app_logic: Logic)`,
-// mirroring `frust_shell_desktop::run_desktop_with`'s `(state, logic, ..)`
+// initialized state and build closure to `__frust_shell_web::run_app`
+// (`fn run_app<State: 'static, Build, V>(state: State, build: Build)`,
+// mirroring `frust_shell_desktop::run_desktop_with`'s `(state, build, ..)`
 // convention), the browser shell's entry point: it wraps `spawn_app`, which
 // owns the canvas-bound event loop and the `requestAnimationFrame` frame
 // pipeline, and reports an event-loop construction failure through the `log`
@@ -1617,10 +1648,10 @@ pub fn __install_default_selection_toolbar() {
 }
 
 /// The browser counterpart of [`android_app!`]/[`ios_app!`]: binds a
-/// [`Component`]'s state and app-logic to the browser shell's wasm-bindgen
-/// entry point. Takes the identical two-argument (state type + app-logic
+/// [`Component`]'s state and build closure to the browser shell's wasm-bindgen
+/// entry point. Takes the identical two-argument (state type + build
 /// expression, state built via `Default`) / three-argument (state type +
-/// explicit state-init expression + app-logic expression) shape
+/// explicit state-init expression + build expression) shape
 /// `android_app!` does, and `app!` drives it through the three-argument form
 /// exactly the way it drives `android_app!`/`ios_app!` (see `@emit_mobile`
 /// below) — most apps reach this through `app!`/`web_app!` rather than
@@ -1633,7 +1664,7 @@ pub fn __install_default_selection_toolbar() {
 /// once when the browser instantiates the compiled `.wasm` — and its body is
 /// a single call into `__frust_web_run`, kept deliberately separate: feeding
 /// `wasm_bindgen`'s attribute macro a body built straight out of
-/// `$state_init`/`$app_logic` (closures that can carry a macro-substituted
+/// `$state_init`/`$build` (closures that can carry a macro-substituted
 /// `$($setup)?` block nested inside another closure — see `app!`'s
 /// `@emit_mobile` arm) trips its own re-parse of the function into a spurious
 /// syntax error on that nested-block shape; a plain, macro-fragment-free call
@@ -1644,25 +1675,25 @@ pub fn __install_default_selection_toolbar() {
 ///    and runs `$state_init` under its root owner — the point at which a
 ///    `setup = { .. }` block bundled into `$state_init` by `app!` (see
 ///    `@emit_mobile`) runs, identically ordered to every other platform.
-/// 3. Hands the initialized state and `$app_logic` to
+/// 3. Hands the initialized state and `$build` to
 ///    `frust_shell_web::run_app` (via the hidden [`__frust_shell_web`]
 ///    re-export) — the browser shell's own entry point, which owns the
 ///    canvas-bound event loop and the `requestAnimationFrame` frame pipeline
 ///    (see [`__frust_shell_web`]'s doc comment for the contract).
 #[macro_export]
 macro_rules! web_app {
-    ($state_ty:ty, $app_logic:expr $(,)?) => {
+    ($state_ty:ty, $build:expr $(,)?) => {
         $crate::web_app!(
             $state_ty,
             <$state_ty as ::core::default::Default>::default,
-            $app_logic
+            $build
         );
     };
-    ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
+    ($state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         // Factored out of the `#[wasm_bindgen(start)]` function below rather
         // than inlined into it: `wasm_bindgen`'s attribute macro re-parses
         // the function it is attached to, and a body built straight out of
-        // `$state_init`/`$app_logic` — themselves closures that may carry a
+        // `$state_init`/`$build` — themselves closures that may carry a
         // macro-substituted `$($setup)?` block nested inside another closure
         // (see `app!`'s `@emit_mobile` arm) — trips it into a spurious parse
         // error on that nested-block shape. A plain, macro-fragment-free call
@@ -1672,7 +1703,7 @@ macro_rules! web_app {
         fn __frust_web_run() {
             $crate::__web_bootstrap();
             let __frust_state: $state_ty = $crate::__web_init_state($state_init);
-            $crate::__frust_shell_web::run_app(__frust_state, $app_logic);
+            $crate::__frust_shell_web::run_app(__frust_state, $build);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -1728,19 +1759,23 @@ pub use frust_shell_desktop::{
     DEFAULT_APP_NAME, DesktopConfig, IconData as DesktopIconData, MenuItemSpec, MenuRole, MenuSpec,
 };
 
-/// A Frust application: the app state plus the `app_logic` function that maps
-/// it to a view tree.
+/// A Frust application: the app state plus the `build` closure that maps it
+/// to a view tree.
+///
+/// This is the low-level primitive. [`app!`] and [`run`] expand into
+/// `App::new(state, move |state| root.build(state))` (see
+/// [`run_with_setup_and_config`]); ordinary apps write a [`Component`] and
+/// start it with those instead of constructing an `App` by hand.
 ///
 /// Construct with [`App::new`] and start the event loop with [`App::run`],
 /// optionally naming a desktop identity with [`App::desktop`] in between.
 ///
 /// The view type is intentionally *not* a parameter of this struct: capturing a
-/// free `fn app_logic(&mut State) -> impl View<State>`'s opaque return type into
-/// a stored type parameter defeats method resolution (the opaque type's trait
-/// bounds can't be re-proven on the already-typed value). Instead [`App::run`]
-/// infers the view type freshly at the call site, so
-/// `App::new(state, app_logic).run()` compiles for both `impl View` and
-/// concrete-typed `app_logic`.
+/// build fn's `impl View<State>` opaque return type into a stored type
+/// parameter defeats method resolution (the opaque type's trait bounds can't
+/// be re-proven on the already-typed value). Instead [`App::run`] infers the
+/// view type freshly at the call site, so `App::new(state, build).run()`
+/// compiles for both `impl View` and concrete-typed `build`.
 // On a mobile target the fields are consumed only by the desktop-gated `run`,
 // so they read as dead there; the app is driven through `android_app!`/JNI or
 // `ios_app!`/C-ABI instead.
@@ -1748,9 +1783,9 @@ pub use frust_shell_desktop::{
     any(target_os = "android", target_os = "ios", target_arch = "wasm32"),
     allow(dead_code)
 )]
-pub struct App<State, Logic> {
+pub struct App<State, Build> {
     state: State,
-    logic: Logic,
+    build: Build,
     /// The desktop identity [`App::run`] hands the shell —
     /// [`DesktopConfig::default()`] (today's zero-config preview window) unless
     /// [`App::desktop`] replaced it.
@@ -1761,15 +1796,15 @@ pub struct App<State, Logic> {
     config: DesktopConfig,
 }
 
-impl<State, Logic> App<State, Logic> {
-    /// Create an app from an initial `state` and its `app_logic`.
+impl<State, Build> App<State, Build> {
+    /// Create an app from an initial `state` and its `build` closure.
     ///
-    /// `logic` is a `FnMut(&mut State) -> impl View<State>` re-run each frame to
+    /// `build` is a `FnMut(&mut State) -> impl View<State>` re-run each frame to
     /// produce the current view tree.
-    pub fn new(state: State, logic: Logic) -> Self {
+    pub fn new(state: State, build: Build) -> Self {
         Self {
             state,
-            logic,
+            build,
             #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
             config: DesktopConfig::default(),
         }
@@ -1777,7 +1812,7 @@ impl<State, Logic> App<State, Logic> {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
-impl<State: 'static, Logic> App<State, Logic> {
+impl<State: 'static, Build> App<State, Build> {
     /// Give the app a desktop identity — name, reverse-DNS id, window icon,
     /// native menu bar, last-window-close policy (see [`DesktopConfig`]).
     ///
@@ -1789,8 +1824,9 @@ impl<State: 'static, Logic> App<State, Logic> {
     ///
     /// ```no_run
     /// # struct AppState;
-    /// # fn app_logic(_: &mut AppState) -> impl frust::View<AppState> + use<> { frust::text("hi") }
-    /// frust::App::new(AppState, app_logic)
+    /// # fn build(_: &mut AppState) -> impl frust::View<AppState> + use<> { frust::text("hi") }
+    /// // `App::new` is the low-level primitive; apps normally use a `Component`.
+    /// frust::App::new(AppState, build)
     ///     .desktop(frust::DesktopConfig::new().with_app_name("Huddle"))
     ///     .run()
     ///     .unwrap();
@@ -1804,7 +1840,7 @@ impl<State: 'static, Logic> App<State, Logic> {
     ///
     /// Blocks the calling thread on the platform event loop. Returns once the
     /// window closes, or an error if the window/GPU surface could not be
-    /// created. The concrete view type `V` is inferred from `logic`.
+    /// created. The concrete view type `V` is inferred from `build`.
     ///
     /// Desktop-only: on Android the app is driven by the JNI bridge that
     /// [`android_app!`] generates and on iOS by the C-ABI entry points
@@ -1812,14 +1848,14 @@ impl<State: 'static, Logic> App<State, Logic> {
     pub fn run<V>(self) -> anyhow::Result<()>
     where
         V: View<State>,
-        Logic: FnMut(&mut State) -> V + 'static,
+        Build: FnMut(&mut State) -> V + 'static,
     {
         let Self {
             state,
-            logic,
+            build,
             config,
         } = self;
-        run_desktop_configured(state, logic, config)
+        run_desktop_configured(state, build, config)
     }
 }
 
@@ -1841,19 +1877,19 @@ impl<State: 'static, Logic> App<State, Logic> {
 /// this call, and this is the one point strictly before the shell — and
 /// therefore the first frame — starts.
 #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
-fn run_desktop_configured<State, Logic, V>(
+fn run_desktop_configured<State, Build, V>(
     state: State,
-    logic: Logic,
+    build: Build,
     config: DesktopConfig,
 ) -> anyhow::Result<()>
 where
     State: 'static,
     V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
+    Build: FnMut(&mut State) -> V + 'static,
 {
     __install_default_selection_toolbar();
     let extensions = desktop_extensions(&config);
-    frust_shell_desktop::run_desktop_with(state, logic, config, extensions)
+    frust_shell_desktop::run_desktop_with(state, build, config, extensions)
 }
 
 /// The per-OS shell selection: one arm per shell crate this crate's manifest

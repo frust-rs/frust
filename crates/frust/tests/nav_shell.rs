@@ -62,7 +62,7 @@ fn page() -> AnyView<()> {
     any(text("x"))
 }
 
-/// The `app_logic` closure type [`RenderRoot::rebuild`] drives.
+/// The build closure type [`RenderRoot::rebuild`] drives.
 type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
 
 // ---------------------------------------------------------------------------
