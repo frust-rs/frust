@@ -186,8 +186,14 @@ fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() 
     assert!(dest.join("src/lib.rs").exists());
     let cargo_toml = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
     assert!(cargo_toml.contains("clean-signals-frust"), "{cargo_toml}");
+    assert!(cargo_toml.contains("frust-material"), "{cargo_toml}");
     let lib_rs = std::fs::read_to_string(dest.join("src/lib.rs")).unwrap();
-    assert!(lib_rs.contains("GreetingController"), "{lib_rs}");
+    assert!(lib_rs.contains("CounterController"), "{lib_rs}");
+    assert!(
+        dest.join("src/features/counter/presentation/pages.rs")
+            .exists()
+    );
+    assert!(!dest.join("src/home_page.rs").exists());
     assert_path_mode_wiring(&dest);
 
     let build_status = Command::new("cargo")

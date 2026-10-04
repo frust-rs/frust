@@ -1,0 +1,21 @@
+//! The `counter` feature's domain repository contract.
+//!
+//! [`CounterRepository`] is the seam between the use cases and the data
+//! layer: `data::repositories::InMemoryCounterRepository` implements it over
+//! `data::sources::CountSource`, owning this feature's single failure-mapping
+//! site. Consumed as `Arc<dyn CounterRepository + Send + Sync>`, so neither
+//! the controller nor its use cases carry a repository type parameter.
+
+use crate::failure::AppFailure;
+
+/// The same dual `cfg_attr` every async trait in this scaffold uses —
+/// `wasm32`'s single-threaded event loop can't require `Send` futures.
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+pub trait CounterRepository {
+    /// Load the stored count.
+    async fn load(&self) -> Result<u32, AppFailure>;
+
+    /// Store `count`, replacing the previous value.
+    async fn save(&self, count: u32) -> Result<(), AppFailure>;
+}

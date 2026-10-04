@@ -1,0 +1,51 @@
+//! [`InMemoryCounterRepository`] — the [`CounterRepository`] implementation
+//! this scaffold wires up.
+//!
+//! Adapts [`CountSource`] to the counter domain trait, owning this feature's
+//! single failure-mapping site ([`map_source_error`]) — the **only** place a
+//! [`SourceError`] is converted into an [`AppFailure`]. This is the **only**
+//! counter file outside `data/sources.rs` that mentions the source (the
+//! inward-dependency rule).
+
+use crate::failure::AppFailure;
+use crate::features::counter::data::sources::{CountSource, SourceError};
+use crate::features::counter::domain::repositories::CounterRepository;
+
+/// The source-backed [`CounterRepository`].
+#[derive(Clone, Default)]
+pub struct InMemoryCounterRepository {
+    source: CountSource,
+}
+
+impl InMemoryCounterRepository {
+    /// A fresh repository handle over a fresh [`CountSource`].
+    pub fn new() -> Self {
+        Self {
+            source: CountSource::new(),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl CounterRepository for InMemoryCounterRepository {
+    async fn load(&self) -> Result<u32, AppFailure> {
+        self.source.fetch_count().await.map_err(map_source_error)
+    }
+
+    async fn save(&self, count: u32) -> Result<(), AppFailure> {
+        self.source
+            .store_count(count)
+            .await
+            .map_err(map_source_error)
+    }
+}
+
+/// This feature's single transport→failure mapping site: every
+/// [`SourceError`] variant maps to exactly one [`AppFailure`] here, and
+/// nowhere else.
+fn map_source_error(err: SourceError) -> AppFailure {
+    match err {
+        SourceError::Unavailable(msg) => AppFailure::Network(msg),
+    }
+}

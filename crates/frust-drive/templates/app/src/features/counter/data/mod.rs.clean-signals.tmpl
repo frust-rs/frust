@@ -1,0 +1,8 @@
+//! `counter` data layer: [`sources::CountSource`] (the in-memory transport
+//! stand-in, with its internal [`sources::SourceError`]) and
+//! [`repositories::InMemoryCounterRepository`] (the
+//! [`CounterRepository`](super::domain::CounterRepository) implementation,
+//! owning this feature's single failure-mapping site).
+
+pub mod repositories;
+pub mod sources;

@@ -33,19 +33,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # the default `Cargo.toml.tmpl`'s comment).
 {{ frust_dep_line }}
 
-# Design system (gs1): Glyph is this app's design system, brought in as a
-# sibling plugin crate (`frust-glyph`, below) rather than a `frust` Cargo
-# feature — mirrors the default `Cargo.toml.tmpl`'s comment (see that file
-# for the full rationale). `src/lib.rs`'s `frust::app!(..., setup = {
-# frust_glyph::install(); })` is the runtime call that actually makes it the
-# active theme; delete the `frust-glyph` dependency below and that call to
-# opt out (still builds, neutral-themed), or swap it for `frust-material`/
-# `frust-cupertino` plus the matching `install()` call to use one of the
-# other two built-in design systems instead.
+# Design system: Material 3, brought in as a sibling plugin crate
+# (`frust-material`) rather than a `frust` Cargo feature, and made the active
+# theme by `src/lib.rs`'s `frust::app!(..., setup = { frust_material::install(); })`
+# (every shell otherwise falls back to a neutral `Theme::neutral()`). To swap,
+# replace this dependency with the Glyph or Cupertino plugin crate and change
+# the setup call to match. Removing both leaves the app neutral-themed.
 {%- if frust_plugin_version %}
-frust-glyph = "{{ frust_plugin_version }}"
+frust-material = "{{ frust_plugin_version }}"
 {%- else %}
-frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
+frust-material = { path = "{{ frust_path }}/../../plugins/material" }
 {%- endif %}
 
 # `--arch clean-signals` demo: the Frust

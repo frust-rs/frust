@@ -1,0 +1,10 @@
+//! The `counter` feature slice: the smallest full-ceremony example of the
+//! clean-architecture convention (see `docs/CLI_DEVELOPMENT.md`'s `--arch
+//! clean-signals` note) — one repository trait, two use cases, one in-memory
+//! source with an internal error, one controller, one page. Layers depend
+//! inward only: `presentation` → `domain` ← `data`; nothing outside `data/`
+//! mentions [`data::sources`].
+
+pub mod data;
+pub mod domain;
+pub mod presentation;
