@@ -172,11 +172,12 @@ fn gallery_shell(
     let inner_view = navigator(inner, blank_page)
         .transition(TransitionSpec::duration(PageTransition::M3FadeThrough));
 
-    // App bar wrapped for the top edge. Navigation bar self-insets the bottom
-    // and is wrapped only for the horizontal edges (respecting display-cutout
-    // insets).
+    // The app bar self-insets its top and side edges (painting its container
+    // behind the status bar), so it needs no wrapper. The navigation bar
+    // self-insets the bottom and is wrapped only for the horizontal edges
+    // (respecting display-cutout insets).
     any(scaffold(any(section_routes.observe(inner_view)))
-        .app_bar(any(safe_area(bar).bottom(false)))
+        .app_bar(any(bar))
         .bottom_bar(any(safe_area(nav_bar).top(false).bottom(false)))
         .background(theme.scheme().surface))
 }
