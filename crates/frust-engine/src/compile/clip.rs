@@ -53,8 +53,8 @@ use vello_common::strip::Strip;
 use vello_common::strip_generator::{StripGenerator, StripStorage};
 use vello_common::tile::Tile;
 
-use super::cull::ViewportSplit;
-use super::{FLATTEN_TOLERANCE, cull_viewport, fast_rect};
+use super::cull::{ViewportSplit, cull_viewport, rounded_rect_elements};
+use super::{FLATTEN_TOLERANCE, fast_rect};
 
 /// The scissor of a stack that clips nothing.
 ///
@@ -215,7 +215,7 @@ impl ClipStack {
             return;
         }
         let shape = RoundedRect::from_rect(rect, radii);
-        self.push_mask(shape.path_elements(FLATTEN_TOLERANCE), transform, generator);
+        self.push_mask(rounded_rect_elements(&shape), transform, generator);
     }
 
     /// Pop the most recent clip.
